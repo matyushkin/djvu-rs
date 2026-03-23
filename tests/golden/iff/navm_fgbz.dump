@@ -1,0 +1,48 @@
+  FORM:DJVM [100403] 
+    DIRM [93]         Document directory (bundled, 7 files 6 pages)
+    NAVM [89] 
+    FORM:DJVI [930] {dict0006.iff} [I]
+      Djbz [918]        JB2 shared dictionary
+    FORM:DJVU [1403] {p0001.djvu} [P1]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [985]        JB2 bilevel data
+      FGbz [21]         JB2 colors data, v0, 2 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 213x275
+      ANTz [233]        Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6657] {p0002.djvu} [P2]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [6424]       JB2 bilevel data
+      FGbz [80]         JB2 colors data, v0, 7 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 213x275
+    FORM:DJVU [14151] {p0003.djvu} [P3]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [13820]      JB2 bilevel data
+      FGbz [177]        JB2 colors data, v0, 5 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 213x275
+    FORM:DJVU [27428] {p0004.djvu} [P4]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [22523]      JB2 bilevel data
+      FGbz [251]        JB2 colors data, v0, 25 colors
+      BG44 [1651]       IW4 data #1, 72 slices, v1.2 (color), 850x1100
+      BG44 [735]        IW4 data #2, 11 slices
+      BG44 [965]        IW4 data #3, 10 slices
+      BG44 [1208]       IW4 data #4, 10 slices
+    FORM:DJVU [47541] {p0005.djvu} [P5]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [41925]      JB2 bilevel data
+      FGbz [451]        JB2 colors data, v0, 47 colors
+      BG44 [1515]       IW4 data #1, 72 slices, v1.2 (color), 850x1100
+      BG44 [720]        IW4 data #2, 11 slices
+      BG44 [1130]       IW4 data #3, 10 slices
+      BG44 [1707]       IW4 data #4, 10 slices
+    FORM:DJVU [2029] {p0006.djvu} [P6]
+      INFO [10]         DjVu 2550x3300, v24, 300 dpi, gamma=2.2
+      INCL [12]         Indirection chunk --> {dict0006.iff}
+      Sjbz [1817]       JB2 bilevel data
+      FGbz [57]         JB2 colors data, v0, 8 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 213x275
