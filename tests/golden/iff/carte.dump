@@ -1,0 +1,14 @@
+  FORM:DJVM [154270] 
+    DIRM [43]         Document directory (bundled, 2 files 1 pages)
+    FORM:THUM [2313] {carte.thumb} [T]
+      TH44 [2301]       Thumbnail icon for page 1
+    FORM:DJVU [151884] {carte.djvu} [P1]
+      INFO [5]          DjVu 4200x2556, v17
+      Sjbz [90131]      JB2 bilevel data
+      BG44 [8603]       IW4 data #1, 74 slices, v1.2 (color), 1400x852
+      FG44 [5461]       IW4 data #1, 100 slices, v1.2 (color), 350x213
+      BG44 [12323]      IW4 data #2, 10 slices
+      BG44 [6436]       IW4 data #3, 4 slices
+      BG44 [28083]      IW4 data #4, 9 slices
+      ANTz [226]        Page annotation (hyperlinks, etc.)
+      TXTz [534]        Hidden text (text, etc.)

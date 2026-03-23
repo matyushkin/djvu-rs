@@ -1,0 +1,11 @@
+[package]
+name = "cos-djvu"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+description = "Vendored pure-Rust DjVu renderer (based on djvu-rs by Rafael Bagmanov)"
+
+[dependencies]
+self_cell = "1.2"
+
+[dev-dependencies]
