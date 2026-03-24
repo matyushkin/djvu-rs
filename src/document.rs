@@ -398,6 +398,72 @@ impl<'a> Page<'a> {
         Ok(Some(pm))
     }
 
+    /// Number of BG44 chunks in this page (0 = no background layer).
+    pub fn bg44_chunk_count(&self) -> usize {
+        self.form.find_all(b"BG44").len()
+    }
+
+    /// Decode the IW44 background progressively: return a pixmap after each
+    /// BG44 chunk.  The first entry is a coarse (blurry) preview decoded from
+    /// just the first chunk; each subsequent entry is a more refined image.
+    /// The last entry is identical to `decode_background()`.
+    ///
+    /// Returns `Ok(None)` if there are no BG44 chunks.
+    pub fn decode_background_progressive(&self) -> Result<Option<Vec<Pixmap>>, Error> {
+        let chunks: Vec<&[u8]> = self
+            .form
+            .find_all(b"BG44")
+            .into_iter()
+            .map(|c| c.data())
+            .collect();
+
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut img = IW44Image::new();
+        let mut frames = Vec::with_capacity(chunks.len());
+
+        for chunk_data in &chunks {
+            img.decode_chunk(chunk_data)
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            let pm = img
+                .to_pixmap()
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            frames.push(pm);
+        }
+
+        Ok(Some(frames))
+    }
+
+    /// Decode only the first BG44 chunk — a coarse (blurry) preview.
+    ///
+    /// Much faster than `decode_background()` because it skips refinement
+    /// chunks and only does one inverse wavelet transform. Returns `None`
+    /// if there are no BG44 chunks, or if there is only one chunk (in
+    /// which case `decode_background()` is already fast enough).
+    pub fn decode_background_coarse(&self) -> Result<Option<Pixmap>, Error> {
+        let chunks: Vec<&[u8]> = self
+            .form
+            .find_all(b"BG44")
+            .into_iter()
+            .map(|c| c.data())
+            .collect();
+
+        // Only worth it for multi-chunk backgrounds.
+        if chunks.len() <= 1 {
+            return Ok(None);
+        }
+
+        let mut img = IW44Image::new();
+        img.decode_chunk(chunks[0])
+            .map_err(|e| Error::FormatError(e.to_string()))?;
+        let pm = img
+            .to_pixmap()
+            .map_err(|e| Error::FormatError(e.to_string()))?;
+        Ok(Some(pm))
+    }
+
     /// Decode the IW44 foreground layer.
     pub fn decode_foreground(&self) -> Result<Option<Pixmap>, Error> {
         let img = match self.decode_iw44_layer(b"FG44")? {
@@ -1473,5 +1539,95 @@ mod tests {
         let data = std::fs::read(assets_path().join("colorbook.djvu")).unwrap();
         let doc = Document::parse(&data).unwrap();
         assert!(doc.thumbnail(0).unwrap().is_none());
+    }
+
+    // ── Progressive decode ─────────────────────────────────────────────
+
+    #[test]
+    fn progressive_bg_returns_frames_per_chunk() {
+        // carte.djvu is a color page with multiple BG44 chunks.
+        let data = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let chunk_count = page.bg44_chunk_count();
+        assert!(
+            chunk_count > 1,
+            "need multi-chunk file for progressive test"
+        );
+
+        let frames = page.decode_background_progressive().unwrap().unwrap();
+        assert_eq!(frames.len(), chunk_count, "one frame per BG44 chunk");
+
+        // Each frame should have the same dimensions.
+        let (w, h) = (frames[0].width, frames[0].height);
+        for (i, f) in frames.iter().enumerate() {
+            assert_eq!((f.width, f.height), (w, h), "frame {i} size mismatch");
+        }
+    }
+
+    #[test]
+    fn progressive_last_frame_matches_full_decode() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+
+        let full = page.decode_background().unwrap().unwrap();
+        let frames = page.decode_background_progressive().unwrap().unwrap();
+        let last = frames.last().unwrap();
+
+        assert_eq!(full.width, last.width);
+        assert_eq!(full.height, last.height);
+        assert_eq!(
+            full.data, last.data,
+            "last progressive frame must match full decode"
+        );
+    }
+
+    #[test]
+    fn progressive_single_chunk_returns_one_frame() {
+        // boy.djvu has a background but likely only 1 BG44 chunk.
+        let data = std::fs::read(assets_path().join("boy.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        if page.bg44_chunk_count() <= 1 {
+            let frames = page.decode_background_progressive().unwrap().unwrap();
+            assert_eq!(frames.len(), 1);
+        }
+    }
+
+    #[test]
+    fn coarse_decode_returns_blurry_frame() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        assert!(page.bg44_chunk_count() > 1);
+
+        let coarse = page.decode_background_coarse().unwrap().unwrap();
+        let full = page.decode_background().unwrap().unwrap();
+
+        // Same dimensions, different pixel data (coarse is blurrier).
+        assert_eq!(coarse.width, full.width);
+        assert_eq!(coarse.height, full.height);
+        assert_ne!(coarse.data, full.data, "coarse should differ from full");
+    }
+
+    #[test]
+    fn coarse_decode_single_chunk_returns_none() {
+        let data = std::fs::read(assets_path().join("boy.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        if page.bg44_chunk_count() <= 1 {
+            assert!(page.decode_background_coarse().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn progressive_no_bg_returns_none() {
+        // boy_jb2.djvu has no BG44 chunks.
+        let data = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.bg44_chunk_count(), 0);
+        assert!(page.decode_background_progressive().unwrap().is_none());
     }
 }

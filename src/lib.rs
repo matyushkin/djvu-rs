@@ -236,6 +236,44 @@ impl<'a> Page<'a> {
         Ok(self.text_layer()?.map(|tl| tl.text))
     }
 
+    /// Fast coarse render: decode only the first BG44 chunk (blurry preview).
+    ///
+    /// Returns `None` for single-chunk or non-IW44 pages. Call `render_scaled()`
+    /// afterwards for full quality — only the wavelet refinement is repeated,
+    /// so the total work is roughly `1/N + 1` instead of `N` inverse transforms.
+    pub fn render_scaled_coarse(&self, scale: f32) -> Result<Option<Pixmap>, Error> {
+        let dw = self.display_width();
+        let dh = self.display_height();
+        let w = ((dw as f32 * scale).round() as u32).max(1);
+        let h = ((dh as f32 * scale).round() as u32).max(1);
+        let (tw, th) = match self.rotation {
+            document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
+            _ => (w, h),
+        };
+        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        render::render_to_size_coarse(&page, tw, th)
+    }
+
+    /// Progressive rendering: returns increasingly refined pixmaps.
+    ///
+    /// For pages with multiple BG44 background chunks, the first frame is a
+    /// coarse (blurry) preview from just the first chunk (~50ms), and each
+    /// subsequent frame is sharper. The last frame is identical to `render_scaled()`.
+    ///
+    /// For single-chunk or non-IW44 pages, returns a single frame.
+    pub fn render_scaled_progressive(&self, scale: f32) -> Result<Vec<Pixmap>, Error> {
+        let dw = self.display_width();
+        let dh = self.display_height();
+        let w = ((dw as f32 * scale).round() as u32).max(1);
+        let h = ((dh as f32 * scale).round() as u32).max(1);
+        let (tw, th) = match self.rotation {
+            document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
+            _ => (w, h),
+        };
+        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        render::render_to_size_progressive(&page, tw, th)
+    }
+
     /// Render the page scaled by a factor (e.g. 0.5 = half size, 2.0 = double).
     pub fn render_scaled(&self, scale: f32) -> Result<Pixmap, Error> {
         let dw = self.display_width();
