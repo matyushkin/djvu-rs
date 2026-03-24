@@ -34,6 +34,83 @@ fn render_to_size_inner(page: &Page, w: u32, h: u32, dilate_passes: u32) -> Resu
     Ok(apply_rotation(output, page.info.rotation))
 }
 
+/// Coarse rendering: decode only the first BG44 chunk for a fast blurry preview.
+///
+/// Skips mask and foreground decoding entirely — shows only the background
+/// layer scaled to the target size. Returns `None` if the page has ≤1 BG44
+/// chunk (use `render_to_size` instead — it's already fast enough).
+pub fn render_to_size_coarse(page: &Page, w: u32, h: u32) -> Result<Option<Pixmap>, Error> {
+    let page_w = page.info.width as u32;
+    let page_h = page.info.height as u32;
+
+    let bg = match page.decode_background_coarse()? {
+        Some(bg) => bg,
+        None => return Ok(None),
+    };
+
+    let output = composite_bg_only(w, h, &bg, page_w, page_h);
+    Ok(Some(apply_rotation(output, page.info.rotation)))
+}
+
+/// Progressive rendering: returns a Vec of increasingly refined pixmaps.
+///
+/// For pages with multiple BG44 chunks, yields a coarse preview after the
+/// first chunk and progressively sharper images after each subsequent chunk.
+/// The last frame is identical to `render_to_size()`.
+///
+/// For pages without a background layer (bilevel, palette), returns a single
+/// frame equivalent to `render_to_size()`.
+pub fn render_to_size_progressive(page: &Page, w: u32, h: u32) -> Result<Vec<Pixmap>, Error> {
+    let rotation = page.info.rotation;
+    let page_w = page.info.width as u32;
+    let page_h = page.info.height as u32;
+
+    // Only worth progressive rendering for multi-chunk backgrounds.
+    let bg_chunks = page.bg44_chunk_count();
+    if bg_chunks <= 1 {
+        // Single chunk or no BG44 — just render normally.
+        let output = composite_page(page, w, h, 0)?;
+        return Ok(vec![apply_rotation(output, rotation)]);
+    }
+
+    let has_palette = page.has_palette();
+    if has_palette {
+        // Palette-based pages don't use IW44 — no progressive benefit.
+        let output = composite_page(page, w, h, 0)?;
+        return Ok(vec![apply_rotation(output, rotation)]);
+    }
+
+    // Decode mask and foreground once (they don't have progressive chunks).
+    let mask = page.decode_mask()?;
+    let fg = page.decode_foreground()?;
+
+    // Decode background progressively.
+    let bg_frames = match page.decode_background_progressive()? {
+        Some(frames) => frames,
+        None => {
+            // No background — single render.
+            let output = match (&mask, &fg) {
+                (Some(mask), None) => composite_bilevel(w, h, mask, page_w, page_h),
+                _ => Pixmap::white(w, h),
+            };
+            return Ok(vec![apply_rotation(output, rotation)]);
+        }
+    };
+
+    let mut results = Vec::with_capacity(bg_frames.len());
+
+    for bg in &bg_frames {
+        let output = match (&mask, &fg) {
+            (None, _) => composite_bg_only(w, h, bg, page_w, page_h),
+            (Some(mask), Some(fg)) => composite_3layer(w, h, mask, bg, fg, page_w, page_h),
+            (Some(mask), None) => composite_mask_bg(w, h, mask, bg, page_w, page_h),
+        };
+        results.push(apply_rotation(output, rotation));
+    }
+
+    Ok(results)
+}
+
 /// Composite page layers at the given size without applying rotation.
 fn composite_page(page: &Page, w: u32, h: u32, dilate_passes: u32) -> Result<Pixmap, Error> {
     let page_w = page.info.width as u32;
