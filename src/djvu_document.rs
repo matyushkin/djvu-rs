@@ -24,12 +24,14 @@
 //! the caller explicitly calls `thumbnail()` (which invokes the IW44 decoder).
 
 use crate::{
+    annotation::{Annotation, AnnotationError, MapArea},
     bzz_new::bzz_decode,
     error::{BzzError, IffError, Iw44Error},
     iff::{IffChunk, parse_form},
     info::PageInfo,
     iw44_new::Iw44Image,
     pixmap::Pixmap,
+    text::{TextError, TextLayer},
 };
 
 // ---- Error type -------------------------------------------------------------
@@ -80,6 +82,14 @@ pub enum DocError {
     /// I/O error when reading file data.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Text layer parse error.
+    #[error("text layer error: {0}")]
+    Text(#[from] TextError),
+
+    /// Annotation parse error.
+    #[error("annotation error: {0}")]
+    Annotation(#[from] AnnotationError),
 }
 
 // ---- Bookmark ---------------------------------------------------------------
@@ -212,6 +222,69 @@ impl DjVuPage {
     /// Return all FG44 foreground chunk data slices, in order.
     pub fn fg44_chunks(&self) -> Vec<&[u8]> {
         self.find_chunks(b"FG44")
+    }
+
+    /// Extract the text layer from TXTz (BZZ-compressed) or TXTa (plain) chunks.
+    ///
+    /// Returns `Ok(None)` if the page has no text layer.
+    pub fn text_layer(&self) -> Result<Option<TextLayer>, DocError> {
+        let page_height = self.info.height as u32;
+
+        if let Some(txtz) = self.find_chunk(b"TXTz") {
+            if txtz.is_empty() {
+                return Ok(None);
+            }
+            let layer = crate::text::parse_text_layer_bzz(txtz, page_height)?;
+            return Ok(Some(layer));
+        }
+
+        if let Some(txta) = self.find_chunk(b"TXTa") {
+            if txta.is_empty() {
+                return Ok(None);
+            }
+            let layer = crate::text::parse_text_layer(txta, page_height)?;
+            return Ok(Some(layer));
+        }
+
+        Ok(None)
+    }
+
+    /// Extract the plain text content of the page (convenience wrapper).
+    ///
+    /// Returns `Ok(None)` if the page has no text layer.
+    pub fn text(&self) -> Result<Option<String>, DocError> {
+        Ok(self.text_layer()?.map(|tl| tl.text))
+    }
+
+    /// Parse the annotation layer from ANTz (BZZ-compressed) or ANTa (plain) chunks.
+    ///
+    /// Returns `Ok(None)` if the page has no annotation chunk.
+    pub fn annotations(&self) -> Result<Option<(Annotation, Vec<MapArea>)>, DocError> {
+        if let Some(antz) = self.find_chunk(b"ANTz") {
+            if antz.is_empty() {
+                return Ok(None);
+            }
+            let result = crate::annotation::parse_annotations_bzz(antz)?;
+            return Ok(Some(result));
+        }
+
+        if let Some(anta) = self.find_chunk(b"ANTa") {
+            if anta.is_empty() {
+                return Ok(None);
+            }
+            let result = crate::annotation::parse_annotations(anta)?;
+            return Ok(Some(result));
+        }
+
+        Ok(None)
+    }
+
+    /// Return all hyperlinks (MapAreas with a non-empty URL) on this page.
+    pub fn hyperlinks(&self) -> Result<Vec<MapArea>, DocError> {
+        match self.annotations()? {
+            None => Ok(Vec::new()),
+            Some((_, mapareas)) => Ok(mapareas.into_iter().filter(|m| !m.url.is_empty()).collect()),
+        }
     }
 
     /// Render this page into a pre-allocated RGBA buffer using the given options.
