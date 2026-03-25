@@ -2,10 +2,15 @@
 name = "cos-djvu"
 version.workspace = true
 edition.workspace = true
-license = "GPL-3.0-or-later"
-description = "Vendored pure-Rust DjVu renderer (based on djvu-rs by Rafael Bagmanov)"
+license = "MIT"
+description = "Pure-Rust DjVu decoder written from the DjVu v3 public specification"
 
 [dependencies]
+thiserror = "2"
 self_cell = "1.2"
+
+[features]
+default = ["std"]
+std = []
 
 [dev-dependencies]

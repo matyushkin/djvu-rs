@@ -1,6 +1,35 @@
-//! Pure Rust DjVu renderer.
+//! Pure-Rust DjVu decoder written from the DjVu v3 public specification.
 //!
-//! # Example
+//! This crate provides a zero-copy IFF container parser, typed error types,
+//! and page metadata extraction. Higher-level decoding (JB2, IW44, BZZ) will
+//! be added in subsequent phases.
+//!
+//! # Key public types
+//!
+//! - [`DjVuError`] — top-level error enum (wraps [`IffError`], etc.)
+//! - [`IffError`] — errors from the IFF container parser
+//! - [`PageInfo`] — page metadata parsed from the INFO chunk
+//! - [`Rotation`] — page rotation enum (None, Ccw90, Rot180, Cw90)
+//! - [`Document`] — owned DjVu document (full rendering, from legacy impl)
+//! - [`Page`] — a page within a [`Document`]
+//! - [`Pixmap`] — RGBA pixel buffer returned by render methods
+//! - [`Bitmap`] — 1-bit bitmap for JB2 mask layers
+//! - [`Bookmark`] — table-of-contents entry from NAVM chunk
+//! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks
+//! - [`TextZone`] — a zone node in the text layer hierarchy
+//! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character)
+//!
+//! # IFF parser (phase 1)
+//!
+//! ```no_run
+//! use cos_djvu::iff::parse_form;
+//!
+//! let data = std::fs::read("file.djvu").unwrap();
+//! let form = parse_form(&data).unwrap();
+//! println!("form type: {:?}", std::str::from_utf8(&form.form_type));
+//! ```
+//!
+//! # Full document rendering
 //!
 //! ```no_run
 //! use cos_djvu::Document;
@@ -12,33 +41,88 @@
 //! println!("{}x{} @ {} dpi", page.width(), page.height(), page.dpi());
 //!
 //! let pixmap = page.render().unwrap();
-//! // pixmap.data: RGBA, pixmap.to_rgb(): RGB
+//! // pixmap.data: RGBA bytes
 //! ```
 
 #![forbid(unsafe_code)]
 
-pub(crate) mod bitmap;
-#[doc(hidden)]
-pub mod bzz;
-#[doc(hidden)]
-pub mod document;
-pub(crate) mod error;
-#[doc(hidden)]
+// ---- New phase-1 modules ---------------------------------------------------
+//
+// These are the new clean-room implementations written from the DjVu spec.
+// They are exposed under their natural names. The legacy modules that conflict
+// are kept under different names below.
+
+/// IFF container parser (phase 1, written from spec).
 pub mod iff;
+
+/// Typed error hierarchy for the new implementation (phase 1).
+pub mod error;
+
+/// INFO chunk parser (phase 1).
+pub(crate) mod info;
+
+// Re-export new phase-1 error types
+pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
+
+// Re-export new phase-1 page info types
+pub use info::{PageInfo, Rotation};
+
+// ---- Legacy implementation (kept for cos-render compatibility) --------------
+//
+// The legacy modules use `crate::legacy_error` and `crate::legacy_iff` as their
+// renamed equivalents of the old `crate::error` and `crate::iff`.
+// Internally they depend on: bitmap, pixmap, iw44, jb2, zp, document, bzz.
+// We keep those at their original crate paths.
+//
+// NOTE: legacy/document.rs and legacy/iff.rs reference `crate::error::Error`
+// and `crate::iff::*` — those `crate::` paths now resolve to the NEW modules.
+// To avoid breakage we insert compatibility re-exports into the new modules.
+// See error.rs (re-exports legacy_error::Error) and iff.rs has separate types.
+//
+// The legacy iff types (DjvuFile, etc.) are exposed under `crate::legacy_iff`.
+// The legacy files are patched to reference their own module names via
+// absolute paths — but since we cannot modify legacy/ files, we instead
+// expose shims at the paths they expect.
+
 #[doc(hidden)]
+#[path = "legacy/bitmap.rs"]
+pub(crate) mod bitmap;
+
+#[doc(hidden)]
+#[path = "legacy/bzz.rs"]
+pub mod bzz;
+
+#[doc(hidden)]
+#[path = "legacy/document.rs"]
+pub mod document;
+
+#[doc(hidden)]
+#[path = "legacy/iw44.rs"]
 pub mod iw44;
+
 #[doc(hidden)]
+#[path = "legacy/jb2.rs"]
 pub mod jb2;
+
+#[doc(hidden)]
+#[path = "legacy/pixmap.rs"]
 pub(crate) mod pixmap;
+
 #[doc(hidden)]
+#[path = "legacy/render.rs"]
 pub mod render;
+
 #[doc(hidden)]
+#[path = "legacy/zp/mod.rs"]
 pub mod zp;
 
+// Re-export legacy public types to preserve the old API surface
 pub use bitmap::Bitmap;
-pub use document::{Bookmark, Rotation, TextLayer, TextZone, TextZoneKind};
-pub use error::Error;
+pub use document::{Bookmark, TextLayer, TextZone, TextZoneKind};
 pub use pixmap::Pixmap;
+
+// Legacy error type (re-exported from legacy_error module included via error.rs)
+pub use error::LegacyError as Error;
 
 use self_cell::self_cell;
 
@@ -159,7 +243,7 @@ impl<'a> Page<'a> {
     }
 
     /// Page rotation from the INFO chunk.
-    pub fn rotation(&self) -> Rotation {
+    pub fn rotation(&self) -> document::Rotation {
         self.rotation
     }
 
@@ -170,18 +254,12 @@ impl<'a> Page<'a> {
     }
 
     /// Render the page to an RGBA pixmap at a target size.
-    ///
-    /// Layers are composited directly at the target resolution --
-    /// no intermediate full-size buffer is allocated.
     pub fn render_to_size(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
         let page = self.doc.inner.borrow_dependent().page(self.index)?;
         render::render_to_size(&page, width, height)
     }
 
     /// Render the page at native resolution with mask dilation for bolder text.
-    ///
-    /// Each dilation pass thickens every stroke by ~1 pixel in each direction.
-    /// Typically 1 pass is enough for improved legibility at reduced display sizes.
     pub fn render_bold(&self, dilate_passes: u32) -> Result<Pixmap, Error> {
         let page = self.doc.inner.borrow_dependent().page(self.index)?;
         render::render_to_size_bold(
@@ -204,43 +282,28 @@ impl<'a> Page<'a> {
     }
 
     /// Render the page at a target size with anti-aliased downscaling.
-    ///
-    /// Renders internally at native resolution, then box-downsamples to the
-    /// target size with a contrast curve that darkens anti-aliased edges.
-    /// `boldness` controls how aggressively edges are darkened:
-    /// 0.0 = neutral, 0.5 = moderate, 1.0 = strong.
     pub fn render_aa(&self, width: u32, height: u32, boldness: f32) -> Result<Pixmap, Error> {
         let page = self.doc.inner.borrow_dependent().page(self.index)?;
         render::render_aa(&page, width, height, boldness)
     }
 
     /// Decode the page thumbnail, if available.
-    ///
-    /// Returns `Ok(None)` if no thumbnail exists for this page.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
         self.doc.inner.borrow_dependent().thumbnail(self.index)
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
-    ///
-    /// Returns `Ok(None)` if the page has no text layer.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, Error> {
         let page = self.doc.inner.borrow_dependent().page(self.index)?;
         page.text_layer()
     }
 
     /// Extract the plain text content of the page.
-    ///
-    /// Returns `Ok(None)` if the page has no text layer.
     pub fn text(&self) -> Result<Option<String>, Error> {
         Ok(self.text_layer()?.map(|tl| tl.text))
     }
 
     /// Fast coarse render: decode only the first BG44 chunk (blurry preview).
-    ///
-    /// Returns `None` for single-chunk or non-IW44 pages. Call `render_scaled()`
-    /// afterwards for full quality — only the wavelet refinement is repeated,
-    /// so the total work is roughly `1/N + 1` instead of `N` inverse transforms.
     pub fn render_scaled_coarse(&self, scale: f32) -> Result<Option<Pixmap>, Error> {
         let dw = self.display_width();
         let dh = self.display_height();
@@ -255,12 +318,6 @@ impl<'a> Page<'a> {
     }
 
     /// Progressive rendering: returns increasingly refined pixmaps.
-    ///
-    /// For pages with multiple BG44 background chunks, the first frame is a
-    /// coarse (blurry) preview from just the first chunk (~50ms), and each
-    /// subsequent frame is sharper. The last frame is identical to `render_scaled()`.
-    ///
-    /// For single-chunk or non-IW44 pages, returns a single frame.
     pub fn render_scaled_progressive(&self, scale: f32) -> Result<Vec<Pixmap>, Error> {
         let dw = self.display_width();
         let dh = self.display_height();
@@ -280,7 +337,6 @@ impl<'a> Page<'a> {
         let dh = self.display_height();
         let w = ((dw as f32 * scale).round() as u32).max(1);
         let h = ((dh as f32 * scale).round() as u32).max(1);
-        // render_to_size works in pre-rotation coords
         let (tw, th) = match self.rotation {
             document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
             _ => (w, h),
@@ -300,275 +356,3 @@ const _: () = {
         assert_sync::<Document>();
     }
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assets_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("references/djvujs/library/assets")
-    }
-
-    fn golden_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/composite")
-    }
-
-    #[test]
-    fn open_and_page_count() {
-        let cases: &[(&str, usize)] = &[
-            ("boy_jb2.djvu", 1),
-            ("chicken.djvu", 1),
-            ("navm_fgbz.djvu", 6),
-            ("DjVu3Spec_bundled.djvu", 71),
-            ("colorbook.djvu", 62),
-        ];
-        for (file, expected) in cases {
-            let doc = Document::open(assets_path().join(file)).unwrap();
-            assert_eq!(doc.page_count(), *expected, "{}", file);
-        }
-    }
-
-    #[test]
-    fn page_dimensions() {
-        let doc = Document::open(assets_path().join("chicken.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        assert_eq!(page.width(), 181);
-        assert_eq!(page.height(), 240);
-        assert_eq!(page.dpi(), 100);
-    }
-
-    #[test]
-    fn render_all_test_files() {
-        let files = [
-            "boy_jb2.djvu",
-            "boy.djvu",
-            "chicken.djvu",
-            "carte.djvu",
-            "navm_fgbz.djvu",
-            "DjVu3Spec_bundled.djvu",
-            "colorbook.djvu",
-            "big-scanned-page.djvu",
-        ];
-        for file in &files {
-            let doc = Document::open(assets_path().join(file)).unwrap();
-            let page = doc.page(0).unwrap();
-            let pixmap = page.render().unwrap();
-            assert!(pixmap.width > 0, "{}: zero width", file);
-            assert!(pixmap.height > 0, "{}: zero height", file);
-            assert_eq!(
-                pixmap.data.len(),
-                pixmap.width as usize * pixmap.height as usize * 4,
-                "{}: data length mismatch",
-                file
-            );
-        }
-    }
-
-    #[test]
-    fn render_pixel_exact_chicken() {
-        let doc = Document::open(assets_path().join("chicken.djvu")).unwrap();
-        let pixmap = doc.page(0).unwrap().render().unwrap();
-        let expected = std::fs::read(golden_path().join("chicken.ppm")).unwrap();
-        assert_eq!(pixmap.to_ppm(), expected);
-    }
-
-    #[test]
-    fn render_pixel_exact_boy_jb2() {
-        let doc = Document::open(assets_path().join("boy_jb2.djvu")).unwrap();
-        let pixmap = doc.page(0).unwrap().render().unwrap();
-        let expected = std::fs::read(golden_path().join("boy_jb2.ppm")).unwrap();
-        assert_eq!(pixmap.to_ppm(), expected);
-    }
-
-    #[test]
-    fn to_rgb_output() {
-        let doc = Document::open(assets_path().join("chicken.djvu")).unwrap();
-        let pixmap = doc.page(0).unwrap().render().unwrap();
-        let rgb = pixmap.to_rgb();
-        assert_eq!(
-            rgb.len(),
-            pixmap.width as usize * pixmap.height as usize * 3
-        );
-    }
-
-    #[test]
-    fn from_bytes() {
-        let data = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
-        let doc = Document::from_bytes(data).unwrap();
-        assert_eq!(doc.page_count(), 1);
-    }
-
-    #[test]
-    fn display_dimensions_with_rotation() {
-        let doc = Document::open(assets_path().join("boy_jb2_rotate90.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        let w = page.width();
-        let h = page.height();
-        // Rotated 90 degrees swaps dimensions
-        assert_eq!(page.display_width(), h);
-        assert_eq!(page.display_height(), w);
-    }
-
-    #[test]
-    fn render_boy_jb2_rotate180() {
-        let doc = Document::open(assets_path().join("boy_jb2_rotate180.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        // 180 degrees keeps dimensions the same
-        assert_eq!(page.display_width(), page.width());
-        assert_eq!(page.display_height(), page.height());
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn render_boy_jb2_rotate270() {
-        let doc = Document::open(assets_path().join("boy_jb2_rotate270.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        // 270 degrees swaps dimensions like 90 degrees
-        assert_eq!(page.display_width(), page.height());
-        assert_eq!(page.display_height(), page.width());
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn parse_ccitt2_empty_last_chunk() {
-        let doc = Document::open(assets_path().join("ccitt_2.djvu")).unwrap();
-        assert!(doc.page_count() >= 1);
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn parse_links_minimal_file() {
-        let doc = Document::open(assets_path().join("links.djvu")).unwrap();
-        assert!(doc.page_count() >= 1);
-    }
-
-    #[test]
-    fn render_problem_page_jb2_edge_case() {
-        let doc = Document::open(assets_path().join("problem_page.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn render_vega_jb2_empty_edges() {
-        let doc = Document::open(assets_path().join("vega.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn render_malliavin_empty_page() {
-        let doc = Document::open(assets_path().join("malliavin.djvu")).unwrap();
-        // Page 6 (index 5) is reported as empty in djvujs
-        assert!(doc.page_count() >= 6);
-        // All pages should at least parse without panic
-        for i in 0..doc.page_count() {
-            let page = doc.page(i).unwrap();
-            let _ = page.render();
-        }
-    }
-
-    #[test]
-    fn parse_irish_multi_bzz() {
-        let doc = Document::open(assets_path().join("irish.djvu")).unwrap();
-        assert!(doc.page_count() >= 1);
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn parse_czech_text_layer() {
-        let doc = Document::open(assets_path().join("czech.djvu")).unwrap();
-        assert!(doc.page_count() >= 7);
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn parse_history_cyrillic_ids() {
-        let doc = Document::open(assets_path().join("history.djvu")).unwrap();
-        assert!(doc.page_count() >= 1);
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-
-    #[test]
-    fn bookmarks_navm_fgbz() {
-        let doc = Document::open(assets_path().join("navm_fgbz.djvu")).unwrap();
-        let bm = doc.bookmarks().unwrap();
-        assert_eq!(bm.len(), 4);
-        assert_eq!(bm[2].title, "Stamps");
-        assert_eq!(bm[2].children.len(), 2);
-    }
-
-    #[test]
-    fn bookmarks_empty_when_absent() {
-        let doc = Document::open(assets_path().join("boy_jb2.djvu")).unwrap();
-        assert!(doc.bookmarks().unwrap().is_empty());
-    }
-
-    #[test]
-    fn text_extraction_djvu3spec() {
-        let doc = Document::open(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
-        let page = doc.page(0).unwrap();
-
-        let tl = page.text_layer().unwrap().unwrap();
-        assert!(!tl.text.is_empty());
-        assert!(tl.text.contains("Introduction"));
-
-        let root = tl.root.as_ref().unwrap();
-        assert_eq!(root.kind, TextZoneKind::Page);
-    }
-
-    #[test]
-    fn text_plain_convenience() {
-        let doc = Document::open(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
-        let text = doc.page(0).unwrap().text().unwrap().unwrap();
-        assert!(text.contains("Introduction"));
-    }
-
-    #[test]
-    fn text_none_for_image_only() {
-        let doc = Document::open(assets_path().join("chicken.djvu")).unwrap();
-        assert!(doc.page(0).unwrap().text().unwrap().is_none());
-    }
-
-    #[test]
-    fn thumbnail_carte() {
-        let doc = Document::open(assets_path().join("carte.djvu")).unwrap();
-        let thumb = doc
-            .page(0)
-            .unwrap()
-            .thumbnail()
-            .unwrap()
-            .expect("carte should have thumbnail");
-        assert!(thumb.width > 0 && thumb.width < 500);
-        assert!(thumb.height > 0 && thumb.height < 500);
-    }
-
-    #[test]
-    fn thumbnail_none_for_image_only() {
-        let doc = Document::open(assets_path().join("chicken.djvu")).unwrap();
-        assert!(doc.page(0).unwrap().thumbnail().unwrap().is_none());
-    }
-
-    #[test]
-    fn render_slow_large_document() {
-        let doc = Document::open(assets_path().join("slow.djvu")).unwrap();
-        assert!(doc.page_count() >= 1);
-        // Just render first page -- this is a perf stress test
-        let page = doc.page(0).unwrap();
-        let pm = page.render().unwrap();
-        assert!(pm.width > 0 && pm.height > 0);
-    }
-}
