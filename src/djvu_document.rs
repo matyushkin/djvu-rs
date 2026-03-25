@@ -188,8 +188,7 @@ impl DjVuPage {
     }
 
     /// Find the first chunk with the given 4-byte ID.
-    #[allow(dead_code)]
-    fn find_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
+    pub fn find_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
         self.chunks
             .iter()
             .find(|c| &c.id == id)
@@ -197,13 +196,40 @@ impl DjVuPage {
     }
 
     /// Find all chunks with the given 4-byte ID.
-    #[allow(dead_code)]
-    fn find_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
+    pub fn find_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
         self.chunks
             .iter()
             .filter(|c| &c.id == id)
             .map(|c| c.data.as_slice())
             .collect()
+    }
+
+    /// Return all BG44 background chunk data slices, in order.
+    pub fn bg44_chunks(&self) -> Vec<&[u8]> {
+        self.find_chunks(b"BG44")
+    }
+
+    /// Return all FG44 foreground chunk data slices, in order.
+    pub fn fg44_chunks(&self) -> Vec<&[u8]> {
+        self.find_chunks(b"FG44")
+    }
+
+    /// Render this page into a pre-allocated RGBA buffer using the given options.
+    ///
+    /// This is the zero-allocation render path: no heap allocation occurs when
+    /// `buf` is already sized to `opts.width * opts.height * 4` bytes.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::djvu_render::RenderError::BufTooSmall`] if buffer is too small
+    /// - [`crate::djvu_render::RenderError::InvalidDimensions`] if width/height is 0
+    /// - Propagates IW44 / JB2 decode errors
+    pub fn render_into(
+        &self,
+        opts: &crate::djvu_render::RenderOptions,
+        buf: &mut [u8],
+    ) -> Result<(), crate::djvu_render::RenderError> {
+        crate::djvu_render::render_into(self, opts, buf)
     }
 }
 
