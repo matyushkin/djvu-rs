@@ -14,7 +14,11 @@
 //! - [`Page`] — a page within a [`Document`]
 //! - [`Pixmap`] — RGBA pixel buffer returned by render methods
 //! - [`Bitmap`] — 1-bit bitmap for JB2 mask layers
-//! - [`Bookmark`] — table-of-contents entry from NAVM chunk
+//! - [`Bookmark`] — table-of-contents entry from NAVM chunk (legacy)
+//! - [`DjVuDocument`] — new phase-3 document model (IFF/BZZ/IW44 based)
+//! - [`DjVuPage`] — lazy page handle (new phase-3)
+//! - [`DjVuBookmark`] — NAVM bookmark (new phase-3)
+//! - [`DocError`] — error type for the new document model
 //! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks
 //! - [`TextZone`] — a zone node in the text layer hierarchy
 //! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character)
@@ -97,8 +101,18 @@ pub mod jb2_new;
 #[path = "iw44_new.rs"]
 pub mod iw44_new;
 
+/// New document model — phase 3.
+///
+/// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
+/// clean-room implementations), [`DjVuPage`] (lazy page handle), and
+/// [`DjVuBookmark`] (NAVM table-of-contents entry).
+pub mod djvu_document;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
+
+// Re-export new phase-3 document model
+pub use djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError};
 
 // Re-export new phase-1 page info types
 pub use info::{PageInfo, Rotation};
