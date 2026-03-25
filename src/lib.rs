@@ -19,6 +19,8 @@
 //! - [`DjVuPage`] — lazy page handle (new phase-3)
 //! - [`DjVuBookmark`] — NAVM bookmark (new phase-3)
 //! - [`DocError`] — error type for the new document model
+//! - [`djvu_render::RenderOptions`] — render parameters (phase 5)
+//! - [`djvu_render::RenderError`] — render pipeline error type (phase 5)
 //! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks
 //! - [`TextZone`] — a zone node in the text layer hierarchy
 //! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character)
@@ -107,6 +109,13 @@ pub mod iw44_new;
 /// clean-room implementations), [`DjVuPage`] (lazy page handle), and
 /// [`DjVuBookmark`] (NAVM table-of-contents entry).
 pub mod djvu_document;
+
+/// Rendering pipeline for [`DjVuPage`] — phase 5.
+///
+/// Provides [`djvu_render::RenderOptions`], [`djvu_render::render_into`],
+/// [`djvu_render::render_pixmap`], [`djvu_render::render_coarse`], and
+/// [`djvu_render::render_progressive`].
+pub mod djvu_render;
 
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
