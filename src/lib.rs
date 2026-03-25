@@ -77,6 +77,18 @@ pub(crate) mod zp_impl;
 #[allow(dead_code)]
 pub(crate) mod bzz_new;
 
+/// JB2 bilevel image decoder — clean-room implementation (phase 2b).
+///
+/// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
+/// ZP adaptive arithmetic coding with a symbol dictionary.
+///
+/// Key public types:
+/// - [`jb2_new::Jb2Dict`] — shared symbol dictionary (from Djbz chunk)
+/// - [`jb2_new::decode`] — decode a Sjbz stream to a [`Bitmap`]
+/// - [`jb2_new::decode_dict`] — decode a Djbz stream to a [`Jb2Dict`]
+#[path = "jb2_new.rs"]
+pub mod jb2_new;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
