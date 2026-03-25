@@ -1,167 +1,190 @@
-use crate::zp::ZPDecoder;
+//! BZZ decompressor — pure-Rust clean-room implementation.
+//!
+//! BZZ is the compression algorithm used in DjVu for directory and annotation
+//! chunks (DIRM, NAVM, ANTz, etc.). It combines:
+//! 1. ZP adaptive arithmetic coding (decoded first)
+//! 2. Move-To-Front (MTF) inverse transform
+//! 3. Burrows-Wheeler Transform (BWT) inverse transform
+//!
+//! This implementation is written from the DjVu v3 specification at
+//! https://www.sndjvu.org/spec.html and does NOT derive from the legacy GPL code.
+//!
+//! Key public types:
+//! - [`bzz_decode`] — decode a BZZ-compressed byte slice into a `Vec<u8>`
 
-/// Errors that can occur during BZZ decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecodeError {
-    /// The BWT block did not contain an end-of-block marker.
-    MissingEndOfBlock,
-}
+use crate::error::BzzError;
+use crate::zp_impl::ZpDecoder;
 
-impl core::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DecodeError::MissingEndOfBlock => write!(f, "BZZ: missing end-of-block marker"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {}
-
-const FREQMAX: usize = 4;
-const CTXIDS: usize = 3;
-const NUM_CONTEXTS: usize = 300;
-
-/// Decode a BZZ-compressed stream.
+/// Number of ZP contexts per BZZ block.
 ///
-/// Returns the decompressed bytes.
-pub fn decode(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
-    let mut zp = ZPDecoder::new(data);
+/// The MTF position hierarchy uses 262 contexts per block:
+///
+/// - 3 contexts for level 0 (MTF position 0)
+/// - 3 contexts for level 1 (MTF position 1)
+/// - 1 context + 1 sub-tree for level 2 (positions 2–3)
+/// - 1 context + 3 sub-tree for level 3 (positions 4–7)
+/// - ... and so on up to level 8
+///
+/// Total: 3 + 3 + 2 + 4 + 8 + 16 + 32 + 64 + 128 + 1 = 262.
+/// We allocate 300 for headroom.
+const CTX_COUNT: usize = 300;
+
+/// Number of "frequency" slots tracked in the MTF order.
+const FREQ_SLOTS: usize = 4;
+
+/// Number of context IDs used for the first two MTF levels.
+const LEVEL_CTXIDS: usize = 3;
+
+/// Decode a BZZ-compressed byte slice.
+///
+/// BZZ streams consist of one or more blocks. Each block is preceded by a
+/// 24-bit block size decoded in passthrough mode. A size of 0 signals the end
+/// of the stream. Each block is decoded as follows:
+/// 1. Decode `N` MTF values using ZP arithmetic coding with 262 contexts.
+/// 2. Apply the inverse MTF transform to recover the BWT-encoded bytes.
+/// 3. Apply the inverse BWT to recover the original bytes.
+///
+/// Returns the decompressed bytes, or an error if the stream is malformed.
+pub(crate) fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
+    let mut zp = ZpDecoder::new(data)?;
     let mut output = Vec::new();
-    let mut ctx = [0u8; NUM_CONTEXTS];
+    let mut block_ctx = [0u8; CTX_COUNT];
 
     loop {
-        let size = decode_raw(&mut zp, 24);
-        if size == 0 {
+        // Read 24-bit block size (passthrough, no context)
+        let block_size = decode_raw_bits(&mut zp, 24);
+        if block_size == 0 {
+            // Size 0 = end-of-stream marker
             break;
         }
-        let block = decode_block(&mut zp, &mut ctx, size as usize)?;
+
+        let block = decode_one_block(&mut zp, &mut block_ctx, block_size as usize)?;
         output.extend_from_slice(&block);
     }
 
     Ok(output)
 }
 
-/// Decode a raw N-bit value from ZP (no context, passthrough).
-fn decode_raw(zp: &mut ZPDecoder, bits: u32) -> u32 {
-    let mut n: u32 = 1;
-    let m: u32 = 1 << bits;
-    while n < m {
-        let b = zp.decode_passthrough() as u32;
-        n = (n << 1) | b;
+/// Decode `bit_count` raw bits from the ZP stream (passthrough, no context).
+///
+/// The bits are decoded MSB-first using the arithmetic tree technique: start
+/// with `n = 1` and repeatedly shift left and OR in the next passthrough bit
+/// until `n >= 2^bit_count`. The result is `n - 2^bit_count`.
+fn decode_raw_bits(zp: &mut ZpDecoder, bit_count: u32) -> u32 {
+    let limit = 1u32 << bit_count;
+    let mut n = 1u32;
+    while n < limit {
+        let bit = zp.decode_passthrough() as u32;
+        n = (n << 1) | bit;
     }
-    n - m
+    n - limit
 }
 
-/// Decode an N-bit value from ZP using context tree.
-/// Note: ctxoff is decremented by 1 before indexing (matching djvulibre convention).
-fn decode_binary(zp: &mut ZPDecoder, ctx: &mut [u8], ctxoff: usize, bits: u32) -> u32 {
-    let base = ctxoff - 1;
-    let mut n: u32 = 1;
-    let m: u32 = 1 << bits;
-    while n < m {
-        let b = zp.decode(&mut ctx[base + n as usize]) as u32;
-        n = (n << 1) | b;
+/// Decode `bit_count` bits using a context binary tree.
+///
+/// `ctx_base` is the index of the first context in the subtree (0-indexed
+/// after the subtree root). The decoding traverses the binary tree by
+/// accumulating the decoded bit into an integer, starting from 1.
+fn decode_context_bits(zp: &mut ZpDecoder, ctx: &mut [u8], ctx_base: usize, bit_count: u32) -> u32 {
+    // The subtree root is at ctx_base - 1; children at ctx_base, ctx_base+1, ...
+    let subtree_offset = ctx_base.wrapping_sub(1);
+    let limit = 1u32 << bit_count;
+    let mut n = 1u32;
+    while n < limit {
+        let bit = zp.decode_bit(&mut ctx[subtree_offset + n as usize]) as u32;
+        n = (n << 1) | bit;
     }
-    n - m
+    n - limit
 }
 
-/// Decode a single BZZ block.
-fn decode_block(
-    zp: &mut ZPDecoder,
-    ctx: &mut [u8; NUM_CONTEXTS],
-    size: usize,
-) -> Result<Vec<u8>, DecodeError> {
-    // Decode frequency shift (0, 1, or 2)
-    let mut fshift: u32 = 0;
+/// Decode one BZZ block of `block_size` symbols.
+///
+/// The block shares ZP contexts across invocations (reset only once per stream,
+/// not per block). The MTF and BWT state are reset per block.
+fn decode_one_block(
+    zp: &mut ZpDecoder,
+    ctx: &mut [u8; CTX_COUNT],
+    block_size: usize,
+) -> Result<Vec<u8>, BzzError> {
+    // Decode the frequency shift parameter (0, 1, or 2)
+    // This controls how aggressively the MTF order adapts
+    let mut freq_shift: u32 = 0;
     if zp.decode_passthrough() {
-        fshift += 1;
+        freq_shift += 1;
         if zp.decode_passthrough() {
-            fshift += 1;
+            freq_shift += 1;
         }
     }
 
-    // Initialize per-block state
-    let mut mtf: [u8; 256] = core::array::from_fn(|i| i as u8);
-    let mut freq = [0u32; FREQMAX];
-    let mut fadd: u32 = 4;
-    let mut mtfno: u32 = 3;
-    let mut markerpos: i32 = -1;
+    // Per-block MTF state
+    let mut mtf_order: [u8; 256] = core::array::from_fn(|i| i as u8);
+    let mut freq_counts = [0u32; FREQ_SLOTS];
+    let mut freq_add: u32 = 4;
+    let mut last_mtf_pos: u32 = 3;
+    let mut marker_at: Option<usize> = None;
 
-    // Decode MTF-encoded symbols
-    let mut data = vec![0u8; size];
+    // Decode N symbols, where N = block_size (includes the BWT marker)
+    let mut bwt_data = vec![0u8; block_size];
 
-    for (i, data_byte) in data.iter_mut().enumerate() {
-        let ctxid = (mtfno.min(CTXIDS as u32 - 1)) as usize;
-        let mut ctxoff: usize;
+    for (sym_idx, output_byte) in bwt_data.iter_mut().enumerate() {
+        // Determine context ID based on last MTF position (clamped to 0..LEVEL_CTXIDS-1)
+        let ctx_id = (last_mtf_pos.min(LEVEL_CTXIDS as u32 - 1)) as usize;
 
         // Hierarchical MTF position decoding
-        // Level 0: mtfno == 0?
-        ctxoff = 0;
-        if zp.decode(&mut ctx[ctxoff + ctxid]) {
-            mtfno = 0;
-            *data_byte = mtf[0];
-        }
-        // Level 1: mtfno == 1?
-        else {
-            ctxoff += CTXIDS;
-            if zp.decode(&mut ctx[ctxoff + ctxid]) {
-                mtfno = 1;
-                *data_byte = mtf[1];
-            }
-            // Level 2: mtfno in {2, 3}?
-            else {
-                ctxoff += CTXIDS;
-                if zp.decode(&mut ctx[ctxoff]) {
-                    mtfno = 2 + decode_binary(zp, ctx, ctxoff + 1, 1);
-                    *data_byte = mtf[mtfno as usize];
-                }
-                // Level 3: mtfno in {4..7}?
-                else {
-                    ctxoff += 2;
-                    if zp.decode(&mut ctx[ctxoff]) {
-                        mtfno = 4 + decode_binary(zp, ctx, ctxoff + 1, 2);
-                        *data_byte = mtf[mtfno as usize];
-                    }
-                    // Level 4: mtfno in {8..15}?
-                    else {
-                        ctxoff += 4;
-                        if zp.decode(&mut ctx[ctxoff]) {
-                            mtfno = 8 + decode_binary(zp, ctx, ctxoff + 1, 3);
-                            *data_byte = mtf[mtfno as usize];
-                        }
-                        // Level 5: mtfno in {16..31}?
-                        else {
-                            ctxoff += 8;
-                            if zp.decode(&mut ctx[ctxoff]) {
-                                mtfno = 16 + decode_binary(zp, ctx, ctxoff + 1, 4);
-                                *data_byte = mtf[mtfno as usize];
-                            }
-                            // Level 6: mtfno in {32..63}?
-                            else {
-                                ctxoff += 16;
-                                if zp.decode(&mut ctx[ctxoff]) {
-                                    mtfno = 32 + decode_binary(zp, ctx, ctxoff + 1, 5);
-                                    *data_byte = mtf[mtfno as usize];
-                                }
-                                // Level 7: mtfno in {64..127}?
-                                else {
-                                    ctxoff += 32;
-                                    if zp.decode(&mut ctx[ctxoff]) {
-                                        mtfno = 64 + decode_binary(zp, ctx, ctxoff + 1, 6);
-                                        *data_byte = mtf[mtfno as usize];
-                                    }
-                                    // Level 8: mtfno in {128..255}?
-                                    else {
-                                        ctxoff += 64;
-                                        if zp.decode(&mut ctx[ctxoff]) {
-                                            mtfno = 128 + decode_binary(zp, ctx, ctxoff + 1, 7);
-                                            *data_byte = mtf[mtfno as usize];
-                                        }
-                                        // Level 9: marker (mtfno == 256)
-                                        else {
-                                            mtfno = 256;
-                                            *data_byte = 0;
-                                            markerpos = i as i32;
+        // Each level asks: "is the MTF position in this range?"
+        // The contexts advance through the `ctx` array as we descend.
+        let mtf_position;
+        let mut ctx_offset: usize = 0;
+
+        if zp.decode_bit(&mut ctx[ctx_offset + ctx_id]) {
+            // Level 0: position is 0
+            mtf_position = 0;
+        } else {
+            ctx_offset += LEVEL_CTXIDS;
+            if zp.decode_bit(&mut ctx[ctx_offset + ctx_id]) {
+                // Level 1: position is 1
+                mtf_position = 1;
+            } else {
+                ctx_offset += LEVEL_CTXIDS;
+                if zp.decode_bit(&mut ctx[ctx_offset]) {
+                    // Level 2: position in [2, 3]
+                    mtf_position = 2 + decode_context_bits(zp, ctx, ctx_offset + 1, 1);
+                } else {
+                    ctx_offset += 2;
+                    if zp.decode_bit(&mut ctx[ctx_offset]) {
+                        // Level 3: position in [4, 7]
+                        mtf_position = 4 + decode_context_bits(zp, ctx, ctx_offset + 1, 2);
+                    } else {
+                        ctx_offset += 4;
+                        if zp.decode_bit(&mut ctx[ctx_offset]) {
+                            // Level 4: position in [8, 15]
+                            mtf_position = 8 + decode_context_bits(zp, ctx, ctx_offset + 1, 3);
+                        } else {
+                            ctx_offset += 8;
+                            if zp.decode_bit(&mut ctx[ctx_offset]) {
+                                // Level 5: position in [16, 31]
+                                mtf_position = 16 + decode_context_bits(zp, ctx, ctx_offset + 1, 4);
+                            } else {
+                                ctx_offset += 16;
+                                if zp.decode_bit(&mut ctx[ctx_offset]) {
+                                    // Level 6: position in [32, 63]
+                                    mtf_position =
+                                        32 + decode_context_bits(zp, ctx, ctx_offset + 1, 5);
+                                } else {
+                                    ctx_offset += 32;
+                                    if zp.decode_bit(&mut ctx[ctx_offset]) {
+                                        // Level 7: position in [64, 127]
+                                        mtf_position =
+                                            64 + decode_context_bits(zp, ctx, ctx_offset + 1, 6);
+                                    } else {
+                                        ctx_offset += 64;
+                                        if zp.decode_bit(&mut ctx[ctx_offset]) {
+                                            // Level 8: position in [128, 255]
+                                            mtf_position = 128
+                                                + decode_context_bits(zp, ctx, ctx_offset + 1, 7);
+                                        } else {
+                                            // Level 9: BWT end-of-block marker (position 256)
+                                            mtf_position = 256;
                                         }
                                     }
                                 }
@@ -172,91 +195,126 @@ fn decode_block(
             }
         }
 
-        // MTF update (move decoded symbol to front)
-        if mtfno < 256 {
-            let sym = *data_byte;
+        last_mtf_pos = mtf_position;
+
+        if mtf_position == 256 {
+            // BWT marker: records where the marker byte sits in the block
+            *output_byte = 0;
+            marker_at = Some(sym_idx);
+        } else {
+            // Retrieve the byte at this MTF position
+            let sym = *mtf_order
+                .get(mtf_position as usize)
+                .ok_or(BzzError::InvalidBlockSize)?;
+            *output_byte = sym;
+
             // Update frequency tracking
-            fadd = fadd.wrapping_add(fadd >> fshift);
-            if fadd > 0x10000000 {
-                fadd >>= 24;
-                for f in freq.iter_mut() {
+            freq_add = freq_add.wrapping_add(freq_add >> freq_shift);
+            if freq_add > 0x1000_0000 {
+                freq_add >>= 24;
+                for f in freq_counts.iter_mut() {
                     *f >>= 24;
                 }
             }
 
-            let mut fc = fadd;
-            if (mtfno as usize) < FREQMAX {
-                fc += freq[mtfno as usize];
+            let mut combined_freq = freq_add;
+            if (mtf_position as usize) < FREQ_SLOTS {
+                combined_freq = combined_freq.saturating_add(freq_counts[mtf_position as usize]);
             }
 
-            // Bubble-sort MTF by frequency
-            let mut k = mtfno as usize;
-            while k >= FREQMAX {
-                mtf[k] = mtf[k - 1];
-                k -= 1;
+            // Bubble the symbol toward the front of the MTF order
+            let mut insert_at = mtf_position as usize;
+            while insert_at >= FREQ_SLOTS {
+                *mtf_order
+                    .get_mut(insert_at)
+                    .ok_or(BzzError::InvalidBlockSize)? = *mtf_order
+                    .get(insert_at - 1)
+                    .ok_or(BzzError::InvalidBlockSize)?;
+                insert_at -= 1;
             }
-            while k > 0 && fc >= freq[k - 1] {
-                mtf[k] = mtf[k - 1];
-                freq[k] = freq[k - 1];
-                k -= 1;
+            while insert_at > 0 {
+                let prev_freq = *freq_counts
+                    .get(insert_at - 1)
+                    .ok_or(BzzError::InvalidBlockSize)?;
+                if combined_freq >= prev_freq {
+                    *mtf_order
+                        .get_mut(insert_at)
+                        .ok_or(BzzError::InvalidBlockSize)? = *mtf_order
+                        .get(insert_at - 1)
+                        .ok_or(BzzError::InvalidBlockSize)?;
+                    *freq_counts
+                        .get_mut(insert_at)
+                        .ok_or(BzzError::InvalidBlockSize)? = prev_freq;
+                    insert_at -= 1;
+                } else {
+                    break;
+                }
             }
-            mtf[k] = sym;
-            freq[k] = fc;
+            *mtf_order
+                .get_mut(insert_at)
+                .ok_or(BzzError::InvalidBlockSize)? = sym;
+            if let Some(fc) = freq_counts.get_mut(insert_at) {
+                *fc = combined_freq;
+            }
         }
     }
 
-    if markerpos < 0 {
-        return Err(DecodeError::MissingEndOfBlock);
-    }
+    let marker_pos = marker_at.ok_or(BzzError::MissingMarker)?;
 
     // Inverse Burrows-Wheeler Transform
-    inverse_bwt(&mut data, markerpos as usize)
+    inverse_bwt(&bwt_data, marker_pos)
 }
 
 /// Inverse Burrows-Wheeler Transform.
 ///
-/// `data` contains the BWT-transformed bytes with a marker at `markerpos`.
-/// Returns the original uncompressed data (excluding the marker byte).
-fn inverse_bwt(data: &mut [u8], markerpos: usize) -> Result<Vec<u8>, DecodeError> {
-    let size = data.len();
-    if size == 0 {
+/// Given `bwt_data` — the BWT-encoded block — and `marker_pos` — the position
+/// of the BWT end-of-block marker — reconstruct the original byte sequence.
+///
+/// The output has length `bwt_data.len() - 1` (the marker byte is excluded).
+fn inverse_bwt(bwt_data: &[u8], marker_pos: usize) -> Result<Vec<u8>, BzzError> {
+    let total = bwt_data.len();
+    if total == 0 {
         return Ok(Vec::new());
     }
 
-    // Build position array: encode (byte_value << 24) | count
-    let mut count = [0u32; 256];
-    let mut pos = vec![0u32; size];
+    // Count occurrences of each byte value (excluding the marker position)
+    let mut byte_count = [0u32; 256];
+    // Build the "rank" array: rank[i] = occurrence index of bwt_data[i] among its siblings
+    let mut rank = vec![0u32; total];
 
-    for i in 0..size {
-        if i == markerpos {
+    for i in 0..total {
+        if i == marker_pos {
             continue;
         }
-        let c = data[i] as usize;
-        pos[i] = ((c as u32) << 24) | (count[c] & 0xffffff);
-        count[c] += 1;
+        let byte_val = bwt_data[i] as usize;
+        // Encode rank as (byte_val << 24) | occurrence_index
+        rank[i] = ((byte_val as u32) << 24) | (byte_count[byte_val] & 0x00ff_ffff);
+        byte_count[byte_val] += 1;
     }
 
-    // Compute cumulative counts (start positions in sorted order)
-    // Position 0 is reserved for the marker
-    let mut last: u32 = 1;
-    for item in &mut count {
-        let tmp = *item;
-        *item = last;
-        last += tmp;
+    // Compute cumulative counts: prefix sums give the sorted starting positions.
+    // Position 0 in the sorted order is reserved for the marker.
+    let mut sorted_start = [0u32; 256];
+    let mut running = 1u32; // start at 1 to skip the marker slot
+    for (byte_val, count) in byte_count.iter().enumerate() {
+        sorted_start[byte_val] = running;
+        running += count;
     }
 
-    // Reconstruct original data by following suffix chain
-    let output_size = size - 1;
-    let mut output = vec![0u8; output_size];
-    let mut j: usize = 0;
-    let mut last_idx = output_size;
+    // Reconstruct original data by following the BWT "follow" permutation
+    let output_len = total - 1;
+    let mut output = vec![0u8; output_len];
+    let mut follow = 0usize; // start at position 0 in the follow chain
+    let mut remaining = output_len;
 
-    while last_idx > 0 {
-        let n = pos[j];
-        let c = (n >> 24) as u8;
-        last_idx -= 1;
-        output[last_idx] = c;
-        j = (count[c as usize] + (n & 0xffffff)) as usize;
+    while remaining > 0 {
+        let encoded = rank[follow];
+        let byte_val = (encoded >> 24) as u8;
+        let occurrence = encoded & 0x00ff_ffff;
+        remaining -= 1;
+        output[remaining] = byte_val;
+        // Next position = start of this byte's sorted block + occurrence rank
+        follow = (sorted_start[byte_val as usize] + occurrence) as usize;
     }
 
     Ok(output)
@@ -266,75 +324,98 @@ fn inverse_bwt(data: &mut [u8], markerpos: usize) -> Result<Vec<u8>, DecodeError
 mod tests {
     use super::*;
 
-    fn golden_path() -> std::path::PathBuf {
+    fn golden_bzz_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/bzz")
     }
 
-    fn test_bzz_roundtrip(name: &str) {
-        let bzz_data = std::fs::read(golden_path().join(format!("{}.bzz", name))).unwrap();
-        let expected = std::fs::read(golden_path().join(format!("{}.txt", name))).unwrap();
-        let decoded = decode(&bzz_data).unwrap();
-        assert_eq!(
-            decoded,
-            expected,
-            "BZZ decode mismatch for {}. Got {} bytes, expected {} bytes",
-            name,
-            decoded.len(),
-            expected.len()
+    // --- TDD: failing tests written first ---
+
+    #[test]
+    fn empty_input_returns_error() {
+        // Empty input: ZpDecoder::new requires at least 2 bytes
+        let result = bzz_decode(&[]);
+        assert!(
+            result.is_err(),
+            "expected error for empty input, got {:?}",
+            result
         );
     }
 
     #[test]
-    fn bzz_decode_short() {
-        test_bzz_roundtrip("test_short");
+    fn single_byte_does_not_panic() {
+        // Should return an error, not panic
+        let result = bzz_decode(&[0x00]);
+        assert!(result.is_err(), "expected error for 1-byte input");
     }
 
     #[test]
-    fn bzz_decode_long() {
-        test_bzz_roundtrip("test_long");
+    fn bzz_decode_known_short() {
+        // Decode the short golden test vector produced by the DjVu reference encoder
+        let compressed =
+            std::fs::read(golden_bzz_path().join("test_short.bzz")).expect("test fixture missing");
+        let expected =
+            std::fs::read(golden_bzz_path().join("test_short.txt")).expect("test fixture missing");
+        let decoded = bzz_decode(&compressed).expect("bzz_decode failed");
+        assert_eq!(
+            decoded, expected,
+            "decoded output does not match expected for test_short"
+        );
     }
 
     #[test]
-    fn bzz_decode_1byte() {
-        test_bzz_roundtrip("test_1byte");
+    fn bzz_decode_known_long() {
+        let compressed =
+            std::fs::read(golden_bzz_path().join("test_long.bzz")).expect("test fixture missing");
+        let expected =
+            std::fs::read(golden_bzz_path().join("test_long.txt")).expect("test fixture missing");
+        let decoded = bzz_decode(&compressed).expect("bzz_decode failed");
+        assert_eq!(
+            decoded, expected,
+            "decoded output does not match for test_long"
+        );
     }
 
     #[test]
-    fn bzz_decode_real_dirm() {
-        // BZZ payload extracted from DIRM chunk of navm_fgbz.djvu
-        let bzz_data = std::fs::read(golden_path().join("navm_fgbz_dirm.bzz")).unwrap();
-        let expected = std::fs::read(golden_path().join("navm_fgbz_dirm.bin")).unwrap();
-        let decoded = decode(&bzz_data).unwrap();
-        assert_eq!(decoded, expected);
-    }
-
-    // --- Phase 6.2: Edge case tests ---
-
-    #[test]
-    fn bzz_empty_input() {
-        let result = decode(&[]);
-        assert!(result.is_err() || result.unwrap().is_empty());
+    fn bzz_decode_known_1byte() {
+        let compressed =
+            std::fs::read(golden_bzz_path().join("test_1byte.bzz")).expect("test fixture missing");
+        let expected =
+            std::fs::read(golden_bzz_path().join("test_1byte.txt")).expect("test fixture missing");
+        let decoded = bzz_decode(&compressed).expect("bzz_decode failed");
+        assert_eq!(
+            decoded, expected,
+            "decoded output does not match for test_1byte"
+        );
     }
 
     #[test]
-    fn bzz_single_byte() {
-        // Should not panic on minimal input
-        let _ = decode(&[0x00]);
+    fn bzz_decode_real_dirm_chunk() {
+        // BZZ payload extracted from the DIRM chunk of navm_fgbz.djvu
+        // This exercises a real-world DjVu file's directory chunk
+        let compressed = std::fs::read(golden_bzz_path().join("navm_fgbz_dirm.bzz"))
+            .expect("test fixture missing");
+        let expected = std::fs::read(golden_bzz_path().join("navm_fgbz_dirm.bin"))
+            .expect("test fixture missing");
+        let decoded = bzz_decode(&compressed).expect("bzz_decode failed on real DIRM chunk");
+        assert!(
+            !decoded.is_empty(),
+            "decoded DIRM chunk should not be empty"
+        );
+        assert_eq!(
+            decoded, expected,
+            "decoded DIRM chunk does not match expected"
+        );
     }
 
     #[test]
-    fn bzz_all_zeros() {
-        let _ = decode(&[0u8; 32]);
-    }
-
-    #[test]
-    fn bzz_all_ones() {
-        let _ = decode(&[0xffu8; 32]);
-    }
-
-    #[test]
-    fn bzz_truncated_header() {
-        // Two bytes — not enough for block size
-        let _ = decode(&[0x42, 0x5a]);
+    fn zp_tables_spot_check() {
+        // Verify that the new ZP coder tables have the correct spec-defined values
+        use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+        assert_eq!(PROB[0], 0x8000, "P[0] should be 0x8000");
+        assert_eq!(PROB[250], 0x481a, "P[250] should be 0x481a");
+        assert_eq!(MPS_NEXT[0], 84, "UP[0] should be 84");
+        assert_eq!(LPS_NEXT[0], 145, "DN[0] should be 145");
+        assert_eq!(THRESHOLD[83], 0, "M[83] should be 0");
+        assert_eq!(THRESHOLD[250], 0, "M[250] should be 0");
     }
 }

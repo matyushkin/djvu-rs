@@ -1,8 +1,20 @@
-//! ZP coder state tables from the DjVu3 specification.
-//! These are format constants defining the adaptive probability model.
+//! ZP coder state tables from the DjVu v3 specification.
+//!
+//! These are format constants defining the adaptive probability model used by the
+//! ZP arithmetic coder. The tables are defined in the DjVu v3 specification at
+//! https://www.sndjvu.org/spec.html.
+//!
+//! Key public types (all `pub(crate)` constants):
+//! - [`PROB`] — probability estimates (251 entries, u16)
+//! - [`THRESHOLD`] — adaptation thresholds (251 entries, u16)
+//! - [`MPS_NEXT`] — state transitions on MPS (most probable symbol) (251 entries, u8)
+//! - [`LPS_NEXT`] — state transitions on LPS (least probable symbol) (251 entries, u8)
 
-/// Probability estimates for each state (251 entries, u16).
-pub static P: [u16; 251] = [
+/// Probability estimates `p[state]` for each ZP coder state (251 entries).
+///
+/// Each entry gives the probability that the next decoded bit is the MPS (most
+/// probable symbol). Values are unsigned 16-bit fractions in the range [0, 0x8000].
+pub(crate) const PROB: [u16; 251] = [
     0x8000, 0x8000, 0x8000, 0x6bbd, 0x6bbd, 0x5d45, 0x5d45, 0x51b9, 0x51b9, 0x4813, 0x4813, 0x3fd5,
     0x3fd5, 0x38b1, 0x38b1, 0x3275, 0x3275, 0x2cfd, 0x2cfd, 0x2825, 0x2825, 0x23ab, 0x23ab, 0x1f87,
     0x1f87, 0x1bbb, 0x1bbb, 0x1845, 0x1845, 0x1523, 0x1523, 0x1253, 0x1253, 0x0fcf, 0x0fcf, 0x0d95,
@@ -26,8 +38,11 @@ pub static P: [u16; 251] = [
     0x2c99, 0x432a, 0x3b5f, 0x447d, 0x5695, 0x5ece, 0x8000, 0x8000, 0x5695, 0x481a, 0x481a,
 ];
 
-/// Adaptation thresholds (m table, 251 entries, u16).
-pub static M: [u16; 251] = [
+/// Adaptation threshold `m[state]` for each ZP coder state (251 entries).
+///
+/// When `a >= m[state]`, the MPS transition updates the context state using
+/// [`MPS_NEXT`]. Entries beyond state 82 are 0 (no threshold-based update).
+pub(crate) const THRESHOLD: [u16; 251] = [
     0x0000, 0x0000, 0x0000, 0x10a5, 0x10a5, 0x1f28, 0x1f28, 0x2bd3, 0x2bd3, 0x36e3, 0x36e3, 0x408c,
     0x408c, 0x48fd, 0x48fd, 0x505d, 0x505d, 0x56d0, 0x56d0, 0x5c71, 0x5c71, 0x615b, 0x615b, 0x65a5,
     0x65a5, 0x6962, 0x6962, 0x6ca2, 0x6ca2, 0x6f74, 0x6f74, 0x71e6, 0x71e6, 0x7404, 0x7404, 0x75d6,
@@ -51,8 +66,11 @@ pub static M: [u16; 251] = [
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
-/// State transitions on MPS (more probable symbol) occurrence.
-pub static UP: [u8; 251] = [
+/// Next state on MPS (most probable symbol) occurrence.
+///
+/// When the decoded bit matches the MPS and `a >= m[state]`, the context is
+/// updated to `MPS_NEXT[state]`.
+pub(crate) const MPS_NEXT: [u8; 251] = [
     84, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
     51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
@@ -67,8 +85,11 @@ pub static UP: [u8; 251] = [
     244, 249, 10, 89, 230,
 ];
 
-/// State transitions on LPS (least probable symbol) occurrence.
-pub static DN: [u8; 251] = [
+/// Next state on LPS (least probable symbol) occurrence.
+///
+/// When the decoded bit does not match the MPS, the context is updated to
+/// `LPS_NEXT[state]`.
+pub(crate) const LPS_NEXT: [u8; 251] = [
     145, 4, 3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
     24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
@@ -82,3 +103,38 @@ pub static DN: [u8; 251] = [
     63, 8, 55, 224, 51, 2, 47, 87, 43, 246, 37, 244, 33, 238, 27, 236, 21, 16, 15, 8, 241, 242, 7,
     10, 245, 2, 1, 83, 250, 2, 143, 246,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tables_have_correct_length() {
+        assert_eq!(PROB.len(), 251);
+        assert_eq!(THRESHOLD.len(), 251);
+        assert_eq!(MPS_NEXT.len(), 251);
+        assert_eq!(LPS_NEXT.len(), 251);
+    }
+
+    #[test]
+    fn zp_tables_spot_check() {
+        // Verify known values from the DjVu v3 spec
+        // First 3 entries of PROB are 0x8000 (maximum probability = 50/50)
+        assert_eq!(PROB[0], 0x8000);
+        assert_eq!(PROB[1], 0x8000);
+        assert_eq!(PROB[2], 0x8000);
+        assert_eq!(PROB[3], 0x6bbd);
+        // Last entry of PROB
+        assert_eq!(PROB[250], 0x481a);
+        // MPS_NEXT[0] = 84 (as per spec)
+        assert_eq!(MPS_NEXT[0], 84);
+        // LPS_NEXT[0] = 145 (as per spec)
+        assert_eq!(LPS_NEXT[0], 145);
+        // THRESHOLD entries past 82 are 0
+        assert_eq!(THRESHOLD[83], 0);
+        assert_eq!(THRESHOLD[250], 0);
+        // Check some mid-range entries (verified against the DjVu v3 spec table)
+        assert_eq!(PROB[128], 0x02e6);
+        assert_eq!(PROB[83], 0x5695);
+    }
+}
