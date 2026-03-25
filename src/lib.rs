@@ -1,8 +1,9 @@
 //! Pure-Rust DjVu decoder written from the DjVu v3 public specification.
 //!
 //! This crate provides a zero-copy IFF container parser, typed error types,
-//! and page metadata extraction. Higher-level decoding (JB2, IW44, BZZ) will
-//! be added in subsequent phases.
+//! and page metadata extraction. Higher-level decoding (JB2, IW44, BZZ) is
+//! provided by phase 2+ modules. The legacy implementation is kept for
+//! backward compatibility while the clean-room rewrite is in progress.
 //!
 //! # Key public types
 //!
@@ -10,22 +11,27 @@
 //! - [`IffError`] — errors from the IFF container parser
 //! - [`PageInfo`] — page metadata parsed from the INFO chunk
 //! - [`Rotation`] — page rotation enum (None, Ccw90, Rot180, Cw90)
-//! - [`Document`] — owned DjVu document (full rendering, from legacy impl)
-//! - [`Page`] — a page within a [`Document`]
-//! - [`Pixmap`] — RGBA pixel buffer returned by render methods
-//! - [`Bitmap`] — 1-bit bitmap for JB2 mask layers
-//! - [`Bookmark`] — table-of-contents entry from NAVM chunk (legacy)
 //! - [`DjVuDocument`] — new phase-3 document model (IFF/BZZ/IW44 based)
 //! - [`DjVuPage`] — lazy page handle (new phase-3)
 //! - [`DjVuBookmark`] — NAVM bookmark (new phase-3)
 //! - [`DocError`] — error type for the new document model
 //! - [`djvu_render::RenderOptions`] — render parameters (phase 5)
 //! - [`djvu_render::RenderError`] — render pipeline error type (phase 5)
-//! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks (legacy + phase 4)
-//! - [`TextZone`] — a zone node in the text layer hierarchy (legacy)
-//! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character) (legacy)
-//! - [`text`] — phase-4 text layer parser (`TextLayer`, `TextZone`, `TextZoneKind`, `Rect`)
-//! - [`annotation`] — phase-4 annotation parser (`Annotation`, `MapArea`, `Shape`, `Color`)
+//! - [`text::TextLayer`] — text layer from TXTz/TXTa chunks (phase 4)
+//! - [`text::TextZone`] — a zone node in the text layer hierarchy (phase 4)
+//! - [`annotation::Annotation`] — page-level annotation (phase 4)
+//! - [`annotation::MapArea`] — clickable area with URL and shape (phase 4)
+//! - [`Pixmap`] — RGBA pixel buffer returned by render methods
+//! - [`Bitmap`] — 1-bit bitmap for JB2 mask layers
+//!
+//! # Legacy API (std only)
+//!
+//! - `Document` — owned DjVu document (full rendering, from legacy impl)
+//! - `Page` — a page within a `Document`
+//! - `Bookmark` — table-of-contents entry from NAVM chunk (legacy)
+//! - `TextLayer` — text layer extracted from TXTz/TXTa chunks (legacy)
+//! - `TextZone`, `TextZoneKind` — zone types (legacy)
+//! - `error::LegacyError` — the original error type (legacy)
 //!
 //! # IFF parser (phase 1)
 //!
@@ -37,22 +43,27 @@
 //! println!("form type: {:?}", std::str::from_utf8(&form.form_type));
 //! ```
 //!
-//! # Full document rendering
+//! # Full document rendering (phase 5)
 //!
 //! ```no_run
-//! use cos_djvu::Document;
+//! use cos_djvu::{DjVuDocument, djvu_render::{render_pixmap, RenderOptions}};
 //!
-//! let doc = Document::open("file.djvu").unwrap();
+//! let data = std::fs::read("file.djvu").unwrap();
+//! let doc = DjVuDocument::parse(&data).unwrap();
 //! println!("{} pages", doc.page_count());
 //!
 //! let page = doc.page(0).unwrap();
 //! println!("{}x{} @ {} dpi", page.width(), page.height(), page.dpi());
 //!
-//! let pixmap = page.render().unwrap();
+//! let opts = RenderOptions { width: page.width() as u32, height: page.height() as u32, scale: 1.0, bold: 0, aa: false };
+//! let pixmap = render_pixmap(page, &opts).unwrap();
 //! // pixmap.data: RGBA bytes
 //! ```
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 // ---- New phase-1 modules ---------------------------------------------------
 //
@@ -64,6 +75,9 @@
 pub mod iff;
 
 /// Typed error hierarchy for the new implementation (phase 1).
+///
+/// Key types: `DjVuError`, `IffError`, `BzzError`, `Jb2Error`, `Iw44Error`,
+/// `LegacyError`. See also `text::TextError` and `annotation::AnnotationError`.
 pub mod error;
 
 /// INFO chunk parser (phase 1).
@@ -71,7 +85,7 @@ pub(crate) mod info;
 
 /// ZP arithmetic coder — clean-room implementation (phase 2a).
 ///
-/// Provides [`ZpDecoder`] for use by the new BZZ decompressor and future
+/// Provides `ZpDecoder` for use by the new BZZ decompressor and future
 /// phase decoders (JB2, IW44). Not yet wired into the legacy rendering path.
 #[path = "zp/mod.rs"]
 #[allow(dead_code)]
@@ -79,29 +93,26 @@ pub(crate) mod zp_impl;
 
 /// BZZ decompressor — clean-room implementation (phase 2a).
 ///
-/// Provides [`bzz_new::bzz_decode`] for decompressing DjVu BZZ streams
+/// Provides `bzz_new::bzz_decode` for decompressing DjVu BZZ streams
 /// (DIRM, NAVM, ANTz chunks). Will replace the legacy bzz module in phase 2b.
 #[path = "bzz.rs"]
 #[allow(dead_code)]
-pub(crate) mod bzz_new;
+pub mod bzz_new;
 
 /// JB2 bilevel image decoder — clean-room implementation (phase 2b).
 ///
 /// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
 /// ZP adaptive arithmetic coding with a symbol dictionary.
 ///
-/// Key public types:
-/// - [`jb2_new::Jb2Dict`] — shared symbol dictionary (from Djbz chunk)
-/// - [`jb2_new::decode`] — decode a Sjbz stream to a [`Bitmap`]
-/// - [`jb2_new::decode_dict`] — decode a Djbz stream to a [`Jb2Dict`]
+/// Key public types: `jb2_new::Jb2Dict`, `jb2_new::decode`, `jb2_new::decode_dict`.
 #[path = "jb2_new.rs"]
 pub mod jb2_new;
 
 /// IW44 wavelet image decoder — clean-room implementation (phase 2c).
 ///
-/// Provides [`iw44_new::Iw44Image`] for decoding BG44/FG44/TH44 chunks.
-/// Uses planar YCbCr storage and the new [`zp_impl::ZpDecoder`] arithmetic coder.
-/// RGB conversion happens only in [`iw44_new::Iw44Image::to_rgb`].
+/// Provides `iw44_new::Iw44Image` for decoding BG44/FG44/TH44 chunks.
+/// Uses planar YCbCr storage and a ZP arithmetic coder.
+/// RGB conversion happens only in `iw44_new::Iw44Image::to_rgb`.
 #[path = "iw44_new.rs"]
 pub mod iw44_new;
 
@@ -114,9 +125,9 @@ pub mod djvu_document;
 
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
-/// Provides [`djvu_render::RenderOptions`], [`djvu_render::render_into`],
-/// [`djvu_render::render_pixmap`], [`djvu_render::render_coarse`], and
-/// [`djvu_render::render_progressive`].
+/// Provides `djvu_render::RenderOptions`, `djvu_render::render_into`,
+/// `djvu_render::render_pixmap`, `djvu_render::render_coarse`, and
+/// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
 /// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
@@ -158,23 +169,32 @@ pub use info::{PageInfo, Rotation};
 // The legacy files are patched to reference their own module names via
 // absolute paths — but since we cannot modify legacy/ files, we instead
 // expose shims at the paths they expect.
+//
+// NOTE: Legacy modules require std (they use std::io, std::path, vec!/format!
+// macros and self_cell). They are gated behind #[cfg(feature = "std")] for
+// no_std compatibility. The new phase-1+ decoder modules (iff, bzz, jb2_new,
+// iw44_new) are alloc-only and work without std.
 
 #[doc(hidden)]
 #[path = "legacy/bitmap.rs"]
 pub(crate) mod bitmap;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/bzz.rs"]
 pub mod bzz;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/document.rs"]
 pub mod document;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/iw44.rs"]
 pub mod iw44;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/jb2.rs"]
 pub mod jb2;
@@ -183,26 +203,35 @@ pub mod jb2;
 #[path = "legacy/pixmap.rs"]
 pub(crate) mod pixmap;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/render.rs"]
 pub mod render;
 
+#[cfg(feature = "std")]
 #[doc(hidden)]
 #[path = "legacy/zp/mod.rs"]
 pub mod zp;
 
-// Re-export legacy public types to preserve the old API surface
+// Re-export types needed by both legacy and new phase modules
 pub use bitmap::Bitmap;
-pub use document::{Bookmark, TextLayer, TextZone, TextZoneKind};
 pub use pixmap::Pixmap;
 
+// Re-export legacy types (only with std feature)
+#[cfg(feature = "std")]
+pub use document::{Bookmark, TextLayer, TextZone, TextZoneKind};
+
 // Legacy error type (re-exported from legacy_error module included via error.rs)
+#[cfg(feature = "std")]
 pub use error::LegacyError as Error;
 
+#[cfg(feature = "std")]
 use self_cell::self_cell;
 
+#[cfg(feature = "std")]
 type ParsedDocument<'a> = document::Document<'a>;
 
+#[cfg(feature = "std")]
 self_cell!(
     struct DocumentInner {
         owner: Box<[u8]>,
@@ -213,6 +242,7 @@ self_cell!(
 );
 
 /// A parsed DjVu document. Owns its data and the parsed structure.
+#[cfg(feature = "std")]
 ///
 /// Parsing happens once at construction time. All subsequent `page()` and
 /// `render()` calls reuse the parsed chunk tree with zero re-parsing overhead.
@@ -220,6 +250,7 @@ pub struct Document {
     inner: DocumentInner,
 }
 
+#[cfg(feature = "std")]
 impl Document {
     /// Open a DjVu file from disk.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
@@ -271,6 +302,7 @@ impl Document {
 }
 
 /// A page within a DjVu document.
+#[cfg(feature = "std")]
 pub struct Page<'a> {
     width: u16,
     height: u16,
@@ -280,6 +312,7 @@ pub struct Page<'a> {
     doc: &'a Document,
 }
 
+#[cfg(feature = "std")]
 impl<'a> Page<'a> {
     /// Page width in pixels (before rotation).
     pub fn width(&self) -> u32 {
@@ -422,6 +455,7 @@ impl<'a> Page<'a> {
 }
 
 // Compile-time assertions: Document is Send + Sync.
+#[cfg(feature = "std")]
 #[allow(dead_code)]
 const _: () = {
     fn assert_send<T: Send>() {}

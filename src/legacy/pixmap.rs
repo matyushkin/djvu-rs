@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, vec::Vec};
+
 /// An RGBA pixel image, 4 bytes per pixel.
 ///
 /// Row-major, top-to-bottom. Alpha is always 255 for DjVu pages.
@@ -24,7 +27,7 @@ impl Pixmap {
     /// Create a new pixmap filled with the given RGBA color.
     ///
     /// Returns an empty 0×0 pixmap if `width * height` would exceed
-    /// [`MAX_PIXELS`] or overflow `usize`, preventing OOM from extreme
+    /// `MAX_PIXELS` or overflow `usize`, preventing OOM from extreme
     /// DPI values.
     pub fn new(width: u32, height: u32, r: u8, g: u8, b: u8, a: u8) -> Self {
         let Some(pixel_count) = (width as usize).checked_mul(height as usize) else {

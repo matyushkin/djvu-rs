@@ -7,10 +7,13 @@
 //! 3. Burrows-Wheeler Transform (BWT) inverse transform
 //!
 //! This implementation is written from the DjVu v3 specification at
-//! https://www.sndjvu.org/spec.html and does NOT derive from the legacy GPL code.
+//! <https://www.sndjvu.org/spec.html> and does NOT derive from the legacy GPL code.
 //!
 //! Key public types:
-//! - [`bzz_decode`] — decode a BZZ-compressed byte slice into a `Vec<u8>`
+//! - `bzz_decode` — decode a BZZ-compressed byte slice into a `Vec<u8>`
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use crate::error::BzzError;
 use crate::zp_impl::ZpDecoder;
@@ -45,7 +48,7 @@ const LEVEL_CTXIDS: usize = 3;
 /// 3. Apply the inverse BWT to recover the original bytes.
 ///
 /// Returns the decompressed bytes, or an error if the stream is malformed.
-pub(crate) fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
+pub fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
     let mut zp = ZpDecoder::new(data)?;
     let mut output = Vec::new();
     let mut block_ctx = [0u8; CTX_COUNT];

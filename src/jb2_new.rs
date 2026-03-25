@@ -6,9 +6,9 @@
 //!
 //! # Key public types
 //!
-//! - [`Jb2Dict`] — shared symbol dictionary decoded from a Djbz chunk
-//! - [`decode`] — decode a Sjbz image stream to a [`Bitmap`]
-//! - [`decode_dict`] — decode a Djbz dictionary stream to a [`Jb2Dict`]
+//! - `Jb2Dict` — shared symbol dictionary decoded from a Djbz chunk
+//! - `decode` — decode a Sjbz image stream to a `Bitmap`
+//! - `decode_dict` — decode a Djbz dictionary stream to a `Jb2Dict`
 //!
 //! # Record types
 //!
@@ -26,6 +26,9 @@
 //! | 9    | required-dict-or-reset |
 //! | 10   | comment |
 //! | 11   | end-of-data |
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use crate::bitmap::Bitmap;
 use crate::error::Jb2Error;

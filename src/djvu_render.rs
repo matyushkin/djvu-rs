@@ -5,8 +5,8 @@
 //!
 //! ## Key public types
 //!
-//! - [`RenderOptions`] — render parameters (size, scale, bold, AA)
-//! - [`RenderError`] — typed errors from the render pipeline
+//! - `RenderOptions` — render parameters (size, scale, bold, AA)
+//! - `RenderError` — typed errors from the render pipeline
 //!
 //! ## Compositing model
 //!
@@ -34,6 +34,9 @@
 //! `render_coarse()` decodes only the first BG44 chunk; subsequent calls to
 //! `render_progressive(chunk_n)` decode one additional chunk, yielding
 //! progressively higher-quality images.
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use crate::djvu_document::DjVuPage;
 use crate::iw44_new::Iw44Image;

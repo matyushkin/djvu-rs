@@ -1,7 +1,7 @@
 //! ZP adaptive binary arithmetic coder — pure-Rust clean-room implementation.
 //!
 //! This module implements the ZP (Z-Prime) adaptive binary arithmetic decoder
-//! from the DjVu v3 specification (https://www.sndjvu.org/spec.html).
+//! from the DjVu v3 specification (<https://www.sndjvu.org/spec.html>).
 //!
 //! Key public types:
 //! - [`ZpDecoder`] — the ZP decoder state machine

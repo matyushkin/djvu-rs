@@ -5,9 +5,12 @@
 //! - [`IffError`] — errors from the new IFF container parser
 //! - [`BzzError`] — errors from the BZZ decompressor (phase 2a)
 //! - [`Jb2Error`], [`Iw44Error`] — stubs for future decoders
-//! - [`LegacyError`] — the original error type, kept for backward compatibility
-//! - [`TextError`] — errors from the text layer parser (phase 4)
-//! - [`AnnotationError`] — errors from the annotation parser (phase 4)
+//! - `LegacyError` — the original error type, kept for backward compatibility
+//! - `TextError` — errors from the text layer parser (phase 4, see `text` module)
+//! - `AnnotationError` — errors from the annotation parser (phase 4, see `annotation` module)
+
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::Cow, string::String};
 
 // ---- New phase-1 typed errors -----------------------------------------------
 
@@ -40,7 +43,12 @@ pub enum DjVuError {
 
     /// A feature or format variant that is not yet supported.
     #[error("unsupported: {0}")]
+    #[cfg(feature = "std")]
     Unsupported(std::borrow::Cow<'static, str>),
+    /// A feature or format variant that is not yet supported.
+    #[error("unsupported: {0}")]
+    #[cfg(not(feature = "std"))]
+    Unsupported(Cow<'static, str>),
 
     /// An I/O error (only available with the `std` feature).
     #[cfg(feature = "std")]
@@ -218,8 +226,8 @@ pub enum LegacyError {
     FormatError(String),
 }
 
-impl std::fmt::Display for LegacyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LegacyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             LegacyError::UnexpectedEof => write!(f, "unexpected end of input"),
             LegacyError::InvalidMagic => write!(f, "invalid magic number"),
@@ -231,6 +239,7 @@ impl std::fmt::Display for LegacyError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for LegacyError {}
 
 /// Alias for [`LegacyError`] at the path `crate::error::Error`.
