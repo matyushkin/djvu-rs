@@ -6,6 +6,8 @@
 //! - [`BzzError`] — errors from the BZZ decompressor (phase 2a)
 //! - [`Jb2Error`], [`Iw44Error`] — stubs for future decoders
 //! - [`LegacyError`] — the original error type, kept for backward compatibility
+//! - [`TextError`] — errors from the text layer parser (phase 4)
+//! - [`AnnotationError`] — errors from the annotation parser (phase 4)
 
 // ---- New phase-1 typed errors -----------------------------------------------
 

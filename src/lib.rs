@@ -21,9 +21,11 @@
 //! - [`DocError`] — error type for the new document model
 //! - [`djvu_render::RenderOptions`] — render parameters (phase 5)
 //! - [`djvu_render::RenderError`] — render pipeline error type (phase 5)
-//! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks
-//! - [`TextZone`] — a zone node in the text layer hierarchy
-//! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character)
+//! - [`TextLayer`] — text layer extracted from TXTz/TXTa chunks (legacy + phase 4)
+//! - [`TextZone`] — a zone node in the text layer hierarchy (legacy)
+//! - [`TextZoneKind`] — zone type (Page, Column, Region, Paragraph, Line, Word, Character) (legacy)
+//! - [`text`] — phase-4 text layer parser (`TextLayer`, `TextZone`, `TextZoneKind`, `Rect`)
+//! - [`annotation`] — phase-4 annotation parser (`Annotation`, `MapArea`, `Shape`, `Color`)
 //!
 //! # IFF parser (phase 1)
 //!
@@ -116,6 +118,20 @@ pub mod djvu_document;
 /// [`djvu_render::render_pixmap`], [`djvu_render::render_coarse`], and
 /// [`djvu_render::render_progressive`].
 pub mod djvu_render;
+
+/// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
+///
+/// Provides [`text::parse_text_layer`] and [`text::parse_text_layer_bzz`]
+/// plus typed structs [`text::TextLayer`], [`text::TextZone`],
+/// [`text::TextZoneKind`], and [`text::Rect`].
+pub mod text;
+
+/// Annotation parser for DjVu ANTz/ANTa chunks — phase 4.
+///
+/// Provides [`annotation::parse_annotations`] and [`annotation::parse_annotations_bzz`]
+/// plus typed structs [`annotation::Annotation`], [`annotation::MapArea`],
+/// [`annotation::Shape`], and [`annotation::Color`].
+pub mod annotation;
 
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
