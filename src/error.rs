@@ -28,6 +28,14 @@ pub enum DjVuError {
     #[error("BZZ error: {0}")]
     Bzz(#[from] BzzError),
 
+    /// A page number was not found in the document.
+    #[error("page {0} not found")]
+    PageNotFound(usize),
+
+    /// The document structure is invalid or unexpected.
+    #[error("invalid structure: {0}")]
+    InvalidStructure(&'static str),
+
     /// A feature or format variant that is not yet supported.
     #[error("unsupported: {0}")]
     Unsupported(std::borrow::Cow<'static, str>),

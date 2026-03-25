@@ -15,16 +15,6 @@ impl AsRef<[u8]> for Pixmap {
     }
 }
 
-impl std::ops::Index<(u32, u32)> for Pixmap {
-    type Output = [u8];
-
-    /// Returns the 4 RGBA bytes at pixel (x, y).
-    fn index(&self, (x, y): (u32, u32)) -> &[u8] {
-        let idx = (y as usize * self.width as usize + x as usize) * 4;
-        &self.data[idx..idx + 4]
-    }
-}
-
 impl Pixmap {
     /// Maximum pixels per pixmap (~64 megapixels = ~256 MB RGBA).
     /// Anything beyond this is a runaway DPI — return an empty pixmap
@@ -73,6 +63,16 @@ impl Pixmap {
             pixel[2] = b;
             pixel[3] = 255;
         }
+    }
+
+    /// Get the 4 RGBA bytes at pixel (x, y), or `None` if out of bounds.
+    #[inline]
+    pub fn get_pixel(&self, x: u32, y: u32) -> Option<&[u8]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = (y as usize * self.width as usize + x as usize) * 4;
+        self.data.get(idx..idx + 4)
     }
 
     /// Get RGB at (x, y). Returns (0, 0, 0) for out-of-bounds reads.
