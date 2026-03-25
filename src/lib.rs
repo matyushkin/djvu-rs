@@ -89,6 +89,14 @@ pub(crate) mod bzz_new;
 #[path = "jb2_new.rs"]
 pub mod jb2_new;
 
+/// IW44 wavelet image decoder — clean-room implementation (phase 2c).
+///
+/// Provides [`iw44_new::Iw44Image`] for decoding BG44/FG44/TH44 chunks.
+/// Uses planar YCbCr storage and the new [`zp_impl::ZpDecoder`] arithmetic coder.
+/// RGB conversion happens only in [`iw44_new::Iw44Image::to_rgb`].
+#[path = "iw44_new.rs"]
+pub mod iw44_new;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
