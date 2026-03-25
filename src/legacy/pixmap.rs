@@ -15,16 +15,6 @@ impl AsRef<[u8]> for Pixmap {
     }
 }
 
-impl std::ops::Index<(u32, u32)> for Pixmap {
-    type Output = [u8];
-
-    /// Returns the 4 RGBA bytes at pixel (x, y).
-    fn index(&self, (x, y): (u32, u32)) -> &[u8] {
-        let idx = (y as usize * self.width as usize + x as usize) * 4;
-        &self.data[idx..idx + 4]
-    }
-}
-
 impl Pixmap {
     /// Maximum pixels per pixmap (~64 megapixels = ~256 MB RGBA).
     /// Anything beyond this is a runaway DPI — return an empty pixmap
@@ -73,6 +63,16 @@ impl Pixmap {
             pixel[2] = b;
             pixel[3] = 255;
         }
+    }
+
+    /// Get the 4 RGBA bytes at pixel (x, y), or `None` if out of bounds.
+    #[inline]
+    pub fn get_pixel(&self, x: u32, y: u32) -> Option<&[u8]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = (y as usize * self.width as usize + x as usize) * 4;
+        self.data.get(idx..idx + 4)
     }
 
     /// Get RGB at (x, y). Returns (0, 0, 0) for out-of-bounds reads.
@@ -145,5 +145,27 @@ mod tests {
         let header = b"P6\n2 1\n255\n";
         assert_eq!(&ppm[..header.len()], header);
         assert_eq!(&ppm[header.len()..], &[255, 0, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn get_pixel_in_bounds() {
+        let mut pm = Pixmap::white(3, 3);
+        pm.set_rgb(1, 2, 10, 20, 30);
+        let px = pm.get_pixel(1, 2).expect("pixel should exist");
+        assert_eq!(px, &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn get_pixel_out_of_bounds_returns_none() {
+        let pm = Pixmap::white(2, 2);
+        assert!(pm.get_pixel(2, 0).is_none());
+        assert!(pm.get_pixel(0, 2).is_none());
+        assert!(pm.get_pixel(5, 5).is_none());
+    }
+
+    #[test]
+    fn get_pixel_empty_pixmap_returns_none() {
+        let pm = Pixmap::default();
+        assert!(pm.get_pixel(0, 0).is_none());
     }
 }

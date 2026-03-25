@@ -1130,22 +1130,25 @@ mod tests {
     fn find_page_form<'a>(
         file: &'a crate::iff::DjvuFile<'a>,
         page: usize,
-    ) -> &'a crate::iff::Chunk<'a> {
+    ) -> Result<&'a crate::iff::Chunk<'a>, crate::error::DjVuError> {
         let mut idx = 0;
         for chunk in file.root.children() {
             if matches!(chunk, crate::iff::Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU")
             {
                 if idx == page {
-                    return chunk;
+                    return Ok(chunk);
                 }
                 idx += 1;
             }
         }
-        panic!("page {} not found", page);
+        Err(crate::error::DjVuError::PageNotFound(page))
     }
 
     /// Find a DJVI form by its component name (from INCL chunk).
-    fn find_djvi_djbz<'a>(file: &'a crate::iff::DjvuFile<'a>, name: &[u8]) -> &'a [u8] {
+    fn find_djvi_djbz<'a>(
+        file: &'a crate::iff::DjvuFile<'a>,
+        _name: &[u8],
+    ) -> Result<&'a [u8], crate::error::DjVuError> {
         for chunk in file.root.children() {
             if let crate::iff::Chunk::Form { secondary_id, .. } = chunk
                 && secondary_id == b"DJVI"
@@ -1153,14 +1156,13 @@ mod tests {
                 // Check if this DJVI's component name matches
                 // The component name is in the DIRM, but we can match by trying to find the Djbz
                 if let Some(djbz) = chunk.find_first(b"Djbz") {
-                    return djbz.data();
+                    return Ok(djbz.data());
                 }
             }
         }
-        panic!(
-            "DJVI with Djbz not found for {:?}",
-            std::str::from_utf8(name)
-        );
+        Err(crate::error::DjVuError::InvalidStructure(
+            "DJVI with Djbz not found",
+        ))
     }
 
     #[test]
@@ -1168,7 +1170,7 @@ mod tests {
         // Page 1 has inline Djbz + Sjbz
         let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
         let file = crate::iff::parse(&djvu).unwrap();
-        let page_form = find_page_form(&file, 0);
+        let page_form = find_page_form(&file, 0).unwrap();
         let djbz_data = page_form.find_first(b"Djbz").unwrap().data();
         let sjbz_data = page_form.find_first(b"Sjbz").unwrap().data();
 
@@ -1191,11 +1193,11 @@ mod tests {
         let file = crate::iff::parse(&djvu).unwrap();
 
         // Get shared dict from the DJVI component
-        let djbz_data = find_djvi_djbz(&file, b"dict0020.iff");
+        let djbz_data = find_djvi_djbz(&file, b"dict0020.iff").unwrap();
         let shared_dict = decode_dict(djbz_data, None).unwrap();
 
         // Get page 2's Sjbz (page index 1)
-        let page_form = find_page_form(&file, 1);
+        let page_form = find_page_form(&file, 1).unwrap();
         let sjbz_data = page_form.find_first(b"Sjbz").unwrap().data();
 
         let bitmap = decode(sjbz_data, Some(&shared_dict)).unwrap();
@@ -1215,10 +1217,10 @@ mod tests {
         let djvu = std::fs::read(assets_path().join("navm_fgbz.djvu")).unwrap();
         let file = crate::iff::parse(&djvu).unwrap();
 
-        let djbz_data = find_djvi_djbz(&file, b"dict0006.iff");
+        let djbz_data = find_djvi_djbz(&file, b"dict0006.iff").unwrap();
         let shared_dict = decode_dict(djbz_data, None).unwrap();
 
-        let page_form = find_page_form(&file, 0);
+        let page_form = find_page_form(&file, 0).unwrap();
         let sjbz_data = page_form.find_first(b"Sjbz").unwrap().data();
 
         let bitmap = decode(sjbz_data, Some(&shared_dict)).unwrap();
@@ -1303,5 +1305,23 @@ mod tests {
             msg.contains("symbol index"),
             "error message should mention symbol index"
         );
+    }
+
+    #[test]
+    fn find_page_form_returns_err_for_missing_page() {
+        // Build a minimal DjvuFile with no DJVU pages.
+        let data = b"AT&TFORM\x00\x00\x00\x04DJVM";
+        let file = crate::iff::parse(data).unwrap();
+        let result = find_page_form(&file, 0);
+        assert!(result.is_err(), "should return Err when page not found");
+    }
+
+    #[test]
+    fn find_djvi_djbz_returns_err_when_no_djvi() {
+        // Build a minimal DjvuFile with no DJVI forms.
+        let data = b"AT&TFORM\x00\x00\x00\x04DJVM";
+        let file = crate::iff::parse(data).unwrap();
+        let result = find_djvi_djbz(&file, b"dict.iff");
+        assert!(result.is_err(), "should return Err when no DJVI found");
     }
 }
