@@ -3,7 +3,8 @@
 //! This module provides:
 //! - [`DjVuError`] — the new top-level error type for phase-1+ code
 //! - [`IffError`] — errors from the new IFF container parser
-//! - [`Jb2Error`], [`Iw44Error`], [`BzzError`] — stubs for future decoders
+//! - [`BzzError`] — errors from the BZZ decompressor (phase 2a)
+//! - [`Jb2Error`], [`Iw44Error`] — stubs for future decoders
 //! - [`LegacyError`] — the original error type, kept for backward compatibility
 
 // ---- New phase-1 typed errors -----------------------------------------------
@@ -23,7 +24,7 @@ pub enum DjVuError {
     #[error("IW44 error: {0}")]
     Iw44(#[from] Iw44Error),
 
-    /// A BZZ compression decoding error (stub).
+    /// A BZZ compression decoding error.
     #[error("BZZ error: {0}")]
     Bzz(#[from] BzzError),
 
@@ -97,16 +98,28 @@ pub enum Iw44Error {
     Invalid,
 }
 
-/// BZZ compression decoding errors (stub for phase 1).
+/// BZZ compression decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BzzError {
-    /// Input ended before the BZZ stream was complete.
-    #[error("BZZ stream is truncated")]
-    Truncated,
+    /// Input is too short to be a valid BZZ stream (fewer than 2 bytes).
+    #[error("BZZ input is too short")]
+    TooShort,
 
-    /// The BZZ stream contains invalid data.
-    #[error("BZZ stream contains invalid data")]
-    Invalid,
+    /// The block size field in the BZZ stream is invalid or out of range.
+    #[error("BZZ stream contains an invalid block size")]
+    InvalidBlockSize,
+
+    /// The BWT sort index embedded in the stream is out of range.
+    #[error("BZZ stream contains an invalid BWT index")]
+    InvalidBwtIndex,
+
+    /// The ZP arithmetic coder encountered an error.
+    #[error("ZP coder error in BZZ stream")]
+    ZpError,
+
+    /// The BWT block did not contain an end-of-block marker.
+    #[error("BZZ block is missing the end-of-block marker")]
+    MissingMarker,
 }
 
 // ---- Legacy error type (kept for backward compatibility) --------------------

@@ -61,6 +61,22 @@ pub mod error;
 /// INFO chunk parser (phase 1).
 pub(crate) mod info;
 
+/// ZP arithmetic coder — clean-room implementation (phase 2a).
+///
+/// Provides [`ZpDecoder`] for use by the new BZZ decompressor and future
+/// phase decoders (JB2, IW44). Not yet wired into the legacy rendering path.
+#[path = "zp/mod.rs"]
+#[allow(dead_code)]
+pub(crate) mod zp_impl;
+
+/// BZZ decompressor — clean-room implementation (phase 2a).
+///
+/// Provides [`bzz_new::bzz_decode`] for decompressing DjVu BZZ streams
+/// (DIRM, NAVM, ANTz chunks). Will replace the legacy bzz module in phase 2b.
+#[path = "bzz.rs"]
+#[allow(dead_code)]
+pub(crate) mod bzz_new;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
