@@ -8,8 +8,8 @@
 //! - [`TextLayer`] — the full text content and zone hierarchy of a page
 //! - [`TextZone`] — a single zone node (page/column/para/line/word/char)
 //! - [`TextZoneKind`] — enum discriminating zone types
-//! - [`Rect`] — bounding rectangle in top-left-origin coordinates
-//! - [`TextError`] — typed errors from this module
+//! - `Rect` — bounding rectangle in top-left-origin coordinates
+//! - `TextError` — typed errors from this module
 //!
 //! ## Format notes
 //!
@@ -20,6 +20,12 @@
 //! coordinates to a top-left origin using the provided page height.
 //!
 //! Zone fields are delta-encoded relative to a parent or previous sibling.
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::{bzz_new::bzz_decode, error::BzzError};
 
@@ -132,7 +138,7 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
     if text_end > data.len() {
         return Err(TextError::TextOverflow);
     }
-    let text = std::str::from_utf8(data.get(pos..text_end).ok_or(TextError::TextOverflow)?)
+    let text = core::str::from_utf8(data.get(pos..text_end).ok_or(TextError::TextOverflow)?)
         .map_err(|_| TextError::InvalidUtf8)?
         .to_string();
     pos = text_end;

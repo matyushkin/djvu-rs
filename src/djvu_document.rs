@@ -23,6 +23,13 @@
 //! `DjVuPage` stores only the raw chunk bytes. No image decoding happens until
 //! the caller explicitly calls `thumbnail()` (which invokes the IW44 decoder).
 
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
     bzz_new::bzz_decode,
@@ -79,7 +86,8 @@ pub enum DocError {
     #[error("indirect DjVu document requires a resolver callback")]
     NoResolver,
 
-    /// I/O error when reading file data.
+    /// I/O error when reading file data (only with `std` feature).
+    #[cfg(feature = "std")]
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -613,7 +621,7 @@ fn read_str_nt(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
             "null terminator missing in DIRM string",
         ));
     }
-    let s = std::str::from_utf8(
+    let s = core::str::from_utf8(
         data.get(start..*pos)
             .ok_or(DocError::Malformed("str slice OOB"))?,
     )
@@ -712,7 +720,7 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
         .ok_or(DocError::Malformed("NAVM string bytes truncated"))?;
     *pos += len;
 
-    std::str::from_utf8(bytes)
+    core::str::from_utf8(bytes)
         .map(|s| s.to_string())
         .map_err(|_| DocError::InvalidUtf8)
 }

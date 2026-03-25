@@ -2,7 +2,7 @@
 //!
 //! These are format constants defining the adaptive probability model used by the
 //! ZP arithmetic coder. The tables are defined in the DjVu v3 specification at
-//! https://www.sndjvu.org/spec.html.
+//! <https://www.sndjvu.org/spec.html>.
 //!
 //! Key public types (all `pub(crate)` constants):
 //! - [`PROB`] — probability estimates (251 entries, u16)

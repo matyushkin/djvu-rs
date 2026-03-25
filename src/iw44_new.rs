@@ -6,10 +6,10 @@
 //!
 //! ## Key public types
 //!
-//! - [`Iw44Image`] — progressive decoder; call [`Iw44Image::decode_chunk`] for
-//!   each BG44/FG44/TH44 chunk, then [`Iw44Image::to_rgb`] to obtain an RGB
+//! - `Iw44Image` — progressive decoder; call `Iw44Image::decode_chunk` for
+//!   each BG44/FG44/TH44 chunk, then `Iw44Image::to_rgb` to obtain an RGB
 //!   pixmap.
-//! - [`Iw44Error`][crate::error::Iw44Error] — typed error enum (re-exported from
+//! - [`crate::error::Iw44Error`] — typed error enum (re-exported from
 //!   `crate::error`).
 //!
 //! ## Architecture
@@ -17,6 +17,9 @@
 //! YCbCr planes are kept separate (`y: Vec<i16>`, `cb: Vec<i16>`, `cr: Vec<i16>`)
 //! until `to_rgb()` is called.  This allows future SIMD processing on each plane
 //! independently.  No interleaved buffers exist inside this module.
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use crate::error::Iw44Error;
 use crate::pixmap::Pixmap;

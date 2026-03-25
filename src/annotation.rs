@@ -5,11 +5,11 @@
 //!
 //! ## Key public types
 //!
-//! - [`Annotation`] — page-level annotation (background, zoom, mode)
-//! - [`MapArea`] — a clickable area with URL, description, and shape
-//! - [`Shape`] — rect / oval / poly / line / text area shape
-//! - [`Color`] — RGB color parsed from `#rrggbb` strings
-//! - [`AnnotationError`] — typed errors from this module
+//! - `Annotation` — page-level annotation (background, zoom, mode)
+//! - `MapArea` — a clickable area with URL, description, and shape
+//! - `Shape` — rect / oval / poly / line / text area shape
+//! - `Color` — RGB color parsed from `#rrggbb` strings
+//! - `AnnotationError` — typed errors from this module
 //!
 //! ## Format notes
 //!
@@ -23,6 +23,13 @@
 //!
 //! This parser handles only the subset documented in the DjVu v3 spec
 //! (background, zoom, mode, maparea with rect/oval/poly/line/text shapes).
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::{bzz_new::bzz_decode, error::BzzError};
 
@@ -122,14 +129,14 @@ pub struct Annotation {
 
 /// Parse an ANTa (plain-text) annotation chunk.
 pub fn parse_annotations(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
-    let text = std::str::from_utf8(data).unwrap_or("");
+    let text = core::str::from_utf8(data).unwrap_or("");
     parse_annotation_text(text)
 }
 
 /// Parse an ANTz (BZZ-compressed) annotation chunk.
 pub fn parse_annotations_bzz(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
     let decoded = bzz_decode(data)?;
-    let text = std::str::from_utf8(&decoded).unwrap_or("");
+    let text = core::str::from_utf8(&decoded).unwrap_or("");
     parse_annotation_text(text)
 }
 

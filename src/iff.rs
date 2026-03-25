@@ -28,6 +28,9 @@
 // ---- Legacy iff types (re-exported for backward compatibility) --------------
 // These are used by crate::document, crate::render, etc.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::error::LegacyError as Error;
 
 /// A 4-byte chunk identifier (e.g., b"FORM", b"INFO", b"Sjbz").
