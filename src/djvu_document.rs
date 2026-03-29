@@ -498,7 +498,9 @@ fn parse_iff_body_chunks(mut buf: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> 
             .ok_or(IffError::Truncated)?;
         let data_len = buf
             .get(4..8)
-            .map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+            .map(|n| n as usize)
             .ok_or(IffError::Truncated)?;
 
         let data_start = 8usize;
