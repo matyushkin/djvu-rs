@@ -1,7 +1,7 @@
 [package]
 name = "djvu-rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Pure-Rust DjVu decoder written from the DjVu v3 public specification"
 publish = true

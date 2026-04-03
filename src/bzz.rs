@@ -68,6 +68,14 @@ pub fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
     Ok(output)
 }
 
+/// Compatibility alias for [`bzz_decode`].
+///
+/// This provides the same `decode(data)` API that the legacy modules used,
+/// so that `document.rs` and other callers can use `crate::bzz::decode` without change.
+pub fn decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
+    bzz_decode(data)
+}
+
 /// Decode `bit_count` raw bits from the ZP stream (passthrough, no context).
 ///
 /// The bits are decoded MSB-first using the arithmetic tree technique: start

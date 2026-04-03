@@ -1,6 +1,6 @@
 //! Phase 4 tests: DjVu annotation (ANTz/ANTa) parsing.
 
-use cos_djvu::annotation::{Color, Shape, parse_annotations};
+use djvu_rs::annotation::{Color, Shape, parse_annotations};
 
 /// Helper: encode a string as ANTa bytes (plain, no BZZ).
 fn make_anta(s: &str) -> Vec<u8> {
@@ -152,7 +152,7 @@ fn test_parse_multiple_mapareas() {
 
 #[test]
 fn test_parse_annotations_bzz() {
-    use cos_djvu::annotation::parse_annotations_bzz;
+    use djvu_rs::annotation::parse_annotations_bzz;
     // Pre-computed BZZ encoding of "(background #aabbcc)"
     // Generated with: printf '(background #aabbcc)' | bzz -e - -
     let encoded: &[u8] = &[
@@ -181,7 +181,7 @@ fn test_djvu_page_annotations_method() {
         return;
     }
     let data = std::fs::read(&path).expect("read chicken.djvu");
-    let doc = cos_djvu::DjVuDocument::parse(&data).expect("parse");
+    let doc = djvu_rs::DjVuDocument::parse(&data).expect("parse");
     let page = doc.page(0).expect("page 0");
     // chicken.djvu likely has no annotations — just check it doesn't error
     let result = page.annotations();
@@ -197,7 +197,7 @@ fn test_djvu_page_hyperlinks_method() {
         return;
     }
     let data = std::fs::read(&path).expect("read chicken.djvu");
-    let doc = cos_djvu::DjVuDocument::parse(&data).expect("parse");
+    let doc = djvu_rs::DjVuDocument::parse(&data).expect("parse");
     let page = doc.page(0).expect("page 0");
     // just verify the method is callable and returns Ok
     let links = page.hyperlinks();
