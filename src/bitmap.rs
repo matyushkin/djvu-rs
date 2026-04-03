@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, vec, vec::Vec};
+
 /// A 1-bit-per-pixel packed bitmap image.
 ///
 /// Pixels are packed 8-per-byte, MSB first within each byte.

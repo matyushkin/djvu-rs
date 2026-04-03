@@ -1,6 +1,6 @@
 //! Phase 4 tests: DjVu text layer (TXTz/TXTa) parsing.
 
-use cos_djvu::{
+use djvu_rs::{
     DjVuDocument,
     text::{TextZoneKind, parse_text_layer},
 };
@@ -177,7 +177,7 @@ fn test_parse_text_layer_bzz() {
     //   "compressed text"  (15 bytes)
     //   \x00  (version)
     // Generated with: printf '\x00\x00\x0fcompressed text\x00' | bzz -e - -
-    use cos_djvu::text::parse_text_layer_bzz;
+    use djvu_rs::text::parse_text_layer_bzz;
     let encoded: &[u8] = &[
         0xff, 0xff, 0xeb, 0xbf, 0x8b, 0x1f, 0xc5, 0x04, 0x22, 0xcf, 0xef, 0xba, 0x6b, 0x2b, 0x4e,
         0x9f, 0x25, 0x6a, 0x9a, 0xa3, 0x86, 0x3f,
