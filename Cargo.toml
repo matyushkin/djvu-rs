@@ -1,6 +1,26 @@
 [package]
 name = "djvu-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust DjVu decoder written from the DjVu v3 public specification"
+publish = true
 
 [dependencies]
+thiserror = "2"
+self_cell = "1.2"
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "codecs"
+harness = false
+
+[[bench]]
+name = "render"
+harness = false

@@ -1,0 +1,635 @@
+  FORM:DJVM [489390] 
+    DIRM [757]        Document directory (bundled, 85 files 71 pages)
+    NAVM [767] 
+    FORM:THUM [352] {thum0001.thumb} [T]
+      TH44 [340]        Thumbnail icon for page 1
+    FORM:DJVU [15970] {p0001_1.djvu} [P1]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      Djbz [8635]       JB2 shared dictionary
+      Sjbz [4255]       JB2 bilevel data
+      TXTz [2960]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2562] {thum0002.thumb} [T]
+      TH44 [338]        Thumbnail icon for page 2
+      TH44 [346]        Thumbnail icon for page 3
+      TH44 [289]        Thumbnail icon for page 4
+      TH44 [353]        Thumbnail icon for page 5
+      TH44 [320]        Thumbnail icon for page 6
+      TH44 [312]        Thumbnail icon for page 7
+      TH44 [291]        Thumbnail icon for page 8
+      TH44 [242]        Thumbnail icon for page 9
+    FORM:DJVI [8622] {dict0020.iff} [I]
+      Djbz [8610]       JB2 shared dictionary
+    FORM:DJVU [6980] {p0002.djvu} [P2]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3729]       JB2 bilevel data
+      TXTz [3120]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6842] {p0003.djvu} [P3]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3687]       JB2 bilevel data
+      TXTz [3024]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5486] {p0004.djvu} [P4]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3326]       JB2 bilevel data
+      TXTz [2029]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7178] {p0005.djvu} [P5]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [4128]       JB2 bilevel data
+      FGbz [27]         JB2 colors data, v0, 2 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 212x275
+      TXTz [2788]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6910] {p0006.djvu} [P6]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [4004]       JB2 bilevel data
+      TXTz [2776]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6376] {p0007.djvu} [P7]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3804]       JB2 bilevel data
+      TXTz [2441]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6050] {p0008.djvu} [P8]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3360]       JB2 bilevel data
+      TXTz [2560]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6582] {p0009.djvu} [P9]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3887]       JB2 bilevel data
+      TXTz [2563]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2024] {thum0003.thumb} [T]
+      TH44 [233]        Thumbnail icon for page 10
+      TH44 [254]        Thumbnail icon for page 11
+      TH44 [271]        Thumbnail icon for page 12
+      TH44 [225]        Thumbnail icon for page 13
+      TH44 [170]        Thumbnail icon for page 14
+      TH44 [261]        Thumbnail icon for page 15
+      TH44 [300]        Thumbnail icon for page 16
+      TH44 [238]        Thumbnail icon for page 17
+    FORM:DJVU [5222] {p0010.djvu} [P10]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3121]       JB2 bilevel data
+      TXTz [1970]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5186] {p0011.djvu} [P11]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3158]       JB2 bilevel data
+      TXTz [1897]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5818] {p0012.djvu} [P12]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3297]       JB2 bilevel data
+      TXTz [2389]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7390] {p0013.djvu} [P13]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [4636]       JB2 bilevel data
+      TXTz [2624]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4900] {p0014.djvu} [P14]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3061]       JB2 bilevel data
+      TXTz [1708]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5940] {p0015.djvu} [P15]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3597]       JB2 bilevel data
+      TXTz [2211]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6174] {p0016.djvu} [P16]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3313]       JB2 bilevel data
+      TXTz [2730]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6178] {p0017.djvu} [P17]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3674]       JB2 bilevel data
+      TXTz [2374]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [1929] {thum0004.thumb} [T]
+      TH44 [241]        Thumbnail icon for page 18
+      TH44 [251]        Thumbnail icon for page 19
+      TH44 [210]        Thumbnail icon for page 20
+      TH44 [234]        Thumbnail icon for page 21
+      TH44 [163]        Thumbnail icon for page 22
+      TH44 [263]        Thumbnail icon for page 23
+      TH44 [213]        Thumbnail icon for page 24
+      TH44 [281]        Thumbnail icon for page 25
+    FORM:DJVU [5894] {p0018.djvu} [P18]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3240]       JB2 bilevel data
+      TXTz [2524]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6700] {p0019.djvu} [P19]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [3718]       JB2 bilevel data
+      TXTz [2852]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [8496] {p0020.djvu} [P20]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0020.iff}
+      Sjbz [6737]       JB2 bilevel data
+      FGbz [32]         JB2 colors data, v0, 2 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 212x275
+      TXTz [1491]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVI [9268] {dict0040.iff} [I]
+      Djbz [9256]       JB2 shared dictionary
+    FORM:DJVU [9596] {p0021.djvu} [P21]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [5681]       JB2 bilevel data
+      FGbz [763]        JB2 colors data, v0, 157 colors
+      BG44 [847]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [123]        IW4 data #2, 11 slices
+      BG44 [123]        IW4 data #3, 11 slices
+      TXTz [1892]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5044] {p0022.djvu} [P22]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [2824]       JB2 bilevel data
+      FGbz [94]         JB2 colors data, v0, 3 colors
+      BG44 [87]         IW4 data #1, 97 slices, v1.2 (b&w), 212x275
+      TXTz [1892]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5668] {p0023.djvu} [P23]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3511]       JB2 bilevel data
+      TXTz [2026]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5988] {p0024.djvu} [P24]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3616]       JB2 bilevel data
+      TXTz [2242]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5714] {p0025.djvu} [P25]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3432]       JB2 bilevel data
+      TXTz [2152]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2034] {thum0005.thumb} [T]
+      TH44 [113]        Thumbnail icon for page 26
+      TH44 [300]        Thumbnail icon for page 27
+      TH44 [213]        Thumbnail icon for page 28
+      TH44 [146]        Thumbnail icon for page 29
+      TH44 [334]        Thumbnail icon for page 30
+      TH44 [239]        Thumbnail icon for page 31
+      TH44 [316]        Thumbnail icon for page 32
+      TH44 [302]        Thumbnail icon for page 33
+    FORM:DJVU [2962] {p0026.djvu} [P26]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [1802]       JB2 bilevel data
+      TXTz [1029]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7338] {p0027.djvu} [P27]
+      INFO [10]         DjVu 3295x2539, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [4290]       JB2 bilevel data
+      TXTz [2917]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6552] {p0028.djvu} [P28]
+      INFO [10]         DjVu 3295x2539, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3785]       JB2 bilevel data
+      TXTz [2636]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [2906] {p0029.djvu} [P29]
+      INFO [10]         DjVu 3295x2539, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [1713]       JB2 bilevel data
+      TXTz [1062]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6482] {p0030.djvu} [P30]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3921]       JB2 bilevel data
+      TXTz [2429]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5628] {p0031.djvu} [P31]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3287]       JB2 bilevel data
+      TXTz [2209]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7326] {p0032.djvu} [P32]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [4254]       JB2 bilevel data
+      TXTz [2941]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [8330] {p0033.djvu} [P33]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [4837]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [845]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [125]        IW4 data #2, 11 slices
+      BG44 [124]        IW4 data #3, 11 slices
+      TXTz [2216]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2116] {thum0006.thumb} [T]
+      TH44 [303]        Thumbnail icon for page 34
+      TH44 [184]        Thumbnail icon for page 35
+      TH44 [232]        Thumbnail icon for page 36
+      TH44 [156]        Thumbnail icon for page 37
+      TH44 [284]        Thumbnail icon for page 38
+      TH44 [290]        Thumbnail icon for page 39
+      TH44 [248]        Thumbnail icon for page 40
+      TH44 [350]        Thumbnail icon for page 41
+    FORM:DJVU [6252] {p0034.djvu} [P34]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3630]       JB2 bilevel data
+      TXTz [2491]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5086] {p0035.djvu} [P35]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3055]       JB2 bilevel data
+      TXTz [1900]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4802] {p0036.djvu} [P36]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [2895]       JB2 bilevel data
+      TXTz [1776]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [3510] {p0037.djvu} [P37]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [2003]       JB2 bilevel data
+      TXTz [1375]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6646] {p0038.djvu} [P38]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [3903]       JB2 bilevel data
+      TXTz [2612]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6762] {p0039.djvu} [P39]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [4061]       JB2 bilevel data
+      TXTz [2569]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [8310] {p0040.djvu} [P40]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0040.iff}
+      Sjbz [4297]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [840]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [122]        IW4 data #2, 11 slices
+      BG44 [122]        IW4 data #3, 11 slices
+      TXTz [2747]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVI [5637] {dict0060.iff} [I]
+      Djbz [5625]       JB2 shared dictionary
+    FORM:DJVU [7818] {p0041.djvu} [P41]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4720]       JB2 bilevel data
+      TXTz [2967]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2255] {thum0007.thumb} [T]
+      TH44 [289]        Thumbnail icon for page 42
+      TH44 [299]        Thumbnail icon for page 43
+      TH44 [304]        Thumbnail icon for page 44
+      TH44 [335]        Thumbnail icon for page 45
+      TH44 [268]        Thumbnail icon for page 46
+      TH44 [252]        Thumbnail icon for page 47
+      TH44 [239]        Thumbnail icon for page 48
+      TH44 [197]        Thumbnail icon for page 49
+    FORM:DJVU [6528] {p0042.djvu} [P42]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [3890]       JB2 bilevel data
+      TXTz [2507]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [8300] {p0043.djvu} [P43]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4289]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [843]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [124]        IW4 data #2, 11 slices
+      BG44 [123]        IW4 data #3, 11 slices
+      TXTz [2738]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7922] {p0044.djvu} [P44]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4280]       JB2 bilevel data
+      FGbz [16]         JB2 colors data, v0, 1 colors
+      BG44 [846]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [123]        IW4 data #2, 11 slices
+      BG44 [123]        IW4 data #3, 11 slices
+      TXTz [2370]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7016] {p0045.djvu} [P45]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4051]       JB2 bilevel data
+      TXTz [2834]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4824] {p0046.djvu} [P46]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [2989]       JB2 bilevel data
+      TXTz [1703]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5004] {p0047.djvu} [P47]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [3016]       JB2 bilevel data
+      TXTz [1857]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [9546] {p0048.djvu} [P48]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [6162]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [835]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [123]        IW4 data #2, 11 slices
+      BG44 [123]        IW4 data #3, 11 slices
+      TXTz [2120]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [3560] {p0049.djvu} [P49]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [1870]       JB2 bilevel data
+      TXTz [1559]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [2481] {thum0008.thumb} [T]
+      TH44 [287]        Thumbnail icon for page 50
+      TH44 [349]        Thumbnail icon for page 51
+      TH44 [332]        Thumbnail icon for page 52
+      TH44 [270]        Thumbnail icon for page 53
+      TH44 [328]        Thumbnail icon for page 54
+      TH44 [312]        Thumbnail icon for page 55
+      TH44 [274]        Thumbnail icon for page 56
+      TH44 [259]        Thumbnail icon for page 57
+    FORM:DJVU [8622] {p0050.djvu} [P50]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4720]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [854]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [125]        IW4 data #2, 11 slices
+      BG44 [125]        IW4 data #3, 11 slices
+      TXTz [2616]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4940] {p0051.djvu} [P51]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [3031]       JB2 bilevel data
+      TXTz [1778]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6754] {p0052.djvu} [P52]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [3942]       JB2 bilevel data
+      TXTz [2681]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6706] {p0053.djvu} [P53]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4366]       JB2 bilevel data
+      TXTz [2210]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6706] {p0054.djvu} [P54]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4090]       JB2 bilevel data
+      TXTz [2486]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6832] {p0055.djvu} [P55]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4061]       JB2 bilevel data
+      TXTz [2639]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [8062] {p0056.djvu} [P56]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4546]       JB2 bilevel data
+      FGbz [17]         JB2 colors data, v0, 1 colors
+      BG44 [844]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [124]        IW4 data #2, 11 slices
+      BG44 [123]        IW4 data #3, 11 slices
+      TXTz [2244]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7426] {p0057.djvu} [P57]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4603]       JB2 bilevel data
+      TXTz [2691]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [1476] {thum0009.thumb} [T]
+      TH44 [286]        Thumbnail icon for page 58
+      TH44 [178]        Thumbnail icon for page 59
+      TH44 [79]         Thumbnail icon for page 60
+      TH44 [174]        Thumbnail icon for page 61
+      TH44 [159]        Thumbnail icon for page 62
+      TH44 [166]        Thumbnail icon for page 63
+      TH44 [214]        Thumbnail icon for page 64
+      TH44 [150]        Thumbnail icon for page 65
+    FORM:DJVU [6874] {p0058.djvu} [P58]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4081]       JB2 bilevel data
+      TXTz [2661]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [7154] {p0059.djvu} [P59]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [4583]       JB2 bilevel data
+      FGbz [16]         JB2 colors data, v0, 1 colors
+      BG44 [846]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [122]        IW4 data #2, 11 slices
+      BG44 [122]        IW4 data #3, 11 slices
+      TXTz [1301]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [3776] {p0060.djvu} [P60]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0060.iff}
+      Sjbz [2234]       JB2 bilevel data
+      FGbz [16]         JB2 colors data, v0, 1 colors
+      BG44 [832]        IW4 data #1, 75 slices, v1.2 (b&w), 847x1099
+      BG44 [121]        IW4 data #2, 11 slices
+      BG44 [121]        IW4 data #3, 11 slices
+      TXTz [287]        Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVI [4170] {dict0071.iff} [I]
+      Djbz [4158]       JB2 shared dictionary
+    FORM:DJVU [4614] {p0061.djvu} [P61]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3273]       JB2 bilevel data
+      TXTz [1209]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4724] {p0062.djvu} [P62]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3346]       JB2 bilevel data
+      TXTz [1247]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4602] {p0063.djvu} [P63]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3317]       JB2 bilevel data
+      TXTz [1153]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5606] {p0064.djvu} [P64]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3690]       JB2 bilevel data
+      TXTz [1785]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4432] {p0065.djvu} [P65]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [2385]       JB2 bilevel data
+      TXTz [1916]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:THUM [983] {thum0010.thumb} [T]
+      TH44 [73]         Thumbnail icon for page 66
+      TH44 [86]         Thumbnail icon for page 67
+      TH44 [156]        Thumbnail icon for page 68
+      TH44 [243]        Thumbnail icon for page 69
+      TH44 [260]        Thumbnail icon for page 70
+      TH44 [111]        Thumbnail icon for page 71
+    FORM:DJVU [2740] {p0066.djvu} [P66]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [1403]       JB2 bilevel data
+      TXTz [1206]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [3536] {p0067.djvu} [P67]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [2062]       JB2 bilevel data
+      TXTz [1344]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [4322] {p0068.djvu} [P68]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [2371]       JB2 bilevel data
+      TXTz [1820]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [6508] {p0069.djvu} [P69]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3562]       JB2 bilevel data
+      TXTz [2816]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [5984] {p0070.djvu} [P70]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [3411]       JB2 bilevel data
+      TXTz [2441]       Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
+    FORM:DJVU [2638] {p0071.djvu} [P71]
+      INFO [10]         DjVu 2539x3295, v25, 300 dpi, gamma=2.2
+      CIDa [36] 
+      INCL [12]         Indirection chunk --> {dict0071.iff}
+      Sjbz [1526]       JB2 bilevel data
+      TXTz [982]        Hidden text (text, etc.)
+      ANTz [19]         Page annotation (hyperlinks, etc.)
