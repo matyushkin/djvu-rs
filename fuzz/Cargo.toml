@@ -1,0 +1,45 @@
+[package]
+name = "cos-djvu-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "fuzz_iff"
+path = "fuzz_targets/fuzz_iff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bzz"
+path = "fuzz_targets/fuzz_bzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_jb2"
+path = "fuzz_targets/fuzz_jb2.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_iw44"
+path = "fuzz_targets/fuzz_iw44.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_full"
+path = "fuzz_targets/fuzz_full.rs"
+test = false
+doc = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cos-djvu = { path = ".." }
+
+[profile.release]
+debug = 1
