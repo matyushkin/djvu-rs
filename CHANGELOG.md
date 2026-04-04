@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-04
+
+### Fixed
+
+- Exclude `.cargo/config.toml` from published package — it contained `-D warnings` which caused
+  docs.rs builds to fail silently
+
 ## [0.2.0] — 2026-04-04
 
 ### Added
@@ -61,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CBZ export** — `djvu render --format cbz` produces a comic-book ZIP with PNG pages
 - **`no_std` support** — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
 
-[Unreleased]: https://github.com/matyushkin/djvu-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/matyushkin/djvu-rs/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/matyushkin/djvu-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/matyushkin/djvu-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/matyushkin/djvu-rs/releases/tag/v0.1.0
