@@ -1,7 +1,6 @@
 # djvu-rs
 
 [![Crates.io](https://img.shields.io/crates/v/djvu-rs.svg)](https://crates.io/crates/djvu-rs)
-[![docs.rs](https://img.shields.io/docsrs/djvu-rs)](https://docs.rs/djvu-rs)
 [![CI](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
