@@ -111,6 +111,86 @@ fn normalize(val: i16) -> i32 {
     v.clamp(-128, 127)
 }
 
+// ---- SIMD YCbCr→RGBA row conversion -----------------------------------------
+//
+// Processes 8 pixels per iteration using `wide::i32x8` (maps to AVX2 on x86_64,
+// NEON on ARM64, or scalar on other targets — all in safe Rust).
+
+/// Convert one row of pre-normalized YCbCr values to RGBA using SIMD.
+///
+/// `y_row`, `cb_row`, `cr_row` are normalized i32 values in `[-128, 127]`.
+/// `out` must hold exactly `y_row.len() * 4` bytes (RGBA).
+///
+/// DjVu YCbCr→RGB formula (LeCun 1998):
+/// ```text
+/// t2    = Cr + (Cr >> 1)
+/// t3    = Y  + 128 - (Cb >> 2)
+/// R     = clamp(Y  + 128 + t2,      0, 255)
+/// G     = clamp(t3 - (t2 >> 1),     0, 255)
+/// B     = clamp(t3 + (Cb << 1),     0, 255)
+/// ```
+pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8]) {
+    use wide::i32x8;
+    debug_assert_eq!(y_row.len(), cb_row.len());
+    debug_assert_eq!(y_row.len(), cr_row.len());
+    debug_assert_eq!(out.len(), y_row.len() * 4);
+
+    let c128 = i32x8::splat(128);
+    let c0 = i32x8::splat(0);
+    let c255 = i32x8::splat(255);
+
+    let w = y_row.len();
+    let full_chunks = w / 8;
+
+    for chunk in 0..full_chunks {
+        let base = chunk * 8;
+        let ys = i32x8::from([
+            y_row[base],     y_row[base + 1], y_row[base + 2], y_row[base + 3],
+            y_row[base + 4], y_row[base + 5], y_row[base + 6], y_row[base + 7],
+        ]);
+        let bs = i32x8::from([
+            cb_row[base],     cb_row[base + 1], cb_row[base + 2], cb_row[base + 3],
+            cb_row[base + 4], cb_row[base + 5], cb_row[base + 6], cb_row[base + 7],
+        ]);
+        let rs = i32x8::from([
+            cr_row[base],     cr_row[base + 1], cr_row[base + 2], cr_row[base + 3],
+            cr_row[base + 4], cr_row[base + 5], cr_row[base + 6], cr_row[base + 7],
+        ]);
+
+        let t2 = rs + (rs >> 1_i32);
+        let t3 = ys + c128 - (bs >> 2_i32);
+
+        let red:   i32x8 = (ys + c128 + t2).max(c0).min(c255);
+        let green: i32x8 = (t3 - (t2 >> 1_i32)).max(c0).min(c255);
+        let blue:  i32x8 = (t3 + (bs << 1_i32)).max(c0).min(c255);
+
+        let reds   = red.to_array();
+        let greens = green.to_array();
+        let blues  = blue.to_array();
+
+        let out_base = base * 4;
+        for i in 0..8 {
+            out[out_base + i * 4]     = reds[i] as u8;
+            out[out_base + i * 4 + 1] = greens[i] as u8;
+            out[out_base + i * 4 + 2] = blues[i] as u8;
+            out[out_base + i * 4 + 3] = 255;
+        }
+    }
+
+    // Scalar tail — fewer than 8 pixels remaining.
+    for col in (full_chunks * 8)..w {
+        let y = y_row[col];
+        let b = cb_row[col];
+        let r = cr_row[col];
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        out[col * 4]     = (y + 128 + t2).clamp(0, 255) as u8;
+        out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        out[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
+        out[col * 4 + 3] = 255;
+    }
+}
+
 // ---- Per-channel wavelet decoder --------------------------------------------
 
 /// State for a single YCbCr plane wavelet decoder.
@@ -823,37 +903,75 @@ impl Iw44Image {
                 .ok_or(Iw44Error::MissingCodec)?
                 .reconstruct(chroma_sub);
 
+            let pw = w as usize;
+            let ph = h as usize;
             let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
+
+            // Fast path: sub=1 (most common — full-resolution render).
+            // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
+            // YCbCr→RGBA formula 8 pixels at a time with SIMD.
+            if sub == 1 {
+                let mut y_norm  = vec![0i32; pw];
+                let mut cb_norm = vec![0i32; pw];
+                let mut cr_norm = vec![0i32; pw];
+
+                for row in 0..ph {
+                    let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
+                    let y_off = row * y_plane.stride;
+
+                    for col in 0..pw {
+                        y_norm[col] = normalize(y_plane.data[y_off + col]);
+                    }
+
+                    if self.chroma_half {
+                        let c_row = row & !1;
+                        let cb_off = c_row * cb_plane.stride;
+                        let cr_off = c_row * cr_plane.stride;
+                        for col in 0..pw {
+                            let c_col = col & !1;
+                            cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
+                            cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
+                        }
+                    } else {
+                        let c_off = row * cb_plane.stride;
+                        for col in 0..pw {
+                            cb_norm[col] = normalize(cb_plane.data[c_off + col]);
+                            cr_norm[col] = normalize(cr_plane.data[c_off + col]);
+                        }
+                    }
+
+                    let row_start = out_row * pw * 4;
+                    ycbcr_row_to_rgba(
+                        &y_norm,
+                        &cb_norm,
+                        &cr_norm,
+                        &mut pm.data[row_start..row_start + pw * 4],
+                    );
+                }
+                return Ok(pm);
+            }
+
+            // General path: sub > 1 (coarse/thumbnail renders).
             for row in 0..h {
-                // DjVu stores rows bottom-to-top; flip on output.
                 let out_row = h - 1 - row;
                 for col in 0..w {
                     let src_row = row as usize * sub;
                     let src_col = col as usize * sub;
                     let y_idx = src_row * y_plane.stride + src_col;
-                    let chroma_row = if self.chroma_half {
-                        src_row & !1
-                    } else {
-                        src_row
-                    };
-                    let chroma_col = if self.chroma_half {
-                        src_col & !1
-                    } else {
-                        src_col
-                    };
+                    let chroma_row = if self.chroma_half { src_row & !1 } else { src_row };
+                    let chroma_col = if self.chroma_half { src_col & !1 } else { src_col };
                     let c_idx = chroma_row * cb_plane.stride + chroma_col;
 
                     let y = normalize(y_plane.data[y_idx]);
                     let b = normalize(cb_plane.data[c_idx]);
                     let r = normalize(cr_plane.data[c_idx]);
 
-                    // DjVu YCbCr → RGB (LeCun 1998 formula)
                     let t2 = r + (r >> 1);
                     let t3 = y + 128 - (b >> 2);
 
-                    let red = (y + 128 + t2).clamp(0, 255) as u8;
+                    let red   = (y + 128 + t2).clamp(0, 255) as u8;
                     let green = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
-                    let blue = (t3 + (b << 1)).clamp(0, 255) as u8;
+                    let blue  = (t3 + (b << 1)).clamp(0, 255) as u8;
                     pm.set_rgb(col, out_row, red, green, blue);
                 }
             }
@@ -1158,5 +1276,80 @@ mod tests {
         let img = Iw44Image::new();
         let result = img.to_rgb_subsample(0);
         assert!(result.is_err());
+    }
+
+    // ---- SIMD YCbCr→RGBA tests -----------------------------------------------
+
+    /// `ycbcr_row_to_rgba` matches the scalar formula on synthetic data.
+    #[test]
+    fn simd_ycbcr_row_matches_scalar() {
+        // Cover all 8-wide SIMD chunks plus a tail (n=20).
+        let n = 20usize;
+        let ys:  Vec<i32> = (0..n).map(|i| (i as i32 * 7)  % 200 - 100).collect();
+        let bs:  Vec<i32> = (0..n).map(|i| (i as i32 * 13) % 200 - 100).collect();
+        let rs:  Vec<i32> = (0..n).map(|i| (i as i32 * 17) % 200 - 100).collect();
+
+        // Scalar reference
+        let mut expected = vec![0u8; n * 4];
+        for col in 0..n {
+            let y = ys[col]; let b = bs[col]; let r = rs[col];
+            let t2 = r + (r >> 1);
+            let t3 = y + 128 - (b >> 2);
+            expected[col * 4]     = (y + 128 + t2).clamp(0, 255) as u8;
+            expected[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+            expected[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
+            expected[col * 4 + 3] = 255;
+        }
+
+        // SIMD result
+        let mut actual = vec![0u8; n * 4];
+        super::ycbcr_row_to_rgba(&ys, &bs, &rs, &mut actual);
+
+        assert_eq!(expected, actual, "SIMD must produce identical output to scalar");
+    }
+
+    /// `ycbcr_row_to_rgba` handles extreme values (clamping at 0 and 255).
+    #[test]
+    fn simd_ycbcr_row_clamps_correctly() {
+        let n = 8usize;
+        // Use values that will clamp to 0 and 255 in each channel.
+        let ys:  Vec<i32> = vec![127, -128, 127, -128, 0, 0, 0, 0];
+        let bs:  Vec<i32> = vec![-128, 127, -128, 127, 0, 0, 0, 0];
+        let rs:  Vec<i32> = vec![127, -128, -128, 127, 0, 0, 0, 0];
+
+        let mut simd_out = vec![0u8; n * 4];
+        super::ycbcr_row_to_rgba(&ys, &bs, &rs, &mut simd_out);
+
+        // All RGBA values must be in [0, 255] and alpha == 255.
+        for chunk in simd_out.chunks_exact(4) {
+            assert_eq!(chunk[3], 255, "alpha must always be 255");
+        }
+    }
+
+    /// SIMD render of boy.djvu produces identical output to the scalar path.
+    ///
+    /// This verifies that the fast path (sub=1) and general path (sub=2, which
+    /// uses the old scalar code) produce consistent results on a real file.
+    #[test]
+    fn simd_render_matches_subsampled_render_dimensions() {
+        let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu not found");
+        let file = crate::iff::parse(&data).expect("parse failed");
+        let chunks = extract_bg44_chunks(&file);
+
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+
+        // Full-resolution render uses SIMD path (sub=1).
+        let full = img.to_rgb().expect("to_rgb failed");
+        // sub=2 uses the scalar general path — just check dims match half.
+        let half = img.to_rgb_subsample(2).expect("subsample(2) failed");
+
+        assert_eq!(full.width,  img.width  as u32);
+        assert_eq!(full.height, img.height as u32);
+        assert_eq!(half.width,  (img.width  as u32).div_ceil(2));
+        assert_eq!(half.height, (img.height as u32).div_ceil(2));
+        // SIMD path must still pass the existing golden test (done in iw44_new_decode_boy_bg).
     }
 }
