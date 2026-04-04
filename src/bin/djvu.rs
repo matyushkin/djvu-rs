@@ -33,6 +33,9 @@ enum Cmd {
         /// Output format.
         #[arg(short, long, default_value = "png", value_enum)]
         format: Format,
+        /// Layer to extract: composite (default), mask, foreground, background.
+        #[arg(short, long, default_value = "composite", value_enum)]
+        layer: Layer,
         /// Output file (single page) or directory (--all, PNG only).
         #[arg(short, long)]
         output: PathBuf,
@@ -57,6 +60,18 @@ enum Format {
     Cbz,
 }
 
+#[derive(Clone, ValueEnum)]
+enum Layer {
+    /// Full composite render (default).
+    Composite,
+    /// JB2 bilevel mask only.
+    Mask,
+    /// IW44 foreground layer only.
+    Foreground,
+    /// IW44 background layer only.
+    Background,
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
@@ -74,8 +89,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             all,
             dpi,
             format,
+            layer,
             output,
-        } => cmd_render(&file, page, all, dpi, format, &output),
+        } => cmd_render(&file, page, all, dpi, format, layer, &output),
         Cmd::Text { file, page, all } => cmd_text(&file, page, all),
     }
 }
@@ -107,11 +123,17 @@ fn cmd_render(
     all: bool,
     dpi: u32,
     format: Format,
+    layer: Layer,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // PDF uses the new DjVuDocument API directly (preserves text, bookmarks, links)
     if matches!(format, Format::Pdf) {
         return render_pdf_structured(path, output);
+    }
+
+    // Layer extraction uses the DjVuDocument API
+    if !matches!(layer, Layer::Composite) {
+        return render_layer(path, page, all, layer, output);
     }
 
     let doc = open(path)?;
@@ -122,6 +144,96 @@ fn cmd_render(
         Format::Pdf => unreachable!(),
         Format::Cbz => render_cbz(&doc, page, all, dpi, count, output),
     }
+}
+
+fn render_layer(
+    path: &Path,
+    page: usize,
+    all: bool,
+    layer: Layer,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)?;
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+    let count = doc.page_count();
+
+    let pages: Vec<usize> = if all {
+        (0..count).collect()
+    } else {
+        vec![page_idx(page, count)?]
+    };
+
+    if all {
+        std::fs::create_dir_all(output)?;
+    } else if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    for idx in pages {
+        let pg = doc.page(idx)?;
+        let out_path = if all {
+            output.join(format!("page_{:04}.png", idx + 1))
+        } else {
+            output.to_path_buf()
+        };
+
+        match layer {
+            Layer::Mask => {
+                let bm = pg.extract_mask()?.ok_or("page has no JB2 mask layer")?;
+                // Convert 1-bit bitmap to RGBA (black/white)
+                let w = bm.width;
+                let h = bm.height;
+                let mut rgba = vec![255u8; (w * h * 4) as usize];
+                for y in 0..h {
+                    for x in 0..w {
+                        if bm.get(x, y) {
+                            let off = ((y * w + x) * 4) as usize;
+                            rgba[off] = 0;
+                            rgba[off + 1] = 0;
+                            rgba[off + 2] = 0;
+                        }
+                    }
+                }
+                let file = std::fs::File::create(&out_path)?;
+                let mut writer = std::io::BufWriter::new(file);
+                encode_png(&mut writer, w, h, &rgba)?;
+            }
+            Layer::Foreground => {
+                let pm = pg
+                    .extract_foreground()?
+                    .ok_or("page has no foreground layer")?;
+                let rgba = pixmap_to_rgba(&pm);
+                let file = std::fs::File::create(&out_path)?;
+                let mut writer = std::io::BufWriter::new(file);
+                encode_png(&mut writer, pm.width, pm.height, &rgba)?;
+            }
+            Layer::Background => {
+                let pm = pg
+                    .extract_background()?
+                    .ok_or("page has no background layer")?;
+                let rgba = pixmap_to_rgba(&pm);
+                let file = std::fs::File::create(&out_path)?;
+                let mut writer = std::io::BufWriter::new(file);
+                encode_png(&mut writer, pm.width, pm.height, &rgba)?;
+            }
+            Layer::Composite => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+/// Convert an RGB Pixmap to RGBA bytes.
+fn pixmap_to_rgba(pm: &djvu_rs::Pixmap) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((pm.width * pm.height * 4) as usize);
+    for y in 0..pm.height {
+        for x in 0..pm.width {
+            let (r, g, b) = pm.get_rgb(x, y);
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    rgba
 }
 
 fn render_png(

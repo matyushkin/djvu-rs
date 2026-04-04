@@ -261,6 +261,91 @@ fn iff_error_implements_error_trait() {
     requires_error::<IffError>();
 }
 
+// ── Layer extraction (#16) ───────────────────────────────────────────────────
+
+/// extract_mask on a bilevel page returns a Bitmap matching page dimensions.
+#[test]
+fn extract_mask_bilevel_page() {
+    let data = std::fs::read("tests/fixtures/boy_jb2.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let mask = page.extract_mask().expect("extract_mask must not error");
+    assert!(mask.is_some(), "boy_jb2 must have a JB2 mask");
+    let bm = mask.unwrap();
+    assert_eq!(bm.width as u16, page.width());
+    assert_eq!(bm.height as u16, page.height());
+}
+
+/// extract_mask returns None when there is no Sjbz chunk (IW44-only page).
+#[test]
+fn extract_mask_no_sjbz_returns_none() {
+    let data = std::fs::read("tests/fixtures/chicken.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    // chicken.djvu is IW44-only (no JB2 mask)
+    let mask = page.extract_mask().expect("must not error");
+    assert!(mask.is_none(), "IW44-only page should have no mask");
+}
+
+/// extract_foreground on a 3-layer page returns a Pixmap.
+#[test]
+fn extract_foreground_3layer() {
+    let data = std::fs::read("tests/fixtures/colorbook.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let fg = page
+        .extract_foreground()
+        .expect("extract_foreground must not error");
+    assert!(
+        fg.is_some(),
+        "colorbook.djvu should have a foreground layer"
+    );
+    let pm = fg.unwrap();
+    assert!(pm.width > 0 && pm.height > 0);
+}
+
+/// extract_foreground returns None when there are no FG44 chunks.
+#[test]
+fn extract_foreground_no_fg44_returns_none() {
+    let data = std::fs::read("tests/fixtures/boy_jb2.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let fg = page.extract_foreground().expect("must not error");
+    assert!(fg.is_none(), "bilevel page should have no foreground layer");
+}
+
+/// extract_background on a color page returns a Pixmap with correct dimensions.
+#[test]
+fn extract_background_color_page() {
+    let data = std::fs::read("tests/fixtures/chicken.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let bg = page
+        .extract_background()
+        .expect("extract_background must not error");
+    assert!(bg.is_some(), "chicken.djvu should have a background");
+    let pm = bg.unwrap();
+    assert!(pm.width > 0 && pm.height > 0);
+}
+
+/// extract_background returns None on a bilevel (JB2-only) page.
+#[test]
+fn extract_background_no_bg44_returns_none() {
+    let data = std::fs::read("tests/fixtures/boy_jb2.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let bg = page.extract_background().expect("must not error");
+    assert!(bg.is_none(), "bilevel page should have no background");
+}
+
+// ── IFF parse_form ──────────────────────────────────────────────────────────
+
 /// find_first returns the first matching chunk.
 #[test]
 fn iff_find_first_existing_chunk() {
