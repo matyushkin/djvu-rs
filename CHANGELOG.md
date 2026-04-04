@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Thumbnails** — TH44 embedded thumbnail extraction (`Page::thumbnail`)
 - **High-level API** — `Document` / `Page` (requires `std` feature)
 - **New document model** — `DjVuDocument` / `DjVuPage` built on clean-room codecs
-- **CLI tool** — `djvu info`, `djvu render`, `djvu text` subcommands
+- **CLI tool** — `djvu info`, `djvu render --format png|pdf|cbz`, `djvu text` subcommands
+- **Rasterized PDF export** — `djvu render --format pdf` embeds each page as an RGB image (FlateDecode)
+- **CBZ export** — `djvu render --format cbz` produces a comic-book ZIP with PNG pages
 - **`no_std` support** — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
 
 [Unreleased]: https://github.com/matyushkin/djvu-rs/compare/v0.1.0...HEAD
