@@ -1,4 +1,4 @@
-//! Typed error hierarchy for the cos-djvu crate.
+//! Typed error hierarchy for the djvu-rs crate.
 //!
 //! This module provides:
 //! - [`DjVuError`] — the new top-level error type for phase-1+ code
@@ -209,7 +209,7 @@ pub enum BzzError {
 /// Original error type used by the legacy implementation.
 ///
 /// Kept at `crate::error::LegacyError` (and re-exported as `crate::Error`)
-/// so that cos-render and other dependents continue to compile.
+/// so that djvu-rs and other dependents continue to compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LegacyError {
     /// Input data is shorter than expected.

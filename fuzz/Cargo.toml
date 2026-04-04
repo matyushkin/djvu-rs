@@ -1,5 +1,5 @@
 [package]
-name = "cos-djvu-fuzz"
+name = "djvu-rs-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -39,7 +39,7 @@ doc = false
 
 [dependencies]
 libfuzzer-sys = "0.4"
-cos-djvu = { path = ".." }
+djvu-rs = { path = ".." }
 
 [profile.release]
 debug = 1

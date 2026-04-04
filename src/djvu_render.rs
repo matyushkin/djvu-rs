@@ -80,7 +80,7 @@ pub enum RenderError {
 /// # Example
 ///
 /// ```
-/// use cos_djvu::djvu_render::RenderOptions;
+/// use djvu_rs::djvu_render::RenderOptions;
 ///
 /// let opts = RenderOptions {
 ///     width: 800,

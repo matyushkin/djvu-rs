@@ -651,14 +651,14 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
 /// ## Usage
 ///
 /// ```no_run
-/// use cos_djvu::iw44_new::Iw44Image;
+/// use djvu_rs::iw44_new::Iw44Image;
 ///
 /// let mut img = Iw44Image::new();
 /// // Feed each BG44 chunk in document order:
 /// img.decode_chunk(chunk_data)?;
 /// // Convert to an RGB pixmap once all desired chunks are decoded:
 /// let pixmap = img.to_rgb()?;
-/// # Ok::<(), cos_djvu::Iw44Error>(())
+/// # Ok::<(), djvu_rs::Iw44Error>(())
 /// ```
 pub struct Iw44Image {
     /// Luma plane dimensions (pixels, before subsampling).
