@@ -82,11 +82,10 @@ pub(crate) mod info;
 #[allow(dead_code)]
 pub(crate) mod zp_impl;
 
-/// BZZ decompressor — clean-room implementation (phase 2a).
+/// BZZ decompressor — clean-room implementation.
 ///
 /// Provides `bzz_new::bzz_decode` for decompressing DjVu BZZ streams
-/// (DIRM, NAVM, ANTz chunks). Will replace the legacy bzz module in phase 2b.
-#[path = "bzz.rs"]
+/// (DIRM, NAVM, ANTz chunks).
 #[allow(dead_code)]
 pub mod bzz_new;
 
@@ -152,10 +151,6 @@ pub use info::{PageInfo, Rotation};
 
 #[doc(hidden)]
 pub(crate) mod bitmap;
-
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub mod bzz;
 
 #[cfg(feature = "std")]
 #[doc(hidden)]

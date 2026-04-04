@@ -228,7 +228,7 @@ impl<'a> Document<'a> {
             None => return Ok(vec![]),
         };
 
-        let decoded = crate::bzz::decode(navm_data)
+        let decoded = crate::bzz_new::bzz_decode(navm_data)
             .map_err(|e| Error::FormatError(format!("NAVM BZZ decode: {}", e)))?;
 
         if decoded.len() < 2 {
@@ -508,7 +508,7 @@ impl<'a> Page<'a> {
             if compressed.is_empty() {
                 return Ok(None);
             }
-            crate::bzz::decode(compressed)
+            crate::bzz_new::bzz_decode(compressed)
                 .map_err(|e| Error::FormatError(format!("TXTz BZZ decode: {}", e)))?
         } else if let Some(txta) = self.form.find_first(b"TXTa") {
             txta.data().to_vec()
@@ -634,7 +634,8 @@ fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), Error> {
 
     // Remaining bytes are BZZ-compressed metadata
     let bzz_data = &data[pos..];
-    let meta = crate::bzz::decode(bzz_data).map_err(|e| Error::FormatError(e.to_string()))?;
+    let meta =
+        crate::bzz_new::bzz_decode(bzz_data).map_err(|e| Error::FormatError(e.to_string()))?;
 
     // Parse metadata: for each component, read size(3), flags(1), id(strNT), name?(strNT), title?(strNT)
     let mut mpos = 0;
@@ -729,7 +730,7 @@ fn parse_fgbz(data: &[u8]) -> Result<Palette, Error> {
 
         let bzz_data = &data[idx_start + 3..];
         let decoded =
-            crate::bzz::decode(bzz_data).map_err(|e| Error::FormatError(e.to_string()))?;
+            crate::bzz_new::bzz_decode(bzz_data).map_err(|e| Error::FormatError(e.to_string()))?;
 
         // Each index is i16be
         let num_indices = data_size as usize;

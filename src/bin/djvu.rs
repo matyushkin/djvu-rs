@@ -109,10 +109,10 @@ fn cmd_render(
         }
     } else {
         let idx = page_idx(page, count)?;
-        if let Some(parent) = output.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = output.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         render_page(&doc, idx, dpi, output)?;
     }
@@ -142,8 +142,8 @@ fn write_png(
     rgba: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(path)?;
-    let ref mut w = std::io::BufWriter::new(file);
-    let mut encoder = png::Encoder::new(w, width, height);
+    let mut w = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(&mut w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;
