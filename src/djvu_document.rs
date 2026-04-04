@@ -151,6 +151,10 @@ pub struct DjVuPage {
     chunks: Vec<RawChunk>,
     /// Page index within the document (0-based).
     index: usize,
+    /// Raw Djbz data from the DJVI shared dictionary component referenced via
+    /// the page's INCL chunk, if present.  Stored here so that `extract_mask`
+    /// can decode it without access to the parent document.
+    shared_djbz: Option<Vec<u8>>,
 }
 
 impl DjVuPage {
@@ -375,9 +379,14 @@ impl DjVuPage {
             None => return Ok(None),
         };
 
-        let dict = match self.find_chunk(b"Djbz") {
-            Some(djbz) => Some(crate::jb2_new::decode_dict(djbz, None)?),
-            None => None,
+        // Prefer an inline Djbz chunk; fall back to the shared DJVI dictionary
+        // that was resolved from the INCL chunk during document parse.
+        let dict = if let Some(djbz) = self.find_chunk(b"Djbz") {
+            Some(crate::jb2_new::decode_dict(djbz, None)?)
+        } else if let Some(djbz) = self.shared_djbz.as_deref() {
+            Some(crate::jb2_new::decode_dict(djbz, None)?)
+        } else {
+            None
         };
 
         let bm = crate::jb2_new::decode(sjbz, dict.as_ref())?;
@@ -489,7 +498,7 @@ impl DjVuDocument {
                         data: c.data.to_vec(),
                     })
                     .collect();
-                let page = parse_page_from_chunks(&form.chunks, 0)?;
+                let page = parse_page_from_chunks(&form.chunks, 0, None)?;
                 Ok(DjVuDocument {
                     pages: vec![page],
                     bookmarks: vec![],
@@ -521,9 +530,23 @@ impl DjVuDocument {
                     .collect();
 
                 if is_bundled {
-                    // Bundled: FORM:DJVU sub-forms follow DIRM in sequence
+                    // Bundled: FORM:DJVU / FORM:DJVI sub-forms follow DIRM in sequence.
                     let sub_forms: Vec<&IffChunk<'_>> =
                         form.chunks.iter().filter(|c| &c.id == b"FORM").collect();
+
+                    // Build a map of DJVI component ID → raw Djbz bytes for
+                    // shared symbol dictionaries (referenced via INCL chunks).
+                    let djvi_djbz: std::collections::HashMap<String, Vec<u8>> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.comp_type == ComponentType::Shared)
+                        .filter_map(|(comp_idx, entry)| {
+                            let sf = sub_forms.get(comp_idx)?;
+                            let chunks = parse_sub_form(sf.data).ok()?;
+                            let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
+                            Some((entry.id.clone(), djbz.data.to_vec()))
+                        })
+                        .collect();
 
                     let mut pages = Vec::new();
                     let mut page_idx = 0usize;
@@ -535,7 +558,16 @@ impl DjVuDocument {
                             "DIRM entry count exceeds FORM children",
                         ))?;
                         let sub_chunks = parse_sub_form(sub_form.data)?;
-                        let page = parse_page_from_chunks(&sub_chunks, page_idx)?;
+
+                        // Resolve INCL reference to a shared DJVI dictionary.
+                        let shared_djbz = sub_chunks
+                            .iter()
+                            .find(|c| &c.id == b"INCL")
+                            .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
+                            .and_then(|name| djvi_djbz.get(name))
+                            .cloned();
+
+                        let page = parse_page_from_chunks(&sub_chunks, page_idx, shared_djbz)?;
                         pages.push(page);
                         page_idx += 1;
                     }
@@ -558,7 +590,7 @@ impl DjVuDocument {
                         let resolved_data = resolver(&entry.id)
                             .map_err(|_| DocError::IndirectResolve(entry.id.clone()))?;
                         let sub_form = parse_form(&resolved_data)?;
-                        let page = parse_page_from_chunks(&sub_form.chunks, page_idx)?;
+                        let page = parse_page_from_chunks(&sub_form.chunks, page_idx, None)?;
                         pages.push(page);
                         page_idx += 1;
                     }
@@ -655,7 +687,15 @@ impl DjVuDocument {
 // ---- Internal parsing helpers -----------------------------------------------
 
 /// Parse a `DjVuPage` from the chunks of a FORM:DJVU.
-fn parse_page_from_chunks(chunks: &[IffChunk<'_>], index: usize) -> Result<DjVuPage, DocError> {
+///
+/// `shared_djbz` is the raw `Djbz` data from a referenced DJVI component
+/// (resolved from the page's INCL chunk by the caller); pass `None` if no
+/// shared dictionary is available.
+fn parse_page_from_chunks(
+    chunks: &[IffChunk<'_>],
+    index: usize,
+    shared_djbz: Option<Vec<u8>>,
+) -> Result<DjVuPage, DocError> {
     let info_chunk = chunks
         .iter()
         .find(|c| &c.id == b"INFO")
@@ -676,6 +716,7 @@ fn parse_page_from_chunks(chunks: &[IffChunk<'_>], index: usize) -> Result<DjVuP
         info,
         chunks: raw_chunks,
         index,
+        shared_djbz,
     })
 }
 
@@ -1268,6 +1309,72 @@ mod tests {
             .raw_chunk(b"INFO")
             .expect("document must expose INFO chunk");
         assert_eq!(info.len(), 10);
+    }
+
+    // ── DJVI shared dictionary / INCL chunks (Issue #45) ────────────────────
+
+    /// DjVu3Spec_bundled.djvu has shared DJVI symbol dictionaries.
+    /// Parsing must succeed and pages with INCL references must carry the dict.
+    #[test]
+    fn djvi_shared_dict_parsed_from_bundled_djvm() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/DjVu3Spec_bundled.djvu");
+        let data = std::fs::read(&path).expect("DjVu3Spec_bundled.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+
+        assert!(doc.page_count() > 0, "document must have pages");
+
+        // At least one page should have a shared dict loaded (shared_djbz Some)
+        let pages_with_dict = doc.pages.iter().filter(|p| p.shared_djbz.is_some()).count();
+        assert!(
+            pages_with_dict > 0,
+            "at least one page must have a resolved shared DJVI dict"
+        );
+    }
+
+    /// Pages with INCL references must render their mask without error.
+    #[test]
+    fn djvi_incl_page_mask_renders_ok() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/DjVu3Spec_bundled.djvu");
+        let data = std::fs::read(&path).expect("DjVu3Spec_bundled.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+
+        // Find first page with a shared dict and render its mask
+        let page = doc
+            .pages
+            .iter()
+            .find(|p| p.shared_djbz.is_some())
+            .expect("at least one page must have a shared dict");
+
+        let mask = page
+            .extract_mask()
+            .expect("extract_mask must succeed for INCL page");
+        assert!(mask.is_some(), "INCL page must have a JB2 mask");
+        let bm = mask.unwrap();
+        assert!(
+            bm.width > 0 && bm.height > 0,
+            "mask must have non-zero dimensions"
+        );
+    }
+
+    /// Pages without INCL still render correctly (no regression).
+    #[test]
+    fn no_regression_non_incl_pages() {
+        // boy_jb2.djvu has a Sjbz mask and no INCL reference
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/boy_jb2.djvu"),
+        )
+        .expect("boy_jb2.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+        assert!(
+            page.shared_djbz.is_none(),
+            "single-page DJVU has no shared dict"
+        );
+        let mask = page.extract_mask().expect("extract_mask must succeed");
+        assert!(mask.is_some(), "boy_jb2.djvu page must have a JB2 mask");
     }
 
     /// Round-trip: bytes from `raw_chunk` re-parse to the same metadata.
