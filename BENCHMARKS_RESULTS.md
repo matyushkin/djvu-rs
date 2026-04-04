@@ -64,19 +64,52 @@ Text layer: `tests/corpus/watchmaker.djvu` (TXTz present)
 
 ## Comparison with DjVuLibre 3.5.29
 
-Tool: `ddjvu -format=ppm -page=1` (CLI utility, process-per-call)
+Two comparison levels: CLI-to-CLI and library-to-library.
+
+### CLI comparison (`ddjvu` vs `djvu render`)
+
+Tool: `ddjvu -format=ppm -page=1` vs `djvu render -o out.png`
 Method: `hyperfine --warmup 3 --runs 10`
-Platform: same machine (Apple M-series, macOS 15)
 
-| File | djvu-rs render | ddjvu CLI | Ratio |
-|------|---------------|-----------|-------|
-| watchmaker.djvu (color IW44) | **3.1 ms** | 145.2 ms | ~47× faster |
-| cable_1973_100133.djvu (bilevel JB2) | **3.1 ms** | 103.0 ms | ~33× faster |
-| pathogenic_bacteria_1896.djvu p.1 (mixed, 520 pp) | **30.5 ms** | 248.3 ms ± 169 ms | ~8× faster |
+| File | djvu-rs CLI | ddjvu CLI | Ratio |
+|------|------------|-----------|-------|
+| watchmaker.djvu (color IW44) | **~73 ms** | 145.2 ms | ~2× faster |
+| cable_1973_100133.djvu (bilevel JB2) | **~73 ms** | 103.0 ms | ~1.4× faster |
+| pathogenic_bacteria_1896.djvu p.1 | **~73 ms** | 248.3 ms | ~3.4× faster |
 
-**Caveat:** `ddjvu` is a subprocess — timings include fork/exec overhead (~50–80 ms on macOS) and PPM file write. The comparison reflects real-world CLI usage, not pure decode time. A library-level comparison via `libdjvulibre` C API would be more apples-to-apples for the decode kernel itself.
+Both CLIs include process startup. djvu-rs outputs PNG (lossless), ddjvu outputs PPM (uncompressed) — PNG encoding adds ~30ms overhead for large pages, so the raw decode advantage is larger than shown.
 
-Even so, djvu-rs embedded in a Rust application avoids all subprocess overhead entirely.
+### Library-level comparison (C API vs Rust API, render-only)
+
+Method: `clock_gettime(CLOCK_MONOTONIC)` around render call, 20 warm-up + 20 measured iterations.
+C source: `scripts/djvulibre_bench.c`
+
+| File | Output size | djvu-rs | libdjvulibre C API | Ratio |
+|------|------------|---------|-------------------|-------|
+| watchmaker.djvu (color IW44, 300 dpi) | 2550×3301 px | **3.15 ms** | 35.4 ms | **~11× faster** |
+| cable_1973_100133.djvu (bilevel JB2, 300 dpi) | 2550×3301 px | **3.12 ms** | 34.7 ms | **~11× faster** |
+| pathogenic_bacteria_1896.djvu p.1 (mixed, 600 dpi) | 2649×4530 px | 30.5 ms | **11.1 ms** | ~0.4× (libdjvulibre wins) |
+
+djvu-rs numbers are from `cargo bench --bench render` (criterion, release mode).
+libdjvulibre numbers are render-only — after the page is already decoded and in memory.
+
+**Analysis:**
+
+- For standard 300 dpi pages djvu-rs is ~11× faster than libdjvulibre for the render step.
+- For the 600 dpi mixed page (12 MP output buffer) libdjvulibre is ~3× faster. This is an
+  expected weakness — djvu-rs color conversion uses scalar Rust; libdjvulibre uses hand-tuned C
+  with SIMD and handles very large buffers more efficiently. This is a known optimisation target.
+- `open+decode` overhead (parse + decode page structure before render): djvu-rs ≈ 0.9 ms (from
+  document benchmarks); libdjvulibre C API ≈ 20–43 ms depending on file size.
+
+### Summary
+
+| Scenario | Winner | Margin |
+|----------|--------|--------|
+| Embedded in application (typical 300 dpi page) | **djvu-rs** | ~11× |
+| Large high-DPI page (600 dpi, 12 MP+) | libdjvulibre | ~3× |
+| CLI usage (process startup included) | **djvu-rs** | ~2–3× |
+| Parse + open document | **djvu-rs** | ~25–50× |
 
 ---
 
@@ -86,3 +119,4 @@ Even so, djvu-rs embedded in a Rust application avoids all subprocess overhead e
 - JB2 and IW44 decode in sub-millisecond to low-millisecond range for typical pages.
 - Full page render at 72 dpi takes ~1.2 ms (composite: IW44 background + JB2 mask + color).
 - Corpus benchmarks use public domain files from Internet Archive.
+- Large high-DPI render (600 dpi) is a known optimization target — SIMD color conversion is planned.
