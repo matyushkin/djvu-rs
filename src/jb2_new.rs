@@ -1586,4 +1586,24 @@ mod tests {
             "saturating_mul must exceed MAX_PIXELS"
         );
     }
+
+    // ── Error path tests ───────────────────��────────────────────────────────
+
+    #[test]
+    fn test_decode_empty_data() {
+        let result = decode(&[], None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_dict_empty() {
+        let result = decode_dict(&[], None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_indexed_empty() {
+        let result = decode_indexed(&[], None);
+        assert!(result.is_err());
+    }
 }

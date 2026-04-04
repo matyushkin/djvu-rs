@@ -339,3 +339,205 @@ fn read_i24(data: &[u8], pos: &mut usize) -> Option<i32> {
     *pos += 3;
     Some((b0 << 16) | (b1 << 8) | b2)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Low-level reader tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_read_u24() {
+        let data = [0x01, 0x02, 0x03];
+        let mut pos = 0;
+        assert_eq!(read_u24(&data, &mut pos), Some(0x010203));
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_read_u24_truncated() {
+        let data = [0x01, 0x02];
+        let mut pos = 0;
+        assert_eq!(read_u24(&data, &mut pos), None);
+    }
+
+    #[test]
+    fn test_read_i16_biased() {
+        let data = [0x80, 0x00]; // 0x8000 - 0x8000 = 0
+        let mut pos = 0;
+        assert_eq!(read_i16_biased(&data, &mut pos), Some(0));
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn test_read_i16_biased_negative() {
+        let data = [0x00, 0x00]; // 0x0000 - 0x8000 = -32768
+        let mut pos = 0;
+        assert_eq!(read_i16_biased(&data, &mut pos), Some(-0x8000));
+    }
+
+    #[test]
+    fn test_read_i16_biased_truncated() {
+        let data = [0x80];
+        let mut pos = 0;
+        assert_eq!(read_i16_biased(&data, &mut pos), None);
+    }
+
+    #[test]
+    fn test_read_i24() {
+        let data = [0x00, 0x01, 0x00];
+        let mut pos = 0;
+        assert_eq!(read_i24(&data, &mut pos), Some(256));
+    }
+
+    // ── extract_text_slice ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_text_slice_basic() {
+        assert_eq!(extract_text_slice("hello world", 0, 5), "hello");
+        assert_eq!(extract_text_slice("hello world", 6, 5), "world");
+    }
+
+    #[test]
+    fn test_extract_text_slice_out_of_bounds() {
+        assert_eq!(extract_text_slice("hello", 10, 5), "");
+        assert_eq!(extract_text_slice("hello", 0, 100), "hello");
+    }
+
+    #[test]
+    fn test_extract_text_slice_utf8_boundary() {
+        // Multi-byte char: each char is 2 bytes
+        let s = "\u{00e9}\u{00e8}"; // é è — 2 bytes each
+        // Slicing at byte 1 (mid-char) should snap to boundary
+        let result = extract_text_slice(s, 1, 2);
+        assert!(result.is_char_boundary(0));
+    }
+
+    #[test]
+    fn test_extract_text_slice_empty() {
+        assert_eq!(extract_text_slice("", 0, 0), "");
+        assert_eq!(extract_text_slice("abc", 1, 0), "");
+    }
+
+    // ── Error paths ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_too_short_data() {
+        assert!(matches!(
+            parse_text_layer(&[0x00], 100),
+            Err(TextError::TooShort)
+        ));
+        assert!(matches!(
+            parse_text_layer(&[], 100),
+            Err(TextError::TooShort)
+        ));
+    }
+
+    #[test]
+    fn test_text_overflow() {
+        // text_len = 0x00_00_FF (255) but only 3+1 bytes available
+        let data = [0x00, 0x00, 0xFF, 0x41];
+        assert!(matches!(
+            parse_text_layer(&data, 100),
+            Err(TextError::TextOverflow)
+        ));
+    }
+
+    #[test]
+    fn test_invalid_utf8() {
+        // text_len = 2, then 2 invalid bytes
+        let data = [0x00, 0x00, 0x02, 0xFF, 0xFE];
+        assert!(matches!(
+            parse_text_layer(&data, 100),
+            Err(TextError::InvalidUtf8)
+        ));
+    }
+
+    #[test]
+    fn test_unknown_zone_type() {
+        // text_len=1, text="A", version=0, then zone type=99 (invalid)
+        let data = [
+            0x00, 0x00, 0x01, // text_len = 1
+            b'A', // text
+            0x00, // version
+            99,   // invalid zone type
+        ];
+        assert!(matches!(
+            parse_text_layer(&data, 100),
+            Err(TextError::UnknownZoneType(99))
+        ));
+    }
+
+    #[test]
+    fn test_zone_truncated() {
+        // text_len=1, text="A", version=0, zone type=1 (Page), then truncated
+        let data = [
+            0x00, 0x00, 0x01, // text_len = 1
+            b'A', // text
+            0x00, // version
+            0x01, // zone type = Page
+            0x80, 0x00, // x (only partial fields)
+        ];
+        assert!(matches!(
+            parse_text_layer(&data, 100),
+            Err(TextError::ZoneTruncated(_))
+        ));
+    }
+
+    // ── Successful parse ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_text_no_zones() {
+        // text_len=0, no zones after that
+        let data = [0x00, 0x00, 0x00];
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.text, "");
+        assert!(result.zones.is_empty());
+    }
+
+    #[test]
+    fn test_text_only_no_zones() {
+        // text_len=5, text="Hello", version byte, then no zone data
+        let data = [
+            0x00, 0x00, 0x05, // text_len = 5
+            b'H', b'e', b'l', b'l', b'o', // text
+            0x00, // version
+        ];
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.text, "Hello");
+        assert!(result.zones.is_empty());
+    }
+
+    #[test]
+    fn test_single_word_zone() {
+        // Build a minimal text layer with one Page zone containing "Hi"
+        let text = b"Hi";
+        let mut data = Vec::new();
+        // text_len = 2 (u24be)
+        data.extend_from_slice(&[0x00, 0x00, 0x02]);
+        data.extend_from_slice(text);
+        data.push(0x00); // version
+
+        // Page zone (type=1)
+        data.push(0x01);
+        // x=0, y=0, w=100, h=50 (biased i16: value + 0x8000)
+        data.extend_from_slice(&0x8000u16.to_be_bytes()); // x=0
+        data.extend_from_slice(&0x8000u16.to_be_bytes()); // y=0
+        data.extend_from_slice(&(100u16 + 0x8000u16).wrapping_add(0).to_be_bytes()); // w=100
+        let h_val = 50i32 + 0x8000;
+        data.extend_from_slice(&(h_val as u16).to_be_bytes()); // h=50
+        data.extend_from_slice(&0x8000u16.to_be_bytes()); // text_start=0
+        // text_len = 2 (i24)
+        data.extend_from_slice(&[0x00, 0x00, 0x02]);
+        // children_count = 0 (i24)
+        data.extend_from_slice(&[0x00, 0x00, 0x00]);
+
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.text, "Hi");
+        assert_eq!(result.zones.len(), 1);
+        assert_eq!(result.zones[0].kind, TextZoneKind::Page);
+        assert_eq!(result.zones[0].text, "Hi");
+        assert_eq!(result.zones[0].rect.width, 100);
+        assert_eq!(result.zones[0].rect.height, 50);
+    }
+}

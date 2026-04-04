@@ -485,3 +485,206 @@ fn parse_color(s: &str) -> Result<Color, AnnotationError> {
         .map_err(|_| AnnotationError::InvalidColor(s.to_string()))?;
     Ok(Color { r, g, b })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Tokenizer ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_basic() {
+        let tokens = tokenize("(background #ffffff)");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], Token::LParen);
+        assert!(matches!(&tokens[1], Token::Atom(s) if s == &"background"));
+        assert!(matches!(&tokens[2], Token::Atom(s) if s == &"#ffffff"));
+        assert_eq!(tokens[3], Token::RParen);
+    }
+
+    #[test]
+    fn test_tokenize_quoted_string() {
+        let tokens = tokenize(r#"(maparea "http://example.com" "desc")"#);
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, Token::Quoted(s) if s == "http://example.com"))
+        );
+    }
+
+    #[test]
+    fn test_tokenize_escape_in_quoted() {
+        let tokens = tokenize(r#""hello\"world""#);
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(&tokens[0], Token::Quoted(s) if s == r#"hello"world"#));
+    }
+
+    #[test]
+    fn test_tokenize_line_comment() {
+        let tokens = tokenize("; this is a comment\n(zoom 100)");
+        // Comment should be skipped
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, Token::Atom(s) if s == &"zoom"))
+        );
+    }
+
+    #[test]
+    fn test_tokenize_empty() {
+        assert!(tokenize("").is_empty());
+        assert!(tokenize("   \n\t  ").is_empty());
+    }
+
+    // ── Color parsing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_color_valid() {
+        let c = parse_color("#ff0080").unwrap();
+        assert_eq!(
+            c,
+            Color {
+                r: 255,
+                g: 0,
+                b: 128
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_color_no_hash() {
+        let c = parse_color("00ff00").unwrap();
+        assert_eq!(c, Color { r: 0, g: 255, b: 0 });
+    }
+
+    #[test]
+    fn test_parse_color_invalid_length() {
+        assert!(matches!(
+            parse_color("#fff"),
+            Err(AnnotationError::InvalidColor(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_color_invalid_hex() {
+        assert!(matches!(
+            parse_color("#gggggg"),
+            Err(AnnotationError::InvalidColor(_))
+        ));
+    }
+
+    // ── Number parsing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_uint_valid() {
+        assert_eq!(parse_uint("42").unwrap(), 42);
+        assert_eq!(parse_uint("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_uint_invalid() {
+        assert!(matches!(
+            parse_uint("abc"),
+            Err(AnnotationError::InvalidNumber(_))
+        ));
+        assert!(matches!(
+            parse_uint("-5"),
+            Err(AnnotationError::InvalidNumber(_))
+        ));
+    }
+
+    // ── Full annotation parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_empty() {
+        let (ann, areas) = parse_annotations(b"").unwrap();
+        assert!(ann.background.is_none());
+        assert!(areas.is_empty());
+    }
+
+    #[test]
+    fn test_parse_background() {
+        let (ann, _) = parse_annotations(b"(background #ff0000)").unwrap();
+        assert_eq!(ann.background, Some(Color { r: 255, g: 0, b: 0 }));
+    }
+
+    #[test]
+    fn test_parse_zoom_and_mode() {
+        let (ann, _) = parse_annotations(b"(zoom 150)(mode color)").unwrap();
+        assert_eq!(ann.zoom, Some(150));
+        assert_eq!(ann.mode.as_deref(), Some("color"));
+    }
+
+    #[test]
+    fn test_parse_maparea_rect() {
+        let input = br#"(maparea "http://example.com" "Example" (rect 10 20 100 50))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].url, "http://example.com");
+        assert_eq!(areas[0].description, "Example");
+        assert!(matches!(&areas[0].shape, Shape::Rect(r) if r.x == 10 && r.y == 20));
+    }
+
+    #[test]
+    fn test_parse_maparea_oval() {
+        let input = br#"(maparea "" "" (oval 0 0 50 50))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert!(matches!(&areas[0].shape, Shape::Oval(_)));
+    }
+
+    #[test]
+    fn test_parse_maparea_poly() {
+        let input = br#"(maparea "" "" (poly 0 0 10 0 10 10 0 10))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        if let Shape::Poly(pts) = &areas[0].shape {
+            assert_eq!(pts.len(), 4);
+            assert_eq!(pts[0], (0, 0));
+            assert_eq!(pts[2], (10, 10));
+        } else {
+            panic!("expected poly shape");
+        }
+    }
+
+    #[test]
+    fn test_parse_maparea_line() {
+        let input = br#"(maparea "" "" (line 0 0 100 100))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert!(matches!(&areas[0].shape, Shape::Line(0, 0, 100, 100)));
+    }
+
+    #[test]
+    fn test_parse_maparea_with_border_and_hilite() {
+        let input = br#"(maparea "" "" (rect 0 0 10 10) (border solid) (hilite #00ff00))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert_eq!(areas[0].border.as_ref().unwrap().style, "solid");
+        assert_eq!(
+            areas[0].highlight.as_ref().unwrap().color,
+            Color { r: 0, g: 255, b: 0 }
+        );
+    }
+
+    #[test]
+    fn test_parse_unknown_shape() {
+        let input = br#"(maparea "" "" (circle 0 0 10))"#;
+        assert!(matches!(
+            parse_annotations(input),
+            Err(AnnotationError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_unknown_toplevel_ignored() {
+        let input = b"(unknown_key value)(zoom 100)";
+        let (ann, _) = parse_annotations(input).unwrap();
+        assert_eq!(ann.zoom, Some(100));
+    }
+
+    #[test]
+    fn test_parse_multiple_mapareas() {
+        let input = br#"(maparea "a" "" (rect 0 0 1 1))(maparea "b" "" (rect 2 2 3 3))"#;
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert_eq!(areas.len(), 2);
+        assert_eq!(areas[0].url, "a");
+        assert_eq!(areas[1].url, "b");
+    }
+}

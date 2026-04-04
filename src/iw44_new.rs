@@ -1127,4 +1127,36 @@ mod tests {
             "progressive and full decode must produce identical pixels"
         );
     }
+
+    // ── Error path tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_decode_empty_chunk() {
+        let mut img = Iw44Image::new();
+        let result = img.decode_chunk(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_truncated_header() {
+        let mut img = Iw44Image::new();
+        // Only 2 bytes — not enough for a header
+        let result = img.decode_chunk(&[0x00, 0x01]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_to_rgb_before_decode() {
+        let img = Iw44Image::new();
+        // No chunks decoded yet — should fail
+        let result = img.to_rgb();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_to_rgb_subsample_zero() {
+        let img = Iw44Image::new();
+        let result = img.to_rgb_subsample(0);
+        assert!(result.is_err());
+    }
 }
