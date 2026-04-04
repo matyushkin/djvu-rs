@@ -21,6 +21,7 @@ exclude = [
     "fuzz/*",
     "scripts/*",
     "BENCHMARKS_RESULTS.md",
+    "BENCHMARKS.md",
 ]
 
 [package.metadata.docs.rs]
