@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{format, vec::Vec};
+
 /// An RGBA pixel image, 4 bytes per pixel.
 ///
 /// Row-major, top-to-bottom. Alpha is always 255 for DjVu pages.

@@ -1,0 +1,3 @@
+[build]
+# Treat all compiler warnings as errors locally, matching CI behaviour.
+rustflags = ["-D", "warnings"]

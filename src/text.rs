@@ -197,11 +197,11 @@ fn parse_zone(
         other => return Err(TextError::UnknownZoneType(other)),
     };
 
-    let mut x = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))? as i32;
-    let mut y = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))? as i32;
-    let width = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))? as i32;
-    let height = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))? as i32;
-    let mut text_start = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))? as i32;
+    let mut x = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
+    let mut y = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
+    let width = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
+    let height = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
+    let mut text_start = read_i16_biased(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
     let text_len = read_i24(data, pos).ok_or(TextError::ZoneTruncated(*pos))?;
 
     // Apply delta encoding (matches djvujs DjVuText.js decodeZone logic)
