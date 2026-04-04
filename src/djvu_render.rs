@@ -75,12 +75,30 @@ pub enum RenderError {
 
 // ── RenderOptions ─────────────────────────────────────────────────────────────
 
+/// User-requested rotation, applied on top of the INFO chunk rotation.
+///
+/// The final rotation is the sum of the INFO rotation and the user rotation.
+/// For example, if the INFO chunk specifies 90° CW and the user requests 90° CW,
+/// the output will be rotated 180°.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserRotation {
+    /// No additional rotation (only INFO chunk rotation applies).
+    #[default]
+    None,
+    /// 90° clockwise.
+    Cw90,
+    /// 180°.
+    Rot180,
+    /// 90° counter-clockwise (= 270° clockwise).
+    Ccw90,
+}
+
 /// Rendering parameters passed to `render_into` and related functions.
 ///
 /// # Example
 ///
 /// ```
-/// use djvu_rs::djvu_render::RenderOptions;
+/// use djvu_rs::djvu_render::{RenderOptions, UserRotation};
 ///
 /// let opts = RenderOptions {
 ///     width: 800,
@@ -88,6 +106,7 @@ pub enum RenderError {
 ///     scale: 1.0,
 ///     bold: 0,
 ///     aa: true,
+///     rotation: UserRotation::None,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +121,8 @@ pub struct RenderOptions {
     pub bold: u8,
     /// Whether to apply anti-aliasing downscale pass.
     pub aa: bool,
+    /// User-requested rotation, combined with the INFO chunk rotation.
+    pub rotation: UserRotation,
 }
 
 impl Default for RenderOptions {
@@ -112,6 +133,7 @@ impl Default for RenderOptions {
             scale: 1.0,
             bold: 0,
             aa: false,
+            rotation: UserRotation::None,
         }
     }
 }
@@ -395,7 +417,42 @@ fn aa_downscale(pm: &Pixmap) -> Pixmap {
 
 // ── Page rotation ───────────────────────────────────────────────────────────
 
-/// Apply page rotation from the INFO chunk to the rendered pixmap.
+/// Convert a rotation to a number of 90° CW steps (0..3).
+fn rotation_to_steps(r: crate::info::Rotation) -> u8 {
+    use crate::info::Rotation;
+    match r {
+        Rotation::None => 0,
+        Rotation::Cw90 => 1,
+        Rotation::Rot180 => 2,
+        Rotation::Ccw90 => 3,
+    }
+}
+
+/// Convert a user rotation to a number of 90° CW steps (0..3).
+fn user_rotation_to_steps(r: UserRotation) -> u8 {
+    match r {
+        UserRotation::None => 0,
+        UserRotation::Cw90 => 1,
+        UserRotation::Rot180 => 2,
+        UserRotation::Ccw90 => 3,
+    }
+}
+
+/// Combine INFO chunk rotation with user rotation and return the combined
+/// `info::Rotation` value.
+fn combine_rotations(info: crate::info::Rotation, user: UserRotation) -> crate::info::Rotation {
+    use crate::info::Rotation;
+    let steps = (rotation_to_steps(info) + user_rotation_to_steps(user)) % 4;
+    match steps {
+        0 => Rotation::None,
+        1 => Rotation::Cw90,
+        2 => Rotation::Rot180,
+        3 => Rotation::Ccw90,
+        _ => unreachable!(),
+    }
+}
+
+/// Apply page rotation to the rendered pixmap.
 ///
 /// For 90°/270° rotations, width and height are swapped.
 fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
@@ -949,7 +1006,10 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm = aa_downscale(&pm);
     }
 
-    Ok(rotate_pixmap(pm, page.rotation()))
+    Ok(rotate_pixmap(
+        pm,
+        combine_rotations(page.rotation(), opts.rotation),
+    ))
 }
 
 /// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
@@ -990,7 +1050,10 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
         composite_into(&ctx, &mut pm.data)?;
     }
 
-    Ok(Some(rotate_pixmap(pm, page.rotation())))
+    Ok(Some(rotate_pixmap(
+        pm,
+        combine_rotations(page.rotation(), opts.rotation),
+    )))
 }
 
 /// Progressive render: decode BG44 chunks 1..=chunk_n and all other layers.
@@ -1072,7 +1135,10 @@ pub fn render_progressive(
         composite_into(&ctx, &mut pm.data)?;
     }
 
-    Ok(rotate_pixmap(pm, page.rotation()))
+    Ok(rotate_pixmap(
+        pm,
+        combine_rotations(page.rotation(), opts.rotation),
+    ))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1134,12 +1200,14 @@ mod tests {
             scale: 0.5,
             bold: 1,
             aa: true,
+            rotation: UserRotation::Cw90,
         };
         assert_eq!(opts.width, 400);
         assert_eq!(opts.height, 300);
         assert_eq!(opts.bold, 1);
         assert!(opts.aa);
         assert!((opts.scale - 0.5).abs() < 1e-6);
+        assert_eq!(opts.rotation, UserRotation::Cw90);
     }
 
     /// `fit_to_width` scales correctly, preserving aspect ratio.
@@ -1273,9 +1341,7 @@ mod tests {
         let opts = RenderOptions {
             width: w,
             height: h,
-            scale: 1.0,
-            bold: 0,
-            aa: false,
+            ..Default::default()
         };
         let mut buf = vec![0u8; (w * h * 4) as usize];
         render_into(page, &opts, &mut buf).expect("render_into should succeed");
@@ -1632,6 +1698,102 @@ mod tests {
             pm.height, orig_w as u32,
             "rotated height should be original width"
         );
+    }
+
+    // -- User rotation tests ---------------------------------------------------
+
+    /// combine_rotations adds steps modulo 4.
+    #[test]
+    fn combine_rotations_identity() {
+        use crate::info::Rotation;
+        assert_eq!(
+            combine_rotations(Rotation::None, UserRotation::None),
+            Rotation::None
+        );
+    }
+
+    #[test]
+    fn combine_rotations_info_only() {
+        use crate::info::Rotation;
+        assert_eq!(
+            combine_rotations(Rotation::Cw90, UserRotation::None),
+            Rotation::Cw90
+        );
+    }
+
+    #[test]
+    fn combine_rotations_user_only() {
+        use crate::info::Rotation;
+        assert_eq!(
+            combine_rotations(Rotation::None, UserRotation::Ccw90),
+            Rotation::Ccw90
+        );
+    }
+
+    #[test]
+    fn combine_rotations_sum() {
+        use crate::info::Rotation;
+        // 90 CW (INFO) + 90 CW (user) = 180
+        assert_eq!(
+            combine_rotations(Rotation::Cw90, UserRotation::Cw90),
+            Rotation::Rot180
+        );
+        // 90 CW + 270 CW = 360 = None
+        assert_eq!(
+            combine_rotations(Rotation::Cw90, UserRotation::Ccw90),
+            Rotation::None
+        );
+        // 180 + 180 = 360 = None
+        assert_eq!(
+            combine_rotations(Rotation::Rot180, UserRotation::Rot180),
+            Rotation::None
+        );
+    }
+
+    /// User rotation Cw90 on a non-rotated page swaps output dimensions.
+    #[test]
+    fn user_rotation_cw90_swaps_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+
+        let opts = RenderOptions {
+            width: pw,
+            height: ph,
+            rotation: UserRotation::Cw90,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render");
+        assert_eq!(pm.width, ph, "user Cw90 should swap: width becomes height");
+        assert_eq!(pm.height, pw, "user Cw90 should swap: height becomes width");
+    }
+
+    /// User rotation 180° preserves dimensions.
+    #[test]
+    fn user_rotation_180_preserves_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+
+        let opts = RenderOptions {
+            width: pw,
+            height: ph,
+            rotation: UserRotation::Rot180,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render");
+        assert_eq!(pm.width, pw);
+        assert_eq!(pm.height, ph);
+    }
+
+    /// UserRotation default is None.
+    #[test]
+    fn user_rotation_default_is_none() {
+        assert_eq!(UserRotation::default(), UserRotation::None);
+        let opts = RenderOptions::default();
+        assert_eq!(opts.rotation, UserRotation::None);
     }
 
     // -- FGbz multi-color palette tests ---------------------------------------
