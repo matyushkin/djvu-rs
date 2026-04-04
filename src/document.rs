@@ -31,6 +31,8 @@ pub struct PageInfo {
     pub width: u16,
     pub height: u16,
     pub dpi: u16,
+    /// Display gamma (e.g. 2.2). Defaults to 2.2 when the INFO byte is 0.
+    pub gamma: f32,
     pub rotation: Rotation,
 }
 
@@ -592,6 +594,13 @@ fn parse_info(data: &[u8]) -> Result<PageInfo, Error> {
         300
     };
 
+    let gamma_byte = if data.len() >= 9 { data[8] } else { 0 };
+    let gamma = if gamma_byte == 0 {
+        2.2_f32
+    } else {
+        gamma_byte as f32 / 10.0
+    };
+
     let flags = if data.len() >= 10 { data[9] } else { 0 };
     let rotation = match flags & 0x07 {
         5 => Rotation::Cw90,
@@ -604,6 +613,7 @@ fn parse_info(data: &[u8]) -> Result<PageInfo, Error> {
         width,
         height,
         dpi,
+        gamma,
         rotation,
     })
 }

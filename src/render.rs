@@ -3,6 +3,43 @@ use crate::document::{Page, Palette, Rotation};
 use crate::error::Error;
 use crate::pixmap::Pixmap;
 
+// ── Gamma correction ────────────────────────────────────────────────────────
+
+/// Build a 256-entry gamma correction LUT.
+///
+/// `lut[i] = round(255 * (i/255)^(1/gamma))`
+///
+/// Returns identity when `gamma` is ≤ 0, non-finite, or ≈ 1.0.
+fn build_gamma_lut(gamma: f32) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    if gamma <= 0.0 || !gamma.is_finite() || (gamma - 1.0).abs() < 1e-4 {
+        for (i, v) in lut.iter_mut().enumerate() {
+            *v = i as u8;
+        }
+        return lut;
+    }
+    let inv_gamma = 1.0 / gamma;
+    for (i, v) in lut.iter_mut().enumerate() {
+        let linear = i as f32 / 255.0;
+        let corrected = linear.powf(inv_gamma);
+        *v = (corrected * 255.0 + 0.5) as u8;
+    }
+    lut
+}
+
+/// Apply gamma correction to every pixel in the pixmap (in-place).
+fn apply_gamma(pm: &mut Pixmap, lut: &[u8; 256]) {
+    let len = pm.data.len();
+    let mut i = 0;
+    while i + 3 < len {
+        pm.data[i] = lut[pm.data[i] as usize];
+        pm.data[i + 1] = lut[pm.data[i + 1] as usize];
+        pm.data[i + 2] = lut[pm.data[i + 2] as usize];
+        // skip alpha at i+3
+        i += 4;
+    }
+}
+
 /// Render a DjVu page to an RGBA pixmap at native resolution.
 pub fn render(page: &Page) -> Result<Pixmap, Error> {
     render_to_size(page, page.info.width as u32, page.info.height as u32)
@@ -30,7 +67,9 @@ pub fn render_to_size_bold(
 }
 
 fn render_to_size_inner(page: &Page, w: u32, h: u32, dilate_passes: u32) -> Result<Pixmap, Error> {
-    let output = composite_page(page, w, h, dilate_passes)?;
+    let mut output = composite_page(page, w, h, dilate_passes)?;
+    let lut = build_gamma_lut(page.info.gamma);
+    apply_gamma(&mut output, &lut);
     Ok(apply_rotation(output, page.info.rotation))
 }
 
@@ -48,7 +87,9 @@ pub fn render_to_size_coarse(page: &Page, w: u32, h: u32) -> Result<Option<Pixma
         None => return Ok(None),
     };
 
-    let output = composite_bg_only(w, h, &bg, page_w, page_h);
+    let mut output = composite_bg_only(w, h, &bg, page_w, page_h);
+    let lut = build_gamma_lut(page.info.gamma);
+    apply_gamma(&mut output, &lut);
     Ok(Some(apply_rotation(output, page.info.rotation)))
 }
 
@@ -64,19 +105,22 @@ pub fn render_to_size_progressive(page: &Page, w: u32, h: u32) -> Result<Vec<Pix
     let rotation = page.info.rotation;
     let page_w = page.info.width as u32;
     let page_h = page.info.height as u32;
+    let gamma_lut = build_gamma_lut(page.info.gamma);
 
     // Only worth progressive rendering for multi-chunk backgrounds.
     let bg_chunks = page.bg44_chunk_count();
     if bg_chunks <= 1 {
         // Single chunk or no BG44 — just render normally.
-        let output = composite_page(page, w, h, 0)?;
+        let mut output = composite_page(page, w, h, 0)?;
+        apply_gamma(&mut output, &gamma_lut);
         return Ok(vec![apply_rotation(output, rotation)]);
     }
 
     let has_palette = page.has_palette();
     if has_palette {
         // Palette-based pages don't use IW44 — no progressive benefit.
-        let output = composite_page(page, w, h, 0)?;
+        let mut output = composite_page(page, w, h, 0)?;
+        apply_gamma(&mut output, &gamma_lut);
         return Ok(vec![apply_rotation(output, rotation)]);
     }
 
@@ -89,10 +133,11 @@ pub fn render_to_size_progressive(page: &Page, w: u32, h: u32) -> Result<Vec<Pix
         Some(frames) => frames,
         None => {
             // No background — single render.
-            let output = match (&mask, &fg) {
+            let mut output = match (&mask, &fg) {
                 (Some(mask), None) => composite_bilevel(w, h, mask, page_w, page_h),
                 _ => Pixmap::white(w, h),
             };
+            apply_gamma(&mut output, &gamma_lut);
             return Ok(vec![apply_rotation(output, rotation)]);
         }
     };
@@ -100,11 +145,12 @@ pub fn render_to_size_progressive(page: &Page, w: u32, h: u32) -> Result<Vec<Pix
     let mut results = Vec::with_capacity(bg_frames.len());
 
     for bg in &bg_frames {
-        let output = match (&mask, &fg) {
+        let mut output = match (&mask, &fg) {
             (None, _) => composite_bg_only(w, h, bg, page_w, page_h),
             (Some(mask), Some(fg)) => composite_3layer(w, h, mask, bg, fg, page_w, page_h),
             (Some(mask), None) => composite_mask_bg(w, h, mask, bg, page_w, page_h),
         };
+        apply_gamma(&mut output, &gamma_lut);
         results.push(apply_rotation(output, rotation));
     }
 
@@ -3079,5 +3125,87 @@ mod tests {
         let bg = page.decode_background().unwrap().unwrap();
         let out_path = out_dir.join("carte_bg_actual.ppm");
         std::fs::write(&out_path, bg.to_ppm()).unwrap();
+    }
+
+    // -- Gamma correction tests -----------------------------------------------
+
+    #[test]
+    fn gamma_lut_identity_at_1_0() {
+        let lut = build_gamma_lut(1.0);
+        for (i, &v) in lut.iter().enumerate() {
+            assert_eq!(v, i as u8, "identity LUT mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn gamma_lut_zero_is_identity() {
+        let lut = build_gamma_lut(0.0);
+        for (i, &v) in lut.iter().enumerate() {
+            assert_eq!(v, i as u8);
+        }
+    }
+
+    #[test]
+    fn gamma_lut_2_2_changes_midtones() {
+        let lut = build_gamma_lut(2.2);
+        // Midtone value 128 should be noticeably different under gamma 2.2
+        assert_ne!(lut[128], 128, "gamma 2.2 should change midtone 128");
+        // Endpoints must be fixed
+        assert_eq!(lut[0], 0);
+        assert_eq!(lut[255], 255);
+    }
+
+    #[test]
+    fn apply_gamma_modifies_pixmap() {
+        let mut pm = Pixmap::white(2, 2);
+        // Set one pixel to a midtone gray
+        pm.set_rgb(0, 0, 128, 128, 128);
+        let lut = build_gamma_lut(2.2);
+        apply_gamma(&mut pm, &lut);
+        let (r, g, b) = pm.get_rgb(0, 0);
+        // After gamma 2.2 correction, midtone should shift
+        assert_ne!(r, 128, "gamma should modify midtone pixel");
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        // White pixel should stay white
+        let (wr, wg, wb) = pm.get_rgb(1, 1);
+        assert_eq!((wr, wg, wb), (255, 255, 255));
+    }
+
+    #[test]
+    fn render_applies_gamma_correction() {
+        // Use boy.djvu which has an IW44 background with midtone pixels
+        // that are affected by gamma correction (unlike bilevel pages
+        // where all pixels are 0 or 255).
+        let data = std::fs::read(assets_path().join("boy.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let w = page.info.width as u32;
+        let h = page.info.height as u32;
+
+        // Composite without gamma (what we'd get without correction)
+        let no_gamma = composite_page(&page, w, h, 0).unwrap();
+
+        // Full render (includes gamma)
+        let with_gamma = render(&page).unwrap();
+
+        // They should differ if page gamma != 1.0
+        if (page.info.gamma - 1.0).abs() >= 1e-4 {
+            let mut diff_count = 0usize;
+            for y in 0..h {
+                for x in 0..w {
+                    let (r1, g1, b1) = no_gamma.get_rgb(x, y);
+                    let (r2, g2, b2) = with_gamma.get_rgb(x, y);
+                    if r1 != r2 || g1 != g2 || b1 != b2 {
+                        diff_count += 1;
+                    }
+                }
+            }
+            assert!(
+                diff_count > 0,
+                "gamma correction should change at least some pixels (page gamma={})",
+                page.info.gamma
+            );
+        }
     }
 }
