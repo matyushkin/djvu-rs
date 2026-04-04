@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-04
+
+### Added
+
+- **Structural PDF export** — `djvu render --format pdf` now produces searchable PDFs with selectable
+  text (from TXTz/TXTa), bookmarks (NAVM → PDF outline), and hyperlinks (ANTz → PDF link annotations)
+- **Mask / layer extraction API** — `DjVuPage::extract_mask()`, `extract_foreground()`,
+  `extract_background()`; CLI: `djvu render --layer mask|fg|bg`
+- **`RenderOptions::fit_to_width` / `fit_to_height` / `fit_to_box`** — aspect-preserving smart scaling
+  helpers that respect page rotation
+- **User-controllable rotation** — `RenderOptions::rotation` overrides the INFO chunk value
+
+### Fixed
+
+- **Gamma correction** — gamma LUT now applied in all render paths (`render_pixmap`, `render_coarse`,
+  `render_progressive`, rotation branches)
+- **Page rotation** — `render_pixmap` and `render_coarse` now apply the rotation from the INFO chunk;
+  output dimensions swap correctly for 90°/270° pages
+- **FGbz multi-color foreground** — per-glyph blit index is now used when compositing; documents with
+  multi-color foreground (stamps, colored annotations) render correctly
+
+### Performance
+
+- **Area-averaging downscale** — render at scale < 1.0 now uses box-filter averaging instead of
+  bilinear; better anti-aliasing and ~2× faster for thumbnail/overview sizes
+- **Composite optimisation** — eliminated redundant mask sampling in 3-layer composite loop
+
+### Refactored
+
+- **Removed `ouroboros` dependency** — `Document` is now a fully owned struct; no self-referential
+  proc-macro required; `lib.rs` is now truly `unsafe`-free
+
 ## [0.1.0] — 2026-04-04
 
 ### Added
@@ -29,5 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CBZ export** — `djvu render --format cbz` produces a comic-book ZIP with PNG pages
 - **`no_std` support** — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
 
-[Unreleased]: https://github.com/matyushkin/djvu-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/matyushkin/djvu-rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/matyushkin/djvu-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/matyushkin/djvu-rs/releases/tag/v0.1.0
