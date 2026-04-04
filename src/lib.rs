@@ -150,6 +150,15 @@ pub mod metadata;
 #[cfg(feature = "std")]
 pub mod pdf;
 
+/// DjVu to TIFF exporter — phase 4 format extension.
+///
+/// Converts DjVu documents to multi-page TIFF files in color (RGB8) or
+/// bilevel (Gray8) modes.
+///
+/// Key function: [`tiff_export::djvu_to_tiff`].
+#[cfg(feature = "tiff")]
+pub mod tiff_export;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 

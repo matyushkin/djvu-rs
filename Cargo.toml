@@ -35,11 +35,13 @@ png = { version = "0.17", optional = true }
 zip = { version = "2", optional = true }
 miniz_oxide = { version = "0.8", optional = true }
 zune-jpeg = { version = "0.5", optional = true }
+tiff = { version = "0.9", optional = true }
 
 [features]
 default = ["std"]
 std = ["dep:clap", "dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg"]
 jpeg = ["dep:zune-jpeg"]
+tiff = ["dep:tiff", "std"]
 
 [dev-dependencies]
 criterion = "0.5"
