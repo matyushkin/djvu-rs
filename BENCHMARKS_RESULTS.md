@@ -1,7 +1,8 @@
 # Benchmark Results
 
-Platform: macOS 15 (Darwin 25.3), Apple Silicon (M-series)
-Rust: stable (edition 2024)
+Platform: Apple M1 Max, 10 cores, 64 GB RAM
+OS: macOS 26.3.1 (Darwin 25.3)
+Rust: 1.92.0 stable (edition 2024)
 Profile: release (opt-level 3, lto = thin)
 Date: 2026-04-04
 
