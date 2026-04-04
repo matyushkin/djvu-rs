@@ -4,7 +4,7 @@
 
 use djvu_rs::IffError;
 use djvu_rs::djvu_document::{DjVuDocument, DocError};
-use djvu_rs::djvu_render::{RenderOptions, render_coarse, render_pixmap, render_progressive};
+use djvu_rs::djvu_render::{RenderOptions, render_coarse, render_gray8, render_pixmap, render_progressive};
 use djvu_rs::iff::parse_form;
 
 // ── DjVuDocument — parse ──────────────────────────────────────────────────────
@@ -342,6 +342,84 @@ fn extract_background_no_bg44_returns_none() {
 
     let bg = page.extract_background().expect("must not error");
     assert!(bg.is_none(), "bilevel page should have no background");
+}
+
+// ── render_gray8 ────────────────────────────────────────────────────────────
+
+/// Grayscale render of a bilevel page must return only 0 and 255 values.
+#[test]
+fn render_gray8_bilevel_only_black_and_white() {
+    let data = std::fs::read("tests/fixtures/boy_jb2.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        ..RenderOptions::default()
+    };
+    let gray = render_gray8(&page, &opts).expect("render_gray8 must succeed");
+
+    assert_eq!(
+        gray.data.len(),
+        gray.width as usize * gray.height as usize,
+        "grayscale buffer must have exactly width*height bytes"
+    );
+    assert_eq!(gray.width, opts.width);
+    assert_eq!(gray.height, opts.height);
+
+    // Bilevel page: all pixels must be exactly 0 (black) or 255 (white).
+    let unexpected: Vec<u8> = gray
+        .data
+        .iter()
+        .copied()
+        .filter(|&v| v != 0 && v != 255)
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "bilevel grayscale must contain only 0/255, found: {:?}",
+        &unexpected[..unexpected.len().min(10)]
+    );
+}
+
+/// Grayscale render of a colour page must have correct buffer size.
+#[test]
+fn render_gray8_color_page_correct_size() {
+    let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        ..RenderOptions::default()
+    };
+    let gray = render_gray8(&page, &opts).expect("render_gray8 must succeed for colour page");
+
+    assert_eq!(
+        gray.data.len(),
+        gray.width as usize * gray.height as usize,
+        "grayscale buffer must have exactly width*height bytes"
+    );
+}
+
+/// `Pixmap::to_gray8` must produce correct luminance values.
+#[test]
+fn pixmap_to_gray8_luminance_values() {
+    use djvu_rs::Pixmap;
+
+    let mut pm = Pixmap::white(3, 1);
+    pm.set_rgb(0, 0, 0, 0, 0);     // black → 0
+    pm.set_rgb(1, 0, 255, 255, 255); // white → 255
+    pm.set_rgb(2, 0, 76, 150, 29);  // approx equal-luminance green (~0.299*76+0.587*150+0.114*29 ≈ 113)
+
+    let gray = pm.to_gray8();
+    assert_eq!(gray.data.len(), 3);
+    assert_eq!(gray.get(0, 0), 0, "black must map to 0");
+    assert_eq!(gray.get(1, 0), 255, "white must map to 255");
+    // 0.299*76 + 0.587*150 + 0.114*29 = 22.7 + 88.1 + 3.3 = 114.1 → 114
+    let lum = gray.get(2, 0);
+    assert!((110..=118).contains(&lum), "luminance should be ~114, got {lum}");
 }
 
 // ── IFF parse_form ──────────────────────────────────────────────────────────
