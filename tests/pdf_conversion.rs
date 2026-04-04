@@ -27,15 +27,9 @@ fn assert_valid_pdf_structure(pdf: &[u8]) {
         "missing %%EOF trailer"
     );
     // Check for xref table
-    assert!(
-        pdf.windows(4).any(|w| w == b"xref"),
-        "missing xref table"
-    );
+    assert!(pdf.windows(4).any(|w| w == b"xref"), "missing xref table");
     // Check for trailer
-    assert!(
-        pdf.windows(7).any(|w| w == b"trailer"),
-        "missing trailer"
-    );
+    assert!(pdf.windows(7).any(|w| w == b"trailer"), "missing trailer");
 }
 
 /// Helper: check that the PDF contains a specific byte pattern.
@@ -74,10 +68,7 @@ fn test_multi_page_bundled() {
     let pdf = djvu_to_pdf(&doc).unwrap();
     assert_valid_pdf_structure(&pdf);
     // DjVu3Spec has multiple pages
-    assert!(
-        pdf_contains(&pdf, b"/Count "),
-        "should have page count"
-    );
+    assert!(pdf_contains(&pdf, b"/Count "), "should have page count");
     // Pages that fail to render should still produce a page object
     let count_str = String::from_utf8_lossy(&pdf);
     assert!(

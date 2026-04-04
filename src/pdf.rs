@@ -133,8 +133,7 @@ impl PdfWriter {
 /// Helper: make a PDF stream object `<< ... /Length N >> stream\n...\nendstream`.
 fn make_stream(dict_extra: &str, data: &[u8]) -> Vec<u8> {
     let len = data.len();
-    let mut body =
-        format!("<< /Length {len}{dict_extra} >>\nstream\n").into_bytes();
+    let mut body = format!("<< /Length {len}{dict_extra} >>\nstream\n").into_bytes();
     body.extend_from_slice(data);
     body.extend_from_slice(b"\nendstream");
     body
@@ -208,9 +207,7 @@ fn build_page_objects(
     let mut content = String::new();
 
     // Draw background image filling the page
-    content.push_str(&format!(
-        "q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"
-    ));
+    content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
 
     // Draw mask overlay (black foreground on transparent)
     if let Some(mask_id) = mask_img_id {
@@ -268,17 +265,12 @@ fn build_page_objects(
 }
 
 /// Build a 1-bit image mask from the JB2 foreground mask.
-fn build_mask_image(
-    w: &mut PdfWriter,
-    page: &DjVuPage,
-    _pw: u32,
-    _ph: u32,
-) -> Option<usize> {
+fn build_mask_image(w: &mut PdfWriter, page: &DjVuPage, _pw: u32, _ph: u32) -> Option<usize> {
     // Decode JB2 mask
     let sjbz = page.find_chunk(b"Sjbz")?;
-    let dict = page.find_chunk(b"Djbz").and_then(|djbz| {
-        crate::jb2_new::decode_dict(djbz, None).ok()
-    });
+    let dict = page
+        .find_chunk(b"Djbz")
+        .and_then(|djbz| crate::jb2_new::decode_dict(djbz, None).ok());
     let bitmap = crate::jb2_new::decode(sjbz, dict.as_ref()).ok()?;
 
     let bw = bitmap.width;
@@ -362,7 +354,9 @@ fn emit_text_zones(ops: &mut String, zone: &TextZone, dpi: f32, pt_h: f32) {
                 100.0
             };
 
-            ops.push_str(&format!("{font_size:.2} 0 0 {font_size:.2} {x:.4} {y:.4} Tm\n"));
+            ops.push_str(&format!(
+                "{font_size:.2} 0 0 {font_size:.2} {x:.4} {y:.4} Tm\n"
+            ));
             if (h_scale - 100.0).abs() > 1.0 {
                 ops.push_str(&format!("{h_scale:.2} Tz\n"));
             }
@@ -398,12 +392,7 @@ fn pdf_escape_string(s: &str) -> String {
 }
 
 /// Build PDF link annotation objects for hyperlinks from the ANTz layer.
-fn build_link_annotations(
-    w: &mut PdfWriter,
-    page: &DjVuPage,
-    dpi: f32,
-    pt_h: f32,
-) -> Vec<usize> {
+fn build_link_annotations(w: &mut PdfWriter, page: &DjVuPage, dpi: f32, pt_h: f32) -> Vec<usize> {
     let hyperlinks = match page.hyperlinks() {
         Ok(links) => links,
         Err(_) => return Vec::new(),
@@ -494,10 +483,8 @@ fn build_outline(
 
     w.add_obj(
         outline_id,
-        format!(
-            "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {count} >>"
-        )
-        .into_bytes(),
+        format!("<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {count} >>")
+            .into_bytes(),
     );
 
     Some(outline_id)

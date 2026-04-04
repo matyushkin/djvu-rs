@@ -238,7 +238,13 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
 /// Check whether any pixel in the mask box is set (foreground).
 /// Used for area-averaging downscale to determine if a box has foreground.
 #[inline]
-fn mask_box_any(mask: &crate::bitmap::Bitmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> bool {
+fn mask_box_any(
+    mask: &crate::bitmap::Bitmap,
+    fx: u32,
+    fy: u32,
+    fx_step: u32,
+    fy_step: u32,
+) -> bool {
     let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
     let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
     let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width.saturating_sub(1));
@@ -558,29 +564,29 @@ fn lookup_palette_color(
     if let Some(bm) = blit_map
         && let Some(m) = mask
     {
-            let mi = py as usize * m.width as usize + px as usize;
-            if mi < bm.len() {
-                let blit_idx = bm[mi];
-                if blit_idx >= 0 {
-                    if !pal.indices.is_empty() {
-                        // Two-level indirection: blit_idx → color_idx → color
-                        let bi = blit_idx as usize;
-                        if bi < pal.indices.len() {
-                            let ci = pal.indices[bi] as usize;
-                            if ci < pal.colors.len() {
-                                return pal.colors[ci];
-                            }
-                        }
-                    } else {
-                        // No index table: use blit_idx directly as color index
-                        let ci = blit_idx as usize;
+        let mi = py as usize * m.width as usize + px as usize;
+        if mi < bm.len() {
+            let blit_idx = bm[mi];
+            if blit_idx >= 0 {
+                if !pal.indices.is_empty() {
+                    // Two-level indirection: blit_idx → color_idx → color
+                    let bi = blit_idx as usize;
+                    if bi < pal.indices.len() {
+                        let ci = pal.indices[bi] as usize;
                         if ci < pal.colors.len() {
                             return pal.colors[ci];
                         }
                     }
+                } else {
+                    // No index table: use blit_idx directly as color index
+                    let ci = blit_idx as usize;
+                    if ci < pal.colors.len() {
+                        return pal.colors[ci];
+                    }
                 }
             }
         }
+    }
     // Fallback: first palette color or black
     pal.colors.first().copied().unwrap_or_default()
 }
@@ -667,13 +673,7 @@ fn composite_loop_area_avg(
 
             let (r, g, b) = if is_fg {
                 if let Some(pal) = ctx.fg_palette {
-                    let (cx, cy) = mask_box_center_fg(
-                        ctx.mask.unwrap(),
-                        fx,
-                        fy,
-                        fx_step,
-                        fy_step,
-                    );
+                    let (cx, cy) = mask_box_center_fg(ctx.mask.unwrap(), fx, fy, fx_step, fy_step);
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, cx, cy);
                     (color.r, color.g, color.b)
                 } else if let Some(fg) = ctx.fg44 {
@@ -1428,8 +1428,14 @@ mod tests {
         };
         let pm = render_pixmap(page, &opts).expect("render should succeed");
         // 90° rotation swaps width and height
-        assert_eq!(pm.width, orig_h as u32, "rotated width should be original height");
-        assert_eq!(pm.height, orig_w as u32, "rotated height should be original width");
+        assert_eq!(
+            pm.width, orig_h as u32,
+            "rotated width should be original height"
+        );
+        assert_eq!(
+            pm.height, orig_w as u32,
+            "rotated height should be original width"
+        );
     }
 
     #[test]
@@ -1460,8 +1466,14 @@ mod tests {
             ..Default::default()
         };
         let pm = render_pixmap(page, &opts).expect("render should succeed");
-        assert_eq!(pm.width, orig_h as u32, "rotated width should be original height");
-        assert_eq!(pm.height, orig_w as u32, "rotated height should be original width");
+        assert_eq!(
+            pm.width, orig_h as u32,
+            "rotated width should be original height"
+        );
+        assert_eq!(
+            pm.height, orig_w as u32,
+            "rotated height should be original width"
+        );
     }
 
     // -- FGbz multi-color palette tests ---------------------------------------
@@ -1506,8 +1518,8 @@ mod tests {
     fn lookup_palette_color_uses_blit_map() {
         let pal = FgbzPalette {
             colors: vec![
-                PaletteColor { r: 255, g: 0, b: 0 },   // index 0: red
-                PaletteColor { r: 0, g: 0, b: 255 },   // index 1: blue
+                PaletteColor { r: 255, g: 0, b: 0 }, // index 0: red
+                PaletteColor { r: 0, g: 0, b: 255 }, // index 1: blue
             ],
             indices: vec![1, 0], // blit 0 → color 1 (blue), blit 1 → color 0 (red)
         };
@@ -1515,10 +1527,18 @@ mod tests {
         let blit_map = vec![0i32, 1i32]; // pixel (0,0) → blit 0, pixel (1,0) → blit 1
 
         let c0 = lookup_palette_color(&pal, Some(&blit_map), Some(&bm), 0, 0);
-        assert_eq!((c0.r, c0.g, c0.b), (0, 0, 255), "blit 0 → indices[0]=1 → blue");
+        assert_eq!(
+            (c0.r, c0.g, c0.b),
+            (0, 0, 255),
+            "blit 0 → indices[0]=1 → blue"
+        );
 
         let c1 = lookup_palette_color(&pal, Some(&blit_map), Some(&bm), 1, 0);
-        assert_eq!((c1.r, c1.g, c1.b), (255, 0, 0), "blit 1 → indices[1]=0 → red");
+        assert_eq!(
+            (c1.r, c1.g, c1.b),
+            (255, 0, 0),
+            "blit 1 → indices[1]=0 → red"
+        );
     }
 
     #[test]
@@ -1528,6 +1548,10 @@ mod tests {
             indices: vec![],
         };
         let c = lookup_palette_color(&pal, None, None, 0, 0);
-        assert_eq!((c.r, c.g, c.b), (0, 128, 0), "should fall back to first color");
+        assert_eq!(
+            (c.r, c.g, c.b),
+            (0, 128, 0),
+            "should fall back to first color"
+        );
     }
 }

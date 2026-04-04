@@ -51,8 +51,8 @@ fn bzz_decode_antz_chunk() {
             && let Ok(inner) = parse_form(chunk.data)
             && let Some(antz) = inner.chunks.iter().find(|c| &c.id == b"ANTz")
         {
-            let decoded = bzz_new::bzz_decode(antz.data)
-                .expect("ANTz chunk must decompress without error");
+            let decoded =
+                bzz_new::bzz_decode(antz.data).expect("ANTz chunk must decompress without error");
             assert!(!decoded.is_empty());
             found = true;
             break;

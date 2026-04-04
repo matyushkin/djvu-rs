@@ -150,10 +150,7 @@ fn render_png(
     Ok(())
 }
 
-fn render_pdf_structured(
-    path: &Path,
-    output: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn render_pdf_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {

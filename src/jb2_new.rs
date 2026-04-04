@@ -1001,11 +1001,29 @@ fn decode_image_indexed(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
                 let (x, y) = decode_symbol_coords(
-                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
-                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
-                    &mut last_right, &mut baseline, bm.width, bm.height,
+                    &mut zp,
+                    &mut offset_type_ctx,
+                    &mut hoff_ctx,
+                    &mut voff_ctx,
+                    &mut shoff_ctx,
+                    &mut svoff_ctx,
+                    &mut first_left,
+                    &mut first_bottom,
+                    &mut last_right,
+                    &mut baseline,
+                    bm.width,
+                    bm.height,
                 );
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, x, y, blit_count);
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &bm,
+                    x,
+                    y,
+                    blit_count,
+                );
                 blit_count += 1;
                 dict.push(bm.crop_to_content());
             }
@@ -1020,63 +1038,173 @@ fn decode_image_indexed(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
                 let (x, y) = decode_symbol_coords(
-                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
-                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
-                    &mut last_right, &mut baseline, bm.width, bm.height,
+                    &mut zp,
+                    &mut offset_type_ctx,
+                    &mut hoff_ctx,
+                    &mut voff_ctx,
+                    &mut shoff_ctx,
+                    &mut svoff_ctx,
+                    &mut first_left,
+                    &mut first_bottom,
+                    &mut last_right,
+                    &mut baseline,
+                    bm.width,
+                    bm.height,
                 );
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, x, y, blit_count);
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &bm,
+                    x,
+                    y,
+                    blit_count,
+                );
                 blit_count += 1;
             }
             4 => {
-                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
-                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
-                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                if dict.is_empty() {
+                    return Err(Jb2Error::EmptyDictReference);
+                }
+                let index =
+                    decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() {
+                    return Err(Jb2Error::InvalidSymbolIndex);
+                }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
-                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
-                let (x, y) = decode_symbol_coords(
-                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
-                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
-                    &mut last_right, &mut baseline, cbm.width, cbm.height,
+                let cbm = decode_bitmap_ref(
+                    &mut zp,
+                    &mut refinement_bitmap_ctx,
+                    dict[index].width + wdiff,
+                    dict[index].height + hdiff,
+                    &dict[index],
                 );
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &cbm, x, y, blit_count);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp,
+                    &mut offset_type_ctx,
+                    &mut hoff_ctx,
+                    &mut voff_ctx,
+                    &mut shoff_ctx,
+                    &mut svoff_ctx,
+                    &mut first_left,
+                    &mut first_bottom,
+                    &mut last_right,
+                    &mut baseline,
+                    cbm.width,
+                    cbm.height,
+                );
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &cbm,
+                    x,
+                    y,
+                    blit_count,
+                );
                 blit_count += 1;
                 dict.push(cbm.crop_to_content());
             }
             5 => {
-                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
-                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
-                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                if dict.is_empty() {
+                    return Err(Jb2Error::EmptyDictReference);
+                }
+                let index =
+                    decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() {
+                    return Err(Jb2Error::InvalidSymbolIndex);
+                }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
-                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
+                let cbm = decode_bitmap_ref(
+                    &mut zp,
+                    &mut refinement_bitmap_ctx,
+                    dict[index].width + wdiff,
+                    dict[index].height + hdiff,
+                    &dict[index],
+                );
                 dict.push(cbm.crop_to_content());
             }
             6 => {
-                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
-                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
-                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                if dict.is_empty() {
+                    return Err(Jb2Error::EmptyDictReference);
+                }
+                let index =
+                    decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() {
+                    return Err(Jb2Error::InvalidSymbolIndex);
+                }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
-                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
-                let (x, y) = decode_symbol_coords(
-                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
-                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
-                    &mut last_right, &mut baseline, cbm.width, cbm.height,
+                let cbm = decode_bitmap_ref(
+                    &mut zp,
+                    &mut refinement_bitmap_ctx,
+                    dict[index].width + wdiff,
+                    dict[index].height + hdiff,
+                    &dict[index],
                 );
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &cbm, x, y, blit_count);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp,
+                    &mut offset_type_ctx,
+                    &mut hoff_ctx,
+                    &mut voff_ctx,
+                    &mut shoff_ctx,
+                    &mut svoff_ctx,
+                    &mut first_left,
+                    &mut first_bottom,
+                    &mut last_right,
+                    &mut baseline,
+                    cbm.width,
+                    cbm.height,
+                );
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &cbm,
+                    x,
+                    y,
+                    blit_count,
+                );
                 blit_count += 1;
             }
             7 => {
-                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
-                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
-                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                if dict.is_empty() {
+                    return Err(Jb2Error::EmptyDictReference);
+                }
+                let index =
+                    decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() {
+                    return Err(Jb2Error::InvalidSymbolIndex);
+                }
                 let (x, y) = decode_symbol_coords(
-                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
-                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
-                    &mut last_right, &mut baseline, dict[index].width, dict[index].height,
+                    &mut zp,
+                    &mut offset_type_ctx,
+                    &mut hoff_ctx,
+                    &mut voff_ctx,
+                    &mut shoff_ctx,
+                    &mut svoff_ctx,
+                    &mut first_left,
+                    &mut first_bottom,
+                    &mut last_right,
+                    &mut baseline,
+                    dict[index].width,
+                    dict[index].height,
                 );
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &dict[index], x, y, blit_count);
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &dict[index],
+                    x,
+                    y,
+                    blit_count,
+                );
                 blit_count += 1;
             }
             8 => {
@@ -1085,7 +1213,16 @@ fn decode_image_indexed(
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
-                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, left - 1, top - h, blit_count);
+                blit_indexed(
+                    &mut page,
+                    &mut blit_map,
+                    image_width,
+                    image_height,
+                    &bm,
+                    left - 1,
+                    top - h,
+                    blit_count,
+                );
                 blit_count += 1;
             }
             9 => {}
