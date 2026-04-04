@@ -107,6 +107,7 @@ pub enum UserRotation {
 ///     bold: 0,
 ///     aa: true,
 ///     rotation: UserRotation::None,
+///     permissive: false,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +124,18 @@ pub struct RenderOptions {
     pub aa: bool,
     /// User-requested rotation, combined with the INFO chunk rotation.
     pub rotation: UserRotation,
+    /// When `true`, tolerate corrupted chunks instead of returning an error.
+    ///
+    /// - BG44: decodes chunks until the first decode error; uses whatever
+    ///   was decoded so far (may be empty / blurry).
+    /// - JB2 mask: if decoding fails, renders the background without a mask
+    ///   rather than returning `Err`.
+    ///
+    /// Returns `Ok(pixmap)` even when chunks are skipped. Useful for document
+    /// viewers where a partial render is better than a blank page.
+    ///
+    /// Default: `false` (strict — any decode error propagates as `Err`).
+    pub permissive: bool,
 }
 
 impl Default for RenderOptions {
@@ -134,6 +147,7 @@ impl Default for RenderOptions {
             bold: 0,
             aa: false,
             rotation: UserRotation::None,
+            permissive: false,
         }
     }
 }
@@ -608,6 +622,29 @@ fn decode_background_chunks(
     Ok(Some(pm))
 }
 
+/// Permissive variant: decode BG44 chunks until the first error, then stop.
+///
+/// Returns whatever was decoded so far (may be blurry / incomplete).
+/// Returns `None` only when there are no BG44 chunks at all or even the
+/// first chunk fails to produce a valid image.
+fn decode_background_chunks_permissive(
+    page: &DjVuPage,
+    max_chunks: usize,
+) -> Option<Pixmap> {
+    let bg44_chunks = page.bg44_chunks();
+    if bg44_chunks.is_empty() {
+        return None;
+    }
+
+    let mut img = Iw44Image::new();
+    for chunk_data in bg44_chunks.iter().take(max_chunks) {
+        if img.decode_chunk(chunk_data).is_err() {
+            break; // stop on first error, use what we have
+        }
+    }
+    img.to_rgb().ok()
+}
+
 /// Decode the JB2 mask (Sjbz chunk) without blit tracking.
 fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderError> {
     let sjbz = match page.find_chunk(b"Sjbz") {
@@ -960,17 +997,50 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
 
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    let bg = decode_background_chunks(page, usize::MAX)?;
-    let fg_palette = decode_fg_palette_full(page)?;
+    // Decode all layers, respecting permissive mode.
+    let bg;
+    let fg_palette;
+    let mask;
+    let blit_map;
+    let fg44;
 
-    let (mask, blit_map) = if fg_palette.is_some() {
-        match decode_mask_indexed(page)? {
-            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
-            None => (None, None),
+    if opts.permissive {
+        bg = decode_background_chunks_permissive(page, usize::MAX);
+        fg_palette = decode_fg_palette_full(page).ok().flatten();
+        let indexed = if fg_palette.is_some() {
+            decode_mask_indexed(page).ok().flatten()
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = decode_mask(page).ok().flatten();
+            blit_map = None;
         }
+        fg44 = decode_fg44(page).ok().flatten();
     } else {
-        (decode_mask(page)?, None)
-    };
+        bg = decode_background_chunks(page, usize::MAX)?;
+        fg_palette = decode_fg_palette_full(page)?;
+        let indexed_result = if fg_palette.is_some() {
+            decode_mask_indexed(page)?
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed_result {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = if fg_palette.is_none() {
+                decode_mask(page)?
+            } else {
+                None
+            };
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page)?;
+    }
 
     let mask = if opts.bold > 0 {
         mask.map(|m| {
@@ -983,7 +1053,6 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     } else {
         mask
     };
-    let fg44 = decode_fg44(page)?;
 
     let mut pm = Pixmap::white(w, h);
 
@@ -1213,6 +1282,7 @@ mod tests {
             bold: 1,
             aa: true,
             rotation: UserRotation::Cw90,
+            permissive: false,
         };
         assert_eq!(opts.width, 400);
         assert_eq!(opts.height, 300);

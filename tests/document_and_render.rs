@@ -422,6 +422,79 @@ fn pixmap_to_gray8_luminance_values() {
     assert!((110..=118).contains(&lum), "luminance should be ~114, got {lum}");
 }
 
+// ── permissive render mode ───────────────────────────────────────────────────
+
+/// Build a DjVu byte buffer with the BG44 chunk data deliberately truncated
+/// to half its original size. Used to test permissive render mode.
+///
+/// DjVu file layout: `AT&T` (4) + `FORM` (4) + form_len (4 BE) + `DJVU` (4) + chunks…
+/// We patch both the BG44 chunk length and the outer FORM chunk length.
+fn make_truncated_bg44_djvu() -> Vec<u8> {
+    let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
+    // Find BG44 chunk id
+    let bg44_pos = data
+        .windows(4)
+        .position(|w| w == b"BG44")
+        .expect("boy.djvu must have a BG44 chunk");
+    let chunk_len = u32::from_be_bytes(data[bg44_pos + 4..bg44_pos + 8].try_into().unwrap());
+    // Truncate aggressively (keep only 4 bytes) so the IW44 decoder definitely errors.
+    let truncated_len = 4u32;
+    let reduction = chunk_len - truncated_len;
+
+    // Patch the outer FORM length (at offset 8, after AT&T=4 + FORM=4)
+    let form_len = u32::from_be_bytes(data[8..12].try_into().unwrap());
+    let new_form_len = form_len - reduction;
+
+    let header_end = bg44_pos + 8; // after BG44 id + length
+    let mut out = data[..8].to_vec(); // AT&T + FORM
+    out.extend_from_slice(&new_form_len.to_be_bytes()); // patched FORM length
+    out.extend_from_slice(&data[12..bg44_pos + 4]); // DJVU + chunks up to BG44 id
+    out.extend_from_slice(&truncated_len.to_be_bytes()); // patched BG44 length
+    out.extend_from_slice(&data[header_end..header_end + truncated_len as usize]);
+    out
+}
+
+/// Strict mode must return an error on a truncated BG44 chunk.
+#[test]
+fn permissive_strict_fails_on_truncated_bg44() {
+    let corrupted = make_truncated_bg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).unwrap();
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: false,
+        ..RenderOptions::default()
+    };
+    let result = render_pixmap(&page, &opts);
+    assert!(
+        result.is_err(),
+        "strict mode must return Err on corrupted BG44"
+    );
+}
+
+/// Permissive mode must return Ok with a non-empty pixmap on the same file.
+#[test]
+fn permissive_render_returns_ok_on_truncated_bg44() {
+    let corrupted = make_truncated_bg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).unwrap();
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: true,
+        ..RenderOptions::default()
+    };
+    let pm = render_pixmap(&page, &opts)
+        .expect("permissive mode must return Ok even for corrupted BG44");
+    assert!(!pm.data.is_empty(), "pixmap must not be empty");
+    assert_eq!(
+        pm.data.len(),
+        pm.width as usize * pm.height as usize * 4,
+        "pixmap must have correct RGBA size"
+    );
+}
+
 // ── IFF parse_form ──────────────────────────────────────────────────────────
 
 /// find_first returns the first matching chunk.
