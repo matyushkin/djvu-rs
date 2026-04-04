@@ -11,6 +11,14 @@ readme = "README.md"
 keywords = ["djvu", "decoder", "document", "image", "pdf"]
 categories = ["parser-implementations", "multimedia::images", "encoding"]
 publish = true
+exclude = [
+    "tests/corpus/*",
+    "references/*",
+    "benches/*",
+    "fuzz/*",
+    "scripts/*",
+    "BENCHMARKS_RESULTS.md",
+]
 
 [package.metadata.docs.rs]
 all-features = true
