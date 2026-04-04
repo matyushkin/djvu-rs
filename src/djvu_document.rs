@@ -209,21 +209,60 @@ impl DjVuPage {
         Ok(Some(pixmap))
     }
 
-    /// Find the first chunk with the given 4-byte ID.
-    pub fn find_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
+    /// Return the raw bytes of the first chunk with the given 4-byte ID.
+    ///
+    /// Returns `None` if no chunk with that ID exists.  The returned slice
+    /// points into the owned chunk storage — zero copy.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let sjbz = page.raw_chunk(b"Sjbz").expect("page must have a JB2 chunk");
+    /// ```
+    pub fn raw_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
         self.chunks
             .iter()
             .find(|c| &c.id == id)
             .map(|c| c.data.as_slice())
     }
 
-    /// Find all chunks with the given 4-byte ID.
-    pub fn find_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
+    /// Return the raw bytes of all chunks with the given 4-byte ID, in order.
+    ///
+    /// Returns an empty `Vec` if no such chunk exists.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let bg44_chunks = page.all_chunks(b"BG44");
+    /// assert!(!bg44_chunks.is_empty(), "colour page must have BG44 data");
+    /// ```
+    pub fn all_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
         self.chunks
             .iter()
             .filter(|c| &c.id == id)
             .map(|c| c.data.as_slice())
             .collect()
+    }
+
+    /// Return the IDs of all chunks present on this page, in order.
+    ///
+    /// Duplicate IDs appear multiple times (once per chunk).
+    pub fn chunk_ids(&self) -> Vec<[u8; 4]> {
+        self.chunks.iter().map(|c| c.id).collect()
+    }
+
+    /// Find the first chunk with the given 4-byte ID.
+    ///
+    /// Equivalent to [`Self::raw_chunk`]; kept for internal use.
+    pub fn find_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
+        self.raw_chunk(id)
+    }
+
+    /// Find all chunks with the given 4-byte ID.
+    ///
+    /// Equivalent to [`Self::all_chunks`]; kept for internal use.
+    pub fn find_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
+        self.all_chunks(id)
     }
 
     /// Return all BG44 background chunk data slices, in order.
@@ -405,6 +444,9 @@ pub struct DjVuDocument {
     pages: Vec<DjVuPage>,
     /// Parsed NAVM bookmarks, or empty if none.
     bookmarks: Vec<DjVuBookmark>,
+    /// Raw document-level chunks (NAVM, DIRM, etc.) from the DJVM container,
+    /// or from the top-level DJVU form for single-page documents.
+    global_chunks: Vec<RawChunk>,
 }
 
 impl DjVuDocument {
@@ -433,11 +475,20 @@ impl DjVuDocument {
 
         match &form.form_type {
             b"DJVU" => {
-                // Single-page document
+                // Single-page document — expose all top-level chunks as global
+                let global_chunks: Vec<RawChunk> = form
+                    .chunks
+                    .iter()
+                    .map(|c| RawChunk {
+                        id: c.id,
+                        data: c.data.to_vec(),
+                    })
+                    .collect();
                 let page = parse_page_from_chunks(&form.chunks, 0)?;
                 Ok(DjVuDocument {
                     pages: vec![page],
                     bookmarks: vec![],
+                    global_chunks,
                 })
             }
             b"DJVM" => {
@@ -452,6 +503,17 @@ impl DjVuDocument {
 
                 // Collect NAVM bookmarks (BZZ-compressed)
                 let bookmarks = parse_navm_bookmarks(&form.chunks)?;
+
+                // Store non-FORM global chunks (DIRM, NAVM, etc.)
+                let global_chunks: Vec<RawChunk> = form
+                    .chunks
+                    .iter()
+                    .filter(|c| &c.id != b"FORM")
+                    .map(|c| RawChunk {
+                        id: c.id,
+                        data: c.data.to_vec(),
+                    })
+                    .collect();
 
                 if is_bundled {
                     // Bundled: FORM:DJVU sub-forms follow DIRM in sequence
@@ -473,7 +535,11 @@ impl DjVuDocument {
                         page_idx += 1;
                     }
 
-                    Ok(DjVuDocument { pages, bookmarks })
+                    Ok(DjVuDocument {
+                        pages,
+                        bookmarks,
+                        global_chunks,
+                    })
                 } else {
                     // Indirect: pages must be resolved by name
                     let resolver = resolver.ok_or(DocError::NoResolver)?;
@@ -492,7 +558,11 @@ impl DjVuDocument {
                         page_idx += 1;
                     }
 
-                    Ok(DjVuDocument { pages, bookmarks })
+                    Ok(DjVuDocument {
+                        pages,
+                        bookmarks,
+                        global_chunks,
+                    })
                 }
             }
             other => Err(DocError::NotDjVu(*other)),
@@ -519,6 +589,41 @@ impl DjVuDocument {
     /// The NAVM table of contents, or an empty slice if not present.
     pub fn bookmarks(&self) -> &[DjVuBookmark] {
         &self.bookmarks
+    }
+
+    /// Return the raw bytes of the first document-level chunk with the given
+    /// 4-byte ID.
+    ///
+    /// For single-page DJVU files this covers all top-level chunks (INFO,
+    /// Sjbz, BG44, …).  For multi-page DJVM files this covers non-page chunks
+    /// such as DIRM and NAVM.  Per-page chunks are accessed via
+    /// [`DjVuPage::raw_chunk`].
+    ///
+    /// Returns `None` if no such chunk exists.
+    pub fn raw_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
+        self.global_chunks
+            .iter()
+            .find(|c| &c.id == id)
+            .map(|c| c.data.as_slice())
+    }
+
+    /// Return the raw bytes of all document-level chunks with the given ID.
+    ///
+    /// Returns an empty `Vec` if no such chunk exists.
+    pub fn all_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
+        self.global_chunks
+            .iter()
+            .filter(|c| &c.id == id)
+            .map(|c| c.data.as_slice())
+            .collect()
+    }
+
+    /// Return the IDs of all document-level chunks, in order.
+    ///
+    /// For multi-page DJVM files this is the sequence of non-page chunks
+    /// (DIRM, NAVM, …).  Duplicate IDs appear once per chunk.
+    pub fn chunk_ids(&self) -> Vec<[u8; 4]> {
+        self.global_chunks.iter().map(|c| c.id).collect()
     }
 }
 
@@ -1051,5 +1156,107 @@ mod tests {
         file.extend_from_slice(&(form_body.len() as u32).to_be_bytes());
         file.extend_from_slice(&form_body);
         file
+    }
+
+    // ── raw chunk API (Issue #43) ────────────────────────────────────────────
+
+    /// `DjVuPage::raw_chunk` returns bytes for known chunk types.
+    #[test]
+    fn page_raw_chunk_info_present() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        // INFO chunk must be present
+        let info = page.raw_chunk(b"INFO").expect("INFO chunk must be present");
+        assert_eq!(info.len(), 10, "INFO chunk is always 10 bytes");
+    }
+
+    /// `DjVuPage::raw_chunk` returns None for absent chunk types.
+    #[test]
+    fn page_raw_chunk_absent() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        assert!(
+            page.raw_chunk(b"XXXX").is_none(),
+            "unknown chunk type must return None"
+        );
+    }
+
+    /// `DjVuPage::all_chunks` returns multiple BG44 chunks in order.
+    #[test]
+    fn page_all_chunks_bg44_multiple() {
+        // big-scanned-page.djvu has 4 progressive BG44 chunks
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/big-scanned-page.djvu"),
+        )
+        .expect("big-scanned-page.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        let bg44 = page.all_chunks(b"BG44");
+        assert!(
+            bg44.len() >= 2,
+            "colour page must have ≥2 BG44 chunks, got {}",
+            bg44.len()
+        );
+
+        // Chunks must be non-empty
+        for (i, chunk) in bg44.iter().enumerate() {
+            assert!(!chunk.is_empty(), "BG44 chunk {i} must not be empty");
+        }
+    }
+
+    /// `DjVuPage::chunk_ids` lists all chunk IDs in order.
+    #[test]
+    fn page_chunk_ids_includes_info() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        let ids = page.chunk_ids();
+        assert!(!ids.is_empty(), "chunk_ids must not be empty");
+        assert!(
+            ids.contains(b"INFO"),
+            "chunk_ids must include INFO, got: {:?}",
+            ids.iter()
+                .map(|id| std::str::from_utf8(id).unwrap_or("????"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `DjVuDocument::raw_chunk` works for single-page DJVU files.
+    #[test]
+    fn document_raw_chunk_single_page() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+
+        // Single-page DJVU exposes all top-level chunks at document level too
+        let info = doc
+            .raw_chunk(b"INFO")
+            .expect("document must expose INFO chunk");
+        assert_eq!(info.len(), 10);
+    }
+
+    /// Round-trip: bytes from `raw_chunk` re-parse to the same metadata.
+    #[test]
+    fn page_raw_chunk_info_roundtrip() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        let raw_info = page.raw_chunk(b"INFO").expect("INFO chunk must be present");
+        let reparsed = crate::info::PageInfo::parse(raw_info).expect("re-parse must succeed");
+        assert_eq!(reparsed.width, page.width() as u16);
+        assert_eq!(reparsed.height, page.height() as u16);
+        assert_eq!(reparsed.dpi, page.dpi());
     }
 }
