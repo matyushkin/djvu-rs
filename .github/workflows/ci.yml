@@ -27,15 +27,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-lint-
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --check
@@ -60,18 +53,16 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-test-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-test-${{ matrix.rust }}-
+          key: ${{ matrix.rust }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
 
       - name: Test (default features)
-        run: cargo test
+        run: cargo nextest run --workspace
 
       - name: Build (no_std check — no default features)
         run: cargo build --no-default-features
@@ -87,6 +78,11 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.88
 
       - name: Build
         run: cargo build
@@ -105,7 +101,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache cargo-audit binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-0.21
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.21 --locked
+
       - name: Audit dependencies
         run: cargo audit
