@@ -34,10 +34,12 @@ clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
 zip = { version = "2", optional = true }
 miniz_oxide = { version = "0.8", optional = true }
+zune-jpeg = { version = "0.5", optional = true }
 
 [features]
 default = ["std"]
-std = ["dep:clap", "dep:png", "dep:zip", "dep:miniz_oxide"]
+std = ["dep:clap", "dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg"]
+jpeg = ["dep:zune-jpeg"]
 
 [dev-dependencies]
 criterion = "0.5"

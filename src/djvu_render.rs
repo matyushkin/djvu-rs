@@ -71,6 +71,11 @@ pub enum RenderError {
     /// BZZ decompression error (for FGbz palette).
     #[error("BZZ error: {0}")]
     Bzz(#[from] crate::error::BzzError),
+
+    /// JPEG decode error (for BGjp/FGjp chunks).
+    #[cfg(feature = "std")]
+    #[error("JPEG decode error: {0}")]
+    Jpeg(String),
 }
 
 // ── RenderOptions ─────────────────────────────────────────────────────────────
@@ -610,16 +615,21 @@ fn decode_background_chunks(
     max_chunks: usize,
 ) -> Result<Option<Pixmap>, RenderError> {
     let bg44_chunks = page.bg44_chunks();
-    if bg44_chunks.is_empty() {
-        return Ok(None);
+    if !bg44_chunks.is_empty() {
+        let mut img = Iw44Image::new();
+        for chunk_data in bg44_chunks.iter().take(max_chunks) {
+            img.decode_chunk(chunk_data)?;
+        }
+        return Ok(Some(img.to_rgb()?));
     }
 
-    let mut img = Iw44Image::new();
-    for chunk_data in bg44_chunks.iter().take(max_chunks) {
-        img.decode_chunk(chunk_data)?;
+    // Fall back to JPEG-encoded background if present.
+    #[cfg(feature = "std")]
+    if let Some(pm) = decode_bgjp(page)? {
+        return Ok(Some(pm));
     }
-    let pm = img.to_rgb()?;
-    Ok(Some(pm))
+
+    Ok(None)
 }
 
 /// Permissive variant: decode BG44 chunks until the first error, then stop.
@@ -627,22 +637,25 @@ fn decode_background_chunks(
 /// Returns whatever was decoded so far (may be blurry / incomplete).
 /// Returns `None` only when there are no BG44 chunks at all or even the
 /// first chunk fails to produce a valid image.
-fn decode_background_chunks_permissive(
-    page: &DjVuPage,
-    max_chunks: usize,
-) -> Option<Pixmap> {
+fn decode_background_chunks_permissive(page: &DjVuPage, max_chunks: usize) -> Option<Pixmap> {
     let bg44_chunks = page.bg44_chunks();
-    if bg44_chunks.is_empty() {
-        return None;
+    if !bg44_chunks.is_empty() {
+        let mut img = Iw44Image::new();
+        for chunk_data in bg44_chunks.iter().take(max_chunks) {
+            if img.decode_chunk(chunk_data).is_err() {
+                break; // stop on first error, use what we have
+            }
+        }
+        return img.to_rgb().ok();
     }
 
-    let mut img = Iw44Image::new();
-    for chunk_data in bg44_chunks.iter().take(max_chunks) {
-        if img.decode_chunk(chunk_data).is_err() {
-            break; // stop on first error, use what we have
-        }
+    // Fall back to JPEG-encoded background if present.
+    #[cfg(feature = "std")]
+    {
+        decode_bgjp(page).ok().flatten()
     }
-    img.to_rgb().ok()
+    #[cfg(not(feature = "std"))]
+    None
 }
 
 /// Decode the JB2 mask (Sjbz chunk) without blit tracking.
@@ -694,17 +707,90 @@ fn decode_fg_palette_full(page: &DjVuPage) -> Result<Option<FgbzPalette>, Render
 }
 
 /// Decode the FG44 foreground layer.
+///
+/// Falls back to FGjp (JPEG-encoded foreground) when no FG44 chunks are present.
 fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
     let fg44_chunks = page.fg44_chunks();
-    if fg44_chunks.is_empty() {
-        return Ok(None);
+    if !fg44_chunks.is_empty() {
+        let mut img = Iw44Image::new();
+        for chunk_data in &fg44_chunks {
+            img.decode_chunk(chunk_data)?;
+        }
+        return Ok(Some(img.to_rgb()?));
     }
-    let mut img = Iw44Image::new();
-    for chunk_data in &fg44_chunks {
-        img.decode_chunk(chunk_data)?;
+
+    // Fall back to JPEG-encoded foreground if present.
+    #[cfg(feature = "std")]
+    if let Some(pm) = decode_fgjp(page)? {
+        return Ok(Some(pm));
     }
-    let pm = img.to_rgb()?;
-    Ok(Some(pm))
+
+    Ok(None)
+}
+
+/// Decode a BGjp (JPEG-encoded background) chunk into an RGB [`Pixmap`].
+///
+/// Returns `None` when the page has no `BGjp` chunk.
+/// Only available with the `std` feature (requires `zune-jpeg`).
+#[cfg(feature = "std")]
+fn decode_bgjp(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
+    let data = match page.find_chunk(b"BGjp") {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    Ok(Some(decode_jpeg_to_pixmap(data)?))
+}
+
+/// Decode an FGjp (JPEG-encoded foreground) chunk into an RGB [`Pixmap`].
+///
+/// Returns `None` when the page has no `FGjp` chunk.
+/// Only available with the `std` feature (requires `zune-jpeg`).
+#[cfg(feature = "std")]
+fn decode_fgjp(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
+    let data = match page.find_chunk(b"FGjp") {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    Ok(Some(decode_jpeg_to_pixmap(data)?))
+}
+
+/// Decode raw JPEG bytes into an RGBA [`Pixmap`].
+///
+/// Uses `zune-jpeg` for decoding. The JPEG is decoded to RGB and then
+/// converted to RGBA (alpha = 255).
+#[cfg(feature = "std")]
+fn decode_jpeg_to_pixmap(data: &[u8]) -> Result<Pixmap, RenderError> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::JpegDecoder;
+
+    let cursor = ZCursor::new(data);
+    let mut decoder = JpegDecoder::new(cursor);
+    decoder
+        .decode_headers()
+        .map_err(|e| RenderError::Jpeg(format!("{e:?}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| RenderError::Jpeg("missing image info after decode_headers".to_owned()))?;
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let rgb = decoder
+        .decode()
+        .map_err(|e| RenderError::Jpeg(format!("{e:?}")))?;
+
+    // zune-jpeg returns RGB bytes; convert to RGBA
+    let mut rgba = vec![0u8; w * h * 4];
+    for (i, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+        let src = i * 3;
+        pixel[0] = *rgb.get(src).unwrap_or(&0);
+        pixel[1] = *rgb.get(src + 1).unwrap_or(&0);
+        pixel[2] = *rgb.get(src + 2).unwrap_or(&0);
+        pixel[3] = 255;
+    }
+    Ok(Pixmap {
+        width: w as u32,
+        height: h as u32,
+        data: rgba,
+    })
 }
 
 /// All decoded layers and options passed to the compositor.
@@ -1955,5 +2041,110 @@ mod tests {
             (0, 128, 0),
             "should fall back to first color"
         );
+    }
+
+    // ── BGjp / FGjp tests ─────────────────────────────────────────────────────
+
+    /// Load the synthetic bgjp_test.djvu fixture from the assets directory.
+    fn load_bgjp_doc() -> DjVuDocument {
+        load_doc("bgjp_test.djvu")
+    }
+
+    /// BGjp fixture loads without error and reports correct dimensions.
+    #[test]
+    fn bgjp_fixture_loads() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.width(), 4);
+        assert_eq!(page.height(), 4);
+    }
+
+    /// BGjp chunk is present in the fixture.
+    #[test]
+    fn bgjp_chunk_present() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        assert!(
+            page.find_chunk(b"BGjp").is_some(),
+            "fixture must have a BGjp chunk"
+        );
+        assert!(
+            page.bg44_chunks().is_empty(),
+            "fixture must NOT have BG44 chunks"
+        );
+    }
+
+    /// `decode_bgjp` returns a non-None Pixmap for the BGjp fixture.
+    #[test]
+    fn decode_bgjp_returns_pixmap() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        let pm = decode_bgjp(page).expect("decode_bgjp must not error");
+        assert!(pm.is_some(), "decode_bgjp must return Some(Pixmap)");
+        let pm = pm.unwrap();
+        assert_eq!(pm.width, 4);
+        assert_eq!(pm.height, 4);
+        assert_eq!(pm.data.len(), 4 * 4 * 4); // RGBA
+    }
+
+    /// `decode_bgjp` returns None for a page with no BGjp chunk.
+    #[test]
+    fn decode_bgjp_returns_none_without_chunk() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pm = decode_bgjp(page).expect("should not error");
+        assert!(pm.is_none());
+    }
+
+    /// `decode_jpeg_to_pixmap` produces RGBA output with alpha=255.
+    #[test]
+    fn decode_jpeg_to_pixmap_alpha_is_255() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        let data = page.find_chunk(b"BGjp").unwrap();
+        let pm = decode_jpeg_to_pixmap(data).expect("decode must succeed");
+        for chunk in pm.data.chunks_exact(4) {
+            assert_eq!(chunk[3], 255, "alpha must be 255 for every pixel");
+        }
+    }
+
+    /// render_pixmap falls back to BGjp when no BG44 chunks are present.
+    #[test]
+    fn render_pixmap_uses_bgjp_background() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+            bold: 0,
+            aa: false,
+            rotation: UserRotation::None,
+            permissive: false,
+        };
+        let pm = render_pixmap(page, &opts).expect("render must succeed");
+        assert_eq!(pm.width, 4);
+        assert_eq!(pm.height, 4);
+    }
+
+    /// render_coarse also falls back to BGjp (no BG44 chunks).
+    #[test]
+    fn render_coarse_uses_bgjp_background() {
+        let doc = load_bgjp_doc();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 4,
+            height: 4,
+            scale: 1.0,
+            bold: 0,
+            aa: false,
+            rotation: UserRotation::None,
+            permissive: false,
+        };
+        let pm = render_coarse(page, &opts).expect("render_coarse must succeed");
+        assert!(pm.is_some(), "must return Some when BGjp present");
+        let pm = pm.unwrap();
+        assert_eq!(pm.width, 4);
+        assert_eq!(pm.height, 4);
     }
 }
