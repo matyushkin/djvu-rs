@@ -76,30 +76,9 @@ Rust **1.88** (edition 2024 features: let-chains stabilized in 1.88)
 
 ## Roadmap
 
-### v0.1 — Core decoder + CLI (current)
-- [x] IFF container, JB2, IW44, BZZ codecs
-- [x] Multi-page DJVM, text layer, annotations, bookmarks
-- [x] Page rendering (RGBA output)
-- [x] `djvu info` — page count, dimensions, document structure
-- [x] `djvu render` — export pages to PNG at any DPI
-- [x] `djvu render --format pdf` — rasterized PDF (each page as an image)
-- [x] `djvu render --format cbz` — CBZ (comic book zip)
-- [x] `djvu text` — extract text layer
-- [x] `cargo install djvu-rs` installs the CLI alongside the library
+See [GitHub milestones](https://github.com/matyushkin/djvu-rs/milestones) for the full roadmap and progress tracking.
 
-### v0.2 — Structural PDF export
-The goal is a proper DjVu → PDF conversion: compact files with selectable, searchable text — similar to what `djvudigital` produces, but in pure Rust.
-
-- [ ] Embed IW44 background using PDF's native `/Filter /JPXDecode` (wavelet, near-lossless)
-- [ ] Embed JB2 foreground mask as PDF image with text layer overlay
-- [ ] Place `TXTz`/`TXTa` word coordinates as invisible PDF text (makes text selectable)
-- [ ] Preserve bookmarks (NAVM → PDF outline)
-- [ ] Preserve hyperlinks (ANTz map areas → PDF link annotations)
-
-### Future
-- Native cross-platform viewer (`djvu-view`, separate repository)
-- Encoding / DjVu creation (not just decoding)
-- WASM build for browser use
+Next up: **[v0.2 — Structural PDF export](https://github.com/matyushkin/djvu-rs/milestone/1)** — proper DjVu → PDF with selectable text, lossless IW44/JB2 embedding, and preserved bookmarks/hyperlinks.
 
 ## License
 
