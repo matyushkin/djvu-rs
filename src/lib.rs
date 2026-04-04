@@ -134,6 +134,16 @@ pub mod text;
 /// [`annotation::Shape`], and [`annotation::Color`].
 pub mod annotation;
 
+/// DjVu to PDF converter — phase 6.
+///
+/// Converts DjVu documents to PDF preserving structure: rasterized page images,
+/// invisible text layer (searchable), bookmarks (PDF outline), and hyperlinks
+/// (PDF link annotations).
+///
+/// Key function: [`pdf::djvu_to_pdf`].
+#[cfg(feature = "std")]
+pub mod pdf;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
