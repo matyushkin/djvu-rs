@@ -309,17 +309,15 @@ fn composite_mask_bg(
     page_w: u32,
     page_h: u32,
 ) -> Pixmap {
+    // Pass 1: fill output unconditionally with scaled background (branch-free, cache-friendly).
+    let mut out = composite_bg_only(w, h, bg, page_w, page_h);
+    // Pass 2: overwrite only masked pixels with black (sparse, avoids branch per pixel).
     let mapper = PageMapper::new(w, h, page_w, page_h);
-    let scaled_bg = scale_layer_bilinear(bg, page_w, page_h);
-    let mut out = Pixmap::white(w, h);
     for y in 0..h {
         for x in 0..w {
             let (px, py) = mapper.map(x, y);
             if px < mask.width && py < mask.height && mask.get(px, py) {
                 out.set_rgb(x, y, 0, 0, 0);
-            } else {
-                let (r, g, b) = sample_scaled(&scaled_bg, px, py);
-                out.set_rgb(x, y, r, g, b);
             }
         }
     }
@@ -366,18 +364,16 @@ fn composite_3layer(
     page_w: u32,
     page_h: u32,
 ) -> Pixmap {
+    // Pass 1: fill output unconditionally with scaled background (branch-free, cache-friendly).
+    let mut out = composite_bg_only(w, h, bg, page_w, page_h);
+    // Pass 2: overwrite only masked pixels with FG color (sparse, avoids redundant BG sampling).
     let mapper = PageMapper::new(w, h, page_w, page_h);
     let fg_samp = NearestSampler::new(fg, page_w, page_h);
-    let scaled_bg = scale_layer_bilinear(bg, page_w, page_h);
-    let mut out = Pixmap::white(w, h);
     for y in 0..h {
         for x in 0..w {
             let (px, py) = mapper.map(x, y);
             if px < mask.width && py < mask.height && mask.get(px, py) {
                 let (r, g, b) = fg_samp.sample(fg, px, py);
-                out.set_rgb(x, y, r, g, b);
-            } else {
-                let (r, g, b) = sample_scaled(&scaled_bg, px, py);
                 out.set_rgb(x, y, r, g, b);
             }
         }
