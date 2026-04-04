@@ -27,7 +27,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::{bzz_new::bzz_decode, error::BzzError};
+use crate::{bzz_new::bzz_decode, error::BzzError, info::Rotation};
 
 // ---- Error ------------------------------------------------------------------
 
@@ -102,6 +102,120 @@ pub struct TextLayer {
     pub text: String,
     /// Top-level zone nodes (usually a single `Page` zone).
     pub zones: Vec<TextZone>,
+}
+
+impl TextLayer {
+    /// Return a copy of this text layer with all zone rectangles transformed to
+    /// match a rendered page of size `render_w × render_h`.
+    ///
+    /// - `page_w`, `page_h` — native page dimensions from the INFO chunk.
+    /// - `rotation` — page rotation from the INFO chunk.
+    /// - `render_w`, `render_h` — the pixel size of the rendered output.
+    ///
+    /// Applies rotation first (in native pixel space), then scales the result
+    /// proportionally to the requested render size.  The text content is
+    /// preserved unchanged.
+    pub fn transform(
+        &self,
+        page_w: u32,
+        page_h: u32,
+        rotation: Rotation,
+        render_w: u32,
+        render_h: u32,
+    ) -> Self {
+        let (disp_w, disp_h) = match rotation {
+            Rotation::Cw90 | Rotation::Ccw90 => (page_h, page_w),
+            _ => (page_w, page_h),
+        };
+        let t = ZoneTransform {
+            page_w,
+            page_h,
+            rotation,
+            disp_w,
+            disp_h,
+            render_w,
+            render_h,
+        };
+        let zones = self.zones.iter().map(|z| transform_zone(z, &t)).collect();
+        TextLayer {
+            text: self.text.clone(),
+            zones,
+        }
+    }
+}
+
+// ---- Coordinate helpers -----------------------------------------------------
+
+impl Rect {
+    /// Rotate this rectangle within a `page_w × page_h` native coordinate space.
+    ///
+    /// Coordinates are in top-left origin.  Returns the transformed rect in the
+    /// rotated display space (which has dimensions `page_h × page_w` for 90°
+    /// rotations and `page_w × page_h` for 0°/180°).
+    pub fn rotate(&self, page_w: u32, page_h: u32, rotation: Rotation) -> Self {
+        match rotation {
+            Rotation::None => self.clone(),
+            Rotation::Rot180 => Rect {
+                x: page_w.saturating_sub(self.x.saturating_add(self.width)),
+                y: page_h.saturating_sub(self.y.saturating_add(self.height)),
+                width: self.width,
+                height: self.height,
+            },
+            // Clockwise 90°: displayed page is page_h wide × page_w tall.
+            // (x, y, w, h) → (page_h - y - h,  x,  h,  w)
+            Rotation::Cw90 => Rect {
+                x: page_h.saturating_sub(self.y.saturating_add(self.height)),
+                y: self.x,
+                width: self.height,
+                height: self.width,
+            },
+            // Counter-clockwise 90°: displayed page is page_h wide × page_w tall.
+            // (x, y, w, h) → (y,  page_w - x - w,  h,  w)
+            Rotation::Ccw90 => Rect {
+                x: self.y,
+                y: page_w.saturating_sub(self.x.saturating_add(self.width)),
+                width: self.height,
+                height: self.width,
+            },
+        }
+    }
+
+    /// Scale this rectangle from a `from_w × from_h` space to `to_w × to_h`.
+    pub fn scale(&self, from_w: u32, from_h: u32, to_w: u32, to_h: u32) -> Self {
+        if from_w == 0 || from_h == 0 {
+            return self.clone();
+        }
+        Rect {
+            x: (self.x as u64 * to_w as u64 / from_w as u64) as u32,
+            y: (self.y as u64 * to_h as u64 / from_h as u64) as u32,
+            width: (self.width as u64 * to_w as u64 / from_w as u64) as u32,
+            height: (self.height as u64 * to_h as u64 / from_h as u64) as u32,
+        }
+    }
+}
+
+/// Parameters for `transform_zone` — groups the 7 invariants so we stay
+/// under clippy's `too_many_arguments` limit.
+struct ZoneTransform {
+    page_w: u32,
+    page_h: u32,
+    rotation: Rotation,
+    disp_w: u32,
+    disp_h: u32,
+    render_w: u32,
+    render_h: u32,
+}
+
+fn transform_zone(zone: &TextZone, t: &ZoneTransform) -> TextZone {
+    let rotated = zone.rect.rotate(t.page_w, t.page_h, t.rotation);
+    let scaled = rotated.scale(t.disp_w, t.disp_h, t.render_w, t.render_h);
+    let children = zone.children.iter().map(|c| transform_zone(c, t)).collect();
+    TextZone {
+        kind: zone.kind,
+        rect: scaled,
+        text: zone.text.clone(),
+        children,
+    }
 }
 
 // ---- Entry points -----------------------------------------------------------
@@ -506,6 +620,144 @@ mod tests {
         let result = parse_text_layer(&data, 100).unwrap();
         assert_eq!(result.text, "Hello");
         assert!(result.zones.is_empty());
+    }
+
+    // ── TextLayer::transform ─────────────────────────────────────────────────
+
+    fn make_layer(x: u32, y: u32, w: u32, h: u32) -> TextLayer {
+        TextLayer {
+            text: "test".to_string(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                },
+                text: "test".to_string(),
+                children: vec![],
+            }],
+        }
+    }
+
+    fn rect0(layer: &TextLayer) -> &Rect {
+        &layer.zones[0].rect
+    }
+
+    #[test]
+    fn transform_none_identity() {
+        // No rotation, 1:1 scale — rects unchanged
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::None, 100, 200);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40
+            }
+        );
+    }
+
+    #[test]
+    fn transform_none_scale_2x() {
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::None, 200, 400);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 20,
+                y: 40,
+                width: 60,
+                height: 80
+            }
+        );
+    }
+
+    #[test]
+    fn transform_rot180() {
+        // page 100×200, rect (10, 20, 30, 40)
+        // new_x = 100 - 10 - 30 = 60
+        // new_y = 200 - 20 - 40 = 140
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::Rot180, 100, 200);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 60,
+                y: 140,
+                width: 30,
+                height: 40
+            }
+        );
+    }
+
+    #[test]
+    fn transform_cw90() {
+        // page 100×200, rect (x=10, y=20, w=30, h=40)
+        // displayed: 200 wide × 100 tall
+        // new_x = page_h - y - h = 200 - 20 - 40 = 140
+        // new_y = x = 10
+        // new_w = h = 40,  new_h = w = 30
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::Cw90, 200, 100);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 140,
+                y: 10,
+                width: 40,
+                height: 30
+            }
+        );
+    }
+
+    #[test]
+    fn transform_ccw90() {
+        // page 100×200, rect (x=10, y=20, w=30, h=40)
+        // displayed: 200 wide × 100 tall
+        // new_x = y = 20
+        // new_y = page_w - x - w = 100 - 10 - 30 = 60
+        // new_w = h = 40,  new_h = w = 30
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::Ccw90, 200, 100);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 20,
+                y: 60,
+                width: 40,
+                height: 30
+            }
+        );
+    }
+
+    #[test]
+    fn transform_cw90_then_scale() {
+        // page 100×200, rect (10, 20, 30, 40), render at 2× (400×200)
+        // After Cw90: (140, 10, 40, 30) in 200×100 space
+        // Scale ×2: (280, 20, 80, 60)
+        let layer = make_layer(10, 20, 30, 40);
+        let out = layer.transform(100, 200, Rotation::Cw90, 400, 200);
+        assert_eq!(
+            *rect0(&out),
+            Rect {
+                x: 280,
+                y: 20,
+                width: 80,
+                height: 60
+            }
+        );
+    }
+
+    #[test]
+    fn transform_text_preserved() {
+        let layer = make_layer(0, 0, 10, 10);
+        let out = layer.transform(100, 100, Rotation::Cw90, 100, 100);
+        assert_eq!(out.text, "test");
+        assert_eq!(out.zones[0].text, "test");
     }
 
     #[test]

@@ -4,7 +4,9 @@
 
 use djvu_rs::IffError;
 use djvu_rs::djvu_document::{DjVuDocument, DocError};
-use djvu_rs::djvu_render::{RenderOptions, render_coarse, render_gray8, render_pixmap, render_progressive};
+use djvu_rs::djvu_render::{
+    RenderOptions, render_coarse, render_gray8, render_pixmap, render_progressive,
+};
 use djvu_rs::iff::parse_form;
 
 // ── DjVuDocument — parse ──────────────────────────────────────────────────────
@@ -358,7 +360,7 @@ fn render_gray8_bilevel_only_black_and_white() {
         height: page.height() as u32,
         ..RenderOptions::default()
     };
-    let gray = render_gray8(&page, &opts).expect("render_gray8 must succeed");
+    let gray = render_gray8(page, &opts).expect("render_gray8 must succeed");
 
     assert_eq!(
         gray.data.len(),
@@ -394,7 +396,7 @@ fn render_gray8_color_page_correct_size() {
         height: page.height() as u32,
         ..RenderOptions::default()
     };
-    let gray = render_gray8(&page, &opts).expect("render_gray8 must succeed for colour page");
+    let gray = render_gray8(page, &opts).expect("render_gray8 must succeed for colour page");
 
     assert_eq!(
         gray.data.len(),
@@ -409,9 +411,9 @@ fn pixmap_to_gray8_luminance_values() {
     use djvu_rs::Pixmap;
 
     let mut pm = Pixmap::white(3, 1);
-    pm.set_rgb(0, 0, 0, 0, 0);     // black → 0
+    pm.set_rgb(0, 0, 0, 0, 0); // black → 0
     pm.set_rgb(1, 0, 255, 255, 255); // white → 255
-    pm.set_rgb(2, 0, 76, 150, 29);  // approx equal-luminance green (~0.299*76+0.587*150+0.114*29 ≈ 113)
+    pm.set_rgb(2, 0, 76, 150, 29); // approx equal-luminance green (~0.299*76+0.587*150+0.114*29 ≈ 113)
 
     let gray = pm.to_gray8();
     assert_eq!(gray.data.len(), 3);
@@ -419,7 +421,10 @@ fn pixmap_to_gray8_luminance_values() {
     assert_eq!(gray.get(1, 0), 255, "white must map to 255");
     // 0.299*76 + 0.587*150 + 0.114*29 = 22.7 + 88.1 + 3.3 = 114.1 → 114
     let lum = gray.get(2, 0);
-    assert!((110..=118).contains(&lum), "luminance should be ~114, got {lum}");
+    assert!(
+        (110..=118).contains(&lum),
+        "luminance should be ~114, got {lum}"
+    );
 }
 
 // ── permissive render mode ───────────────────────────────────────────────────
@@ -466,7 +471,7 @@ fn permissive_strict_fails_on_truncated_bg44() {
         permissive: false,
         ..RenderOptions::default()
     };
-    let result = render_pixmap(&page, &opts);
+    let result = render_pixmap(page, &opts);
     assert!(
         result.is_err(),
         "strict mode must return Err on corrupted BG44"
@@ -485,8 +490,8 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
         permissive: true,
         ..RenderOptions::default()
     };
-    let pm = render_pixmap(&page, &opts)
-        .expect("permissive mode must return Ok even for corrupted BG44");
+    let pm =
+        render_pixmap(page, &opts).expect("permissive mode must return Ok even for corrupted BG44");
     assert!(!pm.data.is_empty(), "pixmap must not be empty");
     assert_eq!(
         pm.data.len(),
