@@ -1,6 +1,6 @@
 [package]
 name = "djvu-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -12,6 +12,7 @@ keywords = ["djvu", "decoder", "document", "image", "pdf"]
 categories = ["parser-implementations", "multimedia::images", "encoding"]
 publish = true
 exclude = [
+    ".cargo/config.toml",
     "tests/corpus/*",
     "tests/golden/*",
     "tests/fixtures/*",
