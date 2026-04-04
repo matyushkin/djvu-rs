@@ -11,9 +11,45 @@ cargo bench --bench document         # document-level operations
 
 Results require `tests/corpus/` files for document and corpus benchmarks. See `CONTRIBUTING.md` for how to obtain them.
 
+CI benchmarks run automatically on every release tag via [`.github/workflows/bench.yml`](.github/workflows/bench.yml).
+Full Criterion HTML reports are uploaded as workflow artifacts (90-day retention).
+
+## Contributing results
+
+To add results for a new platform, run:
+
+```sh
+cargo bench 2>&1 | tee bench_output.txt
+```
+
+Then open a PR updating this file with the new column. Please include CPU model, OS, and Rust version.
+
 ---
 
-## Platform
+## Multi-platform comparison
+
+Key render benchmarks across platforms (time = Criterion median, release profile).
+
+| Benchmark | Apple M1 Max | x86_64 Linux (CI) |
+|-----------|-------------|-------------------|
+| `render_page/dpi/72` (boy.djvu) | **1.21 ms** | *(see CI artifacts)* |
+| `render_page/dpi/144` (boy.djvu) | **1.74 ms** | *(see CI artifacts)* |
+| `render_page/dpi/300` (boy.djvu) | **4.02 ms** | *(see CI artifacts)* |
+| `render_scaled_0.5x/bilinear` | **1.17 ms** | *(see CI artifacts)* |
+| `render_scaled_0.5x/lanczos3` | **5.68 ms** | *(see CI artifacts)* |
+| `render_corpus_color` (watchmaker.djvu) | **3.15 ms** | *(see CI artifacts)* |
+| `render_corpus_bilevel` (cable_1973.djvu) | **3.12 ms** | *(see CI artifacts)* |
+| `jb2_decode` (boy_jb2.djvu) | **228 µs** | *(see CI artifacts)* |
+| `iw44_decode_first_chunk` (boy.djvu) | **734 µs** | *(see CI artifacts)* |
+| `bzz_decode` (navm_fgbz.djvu) | **82.6 ms** | *(see CI artifacts)* |
+
+Linux x86_64 results are collected automatically on every release tag and available as GitHub Actions artifacts.
+
+---
+
+## Detailed results — Apple M1 Max
+
+### Platform
 
 | | |
 |---|---|
