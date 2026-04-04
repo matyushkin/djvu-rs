@@ -98,6 +98,23 @@ pub enum UserRotation {
     Ccw90,
 }
 
+/// Resampling algorithm used when scaling a rendered page to the target size.
+///
+/// Applied after full-resolution decode and compositing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Resampling {
+    /// Bilinear interpolation (default — fast, acceptable quality).
+    #[default]
+    Bilinear,
+    /// Lanczos-3 separable resampling.
+    ///
+    /// Higher quality than bilinear for downscaling (less aliasing, sharper
+    /// text). Slower: two-pass separable filter with a 6-tap kernel.
+    /// The rendered pixmap is produced at full page resolution and then
+    /// downscaled, so memory usage is higher than `Bilinear`.
+    Lanczos3,
+}
+
 /// Rendering parameters passed to `render_into` and related functions.
 ///
 /// # Example
@@ -113,6 +130,7 @@ pub enum UserRotation {
 ///     aa: true,
 ///     rotation: UserRotation::None,
 ///     permissive: false,
+///     resampling: djvu_rs::djvu_render::Resampling::Bilinear,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +159,10 @@ pub struct RenderOptions {
     ///
     /// Default: `false` (strict — any decode error propagates as `Err`).
     pub permissive: bool,
+    /// Resampling algorithm applied when scaling to `width`×`height`.
+    ///
+    /// Default: [`Resampling::Bilinear`] (preserves backward compatibility).
+    pub resampling: Resampling,
 }
 
 impl Default for RenderOptions {
@@ -153,6 +175,7 @@ impl Default for RenderOptions {
             aa: false,
             rotation: UserRotation::None,
             permissive: false,
+            resampling: Resampling::Bilinear,
         }
     }
 }
@@ -353,6 +376,124 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
         ((g_sum + count / 2) / count) as u8,
         ((b_sum + count / 2) / count) as u8,
     )
+}
+
+// ── Lanczos-3 resampling ─────────────────────────────────────────────────────
+
+/// Lanczos-3 kernel: `sinc(x) * sinc(x/3)` for `|x| < 3`, 0 otherwise.
+///
+/// Uses the normalised sinc: `sinc(x) = sin(π x) / (π x)`, `sinc(0) = 1`.
+#[inline]
+fn lanczos3_kernel(x: f32) -> f32 {
+    let ax = x.abs();
+    if ax >= 3.0 {
+        return 0.0;
+    }
+    if ax < 1e-6 {
+        return 1.0;
+    }
+    let pi_x = core::f32::consts::PI * ax;
+    let sinc_x = pi_x.sin() / pi_x;
+    let pi_x3 = pi_x / 3.0;
+    let sinc_x3 = pi_x3.sin() / pi_x3;
+    sinc_x * sinc_x3
+}
+
+/// Scale `src` to `dst_w × dst_h` using separable Lanczos-3 resampling.
+///
+/// Two-pass implementation:
+/// 1. Horizontal pass: `src_w × src_h` → `dst_w × src_h` intermediate.
+/// 2. Vertical pass: `dst_w × src_h` → `dst_w × dst_h` output.
+///
+/// Only RGBA pixmaps are handled (alpha is passed through unchanged at 255).
+pub fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
+    let src_w = src.width;
+    let src_h = src.height;
+
+    // Short-circuit: nothing to scale.
+    if src_w == dst_w && src_h == dst_h {
+        return src.clone();
+    }
+    if dst_w == 0 || dst_h == 0 {
+        return Pixmap::white(dst_w.max(1), dst_h.max(1));
+    }
+
+    // ── Horizontal pass ───────────────────────────────────────────────────────
+    // Map each output column `ox` (0..dst_w) to a source position, then sum
+    // the Lanczos-3 kernel over the contributing source columns.
+    let h_scale = src_w as f32 / dst_w as f32;
+    let h_support = (3.0_f32 * h_scale.max(1.0)).ceil() as i32; // kernel half-width in src pixels
+
+    let mut mid = Pixmap::new(dst_w, src_h, 255, 255, 255, 255);
+    for oy in 0..src_h {
+        for ox in 0..dst_w {
+            // Centre of the output pixel in source coordinates.
+            let cx = (ox as f32 + 0.5) * h_scale - 0.5;
+            let x0 = (cx.floor() as i32 - h_support + 1).max(0);
+            let x1 = (cx.floor() as i32 + h_support).min(src_w as i32 - 1);
+
+            let mut r = 0.0_f32;
+            let mut g = 0.0_f32;
+            let mut b = 0.0_f32;
+            let mut w_sum = 0.0_f32;
+
+            for sx in x0..=x1 {
+                let w = lanczos3_kernel((sx as f32 - cx) / h_scale.max(1.0));
+                let (pr, pg, pb) = src.get_rgb(sx as u32, oy);
+                r += pr as f32 * w;
+                g += pg as f32 * w;
+                b += pb as f32 * w;
+                w_sum += w;
+            }
+
+            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+            mid.set_rgb(
+                ox,
+                oy,
+                (r * norm).round().clamp(0.0, 255.0) as u8,
+                (g * norm).round().clamp(0.0, 255.0) as u8,
+                (b * norm).round().clamp(0.0, 255.0) as u8,
+            );
+        }
+    }
+
+    // ── Vertical pass ─────────────────────────────────────────────────────────
+    let v_scale = src_h as f32 / dst_h as f32;
+    let v_support = (3.0_f32 * v_scale.max(1.0)).ceil() as i32;
+
+    let mut out = Pixmap::new(dst_w, dst_h, 255, 255, 255, 255);
+    for oy in 0..dst_h {
+        let cy = (oy as f32 + 0.5) * v_scale - 0.5;
+        let y0 = (cy.floor() as i32 - v_support + 1).max(0);
+        let y1 = (cy.floor() as i32 + v_support).min(src_h as i32 - 1);
+
+        for ox in 0..dst_w {
+            let mut r = 0.0_f32;
+            let mut g = 0.0_f32;
+            let mut b = 0.0_f32;
+            let mut w_sum = 0.0_f32;
+
+            for sy in y0..=y1 {
+                let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
+                let (pr, pg, pb) = mid.get_rgb(ox, sy as u32);
+                r += pr as f32 * w;
+                g += pg as f32 * w;
+                b += pb as f32 * w;
+                w_sum += w;
+            }
+
+            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+            out.set_rgb(
+                ox,
+                oy,
+                (r * norm).round().clamp(0.0, 255.0) as u8,
+                (g * norm).round().clamp(0.0, 255.0) as u8,
+                (b * norm).round().clamp(0.0, 255.0) as u8,
+            );
+        }
+    }
+
+    out
 }
 
 /// Check whether any pixel in the mask box is set (foreground).
@@ -1161,6 +1302,32 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm = aa_downscale(&pm);
     }
 
+    // Apply Lanczos-3 post-processing when requested.
+    // The composited pixmap is already at `w × h`; if the page dimensions
+    // differ from the output (i.e. actual scaling happened) reprocess it
+    // with the higher-quality Lanczos filter.
+    if opts.resampling == Resampling::Lanczos3 {
+        let need_scale = page.width() as u32 != w || page.height() as u32 != h;
+        if need_scale {
+            // Re-render at native resolution, then downscale with Lanczos.
+            let native_opts = RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                scale: 1.0,
+                bold: opts.bold,
+                aa: false,
+                rotation: UserRotation::None, // rotation applied after scaling
+                permissive: opts.permissive,
+                resampling: Resampling::Bilinear, // avoid infinite recursion
+            };
+            // Render at full resolution (may fail gracefully).
+            if let Ok(native_pm) = render_pixmap(page, &native_opts) {
+                pm = scale_lanczos3(&native_pm, w, h);
+            }
+            // If native render failed, pm already holds the bilinear result.
+        }
+    }
+
     Ok(rotate_pixmap(
         pm,
         combine_rotations(page.rotation(), opts.rotation),
@@ -1356,6 +1523,7 @@ mod tests {
         assert_eq!(opts.bold, 0);
         assert!(!opts.aa);
         assert!((opts.scale - 1.0).abs() < 1e-6);
+        assert_eq!(opts.resampling, Resampling::Bilinear);
     }
 
     /// RenderOptions can be constructed with explicit fields.
@@ -1369,6 +1537,7 @@ mod tests {
             aa: true,
             rotation: UserRotation::Cw90,
             permissive: false,
+            resampling: Resampling::Bilinear,
         };
         assert_eq!(opts.width, 400);
         assert_eq!(opts.height, 300);
@@ -2121,6 +2290,7 @@ mod tests {
             aa: false,
             rotation: UserRotation::None,
             permissive: false,
+            resampling: Resampling::Bilinear,
         };
         let pm = render_pixmap(page, &opts).expect("render must succeed");
         assert_eq!(pm.width, 4);
@@ -2140,11 +2310,141 @@ mod tests {
             aa: false,
             rotation: UserRotation::None,
             permissive: false,
+            resampling: Resampling::Bilinear,
         };
         let pm = render_coarse(page, &opts).expect("render_coarse must succeed");
         assert!(pm.is_some(), "must return Some when BGjp present");
         let pm = pm.unwrap();
         assert_eq!(pm.width, 4);
         assert_eq!(pm.height, 4);
+    }
+
+    // ── Lanczos-3 tests ───────────────────────────────────────────────────────
+
+    /// `lanczos3_kernel(0)` == 1.0 (unity at origin).
+    #[test]
+    fn lanczos3_kernel_unity_at_zero() {
+        assert!((lanczos3_kernel(0.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// `lanczos3_kernel` is zero outside |x| ≥ 3.
+    #[test]
+    fn lanczos3_kernel_zero_outside_support() {
+        assert_eq!(lanczos3_kernel(3.0), 0.0);
+        assert_eq!(lanczos3_kernel(-3.5), 0.0);
+        assert_eq!(lanczos3_kernel(10.0), 0.0);
+    }
+
+    /// `scale_lanczos3` preserves dimensions.
+    #[test]
+    fn scale_lanczos3_correct_dimensions() {
+        let src = Pixmap::white(100, 80);
+        let dst = scale_lanczos3(&src, 50, 40);
+        assert_eq!(dst.width, 50);
+        assert_eq!(dst.height, 40);
+    }
+
+    /// `scale_lanczos3` returns a clone when source and target match.
+    #[test]
+    fn scale_lanczos3_noop_when_same_size() {
+        let src = Pixmap::new(4, 4, 200, 100, 50, 255);
+        let dst = scale_lanczos3(&src, 4, 4);
+        assert_eq!(dst.width, 4);
+        assert_eq!(dst.height, 4);
+        assert_eq!(dst.data, src.data);
+    }
+
+    /// Scaling a solid-color pixmap with Lanczos-3 preserves the color.
+    #[test]
+    fn scale_lanczos3_preserves_solid_color() {
+        // Solid red 20×20 → 10×10
+        let src = Pixmap::new(20, 20, 200, 0, 0, 255);
+        let dst = scale_lanczos3(&src, 10, 10);
+        assert_eq!(dst.width, 10);
+        assert_eq!(dst.height, 10);
+        // All output pixels should be close to red (200, 0, 0).
+        for chunk in dst.data.chunks_exact(4) {
+            let (r, g, b) = (chunk[0], chunk[1], chunk[2]);
+            assert!(
+                (r as i32 - 200).abs() <= 5 && g <= 5 && b <= 5,
+                "expected near-red (200,0,0), got ({r},{g},{b})"
+            );
+        }
+    }
+
+    /// `Resampling::Lanczos3` produces the correct output dimensions.
+    #[test]
+    fn render_pixmap_lanczos3_correct_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+        let tw = pw / 2;
+        let th = ph / 2;
+
+        let opts = RenderOptions {
+            width: tw,
+            height: th,
+            scale: 0.5,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("Lanczos3 render must succeed");
+        assert_eq!(pm.width, tw);
+        assert_eq!(pm.height, th);
+    }
+
+    /// Lanczos-3 and bilinear renders differ (different algorithms produce different output).
+    #[test]
+    fn lanczos3_differs_from_bilinear_at_half_scale() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+        let tw = pw / 2;
+        let th = ph / 2;
+
+        let bilinear = render_pixmap(
+            page,
+            &RenderOptions {
+                width: tw,
+                height: th,
+                scale: 0.5,
+                resampling: Resampling::Bilinear,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let lanczos = render_pixmap(
+            page,
+            &RenderOptions {
+                width: tw,
+                height: th,
+                scale: 0.5,
+                resampling: Resampling::Lanczos3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Dimensions must be the same.
+        assert_eq!(bilinear.width, lanczos.width);
+        assert_eq!(bilinear.height, lanczos.height);
+
+        // But pixel values should differ (algorithms are not identical).
+        let differ = bilinear
+            .data
+            .iter()
+            .zip(lanczos.data.iter())
+            .any(|(a, b)| a != b);
+        assert!(differ, "Lanczos3 and bilinear must produce different pixel values");
+    }
+
+    /// `Resampling::Bilinear` default is maintained for backward compat.
+    #[test]
+    fn resampling_default_is_bilinear() {
+        let opts = RenderOptions::default();
+        assert_eq!(opts.resampling, Resampling::Bilinear);
     }
 }
