@@ -261,6 +261,29 @@ impl DjVuPage {
         Ok(None)
     }
 
+    /// Parse the text layer and transform all zone rectangles to match a
+    /// rendered page of size `render_w × render_h`.
+    ///
+    /// This is a convenience wrapper around [`Self::text_layer`] followed by
+    /// [`TextLayer::transform`].  It applies the page's own rotation (from the
+    /// INFO chunk) and scales coordinates proportionally to the requested
+    /// render size, so callers can use the returned rects directly for text
+    /// selection / copy-paste overlays without any additional maths.
+    ///
+    /// Returns `Ok(None)` if the page has no text layer.
+    pub fn text_layer_at_size(
+        &self,
+        render_w: u32,
+        render_h: u32,
+    ) -> Result<Option<TextLayer>, DocError> {
+        let page_w = self.info.width as u32;
+        let page_h = self.info.height as u32;
+        let rotation = self.info.rotation;
+        Ok(self
+            .text_layer()?
+            .map(|tl| tl.transform(page_w, page_h, rotation, render_w, render_h)))
+    }
+
     /// Extract the plain text content of the page (convenience wrapper).
     ///
     /// Returns `Ok(None)` if the page has no text layer.
