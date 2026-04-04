@@ -46,6 +46,21 @@ Corpus files: `tests/corpus/`
 
 ---
 
+## Document benchmarks (`cargo bench --bench document`)
+
+Test file: `tests/corpus/pathogenic_bacteria_1896.djvu` (520 pages, 25 MB, mixed IW44+JB2)
+Text layer: `tests/corpus/watchmaker.djvu` (TXTz present)
+
+| Benchmark | Time (median) | Notes |
+|-----------|--------------|-------|
+| `parse_multipage_520p` | **912 µs** | Parse DJVM directory + all page descriptors, 520 pages, 25 MB |
+| `iterate_pages_520p` | **482 µs** | Read width/height/dpi for all 520 pages (no render) |
+| `render_large_doc_first_page` | **30.5 ms** | Render page 1 of 520 (mixed content) at native DPI |
+| `render_large_doc_mid_page` | **61.8 ms** | Render page 260 of 520 — larger/denser page |
+| `text_extraction_single_page` | **194 µs** | TXTz parse + plain text output, watchmaker.djvu |
+
+---
+
 ## Comparison with DjVuLibre 3.5.29
 
 Tool: `ddjvu -format=ppm -page=1` (CLI utility, process-per-call)
@@ -56,6 +71,7 @@ Platform: same machine (Apple M-series, macOS 15)
 |------|---------------|-----------|-------|
 | watchmaker.djvu (color IW44) | **3.1 ms** | 145.2 ms | ~47× faster |
 | cable_1973_100133.djvu (bilevel JB2) | **3.1 ms** | 103.0 ms | ~33× faster |
+| pathogenic_bacteria_1896.djvu p.1 (mixed, 520 pp) | **30.5 ms** | 248.3 ms ± 169 ms | ~8× faster |
 
 **Caveat:** `ddjvu` is a subprocess — timings include fork/exec overhead (~50–80 ms on macOS) and PPM file write. The comparison reflects real-world CLI usage, not pure decode time. A library-level comparison via `libdjvulibre` C API would be more apples-to-apples for the decode kernel itself.
 
