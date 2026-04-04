@@ -22,10 +22,12 @@ self_cell = { version = "1.2", optional = true }
 # Used by the djvu CLI binary. Will move to a separate djvu-cli crate in v0.2.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
+zip = { version = "2", optional = true }
+miniz_oxide = { version = "0.8", optional = true }
 
 [features]
 default = ["std"]
-std = ["dep:self_cell", "dep:clap", "dep:png"]
+std = ["dep:self_cell", "dep:clap", "dep:png", "dep:zip", "dep:miniz_oxide"]
 
 [dev-dependencies]
 criterion = "0.5"
