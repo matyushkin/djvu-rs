@@ -177,3 +177,4 @@ target tracked in [Issue #1](https://github.com/matyushkin/djvu-rs/issues/1).
 - Corpus benchmarks use public domain files from Internet Archive.
 - Large high-DPI render (600 dpi) is a known optimization target — SIMD color conversion is planned (Issue #1).
 - Lanczos3 is available via `RenderOptions { resampling: Resampling::Lanczos3, .. }` for higher-quality downscaling at the cost of ~5× render time.
+- YCbCr→RGB conversion uses `wide::i32x8` SIMD (8 pixels per iteration). On the M1 Max the wavelet transform dominates; the SIMD path shows most benefit on large high-DPI pages (600 dpi, ≥ 12 MP) where color conversion is a larger fraction of total time.
