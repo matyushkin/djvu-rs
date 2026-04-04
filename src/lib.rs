@@ -159,6 +159,16 @@ pub mod pdf;
 #[cfg(feature = "tiff")]
 pub mod tiff_export;
 
+/// Async render surface for [`DjVuPage`] — phase 5 extension.
+///
+/// Wraps the synchronous render pipeline in [`tokio::task::spawn_blocking`]
+/// so CPU-bound IW44/JB2 work runs on the blocking thread pool without
+/// blocking the async runtime.
+///
+/// Key functions: [`djvu_async::render_pixmap_async`], [`djvu_async::render_gray8_async`].
+#[cfg(feature = "async")]
+pub mod djvu_async;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
