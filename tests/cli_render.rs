@@ -81,6 +81,7 @@ fn render_higher_dpi_produces_larger_image() {
 }
 
 #[test]
+#[ignore = "renders all pages of conquete_paix.djvu — slow (~3 min), run with --ignored"]
 fn render_all_pages_creates_multiple_files() {
     let dir = tempfile::tempdir().unwrap();
 
