@@ -116,6 +116,85 @@ impl Default for RenderOptions {
     }
 }
 
+impl RenderOptions {
+    /// Create render options that scale the page to fit the given width,
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    pub fn fit_to_width(page: &crate::djvu_document::DjVuPage, width: u32) -> Self {
+        let (dw, dh) = display_dimensions(page);
+        let height = if dw == 0 {
+            width
+        } else {
+            ((dh as f64 * width as f64) / dw as f64).round() as u32
+        }
+        .max(1);
+        let scale = width as f32 / dw.max(1) as f32;
+        RenderOptions {
+            width,
+            height,
+            scale,
+            ..Default::default()
+        }
+    }
+
+    /// Create render options that scale the page to fit the given height,
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    pub fn fit_to_height(page: &crate::djvu_document::DjVuPage, height: u32) -> Self {
+        let (dw, dh) = display_dimensions(page);
+        let width = if dh == 0 {
+            height
+        } else {
+            ((dw as f64 * height as f64) / dh as f64).round() as u32
+        }
+        .max(1);
+        let scale = height as f32 / dh.max(1) as f32;
+        RenderOptions {
+            width,
+            height,
+            scale,
+            ..Default::default()
+        }
+    }
+
+    /// Create render options that scale the page to fit within a bounding box,
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    pub fn fit_to_box(
+        page: &crate::djvu_document::DjVuPage,
+        max_width: u32,
+        max_height: u32,
+    ) -> Self {
+        let (dw, dh) = display_dimensions(page);
+        if dw == 0 || dh == 0 {
+            return RenderOptions {
+                width: max_width.max(1),
+                height: max_height.max(1),
+                scale: 1.0,
+                ..Default::default()
+            };
+        }
+        let scale_w = max_width as f64 / dw as f64;
+        let scale_h = max_height as f64 / dh as f64;
+        let scale = if scale_w < scale_h { scale_w } else { scale_h };
+        let width = (dw as f64 * scale).round() as u32;
+        let height = (dh as f64 * scale).round() as u32;
+        RenderOptions {
+            width: width.max(1),
+            height: height.max(1),
+            scale: scale as f32,
+            ..Default::default()
+        }
+    }
+}
+
+/// Return `(display_width, display_height)` — dimensions after rotation.
+fn display_dimensions(page: &crate::djvu_document::DjVuPage) -> (u32, u32) {
+    let w = page.width() as u32;
+    let h = page.height() as u32;
+    match page.rotation() {
+        crate::info::Rotation::Cw90 | crate::info::Rotation::Ccw90 => (h, w),
+        _ => (w, h),
+    }
+}
+
 // ── Gamma LUT ─────────────────────────────────────────────────────────────────
 
 /// Precompute a gamma-correction look-up table for values 0..255.
@@ -1061,6 +1140,85 @@ mod tests {
         assert_eq!(opts.bold, 1);
         assert!(opts.aa);
         assert!((opts.scale - 0.5).abs() < 1e-6);
+    }
+
+    /// `fit_to_width` scales correctly, preserving aspect ratio.
+    #[test]
+    fn fit_to_width_preserves_aspect() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+
+        let opts = RenderOptions::fit_to_width(page, 800);
+        assert_eq!(opts.width, 800);
+        let expected_h = ((ph as f64 * 800.0) / pw as f64).round() as u32;
+        assert_eq!(opts.height, expected_h);
+        assert!((opts.scale - 800.0 / pw as f32).abs() < 0.01);
+    }
+
+    /// `fit_to_height` scales correctly, preserving aspect ratio.
+    #[test]
+    fn fit_to_height_preserves_aspect() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+
+        let opts = RenderOptions::fit_to_height(page, 600);
+        assert_eq!(opts.height, 600);
+        let expected_w = ((pw as f64 * 600.0) / ph as f64).round() as u32;
+        assert_eq!(opts.width, expected_w);
+        assert!((opts.scale - 600.0 / ph as f32).abs() < 0.01);
+    }
+
+    /// `fit_to_box` chooses the smaller scale factor.
+    #[test]
+    fn fit_to_box_constrains_both() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+
+        // Very wide box — height should be the constraint
+        let opts = RenderOptions::fit_to_box(page, 10000, 100);
+        assert!(opts.width <= 10000);
+        assert!(opts.height <= 100);
+        assert!(opts.width > 0 && opts.height > 0);
+
+        // Very tall box — width should be the constraint
+        let opts = RenderOptions::fit_to_box(page, 100, 10000);
+        assert!(opts.width <= 100);
+        assert!(opts.height <= 10000);
+        assert!(opts.width > 0 && opts.height > 0);
+    }
+
+    /// `fit_to_box` with a square box picks the tighter dimension.
+    #[test]
+    fn fit_to_box_square() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+
+        let opts = RenderOptions::fit_to_box(page, 500, 500);
+        assert!(opts.width <= 500);
+        assert!(opts.height <= 500);
+        // At least one dimension should be close to 500
+        assert!(opts.width >= 490 || opts.height >= 490);
+    }
+
+    /// Rotated page: fit_to_width uses display dimensions (swapped w/h).
+    #[test]
+    fn fit_to_width_rotation_aware() {
+        // boy_jb2_rotate90 has a 90° rotation in the INFO chunk
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+        // Display dimensions are swapped for 90° rotation
+        let (dw, dh) = (ph, pw);
+
+        let opts = RenderOptions::fit_to_width(page, 400);
+        assert_eq!(opts.width, 400);
+        let expected_h = ((dh as f64 * 400.0) / dw as f64).round() as u32;
+        assert_eq!(opts.height, expected_h);
     }
 
     /// `render_into` with a zero-width dimension returns InvalidDimensions.
