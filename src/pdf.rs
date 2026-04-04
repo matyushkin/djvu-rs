@@ -710,4 +710,173 @@ mod tests {
         assert!(s.contains("/Length 5"));
         assert!(s.contains("stream\nhello\nendstream"));
     }
+
+    #[test]
+    fn test_deflate_roundtrip() {
+        let data = b"hello world, this is a test of deflate compression";
+        let compressed = deflate(data);
+        // Compressed data should be non-empty
+        assert!(!compressed.is_empty());
+        // Decompress and verify
+        let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).unwrap();
+        assert_eq!(&decompressed, data);
+    }
+
+    #[test]
+    fn test_make_deflate_stream() {
+        let body = make_deflate_stream(" /Type /XObject", b"test data");
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.contains("/Filter /FlateDecode"));
+        assert!(s.contains("/Type /XObject"));
+        assert!(s.contains("stream\n"));
+        assert!(s.contains("\nendstream"));
+    }
+
+    #[test]
+    fn test_font_dict() {
+        let d = font_dict();
+        let s = String::from_utf8_lossy(&d);
+        assert!(s.contains("/Type /Font"));
+        assert!(s.contains("/BaseFont /Helvetica"));
+    }
+
+    #[test]
+    fn test_pdf_writer_alloc_ids() {
+        let mut w = PdfWriter::new();
+        let id1 = w.alloc_id();
+        let id2 = w.alloc_id();
+        let id3 = w.alloc_id();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn test_pdf_writer_multiple_objects() {
+        let mut w = PdfWriter::new();
+        w.add(b"<< /Type /Catalog >>".to_vec());
+        w.add(b"<< /Type /Pages >>".to_vec());
+        let pdf = w.serialize();
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(s.contains("1 0 obj"));
+        assert!(s.contains("2 0 obj"));
+        assert!(s.contains("/Size 3")); // 0, 1, 2
+    }
+
+    #[test]
+    fn test_resolve_bookmark_dest_page_prefix() {
+        let page_ids = vec![10, 20, 30];
+        let dest = resolve_bookmark_dest("#page2", &page_ids);
+        assert!(dest.contains("20 0 R"));
+        assert!(dest.contains("/Fit"));
+    }
+
+    #[test]
+    fn test_resolve_bookmark_dest_page_underscore() {
+        let page_ids = vec![10, 20, 30];
+        let dest = resolve_bookmark_dest("#page_3", &page_ids);
+        assert!(dest.contains("30 0 R"));
+    }
+
+    #[test]
+    fn test_resolve_bookmark_dest_out_of_range() {
+        let page_ids = vec![10];
+        let dest = resolve_bookmark_dest("#page99", &page_ids);
+        // Should fall through to bare number parse or be empty
+        assert!(!dest.contains("10 0 R"));
+    }
+
+    #[test]
+    fn test_resolve_bookmark_dest_external_url() {
+        let page_ids = vec![10];
+        let dest = resolve_bookmark_dest("http://example.com", &page_ids);
+        assert!(dest.contains("/S /URI"));
+        assert!(dest.contains("http://example.com"));
+    }
+
+    #[test]
+    fn test_resolve_bookmark_dest_empty_url() {
+        let page_ids = vec![10];
+        let dest = resolve_bookmark_dest("", &page_ids);
+        assert!(dest.is_empty());
+    }
+
+    #[test]
+    fn test_pdf_escape_special_chars() {
+        assert_eq!(pdf_escape_string("a(b)c\\d"), "a\\(b\\)c\\\\d");
+    }
+
+    #[test]
+    fn test_pdf_escape_non_ascii() {
+        // Non-ASCII chars should be replaced with ?
+        let result = pdf_escape_string("caf\u{00e9}");
+        assert_eq!(result, "caf?");
+    }
+
+    #[test]
+    fn test_shape_to_pdf_rect_rect() {
+        use crate::annotation;
+        let shape = annotation::Shape::Rect(annotation::Rect {
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 300,
+        });
+        let rect = shape_to_pdf_rect(&shape, 300.0, 72.0).unwrap();
+        assert!((rect.0 - 0.0).abs() < 0.01); // x1
+        assert!((rect.2 - 72.0).abs() < 0.01); // x2 = 300 * 72/300
+    }
+
+    #[test]
+    fn test_shape_to_pdf_rect_poly() {
+        use crate::annotation;
+        let shape = annotation::Shape::Poly(vec![(0, 0), (300, 0), (300, 300), (0, 300)]);
+        let rect = shape_to_pdf_rect(&shape, 300.0, 72.0).unwrap();
+        assert!((rect.0 - 0.0).abs() < 0.01);
+        assert!((rect.2 - 72.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_shape_to_pdf_rect_empty_poly() {
+        use crate::annotation;
+        let shape = annotation::Shape::Poly(vec![]);
+        assert!(shape_to_pdf_rect(&shape, 300.0, 72.0).is_none());
+    }
+
+    #[test]
+    fn test_shape_to_pdf_rect_line() {
+        use crate::annotation;
+        let shape = annotation::Shape::Line(0, 0, 150, 150);
+        let rect = shape_to_pdf_rect(&shape, 150.0, 72.0).unwrap();
+        assert!((rect.0 - 0.0).abs() < 0.01);
+        assert!((rect.2 - 72.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_count_outline_items_empty() {
+        let bookmarks: Vec<crate::djvu_document::DjVuBookmark> = vec![];
+        assert_eq!(count_outline_items(&bookmarks), 0);
+    }
+
+    #[test]
+    fn test_count_outline_items_nested() {
+        use crate::djvu_document::DjVuBookmark;
+        let bookmarks = vec![DjVuBookmark {
+            title: "Chapter 1".into(),
+            url: "#1".into(),
+            children: vec![
+                DjVuBookmark {
+                    title: "Section 1.1".into(),
+                    url: "#2".into(),
+                    children: vec![],
+                },
+                DjVuBookmark {
+                    title: "Section 1.2".into(),
+                    url: "#3".into(),
+                    children: vec![],
+                },
+            ],
+        }];
+        assert_eq!(count_outline_items(&bookmarks), 3);
+    }
 }
