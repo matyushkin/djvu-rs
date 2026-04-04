@@ -151,6 +151,27 @@ fn make_deflate_stream(dict_extra: &str, data: &[u8]) -> Vec<u8> {
     make_stream(&extra, &compressed)
 }
 
+/// Encode RGB bytes as JPEG and return the compressed bytes.
+///
+/// `quality` is in range 1–100. Values around 75–85 give excellent
+/// perceptual quality for typical DjVu backgrounds at a fraction of the
+/// FlateDecode+RGB size.
+fn encode_rgb_to_jpeg(rgb: &[u8], width: u32, height: u32, quality: u8) -> Vec<u8> {
+    use jpeg_encoder::{ColorType, Encoder};
+    let mut out = Vec::new();
+    let enc = Encoder::new(&mut out, quality);
+    // Ignore encoding errors — fallback to empty, which will be caught at
+    // the caller and downgraded to FlateDecode.
+    let _ = enc.encode(rgb, width as u16, height as u16, ColorType::Rgb);
+    out
+}
+
+/// Helper: make a DCTDecode (JPEG) stream object.
+fn make_dct_stream(dict_extra: &str, jpeg_bytes: &[u8]) -> Vec<u8> {
+    let extra = format!(" /Filter /DCTDecode{dict_extra}");
+    make_stream(&extra, jpeg_bytes)
+}
+
 // ---- PDF font for invisible text --------------------------------------------
 
 /// Build a Type1 font dictionary for Helvetica (standard 14 font, no embedding needed).
@@ -176,6 +197,7 @@ fn build_page_objects(
     page: &DjVuPage,
     pages_id: usize,
     font_id: usize,
+    pdf_opts: &PdfOptions,
 ) -> Result<usize, PdfError> {
     let pw = page.width() as u32;
     let ph = page.height() as u32;
@@ -184,20 +206,32 @@ fn build_page_objects(
     let pt_h = px_to_pt(ph as f32, dpi);
 
     // Render page to RGB
-    let opts = RenderOptions {
+    let render_opts = RenderOptions {
         width: pw,
         height: ph,
         ..RenderOptions::default()
     };
-    let pixmap = djvu_render::render_pixmap(page, &opts)?;
+    let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
     let rgb = pixmap.to_rgb();
 
-    // Background image XObject (FlateDecode RGB)
+    // Background image XObject — DCTDecode (JPEG) when quality is set,
+    // FlateDecode (deflate+RGB) otherwise.
     let img_dict = format!(
         " /Type /XObject /Subtype /Image /Width {pw} /Height {ph}\
          /ColorSpace /DeviceRGB /BitsPerComponent 8"
     );
-    let img_body = make_deflate_stream(&img_dict, &rgb);
+    let img_body = match pdf_opts.jpeg_quality {
+        Some(quality) => {
+            let jpeg = encode_rgb_to_jpeg(&rgb, pw, ph, quality);
+            if jpeg.is_empty() {
+                // JPEG encoding failed — fall back to deflate
+                make_deflate_stream(&img_dict, &rgb)
+            } else {
+                make_dct_stream(&img_dict, &jpeg)
+            }
+        }
+        None => make_deflate_stream(&img_dict, &rgb),
+    };
     let img_id = w.add(img_body);
 
     // JB2 mask as 1-bit image (if present)
@@ -595,16 +629,53 @@ fn resolve_bookmark_dest(url: &str, page_ids: &[usize]) -> String {
 
 /// Convert a DjVu document to PDF bytes.
 ///
+/// Options for DjVu → PDF conversion.
+///
+/// Use `PdfOptions::default()` for sensible defaults (DCTDecode background
+/// at quality 80, which produces much smaller files than the FlateDecode path
+/// with comparable visual quality).
+#[derive(Debug, Clone)]
+pub struct PdfOptions {
+    /// JPEG quality for background image encoding (1–100).
+    ///
+    /// Higher values produce better quality at larger file sizes.
+    /// Set to `None` to use lossless FlateDecode (PNG-like, larger output).
+    pub jpeg_quality: Option<u8>,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        PdfOptions {
+            jpeg_quality: Some(80),
+        }
+    }
+}
+
+/// Convert a DjVu document to PDF bytes using custom options.
+///
+/// See [`PdfOptions`] for available settings.
+pub fn djvu_to_pdf_with_options(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, PdfError> {
+    djvu_to_pdf_impl(doc, opts)
+}
+
 /// This produces a PDF 1.4 file with:
 /// - Rasterized page images (IW44 background + JB2 mask composite)
 /// - Invisible text layer for search and selection
 /// - Bookmarks (PDF outline) from NAVM
 /// - Hyperlink annotations from ANTz
 ///
+/// Background images are encoded as DCTDecode (JPEG at quality 80) by default,
+/// producing significantly smaller files than the legacy FlateDecode path.
+/// Use [`djvu_to_pdf_with_options`] with `jpeg_quality: None` for lossless output.
+///
 /// # Errors
 ///
 /// Returns `PdfError` if page rendering or text layer parsing fails.
 pub fn djvu_to_pdf(doc: &DjVuDocument) -> Result<Vec<u8>, PdfError> {
+    djvu_to_pdf_impl(doc, &PdfOptions::default())
+}
+
+fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, PdfError> {
     let mut w = PdfWriter::new();
 
     // Reserve IDs for catalog and pages
@@ -619,7 +690,7 @@ pub fn djvu_to_pdf(doc: &DjVuDocument) -> Result<Vec<u8>, PdfError> {
     let mut page_obj_ids = Vec::new();
     for i in 0..doc.page_count() {
         let page = doc.page(i)?;
-        let page_id = match build_page_objects(&mut w, page, pages_id, font_id) {
+        let page_id = match build_page_objects(&mut w, page, pages_id, font_id, opts) {
             Ok(id) => id,
             Err(_) => {
                 // Fallback: blank page at native dimensions
@@ -878,5 +949,94 @@ mod tests {
             ],
         }];
         assert_eq!(count_outline_items(&bookmarks), 3);
+    }
+
+    // ── DCTDecode / PdfOptions tests ──────────────────────────────────────────
+
+    fn assets_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("references/djvujs/library/assets")
+    }
+
+    fn load_doc(name: &str) -> crate::djvu_document::DjVuDocument {
+        let data = std::fs::read(assets_path().join(name))
+            .unwrap_or_else(|_| panic!("{name} must exist"));
+        crate::djvu_document::DjVuDocument::parse(&data)
+            .unwrap_or_else(|e| panic!("parse failed: {e}"))
+    }
+
+    /// `PdfOptions::default()` uses jpeg_quality = Some(80).
+    #[test]
+    fn pdf_options_default_is_jpeg80() {
+        let opts = PdfOptions::default();
+        assert_eq!(opts.jpeg_quality, Some(80));
+    }
+
+    /// JPEG encoding roundtrip: `encode_rgb_to_jpeg` returns a non-empty JPEG.
+    #[test]
+    fn encode_rgb_to_jpeg_returns_jpeg() {
+        // 4×4 solid red image
+        let rgb = vec![255u8, 0, 0].repeat(16); // 16 pixels * 3 channels
+        let jpeg = encode_rgb_to_jpeg(&rgb, 4, 4, 80);
+        assert!(!jpeg.is_empty(), "JPEG output must not be empty");
+        // JPEG starts with FF D8
+        assert_eq!(jpeg[0], 0xFF);
+        assert_eq!(jpeg[1], 0xD8);
+    }
+
+    /// `make_dct_stream` embeds /Filter /DCTDecode in the PDF stream dict.
+    #[test]
+    fn make_dct_stream_has_dctdecode_filter() {
+        let fake_jpeg = b"\xFF\xD8\xFF\xD9"; // minimal JPEG markers
+        let stream = make_dct_stream(" /Type /XObject", fake_jpeg);
+        let s = String::from_utf8_lossy(&stream);
+        assert!(s.contains("/Filter /DCTDecode"), "must contain DCTDecode filter");
+        assert!(s.contains("/Type /XObject"));
+    }
+
+    /// DCT PDF is smaller than deflate PDF for the same page.
+    #[test]
+    fn dct_pdf_is_smaller_than_deflate_pdf() {
+        let doc = load_doc("chicken.djvu");
+        let dct_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: Some(75) })
+            .expect("DCT conversion must succeed");
+        let flat_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None })
+            .expect("FlateDecode conversion must succeed");
+        assert!(
+            dct_pdf.len() < flat_pdf.len(),
+            "DCT PDF ({} bytes) must be smaller than FlateDecode PDF ({} bytes)",
+            dct_pdf.len(),
+            flat_pdf.len()
+        );
+    }
+
+    /// Output PDF contains /DCTDecode when jpeg_quality is set.
+    #[test]
+    fn pdf_with_dct_contains_dctdecode_marker() {
+        let doc = load_doc("chicken.djvu");
+        let pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: Some(80) }).unwrap();
+        let has_dct = pdf.windows(9).any(|w| w == b"DCTDecode");
+        assert!(has_dct, "PDF must contain DCTDecode");
+    }
+
+    /// Output PDF does NOT contain /DCTDecode when jpeg_quality is None.
+    #[test]
+    fn pdf_without_dct_has_no_dctdecode() {
+        let doc = load_doc("chicken.djvu");
+        let pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None }).unwrap();
+        let has_dct = pdf.windows(9).any(|w| w == b"DCTDecode");
+        assert!(!has_dct, "FlateDecode PDF must not contain DCTDecode");
+    }
+
+    /// `djvu_to_pdf` (default, DCT at 80) is smaller than FlateDecode.
+    #[test]
+    fn default_djvu_to_pdf_is_dct() {
+        let doc = load_doc("chicken.djvu");
+        let default_pdf = djvu_to_pdf(&doc).unwrap();
+        let flat_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None }).unwrap();
+        assert!(
+            default_pdf.len() < flat_pdf.len(),
+            "default PDF must use DCT and be smaller than FlateDecode"
+        );
     }
 }
