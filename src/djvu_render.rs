@@ -184,6 +184,94 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
     )
 }
 
+/// Area-average (box filter) sample: average all source pixels covered by the
+/// output pixel's footprint.  Used when downscaling (scale < 1.0) for better
+/// anti-aliasing and fewer moire patterns than bilinear.
+///
+/// `fx`, `fy` are the top-left corner of the output pixel in fixed-point.
+/// `fx_step`, `fy_step` are the output pixel size in source coordinates.
+#[inline]
+fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> (u8, u8, u8) {
+    let x0 = (fx >> FRACBITS).min(pm.width.saturating_sub(1));
+    let y0 = (fy >> FRACBITS).min(pm.height.saturating_sub(1));
+    let x1 = ((fx + fx_step) >> FRACBITS).min(pm.width.saturating_sub(1));
+    let y1 = ((fy + fy_step) >> FRACBITS).min(pm.height.saturating_sub(1));
+
+    // Fast path: box is 1×1 pixel → just read it
+    if x0 == x1 && y0 == y1 {
+        return pm.get_rgb(x0, y0);
+    }
+
+    let mut r_sum = 0u32;
+    let mut g_sum = 0u32;
+    let mut b_sum = 0u32;
+
+    let pw = pm.width as usize;
+    let cols = (x1 - x0 + 1) as usize;
+    let rows = (y1 - y0 + 1) as usize;
+
+    // Read directly from the RGBA data buffer for speed
+    for sy in y0..=y1 {
+        let row_off = (sy as usize * pw + x0 as usize) * 4;
+        for c in 0..cols {
+            let off = row_off + c * 4;
+            if let Some(px) = pm.data.get(off..off + 3) {
+                r_sum += px[0] as u32;
+                g_sum += px[1] as u32;
+                b_sum += px[2] as u32;
+            }
+        }
+    }
+
+    let count = (rows * cols) as u32;
+    if count == 0 {
+        return (255, 255, 255);
+    }
+
+    (
+        ((r_sum + count / 2) / count) as u8,
+        ((g_sum + count / 2) / count) as u8,
+        ((b_sum + count / 2) / count) as u8,
+    )
+}
+
+/// Check whether any pixel in the mask box is set (foreground).
+/// Used for area-averaging downscale to determine if a box has foreground.
+#[inline]
+fn mask_box_any(mask: &crate::bitmap::Bitmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> bool {
+    let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
+    let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
+    let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width.saturating_sub(1));
+    let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height.saturating_sub(1));
+
+    for sy in y0..=y1 {
+        for sx in x0..=x1 {
+            if mask.get(sx, sy) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Find the center foreground pixel in a mask box for palette color lookup.
+#[inline]
+fn mask_box_center_fg(
+    mask: &crate::bitmap::Bitmap,
+    fx: u32,
+    fy: u32,
+    fx_step: u32,
+    fy_step: u32,
+) -> (u32, u32) {
+    // Use the center of the box
+    let cx = (fx + fx_step / 2) >> FRACBITS;
+    let cy = (fy + fy_step / 2) >> FRACBITS;
+    (
+        cx.min(mask.width.saturating_sub(1)),
+        cy.min(mask.height.saturating_sub(1)),
+    )
+}
+
 // ── Anti-aliasing downscale ──────────────────────────────────────────────────
 
 /// Apply a 2×2 box-filter downscale pass for anti-aliasing.
@@ -497,19 +585,18 @@ fn lookup_palette_color(
     pal.colors.first().copied().unwrap_or_default()
 }
 
-/// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
-///
-/// This is a zero-allocation render path when `buf` is already the right size.
-fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), RenderError> {
-    let w = ctx.opts.width;
-    let h = ctx.opts.height;
-    let page_w = ctx.page_w;
-    let page_h = ctx.page_h;
-
-    // Recompute simpler scale: fx_step = page_w * FRAC / w
-    let fx_step = ((page_w as u64 * FRAC as u64) / w.max(1) as u64) as u32;
-    let fy_step = ((page_h as u64 * FRAC as u64) / h.max(1) as u64) as u32;
-
+/// Bilinear composite loop — used when upscaling or at 1:1 (step ≤ 1 pixel).
+/// Single-pixel mask check per output pixel.
+fn composite_loop_bilinear(
+    ctx: &CompositeContext<'_>,
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    page_w: u32,
+    page_h: u32,
+    fx_step: u32,
+    fy_step: u32,
+) {
     for oy in 0..h {
         let fy = oy * fy_step;
         let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
@@ -519,13 +606,11 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
             let fx = ox * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-            // Check mask first to avoid unnecessary background sampling
             let is_fg = ctx
                 .mask
                 .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
 
             let (r, g, b) = if is_fg {
-                // Foreground pixel: use FGbz palette or FG44 color
                 if let Some(pal) = ctx.fg_palette {
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     (color.r, color.g, color.b)
@@ -535,13 +620,11 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                // Background pixel: sample IW44
                 sample_bilinear(bg, fx, fy)
             } else {
                 (255, 255, 255)
             };
 
-            // Apply gamma correction
             let r = ctx.gamma_lut[r as usize];
             let g = ctx.gamma_lut[g as usize];
             let b = ctx.gamma_lut[b as usize];
@@ -554,6 +637,87 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
                 pixel[3] = 255;
             }
         }
+    }
+}
+
+/// Area-averaging composite loop — used when downscaling (step > 1 pixel).
+/// Uses box filter for background sampling and checks a box of mask pixels.
+fn composite_loop_area_avg(
+    ctx: &CompositeContext<'_>,
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    _page_w: u32,
+    _page_h: u32,
+    fx_step: u32,
+    fy_step: u32,
+) {
+    for oy in 0..h {
+        let fy = oy * fy_step;
+        let row_base = oy as usize * w as usize;
+
+        for ox in 0..w {
+            let fx = ox * fx_step;
+
+            let is_fg = ctx
+                .mask
+                .is_some_and(|m| mask_box_any(m, fx, fy, fx_step, fy_step));
+
+            let (r, g, b) = if is_fg {
+                if let Some(pal) = ctx.fg_palette {
+                    let (cx, cy) = mask_box_center_fg(
+                        ctx.mask.unwrap(),
+                        fx,
+                        fy,
+                        fx_step,
+                        fy_step,
+                    );
+                    let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, cx, cy);
+                    (color.r, color.g, color.b)
+                } else if let Some(fg) = ctx.fg44 {
+                    sample_area_avg(fg, fx, fy, fx_step, fy_step)
+                } else {
+                    (0, 0, 0)
+                }
+            } else if let Some(bg) = ctx.bg {
+                sample_area_avg(bg, fx, fy, fx_step, fy_step)
+            } else {
+                (255, 255, 255)
+            };
+
+            let r = ctx.gamma_lut[r as usize];
+            let g = ctx.gamma_lut[g as usize];
+            let b = ctx.gamma_lut[b as usize];
+
+            let base = (row_base + ox as usize) * 4;
+            if let Some(pixel) = buf.get_mut(base..base + 4) {
+                pixel[0] = r;
+                pixel[1] = g;
+                pixel[2] = b;
+                pixel[3] = 255;
+            }
+        }
+    }
+}
+
+/// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
+///
+/// This is a zero-allocation render path when `buf` is already the right size.
+fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), RenderError> {
+    let w = ctx.opts.width;
+    let h = ctx.opts.height;
+    let page_w = ctx.page_w;
+    let page_h = ctx.page_h;
+
+    // Fixed-point step: how many source pixels per output pixel
+    let fx_step = ((page_w as u64 * FRAC as u64) / w.max(1) as u64) as u32;
+    let fy_step = ((page_h as u64 * FRAC as u64) / h.max(1) as u64) as u32;
+
+    // Downscaling when output is smaller than source (step > 1 pixel)
+    if fx_step > FRAC || fy_step > FRAC {
+        composite_loop_area_avg(ctx, buf, w, h, page_w, page_h, fx_step, fy_step);
+    } else {
+        composite_loop_bilinear(ctx, buf, w, h, page_w, page_h, fx_step, fy_step);
     }
 
     Ok(())
