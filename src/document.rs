@@ -110,8 +110,8 @@ struct DirmEntry {
 }
 
 /// A parsed DjVu document (single-page or multi-page bundled).
-pub struct Document<'a> {
-    file: DjvuFile<'a>,
+pub struct Document {
+    file: DjvuFile,
     /// For DJVM: DIRM entries and FORM children (indexed by order in DIRM).
     dirm_entries: Vec<DirmEntry>,
     /// Indices into dirm_entries for page-type components only.
@@ -120,9 +120,9 @@ pub struct Document<'a> {
     is_single_page: bool,
 }
 
-impl<'a> Document<'a> {
+impl Document {
     /// Parse a DjVu document from raw bytes.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &[u8]) -> Result<Self, Error> {
         let file = crate::iff::parse(data)?;
         match &file.root {
             Chunk::Form {
@@ -148,7 +148,7 @@ impl<'a> Document<'a> {
                         Chunk::Leaf {
                             id: [b'D', b'I', b'R', b'M'],
                             data,
-                        } => Some(*data),
+                        } => Some(data.as_slice()),
                         _ => None,
                     })
                     .ok_or(Error::MissingChunk("DIRM"))?;
@@ -203,8 +203,8 @@ impl<'a> Document<'a> {
 
     /// Get the FORM chunk for a DIRM component by its dirm index.
     /// In bundled documents, FORM children after DIRM/NAVM correspond to DIRM entries in order.
-    fn get_component_form(&self, dirm_index: usize) -> Result<&Chunk<'a>, Error> {
-        let forms: Vec<&Chunk<'a>> = self
+    fn get_component_form(&self, dirm_index: usize) -> Result<&Chunk, Error> {
+        let forms: Vec<&Chunk> = self
             .file
             .root
             .children()
@@ -307,7 +307,7 @@ impl<'a> Document<'a> {
     }
 
     /// Resolve an INCL reference to a shared DJVI component's children.
-    fn resolve_incl(&self, ref_id: &str) -> Result<&Chunk<'a>, Error> {
+    fn resolve_incl(&self, ref_id: &str) -> Result<&Chunk, Error> {
         if self.is_single_page {
             return Err(Error::FormatError("INCL in single-page document".into()));
         }
@@ -328,12 +328,12 @@ impl<'a> Document<'a> {
 /// A single page within a DjVu document.
 pub struct Page<'a> {
     pub info: PageInfo,
-    form: &'a Chunk<'a>,
-    doc: &'a Document<'a>,
+    form: &'a Chunk,
+    doc: &'a Document,
 }
 
 impl<'a> Page<'a> {
-    fn from_form(form: &'a Chunk<'a>, doc: &'a Document<'a>) -> Result<Self, Error> {
+    fn from_form(form: &'a Chunk, doc: &'a Document) -> Result<Self, Error> {
         let info_chunk = form
             .find_first(b"INFO")
             .ok_or(Error::MissingChunk("INFO"))?;

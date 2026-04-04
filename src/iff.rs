@@ -38,7 +38,7 @@ pub type ChunkId = [u8; 4];
 
 /// A parsed IFF chunk — either a FORM container or a leaf data chunk.
 #[derive(Debug, Clone)]
-pub enum Chunk<'a> {
+pub enum Chunk {
     /// A FORM container with a secondary ID and child chunks.
     Form {
         /// The secondary ID (e.g., b"DJVU", b"DJVM", b"DJVI", b"THUM").
@@ -47,20 +47,20 @@ pub enum Chunk<'a> {
         #[allow(dead_code)]
         length: u32,
         /// Child chunks within this FORM.
-        children: Vec<Chunk<'a>>,
+        children: Vec<Chunk>,
     },
     /// A leaf chunk with raw data.
     Leaf {
         /// The chunk ID (e.g., b"INFO", b"Sjbz", b"BG44").
         id: ChunkId,
-        /// The raw chunk payload bytes (zero-copy slice of input).
-        data: &'a [u8],
+        /// The raw chunk payload bytes.
+        data: Vec<u8>,
     },
 }
 
-impl<'a> Chunk<'a> {
+impl Chunk {
     /// For leaf chunks, return the data slice. For FORM chunks, returns empty slice.
-    pub fn data(&self) -> &'a [u8] {
+    pub fn data(&self) -> &[u8] {
         match self {
             Chunk::Form { .. } => &[],
             Chunk::Leaf { data, .. } => data,
@@ -68,7 +68,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// For FORM chunks, return children. For leaf chunks, returns empty slice.
-    pub fn children(&self) -> &[Chunk<'a>] {
+    pub fn children(&self) -> &[Chunk] {
         match self {
             Chunk::Form { children, .. } => children,
             Chunk::Leaf { .. } => &[],
@@ -76,7 +76,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Find the first leaf chunk with the given ID in direct children.
-    pub fn find_first(&self, target_id: &[u8; 4]) -> Option<&Chunk<'a>> {
+    pub fn find_first(&self, target_id: &[u8; 4]) -> Option<&Chunk> {
         self.children().iter().find(|c| match c {
             Chunk::Leaf { id, .. } => id == target_id,
             _ => false,
@@ -84,7 +84,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Find all leaf chunks with the given ID in direct children.
-    pub fn find_all(&self, target_id: &[u8; 4]) -> Vec<&Chunk<'a>> {
+    pub fn find_all(&self, target_id: &[u8; 4]) -> Vec<&Chunk> {
         self.children()
             .iter()
             .filter(|c| match c {
@@ -97,14 +97,14 @@ impl<'a> Chunk<'a> {
 
 /// A parsed DjVu document (the root FORM chunk).
 #[derive(Debug, Clone)]
-pub struct DjvuFile<'a> {
-    pub root: Chunk<'a>,
+pub struct DjvuFile {
+    pub root: Chunk,
 }
 
 /// Parse a DjVu file from raw bytes (legacy tree-based parser).
 ///
 /// Expects the file to begin with "AT&T" magic followed by a root FORM chunk.
-pub fn parse(data: &[u8]) -> Result<DjvuFile<'_>, Error> {
+pub fn parse(data: &[u8]) -> Result<DjvuFile, Error> {
     if data.len() < 4 {
         return Err(Error::UnexpectedEof);
     }
@@ -123,7 +123,7 @@ pub fn parse(data: &[u8]) -> Result<DjvuFile<'_>, Error> {
 
 /// Parse a single chunk starting at `offset` within `data`.
 /// Returns the parsed chunk and the number of bytes consumed (including padding).
-fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk<'_>, usize), Error> {
+fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk, usize), Error> {
     if offset + 8 > data.len() {
         return Err(Error::UnexpectedEof);
     }
@@ -175,7 +175,7 @@ fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk<'_>, usize), Error> 
             padded_total,
         ))
     } else {
-        let chunk_data = &data[payload_start..payload_end];
+        let chunk_data = data[payload_start..payload_end].to_vec();
         Ok((
             Chunk::Leaf {
                 id,
@@ -187,7 +187,7 @@ fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk<'_>, usize), Error> 
 }
 
 /// Parse sequential chunks within a range of bytes.
-fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk<'_>>, Error> {
+fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk>, Error> {
     let mut chunks = Vec::new();
     let mut pos = start;
 
@@ -348,14 +348,14 @@ fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, IffError> {
 
 /// Produce a structural dump of the chunk tree.
 #[cfg(test)]
-pub fn dump(file: &DjvuFile<'_>) -> String {
+pub fn dump(file: &DjvuFile) -> String {
     let mut out = String::new();
     dump_chunk(&file.root, 1, &mut out);
     out
 }
 
 #[cfg(test)]
-fn dump_chunk(chunk: &Chunk<'_>, depth: usize, out: &mut String) {
+fn dump_chunk(chunk: &Chunk, depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     match chunk {
         Chunk::Form {

@@ -1080,17 +1080,17 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/jb2")
     }
 
-    fn extract_sjbz(djvu_data: &[u8]) -> &[u8] {
+    fn extract_sjbz(djvu_data: &[u8]) -> Vec<u8> {
         let file = crate::iff::parse(djvu_data).unwrap();
         let sjbz = file.root.find_first(b"Sjbz").unwrap();
-        sjbz.data()
+        sjbz.data().to_vec()
     }
 
     #[test]
     fn jb2_decode_boy_jb2_mask() {
         let djvu = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
         let sjbz = extract_sjbz(&djvu);
-        let bitmap = decode(sjbz, None).unwrap();
+        let bitmap = decode(&sjbz, None).unwrap();
         let actual_pbm = bitmap.to_pbm();
         let expected_pbm = std::fs::read(golden_path().join("boy_jb2_mask.pbm")).unwrap();
         assert_eq!(
@@ -1127,10 +1127,10 @@ mod tests {
     }
 
     /// Find the Nth DJVU page form (0-indexed) in a bundled DJVM.
-    fn find_page_form<'a>(
-        file: &'a crate::iff::DjvuFile<'a>,
+    fn find_page_form(
+        file: &crate::iff::DjvuFile,
         page: usize,
-    ) -> Result<&'a crate::iff::Chunk<'a>, crate::error::DjVuError> {
+    ) -> Result<&crate::iff::Chunk, crate::error::DjVuError> {
         let mut idx = 0;
         for chunk in file.root.children() {
             if matches!(chunk, crate::iff::Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU")
@@ -1145,10 +1145,10 @@ mod tests {
     }
 
     /// Find a DJVI form by its component name (from INCL chunk).
-    fn find_djvi_djbz<'a>(
-        file: &'a crate::iff::DjvuFile<'a>,
+    fn find_djvi_djbz(
+        file: &crate::iff::DjvuFile,
         _name: &[u8],
-    ) -> Result<&'a [u8], crate::error::DjVuError> {
+    ) -> Result<Vec<u8>, crate::error::DjVuError> {
         for chunk in file.root.children() {
             if let crate::iff::Chunk::Form { secondary_id, .. } = chunk
                 && secondary_id == b"DJVI"
@@ -1156,7 +1156,7 @@ mod tests {
                 // Check if this DJVI's component name matches
                 // The component name is in the DIRM, but we can match by trying to find the Djbz
                 if let Some(djbz) = chunk.find_first(b"Djbz") {
-                    return Ok(djbz.data());
+                    return Ok(djbz.data().to_vec());
                 }
             }
         }
@@ -1194,7 +1194,7 @@ mod tests {
 
         // Get shared dict from the DJVI component
         let djbz_data = find_djvi_djbz(&file, b"dict0020.iff").unwrap();
-        let shared_dict = decode_dict(djbz_data, None).unwrap();
+        let shared_dict = decode_dict(&djbz_data, None).unwrap();
 
         // Get page 2's Sjbz (page index 1)
         let page_form = find_page_form(&file, 1).unwrap();
@@ -1218,7 +1218,7 @@ mod tests {
         let file = crate::iff::parse(&djvu).unwrap();
 
         let djbz_data = find_djvi_djbz(&file, b"dict0006.iff").unwrap();
-        let shared_dict = decode_dict(djbz_data, None).unwrap();
+        let shared_dict = decode_dict(&djbz_data, None).unwrap();
 
         let page_form = find_page_form(&file, 0).unwrap();
         let sjbz_data = page_form.find_first(b"Sjbz").unwrap().data();

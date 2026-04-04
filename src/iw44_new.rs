@@ -893,8 +893,8 @@ mod tests {
     }
 
     /// Extract all BG44 chunk payloads from the first DJVU form in the file.
-    fn extract_bg44_chunks<'a>(file: &'a crate::iff::DjvuFile<'a>) -> Vec<&'a [u8]> {
-        fn collect<'a>(chunk: &'a crate::iff::Chunk<'a>) -> Option<Vec<&'a [u8]>> {
+    fn extract_bg44_chunks(file: &crate::iff::DjvuFile) -> Vec<&[u8]> {
+        fn collect(chunk: &crate::iff::Chunk) -> Option<Vec<&[u8]>> {
             match chunk {
                 crate::iff::Chunk::Form {
                     secondary_id,
@@ -908,7 +908,7 @@ mod tests {
                                 crate::iff::Chunk::Leaf {
                                     id: [b'B', b'G', b'4', b'4'],
                                     data,
-                                } => Some(*data),
+                                } => Some(data.as_slice()),
                                 _ => None,
                             })
                             .collect::<Vec<_>>();

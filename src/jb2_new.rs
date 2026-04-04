@@ -1464,7 +1464,7 @@ mod tests {
 
         // Inline Djbz in page 1
         let mut idx = 0usize;
-        let mut page_form_opt: Option<&crate::iff::Chunk<'_>> = None;
+        let mut page_form_opt: Option<&crate::iff::Chunk> = None;
         for chunk in file.root.children() {
             if matches!(chunk, crate::iff::Chunk::Form { secondary_id, .. }
                 if secondary_id == b"DJVU")
