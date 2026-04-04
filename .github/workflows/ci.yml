@@ -5,11 +5,44 @@ on:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── Fast lint gate (runs in ~15s) ────────────────────────────────────────────
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-lint-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+  # ── Tests (run in parallel with lint) ────────────────────────────────────────
   test:
     name: Test (${{ matrix.rust }})
     runs-on: ubuntu-latest
@@ -25,7 +58,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -34,18 +66,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust }}-
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build (default features)
-        run: cargo build --all-targets
+          key: ${{ runner.os }}-test-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-${{ matrix.rust }}-
 
       - name: Test (default features)
         run: cargo test
@@ -53,6 +75,7 @@ jobs:
       - name: Build (no_std check — no default features)
         run: cargo build --no-default-features
 
+  # ── MSRV ─────────────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
@@ -67,12 +90,12 @@ jobs:
       - name: Build
         run: cargo build
 
+  # ── Licenses & audit ─────────────────────────────────────────────────────────
   deny:
     name: Licenses & advisories (cargo deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
@@ -81,9 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-
       - name: Audit dependencies
         run: cargo audit
