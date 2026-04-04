@@ -72,7 +72,7 @@ Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decod
 
 ## Minimum supported Rust version (MSRV)
 
-Rust **1.85** (edition 2024 features are used: let-chains, etc.)
+Rust **1.88** (edition 2024 features: let-chains stabilized in 1.88)
 
 ## Roadmap
 
