@@ -220,6 +220,52 @@ fn aa_downscale(pm: &Pixmap) -> Pixmap {
     out
 }
 
+// ── Page rotation ───────────────────────────────────────────────────────────
+
+/// Apply page rotation from the INFO chunk to the rendered pixmap.
+///
+/// For 90°/270° rotations, width and height are swapped.
+fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
+    use crate::info::Rotation;
+    match rotation {
+        Rotation::None => src,
+        Rotation::Cw90 => {
+            let w = src.height;
+            let h = src.width;
+            let mut out = Pixmap::white(w, h);
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    let (r, g, b) = src.get_rgb(x, y);
+                    out.set_rgb(src.height - 1 - y, x, r, g, b);
+                }
+            }
+            out
+        }
+        Rotation::Rot180 => {
+            let mut out = Pixmap::white(src.width, src.height);
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    let (r, g, b) = src.get_rgb(x, y);
+                    out.set_rgb(src.width - 1 - x, src.height - 1 - y, r, g, b);
+                }
+            }
+            out
+        }
+        Rotation::Ccw90 => {
+            let w = src.height;
+            let h = src.width;
+            let mut out = Pixmap::white(w, h);
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    let (r, g, b) = src.get_rgb(x, y);
+                    out.set_rgb(y, src.width - 1 - x, r, g, b);
+                }
+            }
+            out
+        }
+    }
+}
+
 // ── FGbz palette parsing ──────────────────────────────────────────────────────
 
 /// An RGB color from the FGbz palette.
@@ -571,7 +617,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm = aa_downscale(&pm);
     }
 
-    Ok(pm)
+    Ok(rotate_pixmap(pm, page.rotation()))
 }
 
 /// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
@@ -611,7 +657,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
         composite_into(&ctx, &mut pm.data)?;
     }
 
-    Ok(Some(pm))
+    Ok(Some(rotate_pixmap(pm, page.rotation())))
 }
 
 /// Progressive render: decode BG44 chunks 1..=chunk_n and all other layers.
@@ -683,7 +729,7 @@ pub fn render_progressive(
         composite_into(&ctx, &mut pm.data)?;
     }
 
-    Ok(pm)
+    Ok(rotate_pixmap(pm, page.rotation()))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1059,5 +1105,98 @@ mod tests {
     fn _unused_load_page(_: &str) -> ! {
         let _ = load_page; // suppress dead code warning
         panic!("use load_doc instead")
+    }
+
+    // -- Rotation tests -------------------------------------------------------
+
+    #[test]
+    fn rotate_pixmap_none_is_identity() {
+        let mut pm = Pixmap::white(3, 2);
+        pm.set_rgb(0, 0, 255, 0, 0);
+        let rotated = rotate_pixmap(pm.clone(), crate::info::Rotation::None);
+        assert_eq!(rotated.width, 3);
+        assert_eq!(rotated.height, 2);
+        assert_eq!(rotated.get_rgb(0, 0), (255, 0, 0));
+    }
+
+    #[test]
+    fn rotate_pixmap_cw90_swaps_dims() {
+        let mut pm = Pixmap::white(4, 2);
+        pm.set_rgb(0, 0, 255, 0, 0); // top-left red
+        let rotated = rotate_pixmap(pm, crate::info::Rotation::Cw90);
+        assert_eq!(rotated.width, 2);
+        assert_eq!(rotated.height, 4);
+        // Top-left (0,0) of original goes to (height-1-0, 0) = (1, 0) in rotated
+        assert_eq!(rotated.get_rgb(1, 0), (255, 0, 0));
+    }
+
+    #[test]
+    fn rotate_pixmap_180_preserves_dims() {
+        let mut pm = Pixmap::white(3, 2);
+        pm.set_rgb(0, 0, 255, 0, 0); // top-left red
+        let rotated = rotate_pixmap(pm, crate::info::Rotation::Rot180);
+        assert_eq!(rotated.width, 3);
+        assert_eq!(rotated.height, 2);
+        assert_eq!(rotated.get_rgb(2, 1), (255, 0, 0));
+    }
+
+    #[test]
+    fn rotate_pixmap_ccw90_swaps_dims() {
+        let mut pm = Pixmap::white(4, 2);
+        pm.set_rgb(0, 0, 255, 0, 0); // top-left red
+        let rotated = rotate_pixmap(pm, crate::info::Rotation::Ccw90);
+        assert_eq!(rotated.width, 2);
+        assert_eq!(rotated.height, 4);
+        // Top-left (0,0) -> (0, width-1-0) = (0, 3) in rotated
+        assert_eq!(rotated.get_rgb(0, 3), (255, 0, 0));
+    }
+
+    #[test]
+    fn render_pixmap_rotation_90_swaps_dimensions() {
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).expect("page 0");
+        let orig_w = page.width();
+        let orig_h = page.height();
+        let opts = RenderOptions {
+            width: orig_w as u32,
+            height: orig_h as u32,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render should succeed");
+        // 90° rotation swaps width and height
+        assert_eq!(pm.width, orig_h as u32, "rotated width should be original height");
+        assert_eq!(pm.height, orig_w as u32, "rotated height should be original width");
+    }
+
+    #[test]
+    fn render_pixmap_rotation_180_preserves_dimensions() {
+        let doc = load_doc("boy_jb2_rotate180.djvu");
+        let page = doc.page(0).expect("page 0");
+        let orig_w = page.width();
+        let orig_h = page.height();
+        let opts = RenderOptions {
+            width: orig_w as u32,
+            height: orig_h as u32,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render should succeed");
+        assert_eq!(pm.width, orig_w as u32);
+        assert_eq!(pm.height, orig_h as u32);
+    }
+
+    #[test]
+    fn render_pixmap_rotation_270_swaps_dimensions() {
+        let doc = load_doc("boy_jb2_rotate270.djvu");
+        let page = doc.page(0).expect("page 0");
+        let orig_w = page.width();
+        let orig_h = page.height();
+        let opts = RenderOptions {
+            width: orig_w as u32,
+            height: orig_h as u32,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render should succeed");
+        assert_eq!(pm.width, orig_h as u32, "rotated width should be original height");
+        assert_eq!(pm.height, orig_w as u32, "rotated height should be original width");
     }
 }

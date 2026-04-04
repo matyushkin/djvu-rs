@@ -72,14 +72,17 @@ impl PageInfo {
             gamma_byte as f32 / 10.0
         };
 
-        // Flags: bits 0–1 encode rotation
+        // Flags byte, bits 0–2: rotation per DjVu spec.
+        // Real-world DjVu files use three specific flag values:
+        //   5 → CW 90°    2 → 180°    6 → CW 270° (= CCW 90°)
+        // Other values (including 1, 3) are treated as no rotation,
+        // matching DjVuLibre behavior.
         let flags = data[9];
-        let rotation = match flags & 0x03 {
-            0 => Rotation::None,
-            1 => Rotation::Ccw90,
+        let rotation = match flags & 0x07 {
+            5 => Rotation::Cw90,
             2 => Rotation::Rot180,
-            3 => Rotation::Cw90,
-            _ => Rotation::None, // unreachable: 2 bits can only be 0-3
+            6 => Rotation::Ccw90,
+            _ => Rotation::None,
         };
 
         Ok(PageInfo {
@@ -139,27 +142,35 @@ mod tests {
     }
 
     #[test]
-    fn rotation_ccw90() {
+    fn rotation_flag1_is_none() {
         let mut bytes = chicken_info_bytes();
-        bytes[9] = 0x01; // flags bits 0-1 = 1
+        bytes[9] = 0x01;
         let info = PageInfo::parse(&bytes).unwrap();
-        assert_eq!(info.rotation, Rotation::Ccw90);
+        assert_eq!(info.rotation, Rotation::None);
     }
 
     #[test]
-    fn rotation_rot180() {
+    fn rotation_flag2_is_180() {
         let mut bytes = chicken_info_bytes();
-        bytes[9] = 0x02; // flags bits 0-1 = 2
+        bytes[9] = 0x02;
         let info = PageInfo::parse(&bytes).unwrap();
         assert_eq!(info.rotation, Rotation::Rot180);
     }
 
     #[test]
-    fn rotation_cw90() {
+    fn rotation_flag5_is_cw90() {
         let mut bytes = chicken_info_bytes();
-        bytes[9] = 0x03; // flags bits 0-1 = 3
+        bytes[9] = 0x05;
         let info = PageInfo::parse(&bytes).unwrap();
         assert_eq!(info.rotation, Rotation::Cw90);
+    }
+
+    #[test]
+    fn rotation_flag6_is_ccw90() {
+        let mut bytes = chicken_info_bytes();
+        bytes[9] = 0x06;
+        let info = PageInfo::parse(&bytes).unwrap();
+        assert_eq!(info.rotation, Rotation::Ccw90);
     }
 
     #[test]
