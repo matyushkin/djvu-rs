@@ -137,6 +137,7 @@ fn write_color_page<W: std::io::Write + std::io::Seek>(
         aa: false,
         rotation: djvu_render::UserRotation::None,
         permissive: false,
+        resampling: djvu_render::Resampling::Bilinear,
     };
     let pixmap = djvu_render::render_pixmap(page, &opts)?;
 

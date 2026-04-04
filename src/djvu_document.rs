@@ -143,7 +143,7 @@ struct RawChunk {
 ///
 /// Raw chunk data is stored on construction. No image decoding is performed
 /// until the caller invokes `thumbnail()`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
     info: PageInfo,
