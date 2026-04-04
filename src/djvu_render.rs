@@ -276,60 +276,83 @@ struct PaletteColor {
     b: u8,
 }
 
-/// Parse the FGbz palette from raw chunk data.
+/// Parsed FGbz data: palette colors and optional per-blit color indices.
+struct FgbzPalette {
+    colors: Vec<PaletteColor>,
+    /// Per-blit color index: `indices[blit_idx]` → index into `colors`.
+    /// Empty when the FGbz chunk has no index table (version bit 7 unset).
+    indices: Vec<i16>,
+}
+
+/// Parse the FGbz chunk into palette colors and per-blit index table.
 ///
 /// FGbz format:
-/// - byte 0: version (must be 0 or 1)
+/// - byte 0: version (bit 7 = has index table, bits 6-0 must be 0)
 /// - byte 1-2: big-endian u16 palette size (number of colors)
-/// - remaining: BZZ-compressed palette data
-///   - After decompression: `[b, g, r]` triples (BGR order)
-///
-/// Returns a Vec of RGB colors.
-fn parse_fgbz_palette(data: &[u8]) -> Result<Vec<PaletteColor>, RenderError> {
+/// - next `palette_size * 3` bytes: BGR triples (raw if version=0, BZZ if version has bit 0 set)
+/// - if bit 7 set: 3-byte big-endian count + BZZ-compressed i16be index table
+fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
     if data.len() < 3 {
-        return Ok(vec![]);
+        return Ok(FgbzPalette {
+            colors: vec![],
+            indices: vec![],
+        });
     }
 
-    let _version = data[0];
+    let version = data[0];
+    let has_indices = (version & 0x80) != 0;
+
     let n_colors =
         u16::from_be_bytes([*data.get(1).unwrap_or(&0), *data.get(2).unwrap_or(&0)]) as usize;
 
     if n_colors == 0 {
-        return Ok(vec![]);
+        return Ok(FgbzPalette {
+            colors: vec![],
+            indices: vec![],
+        });
     }
 
-    // The palette colors follow byte 3 as BZZ-compressed data or raw data
-    // depending on the version flag.
-    // Version 0: raw BGR triples
-    // Version 1: BZZ-compressed BGR triples
-    let palette_data = data.get(3..).unwrap_or(&[]);
-
-    let raw_colors = if _version == 1 {
-        crate::bzz_new::bzz_decode(palette_data)?
-    } else {
-        palette_data.to_vec()
-    };
-
-    let expected = n_colors * 3;
-    let available = raw_colors.len().min(expected);
+    // Colors: raw BGR triples starting at byte 3
+    let color_bytes = n_colors * 3;
+    let color_data = data.get(3..).unwrap_or(&[]);
 
     let mut colors = Vec::with_capacity(n_colors);
     for i in 0..n_colors {
         let base = i * 3;
-        if base + 2 < available {
-            // DjVu FGbz stores colors in BGR order
+        if base + 2 < color_data.len().min(color_bytes) {
             colors.push(PaletteColor {
-                r: raw_colors[base + 2],
-                g: raw_colors[base + 1],
-                b: raw_colors[base],
+                r: color_data[base + 2],
+                g: color_data[base + 1],
+                b: color_data[base],
             });
         } else {
-            // Pad with black if data is truncated
             colors.push(PaletteColor { r: 0, g: 0, b: 0 });
         }
     }
 
-    Ok(colors)
+    // Per-blit index table
+    let mut indices = Vec::new();
+    if has_indices {
+        let idx_start = 3 + color_bytes;
+        if idx_start + 3 <= data.len() {
+            let num_indices = ((data[idx_start] as u32) << 16)
+                | ((data[idx_start + 1] as u32) << 8)
+                | (data[idx_start + 2] as u32);
+
+            let bzz_data = data.get(idx_start + 3..).unwrap_or(&[]);
+            let decoded = crate::bzz_new::bzz_decode(bzz_data)?;
+
+            let n = num_indices as usize;
+            indices.reserve(n);
+            for i in 0..n {
+                if i * 2 + 1 < decoded.len() {
+                    indices.push(i16::from_be_bytes([decoded[i * 2], decoded[i * 2 + 1]]));
+                }
+            }
+        }
+    }
+
+    Ok(FgbzPalette { colors, indices })
 }
 
 // ── Core compositor ───────────────────────────────────────────────────────────
@@ -355,14 +378,13 @@ fn decode_background_chunks(
     Ok(Some(pm))
 }
 
-/// Decode the JB2 mask (Sjbz chunk).
+/// Decode the JB2 mask (Sjbz chunk) without blit tracking.
 fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderError> {
     let sjbz = match page.find_chunk(b"Sjbz") {
         Some(data) => data,
         None => return Ok(None),
     };
 
-    // Try to find a Djbz shared dictionary chunk
     let dict = match page.find_chunk(b"Djbz") {
         Some(djbz) => Some(jb2_new::decode_dict(djbz, None)?),
         None => None,
@@ -372,18 +394,36 @@ fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderE
     Ok(Some(bm))
 }
 
-/// Decode the FGbz foreground palette.
-fn decode_fg_palette(page: &DjVuPage) -> Result<Option<Vec<PaletteColor>>, RenderError> {
+/// Decode the JB2 mask with per-pixel blit index tracking.
+fn decode_mask_indexed(
+    page: &DjVuPage,
+) -> Result<Option<(crate::bitmap::Bitmap, Vec<i32>)>, RenderError> {
+    let sjbz = match page.find_chunk(b"Sjbz") {
+        Some(data) => data,
+        None => return Ok(None),
+    };
+
+    let dict = match page.find_chunk(b"Djbz") {
+        Some(djbz) => Some(jb2_new::decode_dict(djbz, None)?),
+        None => None,
+    };
+
+    let (bm, blit_map) = jb2_new::decode_indexed(sjbz, dict.as_ref())?;
+    Ok(Some((bm, blit_map)))
+}
+
+/// Decode the FGbz foreground palette with per-blit color indices.
+fn decode_fg_palette_full(page: &DjVuPage) -> Result<Option<FgbzPalette>, RenderError> {
     let fgbz = match page.find_chunk(b"FGbz") {
         Some(data) => data,
         None => return Ok(None),
     };
 
-    let colors = parse_fgbz_palette(fgbz)?;
-    if colors.is_empty() {
+    let pal = parse_fgbz(fgbz)?;
+    if pal.colors.is_empty() {
         return Ok(None);
     }
-    Ok(Some(colors))
+    Ok(Some(pal))
 }
 
 /// Decode the FG44 foreground layer.
@@ -407,9 +447,54 @@ struct CompositeContext<'a> {
     page_h: u32,
     bg: Option<&'a Pixmap>,
     mask: Option<&'a crate::bitmap::Bitmap>,
-    fg_palette: Option<&'a [PaletteColor]>,
+    fg_palette: Option<&'a FgbzPalette>,
+    /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
+    blit_map: Option<&'a [i32]>,
     fg44: Option<&'a Pixmap>,
     gamma_lut: &'a [u8; 256],
+}
+
+/// Look up the palette color for a foreground pixel at (px, py).
+///
+/// Uses the blit map to find the per-glyph blit index, then maps it through
+/// the FGbz index table to get the final color. Falls back to palette[0] when
+/// no index table is present, and to black when lookup fails.
+#[inline]
+fn lookup_palette_color(
+    pal: &FgbzPalette,
+    blit_map: Option<&[i32]>,
+    mask: Option<&crate::bitmap::Bitmap>,
+    px: u32,
+    py: u32,
+) -> PaletteColor {
+    if let Some(bm) = blit_map {
+        if let Some(m) = mask {
+            let mi = py as usize * m.width as usize + px as usize;
+            if mi < bm.len() {
+                let blit_idx = bm[mi];
+                if blit_idx >= 0 {
+                    if !pal.indices.is_empty() {
+                        // Two-level indirection: blit_idx → color_idx → color
+                        let bi = blit_idx as usize;
+                        if bi < pal.indices.len() {
+                            let ci = pal.indices[bi] as usize;
+                            if ci < pal.colors.len() {
+                                return pal.colors[ci];
+                            }
+                        }
+                    } else {
+                        // No index table: use blit_idx directly as color index
+                        let ci = blit_idx as usize;
+                        if ci < pal.colors.len() {
+                            return pal.colors[ci];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: first palette color or black
+    pal.colors.first().copied().unwrap_or_default()
 }
 
 /// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
@@ -450,10 +535,8 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
 
             if is_fg {
                 // Foreground pixel: use FGbz palette or FG44 color
-                if let Some(palette) = ctx.fg_palette {
-                    // Simple: all foreground pixels get palette color 0 (black text)
-                    // Full implementation would use per-glyph blit indices.
-                    let color = palette.first().copied().unwrap_or_default();
+                if let Some(pal) = ctx.fg_palette {
+                    let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     r = color.r;
                     g = color.g;
                     b = color.b;
@@ -532,8 +615,18 @@ pub fn render_into(
 
     // Decode all layers
     let bg = decode_background_chunks(page, usize::MAX)?;
-    let mask = decode_mask(page)?;
-    // Apply bold dilation
+    let fg_palette = decode_fg_palette_full(page)?;
+
+    // Use indexed mask when we have a palette (for per-glyph colors)
+    let (mask, blit_map) = if fg_palette.is_some() {
+        match decode_mask_indexed(page)? {
+            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
+            None => (None, None),
+        }
+    } else {
+        (decode_mask(page)?, None)
+    };
+
     let mask = if opts.bold > 0 {
         mask.map(|m| {
             let mut dilated = m;
@@ -545,7 +638,6 @@ pub fn render_into(
     } else {
         mask
     };
-    let fg_palette = decode_fg_palette(page)?;
     let fg44 = decode_fg44(page)?;
 
     let ctx = CompositeContext {
@@ -554,16 +646,13 @@ pub fn render_into(
         page_h: page.height() as u32,
         bg: bg.as_ref(),
         mask: mask.as_ref(),
-        fg_palette: fg_palette.as_deref(),
+        fg_palette: fg_palette.as_ref(),
+        blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
         gamma_lut: &gamma_lut,
     };
     composite_into(&ctx, buf)?;
 
-    // AA pass: when enabled, we rendered at 2× and downscale here.
-    // For simplicity in this implementation, we just apply the existing buf
-    // as-is. The caller can request AA by setting opts.aa = true and providing
-    // a Pixmap wrapper. Full AA pass is available via `render_pixmap_aa`.
     Ok(())
 }
 
@@ -582,7 +671,17 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     let gamma_lut = build_gamma_lut(page.gamma());
 
     let bg = decode_background_chunks(page, usize::MAX)?;
-    let mask = decode_mask(page)?;
+    let fg_palette = decode_fg_palette_full(page)?;
+
+    let (mask, blit_map) = if fg_palette.is_some() {
+        match decode_mask_indexed(page)? {
+            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
+            None => (None, None),
+        }
+    } else {
+        (decode_mask(page)?, None)
+    };
+
     let mask = if opts.bold > 0 {
         mask.map(|m| {
             let mut dilated = m;
@@ -594,7 +693,6 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     } else {
         mask
     };
-    let fg_palette = decode_fg_palette(page)?;
     let fg44 = decode_fg44(page)?;
 
     let mut pm = Pixmap::white(w, h);
@@ -606,7 +704,8 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             page_h: page.height() as u32,
             bg: bg.as_ref(),
             mask: mask.as_ref(),
-            fg_palette: fg_palette.as_deref(),
+            fg_palette: fg_palette.as_ref(),
+            blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
             gamma_lut: &gamma_lut,
         };
@@ -651,6 +750,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             bg: Some(&bg),
             mask: None,
             fg_palette: None,
+            blit_map: None,
             fg44: None,
             gamma_lut: &gamma_lut,
         };
@@ -699,7 +799,17 @@ pub fn render_progressive(
 
     // Decode background up to chunk_n + 1 chunks
     let bg = decode_background_chunks(page, chunk_n + 1)?;
-    let mask = decode_mask(page)?;
+    let fg_palette = decode_fg_palette_full(page)?;
+
+    let (mask, blit_map) = if fg_palette.is_some() {
+        match decode_mask_indexed(page)? {
+            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
+            None => (None, None),
+        }
+    } else {
+        (decode_mask(page)?, None)
+    };
+
     let mask = if opts.bold > 0 {
         mask.map(|m| {
             let mut dilated = m;
@@ -711,7 +821,6 @@ pub fn render_progressive(
     } else {
         mask
     };
-    let fg_palette = decode_fg_palette(page)?;
     let fg44 = decode_fg44(page)?;
 
     let mut pm = Pixmap::white(w, h);
@@ -722,7 +831,8 @@ pub fn render_progressive(
             page_h: page.height() as u32,
             bg: bg.as_ref(),
             mask: mask.as_ref(),
-            fg_palette: fg_palette.as_deref(),
+            fg_palette: fg_palette.as_ref(),
+            blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
             gamma_lut: &gamma_lut,
         };
@@ -1198,5 +1308,72 @@ mod tests {
         let pm = render_pixmap(page, &opts).expect("render should succeed");
         assert_eq!(pm.width, orig_h as u32, "rotated width should be original height");
         assert_eq!(pm.height, orig_w as u32, "rotated height should be original width");
+    }
+
+    // -- FGbz multi-color palette tests ---------------------------------------
+
+    #[test]
+    fn fgbz_palette_page_renders_multiple_colors() {
+        // irish.djvu is a single-page file with an FGbz palette.
+        let doc = load_doc("irish.djvu");
+        let page = doc.page(0).expect("page 0");
+        let w = page.width() as u32;
+        let h = page.height() as u32;
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render should succeed");
+
+        // Collect distinct non-white, non-black foreground colors
+        let mut fg_colors = std::collections::HashSet::new();
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g, b) = pm.get_rgb(x, y);
+                // Skip white and near-white (background)
+                if r > 240 && g > 240 && b > 240 {
+                    continue;
+                }
+                fg_colors.insert((r, g, b));
+            }
+        }
+
+        // A multi-color palette page should produce more than 1 distinct
+        // foreground color (if it only had 1, it'd be the old bug).
+        assert!(
+            fg_colors.len() > 1,
+            "multi-color palette page should have >1 distinct foreground colors, got {}",
+            fg_colors.len()
+        );
+    }
+
+    #[test]
+    fn lookup_palette_color_uses_blit_map() {
+        let pal = FgbzPalette {
+            colors: vec![
+                PaletteColor { r: 255, g: 0, b: 0 },   // index 0: red
+                PaletteColor { r: 0, g: 0, b: 255 },   // index 1: blue
+            ],
+            indices: vec![1, 0], // blit 0 → color 1 (blue), blit 1 → color 0 (red)
+        };
+        let bm = crate::bitmap::Bitmap::new(2, 1);
+        let blit_map = vec![0i32, 1i32]; // pixel (0,0) → blit 0, pixel (1,0) → blit 1
+
+        let c0 = lookup_palette_color(&pal, Some(&blit_map), Some(&bm), 0, 0);
+        assert_eq!((c0.r, c0.g, c0.b), (0, 0, 255), "blit 0 → indices[0]=1 → blue");
+
+        let c1 = lookup_palette_color(&pal, Some(&blit_map), Some(&bm), 1, 0);
+        assert_eq!((c1.r, c1.g, c1.b), (255, 0, 0), "blit 1 → indices[1]=0 → red");
+    }
+
+    #[test]
+    fn lookup_palette_color_fallback_without_blit_map() {
+        let pal = FgbzPalette {
+            colors: vec![PaletteColor { r: 0, g: 128, b: 0 }],
+            indices: vec![],
+        };
+        let c = lookup_palette_color(&pal, None, None, 0, 0);
+        assert_eq!((c.r, c.g, c.b), (0, 128, 0), "should fall back to first color");
     }
 }
