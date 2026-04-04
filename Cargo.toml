@@ -16,6 +16,13 @@ std = []
 
 [dev-dependencies]
 criterion = "0.5"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[[bin]]
+name = "djvu"
+path = "src/bin/djvu.rs"
 
 [[bench]]
 name = "codecs"
