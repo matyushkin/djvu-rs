@@ -17,14 +17,11 @@ fn corpus_path() -> PathBuf {
 }
 
 /// Search legacy IFF chunks recursively for the first chunk with the given id.
-fn find_chunk_legacy<'a>(
-    chunks: &'a [djvu_rs::iff::Chunk<'a>],
-    target: &[u8; 4],
-) -> Option<Vec<u8>> {
+fn find_chunk_legacy(chunks: &[djvu_rs::iff::Chunk], target: &[u8; 4]) -> Option<Vec<u8>> {
     for chunk in chunks {
         match chunk {
             djvu_rs::iff::Chunk::Leaf { id, data } if id == target => {
-                return Some(data.to_vec());
+                return Some(data.clone());
             }
             djvu_rs::iff::Chunk::Form { children, .. } => {
                 if let Some(found) = find_chunk_legacy(children, target) {
