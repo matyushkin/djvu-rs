@@ -116,7 +116,7 @@ fn render_all_pages_creates_multiple_files() {
     let pngs: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "png"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
         .collect();
 
     assert!(pngs.len() > 1, "expected multiple PNGs, got {}", pngs.len());
