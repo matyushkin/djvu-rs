@@ -13,6 +13,8 @@ categories = ["parser-implementations", "multimedia::images", "encoding"]
 publish = true
 exclude = [
     "tests/corpus/*",
+    "tests/golden/*",
+    "tests/fixtures/*",
     "references/*",
     "benches/*",
     "fuzz/*",
