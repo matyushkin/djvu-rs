@@ -57,6 +57,7 @@ fn bench_render_at_dpi(c: &mut Criterion) {
             scale,
             bold: 0,
             aa: false,
+            rotation: djvu_rs::djvu_render::UserRotation::None,
         };
 
         group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {
@@ -92,6 +93,7 @@ fn bench_render_coarse(c: &mut Criterion) {
         scale: 1.0,
         bold: 0,
         aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
     };
 
     c.bench_function("render_coarse", |b| {
@@ -133,6 +135,7 @@ fn bench_render_corpus_color(c: &mut Criterion) {
         scale: 1.0,
         bold: 0,
         aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
     };
     c.bench_function("render_corpus_color", |b| {
         b.iter(|| {
@@ -175,6 +178,7 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
         scale: 1.0,
         bold: 0,
         aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
     };
     c.bench_function("render_corpus_bilevel", |b| {
         b.iter(|| {
