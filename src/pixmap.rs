@@ -116,6 +116,49 @@ impl Pixmap {
         }
         out
     }
+
+    /// Convert to 8-bit grayscale using ITU-R BT.601 luminance weights.
+    ///
+    /// `Y = 0.299·R + 0.587·G + 0.114·B`
+    ///
+    /// Returns a [`GrayPixmap`] with `data.len() == width * height`.
+    pub fn to_gray8(&self) -> GrayPixmap {
+        let pixel_count = self.data.len() / 4;
+        let mut data = Vec::with_capacity(pixel_count);
+        for chunk in self.data.chunks_exact(4) {
+            let r = chunk[0] as u32;
+            let g = chunk[1] as u32;
+            let b = chunk[2] as u32;
+            // Fixed-point: weights × 1024 → 306 + 601 + 117 = 1024
+            let y = (r * 306 + g * 601 + b * 117) >> 10;
+            data.push(y.min(255) as u8);
+        }
+        GrayPixmap {
+            width: self.width,
+            height: self.height,
+            data,
+        }
+    }
+}
+
+/// An 8-bit grayscale image, 1 byte per pixel.
+///
+/// Row-major, top-to-bottom. `data.len() == width * height`.
+/// Produced by [`Pixmap::to_gray8`] or [`crate::djvu_render::render_gray8`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrayPixmap {
+    pub width: u32,
+    pub height: u32,
+    /// Grayscale pixel data, row-major. Length = `width * height`.
+    pub data: Vec<u8>,
+}
+
+impl GrayPixmap {
+    /// Get the luminance value at pixel (x, y).
+    #[inline]
+    pub fn get(&self, x: u32, y: u32) -> u8 {
+        self.data[(y as usize * self.width as usize) + x as usize]
+    }
 }
 
 #[cfg(test)]

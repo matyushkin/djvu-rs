@@ -41,7 +41,7 @@ use alloc::{vec, vec::Vec};
 use crate::djvu_document::DjVuPage;
 use crate::iw44_new::Iw44Image;
 use crate::jb2_new;
-use crate::pixmap::Pixmap;
+use crate::pixmap::{GrayPixmap, Pixmap};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -1010,6 +1010,18 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm,
         combine_rotations(page.rotation(), opts.rotation),
     ))
+}
+
+/// Render a `DjVuPage` to an 8-bit grayscale image.
+///
+/// Equivalent to calling [`render_pixmap`] and converting the result with
+/// [`Pixmap::to_gray8`]. Returns a [`GrayPixmap`] where `data.len() ==
+/// width * height`.
+///
+/// For bilevel (JB2-only) pages this produces only `0` and `255` values.
+/// For colour pages, luminance is computed with ITU-R BT.601 weights.
+pub fn render_gray8(page: &DjVuPage, opts: &RenderOptions) -> Result<GrayPixmap, RenderError> {
+    Ok(render_pixmap(page, opts)?.to_gray8())
 }
 
 /// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
