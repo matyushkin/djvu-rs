@@ -70,6 +70,34 @@ Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decod
 
 Rust **1.85** (edition 2024 features are used: let-chains, etc.)
 
+## Roadmap
+
+### v0.1 — Core decoder (current)
+- [x] IFF container, JB2, IW44, BZZ codecs
+- [x] Multi-page DJVM, text layer, annotations, bookmarks
+- [x] Page rendering (RGBA output)
+
+### v0.2 — CLI tool
+- [ ] `djvu info` — page count, dimensions, document structure
+- [ ] `djvu render` — export pages to PNG at any DPI
+- [ ] `djvu render --format pdf` — rasterized PDF (each page as an image)
+- [ ] `djvu render --format cbz` — CBZ (comic book zip)
+- [ ] `cargo install djvu-rs` installs the CLI alongside the library
+
+### v0.3 — Structural PDF export
+The goal is a proper DjVu → PDF conversion: compact files with selectable, searchable text — similar to what `djvudigital` produces, but in pure Rust.
+
+- [ ] Embed IW44 background using PDF's native `/Filter /JPXDecode` (wavelet, near-lossless)
+- [ ] Embed JB2 foreground mask as PDF image with text layer overlay
+- [ ] Place `TXTz`/`TXTa` word coordinates as invisible PDF text (makes text selectable)
+- [ ] Preserve bookmarks (NAVM → PDF outline)
+- [ ] Preserve hyperlinks (ANTz map areas → PDF link annotations)
+
+### Future
+- Native cross-platform viewer (`djvu-view`, separate repository)
+- Encoding / DjVu creation (not just decoding)
+- WASM build for browser use
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
