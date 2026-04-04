@@ -30,6 +30,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 thiserror = "2"
+wide = "0.7"
 # Used by the djvu CLI binary. Will move to a separate djvu-cli crate in v0.2.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
