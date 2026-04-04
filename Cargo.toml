@@ -9,6 +9,9 @@ publish = true
 [dependencies]
 thiserror = "2"
 self_cell = "1.2"
+# Used by the djvu CLI binary. Will move to a separate djvu-cli crate in v0.2.
+clap = { version = "4", features = ["derive"] }
+png = "0.17"
 
 [features]
 default = ["std"]
