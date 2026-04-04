@@ -134,6 +134,12 @@ pub mod text;
 /// [`annotation::Shape`], and [`annotation::Color`].
 pub mod annotation;
 
+/// Document metadata parser for METa/METz chunks — phase 4 extension.
+///
+/// Provides [`metadata::parse_metadata`] and [`metadata::parse_metadata_bzz`]
+/// plus [`metadata::DjVuMetadata`] and [`metadata::MetadataError`].
+pub mod metadata;
+
 /// DjVu to PDF converter — phase 6.
 ///
 /// Converts DjVu documents to PDF preserving structure: rasterized page images,
