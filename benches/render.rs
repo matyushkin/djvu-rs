@@ -195,11 +195,100 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
     });
 }
 
+/// Benchmark 0.5× scaling with Bilinear vs Lanczos3 resampling on a color page.
+///
+/// Lanczos3 re-renders at native resolution first, so the difference reveals
+/// the cost of the two-pass separable kernel vs the built-in bilinear compositor.
+fn bench_render_scaled(c: &mut Criterion) {
+    let doc = match load_doc("boy.djvu") {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_render_scaled: boy.djvu not found");
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_render_scaled: failed to get page 0");
+            return;
+        }
+    };
+
+    let native_w = page.width() as u32;
+    let native_h = page.height() as u32;
+    let half_w = (native_w / 2).max(1);
+    let half_h = (native_h / 2).max(1);
+
+    let mut group = c.benchmark_group("render_scaled_0.5x");
+
+    let opts_bilinear = djvu_rs::djvu_render::RenderOptions {
+        width: half_w,
+        height: half_h,
+        scale: 0.5,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+    };
+    group.bench_function("bilinear", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts_bilinear));
+        });
+    });
+
+    let opts_lanczos = djvu_rs::djvu_render::RenderOptions {
+        width: half_w,
+        height: half_h,
+        scale: 0.5,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Lanczos3,
+    };
+    group.bench_function("lanczos3", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts_lanczos));
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark full DjVu→PDF export pipeline (render + DCTDecode JPEG compression).
+fn bench_pdf_export(c: &mut Criterion) {
+    let path = corpus_path().join("watchmaker.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_pdf_export: watchmaker.djvu not found in tests/corpus/");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_pdf_export: failed to parse watchmaker.djvu");
+            return;
+        }
+    };
+
+    c.bench_function("pdf_export_single_page", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_render_at_dpi,
     bench_render_coarse,
     bench_render_corpus_color,
-    bench_render_corpus_bilevel
+    bench_render_corpus_bilevel,
+    bench_render_scaled,
+    bench_pdf_export,
 );
 criterion_main!(benches);
