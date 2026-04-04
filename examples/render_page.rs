@@ -4,8 +4,12 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let input = args.next().expect("usage: render_page <input.djvu> <output.png>");
-    let output = args.next().expect("usage: render_page <input.djvu> <output.png>");
+    let input = args
+        .next()
+        .expect("usage: render_page <input.djvu> <output.png>");
+    let output = args
+        .next()
+        .expect("usage: render_page <input.djvu> <output.png>");
 
     let doc = djvu_rs::Document::open(&input)?;
     let page = doc.page(0)?;
