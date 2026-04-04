@@ -58,9 +58,13 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Cmd::Info { file } => cmd_info(&file),
-        Cmd::Render { file, page, all, dpi, output } => {
-            cmd_render(&file, page, all, dpi, &output)
-        }
+        Cmd::Render {
+            file,
+            page,
+            all,
+            dpi,
+            output,
+        } => cmd_render(&file, page, all, dpi, &output),
         Cmd::Text { file, page, all } => cmd_text(&file, page, all),
     }
 }
@@ -131,7 +135,12 @@ fn render_page(
     Ok(())
 }
 
-fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn write_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(path)?;
     let ref mut w = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, width, height);
@@ -176,8 +185,7 @@ fn open(path: &Path) -> Result<Document, Box<dyn std::error::Error>> {
         return Err(format!("{}: no such file", path.display()).into());
     }
     let data = std::fs::read(path)?;
-    let doc = Document::from_bytes(data)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let doc = Document::from_bytes(data).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(doc)
 }
 

@@ -18,7 +18,10 @@ fn corpus(name: &str) -> PathBuf {
 fn info_shows_page_count() {
     Command::cargo_bin("djvu")
         .unwrap()
-        .args(["info", corpus("pathogenic_bacteria_1896.djvu").to_str().unwrap()])
+        .args([
+            "info",
+            corpus("pathogenic_bacteria_1896.djvu").to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("520"));
@@ -72,8 +75,7 @@ fn info_multipage_doc_lists_pages() {
         .find_map(|l| {
             let l = l.to_lowercase();
             if l.contains("page") {
-                l.split_whitespace()
-                    .find_map(|w| w.parse().ok())
+                l.split_whitespace().find_map(|w| w.parse().ok())
             } else {
                 None
             }

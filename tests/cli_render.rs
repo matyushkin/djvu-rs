@@ -44,8 +44,10 @@ fn render_specific_page() {
         .args([
             "render",
             corpus("pathogenic_bacteria_1896.djvu").to_str().unwrap(),
-            "-p", "5",
-            "-o", out.to_str().unwrap(),
+            "-p",
+            "5",
+            "-o",
+            out.to_str().unwrap(),
         ])
         .assert()
         .success();
@@ -62,13 +64,27 @@ fn render_higher_dpi_produces_larger_image() {
 
     Command::cargo_bin("djvu")
         .unwrap()
-        .args(["render", file.to_str().unwrap(), "-d", "72", "-o", low.to_str().unwrap()])
+        .args([
+            "render",
+            file.to_str().unwrap(),
+            "-d",
+            "72",
+            "-o",
+            low.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
     Command::cargo_bin("djvu")
         .unwrap()
-        .args(["render", file.to_str().unwrap(), "-d", "300", "-o", high.to_str().unwrap()])
+        .args([
+            "render",
+            file.to_str().unwrap(),
+            "-d",
+            "300",
+            "-o",
+            high.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -91,7 +107,8 @@ fn render_all_pages_creates_multiple_files() {
             "render",
             corpus("conquete_paix.djvu").to_str().unwrap(),
             "--all",
-            "-o", dir.path().to_str().unwrap(),
+            "-o",
+            dir.path().to_str().unwrap(),
         ])
         .assert()
         .success();
@@ -116,7 +133,8 @@ fn render_output_dir_created_if_missing() {
         .args([
             "render",
             corpus("watchmaker.djvu").to_str().unwrap(),
-            "-o", out.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
         ])
         .assert()
         .success();
@@ -136,8 +154,10 @@ fn render_page_out_of_range_exits_nonzero() {
         .args([
             "render",
             corpus("watchmaker.djvu").to_str().unwrap(),
-            "-p", "999",
-            "-o", out.to_str().unwrap(),
+            "-p",
+            "999",
+            "-o",
+            out.to_str().unwrap(),
         ])
         .assert()
         .failure()

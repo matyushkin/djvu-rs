@@ -39,7 +39,10 @@ fn text_no_layer_exits_success_with_message() {
     // pathogenic_bacteria has no TXTz — should exit 0, not crash
     Command::cargo_bin("djvu")
         .unwrap()
-        .args(["text", corpus("pathogenic_bacteria_1896.djvu").to_str().unwrap()])
+        .args([
+            "text",
+            corpus("pathogenic_bacteria_1896.djvu").to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("No text layer"));
@@ -52,7 +55,8 @@ fn text_specific_page() {
         .args([
             "text",
             corpus("conquete_paix.djvu").to_str().unwrap(),
-            "-p", "1",
+            "-p",
+            "1",
         ])
         .assert()
         .success();
@@ -75,7 +79,10 @@ fn text_all_pages_outputs_multiple_sections() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Expect page markers like "--- Page N ---"
     let page_markers = stdout.lines().filter(|l| l.starts_with("--- Page")).count();
-    assert!(page_markers > 1, "expected multiple page sections, got {page_markers}");
+    assert!(
+        page_markers > 1,
+        "expected multiple page sections, got {page_markers}"
+    );
 }
 
 // --- error cases ---
@@ -97,7 +104,8 @@ fn text_page_out_of_range_exits_nonzero() {
         .args([
             "text",
             corpus("watchmaker.djvu").to_str().unwrap(),
-            "-p", "999",
+            "-p",
+            "999",
         ])
         .assert()
         .failure()
