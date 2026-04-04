@@ -12,6 +12,7 @@ they are US government works.
 | `watchmaker.djvu` | https://archive.org/details/Watchmaker2001 | Color IW44 | 1 | Single-page color DjVu, ~183 KB |
 | `cable_1973_100133.djvu` | https://archive.org/details/State-Dept-cable-1973-100133 | JB2 bilevel | 1 | US State Dept cable, US gov't work (PD), ~15 KB |
 | `conquete_paix.djvu` | https://archive.org/details/TriompheSagesseValeur | Mixed IW44+JB2 | multi | "La conquête de la paix" — pre-1928 French book (PD), ~1.7 MB |
+| `pathogenic_bacteria_1896.djvu` | https://archive.org/details/PathogenicBacteria | Mixed IW44+JB2 | 520 | "Pathogenic Bacteria" (1896) — medical textbook, text + microscopy photos (PD), ~25 MB |
 
 ## Public domain basis
 
@@ -19,6 +20,7 @@ they are US government works.
   are in the public domain under 17 U.S.C. § 105.
 - **Watchmaker (2001)**: Identified by Internet Archive as public domain.
   Confirm before redistribution.
+- **Pathogenic Bacteria (1896)**: Published 1896 (pre-1928 US); public domain.
 - **La conquête de la paix**: Published before 1928; public domain in the US.
   Original work published in France, also public domain there (author died > 70 years ago).
 
