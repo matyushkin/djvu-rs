@@ -33,7 +33,7 @@ use alloc::{
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
     bzz_new::bzz_decode,
-    error::{BzzError, IffError, Iw44Error},
+    error::{BzzError, IffError, Iw44Error, Jb2Error},
     iff::{IffChunk, parse_form},
     info::PageInfo,
     iw44_new::Iw44Image,
@@ -57,6 +57,10 @@ pub enum DocError {
     /// IW44 wavelet decoding error.
     #[error("IW44 error: {0}")]
     Iw44(#[from] Iw44Error),
+
+    /// JB2 bilevel image decoding error.
+    #[error("JB2 error: {0}")]
+    Jb2(#[from] Jb2Error),
 
     /// The file is not a supported DjVu format.
     #[error("not a DjVu file: found form type {0:?}")]
@@ -293,6 +297,58 @@ impl DjVuPage {
             None => Ok(Vec::new()),
             Some((_, mapareas)) => Ok(mapareas.into_iter().filter(|m| !m.url.is_empty()).collect()),
         }
+    }
+
+    /// Decode the JB2 foreground mask as a 1-bit [`Bitmap`](crate::bitmap::Bitmap).
+    ///
+    /// Returns `Ok(None)` if the page has no Sjbz (JB2 mask) chunk.
+    pub fn extract_mask(&self) -> Result<Option<crate::bitmap::Bitmap>, DocError> {
+        let sjbz = match self.find_chunk(b"Sjbz") {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let dict = match self.find_chunk(b"Djbz") {
+            Some(djbz) => Some(crate::jb2_new::decode_dict(djbz, None)?),
+            None => None,
+        };
+
+        let bm = crate::jb2_new::decode(sjbz, dict.as_ref())?;
+        Ok(Some(bm))
+    }
+
+    /// Decode the IW44 foreground layer (FG44 chunks) if present.
+    ///
+    /// Returns `Ok(None)` if the page has no FG44 chunks.
+    pub fn extract_foreground(&self) -> Result<Option<Pixmap>, DocError> {
+        let chunks = self.fg44_chunks();
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut img = Iw44Image::new();
+        for chunk_data in &chunks {
+            img.decode_chunk(chunk_data)?;
+        }
+        let pixmap = img.to_rgb()?;
+        Ok(Some(pixmap))
+    }
+
+    /// Decode the IW44 background layer (BG44 chunks) if present.
+    ///
+    /// Returns `Ok(None)` if the page has no BG44 chunks.
+    pub fn extract_background(&self) -> Result<Option<Pixmap>, DocError> {
+        let chunks = self.bg44_chunks();
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut img = Iw44Image::new();
+        for chunk_data in &chunks {
+            img.decode_chunk(chunk_data)?;
+        }
+        let pixmap = img.to_rgb()?;
+        Ok(Some(pixmap))
     }
 
     /// Render this page into a pre-allocated RGBA buffer using the given options.
