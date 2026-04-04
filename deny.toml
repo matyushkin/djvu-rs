@@ -7,6 +7,9 @@ ignore = []
 
 [licenses]
 version = 2
+# Only explicitly allowed licenses are accepted.
+# Anything not listed here (including GPL/LGPL/AGPL) will be rejected,
+# protecting the "no GPL code" guarantee stated in SOURCES.md.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -19,20 +22,6 @@ allow = [
     "CC0-1.0",
     "Zlib",
 ]
-# This crate is MIT. We explicitly disallow GPL/LGPL to protect the
-# "no GPL code" guarantee stated in SOURCES.md.
-[[licenses.deny]]
-id = "GPL-2.0"
-[[licenses.deny]]
-id = "GPL-3.0"
-[[licenses.deny]]
-id = "LGPL-2.0"
-[[licenses.deny]]
-id = "LGPL-2.1"
-[[licenses.deny]]
-id = "LGPL-3.0"
-[[licenses.deny]]
-id = "AGPL-3.0"
 
 [bans]
 multiple-versions = "warn"
