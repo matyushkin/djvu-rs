@@ -47,16 +47,15 @@ fn bzz_decode_antz_chunk() {
     // ANTz is inside a FORM:DJVU sub-form
     let mut found = false;
     for chunk in &form.chunks {
-        if &chunk.id == b"FORM" {
-            if let Ok(inner) = parse_form(chunk.data) {
-                if let Some(antz) = inner.chunks.iter().find(|c| &c.id == b"ANTz") {
-                    let decoded = bzz_new::bzz_decode(antz.data)
-                        .expect("ANTz chunk must decompress without error");
-                    assert!(!decoded.is_empty());
-                    found = true;
-                    break;
-                }
-            }
+        if &chunk.id == b"FORM"
+            && let Ok(inner) = parse_form(chunk.data)
+            && let Some(antz) = inner.chunks.iter().find(|c| &c.id == b"ANTz")
+        {
+            let decoded = bzz_new::bzz_decode(antz.data)
+                .expect("ANTz chunk must decompress without error");
+            assert!(!decoded.is_empty());
+            found = true;
+            break;
         }
     }
     if !found {

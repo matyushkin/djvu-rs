@@ -555,8 +555,9 @@ fn lookup_palette_color(
     px: u32,
     py: u32,
 ) -> PaletteColor {
-    if let Some(bm) = blit_map {
-        if let Some(m) = mask {
+    if let Some(bm) = blit_map
+        && let Some(m) = mask
+    {
             let mi = py as usize * m.width as usize + px as usize;
             if mi < bm.len() {
                 let blit_idx = bm[mi];
@@ -580,13 +581,13 @@ fn lookup_palette_color(
                 }
             }
         }
-    }
     // Fallback: first palette color or black
     pal.colors.first().copied().unwrap_or_default()
 }
 
 /// Bilinear composite loop — used when upscaling or at 1:1 (step ≤ 1 pixel).
 /// Single-pixel mask check per output pixel.
+#[allow(clippy::too_many_arguments)]
 fn composite_loop_bilinear(
     ctx: &CompositeContext<'_>,
     buf: &mut [u8],
@@ -642,6 +643,7 @@ fn composite_loop_bilinear(
 
 /// Area-averaging composite loop — used when downscaling (step > 1 pixel).
 /// Uses box filter for background sampling and checks a box of mask pixels.
+#[allow(clippy::too_many_arguments)]
 fn composite_loop_area_avg(
     ctx: &CompositeContext<'_>,
     buf: &mut [u8],

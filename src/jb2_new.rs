@@ -387,6 +387,7 @@ impl Baseline {
 // Blit a symbol onto the page (OR compositing, bottom-left origin)
 // ────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn blit_indexed(
     page: &mut [u8],
     blit_map: &mut [i32],

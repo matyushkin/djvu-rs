@@ -234,8 +234,7 @@ fn build_page_objects(
 
     // Resources dictionary
     let mut resources = format!("/XObject << /Im0 {img_id} 0 R");
-    if mask_img_id.is_some() {
-        let mid = mask_img_id.unwrap();
+    if let Some(mid) = mask_img_id {
         resources.push_str(&format!(" /Mask0 {mid} 0 R"));
     }
     resources.push_str(" >>");
@@ -572,12 +571,12 @@ fn count_outline_items(bookmarks: &[DjVuBookmark]) -> usize {
 fn resolve_bookmark_dest(url: &str, page_ids: &[usize]) -> String {
     if let Some(stripped) = url.strip_prefix('#') {
         // Try to parse as page number
-        if let Some(page_str) = stripped.strip_prefix("page") {
-            if let Ok(page_num) = page_str.trim_start_matches('_').parse::<usize>() {
-                let idx = page_num.saturating_sub(1);
-                if let Some(&pid) = page_ids.get(idx) {
-                    return format!(" /Dest [{pid} 0 R /Fit]");
-                }
+        if let Some(page_str) = stripped.strip_prefix("page")
+            && let Ok(page_num) = page_str.trim_start_matches('_').parse::<usize>()
+        {
+            let idx = page_num.saturating_sub(1);
+            if let Some(&pid) = page_ids.get(idx) {
+                return format!(" /Dest [{pid} 0 R /Fit]");
             }
         }
         // Try +N / -N (relative, but treat as absolute from 1)
