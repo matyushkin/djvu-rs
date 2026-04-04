@@ -46,6 +46,23 @@ Corpus files: `tests/corpus/`
 
 ---
 
+## Comparison with DjVuLibre 3.5.29
+
+Tool: `ddjvu -format=ppm -page=1` (CLI utility, process-per-call)
+Method: `hyperfine --warmup 3 --runs 10`
+Platform: same machine (Apple M-series, macOS 15)
+
+| File | djvu-rs render | ddjvu CLI | Ratio |
+|------|---------------|-----------|-------|
+| watchmaker.djvu (color IW44) | **3.1 ms** | 145.2 ms | ~47× faster |
+| cable_1973_100133.djvu (bilevel JB2) | **3.1 ms** | 103.0 ms | ~33× faster |
+
+**Caveat:** `ddjvu` is a subprocess — timings include fork/exec overhead (~50–80 ms on macOS) and PPM file write. The comparison reflects real-world CLI usage, not pure decode time. A library-level comparison via `libdjvulibre` C API would be more apples-to-apples for the decode kernel itself.
+
+Even so, djvu-rs embedded in a Rust application avoids all subprocess overhead entirely.
+
+---
+
 ## Notes
 
 - `bzz_decode` is slow (82 ms) because the NAVM chunk in navm_fgbz.djvu is large (~6 KB compressed). BZZ is an inherently sequential algorithm (BWT inverse requires a full-block sort).
