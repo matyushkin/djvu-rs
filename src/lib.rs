@@ -189,20 +189,16 @@ pub use document::{Bookmark, TextLayer, TextZone, TextZoneKind};
 pub use error::LegacyError as Error;
 
 #[cfg(feature = "std")]
-use self_cell::self_cell;
+use ouroboros::self_referencing;
 
 #[cfg(feature = "std")]
-type ParsedDocument<'a> = document::Document<'a>;
-
-#[cfg(feature = "std")]
-self_cell!(
-    struct DocumentInner {
-        owner: Box<[u8]>,
-
-        #[covariant]
-        dependent: ParsedDocument,
-    }
-);
+#[self_referencing]
+struct DocumentInner {
+    data: Box<[u8]>,
+    #[borrows(data)]
+    #[covariant]
+    doc: document::Document<'this>,
+}
 
 /// A parsed DjVu document. Owns its data and the parsed structure.
 #[cfg(feature = "std")]
@@ -234,25 +230,27 @@ impl Document {
 
     /// Parse a DjVu document from owned bytes.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, Error> {
-        let inner = DocumentInner::try_new(data.into_boxed_slice(), |bytes| {
-            document::Document::parse(bytes)
-        })?;
+        let inner = DocumentInnerTryBuilder {
+            data: data.into_boxed_slice(),
+            doc_builder: |bytes| document::Document::parse(bytes),
+        }
+        .try_build()?;
         Ok(Document { inner })
     }
 
     /// Parse the NAVM bookmarks (table of contents).
     pub fn bookmarks(&self) -> Result<Vec<Bookmark>, Error> {
-        self.inner.borrow_dependent().bookmarks()
+        self.inner.borrow_doc().bookmarks()
     }
 
     /// Number of pages.
     pub fn page_count(&self) -> usize {
-        self.inner.borrow_dependent().page_count()
+        self.inner.borrow_doc().page_count()
     }
 
     /// Access a page by 0-based index.
     pub fn page(&self, index: usize) -> Result<Page<'_>, Error> {
-        let inner = self.inner.borrow_dependent().page(index)?;
+        let inner = self.inner.borrow_doc().page(index)?;
         Ok(Page {
             width: inner.info.width,
             height: inner.info.height,
@@ -320,19 +318,19 @@ impl<'a> Page<'a> {
 
     /// Render the page to an RGBA pixmap at native resolution.
     pub fn render(&self) -> Result<Pixmap, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render(&page)
     }
 
     /// Render the page to an RGBA pixmap at a target size.
     pub fn render_to_size(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size(&page, width, height)
     }
 
     /// Render the page at native resolution with mask dilation for bolder text.
     pub fn render_bold(&self, dilate_passes: u32) -> Result<Pixmap, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size_bold(
             &page,
             page.info.width as u32,
@@ -348,24 +346,24 @@ impl<'a> Page<'a> {
         height: u32,
         dilate_passes: u32,
     ) -> Result<Pixmap, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size_bold(&page, width, height, dilate_passes)
     }
 
     /// Render the page at a target size with anti-aliased downscaling.
     pub fn render_aa(&self, width: u32, height: u32, boldness: f32) -> Result<Pixmap, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_aa(&page, width, height, boldness)
     }
 
     /// Decode the page thumbnail, if available.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
-        self.doc.inner.borrow_dependent().thumbnail(self.index)
+        self.doc.inner.borrow_doc().thumbnail(self.index)
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, Error> {
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         page.text_layer()
     }
 
@@ -384,7 +382,7 @@ impl<'a> Page<'a> {
             document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
             _ => (w, h),
         };
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size_coarse(&page, tw, th)
     }
 
@@ -398,7 +396,7 @@ impl<'a> Page<'a> {
             document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
             _ => (w, h),
         };
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size_progressive(&page, tw, th)
     }
 
@@ -412,7 +410,7 @@ impl<'a> Page<'a> {
             document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
             _ => (w, h),
         };
-        let page = self.doc.inner.borrow_dependent().page(self.index)?;
+        let page = self.doc.inner.borrow_doc().page(self.index)?;
         render::render_to_size(&page, tw, th)
     }
 }
