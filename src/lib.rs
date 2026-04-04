@@ -188,7 +188,7 @@ pub mod zp;
 
 // Re-export types needed by both legacy and new phase modules
 pub use bitmap::Bitmap;
-pub use pixmap::Pixmap;
+pub use pixmap::{GrayPixmap, Pixmap};
 
 // Re-export legacy types (only with std feature)
 #[cfg(feature = "std")]
