@@ -511,54 +511,42 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     let fy_step = ((page_h as u64 * FRAC as u64) / h.max(1) as u64) as u32;
 
     for oy in 0..h {
+        let fy = oy * fy_step;
+        let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
+        let row_base = oy as usize * w as usize;
+
         for ox in 0..w {
             let fx = ox * fx_step;
-            let fy = oy * fy_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
-            let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
 
-            // Default: white background
-            let (mut r, mut g, mut b) = (255u8, 255u8, 255u8);
-
-            // Layer 1: IW44 background
-            if let Some(bg) = ctx.bg {
-                let (br, bg_c, bb) = sample_bilinear(bg, fx, fy);
-                r = br;
-                g = bg_c;
-                b = bb;
-            }
-
-            // Layer 2 + 3: JB2 mask + FGbz palette / FG44
+            // Check mask first to avoid unnecessary background sampling
             let is_fg = ctx
                 .mask
                 .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
 
-            if is_fg {
+            let (r, g, b) = if is_fg {
                 // Foreground pixel: use FGbz palette or FG44 color
                 if let Some(pal) = ctx.fg_palette {
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
-                    r = color.r;
-                    g = color.g;
-                    b = color.b;
+                    (color.r, color.g, color.b)
                 } else if let Some(fg) = ctx.fg44 {
-                    let (fr, fg_c, fb) = sample_bilinear(fg, fx, fy);
-                    r = fr;
-                    g = fg_c;
-                    b = fb;
+                    sample_bilinear(fg, fx, fy)
                 } else {
-                    // No foreground info: render as black
-                    r = 0;
-                    g = 0;
-                    b = 0;
+                    (0, 0, 0)
                 }
-            }
+            } else if let Some(bg) = ctx.bg {
+                // Background pixel: sample IW44
+                sample_bilinear(bg, fx, fy)
+            } else {
+                (255, 255, 255)
+            };
 
             // Apply gamma correction
-            r = ctx.gamma_lut[r as usize];
-            g = ctx.gamma_lut[g as usize];
-            b = ctx.gamma_lut[b as usize];
+            let r = ctx.gamma_lut[r as usize];
+            let g = ctx.gamma_lut[g as usize];
+            let b = ctx.gamma_lut[b as usize];
 
-            let base = (oy as usize * w as usize + ox as usize) * 4;
+            let base = (row_base + ox as usize) * 4;
             if let Some(pixel) = buf.get_mut(base..base + 4) {
                 pixel[0] = r;
                 pixel[1] = g;
