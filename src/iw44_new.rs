@@ -653,6 +653,7 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
 /// ```no_run
 /// use djvu_rs::iw44_new::Iw44Image;
 ///
+/// let chunk_data: &[u8] = &[]; // BG44 chunk bytes from the DjVu file
 /// let mut img = Iw44Image::new();
 /// // Feed each BG44 chunk in document order:
 /// img.decode_chunk(chunk_data)?;
