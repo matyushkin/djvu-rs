@@ -387,6 +387,49 @@ impl Baseline {
 // Blit a symbol onto the page (OR compositing, bottom-left origin)
 // ────────────────────────────────────────────────────────────────────────────
 
+fn blit_indexed(
+    page: &mut [u8],
+    blit_map: &mut [i32],
+    page_w: i32,
+    page_h: i32,
+    symbol: &Jbm,
+    x: i32,
+    y: i32,
+    blit_idx: i32,
+) {
+    if x >= 0 && y >= 0 && x + symbol.width <= page_w && y + symbol.height <= page_h {
+        let pw = page_w as usize;
+        let sw = symbol.width as usize;
+        for row in 0..symbol.height as usize {
+            let src_off = row * sw;
+            let dst_off = (y as usize + row) * pw + x as usize;
+            for col in 0..sw {
+                if symbol.data[src_off + col] != 0 {
+                    page[dst_off + col] = 1;
+                    blit_map[dst_off + col] = blit_idx;
+                }
+            }
+        }
+    } else {
+        for row in 0..symbol.height {
+            let py = y + row;
+            if py < 0 || py >= page_h {
+                continue;
+            }
+            for col in 0..symbol.width {
+                if symbol.get(row, col) != 0 {
+                    let px = x + col;
+                    if px >= 0 && px < page_w {
+                        let idx = (py * page_w + px) as usize;
+                        page[idx] = 1;
+                        blit_map[idx] = blit_idx;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32) {
     // Fast path: symbol completely within page bounds
     if x >= 0 && y >= 0 && x + symbol.width <= page_w && y + symbol.height <= page_h {
@@ -463,6 +506,18 @@ fn page_to_bitmap(page: &[u8], width: i32, height: i32) -> Bitmap {
     bm
 }
 
+/// Flip blit_map vertically to match bitmap coordinate system (bottom→top).
+fn flip_blit_map(blit_map: &mut [i32], width: usize, height: usize) {
+    for row in 0..height / 2 {
+        let mirror = height - 1 - row;
+        let a = row * width;
+        let b = mirror * width;
+        for col in 0..width {
+            blit_map.swap(a + col, b + col);
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Symbol coordinate decoding
 // ────────────────────────────────────────────────────────────────────────────
@@ -526,6 +581,19 @@ pub struct Jb2Dict {
 /// Returns [`Jb2Error`] on malformed input, missing dictionary, or oversized image.
 pub fn decode(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb2Error> {
     decode_image(data, shared_dict)
+}
+
+/// Decode a JB2 image stream with per-pixel blit index tracking.
+///
+/// Returns the bitmap and a blit map (`Vec<i32>`) of the same pixel dimensions.
+/// `blit_map[y * width + x]` holds the blit record index for each foreground
+/// pixel, or `-1` for background. This is used by the FGbz palette to assign
+/// per-glyph colors.
+pub fn decode_indexed(
+    data: &[u8],
+    shared_dict: Option<&Jb2Dict>,
+) -> Result<(Bitmap, Vec<i32>), Jb2Error> {
+    decode_image_indexed(data, shared_dict)
 }
 
 /// Decode a JB2 dictionary stream (Djbz chunk data) into a [`Jb2Dict`].
@@ -844,6 +912,196 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
     }
 
     Ok(page_to_bitmap(&page, image_width, image_height))
+}
+
+/// Same as `decode_image` but tracks per-pixel blit indices.
+fn decode_image_indexed(
+    data: &[u8],
+    shared_dict: Option<&Jb2Dict>,
+) -> Result<(Bitmap, Vec<i32>), Jb2Error> {
+    let mut zp = ZpDecoder::new(data).map_err(|_| Jb2Error::ZpInitFailed)?;
+
+    let mut record_type_ctx = NumContext::new();
+    let mut image_size_ctx = NumContext::new();
+    let mut symbol_width_ctx = NumContext::new();
+    let mut symbol_height_ctx = NumContext::new();
+    let mut inherit_dict_size_ctx = NumContext::new();
+    let mut hoff_ctx = NumContext::new();
+    let mut voff_ctx = NumContext::new();
+    let mut shoff_ctx = NumContext::new();
+    let mut svoff_ctx = NumContext::new();
+    let mut symbol_index_ctx = NumContext::new();
+    let mut symbol_width_diff_ctx = NumContext::new();
+    let mut symbol_height_diff_ctx = NumContext::new();
+    let mut horiz_abs_loc_ctx = NumContext::new();
+    let mut vert_abs_loc_ctx = NumContext::new();
+    let mut comment_length_ctx = NumContext::new();
+    let mut comment_octet_ctx = NumContext::new();
+
+    let mut offset_type_ctx: u8 = 0;
+    let mut direct_bitmap_ctx = vec![0u8; 1024];
+    let mut refinement_bitmap_ctx = vec![0u8; 2048];
+
+    let mut rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
+    let mut initial_dict_length: usize = 0;
+    if rtype == 9 {
+        initial_dict_length = decode_num(&mut zp, &mut inherit_dict_size_ctx, 0, 262142) as usize;
+        rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
+    }
+    let _ = rtype;
+
+    let image_width = {
+        let w = decode_num(&mut zp, &mut image_size_ctx, 0, 262142);
+        if w == 0 { 200 } else { w }
+    };
+    let image_height = {
+        let h = decode_num(&mut zp, &mut image_size_ctx, 0, 262142);
+        if h == 0 { 200 } else { h }
+    };
+
+    let mut flag_ctx: u8 = 0;
+    if zp.decode_bit(&mut flag_ctx) {
+        return Err(Jb2Error::BadHeaderFlag);
+    }
+
+    let mut dict: Vec<Jbm> = Vec::new();
+    if initial_dict_length > 0 {
+        match shared_dict {
+            Some(sd) => {
+                if initial_dict_length > sd.symbols.len() {
+                    return Err(Jb2Error::InheritedDictTooLarge);
+                }
+                dict.extend_from_slice(&sd.symbols[..initial_dict_length]);
+            }
+            None => return Err(Jb2Error::MissingSharedDict),
+        }
+    }
+
+    const MAX_PIXELS: usize = 64 * 1024 * 1024;
+    let page_size = (image_width as usize).saturating_mul(image_height as usize);
+    if page_size > MAX_PIXELS {
+        return Err(Jb2Error::ImageTooLarge);
+    }
+    let mut page = vec![0u8; page_size];
+    let mut blit_map = vec![-1i32; page_size];
+
+    let mut first_left: i32 = -1;
+    let mut first_bottom: i32 = image_height - 1;
+    let mut last_right: i32 = 0;
+    let mut baseline = Baseline::new();
+    let mut blit_count: i32 = 0;
+
+    loop {
+        let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
+
+        match rtype {
+            1 => {
+                let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
+                let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
+                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
+                    &mut last_right, &mut baseline, bm.width, bm.height,
+                );
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, x, y, blit_count);
+                blit_count += 1;
+                dict.push(bm.crop_to_content());
+            }
+            2 => {
+                let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
+                let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                dict.push(bm.crop_to_content());
+            }
+            3 => {
+                let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
+                let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
+                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
+                    &mut last_right, &mut baseline, bm.width, bm.height,
+                );
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, x, y, blit_count);
+                blit_count += 1;
+            }
+            4 => {
+                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
+                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
+                let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
+                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
+                    &mut last_right, &mut baseline, cbm.width, cbm.height,
+                );
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &cbm, x, y, blit_count);
+                blit_count += 1;
+                dict.push(cbm.crop_to_content());
+            }
+            5 => {
+                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
+                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
+                let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
+                dict.push(cbm.crop_to_content());
+            }
+            6 => {
+                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
+                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
+                let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm = decode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, dict[index].width + wdiff, dict[index].height + hdiff, &dict[index]);
+                let (x, y) = decode_symbol_coords(
+                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
+                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
+                    &mut last_right, &mut baseline, cbm.width, cbm.height,
+                );
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &cbm, x, y, blit_count);
+                blit_count += 1;
+            }
+            7 => {
+                if dict.is_empty() { return Err(Jb2Error::EmptyDictReference); }
+                let index = decode_num(&mut zp, &mut symbol_index_ctx, 0, dict.len() as i32 - 1) as usize;
+                if index >= dict.len() { return Err(Jb2Error::InvalidSymbolIndex); }
+                let (x, y) = decode_symbol_coords(
+                    &mut zp, &mut offset_type_ctx, &mut hoff_ctx, &mut voff_ctx,
+                    &mut shoff_ctx, &mut svoff_ctx, &mut first_left, &mut first_bottom,
+                    &mut last_right, &mut baseline, dict[index].width, dict[index].height,
+                );
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &dict[index], x, y, blit_count);
+                blit_count += 1;
+            }
+            8 => {
+                let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
+                let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
+                let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
+                blit_indexed(&mut page, &mut blit_map, image_width, image_height, &bm, left - 1, top - h, blit_count);
+                blit_count += 1;
+            }
+            9 => {}
+            10 => {
+                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142);
+                for _ in 0..length {
+                    decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
+                }
+            }
+            11 => break,
+            _ => return Err(Jb2Error::UnknownRecordType),
+        }
+    }
+
+    let bm = page_to_bitmap(&page, image_width, image_height);
+    flip_blit_map(&mut blit_map, image_width as usize, image_height as usize);
+    Ok((bm, blit_map))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
