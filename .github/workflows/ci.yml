@@ -102,14 +102,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo-audit binary
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-0.21
-
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.21 --locked
+        uses: taiki-e/install-action@cargo-audit
 
       - name: Audit dependencies
         run: cargo audit
