@@ -108,6 +108,75 @@ impl Bitmap {
         }
         out
     }
+
+    /// Perform `passes` rounds of 4-connected morphological dilation using
+    /// packed bitwise operations and two pre-allocated ping-pong buffers.
+    /// Zero allocations after the initial setup; much faster than calling
+    /// `dilate()` N times for passes > 1.
+    ///
+    /// Pixel layout (MSB-first): bit 7 of each byte = leftmost pixel in that
+    /// group of 8. Horizontal dilation uses `byte >> 1` (right) and
+    /// `byte << 1` (left) with cross-byte carries; vertical dilation ORs
+    /// each row into its neighbours.
+    pub fn dilate_n(self, passes: u32) -> Self {
+        if passes == 0 {
+            return self;
+        }
+        let width = self.width;
+        let height = self.height;
+        let stride = self.row_stride();
+        let h = height as usize;
+
+        let mut src = self.data;
+        let mut dst = vec![0u8; stride * h];
+
+        for _ in 0..passes {
+            for b in dst.iter_mut() {
+                *b = 0;
+            }
+
+            for y in 0..h {
+                let row = y * stride;
+
+                for i in 0..stride {
+                    let v = src[row + i];
+                    if v == 0 {
+                        continue;
+                    }
+
+                    dst[row + i] |= v; // original
+                    dst[row + i] |= v >> 1; // right neighbours (x+1) within byte
+                    dst[row + i] |= v << 1; // left neighbours (x-1) within byte
+
+                    // Carry: rightmost pixel of byte i → leftmost of byte i+1
+                    if i + 1 < stride {
+                        dst[row + i + 1] |= (v & 0x01) << 7;
+                    }
+                    // Carry: leftmost pixel of byte i → rightmost of byte i-1
+                    if i > 0 {
+                        dst[row + i - 1] |= (v & 0x80) >> 7;
+                    }
+
+                    // Vertical: down (y+1)
+                    if y + 1 < h {
+                        dst[(y + 1) * stride + i] |= v;
+                    }
+                    // Vertical: up (y-1)
+                    if y > 0 {
+                        dst[(y - 1) * stride + i] |= v;
+                    }
+                }
+            }
+
+            core::mem::swap(&mut src, &mut dst);
+        }
+
+        Bitmap {
+            width,
+            height,
+            data: src,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +264,90 @@ mod tests {
         assert_eq!(&pbm[..hdr.len()], hdr);
         // Bits: 1 0 1 00000 = 0b10100000 = 0xA0
         assert_eq!(pbm[hdr.len()], 0xA0);
+    }
+
+    // ── dilate_n tests ───────────────────────────────────────────────────────
+
+    /// Helper: collect all set pixels as (x,y) pairs, sorted.
+    fn set_pixels(bm: &Bitmap) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for y in 0..bm.height {
+            for x in 0..bm.width {
+                if bm.get(x, y) {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn dilate_n_zero_passes_is_identity() {
+        let mut bm = Bitmap::new(8, 8);
+        bm.set(3, 3, true);
+        let orig = set_pixels(&bm);
+        let result = set_pixels(&bm.clone().dilate_n(0));
+        assert_eq!(orig, result);
+    }
+
+    #[test]
+    fn dilate_n_one_pass_matches_dilate() {
+        let mut bm = Bitmap::new(16, 16);
+        bm.set(7, 7, true);
+        bm.set(0, 0, true);
+        bm.set(15, 15, true);
+        let expected = set_pixels(&bm.dilate());
+        let got = set_pixels(&bm.clone().dilate_n(1));
+        assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn dilate_n_two_passes_matches_dilate_twice() {
+        let mut bm = Bitmap::new(20, 20);
+        bm.set(10, 10, true);
+        bm.set(1, 1, true);
+        let expected = set_pixels(&bm.dilate().dilate());
+        let got = set_pixels(&bm.clone().dilate_n(2));
+        assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn dilate_n_three_passes_matches_dilate_three_times() {
+        let mut bm = Bitmap::new(20, 20);
+        bm.set(10, 10, true);
+        let expected = set_pixels(&bm.dilate().dilate().dilate());
+        let got = set_pixels(&bm.clone().dilate_n(3));
+        assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn dilate_n_cross_byte_boundary() {
+        // Pixel at position 7 (last in first byte) — its x+1 neighbour is pixel 8
+        let mut bm = Bitmap::new(16, 1);
+        bm.set(7, 0, true);
+        let result = bm.clone().dilate_n(1);
+        assert!(result.get(6, 0), "x-1 neighbour");
+        assert!(result.get(7, 0), "original");
+        assert!(result.get(8, 0), "x+1 neighbour (cross-byte)");
+        // Pixel at position 8 (first in second byte) — its x-1 neighbour is pixel 7
+        let mut bm2 = Bitmap::new(16, 1);
+        bm2.set(8, 0, true);
+        let result2 = bm2.clone().dilate_n(1);
+        assert!(result2.get(7, 0), "x-1 neighbour (cross-byte)");
+        assert!(result2.get(8, 0), "original");
+        assert!(result2.get(9, 0), "x+1 neighbour");
+    }
+
+    #[test]
+    fn dilate_n_boundary_pixels_dont_wrap() {
+        // Top-left corner pixel — should only expand right and down
+        let mut bm = Bitmap::new(16, 16);
+        bm.set(0, 0, true);
+        let result = bm.dilate_n(1);
+        assert!(result.get(0, 0));
+        assert!(result.get(1, 0));
+        assert!(result.get(0, 1));
+        // Nothing in last row/col from this pixel
+        assert!(!result.get(15, 15));
     }
 }

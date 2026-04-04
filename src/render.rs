@@ -188,11 +188,7 @@ fn composite_page(page: &Page, w: u32, h: u32, dilate_passes: u32) -> Result<Pix
 }
 
 fn dilate_mask(mask: Bitmap, passes: u32) -> Bitmap {
-    let mut m = mask;
-    for _ in 0..passes {
-        m = m.dilate();
-    }
-    m
+    mask.dilate_n(passes)
 }
 
 /// Dilate the mask bitmap and propagate blit indices to newly-set pixels.
