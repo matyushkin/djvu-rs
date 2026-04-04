@@ -37,6 +37,7 @@ use crate::{
     iff::{IffChunk, parse_form},
     info::PageInfo,
     iw44_new::Iw44Image,
+    metadata::{DjVuMetadata, MetadataError},
     pixmap::Pixmap,
     text::{TextError, TextLayer},
 };
@@ -102,6 +103,10 @@ pub enum DocError {
     /// Annotation parse error.
     #[error("annotation error: {0}")]
     Annotation(#[from] AnnotationError),
+
+    /// Metadata parse error.
+    #[error("metadata error: {0}")]
+    Metadata(#[from] MetadataError),
 }
 
 // ---- Bookmark ---------------------------------------------------------------
@@ -589,6 +594,26 @@ impl DjVuDocument {
     /// The NAVM table of contents, or an empty slice if not present.
     pub fn bookmarks(&self) -> &[DjVuBookmark] {
         &self.bookmarks
+    }
+
+    /// Parse document-level metadata from a METz (BZZ-compressed) or METa
+    /// (plain text) chunk.
+    ///
+    /// Returns `Ok(None)` if no METa/METz chunk is present.
+    pub fn metadata(&self) -> Result<Option<DjVuMetadata>, DocError> {
+        if let Some(metz) = self.raw_chunk(b"METz") {
+            if metz.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(crate::metadata::parse_metadata_bzz(metz)?));
+        }
+        if let Some(meta) = self.raw_chunk(b"METa") {
+            if meta.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(crate::metadata::parse_metadata(meta)?));
+        }
+        Ok(None)
     }
 
     /// Return the raw bytes of the first document-level chunk with the given
