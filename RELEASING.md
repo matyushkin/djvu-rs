@@ -1,34 +1,43 @@
 # Releasing djvu-rs
 
-One tag → two things happen automatically:
-- crates.io publish (`cargo publish`)
-- GitHub Release created with notes from `CHANGELOG.md`
+Releases are automated via [release-please](https://github.com/googleapis/release-please).
+You do **not** need to manually edit `CHANGELOG.md`, bump `Cargo.toml`, or create tags.
 
-## Checklist
+## How it works
 
-```
-[ ] 1. Update CHANGELOG.md
-       - Replace `## [Unreleased]` with `## [X.Y.Z] — YYYY-MM-DD`
-       - Add a new empty `## [Unreleased]` section above it
-       - Update the comparison links at the bottom
+1. **Merge PRs to `master`** — use [Conventional Commits](#conventional-commits) in every commit
+   message so release-please can determine the correct version bump.
 
-[ ] 2. Bump version in Cargo.toml
-       version = "X.Y.Z"
+2. **release-please opens a Release PR automatically** — after each push to `master` it creates
+   (or updates) a PR titled `chore(main): release X.Y.Z` containing:
+   - `Cargo.toml` version bump
+   - `CHANGELOG.md` update (new section with all changes since last release)
 
-[ ] 3. Commit
-       git add Cargo.toml CHANGELOG.md
-       git commit -m "chore: release vX.Y.Z"
+3. **Merge the Release PR when ready** — this is the only manual step. release-please then:
+   - Creates the `vX.Y.Z` git tag
+   - Creates a GitHub Release with the changelog notes
 
-[ ] 4. Tag and push
-       git tag vX.Y.Z
-       git push origin master --tags
+4. **CI publishes to crates.io** — `.github/workflows/publish.yml` triggers on the new tag,
+   runs tests, and runs `cargo publish`.
 
-[ ] 5. CI does the rest
-       - Verifies Cargo.toml version matches the tag
-       - Runs tests
-       - cargo publish → crates.io
-       - gh release create → GitHub Release (notes from CHANGELOG)
-```
+## Conventional Commits
+
+Every commit message must start with a type prefix. release-please reads these to decide
+the version bump:
+
+| Commit prefix | Version bump | Example |
+|---------------|-------------|---------|
+| `fix:` | patch | `fix: clamp overflow in IW44 normalize` |
+| `perf:` | patch | `perf(iw44): SIMD YCbCr→RGB` |
+| `docs:` | patch | `docs: add Rotation variants` |
+| `chore:` | none | `chore: update CI cache` |
+| `feat:` | minor | `feat: async render API` |
+| `feat!:` or `BREAKING CHANGE:` in footer | major | `feat!: remove deprecated render_to_size` |
+
+**While version is `0.x`:** `feat!` bumps minor (not major) — configured via
+`bump-minor-pre-major: true` in `release-please-config.json`.
+
+Full spec: [conventionalcommits.org](https://www.conventionalcommits.org/en/v1.0.0/)
 
 ## Version policy
 
@@ -36,8 +45,24 @@ Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 
 | Change | Version bump |
 |--------|-------------|
-| Breaking API change | MAJOR (X) |
-| New public API, no breakage | MINOR (Y) |
-| Bug fix, docs, perf, internal refactor | PATCH (Z) |
+| Breaking public API change | MAJOR (`feat!` / `BREAKING CHANGE`) |
+| New public API, backward-compatible | MINOR (`feat`) |
+| Bug fix, performance, docs, internal | PATCH (`fix`, `perf`, `docs`, `refactor`) |
 
-While version is `0.x`, minor bumps may include breaking changes.
+While version is `0.x`, minor bumps may include breaking changes per SemVer §4.
+
+## Emergency / manual release
+
+If you need to release outside the normal flow:
+
+```sh
+# 1. Edit Cargo.toml and CHANGELOG.md manually
+git add Cargo.toml CHANGELOG.md
+git commit -m "chore: release vX.Y.Z"
+
+# 2. Tag and push
+git tag vX.Y.Z
+git push origin master --tags
+```
+
+CI will pick up the tag and publish to crates.io as usual.
