@@ -134,6 +134,10 @@ pub enum Jb2Error {
     /// The ZP arithmetic coder could not be initialized (insufficient input).
     #[error("JB2: insufficient data to initialize ZP coder")]
     ZpInitFailed,
+
+    /// Stream contains more records than the safety limit allows.
+    #[error("JB2: record count exceeds safety limit")]
+    TooManyRecords,
 }
 
 /// IW44 wavelet image decoding errors.

@@ -247,6 +247,7 @@ impl Jbm {
 /// Decodes top-to-bottom using an incremental rolling window that avoids
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // 4 MP per symbol — prevents DoS via huge bitmaps
+const MAX_RECORDS: usize = 1 << 20; // 1 M records per stream — terminates ZP-coder loops on exhausted input
 
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
@@ -711,8 +712,13 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
     let mut last_right: i32 = 0;
     let mut baseline = Baseline::new();
 
-    // Main decode loop
+    // Main decode loop — capped to prevent infinite spin when ZP input is exhausted
+    let mut record_count = 0usize;
     loop {
+        if record_count >= MAX_RECORDS {
+            return Err(Jb2Error::TooManyRecords);
+        }
+        record_count += 1;
         let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
 
         match rtype {
@@ -1010,7 +1016,12 @@ fn decode_image_indexed(
     let mut baseline = Baseline::new();
     let mut blit_count: i32 = 0;
 
+    let mut record_count = 0usize;
     loop {
+        if record_count >= MAX_RECORDS {
+            return Err(Jb2Error::TooManyRecords);
+        }
+        record_count += 1;
         let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
 
         match rtype {
@@ -1314,7 +1325,12 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
     }
 
     // Dict streams only accept types 2, 5, 9, 10, 11
+    let mut record_count = 0usize;
     loop {
+        if record_count >= MAX_RECORDS {
+            return Err(Jb2Error::TooManyRecords);
+        }
+        record_count += 1;
         let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
 
         match rtype {
