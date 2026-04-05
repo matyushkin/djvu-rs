@@ -55,6 +55,7 @@ pub enum MetadataError {
 /// [`DjVuMetadata::extra`].  All values are plain strings — the DjVu format
 /// does not define structured types beyond that.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DjVuMetadata {
     /// Document title.
     pub title: Option<String>,
