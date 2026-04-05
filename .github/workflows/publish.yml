@@ -2,7 +2,7 @@ name: Publish to crates.io
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'djvu-rs-v*']
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +24,8 @@ jobs:
       - name: Verify version matches tag
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME#djvu-rs-v}"
+          TAG="${TAG#v}"
           if [ "$VERSION" != "$TAG" ]; then
             echo "::error::Cargo.toml version ($VERSION) does not match tag (v$TAG)"
             exit 1
