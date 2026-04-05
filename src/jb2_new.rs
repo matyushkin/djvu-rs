@@ -445,6 +445,11 @@ fn blit_indexed(
     y: i32,
     blit_idx: i32,
 ) {
+    // Guard: negative/zero dimensions would wrap `width as usize` to a huge value
+    // in the fast-path loop, causing an effectively infinite iteration count.
+    if symbol.width <= 0 || symbol.height <= 0 {
+        return;
+    }
     if x >= 0 && y >= 0 && x + symbol.width <= page_w && y + symbol.height <= page_h {
         let pw = page_w as usize;
         let sw = symbol.width as usize;
@@ -479,6 +484,11 @@ fn blit_indexed(
 }
 
 fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32) {
+    // Guard: negative/zero dimensions would wrap `width as usize` to a huge value
+    // in the fast-path loop, causing an effectively infinite iteration count.
+    if symbol.width <= 0 || symbol.height <= 0 {
+        return;
+    }
     // Fast path: symbol completely within page bounds.
     // Use checked_add to guard against i32 overflow in the bounds test.
     let fits = x >= 0
@@ -1716,5 +1726,15 @@ mod tests {
     fn test_decode_indexed_empty() {
         let result = decode_indexed(&[], None);
         assert!(result.is_err());
+    }
+
+    /// Regression test: negative symbol dimensions caused `width as usize` to
+    /// wrap to a huge value in the blit fast path, producing a near-infinite
+    /// inner loop and effectively hanging the decoder.
+    #[test]
+    fn blit_negative_width_does_not_hang() {
+        let start = std::time::Instant::now();
+        let _ = decode(&[0x7e, 0x00, 0x0c], None);
+        assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
     }
 }
