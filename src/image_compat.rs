@@ -1,12 +1,14 @@
 //! `image::ImageDecoder` integration for DjVu pages.
 //!
 //! This module provides [`DjVuDecoder`], which implements the
-//! [`image::ImageDecoder`] trait from the `image` crate, making djvu-rs a
-//! first-class image format usable anywhere image-rs pipelines are used.
+//! [`image::ImageDecoder`] and [`image::ImageDecoderRect`] traits from the
+//! `image` crate, making djvu-rs a first-class image format usable anywhere
+//! image-rs pipelines are used.
 //!
 //! ## Key public types
 //!
-//! - [`DjVuDecoder`] — implements `image::ImageDecoder` for a single DjVu page
+//! - [`DjVuDecoder`] — implements `image::ImageDecoder` and `image::ImageDecoderRect`
+//!   for a single DjVu page
 //! - [`ImageCompatError`] — typed errors from this module
 //!
 //! ## Usage
@@ -28,7 +30,7 @@
 use std::io::Cursor;
 
 use image::{
-    ColorType, ImageDecoder, ImageResult,
+    ColorType, ImageDecoder, ImageDecoderRect, ImageResult,
     error::{DecodingError, ImageError, ImageFormatHint},
 };
 
@@ -56,7 +58,7 @@ impl From<ImageCompatError> for ImageError {
 
 // ---- DjVuDecoder ------------------------------------------------------------
 
-/// An `image::ImageDecoder` for a single DjVu page.
+/// An `image::ImageDecoder` and `image::ImageDecoderRect` for a single DjVu page.
 ///
 /// By default renders at the native page resolution. Use [`DjVuDecoder::with_size`]
 /// to override the output dimensions.
@@ -89,7 +91,7 @@ impl<'a> DjVuDecoder<'a> {
         self
     }
 
-    /// Render the page into an RGBA byte buffer.
+    /// Render the full page into an RGBA byte buffer.
     fn render_to_vec(&self) -> Result<Vec<u8>, ImageCompatError> {
         let opts = RenderOptions {
             width: self.width,
@@ -138,6 +140,67 @@ impl<'a> ImageDecoder<'a> for DjVuDecoder<'a> {
             )));
         }
         buf.copy_from_slice(&data);
+        Ok(())
+    }
+}
+
+// ---- ImageDecoderRect impl --------------------------------------------------
+
+impl<'a> ImageDecoderRect<'a> for DjVuDecoder<'a> {
+    /// Decode a rectangular region of the page.
+    ///
+    /// DjVu does not natively support partial rendering; this implementation
+    /// renders the full page and copies out the requested rectangle.
+    /// The `buf` slice must be at least `bytes_per_pixel * width * height` bytes.
+    #[allow(deprecated)]
+    fn read_rect_with_progress<F: Fn(image::Progress)>(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        buf: &mut [u8],
+        _progress_callback: F,
+    ) -> ImageResult<()> {
+        let bytes_per_pixel = self.color_type().bytes_per_pixel() as usize;
+        let row_stride = self.width as usize * bytes_per_pixel;
+        let rect_row_bytes = width as usize * bytes_per_pixel;
+
+        // Validate rectangle stays within image bounds.
+        let x_end = x.checked_add(width).ok_or_else(|| {
+            ImageError::Decoding(DecodingError::new(
+                ImageFormatHint::Name("DjVu".to_string()),
+                "rectangle x+width overflows u32",
+            ))
+        })?;
+        let y_end = y.checked_add(height).ok_or_else(|| {
+            ImageError::Decoding(DecodingError::new(
+                ImageFormatHint::Name("DjVu".to_string()),
+                "rectangle y+height overflows u32",
+            ))
+        })?;
+        if x_end > self.width || y_end > self.height {
+            return Err(ImageError::Decoding(DecodingError::new(
+                ImageFormatHint::Name("DjVu".to_string()),
+                format!(
+                    "rectangle ({x},{y},{width},{height}) out of image bounds ({}×{})",
+                    self.width, self.height
+                ),
+            )));
+        }
+
+        let full = self.render_to_vec().map_err(ImageError::from)?;
+
+        for row in 0..height as usize {
+            let src_y = y as usize + row;
+            let src_start = src_y * row_stride + x as usize * bytes_per_pixel;
+            let src_end = src_start + rect_row_bytes;
+            let dst_start = row * rect_row_bytes;
+            let dst_end = dst_start + rect_row_bytes;
+
+            buf[dst_start..dst_end].copy_from_slice(&full[src_start..src_end]);
+        }
+
         Ok(())
     }
 }
