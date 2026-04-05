@@ -176,6 +176,14 @@ pub mod djvu_async;
 #[cfg(feature = "image")]
 pub mod image_compat;
 
+/// hOCR and ALTO XML export for the text layer.
+///
+/// Key functions: [`ocr_export::to_hocr`], [`ocr_export::to_alto`].
+/// Key types: [`ocr_export::HocrOptions`], [`ocr_export::AltoOptions`],
+/// [`ocr_export::OcrExportError`].
+#[cfg(feature = "std")]
+pub mod ocr_export;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
