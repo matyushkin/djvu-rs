@@ -656,7 +656,11 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
                         let vp3 = load8_i32(&st0, ci);
                         let vp1 = load8_i32(&st1, ci);
                         let vn1 = load8_i32(&st2, ci);
-                        let vn3 = if has_n3 { load8(data, n3_off + ci) } else { zero8 };
+                        let vn3 = if has_n3 {
+                            load8(data, n3_off + ci)
+                        } else {
+                            zero8
+                        };
                         let cur = load8(data, k_off + ci);
                         store8(data, k_off + ci, lifting_even(cur, vp1, vn1, vp3, vn3));
                         store8_i32(&mut st0, ci, vp1);
@@ -813,9 +817,8 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
                             let n3 = data[n3_off + ci] as i32;
                             let a = p1 + n1;
                             let idx = k_off + ci;
-                            data[idx] = (data[idx] as i32
-                                + (((a << 3) + a - (p3 + n3) + 8) >> 4))
-                                as i16;
+                            data[idx] =
+                                (data[idx] as i32 + (((a << 3) + a - (p3 + n3) + 8) >> 4)) as i16;
                             st0[ci] = p1;
                             st1[ci] = n1;
                             st2[ci] = n3;
