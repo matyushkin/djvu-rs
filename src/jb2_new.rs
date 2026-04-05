@@ -1743,10 +1743,10 @@ mod tests {
 mod regression_fuzz2 {
     use super::*;
 
-    /// Regression test: a fuzzer-discovered 11-byte input used to trigger a
-    /// near-4 MP symbol decode, taking >2 s under ASAN. The fix reduces
-    /// MAX_SYMBOL_PIXELS to 1 MP so the decoder rejects it via ImageTooLarge
-    /// before any significant work is done.
+    /// Regression test: a fuzzer-discovered 11-byte input triggered two DoS
+    /// paths simultaneously — the ZP-exhausted record loop spinning up to
+    /// MAX_RECORDS times, and a near-4MP symbol decode. Both are now bounded
+    /// by the reduced MAX_RECORDS (64K) and MAX_SYMBOL_PIXELS (1MP) limits.
     #[test]
     fn huge_symbol_from_small_input_does_not_hang() {
         let data = &[0x7f, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
