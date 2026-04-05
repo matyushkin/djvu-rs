@@ -169,6 +169,13 @@ pub mod tiff_export;
 #[cfg(feature = "async")]
 pub mod djvu_async;
 
+/// `image::ImageDecoder` integration — allows DjVu pages to be used as
+/// first-class image sources in the `image` crate ecosystem.
+///
+/// Key types: [`image_compat::DjVuDecoder`], [`image_compat::ImageCompatError`].
+#[cfg(feature = "image")]
+pub mod image_compat;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
