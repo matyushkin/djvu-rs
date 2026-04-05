@@ -578,32 +578,188 @@ fn layer_virtual_geometry(src: &Pixmap, page_w: u32, page_h: u32) -> (u32, u32, 
 }
 
 // ============================================================
-// Separable bilinear scaler with precomputed LUTs
+// Separable bilinear scaler with SIMD vertical pass
 // ============================================================
 
 /// 4-bit fractional precision (16 sub-pixel positions), matching DjVuLibre.
 const FRACBITS: u32 = 4;
 const FRACMASK: u32 = (1 << FRACBITS) - 1; // 0xF
 
-/// Precomputed interpolation LUT: INTERP[frac][value_diff + 255] gives the
-/// interpolated delta. This eliminates per-pixel multiplication.
+/// Bilinear lerp for one byte value: `(a*(16-f) + b*f + 8) >> 4`.
+#[inline(always)]
+fn lerp8(a: u8, b: u8, f: usize) -> u8 {
+    let cf = 16 - f;
+    ((a as usize * cf + b as usize * f + 8) >> 4) as u8
+}
+
+// ── SIMD vertical-pass helpers ───────────────────────────────────────────────
+//
+// The vertical pass reads two horizontally-interpolated rows (stored as RGBX,
+// 4 bytes per pixel, alpha/pad byte = 0) and writes the bilinearly-blended
+// result as RGBA (alpha = 255) into the output buffer.
+//
+// Processing 16 bytes (= 4 RGBA pixels) per SIMD iteration on AArch64 NEON:
+//   1. Load 16 bytes from row0 and row1.
+//   2. Zero-extend each 8 bytes → u16×8.
+//   3. Compute (a*(16-fy) + b*fy + 8) >> 4  in u16 (no overflow: ≤ 4080+8).
+//   4. Narrow back to u8.
+//   5. OR with 0x000000FF mask per pixel to set alpha = 255.
+//   6. Store 16 bytes to output.
+//
+// The pad (4th) byte in hbuf is always 0, so the lerp produces 0 there too.
+// The OR with the alpha mask then correctly sets it to 255.
+
+/// Copy `src` (RGBX, alpha/pad byte = 0) into `dst` setting alpha to 255.
 ///
-/// For fraction `f` in 0..16 and pixel difference `d` in -255..255:
-///   INTERP[f][d + 255] = (f * d + 8) >> 4
-static INTERP: [[i16; 511]; 16] = {
-    let mut table = [[0i16; 511]; 16];
-    let mut f = 0usize;
-    while f < 16 {
-        let mut d = 0i32;
-        while d < 511 {
-            let diff = d - 255;
-            table[f][d as usize] = ((f as i32 * diff + 8) >> 4) as i16;
-            d += 1;
+/// Both slices must have length `n * 4` where n is the pixel count.
+#[inline(always)]
+fn copy_row_set_alpha(src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: M1/M4/Apple Silicon always has NEON; all ptrs are in-bounds.
+        if src.len() >= 16 {
+            #[allow(unsafe_code)]
+            unsafe {
+                copy_row_set_alpha_neon(src, dst)
+            }
+            return;
         }
-        f += 1;
     }
-    table
-};
+    copy_row_set_alpha_scalar(src, dst);
+}
+
+#[inline(always)]
+fn copy_row_set_alpha_scalar(src: &[u8], dst: &mut [u8]) {
+    let n = src.len() / 4;
+    for i in 0..n {
+        let s = i * 4;
+        dst[s] = src[s];
+        dst[s + 1] = src[s + 1];
+        dst[s + 2] = src[s + 2];
+        dst[s + 3] = 255;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn copy_row_set_alpha_neon(src: &[u8], dst: &mut [u8]) {
+    use std::arch::aarch64::*;
+    // SAFETY: aarch64 always has NEON; slices are aligned and in-bounds.
+    let alpha_mask =
+        unsafe { vld1q_u8([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255].as_ptr()) };
+    let chunks = src.len() / 16;
+    for i in 0..chunks {
+        let off = i * 16;
+        unsafe {
+            let v = vld1q_u8(src.as_ptr().add(off));
+            vst1q_u8(dst.as_mut_ptr().add(off), vorrq_u8(v, alpha_mask));
+        }
+    }
+    // Scalar tail
+    let tail_start = chunks * 16;
+    copy_row_set_alpha_scalar(&src[tail_start..], &mut dst[tail_start..]);
+}
+
+/// Bilinear lerp two RGBX rows → RGBA output, setting alpha = 255.
+///
+/// `fy` is the vertical fraction (0..16).
+#[inline(always)]
+fn lerp_rows(row0: &[u8], row1: &[u8], dst: &mut [u8], fy: usize) {
+    debug_assert_eq!(row0.len(), row1.len());
+    debug_assert_eq!(row0.len(), dst.len());
+    if fy == 0 {
+        copy_row_set_alpha(row0, dst);
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if row0.len() >= 16 {
+            #[allow(unsafe_code)]
+            unsafe {
+                lerp_rows_neon(row0, row1, dst, fy as u16)
+            }
+            return;
+        }
+    }
+    lerp_rows_scalar(row0, row1, dst, fy);
+}
+
+#[inline(always)]
+fn lerp_rows_scalar(row0: &[u8], row1: &[u8], dst: &mut [u8], fy: usize) {
+    let n = dst.len() / 4;
+    let cf = 16 - fy;
+    for i in 0..n {
+        let s = i * 4;
+        dst[s] = ((row0[s] as usize * cf + row1[s] as usize * fy + 8) >> 4) as u8;
+        dst[s + 1] = ((row0[s + 1] as usize * cf + row1[s + 1] as usize * fy + 8) >> 4) as u8;
+        dst[s + 2] = ((row0[s + 2] as usize * cf + row1[s + 2] as usize * fy + 8) >> 4) as u8;
+        dst[s + 3] = 255;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn lerp_rows_neon(row0: &[u8], row1: &[u8], dst: &mut [u8], fy: u16) {
+    use std::arch::aarch64::*;
+    let cfy = 16 - fy;
+    // SAFETY: aarch64 always has NEON; all register ops are safe.
+    let (fy_v, cfy_v, eight, alpha_mask) = unsafe {
+        (
+            vdupq_n_u16(fy),
+            vdupq_n_u16(cfy),
+            vdupq_n_u16(8),
+            vld1q_u8([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255].as_ptr()),
+        )
+    };
+
+    let chunks = dst.len() / 16;
+    for i in 0..chunks {
+        let off = i * 16;
+        // SAFETY: off + 16 <= dst.len() by construction; row0/row1 have same len.
+        unsafe {
+            let a = vld1q_u8(row0.as_ptr().add(off));
+            let b = vld1q_u8(row1.as_ptr().add(off));
+
+            // Zero-extend lo/hi 8 bytes to u16
+            let a_lo = vmovl_u8(vget_low_u8(a));
+            let a_hi = vmovl_u8(vget_high_u8(a));
+            let b_lo = vmovl_u8(vget_low_u8(b));
+            let b_hi = vmovl_u8(vget_high_u8(b));
+
+            // lerp = (a*cfy + b*fy + 8) >> 4
+            let lo = vshrq_n_u16(
+                vaddq_u16(
+                    vaddq_u16(vmulq_u16(a_lo, cfy_v), vmulq_u16(b_lo, fy_v)),
+                    eight,
+                ),
+                4,
+            );
+            let hi = vshrq_n_u16(
+                vaddq_u16(
+                    vaddq_u16(vmulq_u16(a_hi, cfy_v), vmulq_u16(b_hi, fy_v)),
+                    eight,
+                ),
+                4,
+            );
+
+            // Narrow to u8, set alpha=255 via OR mask
+            let result = vorrq_u8(vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)), alpha_mask);
+            vst1q_u8(dst.as_mut_ptr().add(off), result);
+        }
+    }
+
+    // Scalar tail for the last <16 bytes (< 4 pixels)
+    let tail_start = chunks * 16;
+    lerp_rows_scalar(
+        &row0[tail_start..],
+        &row1[tail_start..],
+        &mut dst[tail_start..],
+        fy as usize,
+    );
+}
 
 /// Precompute source coordinates for a scanline, matching BilinearSampler's f64 math.
 /// Returns a Vec of packed u32: upper bits = integer coord, lower FRACBITS = fraction.
@@ -626,14 +782,15 @@ fn prepare_coord(src_size: u32, out_size: u32) -> Vec<u32> {
 }
 
 /// Pre-scale a source layer to page dimensions using separable bilinear interpolation.
-/// This is much faster than per-pixel bilinear because:
-/// 1. Coordinate computation is done once (not per-pixel)
-/// 2. Interpolation uses LUT (no multiplication)
-/// 3. Horizontal and vertical passes are separated (cache-friendly)
+///
+/// Pass 1 (horizontal): interpolate along X into an intermediate RGBX buffer
+/// (4 bytes per pixel, pad byte = 0) of size `sh × ow`.
+///
+/// Pass 2 (vertical): lerp two horizontal rows → RGBA output (alpha = 255),
+/// accelerated with NEON on AArch64 (4 pixels / 16 bytes per SIMD iteration).
 fn scale_layer_bilinear(src: &Pixmap, page_w: u32, page_h: u32) -> Pixmap {
     let (_, virt_w, virt_h, virt_page_w, virt_page_h) = layer_virtual_geometry(src, page_w, page_h);
 
-    // Output dimensions in virtual page space
     let ow = virt_page_w;
     let oh = virt_page_h;
     let sw = src.width as usize;
@@ -643,19 +800,20 @@ fn scale_layer_bilinear(src: &Pixmap, page_w: u32, page_h: u32) -> Pixmap {
         return Pixmap::white(ow.max(1), oh.max(1));
     }
 
-    // Coordinate maps: output → virtual source space (matching BilinearSampler's mapping)
     let hcoord = prepare_coord(virt_w, ow);
     let vcoord = prepare_coord(virt_h, oh);
 
     let sw_m1 = sw - 1;
     let sh_m1 = sh - 1;
-
-    // Pass 1: horizontal interpolation — produce intermediate buffer (ow × sh) in RGB
     let ow_us = ow as usize;
-    let mut hbuf: Vec<u8> = vec![0u8; sh * ow_us * 3];
+
+    // Pass 1: horizontal interpolation → RGBX intermediate (pad byte = 0).
+    // 4-byte stride matches the output stride, enabling branch-free SIMD in pass 2.
+    let hstride = ow_us * 4;
+    let mut hbuf: Vec<u8> = vec![0u8; sh * hstride];
     for sy in 0..sh {
         let src_row_off = sy * sw;
-        let dst_row_off = sy * ow_us * 3;
+        let dst_row_off = sy * hstride;
         for (dx, &coord) in hcoord.iter().enumerate().take(ow_us) {
             let ix = ((coord >> FRACBITS) as usize).min(sw_m1);
             let fx = (coord & FRACMASK) as usize;
@@ -663,30 +821,23 @@ fn scale_layer_bilinear(src: &Pixmap, page_w: u32, page_h: u32) -> Pixmap {
 
             let s0 = (src_row_off + ix) * 4;
             let s1 = (src_row_off + ix1) * 4;
+            let d = dst_row_off + dx * 4;
 
-            let r0 = src.data[s0] as i16;
-            let g0 = src.data[s0 + 1] as i16;
-            let b0 = src.data[s0 + 2] as i16;
-
-            let d = dst_row_off + dx * 3;
             if fx == 0 {
-                hbuf[d] = r0 as u8;
-                hbuf[d + 1] = g0 as u8;
-                hbuf[d + 2] = b0 as u8;
+                hbuf[d] = src.data[s0];
+                hbuf[d + 1] = src.data[s0 + 1];
+                hbuf[d + 2] = src.data[s0 + 2];
+                // hbuf[d+3] = 0 (pad; already zeroed by vec! init)
             } else {
-                let r1 = src.data[s1] as i16;
-                let g1 = src.data[s1 + 1] as i16;
-                let b1 = src.data[s1 + 2] as i16;
-                hbuf[d] = (r0 + INTERP[fx][(r1 - r0 + 255) as usize]) as u8;
-                hbuf[d + 1] = (g0 + INTERP[fx][(g1 - g0 + 255) as usize]) as u8;
-                hbuf[d + 2] = (b0 + INTERP[fx][(b1 - b0 + 255) as usize]) as u8;
+                hbuf[d] = lerp8(src.data[s0], src.data[s1], fx);
+                hbuf[d + 1] = lerp8(src.data[s0 + 1], src.data[s1 + 1], fx);
+                hbuf[d + 2] = lerp8(src.data[s0 + 2], src.data[s1 + 2], fx);
             }
         }
     }
 
-    // Pass 2: vertical interpolation on hbuf → output (ow × oh)
+    // Pass 2: vertical interpolation — SIMD lerp (RGBX → RGBA, alpha=255).
     let mut out = Pixmap::white(ow, oh);
-    let hstride = ow_us * 3;
     for (dy, &coord) in vcoord.iter().enumerate().take(oh as usize) {
         let iy = ((coord >> FRACBITS) as usize).min(sh_m1);
         let fy = (coord & FRACMASK) as usize;
@@ -696,34 +847,12 @@ fn scale_layer_bilinear(src: &Pixmap, page_w: u32, page_h: u32) -> Pixmap {
         let row1_off = iy1 * hstride;
         let out_off = dy * ow_us * 4;
 
-        if fy == 0 {
-            for dx in 0..ow_us {
-                let s = row0_off + dx * 3;
-                let d = out_off + dx * 4;
-                out.data[d] = hbuf[s];
-                out.data[d + 1] = hbuf[s + 1];
-                out.data[d + 2] = hbuf[s + 2];
-                out.data[d + 3] = 255;
-            }
-        } else {
-            for dx in 0..ow_us {
-                let s0 = row0_off + dx * 3;
-                let s1 = row1_off + dx * 3;
-                let d = out_off + dx * 4;
-
-                let r0 = hbuf[s0] as i16;
-                let g0 = hbuf[s0 + 1] as i16;
-                let b0 = hbuf[s0 + 2] as i16;
-                let r1 = hbuf[s1] as i16;
-                let g1 = hbuf[s1 + 1] as i16;
-                let b1 = hbuf[s1 + 2] as i16;
-
-                out.data[d] = (r0 + INTERP[fy][(r1 - r0 + 255) as usize]) as u8;
-                out.data[d + 1] = (g0 + INTERP[fy][(g1 - g0 + 255) as usize]) as u8;
-                out.data[d + 2] = (b0 + INTERP[fy][(b1 - b0 + 255) as usize]) as u8;
-                out.data[d + 3] = 255;
-            }
-        }
+        lerp_rows(
+            &hbuf[row0_off..row0_off + ow_us * 4],
+            &hbuf[row1_off..row1_off + ow_us * 4],
+            &mut out.data[out_off..out_off + ow_us * 4],
+            fy,
+        );
     }
 
     out

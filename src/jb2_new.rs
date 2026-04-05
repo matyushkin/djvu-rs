@@ -1754,6 +1754,14 @@ mod regression_fuzz2 {
         ];
         let start = std::time::Instant::now();
         let _ = decode(data, None);
-        assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
+        // In release the full decode is <100 ms; in debug the unoptimised loop
+        // is ~10× slower, so we allow 8 s (still well under the 10 s fuzz
+        // CI timeout that motivated this fix).
+        let limit_secs = if cfg!(debug_assertions) { 8 } else { 2 };
+        assert!(
+            start.elapsed().as_secs() < limit_secs,
+            "took {:?}",
+            start.elapsed()
+        );
     }
 }
