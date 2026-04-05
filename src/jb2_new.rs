@@ -201,6 +201,47 @@ impl Jbm {
         }
     }
 
+    /// Construct a `Jbm` using a reusable scratch buffer.
+    ///
+    /// The buffer is grown to at least `width * height` bytes (never shrunk),
+    /// and the used portion is zeroed.  The old buffer contents are taken via
+    /// `std::mem::take` so `pool` is left empty on return; the caller regains
+    /// the buffer by calling [`Jbm::crop_and_recycle`] or [`Jbm::recycle_into`].
+    fn new_from_pool(width: i32, height: i32, pool: &mut Vec<u8>) -> Self {
+        let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
+        if pool.len() < pixels {
+            pool.resize(pixels, 0u8);
+        }
+        // Zero the portion we will use (including any bytes reused from a previous symbol).
+        pool[..pixels].fill(0u8);
+        let mut data = std::mem::take(pool);
+        data.truncate(pixels);
+        Jbm {
+            width,
+            height,
+            data,
+        }
+    }
+
+    /// Crop to content and return the original backing buffer to the pool.
+    ///
+    /// This is the pool-aware alternative to `crop_to_content()`: it performs
+    /// the same crop but moves the (now-unused) full-size backing buffer back
+    /// into `pool` so it can be reused for the next symbol decode.
+    fn crop_and_recycle(self, pool: &mut Vec<u8>) -> Jbm {
+        let cropped = self.crop_to_content();
+        // Move our data buffer back to the pool (it may be larger than `cropped.data`)
+        *pool = self.data;
+        cropped
+    }
+
+    /// Move the backing buffer back into `pool` without cropping.
+    ///
+    /// Used for symbols that are blitted but not stored in the dict.
+    fn recycle_into(self, pool: &mut Vec<u8>) {
+        *pool = self.data;
+    }
+
     /// Return a new Jbm with surrounding empty rows/columns removed.
     fn crop_to_content(&self) -> Jbm {
         let mut min_row = self.height;
@@ -285,12 +326,13 @@ fn decode_bitmap_direct(
     ctx: &mut [u8],
     width: i32,
     height: i32,
+    pool: &mut Vec<u8>,
 ) -> Result<Jbm, Jb2Error> {
     let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
     if pixels > MAX_SYMBOL_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
-    let mut bm = Jbm::new(width, height);
+    let mut bm = Jbm::new_from_pool(width, height, pool);
 
     for row in (0..height).rev() {
         // r2: 3 bits from row+2, columns col-1..col+1
@@ -336,12 +378,13 @@ fn decode_bitmap_ref(
     width: i32,
     height: i32,
     mbm: &Jbm,
+    pool: &mut Vec<u8>,
 ) -> Result<Jbm, Jb2Error> {
     let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
     if pixels > MAX_SYMBOL_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
-    let mut cbm = Jbm::new(width, height);
+    let mut cbm = Jbm::new_from_pool(width, height, pool);
 
     // Center alignment: anchor the reference bitmap at the center of the child.
     let crow = (height - 1) >> 1;
@@ -678,6 +721,20 @@ pub fn decode_dict(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict, 
 // ────────────────────────────────────────────────────────────────────────────
 
 fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb2Error> {
+    let mut pool = Vec::new();
+    decode_image_with_pool(data, shared_dict, &mut pool)
+}
+
+/// Decode a JB2 image stream, reusing `pool` as a scratch buffer for symbol bitmaps.
+///
+/// `pool` is resized up (never shrunk) across symbol decodes, eliminating
+/// per-symbol heap allocations. Pass `&mut Vec::new()` to use a fresh pool,
+/// or reuse a pool across multiple decode calls for additional savings.
+fn decode_image_with_pool(
+    data: &[u8],
+    shared_dict: Option<&Jb2Dict>,
+    pool: &mut Vec<u8>,
+) -> Result<Bitmap, Jb2Error> {
     let mut zp = ZpDecoder::new(data).map_err(|_| Jb2Error::ZpInitFailed)?;
 
     // Contexts for variable-length integer decoding
@@ -774,7 +831,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -791,7 +848,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 );
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
-                dict.push(bm.crop_to_content());
+                dict.push(bm.crop_and_recycle(pool));
             }
 
             // 2 — new symbol, direct decode → add to dict only
@@ -799,8 +856,8 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
-                dict.push(bm.crop_to_content());
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
+                dict.push(bm.crop_and_recycle(pool));
             }
 
             // 3 — new symbol, direct decode → blit only (not stored in dict)
@@ -808,7 +865,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -825,6 +882,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 );
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
+                bm.recycle_into(pool);
             }
 
             // 4 — matched refinement → add to dict AND blit
@@ -848,6 +906,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -865,7 +924,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &cbm, x, y);
-                dict.push(cbm.crop_to_content());
+                dict.push(cbm.crop_and_recycle(pool));
             }
 
             // 5 — matched refinement → add to dict only
@@ -889,8 +948,9 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
-                dict.push(cbm.crop_to_content());
+                dict.push(cbm.crop_and_recycle(pool));
             }
 
             // 6 — matched refinement → blit only
@@ -914,6 +974,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -931,6 +992,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &cbm, x, y);
+                cbm.recycle_into(pool);
             }
 
             // 7 — matched copy, no refinement → blit only
@@ -969,13 +1031,14 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
                 let x = left - 1;
                 let y = top - h;
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
+                bm.recycle_into(pool);
             }
 
             // 9 — required-dict-or-reset (already consumed in preamble; ignore here)
@@ -1004,6 +1067,15 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
 fn decode_image_indexed(
     data: &[u8],
     shared_dict: Option<&Jb2Dict>,
+) -> Result<(Bitmap, Vec<i32>), Jb2Error> {
+    let mut pool = Vec::new();
+    decode_image_indexed_with_pool(data, shared_dict, &mut pool)
+}
+
+fn decode_image_indexed_with_pool(
+    data: &[u8],
+    shared_dict: Option<&Jb2Dict>,
+    pool: &mut Vec<u8>,
 ) -> Result<(Bitmap, Vec<i32>), Jb2Error> {
     let mut zp = ZpDecoder::new(data).map_err(|_| Jb2Error::ZpInitFailed)?;
 
@@ -1092,7 +1164,7 @@ fn decode_image_indexed(
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -1119,20 +1191,20 @@ fn decode_image_indexed(
                     blit_count,
                 );
                 blit_count += 1;
-                dict.push(bm.crop_to_content());
+                dict.push(bm.crop_and_recycle(pool));
             }
             2 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
-                dict.push(bm.crop_to_content());
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
+                dict.push(bm.crop_and_recycle(pool));
             }
             3 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -1159,6 +1231,7 @@ fn decode_image_indexed(
                     blit_count,
                 );
                 blit_count += 1;
+                bm.recycle_into(pool);
             }
             4 => {
                 if dict.is_empty() {
@@ -1180,6 +1253,7 @@ fn decode_image_indexed(
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -1207,7 +1281,7 @@ fn decode_image_indexed(
                     blit_count,
                 );
                 blit_count += 1;
-                dict.push(cbm.crop_to_content());
+                dict.push(cbm.crop_and_recycle(pool));
             }
             5 => {
                 if dict.is_empty() {
@@ -1229,8 +1303,9 @@ fn decode_image_indexed(
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
-                dict.push(cbm.crop_to_content());
+                dict.push(cbm.crop_and_recycle(pool));
             }
             6 => {
                 if dict.is_empty() {
@@ -1252,6 +1327,7 @@ fn decode_image_indexed(
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -1279,6 +1355,7 @@ fn decode_image_indexed(
                     blit_count,
                 );
                 blit_count += 1;
+                cbm.recycle_into(pool);
             }
             7 => {
                 if dict.is_empty() {
@@ -1320,7 +1397,7 @@ fn decode_image_indexed(
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
@@ -1335,6 +1412,7 @@ fn decode_image_indexed(
                     blit_count,
                 );
                 blit_count += 1;
+                bm.recycle_into(pool);
             }
             9 => {}
             10 => {
@@ -1359,6 +1437,15 @@ fn decode_image_indexed(
 // ────────────────────────────────────────────────────────────────────────────
 
 fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict, Jb2Error> {
+    let mut pool: Vec<u8> = Vec::new();
+    decode_dictionary_with_pool(data, inherited, &mut pool)
+}
+
+fn decode_dictionary_with_pool(
+    data: &[u8],
+    inherited: Option<&Jb2Dict>,
+    pool: &mut Vec<u8>,
+) -> Result<Jb2Dict, Jb2Error> {
     let mut zp = ZpDecoder::new(data).map_err(|_| Jb2Error::ZpInitFailed)?;
 
     let mut record_type_ctx = NumContext::new();
@@ -1423,8 +1510,8 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
-                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
-                dict.push(bm.crop_to_content());
+                let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
+                dict.push(bm.crop_and_recycle(pool));
             }
 
             // 5 — matched refinement → add to dict
@@ -1448,8 +1535,9 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
                     cbm_w,
                     cbm_h,
                     &dict[index],
+                    pool,
                 )?;
-                dict.push(cbm.crop_to_content());
+                dict.push(cbm.crop_and_recycle(pool));
             }
 
             // 9 — required-dict-or-reset (ignored in dict streams)
@@ -1736,6 +1824,30 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = decode(&[0x7e, 0x00, 0x0c], None);
         assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
+    }
+
+    // ── Pool reuse tests ──────────────────────────────────────────────────────
+
+    /// Decoding a real JB2 stream with an explicit scratch pool must produce
+    /// pixel-identical output to the poolless `decode` path, and the pool must
+    /// grow to at least 1 byte (proving it was used for at least one symbol).
+    #[test]
+    fn jb2_pool_decode_matches_regular_decode_carte() {
+        let djvu = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let sjbz = extract_first_page_sjbz(&djvu);
+
+        let regular = decode(&sjbz, None).expect("regular decode");
+
+        let mut pool = Vec::new();
+        let pooled = decode_image_with_pool(&sjbz, None, &mut pool).expect("pool decode");
+
+        assert_eq!(regular.width, pooled.width, "width must match");
+        assert_eq!(regular.height, pooled.height, "height must match");
+        assert_eq!(regular.data, pooled.data, "pixel data must be identical");
+        assert!(
+            pool.capacity() > 0,
+            "pool must have been used (capacity > 0 after decode)"
+        );
     }
 }
 
