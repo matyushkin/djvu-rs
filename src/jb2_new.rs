@@ -1749,13 +1749,11 @@ mod regression_fuzz2 {
     /// by the reduced MAX_RECORDS (64K) and MAX_SYMBOL_PIXELS (1MP) limits.
     #[test]
     fn huge_symbol_from_small_input_does_not_hang() {
-        let data = &[0x7f, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = &[
+            0x7f, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
         let start = std::time::Instant::now();
         let _ = decode(data, None);
-        assert!(
-            start.elapsed().as_secs() < 2,
-            "took {:?}",
-            start.elapsed()
-        );
+        assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
     }
 }
