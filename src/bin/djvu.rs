@@ -50,6 +50,12 @@ enum Cmd {
         /// Extract text from all pages.
         #[arg(long, conflicts_with = "page")]
         all: bool,
+        /// Output format: plain (default), hocr, alto.
+        #[arg(short, long, default_value = "plain", value_enum)]
+        format: TextFormat,
+        /// Output file path for hOCR/ALTO output. Default: stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -58,6 +64,16 @@ enum Format {
     Png,
     Pdf,
     Cbz,
+}
+
+#[derive(Clone, ValueEnum)]
+enum TextFormat {
+    /// Plain text (default).
+    Plain,
+    /// hOCR HTML format.
+    Hocr,
+    /// ALTO XML format.
+    Alto,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -92,7 +108,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             layer,
             output,
         } => cmd_render(&file, page, all, dpi, format, layer, &output),
-        Cmd::Text { file, page, all } => cmd_text(&file, page, all),
+        Cmd::Text {
+            file,
+            page,
+            all,
+            format,
+            output,
+        } => cmd_text(&file, page, all, format, output.as_deref()),
     }
 }
 
@@ -390,27 +412,85 @@ fn encode_png(
 
 // ── text ──────────────────────────────────────────────────────────────────────
 
-fn cmd_text(path: &Path, page: usize, all: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let doc = open(path)?;
-    let count = doc.page_count();
-
-    if all {
-        for i in 0..count {
-            println!("--- Page {} ---", i + 1);
-            print_page_text(&doc, i)?;
+fn cmd_text(
+    path: &Path,
+    page: usize,
+    all: bool,
+    format: TextFormat,
+    output: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match format {
+        TextFormat::Plain => {
+            let doc = open(path)?;
+            let count = doc.page_count();
+            let mut text = String::new();
+            if all {
+                for i in 0..count {
+                    text.push_str(&format!("--- Page {} ---\n", i + 1));
+                    collect_page_text(&doc, i, &mut text)?;
+                }
+            } else {
+                let idx = page_idx(page, count)?;
+                collect_page_text(&doc, idx, &mut text)?;
+            }
+            write_or_print(output, &text)?;
         }
-    } else {
-        let idx = page_idx(page, count)?;
-        print_page_text(&doc, idx)?;
+        TextFormat::Hocr => {
+            let data = std::fs::read(path)?;
+            let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+            let opts = djvu_rs::ocr_export::HocrOptions {
+                page_index: if all {
+                    None
+                } else {
+                    Some(page_idx(page, doc.page_count())?)
+                },
+                dpi: None,
+            };
+            let hocr = djvu_rs::ocr_export::to_hocr(&doc, &opts)?;
+            write_or_print(output, &hocr)?;
+        }
+        TextFormat::Alto => {
+            let data = std::fs::read(path)?;
+            let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+            let opts = djvu_rs::ocr_export::AltoOptions {
+                page_index: if all {
+                    None
+                } else {
+                    Some(page_idx(page, doc.page_count())?)
+                },
+                dpi: None,
+            };
+            let alto = djvu_rs::ocr_export::to_alto(&doc, &opts)?;
+            write_or_print(output, &alto)?;
+        }
     }
     Ok(())
 }
 
-fn print_page_text(doc: &Document, idx: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn write_or_print(output: Option<&Path>, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match output {
+        Some(path) => {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, content)?;
+        }
+        None => print!("{content}"),
+    }
+    Ok(())
+}
+
+fn collect_page_text(
+    doc: &Document,
+    idx: usize,
+    buf: &mut String,
+) -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(idx)?;
     match page.text()? {
-        Some(text) if !text.trim().is_empty() => print!("{text}"),
-        _ => println!("No text layer"),
+        Some(text) if !text.trim().is_empty() => buf.push_str(&text),
+        _ => buf.push_str("No text layer\n"),
     }
     Ok(())
 }
