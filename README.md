@@ -79,8 +79,6 @@ Rust **1.88** (edition 2024 features: let-chains stabilized in 1.88)
 
 See [GitHub milestones](https://github.com/matyushkin/djvu-rs/milestones) for the full roadmap and progress tracking.
 
-Next up: **[v0.2 — Structural PDF export](https://github.com/matyushkin/djvu-rs/milestone/1)** — proper DjVu → PDF with selectable text, lossless IW44/JB2 embedding, and preserved bookmarks/hyperlinks.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
