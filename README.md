@@ -143,9 +143,27 @@ djvu text file.djvu --all
 | `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export, CLI |
 | `tiff` | disabled | TIFF export via the `tiff` crate |
 | `async` | disabled | Async render API via `tokio::task::spawn_blocking` |
+| `parallel` | disabled | Parallel multi-page render via `rayon` |
+| `jpeg` | disabled | JPEG thumbnail decode support |
+| `mmap` | disabled | Memory-mapped file I/O via `memmap2` |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
+
+## Performance
+
+Measured on Apple M1 Max (Rust 1.92, release profile). Compared to DjVuLibre 3.5.29 C library:
+
+| Page type | djvu-rs | libdjvulibre | Ratio |
+|-----------|---------|--------------|-------|
+| Color IW44, 300 dpi (849×1100 px) | 3.3 ms | 37 ms | **~11× faster** |
+| Bilevel JB2, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
+| Mixed, 600 dpi (2649×4530 px) | 42 ms | 12 ms | ~0.3× (libdjvulibre wins) |
+
+Document open + parse is 10–30× faster than the C library. The 600 dpi regression is a
+known target: djvu-rs uses scalar color conversion for large buffers; SIMD is in progress.
+
+See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full details.
 
 ## Minimum supported Rust version (MSRV)
 
