@@ -654,7 +654,10 @@ impl Default for PdfOptions {
 /// Convert a DjVu document to PDF bytes using custom options.
 ///
 /// See [`PdfOptions`] for available settings.
-pub fn djvu_to_pdf_with_options(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, PdfError> {
+pub fn djvu_to_pdf_with_options(
+    doc: &DjVuDocument,
+    opts: &PdfOptions,
+) -> Result<Vec<u8>, PdfError> {
     djvu_to_pdf_impl(doc, opts)
 }
 
@@ -959,8 +962,8 @@ mod tests {
     }
 
     fn load_doc(name: &str) -> crate::djvu_document::DjVuDocument {
-        let data = std::fs::read(assets_path().join(name))
-            .unwrap_or_else(|_| panic!("{name} must exist"));
+        let data =
+            std::fs::read(assets_path().join(name)).unwrap_or_else(|_| panic!("{name} must exist"));
         crate::djvu_document::DjVuDocument::parse(&data)
             .unwrap_or_else(|e| panic!("parse failed: {e}"))
     }
@@ -990,7 +993,10 @@ mod tests {
         let fake_jpeg = b"\xFF\xD8\xFF\xD9"; // minimal JPEG markers
         let stream = make_dct_stream(" /Type /XObject", fake_jpeg);
         let s = String::from_utf8_lossy(&stream);
-        assert!(s.contains("/Filter /DCTDecode"), "must contain DCTDecode filter");
+        assert!(
+            s.contains("/Filter /DCTDecode"),
+            "must contain DCTDecode filter"
+        );
         assert!(s.contains("/Type /XObject"));
     }
 
@@ -998,8 +1004,13 @@ mod tests {
     #[test]
     fn dct_pdf_is_smaller_than_deflate_pdf() {
         let doc = load_doc("chicken.djvu");
-        let dct_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: Some(75) })
-            .expect("DCT conversion must succeed");
+        let dct_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                jpeg_quality: Some(75),
+            },
+        )
+        .expect("DCT conversion must succeed");
         let flat_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None })
             .expect("FlateDecode conversion must succeed");
         assert!(
@@ -1014,7 +1025,13 @@ mod tests {
     #[test]
     fn pdf_with_dct_contains_dctdecode_marker() {
         let doc = load_doc("chicken.djvu");
-        let pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: Some(80) }).unwrap();
+        let pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                jpeg_quality: Some(80),
+            },
+        )
+        .unwrap();
         let has_dct = pdf.windows(9).any(|w| w == b"DCTDecode");
         assert!(has_dct, "PDF must contain DCTDecode");
     }

@@ -59,7 +59,7 @@ fn bench_render_at_dpi(c: &mut Criterion) {
             aa: false,
             rotation: djvu_rs::djvu_render::UserRotation::None,
             permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
         };
 
         group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {

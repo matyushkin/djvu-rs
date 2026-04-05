@@ -29,7 +29,7 @@
 
 use std::io::Cursor;
 
-use tiff::encoder::{colortype, TiffEncoder};
+use tiff::encoder::{TiffEncoder, colortype};
 
 use crate::{
     djvu_document::{DjVuDocument, DjVuPage, DocError},
@@ -181,9 +181,9 @@ fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Vec<u8> {
         None => return vec![0u8; (w * h) as usize],
     };
 
-    let dict = page.find_chunk(b"Djbz").and_then(|djbz| {
-        jb2_new::decode_dict(djbz, None).ok()
-    });
+    let dict = page
+        .find_chunk(b"Djbz")
+        .and_then(|djbz| jb2_new::decode_dict(djbz, None).ok());
 
     let bm = match jb2_new::decode(sjbz, dict.as_ref()) {
         Ok(b) => b,
@@ -243,7 +243,10 @@ mod tests {
     #[test]
     fn bilevel_export_produces_bytes() {
         let doc = load_doc("boy_jb2.djvu");
-        let opts = TiffOptions { mode: TiffMode::Bilevel, ..Default::default() };
+        let opts = TiffOptions {
+            mode: TiffMode::Bilevel,
+            ..Default::default()
+        };
         let tiff = djvu_to_tiff(&doc, &opts).expect("bilevel export must succeed");
         assert!(!tiff.is_empty());
     }
@@ -252,7 +255,10 @@ mod tests {
     #[test]
     fn bilevel_output_starts_with_tiff_magic() {
         let doc = load_doc("boy_jb2.djvu");
-        let opts = TiffOptions { mode: TiffMode::Bilevel, ..Default::default() };
+        let opts = TiffOptions {
+            mode: TiffMode::Bilevel,
+            ..Default::default()
+        };
         let tiff = djvu_to_tiff(&doc, &opts).unwrap();
         let magic = &tiff[..4];
         assert!(magic == b"II\x2A\x00" || magic == b"MM\x00\x2A");
@@ -285,7 +291,11 @@ mod tests {
         let tiff_a = djvu_to_tiff(&doc_a, &opts).unwrap();
         let tiff_b = djvu_to_tiff(&doc_b, &opts).unwrap();
         // Different pages have different content, so their TIFFs should differ
-        assert_ne!(tiff_a.len(), tiff_b.len(), "different pages must produce different TIFF sizes");
+        assert_ne!(
+            tiff_a.len(),
+            tiff_b.len(),
+            "different pages must produce different TIFF sizes"
+        );
     }
 
     /// Color export at 0.5 scale produces a smaller file than at 1.0 scale.
@@ -295,7 +305,10 @@ mod tests {
         let full = djvu_to_tiff(&doc, &TiffOptions::default()).unwrap();
         let half = djvu_to_tiff(
             &doc,
-            &TiffOptions { scale: 0.5, ..Default::default() },
+            &TiffOptions {
+                scale: 0.5,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(
@@ -325,7 +338,10 @@ mod tests {
     #[test]
     fn bilevel_jb2_page_has_black_pixels() {
         let doc = load_doc("boy_jb2.djvu");
-        let opts = TiffOptions { mode: TiffMode::Bilevel, ..Default::default() };
+        let opts = TiffOptions {
+            mode: TiffMode::Bilevel,
+            ..Default::default()
+        };
         let tiff_bytes = djvu_to_tiff(&doc, &opts).unwrap();
 
         let cursor = std::io::Cursor::new(&tiff_bytes);
@@ -333,7 +349,10 @@ mod tests {
         let img = decoder.read_image().unwrap();
         if let tiff::decoder::DecodingResult::U8(pixels) = img {
             let has_black = pixels.iter().any(|&p| p == 255);
-            assert!(has_black, "bilevel JB2 page must have at least one black pixel");
+            assert!(
+                has_black,
+                "bilevel JB2 page must have at least one black pixel"
+            );
         }
     }
 
