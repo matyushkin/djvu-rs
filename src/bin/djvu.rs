@@ -423,15 +423,17 @@ fn cmd_text(
         TextFormat::Plain => {
             let doc = open(path)?;
             let count = doc.page_count();
+            let mut text = String::new();
             if all {
                 for i in 0..count {
-                    println!("--- Page {} ---", i + 1);
-                    print_page_text(&doc, i)?;
+                    text.push_str(&format!("--- Page {} ---\n", i + 1));
+                    collect_page_text(&doc, i, &mut text)?;
                 }
             } else {
                 let idx = page_idx(page, count)?;
-                print_page_text(&doc, idx)?;
+                collect_page_text(&doc, idx, &mut text)?;
             }
+            write_or_print(output, &text)?;
         }
         TextFormat::Hocr => {
             let data = std::fs::read(path)?;
@@ -480,11 +482,15 @@ fn write_or_print(output: Option<&Path>, content: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn print_page_text(doc: &Document, idx: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn collect_page_text(
+    doc: &Document,
+    idx: usize,
+    buf: &mut String,
+) -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(idx)?;
     match page.text()? {
-        Some(text) if !text.trim().is_empty() => print!("{text}"),
-        _ => println!("No text layer"),
+        Some(text) if !text.trim().is_empty() => buf.push_str(&text),
+        _ => buf.push_str("No text layer\n"),
     }
     Ok(())
 }

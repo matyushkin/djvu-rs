@@ -44,7 +44,8 @@ pub enum OcrExportError {
 pub struct HocrOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
-    /// DPI to use for coordinate scaling. Default: native page DPI.
+    /// Reserved for future DPI-based coordinate scaling. Currently unused;
+    /// coordinates are always emitted in native page pixels.
     pub dpi: Option<u32>,
 }
 
@@ -53,7 +54,8 @@ pub struct HocrOptions {
 pub struct AltoOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
-    /// DPI to use for coordinate scaling. Default: native page DPI.
+    /// Reserved for future DPI-based coordinate scaling. Currently unused;
+    /// coordinates are always emitted in native page pixels.
     pub dpi: Option<u32>,
 }
 
