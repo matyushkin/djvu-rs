@@ -432,16 +432,23 @@ fn blit_indexed(
 }
 
 fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32) {
-    // Fast path: symbol completely within page bounds
-    if x >= 0 && y >= 0 && x + symbol.width <= page_w && y + symbol.height <= page_h {
+    // Fast path: symbol completely within page bounds.
+    // Use checked_add to guard against i32 overflow in the bounds test.
+    let fits = x >= 0
+        && y >= 0
+        && x.checked_add(symbol.width).is_some_and(|v| v <= page_w)
+        && y.checked_add(symbol.height).is_some_and(|v| v <= page_h);
+    if fits {
         let pw = page_w as usize;
         let sw = symbol.width as usize;
         for row in 0..symbol.height as usize {
             let src_off = row * sw;
             let dst_off = (y as usize + row) * pw + x as usize;
             for col in 0..sw {
-                if symbol.data[src_off + col] != 0 {
-                    page[dst_off + col] = 1;
+                if symbol.data.get(src_off + col).copied().unwrap_or(0) != 0 &&
+                    let Some(cell) = page.get_mut(dst_off + col)
+                {
+                    *cell = 1;
                 }
             }
         }
