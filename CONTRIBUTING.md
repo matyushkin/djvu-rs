@@ -75,13 +75,42 @@ a comment. Do not copy code from djvulibre or any GPL-licensed source.
 
 ## Commit style
 
-Use short imperative subject lines:
+Commits must follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+This is not just style — **release-please reads commit messages to determine the next
+version number and generate `CHANGELOG.md` automatically.**
 
 ```
-fix: overflow in IW44 slice decoder for very wide images
-feat: add render_gray() for single-channel output
-docs: document Rotation variants
+<type>[optional scope]: <short description>
+
+[optional body]
+
+[optional footer: BREAKING CHANGE: <description>]
 ```
+
+Common types and their effect on versioning:
+
+| Type | Changelog section | Version bump |
+|------|------------------|-------------|
+| `feat` | Added | minor |
+| `fix` | Fixed | patch |
+| `perf` | Performance | patch |
+| `docs` | — (no entry) | patch |
+| `refactor` | — (no entry) | patch |
+| `chore` | — (no entry) | none |
+| `feat!` or `BREAKING CHANGE:` footer | — | major (minor while `0.x`) |
+
+Examples:
+
+```
+fix: clamp overflow in IW44 normalize for extreme coefficients
+feat(render): add render_gray8 for single-channel grayscale output
+feat!: remove deprecated DjVuPage::extract_mask — use raw_chunk instead
+perf(iw44): SIMD YCbCr→RGB using wide::i32x8
+docs: document Rotation enum variants
+chore(ci): upgrade actions/checkout to v4
+```
+
+See `RELEASING.md` for how commits drive the automated release process.
 
 ## Opening a pull request
 
