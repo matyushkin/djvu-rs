@@ -210,6 +210,47 @@ at 600 dpi require SIMD in the wavelet transform itself.
 
 ---
 
+## Comparison with other DjVu libraries
+
+### Library landscape
+
+| Library | Language | License | Actively maintained | Notes |
+|---------|----------|---------|---------------------|-------|
+| **djvu-rs** | Rust | MIT | ✓ | This crate. Pure Rust, no_std codec layer |
+| [DjVuLibre](https://djvu.sourceforge.net/) | C++ | GPL-2.0 | ✓ | Reference implementation, 25+ years old |
+| [python-djvulibre](https://jwilk.net/software/python-djvulibre) | Python (C bindings) | GPL-2.0 | △ | Thin wrapper around DjVuLibre; performance = DjVuLibre |
+| [djvu.js](https://github.com/RussCoder/djvujs) | JavaScript | MIT | △ | Browser-first viewer; no server-side decode |
+| [LizardTech DjVu SDK](https://www.celartem.com/) | C++ | Proprietary | ? | Commercial, rarely used outside enterprise |
+
+No other pure-Rust DjVu decoder exists as of v0.4.
+
+### Numerical comparison
+
+Measured numbers are available only for **djvu-rs vs DjVuLibre** (see section above).
+python-djvulibre delegates all decode work to the underlying DjVuLibre C++ library,
+so its performance equals DjVuLibre's.
+
+djvu.js operates in a browser context (WASM/JS) and is not designed for server-side
+batch processing. A direct comparison is not meaningful.
+
+Contributions with measurements for other libraries are welcome — see **Contributing results** above.
+
+### Feature comparison
+
+| Feature | djvu-rs | DjVuLibre | python-djvulibre | djvu.js |
+|---------|---------|-----------|-----------------|---------|
+| Decode IW44 | ✓ | ✓ | ✓ | ✓ |
+| Decode JB2 | ✓ | ✓ | ✓ | ✓ |
+| Text layer | ✓ | ✓ | ✓ | ✓ |
+| PDF export | ✓ | — | — | — |
+| TIFF export | ✓ | ✓ | ✓ | — |
+| Async render | ✓ | — | — | — |
+| no_std | ✓ | — | — | — |
+| License | MIT | GPL-2.0 | GPL-2.0 | MIT |
+| Rust crate | ✓ | — | — | — |
+
+---
+
 ## Notes
 
 - `bzz_decode` is slow (82 ms) because the NAVM chunk in navm_fgbz.djvu is large (~6 KB compressed). BZZ is inherently sequential (BWT inverse requires a full-block sort).
