@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/matyushkin/djvu-rs/compare/v0.4.2...v0.5.0) (2026-04-05)
+
+
+### Features
+
+* **fuzz:** add render to fuzz_full, add CI fuzz workflow (60 s/target) ([7e3e4eb](https://github.com/matyushkin/djvu-rs/commit/7e3e4eb0d51404d0c460b71ac5a359d4eac6da8b))
+* **mmap:** add memory-mapped I/O via MmapDocument ([387a2ea](https://github.com/matyushkin/djvu-rs/commit/387a2ea40696d88906dc5ead848154cf42189c6a)), closes [#70](https://github.com/matyushkin/djvu-rs/issues/70)
+* **render:** add rayon-based parallel page rendering ([3dc06f9](https://github.com/matyushkin/djvu-rs/commit/3dc06f991d7e26099ea4623580ebded7022f8775)), closes [#69](https://github.com/matyushkin/djvu-rs/issues/69)
+
+
+### Bug Fixes
+
+* **clippy:** use `contains()` instead of `iter().any()` in tiff_export ([f9b4c2b](https://github.com/matyushkin/djvu-rs/commit/f9b4c2b7b9ad3aadbc9539aec09ef651f5545312))
+* **jb2,iw44:** cap comment bytes and IW44 pixel limit to prevent fuzz timeouts ([49c7b1b](https://github.com/matyushkin/djvu-rs/commit/49c7b1bd29505528d53b70e7ab820e5a9c0eae2e))
+* **jb2,iw44:** prevent DoS via refinement bitmaps and uncapped total pixel budget ([3e72cf6](https://github.com/matyushkin/djvu-rs/commit/3e72cf6c33d21661db1198013d789217d8978580))
+* **jb2:** add blit-pixel budget to prevent type-7 dict-copy DoS ([1c03505](https://github.com/matyushkin/djvu-rs/commit/1c0350543b870c3b29fe87c1b59370410ba5e464))
+* **jb2:** cap decode loop at 1 M records to prevent infinite spin on exhausted ZP input ([0b84f2d](https://github.com/matyushkin/djvu-rs/commit/0b84f2dcadaf4cbbae75bd2e53cb82f7f99d4f2d))
+* **jb2:** guard blit fast path against i32 overflow and data buffer overread ([be72d29](https://github.com/matyushkin/djvu-rs/commit/be72d29584170afb0f12a951c10d3f24859ae02f))
+* **jb2:** limit symbol bitmap size to 4 MP to prevent DoS via crafted input ([943f25e](https://github.com/matyushkin/djvu-rs/commit/943f25eaacc7c91234caea2e99ff87950f7d632f))
+
+
+### Performance Improvements
+
+* **iw44:** SIMD-accelerate inverse wavelet transform column pass ([2ac4318](https://github.com/matyushkin/djvu-rs/commit/2ac4318c2c6e56af93ad5fe52670e032a70d378f)), closes [#68](https://github.com/matyushkin/djvu-rs/issues/68)
+
 ## [0.4.2](https://github.com/matyushkin/djvu-rs/compare/v0.4.1...v0.4.2) (2026-04-05)
 
 ### Documentation
