@@ -505,6 +505,93 @@ struct FlatPlane {
 //   2. Row pass (lifting + prediction along columns of subsampled rows)
 //
 // The column pass is transposed for cache efficiency.
+//
+// When `s == 1` (the final, highest-resolution level) the column indices are
+// contiguous, so we can process 8 columns per iteration using `wide::i32x8`.
+
+use wide::i32x8;
+
+/// Load 8 contiguous `i16` values from `slice[off..]` into an `i32x8`.
+#[inline(always)]
+fn load8(slice: &[i16], off: usize) -> i32x8 {
+    i32x8::from([
+        slice[off] as i32,
+        slice[off + 1] as i32,
+        slice[off + 2] as i32,
+        slice[off + 3] as i32,
+        slice[off + 4] as i32,
+        slice[off + 5] as i32,
+        slice[off + 6] as i32,
+        slice[off + 7] as i32,
+    ])
+}
+
+/// Store 8 values from an `i32x8` into contiguous `i16` slots at `slice[off..]`.
+#[inline(always)]
+fn store8(slice: &mut [i16], off: usize, v: i32x8) {
+    let a = v.to_array();
+    slice[off] = a[0] as i16;
+    slice[off + 1] = a[1] as i16;
+    slice[off + 2] = a[2] as i16;
+    slice[off + 3] = a[3] as i16;
+    slice[off + 4] = a[4] as i16;
+    slice[off + 5] = a[5] as i16;
+    slice[off + 6] = a[6] as i16;
+    slice[off + 7] = a[7] as i16;
+}
+
+/// Load 8 contiguous `i32` values from `slice[off..]` into an `i32x8`.
+#[inline(always)]
+fn load8_i32(slice: &[i32], off: usize) -> i32x8 {
+    i32x8::from([
+        slice[off],
+        slice[off + 1],
+        slice[off + 2],
+        slice[off + 3],
+        slice[off + 4],
+        slice[off + 5],
+        slice[off + 6],
+        slice[off + 7],
+    ])
+}
+
+/// Store 8 values from an `i32x8` into contiguous `i32` slots at `slice[off..]`.
+#[inline(always)]
+fn store8_i32(slice: &mut [i32], off: usize, v: i32x8) {
+    let a = v.to_array();
+    slice[off] = a[0];
+    slice[off + 1] = a[1];
+    slice[off + 2] = a[2];
+    slice[off + 3] = a[3];
+    slice[off + 4] = a[4];
+    slice[off + 5] = a[5];
+    slice[off + 6] = a[6];
+    slice[off + 7] = a[7];
+}
+
+/// Lifting filter: `data[idx] -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)`
+#[inline(always)]
+fn lifting_even(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
+    let a = p1 + n1;
+    let c = p3 + n3;
+    let c16 = i32x8::splat(16);
+    cur - (((a << 3) + a - c + c16) >> 5)
+}
+
+/// Prediction filter (inner): `data[idx] += ((9*(p1+n1) - (p3+n3) + 8) >> 4)`
+#[inline(always)]
+fn predict_inner(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
+    let a = p1 + n1;
+    let c8 = i32x8::splat(8);
+    cur + (((a << 3) + a - (p3 + n3) + c8) >> 4)
+}
+
+/// Prediction filter (boundary): `data[idx] += ((p + n + 1) >> 1)`
+#[inline(always)]
+fn predict_avg(cur: i32x8, p: i32x8, n: i32x8) -> i32x8 {
+    let c1 = i32x8::splat(1);
+    cur + ((p + n + c1) >> 1)
+}
 
 fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize, subsample: usize) {
     let stride = plane.stride;
@@ -519,11 +606,15 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
     while s >= subsample {
         let sd = s_degree as usize;
 
+        // When s == 1, column indices are contiguous → use SIMD.
+        let use_simd = s == 1;
+
         // ── Column pass (transposed) ──────────────────────────────────────────
         {
             let kmax = (height - 1) >> sd;
             let border = kmax.saturating_sub(3);
             let num_cols = width.div_ceil(s);
+            let simd_cols = if use_simd { num_cols / 8 * 8 } else { 0 };
 
             // Lifting (even samples)
             for v in &mut st0[..num_cols] {
@@ -534,8 +625,17 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
             }
             if kmax >= 1 {
                 let off = (1 << sd) * stride;
-                for (ci, col) in (0..width).step_by(s).enumerate() {
-                    st2[ci] = data[off + col] as i32;
+                if use_simd {
+                    for ci in (0..simd_cols).step_by(8) {
+                        store8_i32(&mut st2, ci, load8(data, off + ci));
+                    }
+                    for ci in simd_cols..num_cols {
+                        st2[ci] = data[off + ci] as i32;
+                    }
+                } else {
+                    for (ci, col) in (0..width).step_by(s).enumerate() {
+                        st2[ci] = data[off + col] as i32;
+                    }
                 }
             } else {
                 for v in &mut st2[..num_cols] {
@@ -549,20 +649,52 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
                 let has_n3 = k + 3 <= kmax;
                 let n3_off = if has_n3 { ((k + 3) << sd) * stride } else { 0 };
 
-                for (ci, col) in (0..width).step_by(s).enumerate() {
-                    let p3 = st0[ci];
-                    let p1 = st1[ci];
-                    let n1 = st2[ci];
-                    let n3 = if has_n3 { data[n3_off + col] as i32 } else { 0 };
+                if use_simd {
+                    let zero8 = i32x8::splat(0);
+                    let mut ci = 0usize;
+                    while ci < simd_cols {
+                        let vp3 = load8_i32(&st0, ci);
+                        let vp1 = load8_i32(&st1, ci);
+                        let vn1 = load8_i32(&st2, ci);
+                        let vn3 = if has_n3 { load8(data, n3_off + ci) } else { zero8 };
+                        let cur = load8(data, k_off + ci);
+                        store8(data, k_off + ci, lifting_even(cur, vp1, vn1, vp3, vn3));
+                        store8_i32(&mut st0, ci, vp1);
+                        store8_i32(&mut st1, ci, vn1);
+                        store8_i32(&mut st2, ci, vn3);
+                        ci += 8;
+                    }
+                    // scalar tail
+                    while ci < num_cols {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let n3 = if has_n3 { data[n3_off + ci] as i32 } else { 0 };
+                        let a = p1 + n1;
+                        let c = p3 + n3;
+                        let idx = k_off + ci;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = n3;
+                        ci += 1;
+                    }
+                } else {
+                    for (ci, col) in (0..width).step_by(s).enumerate() {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let n3 = if has_n3 { data[n3_off + col] as i32 } else { 0 };
 
-                    let a = p1 + n1;
-                    let c = p3 + n3;
-                    let idx = k_off + col;
-                    data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+                        let a = p1 + n1;
+                        let c = p3 + n3;
+                        let idx = k_off + col;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
 
-                    st0[ci] = p1;
-                    st1[ci] = n1;
-                    st2[ci] = n3;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = n3;
+                    }
                 }
                 k += 2;
             }
@@ -575,13 +707,55 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
 
                 if 2 <= kmax {
                     let kp1_off = (2 << sd) * stride;
-                    for (ci, col) in (0..width).step_by(s).enumerate() {
-                        let p = data[km1_off + col] as i32;
-                        let n = data[kp1_off + col] as i32;
-                        let idx = k_off + col;
-                        data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
+                    if use_simd {
+                        let mut ci = 0usize;
+                        while ci < simd_cols {
+                            let vp = load8(data, km1_off + ci);
+                            let vn = load8(data, kp1_off + ci);
+                            let cur = load8(data, k_off + ci);
+                            store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                            store8_i32(&mut st0, ci, vp);
+                            store8_i32(&mut st1, ci, vn);
+                            ci += 8;
+                        }
+                        while ci < num_cols {
+                            let p = data[km1_off + ci] as i32;
+                            let n = data[kp1_off + ci] as i32;
+                            let idx = k_off + ci;
+                            data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
+                            st0[ci] = p;
+                            st1[ci] = n;
+                            ci += 1;
+                        }
+                    } else {
+                        for (ci, col) in (0..width).step_by(s).enumerate() {
+                            let p = data[km1_off + col] as i32;
+                            let n = data[kp1_off + col] as i32;
+                            let idx = k_off + col;
+                            data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
+                            st0[ci] = p;
+                            st1[ci] = n;
+                        }
+                    }
+                } else if use_simd {
+                    let mut ci = 0usize;
+                    while ci < simd_cols {
+                        let vp = load8(data, km1_off + ci);
+                        let cur = load8(data, k_off + ci);
+                        store8(data, k_off + ci, cur + vp);
+                        store8_i32(&mut st0, ci, vp);
+                        ci += 8;
+                    }
+                    for v in &mut st1[..num_cols] {
+                        *v = 0;
+                    }
+                    while ci < num_cols {
+                        let p = data[km1_off + ci] as i32;
+                        let idx = k_off + ci;
+                        data[idx] = (data[idx] as i32 + p) as i16;
                         st0[ci] = p;
-                        st1[ci] = n;
+                        st1[ci] = 0;
+                        ci += 1;
                     }
                 } else {
                     for (ci, col) in (0..width).step_by(s).enumerate() {
@@ -595,8 +769,20 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
 
                 if border >= 3 {
                     let off = (4 << sd) * stride;
-                    for (ci, col) in (0..width).step_by(s).enumerate() {
-                        st2[ci] = data[off + col] as i32;
+                    if use_simd {
+                        let mut ci = 0usize;
+                        while ci < simd_cols {
+                            store8_i32(&mut st2, ci, load8(data, off + ci));
+                            ci += 8;
+                        }
+                        while ci < num_cols {
+                            st2[ci] = data[off + ci] as i32;
+                            ci += 1;
+                        }
+                    } else {
+                        for (ci, col) in (0..width).step_by(s).enumerate() {
+                            st2[ci] = data[off + col] as i32;
+                        }
                     }
                 }
 
@@ -606,20 +792,51 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
                     let k_off = (k << sd) * stride;
                     let n3_off = ((k + 3) << sd) * stride;
 
-                    for (ci, col) in (0..width).step_by(s).enumerate() {
-                        let p3 = st0[ci];
-                        let p1 = st1[ci];
-                        let n1 = st2[ci];
-                        let n3 = data[n3_off + col] as i32;
+                    if use_simd {
+                        let mut ci = 0usize;
+                        while ci < simd_cols {
+                            let vp3 = load8_i32(&st0, ci);
+                            let vp1 = load8_i32(&st1, ci);
+                            let vn1 = load8_i32(&st2, ci);
+                            let vn3 = load8(data, n3_off + ci);
+                            let cur = load8(data, k_off + ci);
+                            store8(data, k_off + ci, predict_inner(cur, vp1, vn1, vp3, vn3));
+                            store8_i32(&mut st0, ci, vp1);
+                            store8_i32(&mut st1, ci, vn1);
+                            store8_i32(&mut st2, ci, vn3);
+                            ci += 8;
+                        }
+                        while ci < num_cols {
+                            let p3 = st0[ci];
+                            let p1 = st1[ci];
+                            let n1 = st2[ci];
+                            let n3 = data[n3_off + ci] as i32;
+                            let a = p1 + n1;
+                            let idx = k_off + ci;
+                            data[idx] = (data[idx] as i32
+                                + (((a << 3) + a - (p3 + n3) + 8) >> 4))
+                                as i16;
+                            st0[ci] = p1;
+                            st1[ci] = n1;
+                            st2[ci] = n3;
+                            ci += 1;
+                        }
+                    } else {
+                        for (ci, col) in (0..width).step_by(s).enumerate() {
+                            let p3 = st0[ci];
+                            let p1 = st1[ci];
+                            let n1 = st2[ci];
+                            let n3 = data[n3_off + col] as i32;
 
-                        let a = p1 + n1;
-                        let idx = k_off + col;
-                        data[idx] =
-                            (data[idx] as i32 + (((a << 3) + a - (p3 + n3) + 8) >> 4)) as i16;
+                            let a = p1 + n1;
+                            let idx = k_off + col;
+                            data[idx] =
+                                (data[idx] as i32 + (((a << 3) + a - (p3 + n3) + 8) >> 4)) as i16;
 
-                        st0[ci] = p1;
-                        st1[ci] = n1;
-                        st2[ci] = n3;
+                            st0[ci] = p1;
+                            st1[ci] = n1;
+                            st2[ci] = n3;
+                        }
                     }
                     k += 2;
                 }
@@ -629,13 +846,53 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
                     let k_off = (k << sd) * stride;
 
                     if k < kmax {
-                        for (ci, col) in (0..width).step_by(s).enumerate() {
+                        if use_simd {
+                            let mut ci = 0usize;
+                            while ci < simd_cols {
+                                let vp = load8_i32(&st1, ci);
+                                let vn = load8_i32(&st2, ci);
+                                let cur = load8(data, k_off + ci);
+                                store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                                store8_i32(&mut st1, ci, vn);
+                                store8_i32(&mut st2, ci, i32x8::splat(0));
+                                ci += 8;
+                            }
+                            while ci < num_cols {
+                                let p = st1[ci];
+                                let n = st2[ci];
+                                let idx = k_off + ci;
+                                data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
+                                st1[ci] = n;
+                                st2[ci] = 0;
+                                ci += 1;
+                            }
+                        } else {
+                            for (ci, col) in (0..width).step_by(s).enumerate() {
+                                let p = st1[ci];
+                                let n = st2[ci];
+                                let idx = k_off + col;
+                                data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
+                                st1[ci] = n;
+                                st2[ci] = 0;
+                            }
+                        }
+                    } else if use_simd {
+                        let mut ci = 0usize;
+                        while ci < simd_cols {
+                            let vp = load8_i32(&st1, ci);
+                            let cur = load8(data, k_off + ci);
+                            store8(data, k_off + ci, cur + vp);
+                            store8_i32(&mut st1, ci, load8_i32(&st2, ci));
+                            store8_i32(&mut st2, ci, i32x8::splat(0));
+                            ci += 8;
+                        }
+                        while ci < num_cols {
                             let p = st1[ci];
-                            let n = st2[ci];
-                            let idx = k_off + col;
-                            data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
-                            st1[ci] = n;
+                            let idx = k_off + ci;
+                            data[idx] = (data[idx] as i32 + p) as i16;
+                            st1[ci] = st2[ci];
                             st2[ci] = 0;
+                            ci += 1;
                         }
                     } else {
                         for (ci, col) in (0..width).step_by(s).enumerate() {
@@ -651,7 +908,14 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
             }
         }
 
-        // ── Row pass ─────────────────────────────────────────────────────────
+        // ── Row pass (SIMD for s == 1) ───────────────────────────────────────
+        //
+        // When s == 1, sd == 0, so elements are at consecutive indices within each
+        // row.  We vectorise the contiguous even/odd butterfly across 8 rows at a
+        // time to amortise function-call overhead and keep SIMD registers busy.
+        //
+        // For s > 1 the stride between samples is 2^sd ≥ 2, so we fall back to
+        // the scalar loop.
         {
             let kmax = (width - 1) >> sd;
             let border = kmax.saturating_sub(3);
