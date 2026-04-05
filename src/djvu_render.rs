@@ -76,6 +76,10 @@ pub enum RenderError {
     #[cfg(feature = "std")]
     #[error("JPEG decode error: {0}")]
     Jpeg(String),
+
+    /// Document-level error (e.g. page index out of range).
+    #[error("document error: {0}")]
+    Doc(#[from] crate::djvu_document::DocError),
 }
 
 // ── RenderOptions ─────────────────────────────────────────────────────────────
@@ -1344,6 +1348,43 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
 /// For colour pages, luminance is computed with ITU-R BT.601 weights.
 pub fn render_gray8(page: &DjVuPage, opts: &RenderOptions) -> Result<GrayPixmap, RenderError> {
     Ok(render_pixmap(page, opts)?.to_gray8())
+}
+
+/// Render all pages of a document in parallel using rayon.
+///
+/// Each page is rendered independently with its own [`RenderOptions`] computed
+/// from the given `dpi`.  Results are returned in page order.
+///
+/// Requires the `parallel` feature flag.
+#[cfg(feature = "parallel")]
+pub fn render_pages_parallel(
+    doc: &crate::djvu_document::DjVuDocument,
+    dpi: u32,
+) -> Vec<Result<Pixmap, RenderError>> {
+    use rayon::prelude::*;
+
+    let count = doc.page_count();
+    (0..count)
+        .into_par_iter()
+        .map(|i| {
+            let page = doc.page(i)?;
+            let native_dpi = page.dpi() as f32;
+            let scale = dpi as f32 / native_dpi;
+            let w = ((page.width() as f32 * scale).round() as u32).max(1);
+            let h = ((page.height() as f32 * scale).round() as u32).max(1);
+            let opts = RenderOptions {
+                width: w,
+                height: h,
+                scale,
+                bold: 0,
+                aa: false,
+                rotation: UserRotation::None,
+                permissive: false,
+                resampling: Resampling::Bilinear,
+            };
+            render_pixmap(page, &opts)
+        })
+        .collect()
 }
 
 /// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
