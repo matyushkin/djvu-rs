@@ -901,8 +901,8 @@ fn decode_fgjp(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
 /// converted to RGBA (alpha = 255).
 #[cfg(feature = "std")]
 fn decode_jpeg_to_pixmap(data: &[u8]) -> Result<Pixmap, RenderError> {
-    use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
 
     let cursor = ZCursor::new(data);
     let mut decoder = JpegDecoder::new(cursor);
@@ -2438,7 +2438,10 @@ mod tests {
             .iter()
             .zip(lanczos.data.iter())
             .any(|(a, b)| a != b);
-        assert!(differ, "Lanczos3 and bilinear must produce different pixel values");
+        assert!(
+            differ,
+            "Lanczos3 and bilinear must produce different pixel values"
+        );
     }
 
     /// `Resampling::Bilinear` default is maintained for backward compat.

@@ -145,32 +145,50 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
     for chunk in 0..full_chunks {
         let base = chunk * 8;
         let ys = i32x8::from([
-            y_row[base],     y_row[base + 1], y_row[base + 2], y_row[base + 3],
-            y_row[base + 4], y_row[base + 5], y_row[base + 6], y_row[base + 7],
+            y_row[base],
+            y_row[base + 1],
+            y_row[base + 2],
+            y_row[base + 3],
+            y_row[base + 4],
+            y_row[base + 5],
+            y_row[base + 6],
+            y_row[base + 7],
         ]);
         let bs = i32x8::from([
-            cb_row[base],     cb_row[base + 1], cb_row[base + 2], cb_row[base + 3],
-            cb_row[base + 4], cb_row[base + 5], cb_row[base + 6], cb_row[base + 7],
+            cb_row[base],
+            cb_row[base + 1],
+            cb_row[base + 2],
+            cb_row[base + 3],
+            cb_row[base + 4],
+            cb_row[base + 5],
+            cb_row[base + 6],
+            cb_row[base + 7],
         ]);
         let rs = i32x8::from([
-            cr_row[base],     cr_row[base + 1], cr_row[base + 2], cr_row[base + 3],
-            cr_row[base + 4], cr_row[base + 5], cr_row[base + 6], cr_row[base + 7],
+            cr_row[base],
+            cr_row[base + 1],
+            cr_row[base + 2],
+            cr_row[base + 3],
+            cr_row[base + 4],
+            cr_row[base + 5],
+            cr_row[base + 6],
+            cr_row[base + 7],
         ]);
 
         let t2 = rs + (rs >> 1_i32);
         let t3 = ys + c128 - (bs >> 2_i32);
 
-        let red:   i32x8 = (ys + c128 + t2).max(c0).min(c255);
+        let red: i32x8 = (ys + c128 + t2).max(c0).min(c255);
         let green: i32x8 = (t3 - (t2 >> 1_i32)).max(c0).min(c255);
-        let blue:  i32x8 = (t3 + (bs << 1_i32)).max(c0).min(c255);
+        let blue: i32x8 = (t3 + (bs << 1_i32)).max(c0).min(c255);
 
-        let reds   = red.to_array();
+        let reds = red.to_array();
         let greens = green.to_array();
-        let blues  = blue.to_array();
+        let blues = blue.to_array();
 
         let out_base = base * 4;
         for i in 0..8 {
-            out[out_base + i * 4]     = reds[i] as u8;
+            out[out_base + i * 4] = reds[i] as u8;
             out[out_base + i * 4 + 1] = greens[i] as u8;
             out[out_base + i * 4 + 2] = blues[i] as u8;
             out[out_base + i * 4 + 3] = 255;
@@ -184,7 +202,7 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
         let r = cr_row[col];
         let t2 = r + (r >> 1);
         let t3 = y + 128 - (b >> 2);
-        out[col * 4]     = (y + 128 + t2).clamp(0, 255) as u8;
+        out[col * 4] = (y + 128 + t2).clamp(0, 255) as u8;
         out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
         out[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
         out[col * 4 + 3] = 255;
@@ -911,7 +929,7 @@ impl Iw44Image {
             // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
             // YCbCr→RGBA formula 8 pixels at a time with SIMD.
             if sub == 1 {
-                let mut y_norm  = vec![0i32; pw];
+                let mut y_norm = vec![0i32; pw];
                 let mut cb_norm = vec![0i32; pw];
                 let mut cr_norm = vec![0i32; pw];
 
@@ -958,8 +976,16 @@ impl Iw44Image {
                     let src_row = row as usize * sub;
                     let src_col = col as usize * sub;
                     let y_idx = src_row * y_plane.stride + src_col;
-                    let chroma_row = if self.chroma_half { src_row & !1 } else { src_row };
-                    let chroma_col = if self.chroma_half { src_col & !1 } else { src_col };
+                    let chroma_row = if self.chroma_half {
+                        src_row & !1
+                    } else {
+                        src_row
+                    };
+                    let chroma_col = if self.chroma_half {
+                        src_col & !1
+                    } else {
+                        src_col
+                    };
                     let c_idx = chroma_row * cb_plane.stride + chroma_col;
 
                     let y = normalize(y_plane.data[y_idx]);
@@ -969,9 +995,9 @@ impl Iw44Image {
                     let t2 = r + (r >> 1);
                     let t3 = y + 128 - (b >> 2);
 
-                    let red   = (y + 128 + t2).clamp(0, 255) as u8;
+                    let red = (y + 128 + t2).clamp(0, 255) as u8;
                     let green = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
-                    let blue  = (t3 + (b << 1)).clamp(0, 255) as u8;
+                    let blue = (t3 + (b << 1)).clamp(0, 255) as u8;
                     pm.set_rgb(col, out_row, red, green, blue);
                 }
             }
@@ -1285,17 +1311,19 @@ mod tests {
     fn simd_ycbcr_row_matches_scalar() {
         // Cover all 8-wide SIMD chunks plus a tail (n=20).
         let n = 20usize;
-        let ys:  Vec<i32> = (0..n).map(|i| (i as i32 * 7)  % 200 - 100).collect();
-        let bs:  Vec<i32> = (0..n).map(|i| (i as i32 * 13) % 200 - 100).collect();
-        let rs:  Vec<i32> = (0..n).map(|i| (i as i32 * 17) % 200 - 100).collect();
+        let ys: Vec<i32> = (0..n).map(|i| (i as i32 * 7) % 200 - 100).collect();
+        let bs: Vec<i32> = (0..n).map(|i| (i as i32 * 13) % 200 - 100).collect();
+        let rs: Vec<i32> = (0..n).map(|i| (i as i32 * 17) % 200 - 100).collect();
 
         // Scalar reference
         let mut expected = vec![0u8; n * 4];
         for col in 0..n {
-            let y = ys[col]; let b = bs[col]; let r = rs[col];
+            let y = ys[col];
+            let b = bs[col];
+            let r = rs[col];
             let t2 = r + (r >> 1);
             let t3 = y + 128 - (b >> 2);
-            expected[col * 4]     = (y + 128 + t2).clamp(0, 255) as u8;
+            expected[col * 4] = (y + 128 + t2).clamp(0, 255) as u8;
             expected[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
             expected[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
             expected[col * 4 + 3] = 255;
@@ -1305,7 +1333,10 @@ mod tests {
         let mut actual = vec![0u8; n * 4];
         super::ycbcr_row_to_rgba(&ys, &bs, &rs, &mut actual);
 
-        assert_eq!(expected, actual, "SIMD must produce identical output to scalar");
+        assert_eq!(
+            expected, actual,
+            "SIMD must produce identical output to scalar"
+        );
     }
 
     /// `ycbcr_row_to_rgba` handles extreme values (clamping at 0 and 255).
@@ -1313,9 +1344,9 @@ mod tests {
     fn simd_ycbcr_row_clamps_correctly() {
         let n = 8usize;
         // Use values that will clamp to 0 and 255 in each channel.
-        let ys:  Vec<i32> = vec![127, -128, 127, -128, 0, 0, 0, 0];
-        let bs:  Vec<i32> = vec![-128, 127, -128, 127, 0, 0, 0, 0];
-        let rs:  Vec<i32> = vec![127, -128, -128, 127, 0, 0, 0, 0];
+        let ys: Vec<i32> = vec![127, -128, 127, -128, 0, 0, 0, 0];
+        let bs: Vec<i32> = vec![-128, 127, -128, 127, 0, 0, 0, 0];
+        let rs: Vec<i32> = vec![127, -128, -128, 127, 0, 0, 0, 0];
 
         let mut simd_out = vec![0u8; n * 4];
         super::ycbcr_row_to_rgba(&ys, &bs, &rs, &mut simd_out);
@@ -1346,9 +1377,9 @@ mod tests {
         // sub=2 uses the scalar general path — just check dims match half.
         let half = img.to_rgb_subsample(2).expect("subsample(2) failed");
 
-        assert_eq!(full.width,  img.width);
+        assert_eq!(full.width, img.width);
         assert_eq!(full.height, img.height);
-        assert_eq!(half.width,  img.width.div_ceil(2));
+        assert_eq!(half.width, img.width.div_ceil(2));
         assert_eq!(half.height, img.height.div_ceil(2));
         // SIMD path must still pass the existing golden test (done in iw44_new_decode_boy_bg).
     }

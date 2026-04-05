@@ -127,8 +127,8 @@ mod tests {
     }
 
     fn load_doc(name: &str) -> DjVuDocument {
-        let data = std::fs::read(assets_path().join(name))
-            .unwrap_or_else(|_| panic!("{name} must exist"));
+        let data =
+            std::fs::read(assets_path().join(name)).unwrap_or_else(|_| panic!("{name} must exist"));
         DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("{e}"))
     }
 
@@ -186,13 +186,15 @@ mod tests {
             height: ph,
             ..Default::default()
         };
-        let sync_pm =
-            djvu_render::render_pixmap(page, &opts).expect("sync render must succeed");
+        let sync_pm = djvu_render::render_pixmap(page, &opts).expect("sync render must succeed");
         let async_pm = render_pixmap_async(page, opts.clone())
             .await
             .expect("async render must succeed");
 
-        assert_eq!(sync_pm.data, async_pm.data, "async and sync renders must match");
+        assert_eq!(
+            sync_pm.data, async_pm.data,
+            "async and sync renders must match"
+        );
     }
 
     /// Concurrent rendering of multiple instances of the same page succeeds.
@@ -236,6 +238,9 @@ mod tests {
             height: 0,
         });
         let s = err.to_string();
-        assert!(s.contains("render error"), "error must mention 'render error'");
+        assert!(
+            s.contains("render error"),
+            "error must mention 'render error'"
+        );
     }
 }
