@@ -59,6 +59,7 @@ pub enum AnnotationError {
 
 /// An RGB color value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -70,6 +71,7 @@ pub struct Color {
 /// Note: coordinates are in DjVu native space (bottom-left origin).
 /// Integration with the text layer coordinate system requires manual remap.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -79,6 +81,7 @@ pub struct Rect {
 
 /// Shape of a maparea.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Shape {
     Rect(Rect),
     Oval(Rect),
@@ -89,18 +92,21 @@ pub enum Shape {
 
 /// A border style (currently stored as a raw string for forward-compat).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Border {
     pub style: String,
 }
 
 /// A highlight color for a maparea.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Highlight {
     pub color: Color,
 }
 
 /// A clickable map area (hyperlink or highlight region) in a DjVu page.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MapArea {
     /// Target URL (empty string if no link).
     pub url: String,
@@ -116,6 +122,7 @@ pub struct MapArea {
 
 /// Page-level annotation data.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Annotation {
     /// Background color for the page view.
     pub background: Option<Color>,

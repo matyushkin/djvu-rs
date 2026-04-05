@@ -113,6 +113,7 @@ pub enum DocError {
 
 /// A table-of-contents entry from the NAVM chunk.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DjVuBookmark {
     /// Display title.
     pub title: String,

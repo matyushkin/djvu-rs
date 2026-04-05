@@ -20,6 +20,7 @@ use crate::error::IffError;
 
 /// Page rotation encoded in INFO flags bits 0–1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Rotation {
     /// 0° — natural orientation.
     None,
@@ -33,6 +34,7 @@ pub enum Rotation {
 
 /// Metadata from the INFO chunk of a DjVu page.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PageInfo {
     /// Page width in pixels.
     pub width: u16,

@@ -63,6 +63,7 @@ pub enum TextError {
 
 /// Zone type discriminant in the DjVu text layer hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextZoneKind {
     Page,
     Column,
@@ -75,6 +76,7 @@ pub enum TextZoneKind {
 
 /// Bounding rectangle in top-left-origin coordinates (pixels).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -84,6 +86,7 @@ pub struct Rect {
 
 /// A single node in the text zone hierarchy.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextZone {
     /// Zone type.
     pub kind: TextZoneKind,
@@ -97,6 +100,7 @@ pub struct TextZone {
 
 /// The complete text layer of a DjVu page.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextLayer {
     /// Full plain-text content of the page, UTF-8.
     pub text: String,
