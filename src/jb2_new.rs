@@ -248,6 +248,7 @@ impl Jbm {
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // 4 MP per symbol — prevents DoS via huge bitmaps
 const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024; // 64 MP total across all symbols in one stream
+const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 1 << 20; // 1 M records per stream — terminates ZP-coder loops on exhausted input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
 
@@ -260,6 +261,20 @@ fn check_pixel_budget(w: i32, h: i32, total: &mut usize) -> Result<(), Jb2Error>
     }
     *total = total.saturating_add(pixels);
     if *total > MAX_TOTAL_SYMBOL_PIXELS {
+        return Err(Jb2Error::ImageTooLarge);
+    }
+    Ok(())
+}
+
+/// Check that blitting a symbol won't exceed the total blit-work budget.
+///
+/// Prevents DoS via repeated blitting of a large dict symbol (type 7 / matched copy)
+/// which has no decode cost but O(w×h) blit cost per record.
+#[inline(always)]
+fn check_blit_budget(sym: &Jbm, total: &mut usize) -> Result<(), Jb2Error> {
+    let pixels = (sym.width.max(0) as usize).saturating_mul(sym.height.max(0) as usize);
+    *total = total.saturating_add(pixels);
+    if *total > MAX_TOTAL_BLIT_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
     Ok(())
@@ -677,6 +692,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
     let mut total_sym_pixels = 0usize;
+    let mut total_blit_pixels = 0usize;
 
     // Preamble: optional "required-dict-or-reset" (type 9) followed by
     // "start-of-image" (type 0).
@@ -763,6 +779,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     bm.width,
                     bm.height,
                 );
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
                 dict.push(bm.crop_to_content());
             }
@@ -796,6 +813,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     bm.width,
                     bm.height,
                 );
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
             }
 
@@ -835,6 +853,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     cbm.width,
                     cbm.height,
                 );
+                check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &cbm, x, y);
                 dict.push(cbm.crop_to_content());
             }
@@ -900,6 +919,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     cbm.width,
                     cbm.height,
                 );
+                check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &cbm, x, y);
             }
 
@@ -930,6 +950,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                     bm_h,
                 );
                 let sym = &dict[index];
+                check_blit_budget(sym, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, sym, x, y);
             }
 
@@ -943,6 +964,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
                 let x = left - 1;
                 let y = top - h;
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit(&mut page, image_width, image_height, &bm, x, y);
             }
 
@@ -996,6 +1018,7 @@ fn decode_image_indexed(
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
     let mut total_sym_pixels = 0usize;
+    let mut total_blit_pixels = 0usize;
 
     let mut rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
     let mut initial_dict_length: usize = 0;
@@ -1074,6 +1097,7 @@ fn decode_image_indexed(
                     bm.width,
                     bm.height,
                 );
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
@@ -1113,6 +1137,7 @@ fn decode_image_indexed(
                     bm.width,
                     bm.height,
                 );
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
@@ -1160,6 +1185,7 @@ fn decode_image_indexed(
                     cbm.width,
                     cbm.height,
                 );
+                check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
@@ -1231,6 +1257,7 @@ fn decode_image_indexed(
                     cbm.width,
                     cbm.height,
                 );
+                check_blit_budget(&cbm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
@@ -1266,6 +1293,7 @@ fn decode_image_indexed(
                     dict[index].width,
                     dict[index].height,
                 );
+                check_blit_budget(&dict[index], &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
@@ -1285,6 +1313,7 @@ fn decode_image_indexed(
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
+                check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
                     &mut blit_map,
