@@ -18,36 +18,82 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 - **Bookmarks** — NAVM table-of-contents parsing
 - **Multi-page documents** — DJVM bundle format with DIRM directory chunk
 - **Page rendering** — composite foreground + background into RGBA output
-- **Progressive rendering** — incremental BG44 wavelet refinement
-- **Thumbnails** — TH44 embedded thumbnail extraction
-- `no_std` compatible — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only (no `std`)
+- **PDF export** — selectable text, lossless IW44/JB2 embedding, bookmarks, hyperlinks
+- **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
+- **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
+- `no_std` compatible — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
 
 ## Quick start
 
 ```rust
-use djvu_rs::Document;
+use djvu_rs::{DjVuDocument, djvu_render::{render_pixmap, RenderOptions}};
 
-let doc = Document::open("file.djvu")?;
+let data = std::fs::read("file.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+
 println!("{} pages", doc.page_count());
 
 let page = doc.page(0)?;
-println!("{}x{} @ {} dpi", page.width(), page.height(), page.dpi());
+println!("{}×{} @ {} dpi", page.width(), page.height(), page.dpi());
 
-let pixmap = page.render()?;
-// pixmap.data is RGBA bytes (4 bytes per pixel, row-major)
-// pixmap.width, pixmap.height are dimensions in pixels
+let opts = RenderOptions { dpi: 150.0, ..Default::default() };
+let pixmap = render_pixmap(page, &opts)?;
+// pixmap.data — RGBA bytes (width × height × 4), row-major
 ```
 
 ## Text extraction
 
 ```rust
-use djvu_rs::Document;
+use djvu_rs::DjVuDocument;
 
-let doc = Document::open("scanned.djvu")?;
+let data = std::fs::read("scanned.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
 let page = doc.page(0)?;
+
 if let Some(text) = page.text()? {
-    println!("Page text: {}", text);
+    println!("{text}");
 }
+```
+
+## PDF export
+
+```rust
+use djvu_rs::{DjVuDocument, pdf::djvu_to_pdf};
+
+let data = std::fs::read("book.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+
+let pdf_bytes = djvu_to_pdf(&doc)?;
+std::fs::write("book.pdf", pdf_bytes)?;
+```
+
+## TIFF export
+
+Requires the `tiff` feature flag: `djvu-rs = { version = "…", features = ["tiff"] }`.
+
+```rust
+use djvu_rs::{DjVuDocument, tiff_export::{djvu_to_tiff, TiffOptions}};
+
+let data = std::fs::read("scan.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+
+let tiff_bytes = djvu_to_tiff(&doc, &TiffOptions::default())?;
+std::fs::write("scan.tiff", tiff_bytes)?;
+```
+
+## Async render
+
+Requires the `async` feature flag: `djvu-rs = { version = "…", features = ["async"] }`.
+
+```rust
+use djvu_rs::{DjVuDocument, djvu_render::RenderOptions, djvu_async::render_pixmap_async};
+
+let data = std::fs::read("file.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+let page = doc.page(0)?;
+
+let opts = RenderOptions { dpi: 150.0, ..Default::default() };
+let pixmap = render_pixmap_async(page, opts).await?;
 ```
 
 ## Low-level IFF access
@@ -63,17 +109,47 @@ for chunk in &form.chunks {
 }
 ```
 
+## CLI
+
+The `djvu` binary is included when the `std` feature is enabled (the default).
+
+```sh
+# Install
+cargo install djvu-rs
+
+# Document info
+djvu info file.djvu
+
+# Render page 1 to PNG at 200 DPI
+djvu render file.djvu --dpi 200 --output page1.png
+
+# Render all pages to a PDF
+djvu render file.djvu --all --format pdf --output out.pdf
+
+# Export all pages to CBZ
+djvu render file.djvu --all --format cbz --output out.cbz
+
+# Extract text from page 2
+djvu text file.djvu --page 2
+
+# Extract text from all pages
+djvu text file.djvu --all
+```
+
 ## Feature flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `std` | enabled | Enables `Document`, `Page`, file I/O, and rendering. Disable for `no_std` |
+| `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export, CLI |
+| `tiff` | disabled | TIFF export via the `tiff` crate |
+| `async` | disabled | Async render API via `tokio::task::spawn_blocking` |
 
-Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding, text/annotation parsing — all codec primitives that work on byte slices.
+Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
+text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Minimum supported Rust version (MSRV)
 
-Rust **1.88** (edition 2024 features: let-chains stabilized in 1.88)
+Rust **1.88** (edition 2024 — let-chains stabilized in 1.88)
 
 ## Roadmap
 
