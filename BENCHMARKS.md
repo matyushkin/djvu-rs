@@ -28,22 +28,24 @@ Then open a PR updating this file with the new column. Please include CPU model,
 
 ## Multi-platform comparison
 
-Key render benchmarks across platforms (time = Criterion median, release profile).
+Key benchmarks across platforms (Criterion mean, release profile, v0.4.1 tag).
 
-| Benchmark | Apple M1 Max | x86_64 Linux (CI) |
-|-----------|-------------|-------------------|
-| `render_page/dpi/72` (boy.djvu) | **1.21 ms** | *(see CI artifacts)* |
-| `render_page/dpi/144` (boy.djvu) | **1.74 ms** | *(see CI artifacts)* |
-| `render_page/dpi/300` (boy.djvu) | **4.02 ms** | *(see CI artifacts)* |
-| `render_scaled_0.5x/bilinear` | **1.17 ms** | *(see CI artifacts)* |
-| `render_scaled_0.5x/lanczos3` | **5.68 ms** | *(see CI artifacts)* |
-| `render_corpus_color` (watchmaker.djvu) | **3.15 ms** | *(see CI artifacts)* |
-| `render_corpus_bilevel` (cable_1973.djvu) | **3.12 ms** | *(see CI artifacts)* |
-| `jb2_decode` (boy_jb2.djvu) | **228 µs** | *(see CI artifacts)* |
-| `iw44_decode_first_chunk` (boy.djvu) | **734 µs** | *(see CI artifacts)* |
-| `bzz_decode` (navm_fgbz.djvu) | **82.6 ms** | *(see CI artifacts)* |
+| Benchmark | Apple M1 Max | macOS CI (M-series) | x86_64 Linux (CI) |
+|-----------|-------------|---------------------|-------------------|
+| `render_page/dpi/72` | **1.21 ms** | 1.41 ms | 2.26 ms |
+| `render_page/dpi/144` | **1.74 ms** | 2.02 ms | 3.62 ms |
+| `render_page/dpi/300` | **4.02 ms** | 5.08 ms | 10.04 ms |
+| `render_scaled_0.5x/bilinear` | **1.17 ms** | 1.39 ms | 1.99 ms |
+| `render_scaled_0.5x/lanczos3` | **5.68 ms** | 6.34 ms | 12.40 ms |
+| `render_corpus_color` | **3.15 ms** | 3.70 ms | 4.93 ms |
+| `render_corpus_bilevel` | **3.12 ms** | 3.47 ms | 4.91 ms |
+| `jb2_decode` | **228 µs** | 232 µs | 422 µs |
+| `iw44_decode_first_chunk` | **734 µs** | 739 µs | 1.10 ms |
+| `bzz_decode` | **82.6 ms** | 86.3 ms | 118.4 ms |
+| `pdf_export_single_page` | — | **625 ms** | 1 122 ms |
 
-Linux x86_64 results are collected automatically on every release tag and available as GitHub Actions artifacts.
+macOS CI runner: `macos-latest` (GitHub-hosted Apple Silicon).
+Linux CI runner: `ubuntu-latest` (GitHub-hosted x86_64).
 
 ---
 
@@ -127,6 +129,44 @@ Test file: `tests/corpus/pathogenic_bacteria_1896.djvu` (520 pages, 25 MB, mixed
 
 ---
 
+## Detailed results — Linux x86_64 (CI, v0.4.1)
+
+### Platform
+
+| | |
+|---|---|
+| **CPU** | GitHub-hosted `ubuntu-latest` runner (x86_64) |
+| **OS** | Ubuntu 24.04 |
+| **Rust** | stable (edition 2024) |
+| **Profile** | release |
+| **Date** | 2026-04-05 |
+
+### Codec benchmarks
+
+| Benchmark | Time (mean) |
+|-----------|------------|
+| `bzz_decode` | 118.4 ms |
+| `jb2_decode` | 422 µs |
+| `jb2_decode_corpus_bilevel` | 4.65 ms |
+| `iw44_decode_first_chunk` | 1.10 ms |
+| `iw44_decode_corpus_color` | 4.39 ms |
+
+### Render benchmarks
+
+| Benchmark | Time (mean) |
+|-----------|------------|
+| `render_page/dpi/72` | 2.26 ms |
+| `render_page/dpi/144` | 3.62 ms |
+| `render_page/dpi/300` | 10.04 ms |
+| `render_scaled_0.5x/bilinear` | 1.99 ms |
+| `render_scaled_0.5x/lanczos3` | 12.40 ms |
+| `render_coarse` | 2.63 ms |
+| `render_corpus_color` | 4.93 ms |
+| `render_corpus_bilevel` | 4.91 ms |
+| `pdf_export_single_page` | 1 122 ms |
+
+---
+
 ## Comparison with DjVuLibre 3.5.29
 
 ### CLI comparison (`ddjvu` vs `djvu render`)
@@ -164,8 +204,9 @@ C source: `scripts/djvulibre_bench.c`
 | Parse + open document | **djvu-rs** | ~25–50× |
 
 **Analysis:** djvu-rs wins decisively at typical resolutions. The only deficit is the 600 dpi large-page
-case where libdjvulibre's hand-tuned SIMD color conversion dominates. This is a known optimization
-target tracked in [Issue #1](https://github.com/matyushkin/djvu-rs/issues/1).
+case where libdjvulibre's hand-tuned SIMD color conversion dominates. YCbCr→RGB SIMD
+was implemented in v0.4.0 ([#1](https://github.com/matyushkin/djvu-rs/issues/1)); further gains
+at 600 dpi require SIMD in the wavelet transform itself.
 
 ---
 
@@ -175,6 +216,6 @@ target tracked in [Issue #1](https://github.com/matyushkin/djvu-rs/issues/1).
 - JB2 and IW44 decode in sub-millisecond to low-millisecond range for typical pages.
 - Full page render at 72 dpi takes ~1.2 ms (composite: IW44 background + JB2 mask + color conversion).
 - Corpus benchmarks use public domain files from Internet Archive.
-- Large high-DPI render (600 dpi) is a known optimization target — SIMD color conversion is planned (Issue #1).
+- Large high-DPI render (600 dpi): SIMD YCbCr→RGB was added in v0.4.0. Further gains require SIMD in the IW44 wavelet transform.
 - Lanczos3 is available via `RenderOptions { resampling: Resampling::Lanczos3, .. }` for higher-quality downscaling at the cost of ~5× render time.
 - YCbCr→RGB conversion uses `wide::i32x8` SIMD (8 pixels per iteration). On the M1 Max the wavelet transform dominates; the SIMD path shows most benefit on large high-DPI pages (600 dpi, ≥ 12 MP) where color conversion is a larger fraction of total time.
