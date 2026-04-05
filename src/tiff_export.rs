@@ -348,7 +348,7 @@ mod tests {
         let mut decoder = tiff::decoder::Decoder::new(cursor).unwrap();
         let img = decoder.read_image().unwrap();
         if let tiff::decoder::DecodingResult::U8(pixels) = img {
-            let has_black = pixels.iter().any(|&p| p == 255);
+            let has_black = pixels.contains(&255);
             assert!(
                 has_black,
                 "bilevel JB2 page must have at least one black pixel"

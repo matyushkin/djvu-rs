@@ -136,6 +136,13 @@ fn cmd_render(
         return render_layer(path, page, all, layer, output);
     }
 
+    // When the `parallel` feature is enabled and --all is requested for PNG,
+    // use rayon-based parallel rendering via the DjVuDocument API.
+    #[cfg(feature = "parallel")]
+    if all && matches!(format, Format::Png) {
+        return render_png_parallel(path, dpi, output);
+    }
+
     let doc = open(path)?;
     let count = doc.page_count();
 
@@ -319,6 +326,31 @@ fn render_cbz(
     }
 
     zip.finish()?;
+    Ok(())
+}
+
+/// Parallel PNG rendering: renders all pages concurrently using rayon, then
+/// writes PNGs sequentially.
+#[cfg(feature = "parallel")]
+fn render_png_parallel(
+    path: &Path,
+    dpi: u32,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)?;
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+    std::fs::create_dir_all(output)?;
+
+    let pixmaps = djvu_rs::djvu_render::render_pages_parallel(&doc, dpi);
+
+    for (i, result) in pixmaps.into_iter().enumerate() {
+        let pixmap = result?;
+        let out = output.join(format!("page_{:04}.png", i + 1));
+        let file = std::fs::File::create(&out)?;
+        let mut writer = std::io::BufWriter::new(file);
+        encode_png(&mut writer, pixmap.width, pixmap.height, &pixmap.data)?;
+    }
+
     Ok(())
 }
 
