@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn encode_rgb_to_jpeg_returns_jpeg() {
         // 4×4 solid red image
-        let rgb = vec![255u8, 0, 0].repeat(16); // 16 pixels * 3 channels
+        let rgb = [255u8, 0, 0].repeat(16); // 16 pixels * 3 channels
         let jpeg = encode_rgb_to_jpeg(&rgb, 4, 4, 80);
         assert!(!jpeg.is_empty(), "JPEG output must not be empty");
         // JPEG starts with FF D8

@@ -919,8 +919,8 @@ impl Iw44Image {
                     let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                     let y_off = row * y_plane.stride;
 
-                    for col in 0..pw {
-                        y_norm[col] = normalize(y_plane.data[y_off + col]);
+                    for (col, v) in y_norm.iter_mut().enumerate() {
+                        *v = normalize(y_plane.data[y_off + col]);
                     }
 
                     if self.chroma_half {
@@ -1346,10 +1346,10 @@ mod tests {
         // sub=2 uses the scalar general path — just check dims match half.
         let half = img.to_rgb_subsample(2).expect("subsample(2) failed");
 
-        assert_eq!(full.width,  img.width  as u32);
-        assert_eq!(full.height, img.height as u32);
-        assert_eq!(half.width,  (img.width  as u32).div_ceil(2));
-        assert_eq!(half.height, (img.height as u32).div_ceil(2));
+        assert_eq!(full.width,  img.width);
+        assert_eq!(full.height, img.height);
+        assert_eq!(half.width,  img.width.div_ceil(2));
+        assert_eq!(half.height, img.height.div_ceil(2));
         // SIMD path must still pass the existing golden test (done in iw44_new_decode_boy_bg).
     }
 }

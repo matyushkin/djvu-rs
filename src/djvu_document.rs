@@ -536,7 +536,13 @@ impl DjVuDocument {
 
                     // Build a map of DJVI component ID → raw Djbz bytes for
                     // shared symbol dictionaries (referenced via INCL chunks).
-                    let djvi_djbz: std::collections::HashMap<String, Vec<u8>> = entries
+                    // Use BTreeMap so this compiles in no_std (alloc::collections::BTreeMap
+                    // is available; std::collections::HashMap is not).
+                    #[cfg(not(feature = "std"))]
+                    use alloc::collections::BTreeMap;
+                    #[cfg(feature = "std")]
+                    use std::collections::BTreeMap;
+                    let djvi_djbz: BTreeMap<String, Vec<u8>> = entries
                         .iter()
                         .enumerate()
                         .filter(|(_, e)| e.comp_type == ComponentType::Shared)
