@@ -46,7 +46,7 @@ fn bench_render_at_dpi(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("render_page");
 
-    for &dpi in &[72u32, 144u32, 300u32] {
+    for &dpi in &[72u32, 144u32, 300u32, 600u32] {
         let scale = dpi as f32 / native_dpi;
         let w = ((native_w as f32 * scale).round() as u32).max(1);
         let h = ((native_h as f32 * scale).round() as u32).max(1);
