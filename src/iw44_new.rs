@@ -1146,6 +1146,13 @@ impl Iw44Image {
                     cr.decode_slice(&mut zp);
                 }
             }
+            // Once all real input bytes are consumed the ZP coder returns
+            // 0xFF indefinitely, producing deterministic but meaningless
+            // bits. Remaining slices carry no new information, so stop early
+            // to bound decode time on crafted inputs.
+            if zp.is_exhausted() {
+                break;
+            }
         }
 
         Ok(())

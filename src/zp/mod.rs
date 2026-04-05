@@ -183,6 +183,15 @@ impl<'a> ZpDecoder<'a> {
     ///
     /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
+    /// Returns `true` once all real input bytes have been consumed.
+    ///
+    /// After exhaustion the coder returns `0xFF` bytes indefinitely, producing
+    /// deterministic but meaningless bits. Callers may use this to skip
+    /// remaining work that would otherwise loop on constant input.
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+
     pub(crate) fn decode_passthrough(&mut self) -> bool {
         let z = 0x8000u16.wrapping_add(self.a >> 1);
         self.passthrough_with_threshold(z)
