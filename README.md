@@ -143,9 +143,9 @@ djvu text file.djvu --all
 | `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export, CLI |
 | `tiff` | disabled | TIFF export via the `tiff` crate |
 | `async` | disabled | Async render API via `tokio::task::spawn_blocking` |
-| `parallel` | disabled | Parallel multi-page render via `rayon` |
-| `jpeg` | disabled | JPEG thumbnail decode support |
-| `mmap` | disabled | Memory-mapped file I/O via `memmap2` |
+| `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
+| `jpeg` | disabled | Standalone JPEG decode without full `std` (JPEG is included in `std` by default) |
+| `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
