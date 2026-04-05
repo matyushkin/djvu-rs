@@ -1069,6 +1069,27 @@ impl Iw44Image {
         }
     }
 
+    /// Returns the (width, height) of the Cb chroma plane as allocated.
+    ///
+    /// When `chroma_half=true` this should be `(ceil(w/2), ceil(h/2))`.
+    /// Returns `None` if no color chunks have been decoded yet.
+    #[cfg(test)]
+    pub fn chroma_plane_dims(&self) -> Option<(usize, usize)> {
+        self.cb.as_ref().map(|p| (p.width, p.height))
+    }
+
+    /// Returns `true` if the image is a color (YCbCr) image.
+    #[cfg(test)]
+    pub fn is_color(&self) -> bool {
+        self.is_color
+    }
+
+    /// Returns `true` if chroma planes are stored at half resolution.
+    #[cfg(test)]
+    pub fn chroma_half(&self) -> bool {
+        self.chroma_half
+    }
+
     /// Decode one BG44/FG44/TH44 chunk.
     ///
     /// Call this once for each chunk in document order.  The ZP coder state
@@ -1119,8 +1140,13 @@ impl Iw44Image {
             self.cslice = 0;
             self.y = Some(PlaneDecoder::new(w as usize, h as usize));
             if self.is_color {
-                self.cb = Some(PlaneDecoder::new(w as usize, h as usize));
-                self.cr = Some(PlaneDecoder::new(w as usize, h as usize));
+                let (cw, ch) = if self.chroma_half {
+                    ((w as usize).div_ceil(2), (h as usize).div_ceil(2))
+                } else {
+                    (w as usize, h as usize)
+                };
+                self.cb = Some(PlaneDecoder::new(cw, ch));
+                self.cr = Some(PlaneDecoder::new(cw, ch));
             }
             payload_start = 9;
         } else {
@@ -1185,7 +1211,15 @@ impl Iw44Image {
         let y_plane = y_dec.reconstruct(sub);
 
         if self.is_color {
-            let chroma_sub = if self.chroma_half { sub.max(2) } else { sub };
+            // When chroma_half=true the chroma planes are stored at half luma
+            // resolution.  Divide the subsample factor by 2 (minimum 1) so that
+            // reconstruct() operates at the correct scale relative to the smaller
+            // plane.
+            let chroma_sub = if self.chroma_half {
+                sub.div_ceil(2)
+            } else {
+                sub
+            };
             let cb_plane = self
                 .cb
                 .as_ref()
@@ -1218,11 +1252,12 @@ impl Iw44Image {
                     }
 
                     if self.chroma_half {
-                        let c_row = row & !1;
+                        // Chroma plane is half-resolution: index with row/2, col/2.
+                        let c_row = row / 2;
                         let cb_off = c_row * cb_plane.stride;
                         let cr_off = c_row * cr_plane.stride;
                         for col in 0..pw {
-                            let c_col = col & !1;
+                            let c_col = col / 2;
                             cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
                             cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
                         }
@@ -1252,13 +1287,15 @@ impl Iw44Image {
                     let src_row = row as usize * sub;
                     let src_col = col as usize * sub;
                     let y_idx = src_row * y_plane.stride + src_col;
+                    // When chroma_half=true the chroma planes are at half
+                    // resolution, so divide src coordinates by 2.
                     let chroma_row = if self.chroma_half {
-                        src_row & !1
+                        src_row / 2
                     } else {
                         src_row
                     };
                     let chroma_col = if self.chroma_half {
-                        src_col & !1
+                        src_col / 2
                     } else {
                         src_col
                     };
@@ -1546,6 +1583,61 @@ mod tests {
             full_pm.data, prog_pm.data,
             "progressive and full decode must produce identical pixels"
         );
+    }
+
+    // ── chroma_half allocation test ──────────────────────────────────────────
+
+    /// When `chroma_half=true`, chroma planes must be allocated at half
+    /// resolution (ceil(w/2) × ceil(h/2)), not at full luma resolution.
+    ///
+    /// carte.djvu is a color image with chroma_half=true (w=1400, h=852).
+    #[test]
+    fn chroma_half_allocates_half_size_plane() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu not found");
+        let file = crate::iff::parse(&data).expect("iff parse");
+        let chunks = extract_bg44_chunks(&file);
+        assert!(!chunks.is_empty(), "carte.djvu must have BG44 chunks");
+
+        let mut img = Iw44Image::new();
+        img.decode_chunk(chunks[0]).expect("decode_chunk");
+
+        assert!(img.is_color(), "carte.djvu must be a color image");
+        assert!(img.chroma_half(), "carte.djvu must have chroma_half=true");
+        let (cw, ch) = img
+            .chroma_plane_dims()
+            .expect("chroma plane must be allocated after first color chunk");
+        let lw = img.width as usize;
+        let lh = img.height as usize;
+        let expected_w = lw.div_ceil(2);
+        let expected_h = lh.div_ceil(2);
+        assert_eq!(
+            cw, expected_w,
+            "chroma plane width must be ceil(luma_w/2)={expected_w}, got {cw}"
+        );
+        assert_eq!(
+            ch, expected_h,
+            "chroma plane height must be ceil(luma_h/2)={expected_h}, got {ch}"
+        );
+    }
+
+    /// Decode carte.djvu (chroma_half=true color image) fully and compare
+    /// pixel output to the golden reference, ensuring the half-plane allocation
+    /// does not corrupt the decoded image.
+    #[test]
+    fn iw44_new_decode_carte_bg_chroma_half() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu not found");
+        let file = crate::iff::parse(&data).expect("iff parse");
+        let chunks = extract_bg44_chunks(&file);
+
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+        assert_eq!(img.width, 1400);
+        assert_eq!(img.height, 852);
+
+        let pm = img.to_rgb().expect("to_rgb failed");
+        assert_ppm_match(&pm.to_ppm(), "carte_bg.ppm");
     }
 
     // ── Error path tests ────────────────────────────────────────────────────
