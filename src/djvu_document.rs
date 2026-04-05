@@ -690,6 +690,83 @@ impl DjVuDocument {
     }
 }
 
+// ---- Memory-mapped document -------------------------------------------------
+
+/// A DjVu document backed by a memory-mapped file.
+///
+/// Instead of copying the entire file into a `Vec<u8>`, this type maps the file
+/// into the process address space using the OS virtual-memory subsystem.  The
+/// kernel pages data from disk on demand, which can significantly reduce peak
+/// memory usage for large multi-volume scans (100+ MB).
+///
+/// # Safety contract
+///
+/// **The underlying file must not be modified or truncated while the mapping is
+/// alive.**  Mutating a memory-mapped file is undefined behaviour on most
+/// platforms (SIGBUS on Linux/macOS, access violation on Windows).  The caller
+/// is responsible for ensuring file immutability for the lifetime of this
+/// struct.
+///
+/// Requires the `mmap` feature flag.
+#[cfg(feature = "mmap")]
+pub struct MmapDocument {
+    /// The memory mapping — kept alive so the parsed document's borrowed data
+    /// (pages, chunks) remain valid.  In practice `DjVuDocument` owns `Vec`
+    /// copies of all chunk data, so the mmap is only needed during `parse`.
+    _mmap: memmap2::Mmap,
+    doc: DjVuDocument,
+}
+
+#[cfg(feature = "mmap")]
+impl MmapDocument {
+    /// Open a DjVu file via memory-mapped I/O.
+    ///
+    /// # Safety contract
+    ///
+    /// The file at `path` **must not be modified or truncated** while the
+    /// returned `MmapDocument` is alive.  See the struct-level documentation
+    /// for details.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DocError::Io` if the file cannot be opened or mapped, or any
+    /// parse error from [`DjVuDocument::parse`].
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, DocError> {
+        let file = std::fs::File::open(path.as_ref())?;
+
+        // SAFETY: The caller guarantees the file is not modified while mapped.
+        // memmap2::Mmap provides a &[u8] view of the file contents.
+        #[allow(unsafe_code)]
+        let mmap = unsafe { memmap2::Mmap::map(&file) }?;
+
+        let doc = DjVuDocument::parse(&mmap)?;
+        Ok(MmapDocument { _mmap: mmap, doc })
+    }
+
+    /// Access the parsed [`DjVuDocument`].
+    pub fn document(&self) -> &DjVuDocument {
+        &self.doc
+    }
+
+    /// Number of pages in the document.
+    pub fn page_count(&self) -> usize {
+        self.doc.page_count()
+    }
+
+    /// Access a page by 0-based index.
+    pub fn page(&self, index: usize) -> Result<&DjVuPage, DocError> {
+        self.doc.page(index)
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl core::ops::Deref for MmapDocument {
+    type Target = DjVuDocument;
+    fn deref(&self) -> &DjVuDocument {
+        &self.doc
+    }
+}
+
 // ---- Internal parsing helpers -----------------------------------------------
 
 /// Parse a `DjVuPage` from the chunks of a FORM:DJVU.
@@ -1396,5 +1473,24 @@ mod tests {
         assert_eq!(reparsed.width, page.width() as u16);
         assert_eq!(reparsed.height, page.height() as u16);
         assert_eq!(reparsed.dpi, page.dpi());
+    }
+
+    /// MmapDocument opens a file and parses identically to in-memory parse.
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn mmap_document_matches_parse() {
+        let path = assets_path().join("chicken.djvu");
+        let mmap_doc = MmapDocument::open(&path).expect("mmap open should succeed");
+        let data = std::fs::read(&path).expect("read should succeed");
+        let mem_doc = DjVuDocument::parse(&data).expect("parse should succeed");
+
+        assert_eq!(mmap_doc.page_count(), mem_doc.page_count());
+        for i in 0..mmap_doc.page_count() {
+            let mp = mmap_doc.page(i).unwrap();
+            let pp = mem_doc.page(i).unwrap();
+            assert_eq!(mp.width(), pp.width());
+            assert_eq!(mp.height(), pp.height());
+            assert_eq!(mp.dpi(), pp.dpi());
+        }
     }
 }

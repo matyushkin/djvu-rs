@@ -41,6 +41,7 @@ tiff = { version = "0.9", optional = true }
 jpeg-encoder = { version = "0.6", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"], optional = true }
 rayon = { version = "1", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 [features]
 default = ["std"]
@@ -49,6 +50,7 @@ jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "std"]
 parallel = ["dep:rayon", "std"]
+mmap = ["dep:memmap2", "std"]
 
 [dev-dependencies]
 criterion = "0.5"
