@@ -248,6 +248,7 @@ impl Jbm {
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // 4 MP per symbol — prevents DoS via huge bitmaps
 const MAX_RECORDS: usize = 1 << 20; // 1 M records per stream — terminates ZP-coder loops on exhausted input
+const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
 
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
@@ -923,7 +924,8 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
 
             // 10 — comment: skip bytes
             10 => {
-                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142);
+                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
+                let length = length.min(MAX_COMMENT_BYTES);
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }
@@ -1256,7 +1258,8 @@ fn decode_image_indexed(
             }
             9 => {}
             10 => {
-                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142);
+                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
+                let length = length.min(MAX_COMMENT_BYTES);
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }
@@ -1371,7 +1374,8 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
 
             // 10 — comment: skip bytes
             10 => {
-                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142);
+                let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
+                let length = length.min(MAX_COMMENT_BYTES);
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }

@@ -1103,9 +1103,11 @@ impl Iw44Image {
             if w == 0 || h == 0 {
                 return Err(Iw44Error::ZeroDimension);
             }
-            // Prevent OOM on malformed input (~256 M pixels).
+            // Prevent OOM / slow decode on malformed input.
+            // 64 MP allows real scanned documents (e.g. 6780×9148 ≈ 62 MP at 600 dpi)
+            // while bounding worst-case fuzz decode to ~3 s (vs 12 s at 256 MP).
             let pixels = w as u64 * h as u64;
-            if pixels > 256 * 1024 * 1024 {
+            if pixels > 64 * 1024 * 1024 {
                 return Err(Iw44Error::ImageTooLarge);
             }
 
