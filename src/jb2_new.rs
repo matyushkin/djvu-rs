@@ -246,10 +246,10 @@ impl Jbm {
 ///
 /// Decodes top-to-bottom using an incremental rolling window that avoids
 /// recomputing all 10 context bits from scratch each pixel.
-const MAX_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // 4 MP per symbol — prevents DoS via huge bitmaps
-const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024; // 64 MP total across all symbols in one stream
+const MAX_SYMBOL_PIXELS: usize = 1024 * 1024; // 1 MP per symbol — prevents DoS via huge bitmaps
+const MAX_TOTAL_SYMBOL_PIXELS: usize = 16 * 1024 * 1024; // 16 MP total across all symbols in one stream
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
-const MAX_RECORDS: usize = 1 << 20; // 1 M records per stream — terminates ZP-coder loops on exhausted input
+const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
 
 /// Check that decoding a `w × h` symbol won't exceed per-symbol or stream-total pixel budgets.
@@ -1736,5 +1736,26 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = decode(&[0x7e, 0x00, 0x0c], None);
         assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod regression_fuzz2 {
+    use super::*;
+
+    /// Regression test: a fuzzer-discovered 11-byte input used to trigger a
+    /// near-4 MP symbol decode, taking >2 s under ASAN. The fix reduces
+    /// MAX_SYMBOL_PIXELS to 1 MP so the decoder rejects it via ImageTooLarge
+    /// before any significant work is done.
+    #[test]
+    fn huge_symbol_from_small_input_does_not_hang() {
+        let data = &[0x7f, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let start = std::time::Instant::now();
+        let _ = decode(data, None);
+        assert!(
+            start.elapsed().as_secs() < 2,
+            "took {:?}",
+            start.elapsed()
+        );
     }
 }

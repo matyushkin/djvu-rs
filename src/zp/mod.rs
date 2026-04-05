@@ -176,13 +176,6 @@ impl<'a> ZpDecoder<'a> {
         }
     }
 
-    /// Decode one bit in passthrough (context-free) mode.
-    ///
-    /// Used by BZZ to decode raw integer values (block size, BWT index).
-    /// The threshold is `z = 0x8000 + (a >> 1)`.
-    ///
-    /// Returns `true` if the decoded bit is 1.
-    #[inline(always)]
     /// Returns `true` once all real input bytes have been consumed.
     ///
     /// After exhaustion the coder returns `0xFF` bytes indefinitely, producing
@@ -192,6 +185,13 @@ impl<'a> ZpDecoder<'a> {
         self.pos >= self.data.len()
     }
 
+    /// Decode one bit in passthrough (context-free) mode.
+    ///
+    /// Used by BZZ to decode raw integer values (block size, BWT index).
+    /// The threshold is `z = 0x8000 + (a >> 1)`.
+    ///
+    /// Returns `true` if the decoded bit is 1.
+    #[inline(always)]
     pub(crate) fn decode_passthrough(&mut self) -> bool {
         let z = 0x8000u16.wrapping_add(self.a >> 1);
         self.passthrough_with_threshold(z)
