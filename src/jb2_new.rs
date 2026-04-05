@@ -247,8 +247,23 @@ impl Jbm {
 /// Decodes top-to-bottom using an incremental rolling window that avoids
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // 4 MP per symbol — prevents DoS via huge bitmaps
+const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024; // 64 MP total across all symbols in one stream
 const MAX_RECORDS: usize = 1 << 20; // 1 M records per stream — terminates ZP-coder loops on exhausted input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
+
+/// Check that decoding a `w × h` symbol won't exceed per-symbol or stream-total pixel budgets.
+#[inline(always)]
+fn check_pixel_budget(w: i32, h: i32, total: &mut usize) -> Result<(), Jb2Error> {
+    let pixels = (w.max(0) as usize).saturating_mul(h.max(0) as usize);
+    if pixels > MAX_SYMBOL_PIXELS {
+        return Err(Jb2Error::ImageTooLarge);
+    }
+    *total = total.saturating_add(pixels);
+    if *total > MAX_TOTAL_SYMBOL_PIXELS {
+        return Err(Jb2Error::ImageTooLarge);
+    }
+    Ok(())
+}
 
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
@@ -306,7 +321,11 @@ fn decode_bitmap_ref(
     width: i32,
     height: i32,
     mbm: &Jbm,
-) -> Jbm {
+) -> Result<Jbm, Jb2Error> {
+    let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
+    if pixels > MAX_SYMBOL_PIXELS {
+        return Err(Jb2Error::ImageTooLarge);
+    }
     let mut cbm = Jbm::new(width, height);
 
     // Center alignment: anchor the reference bitmap at the center of the child.
@@ -352,7 +371,7 @@ fn decode_bitmap_ref(
             m_r0 = ((m_r0 << 1) & 0b111) | mbm.get(mr - 1, col + col_shift + 2) as u32;
         }
     }
-    cbm
+    Ok(cbm)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -657,6 +676,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
     let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut total_sym_pixels = 0usize;
 
     // Preamble: optional "required-dict-or-reset" (type 9) followed by
     // "start-of-image" (type 0).
@@ -727,6 +747,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
             1 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -750,6 +771,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
             2 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 dict.push(bm.crop_to_content());
             }
@@ -758,6 +780,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
             3 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -790,13 +813,14 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
                 let cbm_w = dict[index].width + wdiff;
                 let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
                     cbm_w,
                     cbm_h,
                     &dict[index],
-                );
+                )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -829,13 +853,14 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
                 let cbm_w = dict[index].width + wdiff;
                 let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
                     cbm_w,
                     cbm_h,
                     &dict[index],
-                );
+                )?;
                 dict.push(cbm.crop_to_content());
             }
 
@@ -853,13 +878,14 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
                 let cbm_w = dict[index].width + wdiff;
                 let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
                     cbm_w,
                     cbm_h,
                     &dict[index],
-                );
+                )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -911,6 +937,7 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
             8 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
@@ -968,6 +995,7 @@ fn decode_image_indexed(
     let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut total_sym_pixels = 0usize;
 
     let mut rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
     let mut initial_dict_length: usize = 0;
@@ -1030,6 +1058,7 @@ fn decode_image_indexed(
             1 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -1061,12 +1090,14 @@ fn decode_image_indexed(
             2 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 dict.push(bm.crop_to_content());
             }
             3 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
@@ -1105,13 +1136,16 @@ fn decode_image_indexed(
                 }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm_w = dict[index].width + wdiff;
+                let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
-                    dict[index].width + wdiff,
-                    dict[index].height + hdiff,
+                    cbm_w,
+                    cbm_h,
                     &dict[index],
-                );
+                )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -1150,13 +1184,16 @@ fn decode_image_indexed(
                 }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm_w = dict[index].width + wdiff;
+                let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
-                    dict[index].width + wdiff,
-                    dict[index].height + hdiff,
+                    cbm_w,
+                    cbm_h,
                     &dict[index],
-                );
+                )?;
                 dict.push(cbm.crop_to_content());
             }
             6 => {
@@ -1170,13 +1207,16 @@ fn decode_image_indexed(
                 }
                 let wdiff = decode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142);
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
+                let cbm_w = dict[index].width + wdiff;
+                let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
-                    dict[index].width + wdiff,
-                    dict[index].height + hdiff,
+                    cbm_w,
+                    cbm_h,
                     &dict[index],
-                );
+                )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
                     &mut offset_type_ctx,
@@ -1241,6 +1281,7 @@ fn decode_image_indexed(
             8 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 let left = decode_num(&mut zp, &mut horiz_abs_loc_ctx, 1, image_width);
                 let top = decode_num(&mut zp, &mut vert_abs_loc_ctx, 1, image_height);
@@ -1294,6 +1335,7 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
 
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut total_sym_pixels = 0usize;
 
     // Preamble
     let mut rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
@@ -1341,6 +1383,7 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
             2 => {
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
+                check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h)?;
                 dict.push(bm.crop_to_content());
             }
@@ -1359,13 +1402,14 @@ fn decode_dictionary(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict
                 let hdiff = decode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142);
                 let cbm_w = dict[index].width + wdiff;
                 let cbm_h = dict[index].height + hdiff;
+                check_pixel_budget(cbm_w, cbm_h, &mut total_sym_pixels)?;
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
                     cbm_w,
                     cbm_h,
                     &dict[index],
-                );
+                )?;
                 dict.push(cbm.crop_to_content());
             }
 
