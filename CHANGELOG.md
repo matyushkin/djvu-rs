@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/matyushkin/djvu-rs/compare/v0.4.0...v0.5.0) (2026-04-05)
+
+
+### Features
+
+* add fit_to_width/height/box to RenderOptions ([#33](https://github.com/matyushkin/djvu-rs/issues/33)) ([b371a93](https://github.com/matyushkin/djvu-rs/commit/b371a93099276cab573244cc262dc6ba093276cf))
+* **api:** raw_chunk / all_chunks / chunk_ids on DjVuPage and DjVuDocument (Issue [#43](https://github.com/matyushkin/djvu-rs/issues/43)) ([#54](https://github.com/matyushkin/djvu-rs/issues/54)) ([3135627](https://github.com/matyushkin/djvu-rs/commit/31356279ad2739ae13ab36a144fbaabe5b5f63ab))
+* **async:** async render API via tokio::task::spawn_blocking (Issue [#51](https://github.com/matyushkin/djvu-rs/issues/51)) ([#61](https://github.com/matyushkin/djvu-rs/issues/61)) ([452636f](https://github.com/matyushkin/djvu-rs/commit/452636f143c56f4fc674968be5d5a4d8bd15d14a))
+* **bench:** add render_scaled and pdf_export benchmarks + BENCHMARKS.md (Issue [#52](https://github.com/matyushkin/djvu-rs/issues/52)) ([#62](https://github.com/matyushkin/djvu-rs/issues/62)) ([a8523c7](https://github.com/matyushkin/djvu-rs/commit/a8523c711c2fc3fc12d1089c5becf1b68af25595))
+* **cli:** implement djvu info/render/text — 24/24 tests green ([eb2e9d6](https://github.com/matyushkin/djvu-rs/commit/eb2e9d61f0a12285f9c6d7de4a4665b31f19a32a))
+* **cos-djvu:** benchmark suite, corpus infrastructure, BENCHMARKS.md (closes [#282](https://github.com/matyushkin/djvu-rs/issues/282)) ([#332](https://github.com/matyushkin/djvu-rs/issues/332)) ([50b6933](https://github.com/matyushkin/djvu-rs/commit/50b69330c73e5883a2954fe646f2cc7b7ec4e654))
+* **cos-djvu:** phase 1 — IFF parser, typed errors, MIT skeleton (closes [#267](https://github.com/matyushkin/djvu-rs/issues/267)) ([#277](https://github.com/matyushkin/djvu-rs/issues/277)) ([1943f3f](https://github.com/matyushkin/djvu-rs/commit/1943f3f1cbef880038065ea377ccdfdff4ee33d0))
+* **cos-djvu:** phase 2a — ZP arithmetic coder + BZZ decompressor (closes [#268](https://github.com/matyushkin/djvu-rs/issues/268)) ([#279](https://github.com/matyushkin/djvu-rs/issues/279)) ([4983056](https://github.com/matyushkin/djvu-rs/commit/498305678a0d13947e6fe5473d2bc6250383595d))
+* **cos-djvu:** phase-5 rendering pipeline — compositing, gamma, scaling, AA (closes [#273](https://github.com/matyushkin/djvu-rs/issues/273)) ([7f5e161](https://github.com/matyushkin/djvu-rs/commit/7f5e161dd7f13c94ed1fb680966416e339eb80d5))
+* **cos-djvu:** phase-6 quality — fuzz targets, benchmarks, no_std, full docs (closes [#274](https://github.com/matyushkin/djvu-rs/issues/274)) ([#324](https://github.com/matyushkin/djvu-rs/issues/324)) ([67fab7f](https://github.com/matyushkin/djvu-rs/commit/67fab7fdce945d972c574f61f9e460c32998a189))
+* **cos-djvu:** text layer + annotations extraction (closes [#272](https://github.com/matyushkin/djvu-rs/issues/272)) ([#316](https://github.com/matyushkin/djvu-rs/issues/316)) ([5beeba9](https://github.com/matyushkin/djvu-rs/commit/5beeba96034a55396769d044ff1c20f20dc379a6))
+* djvu render --format pdf|cbz, roadmap v0.1 finalised ([7d823f6](https://github.com/matyushkin/djvu-rs/commit/7d823f634a1efbc75f743d5d5a8a4f6056e0b0a0))
+* DjVu to PDF converter with text, bookmarks, and hyperlinks ([#2](https://github.com/matyushkin/djvu-rs/issues/2)-[#6](https://github.com/matyushkin/djvu-rs/issues/6)) ([#29](https://github.com/matyushkin/djvu-rs/issues/29)) ([a6f0a74](https://github.com/matyushkin/djvu-rs/commit/a6f0a7486d85146e677ae094396e96b44675e894))
+* document model — DjVuDocument, Page, DIRM, NAVM (closes [#271](https://github.com/matyushkin/djvu-rs/issues/271)) ([#283](https://github.com/matyushkin/djvu-rs/issues/283)) ([e36fd41](https://github.com/matyushkin/djvu-rs/commit/e36fd4169b591cb5f4146fc58bd3aaacf464d82b))
+* import cos-djvu history, remove GPL legacy code ([0f33110](https://github.com/matyushkin/djvu-rs/commit/0f33110d1846e7114c6a46726c9e088cbef25bea))
+* IW44 wavelet decoder with planar YCbCr (closes [#270](https://github.com/matyushkin/djvu-rs/issues/270)) ([#281](https://github.com/matyushkin/djvu-rs/issues/281)) ([f799e70](https://github.com/matyushkin/djvu-rs/commit/f799e7098dfbffdabada8e0c19fea2e31cdac351))
+* JB2 bilevel decoder (closes [#269](https://github.com/matyushkin/djvu-rs/issues/269)) ([#280](https://github.com/matyushkin/djvu-rs/issues/280)) ([e2a6898](https://github.com/matyushkin/djvu-rs/commit/e2a6898618765fe96a07ddaac51a40b665b64efb))
+* **jb2:** DJVI shared dictionary support via INCL chunks (Issue [#45](https://github.com/matyushkin/djvu-rs/issues/45)) ([#56](https://github.com/matyushkin/djvu-rs/issues/56)) ([86a63cb](https://github.com/matyushkin/djvu-rs/commit/86a63cb975303c14159340da4718ed3e23182e3e))
+* mask and foreground/background layer extraction API ([#36](https://github.com/matyushkin/djvu-rs/issues/36)) ([d4c6527](https://github.com/matyushkin/djvu-rs/commit/d4c6527eb03aa9397a681ccdf03a27cf9ed77b0b))
+* **metadata:** METa/METz document metadata parsing (Issue [#44](https://github.com/matyushkin/djvu-rs/issues/44)) ([#55](https://github.com/matyushkin/djvu-rs/issues/55)) ([eb4515b](https://github.com/matyushkin/djvu-rs/commit/eb4515b49819c3b75824738989c07153a7c2c0d6))
+* **pdf:** DCTDecode background encoding — smaller PDF output (Issue [#49](https://github.com/matyushkin/djvu-rs/issues/49)) ([#59](https://github.com/matyushkin/djvu-rs/issues/59)) ([de90a9f](https://github.com/matyushkin/djvu-rs/commit/de90a9fd94ef98fdeb8822aef174e945ebe5a3ea))
+* progressive DjVu rendering, multi-book cache, cos-diagnostics crate ([32432d8](https://github.com/matyushkin/djvu-rs/commit/32432d8c240f4a4673310a70158cf12cb9643635))
+* **render:** BGjp/FGjp JPEG background/foreground decoder (Issue [#47](https://github.com/matyushkin/djvu-rs/issues/47)) ([#57](https://github.com/matyushkin/djvu-rs/issues/57)) ([b65bd81](https://github.com/matyushkin/djvu-rs/commit/b65bd817270c21248aa3ec46b140b6fb97a9b683))
+* **render:** grayscale output mode — GrayPixmap + render_gray8 ([c13ebb7](https://github.com/matyushkin/djvu-rs/commit/c13ebb75ffa0673e670530bdd7ebe53f311a5044))
+* **render:** grayscale output mode — GrayPixmap + render_gray8 (Issue [#15](https://github.com/matyushkin/djvu-rs/issues/15)) ([75d7b37](https://github.com/matyushkin/djvu-rs/commit/75d7b37aed6ce0a6d4d118abc8050b731089a8bf))
+* **render:** Lanczos-3 separable resampling (Issue [#50](https://github.com/matyushkin/djvu-rs/issues/50)) ([#60](https://github.com/matyushkin/djvu-rs/issues/60)) ([56817d1](https://github.com/matyushkin/djvu-rs/commit/56817d162a335fe9597d2e65f84e0778ee147c65))
+* **render:** permissive render mode — skip corrupted chunks ([dc5734a](https://github.com/matyushkin/djvu-rs/commit/dc5734a088f82b6c5bf7b6cfc06a599a2f342a2b))
+* **render:** permissive render mode — skip corrupted chunks (Issue [#19](https://github.com/matyushkin/djvu-rs/issues/19)) ([df5a8d7](https://github.com/matyushkin/djvu-rs/commit/df5a8d715ba8534856d50f570752b8722118c2a0))
+* **text:** TextLayer::transform — rotate + scale zone rects for rendered pages (Issue [#46](https://github.com/matyushkin/djvu-rs/issues/46)) ([#53](https://github.com/matyushkin/djvu-rs/issues/53)) ([c4a514e](https://github.com/matyushkin/djvu-rs/commit/c4a514e8bbdd4bccdb0032130b949580ef5306cc))
+* **tiff:** TIFF export — multi-page color and bilevel modes (Issue [#48](https://github.com/matyushkin/djvu-rs/issues/48)) ([#58](https://github.com/matyushkin/djvu-rs/issues/58)) ([dc90cc0](https://github.com/matyushkin/djvu-rs/commit/dc90cc049ee7bd299ce6156c9c390c8616bdabca))
+* transfer from cos-djvu, remove legacy GPL code, add PD corpus, benchmarks ([33fd496](https://github.com/matyushkin/djvu-rs/commit/33fd4969a691b5445c708b6c5f1ae2f877304f73))
+* **ui:** table of contents navigation panel (closes [#60](https://github.com/matyushkin/djvu-rs/issues/60)) ([#298](https://github.com/matyushkin/djvu-rs/issues/298)) ([3fb0b2a](https://github.com/matyushkin/djvu-rs/commit/3fb0b2a94ff19891d6469f95aa381dcf66b7b712))
+* user-controllable rotation in RenderOptions ([#35](https://github.com/matyushkin/djvu-rs/issues/35)) ([e0f79a8](https://github.com/matyushkin/djvu-rs/commit/e0f79a80bd3d3b2cc43933debb9a0b290aaea285))
+
+
+### Bug Fixes
+
+* add missing chunk_data binding in iw44_new doctest ([d1a210b](https://github.com/matyushkin/djvu-rs/commit/d1a210b8b61fabc5c7634282f0bfb8062503dfa3))
+* apply gamma correction in all legacy render paths ([#9](https://github.com/matyushkin/djvu-rs/issues/9)) ([#22](https://github.com/matyushkin/djvu-rs/issues/22)) ([dfba614](https://github.com/matyushkin/djvu-rs/commit/dfba614c510d8da150ee76cf62f629f89cff48bc))
+* apply page rotation from INFO chunk in render_pixmap and render_coarse ([#10](https://github.com/matyushkin/djvu-rs/issues/10)) ([#24](https://github.com/matyushkin/djvu-rs/issues/24)) ([adec5ee](https://github.com/matyushkin/djvu-rs/commit/adec5eed27bf5f096bad4187a2d88a5349bd07a4))
+* **ci:** IJG license allowlist, no_std BTreeMap, clippy errors ([6a2a391](https://github.com/matyushkin/djvu-rs/commit/6a2a39199dffd1aa60cbe916bd2b28a516185dcd))
+* clippy errors and fmt — let-chain, ref on let, line wrapping ([b4ba2f8](https://github.com/matyushkin/djvu-rs/commit/b4ba2f87acc234e7b7467f394169775b846c03b5))
+* exclude .cargo/config.toml from published package (fixes docs.rs build) ([b9dd0da](https://github.com/matyushkin/djvu-rs/commit/b9dd0dafac62f0d6e12064f431d6b962b6a93e08))
+* FGbz multi-color foreground palette — use per-glyph blit index ([#12](https://github.com/matyushkin/djvu-rs/issues/12)) ([#26](https://github.com/matyushkin/djvu-rs/issues/26)) ([7897164](https://github.com/matyushkin/djvu-rs/commit/789716408799e39c0e78e3caeedb051f913d26ac))
+* **hard-rule:** eliminate last 5 .expect()/.unwrap() in production code (Issue [#443](https://github.com/matyushkin/djvu-rs/issues/443)) ([#444](https://github.com/matyushkin/djvu-rs/issues/444)) ([e4247ea](https://github.com/matyushkin/djvu-rs/commit/e4247eafc1eabadfac42fb04c318252ac0ebcc71))
+* remove deprecated [[licenses.deny]] syntax from deny.toml (cargo-deny v2) ([7971e44](https://github.com/matyushkin/djvu-rs/commit/7971e448cdeb82d8be78910e9f275ecc1b975d65))
+* replace all internal cos-djvu/cos_djvu references with djvu-rs/djvu_rs ([03fb17a](https://github.com/matyushkin/djvu-rs/commit/03fb17ae4460ca6baff50235993c6f005ddc08e4))
+* update MSRV to 1.88 (let-chains stabilized in 1.88) ([8d5b94f](https://github.com/matyushkin/djvu-rs/commit/8d5b94f9d84c9065662e2464003aa75a95613421))
+* vendor djvu-rs into crates/cos-djvu and fix production panics ([5f6d7fe](https://github.com/matyushkin/djvu-rs/commit/5f6d7fecadb7ea3bdcfa5cd530215ff28ea5e133)), closes [#4](https://github.com/matyushkin/djvu-rs/issues/4)
+
+
+### Performance Improvements
+
+* area-averaging downscale for better quality when rendering at reduced size ([#13](https://github.com/matyushkin/djvu-rs/issues/13)) ([#28](https://github.com/matyushkin/djvu-rs/issues/28)) ([b822ded](https://github.com/matyushkin/djvu-rs/commit/b822ded71372b0f70071f8245768d09b89e62a17))
+* **bitmap:** packed bitwise dilation with ping-pong buffers ([2887689](https://github.com/matyushkin/djvu-rs/commit/288768968e910eccfe313785aa316ef8eb0fbdac))
+* **bitmap:** packed bitwise dilation with ping-pong buffers (Issue [#17](https://github.com/matyushkin/djvu-rs/issues/17)) ([0814f55](https://github.com/matyushkin/djvu-rs/commit/0814f5519475073c4b426ca91360491c8ad69830))
+* eliminate redundant mask sampling in 3-layer composite ([#14](https://github.com/matyushkin/djvu-rs/issues/14)) ([#27](https://github.com/matyushkin/djvu-rs/issues/27)) ([f601036](https://github.com/matyushkin/djvu-rs/commit/f601036e8988c2ea0c4f2a5742cd4b1321bc8065))
+* **iw44:** SIMD YCbCr→RGB using wide::i32x8 (Issue [#1](https://github.com/matyushkin/djvu-rs/issues/1)) ([#64](https://github.com/matyushkin/djvu-rs/issues/64)) ([abceef4](https://github.com/matyushkin/djvu-rs/commit/abceef47d2bca524a20d13f4926f4dbf84e3c79b))
+* **render:** eliminate redundant mask sampling in 3-layer composite (Issue [#14](https://github.com/matyushkin/djvu-rs/issues/14)) ([#37](https://github.com/matyushkin/djvu-rs/issues/37)) ([585991d](https://github.com/matyushkin/djvu-rs/commit/585991d961978277b8fdaf2b87236f6d1b825ac0))
+
 ## [0.4.0](https://github.com/matyushkin/djvu-rs/compare/djvu-rs-v0.3.0...djvu-rs-v0.4.0) (2026-04-05)
 
 
