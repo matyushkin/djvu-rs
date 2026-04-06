@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/matyushkin/djvu-rs/compare/v0.5.0...v0.6.0) (2026-04-06)
+
+
+### Features
+
+* hOCR and ALTO XML export for text layer (Issue [#75](https://github.com/matyushkin/djvu-rs/issues/75)) ([#98](https://github.com/matyushkin/djvu-rs/issues/98)) ([263cf14](https://github.com/matyushkin/djvu-rs/commit/263cf1492b57caa2b1d986a7eec8fd4a6cc8305b))
+* implement ImageDecoder trait for image-rs integration (Issue [#80](https://github.com/matyushkin/djvu-rs/issues/80)) ([#97](https://github.com/matyushkin/djvu-rs/issues/97)) ([d7e4a64](https://github.com/matyushkin/djvu-rs/commit/d7e4a64e427454f4353f5124d1d03ba4ae31fe8c))
+* serde support for metadata, annotations, bookmarks, and text zones (Issue [#82](https://github.com/matyushkin/djvu-rs/issues/82)) ([#96](https://github.com/matyushkin/djvu-rs/issues/96)) ([e872ecd](https://github.com/matyushkin/djvu-rs/commit/e872ecdefbee38e0862c899da3955c2ee98ca233))
+
+
+### Bug Fixes
+
+* **ci:** use core::mem::take in no_std context; fix clippy redundant-Some in ocr_export test ([#101](https://github.com/matyushkin/djvu-rs/issues/101)) ([cc1cdf1](https://github.com/matyushkin/djvu-rs/commit/cc1cdf136e4eaaf9311170a20cd1f3b5ffd4ce54))
+* **jb2:** correct regression test comment for fuzz2 fix ([ee380ae](https://github.com/matyushkin/djvu-rs/commit/ee380ae87d3f589627182b5a1350ae76072eb901))
+* **jb2:** guard blit against negative symbol dimensions ([49a3792](https://github.com/matyushkin/djvu-rs/commit/49a3792c764e25594165a10b127612a446d7a732))
+* **jb2:** reduce MAX_RECORDS and MAX_SYMBOL_PIXELS to prevent fuzz timeouts ([3292193](https://github.com/matyushkin/djvu-rs/commit/3292193237d733976ea24c879ade958b1021caaa))
+
+
+### Performance Improvements
+
+* **iw44:** allocate chroma planes at half resolution when chroma_half=true (Issue [#85](https://github.com/matyushkin/djvu-rs/issues/85)) ([#99](https://github.com/matyushkin/djvu-rs/issues/99)) ([927e7c0](https://github.com/matyushkin/djvu-rs/commit/927e7c01580412e45a1487ddb98d62b524eed059))
+* **jb2:** reuse scratch buffer across symbol decodes to eliminate per-symbol heap allocations (Issue [#90](https://github.com/matyushkin/djvu-rs/issues/90)) ([#100](https://github.com/matyushkin/djvu-rs/issues/100)) ([12575d0](https://github.com/matyushkin/djvu-rs/commit/12575d095e73e650a5b04f4a5a56624b15c541f9))
+* **jb2:** shared dict cache + split_at_mut inner loop (Issue [#87](https://github.com/matyushkin/djvu-rs/issues/87)) ([#106](https://github.com/matyushkin/djvu-rs/issues/106)) ([08ca0f4](https://github.com/matyushkin/djvu-rs/commit/08ca0f43f557024411e765afd9f419c2681f6275))
+* **render:** 66% speedup on 600 dpi bilevel pages (Issue [#104](https://github.com/matyushkin/djvu-rs/issues/104)) ([#105](https://github.com/matyushkin/djvu-rs/issues/105)) ([8e5a2f4](https://github.com/matyushkin/djvu-rs/commit/8e5a2f42fdb0872b5a13d2560330346b0dc09989))
+* **render:** NEON bilinear vertical pass + 4-byte RGBX stride ([#93](https://github.com/matyushkin/djvu-rs/issues/93)) ([b0dfdb8](https://github.com/matyushkin/djvu-rs/commit/b0dfdb8de78e34f5f7478bc06bf3c3dfad21d1df))
+* **render:** precomputed coord tables, zero-copy BG path, remove PageMapper ([cf1a8e9](https://github.com/matyushkin/djvu-rs/commit/cf1a8e99eebf86d47c35fa403603354cbd23a5d7))
+
 ## [0.5.3] (unreleased)
 
 
