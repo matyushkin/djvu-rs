@@ -115,7 +115,7 @@ See `RELEASING.md` for how commits drive the automated release process.
 
 ## Opening a pull request
 
-- Target the `master` branch.
+- Target the `main` branch.
 - Keep PRs focused — one logical change per PR.
 - Link to any relevant issue in the description.
 - If the change touches the public API, update `README.md` examples if needed.
