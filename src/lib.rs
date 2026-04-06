@@ -350,6 +350,15 @@ impl<'a> Page<'a> {
         self.rotation
     }
 
+    /// Decode the JB2 mask layer only (no compositing).
+    ///
+    /// Returns `None` when the page has no Sjbz chunk (pure IW44 background page).
+    /// Useful for benchmarking the decode phase in isolation.
+    pub fn decode_mask(&self) -> Result<Option<Bitmap>, Error> {
+        let page = self.doc.doc.page(self.index)?;
+        page.decode_mask()
+    }
+
     /// Render the page to an RGBA pixmap at native resolution.
     pub fn render(&self) -> Result<Pixmap, Error> {
         let page = self.doc.doc.page(self.index)?;

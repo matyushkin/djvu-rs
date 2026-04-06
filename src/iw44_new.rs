@@ -1208,8 +1208,6 @@ impl Iw44Image {
         let w = (self.width as usize).div_ceil(sub) as u32;
         let h = (self.height as usize).div_ceil(sub) as u32;
 
-        let y_plane = y_dec.reconstruct(sub);
-
         if self.is_color {
             // When chroma_half=true the chroma planes are stored at half luma
             // resolution.  Divide the subsample factor by 2 (minimum 1) so that
@@ -1220,16 +1218,33 @@ impl Iw44Image {
             } else {
                 sub
             };
-            let cb_plane = self
-                .cb
-                .as_ref()
-                .ok_or(Iw44Error::MissingCodec)?
-                .reconstruct(chroma_sub);
-            let cr_plane = self
-                .cr
-                .as_ref()
-                .ok_or(Iw44Error::MissingCodec)?
-                .reconstruct(chroma_sub);
+            let cb_dec = self.cb.as_ref().ok_or(Iw44Error::MissingCodec)?;
+            let cr_dec = self.cr.as_ref().ok_or(Iw44Error::MissingCodec)?;
+
+            // Reconstruct Y, Cb and Cr planes.  With the `parallel` feature the
+            // three independent inverse-wavelet-transforms run concurrently on
+            // separate rayon threads, cutting the reconstruction wall-time from
+            // Y+Cb+Cr sequential to max(Y, Cb, Cr) — roughly 1.5–2× faster on
+            // large pages where Y dominates.
+            #[cfg(feature = "parallel")]
+            let (y_plane, cb_plane, cr_plane) = {
+                let (y, (cb, cr)) = rayon::join(
+                    || y_dec.reconstruct(sub),
+                    || {
+                        rayon::join(
+                            || cb_dec.reconstruct(chroma_sub),
+                            || cr_dec.reconstruct(chroma_sub),
+                        )
+                    },
+                );
+                (y, cb, cr)
+            };
+            #[cfg(not(feature = "parallel"))]
+            let (y_plane, cb_plane, cr_plane) = (
+                y_dec.reconstruct(sub),
+                cb_dec.reconstruct(chroma_sub),
+                cr_dec.reconstruct(chroma_sub),
+            );
 
             let pw = w as usize;
             let ph = h as usize;
@@ -1239,43 +1254,81 @@ impl Iw44Image {
             // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
             // YCbCr→RGBA formula 8 pixels at a time with SIMD.
             if sub == 1 {
-                let mut y_norm = vec![0i32; pw];
-                let mut cb_norm = vec![0i32; pw];
-                let mut cr_norm = vec![0i32; pw];
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    let chroma_half = self.chroma_half;
+                    pm.data
+                        .par_chunks_mut(pw * 4)
+                        .enumerate()
+                        .for_each(|(out_row, row_data)| {
+                            let row = ph - 1 - out_row; // DjVu rows are bottom-to-top
+                            let y_off = row * y_plane.stride;
+                            let mut y_norm = vec![0i32; pw];
+                            let mut cb_norm = vec![0i32; pw];
+                            let mut cr_norm = vec![0i32; pw];
+                            for (col, v) in y_norm.iter_mut().enumerate() {
+                                *v = normalize(y_plane.data[y_off + col]);
+                            }
+                            if chroma_half {
+                                let c_row = row / 2;
+                                let cb_off = c_row * cb_plane.stride;
+                                let cr_off = c_row * cr_plane.stride;
+                                for col in 0..pw {
+                                    let c_col = col / 2;
+                                    cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
+                                    cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
+                                }
+                            } else {
+                                let c_off = row * cb_plane.stride;
+                                for col in 0..pw {
+                                    cb_norm[col] = normalize(cb_plane.data[c_off + col]);
+                                    cr_norm[col] = normalize(cr_plane.data[c_off + col]);
+                                }
+                            }
+                            ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, row_data);
+                        });
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let mut y_norm = vec![0i32; pw];
+                    let mut cb_norm = vec![0i32; pw];
+                    let mut cr_norm = vec![0i32; pw];
 
-                for row in 0..ph {
-                    let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
-                    let y_off = row * y_plane.stride;
+                    for row in 0..ph {
+                        let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
+                        let y_off = row * y_plane.stride;
 
-                    for (col, v) in y_norm.iter_mut().enumerate() {
-                        *v = normalize(y_plane.data[y_off + col]);
-                    }
-
-                    if self.chroma_half {
-                        // Chroma plane is half-resolution: index with row/2, col/2.
-                        let c_row = row / 2;
-                        let cb_off = c_row * cb_plane.stride;
-                        let cr_off = c_row * cr_plane.stride;
-                        for col in 0..pw {
-                            let c_col = col / 2;
-                            cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
-                            cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
+                        for (col, v) in y_norm.iter_mut().enumerate() {
+                            *v = normalize(y_plane.data[y_off + col]);
                         }
-                    } else {
-                        let c_off = row * cb_plane.stride;
-                        for col in 0..pw {
-                            cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                            cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                        }
-                    }
 
-                    let row_start = out_row * pw * 4;
-                    ycbcr_row_to_rgba(
-                        &y_norm,
-                        &cb_norm,
-                        &cr_norm,
-                        &mut pm.data[row_start..row_start + pw * 4],
-                    );
+                        if self.chroma_half {
+                            // Chroma plane is half-resolution: index with row/2, col/2.
+                            let c_row = row / 2;
+                            let cb_off = c_row * cb_plane.stride;
+                            let cr_off = c_row * cr_plane.stride;
+                            for col in 0..pw {
+                                let c_col = col / 2;
+                                cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
+                                cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
+                            }
+                        } else {
+                            let c_off = row * cb_plane.stride;
+                            for col in 0..pw {
+                                cb_norm[col] = normalize(cb_plane.data[c_off + col]);
+                                cr_norm[col] = normalize(cr_plane.data[c_off + col]);
+                            }
+                        }
+
+                        let row_start = out_row * pw * 4;
+                        ycbcr_row_to_rgba(
+                            &y_norm,
+                            &cb_norm,
+                            &cr_norm,
+                            &mut pm.data[row_start..row_start + pw * 4],
+                        );
+                    }
                 }
                 return Ok(pm);
             }
@@ -1316,6 +1369,8 @@ impl Iw44Image {
             }
             Ok(pm)
         } else {
+            // Grayscale: only the Y plane is needed.
+            let y_plane = y_dec.reconstruct(sub);
             let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
             for row in 0..h {
                 let out_row = h - 1 - row;

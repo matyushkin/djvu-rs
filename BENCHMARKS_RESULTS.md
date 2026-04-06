@@ -4,7 +4,7 @@ Platform: Apple M1 Max, 10 cores, 64 GB RAM
 OS: macOS 26.3.1 (Darwin 25.3)
 Rust: 1.92.0 stable (edition 2024)
 Profile: release (opt-level 3, lto = thin)
-Date: 2026-04-05
+Date: 2026-04-06
 
 All benchmarks use `criterion` with 100 samples, 3s warm-up, 5s measurement.
 
@@ -43,7 +43,7 @@ Corpus files: `tests/corpus/`
 | Benchmark | Description | Time (median) |
 |-----------|-------------|--------------|
 | `render_corpus_color` | watchmaker.djvu full render | **3.15 ms** |
-| `render_corpus_bilevel` | cable_1973_100133.djvu full render | **3.14 ms** |
+| `render_corpus_bilevel` | cable_1973_100133.djvu full render | **3.15 ms** |
 | `render_scaled_0.5x/bilinear` | boy.djvu at 0.5× with bilinear filter | **1.31 ms** |
 | `render_scaled_0.5x/lanczos3` | boy.djvu at 0.5× with Lanczos-3 filter | **6.19 ms** |
 | `pdf_export_single_page` | Export single page to PDF bytes | **554 ms** |
@@ -52,15 +52,15 @@ Corpus files: `tests/corpus/`
 
 ## Document benchmarks (`cargo bench --bench document`)
 
-Test file: `tests/corpus/pathogenic_bacteria_1896.djvu` (520 pages, 25 MB, mixed IW44+JB2)
+Test file: `tests/corpus/pathogenic_bacteria_1896.djvu` (520 pages, 25 MB, bilevel JB2 at 600 dpi)
 Text layer: `tests/corpus/watchmaker.djvu` (TXTz present)
 
 | Benchmark | Time (median) | Notes |
 |-----------|--------------|-------|
 | `parse_multipage_520p` | **1.92 ms** | Parse DJVM directory + all page descriptors, 520 pages, 25 MB |
 | `iterate_pages_520p` | **521 µs** | Read width/height/dpi for all 520 pages (no render) |
-| `render_large_doc_first_page` | **42.7 ms** | Render page 1 of 520 (mixed content) at native DPI |
-| `render_large_doc_mid_page` | **75.8 ms** | Render page 260 of 520 — larger/denser page |
+| `render_large_doc_first_page` | **14.5 ms** | Render page 1 of 520 at native 600 dpi (was 42.7 ms) |
+| `render_large_doc_mid_page` | **43.9 ms** | Render page 260 of 520 — dense text, large JB2 bitstream (was 75.8 ms) |
 | `text_extraction_single_page` | **202 µs** | TXTz parse + plain text output, watchmaker.djvu |
 
 ---
@@ -84,8 +84,8 @@ djvu-rs library equivalents (in-process, no startup):
 | File | djvu-rs | ddjvu decode-only | Ratio |
 |------|---------|-------------------|-------|
 | boy.djvu at 100 dpi | **~1.6 ms** | ~24 ms | **~15× faster** |
-| watchmaker.djvu | **3.27 ms** | ~217 ms | **~66× faster** |
-| cable_1973.djvu | **3.16 ms** | ~47 ms | **~15× faster** |
+| watchmaker.djvu | **3.15 ms** | ~217 ms | **~69× faster** |
+| cable_1973.djvu | **3.15 ms** | ~47 ms | **~15× faster** |
 
 Note: ddjvu writes full PNM output and includes fork/exec overhead. djvu-rs
 numbers are pure decode+render to an in-memory RGBA buffer.
@@ -98,19 +98,22 @@ C source: `scripts/djvulibre_bench.c`
 | File | Output size | djvu-rs | libdjvulibre C API | Ratio |
 |------|------------|---------|-------------------|-------|
 | watchmaker.djvu (color IW44, 300 dpi) | 2550×3301 px | **3.15 ms** | 37.3 ms | **~12× faster** |
-| cable_1973_100133.djvu (bilevel JB2, 300 dpi) | 2550×3301 px | **3.14 ms** | 36.8 ms | **~12× faster** |
-| pathogenic_bacteria_1896.djvu p.1 (mixed, 600 dpi) | 2649×4530 px | 42.7 ms | **12.2 ms** | ~0.3× (libdjvulibre wins) |
-| pathogenic_bacteria_1896.djvu p.260 (mixed, 600 dpi) | 2649×4530 px | 75.8 ms | **13.8 ms** | ~0.2× (libdjvulibre wins) |
+| cable_1973_100133.djvu (bilevel JB2, 300 dpi) | 2550×3301 px | **3.15 ms** | 36.8 ms | **~12× faster** |
+| pathogenic_bacteria_1896.djvu p.1 (bilevel JB2, 600 dpi) | 2649×4530 px | **14.5 ms** | **12.2 ms** | ~0.84× (libdjvulibre ~19% faster) |
+| pathogenic_bacteria_1896.djvu p.260 (bilevel JB2, 600 dpi) | 2649×4530 px | 43.9 ms | **13.8 ms** | ~0.31× (libdjvulibre wins — large JB2 bitstream) |
 
-djvu-rs numbers are from `cargo bench --bench document` (criterion, release mode).
+djvu-rs numbers are from `cargo bench --bench document` (criterion, release mode, `--features parallel`).
 libdjvulibre numbers are render-only — after the page is already decoded and in memory.
 
 **Analysis:**
 
-- For standard 300 dpi pages, djvu-rs is ~11–12× faster than libdjvulibre for the render step.
-- For large 600 dpi mixed pages (12 MP output buffer) libdjvulibre is ~3–5× faster. This is an
-  expected weakness — djvu-rs color conversion uses scalar Rust; libdjvulibre uses hand-tuned C
-  with SIMD for large buffers. This is a known optimization target.
+- For standard 300 dpi pages, djvu-rs is ~12× faster than libdjvulibre for the render step.
+- For a sparse 600 dpi bilevel page (p.1, 11 KB JB2), djvu-rs is now within 19% of libdjvulibre
+  (14.5 ms vs 12.2 ms) — down from 3.5× slower. Root cause was `Pixmap::new` using a per-pixel
+  push loop instead of a bulk fill; fixed in this release.
+- For a dense 600 dpi bilevel page (p.260, 65 KB JB2), djvu-rs is 3.2× slower. Bottleneck is the
+  old JB2 arithmetic decoder (`crate::jb2`) which decodes the shared symbol dictionary on every
+  call. Caching the decoded dictionary is the next optimization target.
 - `open+decode` latency before render: djvu-rs ≈ 1.9 ms (parse_multipage);
   libdjvulibre C API ≈ 24–60 ms depending on page and file size — **10–30× faster open**.
 
@@ -118,8 +121,9 @@ libdjvulibre numbers are render-only — after the page is already decoded and i
 
 | Scenario | Winner | Margin |
 |----------|--------|--------|
-| Embedded in application (typical 300 dpi page) | **djvu-rs** | ~11× |
-| Large high-DPI page (600 dpi, 12 MP+) | libdjvulibre | ~3–5× |
+| Embedded in application (typical 300 dpi page) | **djvu-rs** | ~12× |
+| Sparse 600 dpi bilevel page (small JB2) | **libdjvulibre** | ~1.2× (near parity) |
+| Dense 600 dpi bilevel page (large JB2) | libdjvulibre | ~3.2× |
 | Open + decode document | **djvu-rs** | ~10–30× |
 
 ---
@@ -130,4 +134,10 @@ libdjvulibre numbers are render-only — after the page is already decoded and i
 - JB2 and IW44 decode in sub-millisecond to low-millisecond range for typical pages.
 - Full page render at 72 dpi takes ~1.4 ms (composite: IW44 background + JB2 mask + color).
 - Corpus benchmarks use public domain files from Internet Archive.
-- Large high-DPI render (600 dpi) is a known optimization target — SIMD color conversion is planned.
+- `render_large_doc_first_page` improved from 42.7 → 14.5 ms (-66%) in this release:
+  - `Pixmap::new` used a per-pixel push loop; replaced with `vec![fill; n]` / `slice::repeat` (-18 ms)
+  - `composite_bilevel` now uses row-slice writes instead of per-pixel `(y*w+x)*4` multiply
+  - `apply_gamma` skipped for pure bilevel output (values are always 0 or 255)
+  - Parallel row processing via rayon (`--features parallel`)
+- Dense 600 dpi pages (large JB2 bitstreams) remain bottlenecked on the old JB2 decoder;
+  shared-dictionary caching is the planned next optimization.

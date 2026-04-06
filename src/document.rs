@@ -351,7 +351,14 @@ impl<'a> Page<'a> {
         self.form.find_first(b"BG44").is_some()
     }
 
-    #[cfg(test)]
+    /// Returns `true` when the page has an IW44-encoded foreground colour layer (`FG44` chunk).
+    ///
+    /// Does **not** account for JPEG-encoded foreground (`FGjp`) or palette foreground
+    /// (`FGbz`). Use [`has_palette`] to check for `FGbz`. The legacy `render` path does
+    /// not decode `FGjp`, so this check is consistent with [`decode_foreground`] for that path.
+    ///
+    /// [`has_palette`]: Self::has_palette
+    /// [`decode_foreground`]: Self::decode_foreground
     pub fn has_foreground(&self) -> bool {
         self.form.find_first(b"FG44").is_some()
     }
