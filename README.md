@@ -213,8 +213,8 @@ Measured on Apple M1 Max (Rust 1.92, release profile). Compared to DjVuLibre 3.5
 
 | Page type | djvu-rs | libdjvulibre | Ratio |
 |-----------|---------|--------------|-------|
-| Color IW44, 300 dpi (849×1100 px) | 3.3 ms | 37 ms | **~11× faster** |
-| Bilevel JB2, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
+| Color IW44, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
+| Bilevel JB2, 300 dpi (849×1100 px) | 3.1 ms | 37 ms | **~12× faster** |
 | Mixed, 600 dpi (2649×4530 px) | 42 ms | 12 ms | ~0.3× (libdjvulibre wins) |
 
 Document open + parse is 10–30× faster than the C library. The 600 dpi regression is a

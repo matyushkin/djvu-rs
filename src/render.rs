@@ -234,14 +234,49 @@ fn dilate_mask_indexed(mask: Bitmap, blit_map: Vec<i32>, passes: u32) -> (Bitmap
 // ============================================================
 
 fn composite_bg_only(w: u32, h: u32, bg: &Pixmap, page_w: u32, page_h: u32) -> Pixmap {
-    let mapper = PageMapper::new(w, h, page_w, page_h);
+    // Fast path: when rendering at non-native DPI (w ≠ page_w or h ≠ page_h),
+    // scale directly to the output size in one bilinear pass.  This eliminates
+    // the w×h nearest-neighbour copy loop that the old two-step approach used.
+    if w != page_w || h != page_h {
+        return scale_bilinear_direct(bg, w, h);
+    }
+    // Native-DPI path: keep the original virtual-geometry logic so that golden
+    // pixel tests (which compare at native DPI) are not disturbed.
     let scaled_bg = scale_layer_bilinear(bg, page_w, page_h);
+    // Common case: virtual-geometry rounds to exact page size — return directly.
+    if scaled_bg.width == w && scaled_bg.height == h {
+        return scaled_bg;
+    }
+    // Rare case: virtual-geometry rounded down by 1–2 pixels in either dimension.
+    // Use bulk row copies and replicate edge pixels instead of per-pixel sampling.
+    let sw = scaled_bg.width as usize;
+    let sh = scaled_bg.height as usize;
+    let ow = w as usize;
+    let oh = h as usize;
+    let copy_w = sw.min(ow);
+    let copy_h = sh.min(oh);
     let mut out = Pixmap::white(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (px, py) = mapper.map(x, y);
-            let (r, g, b) = sample_scaled(&scaled_bg, px, py);
-            out.set_rgb(x, y, r, g, b);
+    for y in 0..copy_h {
+        let src_off = y * sw * 4;
+        let dst_off = y * ow * 4;
+        out.data[dst_off..dst_off + copy_w * 4]
+            .copy_from_slice(&scaled_bg.data[src_off..src_off + copy_w * 4]);
+        // Replicate last column if output is wider
+        if ow > copy_w {
+            let last = (src_off + (copy_w - 1) * 4, src_off + copy_w * 4);
+            let last_col: [u8; 4] = scaled_bg.data[last.0..last.1].try_into().unwrap_or([255, 255, 255, 255]);
+            for ox in copy_w..ow {
+                out.data[dst_off + ox * 4..dst_off + ox * 4 + 4].copy_from_slice(&last_col);
+            }
+        }
+    }
+    // Replicate last row if output is taller
+    if oh > copy_h {
+        let last_row_start = (copy_h - 1) * ow * 4;
+        let last_row: Vec<u8> = out.data[last_row_start..last_row_start + ow * 4].to_vec();
+        for oy in copy_h..oh {
+            let dst_off = oy * ow * 4;
+            out.data[dst_off..dst_off + ow * 4].copy_from_slice(&last_row);
         }
     }
     out
@@ -281,12 +316,15 @@ fn composite_bilevel(w: u32, h: u32, mask: &Bitmap, page_w: u32, page_h: u32) ->
         return out;
     }
 
-    let mapper = PageMapper::new(w, h, page_w, page_h);
-    for y in 0..h {
-        for x in 0..w {
-            let (mx, my) = mapper.map(x, y);
-            if mx < mask.width && my < mask.height && mask.get(mx, my) {
-                out.set_rgb(x, y, 0, 0, 0);
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
+    for (oy, &my) in row_map.iter().enumerate() {
+        if my >= mask.height {
+            continue;
+        }
+        for (ox, &mx) in col_map.iter().enumerate() {
+            if mx < mask.width && mask.get(mx, my) {
+                out.set_rgb(ox as u32, oy as u32, 0, 0, 0);
             }
         }
     }
@@ -307,13 +345,16 @@ fn composite_mask_bg(
 ) -> Pixmap {
     // Pass 1: fill output unconditionally with scaled background (branch-free, cache-friendly).
     let mut out = composite_bg_only(w, h, bg, page_w, page_h);
-    // Pass 2: overwrite only masked pixels with black (sparse, avoids branch per pixel).
-    let mapper = PageMapper::new(w, h, page_w, page_h);
-    for y in 0..h {
-        for x in 0..w {
-            let (px, py) = mapper.map(x, y);
-            if px < mask.width && py < mask.height && mask.get(px, py) {
-                out.set_rgb(x, y, 0, 0, 0);
+    // Pass 2: overwrite only masked pixels with black using precomputed integer coord tables.
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
+    for (oy, &py) in row_map.iter().enumerate() {
+        if py >= mask.height {
+            continue;
+        }
+        for (ox, &px) in col_map.iter().enumerate() {
+            if px < mask.width && mask.get(px, py) {
+                out.set_rgb(ox as u32, oy as u32, 0, 0, 0);
             }
         }
     }
@@ -332,15 +373,18 @@ fn composite_mask_fg(
     page_w: u32,
     page_h: u32,
 ) -> Pixmap {
-    let mapper = PageMapper::new(w, h, page_w, page_h);
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
     let fg_samp = NearestSampler::new(fg, page_w, page_h);
     let mut out = Pixmap::white(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (px, py) = mapper.map(x, y);
-            if px < mask.width && py < mask.height && mask.get(px, py) {
+    for (oy, &py) in row_map.iter().enumerate() {
+        if py >= mask.height {
+            continue;
+        }
+        for (ox, &px) in col_map.iter().enumerate() {
+            if px < mask.width && mask.get(px, py) {
                 let (r, g, b) = fg_samp.sample(fg, px, py);
-                out.set_rgb(x, y, r, g, b);
+                out.set_rgb(ox as u32, oy as u32, r, g, b);
             }
         }
     }
@@ -362,15 +406,18 @@ fn composite_3layer(
 ) -> Pixmap {
     // Pass 1: fill output unconditionally with scaled background (branch-free, cache-friendly).
     let mut out = composite_bg_only(w, h, bg, page_w, page_h);
-    // Pass 2: overwrite only masked pixels with FG color (sparse, avoids redundant BG sampling).
-    let mapper = PageMapper::new(w, h, page_w, page_h);
+    // Pass 2: overwrite only masked pixels with FG color using precomputed integer coord tables.
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
     let fg_samp = NearestSampler::new(fg, page_w, page_h);
-    for y in 0..h {
-        for x in 0..w {
-            let (px, py) = mapper.map(x, y);
-            if px < mask.width && py < mask.height && mask.get(px, py) {
+    for (oy, &py) in row_map.iter().enumerate() {
+        if py >= mask.height {
+            continue;
+        }
+        for (ox, &px) in col_map.iter().enumerate() {
+            if px < mask.width && mask.get(px, py) {
                 let (r, g, b) = fg_samp.sample(fg, px, py);
-                out.set_rgb(x, y, r, g, b);
+                out.set_rgb(ox as u32, oy as u32, r, g, b);
             }
         }
     }
@@ -529,6 +576,28 @@ impl PageMapper {
         };
         (px.min(self.max_x), py.min(self.max_y))
     }
+}
+
+/// Build a coordinate-mapping table for nearest-neighbour scaling.
+///
+/// Maps each output pixel `[0, out_dim)` to the nearest source pixel
+/// `[0, page_dim)` using the same half-pixel-centre convention as
+/// [`PageMapper`]: `mapped = (2*i + 1) * page_dim / (2 * out_dim)`.
+///
+/// All arithmetic is integer-only — no f64 per pixel.
+fn build_coord_map(out_dim: u32, page_dim: u32) -> Vec<u32> {
+    let max = page_dim.saturating_sub(1);
+    if out_dim == page_dim {
+        return (0..out_dim).collect();
+    }
+    let out_dim_u64 = out_dim as u64;
+    let page_dim_u64 = page_dim as u64;
+    (0..out_dim)
+        .map(|i| {
+            let mapped = (2 * i as u64 + 1) * page_dim_u64 / (2 * out_dim_u64);
+            (mapped as u32).min(max)
+        })
+        .collect()
 }
 
 /// Precomputed geometry for nearest-neighbor sampling from a layer.
@@ -866,6 +935,63 @@ fn sample_scaled(scaled: &Pixmap, page_x: u32, page_y: u32) -> (u8, u8, u8) {
     let sx = page_x.min(scaled.width.saturating_sub(1));
     let sy = page_y.min(scaled.height.saturating_sub(1));
     scaled.get_rgb(sx, sy)
+}
+
+/// Bilinear scale `src` to exactly `(ow × oh)` pixels.
+///
+/// Unlike [`scale_layer_bilinear`], does not apply virtual-geometry rounding —
+/// the output is always exactly `ow × oh`.  Used when the caller needs
+/// the result at a precise output size (e.g. compositing at non-native DPI).
+fn scale_bilinear_direct(src: &Pixmap, ow: u32, oh: u32) -> Pixmap {
+    let sw = src.width as usize;
+    let sh = src.height as usize;
+    if sw == 0 || sh == 0 || ow == 0 || oh == 0 {
+        return Pixmap::white(ow.max(1), oh.max(1));
+    }
+    let hcoord = prepare_coord(src.width, ow);
+    let vcoord = prepare_coord(src.height, oh);
+    let sw_m1 = sw - 1;
+    let sh_m1 = sh - 1;
+    let ow_us = ow as usize;
+    let hstride = ow_us * 4;
+    let mut hbuf: Vec<u8> = vec![0u8; sh * hstride];
+    for sy in 0..sh {
+        let src_row_off = sy * sw;
+        let dst_row_off = sy * hstride;
+        for (dx, &coord) in hcoord.iter().enumerate().take(ow_us) {
+            let ix = ((coord >> FRACBITS) as usize).min(sw_m1);
+            let fx = (coord & FRACMASK) as usize;
+            let ix1 = (ix + 1).min(sw_m1);
+            let s0 = (src_row_off + ix) * 4;
+            let s1 = (src_row_off + ix1) * 4;
+            let d = dst_row_off + dx * 4;
+            if fx == 0 {
+                hbuf[d] = src.data[s0];
+                hbuf[d + 1] = src.data[s0 + 1];
+                hbuf[d + 2] = src.data[s0 + 2];
+            } else {
+                hbuf[d] = lerp8(src.data[s0], src.data[s1], fx);
+                hbuf[d + 1] = lerp8(src.data[s0 + 1], src.data[s1 + 1], fx);
+                hbuf[d + 2] = lerp8(src.data[s0 + 2], src.data[s1 + 2], fx);
+            }
+        }
+    }
+    let mut out = Pixmap::white(ow, oh);
+    for (dy, &coord) in vcoord.iter().enumerate().take(oh as usize) {
+        let iy = ((coord >> FRACBITS) as usize).min(sh_m1);
+        let fy = (coord & FRACMASK) as usize;
+        let iy1 = (iy + 1).min(sh_m1);
+        let row0_off = iy * hstride;
+        let row1_off = iy1 * hstride;
+        let out_off = dy * ow_us * 4;
+        lerp_rows(
+            &hbuf[row0_off..row0_off + ow_us * 4],
+            &hbuf[row1_off..row1_off + ow_us * 4],
+            &mut out.data[out_off..out_off + ow_us * 4],
+            fy,
+        );
+    }
+    out
 }
 
 #[cfg(test)]
