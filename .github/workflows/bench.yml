@@ -1,16 +1,28 @@
 name: Benchmarks
 
 on:
-  # Run on every release tag — results are the source of truth for BENCHMARKS.md.
+  # Track regressions on every PR that touches code or benchmarks.
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+  # Update the baseline on every merge to main and on every release tag.
+  # No path filter here — main pushes are infrequent (one per merged PR)
+  # and tags should always produce fresh numbers regardless of what changed.
   push:
+    branches: [main]
     tags:
       - 'v*'
-  # Allow manual triggering to collect results mid-cycle.
+
+  # Allow manual runs (e.g. to seed the initial baseline).
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,18 +31,17 @@ env:
 
 jobs:
   bench:
-    name: Benchmark (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: Benchmark
+    # Single platform for reproducible comparisons.
+    # (macos-latest numbers are kept separately via workflow_dispatch / tags.)
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: read         # needed by dawidd6/action-download-artifact to list artifacts
+      pull-requests: write  # needed to post the comparison comment
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Include large corpus files if tracked via LFS or submodules
-          lfs: false
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -38,36 +49,134 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: bench-${{ matrix.os }}
+          key: bench-ubuntu
 
-      # Run codec benchmarks (always available — uses assets/references/)
+      # ── Download baseline from last successful main-branch run (PR only) ────
+      - name: Download baseline
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: bench-baseline
+          branch: main
+          workflow: bench.yml
+          workflow_conclusion: success
+          path: baseline
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      # ── Run benchmarks ───────────────────────────────────────────────────────
       - name: Bench codecs
         run: cargo bench --bench codecs -- --output-format bencher 2>&1 | tee codec_bench.txt
         continue-on-error: true
 
-      # Run render benchmarks (uses references/ assets)
       - name: Bench render
         run: cargo bench --bench render -- --output-format bencher 2>&1 | tee render_bench.txt
         continue-on-error: true
 
-      # Show a readable summary
+      # ── Print summary ────────────────────────────────────────────────────────
       - name: Print results
         run: |
-          echo "=== Platform: ${{ matrix.os }} ==="
           echo "--- Codec benchmarks ---"
           grep "bench:" codec_bench.txt || echo "(no codec results)"
           echo ""
           echo "--- Render benchmarks ---"
           grep "bench:" render_bench.txt || echo "(no render results)"
 
-      # Upload raw Criterion HTML reports and raw output as workflow artifacts.
-      - name: Upload bench artifacts
+      # ── Compare against baseline and generate Markdown table (PR only) ──────
+      - name: Compare benchmarks
+        if: github.event_name == 'pull_request'
+        id: compare
+        run: |
+          python3 scripts/bench_compare.py \
+            baseline/target/criterion \
+            target/criterion \
+            > bench_comment.md
+          echo "regression_exit=$?" >> "$GITHUB_OUTPUT"
+          cat bench_comment.md
+        continue-on-error: true  # don't skip comment posting on failure
+
+      - name: Post benchmark comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: bench
+          path: bench_comment.md
+        continue-on-error: true  # comment failure must not hide regression result
+
+      # Fail the job if the compare script reported regressions.
+      - name: Fail on regression
+        if: github.event_name == 'pull_request' && steps.compare.outputs.regression_exit == '1'
+        run: |
+          echo "Benchmark regressions detected — see PR comment for details."
+          exit 1
+
+      # ── Upload baseline (main branch + tags) ─────────────────────────────────
+      - name: Upload baseline
+        if: >
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@v4
         with:
-          name: bench-results-${{ matrix.os }}
+          name: bench-baseline
+          # Overwrite the previous baseline so PRs always compare against HEAD of main.
+          overwrite: true
+          path: target/criterion/
+          retention-days: 90
+
+      # ── Always archive full results ──────────────────────────────────────────
+      - name: Upload full results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: |
+            codec_bench.txt
+            render_bench.txt
+            target/criterion/
+          retention-days: 30
+
+  # ── macOS run: tags and manual only (for BENCHMARKS.md) ─────────────────────
+  bench-macos:
+    name: Benchmark (macOS)
+    runs-on: macos-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-macos
+
+      - name: Bench codecs
+        run: cargo bench --bench codecs -- --output-format bencher 2>&1 | tee codec_bench.txt
+        continue-on-error: true
+
+      - name: Bench render
+        run: cargo bench --bench render -- --output-format bencher 2>&1 | tee render_bench.txt
+        continue-on-error: true
+
+      - name: Print results
+        run: |
+          echo "--- Codec benchmarks (macOS) ---"
+          grep "bench:" codec_bench.txt || echo "(no codec results)"
+          echo ""
+          echo "--- Render benchmarks (macOS) ---"
+          grep "bench:" render_bench.txt || echo "(no render results)"
+
+      - name: Upload full results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-macos-${{ github.sha }}
           path: |
             codec_bench.txt
             render_bench.txt
             target/criterion/
           retention-days: 90
-        if: always()
