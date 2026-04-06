@@ -332,32 +332,53 @@ fn decode_bitmap_direct(
     if pixels > MAX_SYMBOL_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
+    if width <= 0 || height <= 0 {
+        return Ok(Jbm::new_from_pool(width, height, pool));
+    }
     let mut bm = Jbm::new_from_pool(width, height, pool);
 
+    let w = width as usize;
+    let h = height as usize;
+    debug_assert_eq!(ctx.len(), 1024, "JB2 direct context must have 1024 entries");
+    debug_assert_eq!(bm.data.len(), w * h);
+
     for row in (0..height).rev() {
-        // r2: 3 bits from row+2, columns col-1..col+1
-        let mut r2 = (bm.get(row + 2, 0) as u32) << 1 | bm.get(row + 2, 1) as u32;
-        // r1: 5 bits from row+1, columns col-2..col+2
-        let mut r1 = (bm.get(row + 1, 0) as u32) << 2
-            | (bm.get(row + 1, 1) as u32) << 1
-            | bm.get(row + 1, 2) as u32;
-        // r0: 2 bits from row, columns col-2, col-1
+        let r = row as usize;
+        let row_off = r * w;
+        // row+1 and row+2 are always decoded before the current row (top-to-bottom).
+        // Split bm.data at the row+1 boundary so we can hold a mutable reference to
+        // the current row while reading from rows above — the slices are non-overlapping.
+        let rp1_start = (r + 1) * w;
+        let total = bm.data.len();
+        let split = rp1_start.min(total);
+        let (lower, upper) = bm.data.split_at_mut(split);
+        // current row — always in bounds (r < h)
+        let row_slice = &mut lower[row_off..row_off + w];
+        // row+1 and row+2: may be empty if near the top of the bitmap
+        let rp1: &[u8] = if upper.len() >= w { &upper[..w] } else { upper };
+        let rp2: &[u8] = if upper.len() >= 2 * w { &upper[w..2 * w] } else if upper.len() > w { &upper[w..] } else { &[] };
+
+        // Read pixel from a row slice at column index; returns 0 for OOB.
+        let pix = |row: &[u8], col: usize| -> u32 { row.get(col).copied().unwrap_or(0) as u32 };
+
+        // r2: 3 bits from (row+2, col-1..col+1) — col-1=-1 gives 0 at col=0
+        let mut r2 = pix(rp2, 0) << 1 | pix(rp2, 1);
+        // r1: 5 bits from (row+1, col-2..col+2) — col-2,-1 give 0 at col=0
+        let mut r1 = pix(rp1, 0) << 2 | pix(rp1, 1) << 1 | pix(rp1, 2);
+        // r0: 2 bits from (row, col-2, col-1) — both 0 at col=0
         let mut r0: u32 = 0;
 
-        for col in 0..width {
-            let idx = (r2 << 7) | (r1 << 2) | r0;
-            let ctx_byte = ctx.get_mut(idx as usize).copied().unwrap_or(0);
-            let mut local_ctx = ctx_byte;
-            let bit = zp.decode_bit(&mut local_ctx);
-            if let Some(slot) = ctx.get_mut(idx as usize) {
-                *slot = local_ctx;
-            }
+        for (col, out) in row_slice.iter_mut().enumerate() {
+            // idx ≤ 1023 always: r2<8, r1<32, r0<4
+            // Single ctx access — eliminates the double get_mut/unwrap_or pattern.
+            let idx = ((r2 << 7) | (r1 << 2) | r0) as usize;
+            let bit = zp.decode_bit(&mut ctx[idx]);
             if bit {
-                bm.set(row, col);
+                *out = 1;
             }
-            // Advance rolling windows for next column
-            r2 = ((r2 << 1) & 0b111) | bm.get(row + 2, col + 2) as u32;
-            r1 = ((r1 << 1) & 0b11111) | bm.get(row + 1, col + 3) as u32;
+            // Advance rolling windows; col+2/col+3 may exceed rp2/rp1 length → pix returns 0.
+            r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
+            r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
             r0 = ((r0 << 1) & 0b11) | bit as u32;
         }
     }
