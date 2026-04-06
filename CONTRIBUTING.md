@@ -8,6 +8,7 @@ to get started.
 ```sh
 git clone https://github.com/matyushkin/djvu-rs
 cd djvu-rs
+git config core.hooksPath .githooks  # install pre-commit checks
 cargo test          # run the full test suite
 cargo clippy -- -D warnings
 cargo fmt --check

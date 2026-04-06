@@ -4,6 +4,8 @@ use crate::iff::{Chunk, DjvuFile};
 use crate::iw44::IW44Image;
 use crate::jb2::JB2Dict;
 use crate::pixmap::Pixmap;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
 pub use crate::iw44::NormalizedPlanes;
@@ -118,6 +120,12 @@ pub struct Document {
     page_indices: Vec<usize>,
     /// For single-page DJVU: true.
     is_single_page: bool,
+    /// Cache of decoded shared JB2 dictionaries, keyed by pointer to raw Djbz chunk bytes.
+    ///
+    /// All pages that INCL the same DJVI component share one pointer → one decoded dict.
+    /// The pointer is stable because `DjvuFile` owns the underlying byte buffer for the
+    /// lifetime of `Document`.
+    dict_cache: RwLock<HashMap<usize, Arc<JB2Dict>>>,
 }
 
 impl Document {
@@ -134,6 +142,7 @@ impl Document {
                     dirm_entries: vec![],
                     page_indices: vec![0], // single page at index 0
                     is_single_page: true,
+                    dict_cache: RwLock::new(HashMap::new()),
                 })
             }
             Chunk::Form {
@@ -170,6 +179,7 @@ impl Document {
                     dirm_entries,
                     page_indices,
                     is_single_page: false,
+                    dict_cache: RwLock::new(HashMap::new()),
                 })
             }
             _ => Err(Error::Unsupported("not a DJVU or DJVM document")),
@@ -323,6 +333,34 @@ impl Document {
             ref_id
         )))
     }
+
+    /// Return a shared reference to the decoded JB2 dictionary for the given Djbz chunk,
+    /// decoding and caching it on the first call.
+    ///
+    /// The cache is keyed by the address of the raw Djbz bytes, which is stable for the
+    /// lifetime of `Document` (the bytes are owned by `DjvuFile`).  All pages that INCL
+    /// the same DJVI component point to the same bytes, so they share one cached decode.
+    fn get_or_decode_dict(&self, djbz_data: &[u8]) -> Result<Arc<JB2Dict>, Error> {
+        let key = djbz_data.as_ptr() as usize;
+
+        // Fast path: already cached (read lock only).
+        {
+            let cache = self.dict_cache.read().unwrap();
+            if let Some(dict) = cache.get(&key) {
+                return Ok(Arc::clone(dict));
+            }
+        }
+
+        // Slow path: decode and insert (write lock).
+        let dict = crate::jb2::decode_dict(djbz_data, None)
+            .map_err(|e| Error::FormatError(e.to_string()))?;
+        let arc = Arc::new(dict);
+        self.dict_cache
+            .write()
+            .unwrap()
+            .insert(key, Arc::clone(&arc));
+        Ok(arc)
+    }
 }
 
 /// A single page within a DjVu document.
@@ -376,7 +414,7 @@ impl<'a> Page<'a> {
 
         let shared_dict = self.resolve_shared_dict()?;
 
-        let bitmap = crate::jb2::decode(sjbz, shared_dict.as_ref())
+        let bitmap = crate::jb2::decode(sjbz, shared_dict.as_deref())
             .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Some(bitmap))
     }
@@ -390,7 +428,7 @@ impl<'a> Page<'a> {
 
         let shared_dict = self.resolve_shared_dict()?;
 
-        let result = crate::jb2::decode_indexed(sjbz, shared_dict.as_ref())
+        let result = crate::jb2::decode_indexed(sjbz, shared_dict.as_deref())
             .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Some(result))
     }
@@ -528,7 +566,12 @@ impl<'a> Page<'a> {
         parse_text_layer(&data)
     }
 
-    fn resolve_shared_dict(&self) -> Result<Option<JB2Dict>, Error> {
+    /// Return the shared JB2 dictionary for this page, if any.
+    ///
+    /// Decodes the Djbz chunk on the first call and caches the result via
+    /// [`Document::get_or_decode_dict`].  Subsequent calls for pages that share
+    /// the same INCL component (or the same inline Djbz) are O(1) cache lookups.
+    fn resolve_shared_dict(&self) -> Result<Option<Arc<JB2Dict>>, Error> {
         // Check all INCL chunks for an external DJVI component with Djbz
         for incl in self.form.find_all(b"INCL") {
             let ref_id = std::str::from_utf8(incl.data())
@@ -538,17 +581,13 @@ impl<'a> Page<'a> {
 
             let shared_form = self.doc.resolve_incl(ref_id)?;
             if let Some(djbz) = shared_form.find_first(b"Djbz") {
-                let dict = crate::jb2::decode_dict(djbz.data(), None)
-                    .map_err(|e| Error::FormatError(e.to_string()))?;
-                return Ok(Some(dict));
+                return Ok(Some(self.doc.get_or_decode_dict(djbz.data())?));
             }
         }
 
         // Then check for inline Djbz in the same FORM as Sjbz
         if let Some(djbz) = self.form.find_first(b"Djbz") {
-            let dict = crate::jb2::decode_dict(djbz.data(), None)
-                .map_err(|e| Error::FormatError(e.to_string()))?;
-            return Ok(Some(dict));
+            return Ok(Some(self.doc.get_or_decode_dict(djbz.data())?));
         }
 
         Ok(None)
@@ -1120,6 +1159,23 @@ mod tests {
         let bm = mask.unwrap();
         assert_eq!(bm.width, 2550);
         assert_eq!(bm.height, 3300);
+    }
+
+    /// Calling decode_mask() twice on the same page must return bit-for-bit identical
+    /// bitmaps.  This verifies that the shared-dict cache is not corrupted across
+    /// repeated calls — a regression that would be invisible if the dict were
+    /// re-decoded from scratch each time (both calls would independently produce the
+    /// same output, masking any cache-poisoning bug).
+    #[test]
+    fn decode_mask_repeated_calls_identical() {
+        let data = std::fs::read(assets_path().join("navm_fgbz.djvu")).unwrap();
+        let doc = Document::parse(&data).unwrap();
+        let bm1 = doc.page(0).unwrap().decode_mask().unwrap().unwrap();
+        let bm2 = doc.page(0).unwrap().decode_mask().unwrap().unwrap();
+        assert_eq!(
+            bm1.data, bm2.data,
+            "decode_mask repeated calls must be identical (cache must not corrupt dict state)"
+        );
     }
 
     #[test]
