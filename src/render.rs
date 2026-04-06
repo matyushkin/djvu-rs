@@ -484,12 +484,12 @@ fn composite_palette(
     page_w: u32,
     page_h: u32,
 ) -> Pixmap {
-    let mapper = PageMapper::new(w, h, page_w, page_h);
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
     let scaled_bg = scale_layer_bilinear(bg, page_w, page_h);
     let mut out = Pixmap::white(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (mx, my) = mapper.map(x, y);
+    for (oy, &my) in row_map.iter().enumerate() {
+        for (ox, &mx) in col_map.iter().enumerate() {
             let is_fg = mx < mask.width && my < mask.height && mask.get(mx, my);
             if is_fg {
                 let mi = my as usize * mask.width as usize + mx as usize;
@@ -498,10 +498,10 @@ fn composite_palette(
                 } else {
                     (0, 0, 0)
                 };
-                out.set_rgb(x, y, r, g, b);
+                out.set_rgb(ox as u32, oy as u32, r, g, b);
             } else {
                 let (r, g, b) = sample_scaled(&scaled_bg, mx, my);
-                out.set_rgb(x, y, r, g, b);
+                out.set_rgb(ox as u32, oy as u32, r, g, b);
             }
         }
     }
@@ -517,19 +517,22 @@ fn composite_palette_no_bg(
     page_w: u32,
     page_h: u32,
 ) -> Pixmap {
-    let mapper = PageMapper::new(w, h, page_w, page_h);
+    let col_map = build_coord_map(w, page_w);
+    let row_map = build_coord_map(h, page_h);
     let mut out = Pixmap::white(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (mx, my) = mapper.map(x, y);
-            if mx < mask.width && my < mask.height && mask.get(mx, my) {
+    for (oy, &my) in row_map.iter().enumerate() {
+        if my >= mask.height {
+            continue;
+        }
+        for (ox, &mx) in col_map.iter().enumerate() {
+            if mx < mask.width && mask.get(mx, my) {
                 let mi = my as usize * mask.width as usize + mx as usize;
                 let (r, g, b) = if mi < blit_map.len() {
                     palette_color(pal, blit_map[mi])
                 } else {
                     (0, 0, 0)
                 };
-                out.set_rgb(x, y, r, g, b);
+                out.set_rgb(ox as u32, oy as u32, r, g, b);
             }
         }
     }
@@ -540,49 +543,12 @@ fn composite_palette_no_bg(
 // Precomputed geometry for sampling — avoids per-pixel recomputation
 // ============================================================
 
-/// Precomputed scale factors for mapping output coords → page coords.
-struct PageMapper {
-    scale_x: f64, // page_w / ow
-    scale_y: f64, // page_h / oh
-    max_x: u32,   // page_w - 1
-    max_y: u32,   // page_h - 1
-    identity_x: bool,
-    identity_y: bool,
-}
-
-impl PageMapper {
-    fn new(ow: u32, oh: u32, page_w: u32, page_h: u32) -> Self {
-        PageMapper {
-            scale_x: page_w as f64 / ow as f64,
-            scale_y: page_h as f64 / oh as f64,
-            max_x: page_w.saturating_sub(1),
-            max_y: page_h.saturating_sub(1),
-            identity_x: ow == page_w,
-            identity_y: oh == page_h,
-        }
-    }
-
-    #[inline(always)]
-    fn map(&self, x: u32, y: u32) -> (u32, u32) {
-        let px = if self.identity_x {
-            x
-        } else {
-            ((x as f64 + 0.5) * self.scale_x) as u32
-        };
-        let py = if self.identity_y {
-            y
-        } else {
-            ((y as f64 + 0.5) * self.scale_y) as u32
-        };
-        (px.min(self.max_x), py.min(self.max_y))
-    }
-}
-
 /// Build a coordinate-mapping table for nearest-neighbour scaling.
 ///
 /// Maps each output pixel `[0, out_dim)` to the nearest source pixel
-/// `[0, page_dim)` using the same half-pixel-centre convention as
-/// [`PageMapper`]: `mapped = (2*i + 1) * page_dim / (2 * out_dim)`.
+/// `[0, page_dim)` using the half-pixel-centre convention:
+/// `mapped = floor((i + 0.5) * page_dim / out_dim)`, computed as
+/// `(2*i + 1) * page_dim / (2 * out_dim)` in integer arithmetic.
 ///
 /// All arithmetic is integer-only — no f64 per pixel.
 fn build_coord_map(out_dim: u32, page_dim: u32) -> Vec<u32> {
