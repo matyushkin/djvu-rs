@@ -20,6 +20,9 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 - **Page rendering** — composite foreground + background into RGBA output
 - **PDF export** — selectable text, lossless IW44/JB2 embedding, bookmarks, hyperlinks
 - **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
+- **hOCR / ALTO XML export** — text layer as hOCR or ALTO XML for OCR toolchains and archives
+- **Serde support** — `Serialize`/`Deserialize` on all public data types (feature flag `serde`)
+- **image-rs integration** — `image::ImageDecoder` impl for use with the `image` crate (feature flag `image`)
 - **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
 - `no_std` compatible — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
 
@@ -134,6 +137,58 @@ djvu text file.djvu --page 2
 
 # Extract text from all pages
 djvu text file.djvu --all
+```
+
+## hOCR and ALTO XML export
+
+```rust
+use djvu_rs::{DjVuDocument, ocr_export::{to_hocr, to_alto, HocrOptions, AltoOptions}};
+
+let data = std::fs::read("scanned.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+
+// hOCR — compatible with Tesseract, ABBYY, and most OCR toolchains
+let hocr = to_hocr(&doc, &HocrOptions::default())?;
+std::fs::write("output.hocr", hocr)?;
+
+// ALTO XML — used by libraries and archives (DFG, Europeana, etc.)
+let alto = to_alto(&doc, &AltoOptions::default())?;
+std::fs::write("output.xml", alto)?;
+```
+
+## Serde support
+
+Requires the `serde` feature flag: `djvu-rs = { version = "…", features = ["serde"] }`.
+
+All public data types (`DjVuBookmark`, `TextZone`, `MapArea`, `PageInfo`, etc.) implement
+`Serialize` and `Deserialize`.
+
+```rust
+use djvu_rs::DjVuDocument;
+
+let data = std::fs::read("book.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+let info = doc.page(0)?.info()?;
+
+let json = serde_json::to_string_pretty(&info)?;
+println!("{json}");
+```
+
+## image-rs integration
+
+Requires the `image` feature flag: `djvu-rs = { version = "…", features = ["image"] }`.
+
+```rust
+use djvu_rs::{DjVuDocument, image_compat::DjVuDecoder};
+use image::DynamicImage;
+
+let data = std::fs::read("file.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+let page = doc.page(0)?;
+
+let decoder = DjVuDecoder::new(&page, 150.0)?;
+let img = DynamicImage::from_decoder(decoder)?;
+img.save("page.png")?;
 ```
 
 ## Feature flags
