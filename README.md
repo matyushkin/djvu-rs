@@ -209,20 +209,22 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Measured on Apple M1 Max (Rust 1.92, release profile). Compared to DjVuLibre 3.5.29 C library:
+Measured on Apple M1 Max (Rust 1.92, release profile, `--features parallel`).
+Compared to DjVuLibre 3.5.29 C library (render-only, in-process):
 
 | Page type | djvu-rs | libdjvulibre | Ratio |
 |-----------|---------|--------------|-------|
 | Color IW44, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
 | Bilevel JB2, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
-| Bilevel JB2, 600 dpi, sparse (2649×4530 px) | 14.5 ms | 12.2 ms | ~0.84× (near parity) |
-| Bilevel JB2, 600 dpi, dense (2649×4530 px) | 43.9 ms | 13.8 ms | ~0.31× (libdjvulibre wins) |
+| Bilevel JB2, 600 dpi, sparse (2649×4530 px) | **10.5 ms** | 12.2 ms | **~1.2× faster** |
+| Bilevel JB2, 600 dpi, dense (2649×4530 px) | 36.2 ms | 13.8 ms | ~0.38× (libdjvulibre wins) |
 
-Document open + parse is 10–30× faster than the C library. Sparse 600 dpi pages now achieve
-near-parity with libdjvulibre following a `Pixmap::new` bulk-fill fix. Dense pages remain
-bottlenecked on the old JB2 decoder; shared-dictionary caching is the next target.
+Document open + parse: djvu-rs ≈ 1.9 ms vs libdjvulibre ≈ 24–60 ms — **10–30× faster**.
 
-See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full details.
+Dense 600 dpi pages remain bottlenecked on the sequential ZP arithmetic decoder.
+All other page types match or beat the C library.
+
+See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full details and methodology.
 
 ## Minimum supported Rust version (MSRV)
 
