@@ -36,13 +36,17 @@ impl Pixmap {
         if pixel_count > Self::MAX_PIXELS {
             return Self::default();
         }
-        let mut data = Vec::with_capacity(pixel_count * 4);
-        for _ in 0..pixel_count {
-            data.push(r);
-            data.push(g);
-            data.push(b);
-            data.push(a);
+        // Fast path: all channels equal — single memset.
+        if r == g && g == b && b == a {
+            return Pixmap {
+                width,
+                height,
+                data: vec![r; pixel_count * 4],
+            };
         }
+        // General path: repeat the 4-byte RGBA pattern `pixel_count` times.
+        // `slice::repeat` uses a doubling memcpy strategy and is highly optimised.
+        let data = [r, g, b, a].repeat(pixel_count);
         Pixmap {
             width,
             height,

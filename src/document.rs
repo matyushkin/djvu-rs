@@ -351,7 +351,7 @@ impl<'a> Page<'a> {
         self.form.find_first(b"BG44").is_some()
     }
 
-    #[cfg(test)]
+    /// Returns `true` when the page has an FG44 foreground colour layer.
     pub fn has_foreground(&self) -> bool {
         self.form.find_first(b"FG44").is_some()
     }
