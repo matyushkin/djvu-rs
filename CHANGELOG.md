@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/matyushkin/djvu-rs/compare/v0.5.1...v0.5.2) (2026-04-06)
+
+
+### Performance Improvements
+
+* **render:** 66% speedup on 600 dpi bilevel pages — `render_large_doc_first_page` 42.7 ms → 14.5 ms (closes [#104](https://github.com/matyushkin/djvu-rs/issues/104))
+  - `Pixmap::new`: replaced per-pixel push loop with bulk fill — 18 ms → 0.8 ms (−95%) for a 2649×4530 buffer
+  - `composite_bilevel`: row-slice writes + rayon `par_chunks_mut` under `--features parallel`
+  - Skip `apply_gamma` for pure bilevel pages (0/255 values, gamma is a mathematical no-op)
+  - Parallel Y/Cb/Cr wavelet reconstruction via `rayon::join` under `--features parallel`
+  - Parallel bilinear scaler passes under `--features parallel`
+
+
 ## [0.5.0](https://github.com/matyushkin/djvu-rs/compare/v0.4.2...v0.5.0) (2026-04-05)
 
 
