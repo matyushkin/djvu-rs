@@ -42,8 +42,8 @@ Corpus files: `tests/corpus/`
 
 | Benchmark | Description | Time (median) |
 |-----------|-------------|--------------|
-| `render_corpus_color` | watchmaker.djvu full render | **3.27 ms** |
-| `render_corpus_bilevel` | cable_1973_100133.djvu full render | **3.16 ms** |
+| `render_corpus_color` | watchmaker.djvu full render | **3.15 ms** |
+| `render_corpus_bilevel` | cable_1973_100133.djvu full render | **3.14 ms** |
 | `render_scaled_0.5x/bilinear` | boy.djvu at 0.5× with bilinear filter | **1.31 ms** |
 | `render_scaled_0.5x/lanczos3` | boy.djvu at 0.5× with Lanczos-3 filter | **6.19 ms** |
 | `pdf_export_single_page` | Export single page to PDF bytes | **554 ms** |
@@ -59,8 +59,8 @@ Text layer: `tests/corpus/watchmaker.djvu` (TXTz present)
 |-----------|--------------|-------|
 | `parse_multipage_520p` | **1.92 ms** | Parse DJVM directory + all page descriptors, 520 pages, 25 MB |
 | `iterate_pages_520p` | **521 µs** | Read width/height/dpi for all 520 pages (no render) |
-| `render_large_doc_first_page` | **44.2 ms** | Render page 1 of 520 (mixed content) at native DPI |
-| `render_large_doc_mid_page` | **75.7 ms** | Render page 260 of 520 — larger/denser page |
+| `render_large_doc_first_page` | **42.7 ms** | Render page 1 of 520 (mixed content) at native DPI |
+| `render_large_doc_mid_page` | **75.8 ms** | Render page 260 of 520 — larger/denser page |
 | `text_extraction_single_page` | **202 µs** | TXTz parse + plain text output, watchmaker.djvu |
 
 ---
@@ -97,10 +97,10 @@ C source: `scripts/djvulibre_bench.c`
 
 | File | Output size | djvu-rs | libdjvulibre C API | Ratio |
 |------|------------|---------|-------------------|-------|
-| watchmaker.djvu (color IW44, 300 dpi) | 2550×3301 px | **3.27 ms** | 37.3 ms | **~11× faster** |
-| cable_1973_100133.djvu (bilevel JB2, 300 dpi) | 2550×3301 px | **3.16 ms** | 36.8 ms | **~12× faster** |
-| pathogenic_bacteria_1896.djvu p.1 (mixed, 600 dpi) | 2649×4530 px | 44.2 ms | **12.2 ms** | ~0.3× (libdjvulibre wins) |
-| pathogenic_bacteria_1896.djvu p.260 (mixed, 600 dpi) | 2649×4530 px | 75.7 ms | **13.8 ms** | ~0.2× (libdjvulibre wins) |
+| watchmaker.djvu (color IW44, 300 dpi) | 2550×3301 px | **3.15 ms** | 37.3 ms | **~12× faster** |
+| cable_1973_100133.djvu (bilevel JB2, 300 dpi) | 2550×3301 px | **3.14 ms** | 36.8 ms | **~12× faster** |
+| pathogenic_bacteria_1896.djvu p.1 (mixed, 600 dpi) | 2649×4530 px | 42.7 ms | **12.2 ms** | ~0.3× (libdjvulibre wins) |
+| pathogenic_bacteria_1896.djvu p.260 (mixed, 600 dpi) | 2649×4530 px | 75.8 ms | **13.8 ms** | ~0.2× (libdjvulibre wins) |
 
 djvu-rs numbers are from `cargo bench --bench document` (criterion, release mode).
 libdjvulibre numbers are render-only — after the page is already decoded and in memory.
