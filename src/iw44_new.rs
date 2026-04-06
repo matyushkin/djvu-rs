@@ -569,6 +569,37 @@ fn store8_i32(slice: &mut [i32], off: usize, v: i32x8) {
     slice[off + 7] = a[7];
 }
 
+/// Gather one `i16` value from each of 8 consecutive rows at column index `k`.
+///
+/// `offs[i]` is the start offset `row_i * stride` for row `i`.
+#[inline(always)]
+fn load_rows8(data: &[i16], offs: &[usize; 8], k: usize) -> i32x8 {
+    i32x8::from([
+        data[offs[0] + k] as i32,
+        data[offs[1] + k] as i32,
+        data[offs[2] + k] as i32,
+        data[offs[3] + k] as i32,
+        data[offs[4] + k] as i32,
+        data[offs[5] + k] as i32,
+        data[offs[6] + k] as i32,
+        data[offs[7] + k] as i32,
+    ])
+}
+
+/// Scatter one value from `v` to each of 8 consecutive rows at column index `k`.
+#[inline(always)]
+fn store_rows8(data: &mut [i16], offs: &[usize; 8], k: usize, v: i32x8) {
+    let a = v.to_array();
+    data[offs[0] + k] = a[0] as i16;
+    data[offs[1] + k] = a[1] as i16;
+    data[offs[2] + k] = a[2] as i16;
+    data[offs[3] + k] = a[3] as i16;
+    data[offs[4] + k] = a[4] as i16;
+    data[offs[5] + k] = a[5] as i16;
+    data[offs[6] + k] = a[6] as i16;
+    data[offs[7] + k] = a[7] as i16;
+}
+
 /// Lifting filter: `data[idx] -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)`
 #[inline(always)]
 fn lifting_even(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
@@ -591,6 +622,195 @@ fn predict_inner(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x
 fn predict_avg(cur: i32x8, p: i32x8, n: i32x8) -> i32x8 {
     let c1 = i32x8::splat(1);
     cur + ((p + n + c1) >> 1)
+}
+
+/// Apply the row-direction wavelet pass for one resolution level.
+///
+/// When `use_simd` is `true` and `s == 1` (`sd == 0`), the first
+/// `height / 8 * 8` rows are processed 8 at a time using `i32x8` SIMD.
+/// The remaining rows (and all rows when `s > 1` or `use_simd` is false) use
+/// the scalar path.
+///
+/// `s` — step between active samples (power of two); `sd = log2(s)`.
+pub(crate) fn row_pass_inner(
+    data: &mut [i16],
+    width: usize,
+    height: usize,
+    stride: usize,
+    s: usize,
+    sd: usize,
+    use_simd: bool,
+) {
+    let kmax = (width - 1) >> sd;
+    let border = kmax.saturating_sub(3);
+
+    // ── SIMD path: 8 rows at a time (only when s == 1, i.e. sd == 0) ─────────
+    let simd_rows = if use_simd && s == 1 {
+        height / 8 * 8
+    } else {
+        0
+    };
+
+    for row_base in (0..simd_rows).step_by(8) {
+        let o: [usize; 8] = core::array::from_fn(|i| (row_base + i) * stride);
+
+        // — Lifting (even k) ——————————————————————————————————————————————————
+        let mut prev1v = i32x8::splat(0);
+        let mut next1v = i32x8::splat(0);
+        let mut next3v = if kmax >= 1 {
+            load_rows8(data, &o, 1)
+        } else {
+            i32x8::splat(0)
+        };
+        let mut prev3v: i32x8;
+        let mut k = 0usize;
+        while k <= kmax {
+            prev3v = prev1v;
+            prev1v = next1v;
+            next1v = next3v;
+            next3v = if k + 3 <= kmax {
+                load_rows8(data, &o, k + 3)
+            } else {
+                i32x8::splat(0)
+            };
+            let cur = load_rows8(data, &o, k);
+            store_rows8(
+                data,
+                &o,
+                k,
+                lifting_even(cur, prev1v, next1v, prev3v, next3v),
+            );
+            k += 2;
+        }
+
+        // — Prediction (odd k) ————————————————————————————————————————————————
+        if kmax >= 1 {
+            let mut k = 1usize;
+            prev1v = load_rows8(data, &o, k - 1); // data[0] per row
+            if k < kmax {
+                next1v = load_rows8(data, &o, k + 1);
+                let cur = load_rows8(data, &o, k);
+                store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+            } else {
+                // k == kmax: boundary — only one odd sample, += prev
+                let cur = load_rows8(data, &o, k);
+                store_rows8(data, &o, k, cur + prev1v);
+                next1v = i32x8::splat(0);
+            }
+
+            next3v = if border >= 3 {
+                load_rows8(data, &o, k + 3)
+            } else {
+                i32x8::splat(0)
+            };
+
+            k = 3;
+            while k <= border {
+                prev3v = prev1v;
+                prev1v = next1v;
+                next1v = next3v;
+                next3v = load_rows8(data, &o, k + 3);
+                let cur = load_rows8(data, &o, k);
+                store_rows8(
+                    data,
+                    &o,
+                    k,
+                    predict_inner(cur, prev1v, next1v, prev3v, next3v),
+                );
+                k += 2;
+            }
+
+            while k <= kmax {
+                prev1v = next1v;
+                next1v = next3v;
+                next3v = i32x8::splat(0);
+                let cur = load_rows8(data, &o, k);
+                if k < kmax {
+                    store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+                } else {
+                    store_rows8(data, &o, k, cur + prev1v);
+                }
+                k += 2;
+            }
+        }
+    }
+
+    // ── Scalar path: remaining rows ───────────────────────────────────────────
+    let scalar_start = simd_rows;
+    for row in (scalar_start..height).step_by(s) {
+        let off = row * stride;
+
+        // Lifting (even samples)
+        let mut prev1: i32 = 0;
+        let mut next1: i32 = 0;
+        let mut next3: i32 = if kmax >= 1 {
+            data[off + (1 << sd)] as i32
+        } else {
+            0
+        };
+        let mut prev3: i32;
+        let mut k = 0usize;
+        while k <= kmax {
+            prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                data[off + ((k + 3) << sd)] as i32
+            } else {
+                0
+            };
+            let a = prev1 + next1;
+            let c = prev3 + next3;
+            let idx = off + (k << sd);
+            data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+            k += 2;
+        }
+
+        // Prediction (odd samples)
+        if kmax >= 1 {
+            let mut k = 1usize;
+            prev1 = data[off + ((k - 1) << sd)] as i32;
+            if k < kmax {
+                next1 = data[off + ((k + 1) << sd)] as i32;
+                let idx = off + (k << sd);
+                data[idx] = (data[idx] as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
+            } else {
+                let idx = off + (k << sd);
+                data[idx] = (data[idx] as i32 + prev1) as i16;
+            }
+
+            next3 = if border >= 3 {
+                data[off + ((k + 3) << sd)] as i32
+            } else {
+                0
+            };
+
+            k = 3;
+            while k <= border {
+                prev3 = prev1;
+                prev1 = next1;
+                next1 = next3;
+                next3 = data[off + ((k + 3) << sd)] as i32;
+                let a = prev1 + next1;
+                let idx = off + (k << sd);
+                data[idx] = (data[idx] as i32 + (((a << 3) + a - (prev3 + next3) + 8) >> 4)) as i16;
+                k += 2;
+            }
+
+            while k <= kmax {
+                prev1 = next1;
+                next1 = next3;
+                next3 = 0;
+                let idx = off + (k << sd);
+                if k < kmax {
+                    data[idx] = (data[idx] as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
+                } else {
+                    data[idx] = (data[idx] as i32 + prev1) as i16;
+                }
+                k += 2;
+            }
+        }
+    }
 }
 
 fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize, subsample: usize) {
@@ -911,95 +1131,8 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
             }
         }
 
-        // ── Row pass (SIMD for s == 1) ───────────────────────────────────────
-        //
-        // When s == 1, sd == 0, so elements are at consecutive indices within each
-        // row.  We vectorise the contiguous even/odd butterfly across 8 rows at a
-        // time to amortise function-call overhead and keep SIMD registers busy.
-        //
-        // For s > 1 the stride between samples is 2^sd ≥ 2, so we fall back to
-        // the scalar loop.
-        {
-            let kmax = (width - 1) >> sd;
-            let border = kmax.saturating_sub(3);
-
-            for row in (0..height).step_by(s) {
-                let off = row * stride;
-
-                // Lifting (even samples)
-                let mut prev1: i32 = 0;
-                let mut next1: i32 = 0;
-                let mut next3: i32 = if kmax >= 1 {
-                    data[off + (1 << sd)] as i32
-                } else {
-                    0
-                };
-                let mut prev3: i32;
-                let mut k = 0usize;
-                while k <= kmax {
-                    prev3 = prev1;
-                    prev1 = next1;
-                    next1 = next3;
-                    next3 = if k + 3 <= kmax {
-                        data[off + ((k + 3) << sd)] as i32
-                    } else {
-                        0
-                    };
-                    let a = prev1 + next1;
-                    let c = prev3 + next3;
-                    let idx = off + (k << sd);
-                    data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
-                    k += 2;
-                }
-
-                // Prediction (odd samples)
-                if kmax >= 1 {
-                    let mut k = 1usize;
-                    prev1 = data[off + ((k - 1) << sd)] as i32;
-                    if k < kmax {
-                        next1 = data[off + ((k + 1) << sd)] as i32;
-                        let idx = off + (k << sd);
-                        data[idx] = (data[idx] as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
-                    } else {
-                        let idx = off + (k << sd);
-                        data[idx] = (data[idx] as i32 + prev1) as i16;
-                    }
-
-                    next3 = if border >= 3 {
-                        data[off + ((k + 3) << sd)] as i32
-                    } else {
-                        0
-                    };
-
-                    k = 3;
-                    while k <= border {
-                        prev3 = prev1;
-                        prev1 = next1;
-                        next1 = next3;
-                        next3 = data[off + ((k + 3) << sd)] as i32;
-                        let a = prev1 + next1;
-                        let idx = off + (k << sd);
-                        data[idx] =
-                            (data[idx] as i32 + (((a << 3) + a - (prev3 + next3) + 8) >> 4)) as i16;
-                        k += 2;
-                    }
-
-                    while k <= kmax {
-                        prev1 = next1;
-                        next1 = next3;
-                        next3 = 0;
-                        if k < kmax {
-                            let idx = off + (k << sd);
-                            data[idx] = (data[idx] as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
-                        } else {
-                            let idx = off + (k << sd);
-                            data[idx] = (data[idx] as i32 + prev1) as i16;
-                        }
-                        k += 2;
-                    }
-                }
-            }
-        }
+        // ── Row pass ─────────────────────────────────────────────────────────
+        row_pass_inner(data, width, height, stride, s, sd, use_simd);
 
         s >>= 1;
         s_degree = s_degree.saturating_sub(1);
@@ -1805,5 +1938,35 @@ mod tests {
         assert_eq!(half.width, img.width.div_ceil(2));
         assert_eq!(half.height, img.height.div_ceil(2));
         // SIMD path must still pass the existing golden test (done in iw44_new_decode_boy_bg).
+    }
+
+    /// SIMD row pass (8 rows at a time) produces identical results to the scalar
+    /// path on a synthetic 32×16 plane with a deterministic non-trivial pattern.
+    ///
+    /// Both paths are exercised by calling `row_pass_inner` with `use_simd=false`
+    /// (all scalar) and `use_simd=true` (SIMD + scalar tail) on identical copies
+    /// of the same data.
+    #[test]
+    fn simd_row_pass_matches_scalar() {
+        let width = 32usize;
+        let height = 16usize;
+        let stride = width;
+        let n = stride * height;
+
+        // Deterministic non-trivial pattern: values in [-255, 255].
+        let initial: Vec<i16> = (0..n).map(|i| ((i * 7 + 13) % 511) as i16 - 255).collect();
+
+        let mut scalar_data = initial.clone();
+        // s=1, sd=0, use_simd=false → pure scalar
+        super::row_pass_inner(&mut scalar_data, width, height, stride, 1, 0, false);
+
+        let mut simd_data = initial.clone();
+        // s=1, sd=0, use_simd=true → SIMD for rows 0..15, scalar tail for remainder
+        super::row_pass_inner(&mut simd_data, width, height, stride, 1, 0, true);
+
+        assert_eq!(
+            scalar_data, simd_data,
+            "SIMD row pass must produce identical output to scalar"
+        );
     }
 }
