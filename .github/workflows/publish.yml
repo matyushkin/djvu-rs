@@ -6,6 +6,11 @@ on:
   # Also trigger on manual tag push (for emergency releases outside release-please).
   push:
     tags: ['v*', 'djvu-rs-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.6.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,7 +22,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
+      - name: Resolve ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "PUBLISH_REF=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            echo "PUBLISH_REF=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "PUBLISH_REF=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PUBLISH_REF }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -28,7 +45,7 @@ jobs:
       - name: Verify version matches tag
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          TAG="${GITHUB_REF_NAME#djvu-rs-v}"
+          TAG="${PUBLISH_REF#djvu-rs-v}"
           TAG="${TAG#v}"
           if [ "$VERSION" != "$TAG" ]; then
             echo "::error::Cargo.toml version ($VERSION) does not match tag (v$TAG)"
