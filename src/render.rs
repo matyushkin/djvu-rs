@@ -299,8 +299,20 @@ fn composite_bg_only(w: u32, h: u32, bg: &Pixmap, page_w: u32, page_h: u32) -> P
 ///
 /// Called from `composite_bilevel` — extracted to allow both sequential and parallel
 /// paths to share the same per-row logic without duplicating the inner loop.
+///
+/// # Caller contract
+/// `out_row` must have length `pw * 4` and must be pre-filled with white (0xFF bytes)
+/// so that pixels with unset mask bits keep their background colour and the alpha
+/// channel (byte `p + 3`) stays 255 without being explicitly written here.
 #[inline]
 fn bilevel_row(mask_row: &[u8], out_row: &mut [u8], pw: usize) {
+    debug_assert_eq!(
+        out_row.len(),
+        pw * 4,
+        "out_row length mismatch: expected {}, got {}",
+        pw * 4,
+        out_row.len()
+    );
     let mut px = 0usize;
     for &byte in &mask_row[..pw.div_ceil(8)] {
         if byte == 0 {
@@ -309,9 +321,10 @@ fn bilevel_row(mask_row: &[u8], out_row: &mut [u8], pw: usize) {
             continue;
         }
         let remaining = (pw - px).min(8);
-        // Per-bit unpack: write R=0, G=0, B=0 for set bits (alpha stays 255).
-        // We use direct slice indexing into out_row (pre-computed row offset)
-        // to avoid the per-pixel (y * width + x) * 4 multiply.
+        // Per-bit unpack: write R=0, G=0, B=0 for set bits.
+        // Alpha stays 255 because the caller pre-fills out_row with 0xFF.
+        // Bounds: bit < remaining <= pw - px, so px + bit < pw, so
+        // p = (px + bit) * 4 <= (pw - 1) * 4 and p + 2 < pw * 4 == out_row.len().
         for bit in 0..remaining {
             if byte & (0x80 >> bit) != 0 {
                 let p = (px + bit) * 4;
@@ -859,6 +872,10 @@ fn prepare_coord(src_size: u32, out_size: u32) -> Vec<u32> {
 /// Reads RGBA pixels from `src` at `src_row_off .. src_row_off + sw` and writes
 /// the interpolated RGBX result (alpha/pad byte = 0) into `dst` (length = `ow * 4`).
 /// `hcoord[dx]` encodes the fixed-point source x-coordinate for output column `dx`.
+///
+/// # Caller contract
+/// - `src.len() >= (src_row_off + sw_m1 + 1) * 4 + 2` (enough source pixels for the row)
+/// - `dst.len() >= ow * 4` (destination pre-sized by caller, zeroed for pad byte)
 #[inline]
 fn hpass_row(
     src: &[u8],
@@ -868,6 +885,18 @@ fn hpass_row(
     ow: usize,
     dst: &mut [u8],
 ) {
+    debug_assert!(
+        src.len() >= (src_row_off + sw_m1 + 1) * 4,
+        "src too short for hpass_row: len={}, need>={}",
+        src.len(),
+        (src_row_off + sw_m1 + 1) * 4
+    );
+    debug_assert!(
+        dst.len() >= ow * 4,
+        "dst too short for hpass_row: len={}, need>={}",
+        dst.len(),
+        ow * 4
+    );
     for (dx, &coord) in hcoord.iter().enumerate().take(ow) {
         let ix = ((coord >> FRACBITS) as usize).min(sw_m1);
         let fx = (coord & FRACMASK) as usize;
@@ -3573,8 +3602,11 @@ mod tests {
         assert!((b as i32 - 90).abs() <= 2, "B centre pixel off: {b}");
     }
 
-    /// scale_layer_bilinear must produce identical output for the same input regardless
-    /// of whether the `parallel` feature enables rayon.
+    /// scale_layer_bilinear must produce deterministic output and correct pixel values.
+    ///
+    /// Note: both calls run with the same feature flag (parallel or not), so this
+    /// verifies determinism, not parallel-vs-sequential equivalence. Pixel value
+    /// assertions below catch incorrect interpolation in whichever path is active.
     #[test]
     fn scale_layer_bilinear_deterministic() {
         let src = gradient_pixmap(200, 150);
@@ -3586,5 +3618,19 @@ mod tests {
         );
         assert_eq!(out1.width, 600);
         assert_eq!(out1.height, 450);
+        // Top-left corner maps to src(0,0) = (0, 0, 0).
+        let (r, g, b) = out1.get_rgb(0, 0);
+        assert_eq!((r, g, b), (0, 0, 0), "top-left pixel wrong: ({r},{g},{b})");
+        // Bottom-right corner maps to ~src(199, 149).
+        // gradient_pixmap: r=x%256, g=y%256, b=(x+y)%256 → (199, 149, 92).
+        let (r, g, b) = out1.get_rgb(599, 449);
+        assert!((r as i32 - 199).abs() <= 2, "bottom-right R wrong: {r}");
+        assert!((g as i32 - 149).abs() <= 2, "bottom-right G wrong: {g}");
+        assert!((b as i32 - 92).abs() <= 2, "bottom-right B wrong: {b}");
+        // Centre of 600×450 maps to src(100, 75) → (100, 75, 175).
+        let (r, g, b) = out1.get_rgb(300, 225);
+        assert!((r as i32 - 100).abs() <= 2, "centre R wrong: {r}");
+        assert!((g as i32 - 75).abs() <= 2, "centre G wrong: {g}");
+        assert!((b as i32 - 175).abs() <= 2, "centre B wrong: {b}");
     }
 }
