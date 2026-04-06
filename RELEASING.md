@@ -5,10 +5,10 @@ You do **not** need to manually edit `CHANGELOG.md`, bump `Cargo.toml`, or creat
 
 ## How it works
 
-1. **Merge PRs to `master`** — use [Conventional Commits](#conventional-commits) in every commit
+1. **Merge PRs to `main`** — use [Conventional Commits](#conventional-commits) in every commit
    message so release-please can determine the correct version bump.
 
-2. **release-please opens a Release PR automatically** — after each push to `master` it creates
+2. **release-please opens a Release PR automatically** — after each push to `main` it creates
    (or updates) a PR titled `chore(main): release X.Y.Z` containing:
    - `Cargo.toml` version bump
    - `CHANGELOG.md` update (new section with all changes since last release)
@@ -62,7 +62,7 @@ git commit -m "chore: release vX.Y.Z"
 
 # 2. Tag and push
 git tag vX.Y.Z
-git push origin master --tags
+git push origin main --tags
 
 # 3. Create the GitHub Release manually (publish.yml does not do this for manual tags)
 gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/release-notes.md
