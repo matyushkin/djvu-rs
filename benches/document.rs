@@ -128,6 +128,68 @@ fn bench_render_large_doc_mid(c: &mut Criterion) {
     });
 }
 
+/// Isolate JB2 decode for page 260 (the mid-page benchmark).
+fn bench_decode_mask_mid(c: &mut Criterion) {
+    let data = match load_large_doc_bytes() {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_decode_mask_mid: pathogenic_bacteria_1896.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::Document::from_bytes(data) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_decode_mask_mid: failed to parse document");
+            return;
+        }
+    };
+    let page = match doc.page(260) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_decode_mask_mid: failed to get page 260");
+            return;
+        }
+    };
+
+    c.bench_function("decode_mask_mid_600dpi", |b| {
+        b.iter(|| {
+            let _ = black_box(page.decode_mask());
+        });
+    });
+}
+
+/// Isolate JB2 decode from composite: measure just `decode_mask()` on large page.
+fn bench_decode_mask_large(c: &mut Criterion) {
+    let data = match load_large_doc_bytes() {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_decode_mask_large: pathogenic_bacteria_1896.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::Document::from_bytes(data) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_decode_mask_large: failed to parse document");
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_decode_mask_large: failed to get page 0");
+            return;
+        }
+    };
+
+    c.bench_function("decode_mask_large_600dpi", |b| {
+        b.iter(|| {
+            let _ = black_box(page.decode_mask());
+        });
+    });
+}
+
 /// Text layer extraction: extract plain text from watchmaker.djvu (has TXTz).
 fn bench_text_extraction(c: &mut Criterion) {
     let path = corpus_path().join("watchmaker.djvu");
@@ -166,6 +228,8 @@ criterion_group!(
     bench_iterate_pages,
     bench_render_large_doc_first,
     bench_render_large_doc_mid,
+    bench_decode_mask_large,
+    bench_decode_mask_mid,
     bench_text_extraction,
 );
 criterion_main!(benches);
