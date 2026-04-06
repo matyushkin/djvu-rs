@@ -63,6 +63,15 @@ git commit -m "chore: release vX.Y.Z"
 # 2. Tag and push
 git tag vX.Y.Z
 git push origin master --tags
+
+# 3. Create the GitHub Release manually (publish.yml does not do this for manual tags)
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/release-notes.md
 ```
 
-CI will pick up the tag and publish to crates.io as usual.
+CI will pick up the tag and publish to crates.io. Note that `publish.yml` skips
+the publish step automatically if the version already exists on crates.io, so
+pushing a tag for a version you already published manually is safe.
+
+> **Important:** manual tags do not create a GitHub Release automatically.
+> Always run `gh release create` after a manual tag, otherwise the GitHub
+> Releases page will be out of sync with crates.io.
