@@ -315,7 +315,13 @@ fn decode_bitmap_direct(zp: &mut ZPDecoder, ctx: &mut [u8], width: i32, height: 
         let row_slice = &mut lower[row_off..row_off + w];
         // row+1 and row+2: may be empty if near the top of the bitmap
         let rp1: &[u8] = if upper.len() >= w { &upper[..w] } else { upper };
-        let rp2: &[u8] = if upper.len() >= 2 * w { &upper[w..2 * w] } else if upper.len() > w { &upper[w..] } else { &[] };
+        let rp2: &[u8] = if upper.len() >= 2 * w {
+            &upper[w..2 * w]
+        } else if upper.len() > w {
+            &upper[w..]
+        } else {
+            &[]
+        };
 
         // Read pixel from a row slice at column index; returns 0 for OOB.
         let pix = |row: &[u8], col: usize| -> u32 { row.get(col).copied().unwrap_or(0) as u32 };

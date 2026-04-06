@@ -355,7 +355,10 @@ impl Document {
         let dict = crate::jb2::decode_dict(djbz_data, None)
             .map_err(|e| Error::FormatError(e.to_string()))?;
         let arc = Arc::new(dict);
-        self.dict_cache.write().unwrap().insert(key, Arc::clone(&arc));
+        self.dict_cache
+            .write()
+            .unwrap()
+            .insert(key, Arc::clone(&arc));
         Ok(arc)
     }
 }
