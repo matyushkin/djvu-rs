@@ -18,7 +18,7 @@ mod tests {
         // The chicken.djvu may or may not have a text layer.
         // Find any test file that does.
         let data = std::fs::read(chicken_path()).ok()?;
-        Some(DjVuDocument::parse(&data).ok()?)
+        DjVuDocument::parse(&data).ok()
     }
 
     // ---- hOCR tests ---------------------------------------------------------

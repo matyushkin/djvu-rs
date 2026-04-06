@@ -214,7 +214,7 @@ impl Jbm {
         }
         // Zero the portion we will use (including any bytes reused from a previous symbol).
         pool[..pixels].fill(0u8);
-        let mut data = std::mem::take(pool);
+        let mut data = core::mem::take(pool);
         data.truncate(pixels);
         Jbm {
             width,
