@@ -37,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      actions: read         # needed by dawidd6/action-download-artifact to list artifacts
       pull-requests: write  # needed to post the comparison comment
 
     steps:
