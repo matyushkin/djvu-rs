@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] (unreleased)
+
+
+### Performance Improvements
+
+* **jb2:** cache shared symbol dictionary to avoid re-decoding Djbz on every `decode_mask()` call — `render_large_doc_first_page` 14.5 ms → 10.5 ms (−28%), `render_large_doc_mid_page` 43.9 ms → 36.2 ms (−18%) (closes [#87](https://github.com/matyushkin/djvu-rs/issues/87))
+  - `Document::get_or_decode_dict`: `RwLock<HashMap<usize, Arc<JB2Dict>>>` keyed by Djbz data pointer — multi-page documents decode the shared dictionary once across all pages
+  - `decode_bitmap_direct`: `split_at_mut` look-ahead row access eliminates per-pixel `row * width` multiply and 4-comparison bounds checks; `jb2_decode` small-page benchmark: 245 µs → 189 µs (−23%)
+
+
 ## [0.5.2](https://github.com/matyushkin/djvu-rs/compare/v0.5.1...v0.5.2) (2026-04-06)
 
 
