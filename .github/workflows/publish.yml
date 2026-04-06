@@ -1,6 +1,9 @@
 name: Publish to crates.io
 
 on:
+  release:
+    types: [published]
+  # Also trigger on manual tag push (for emergency releases outside release-please).
   push:
     tags: ['v*', 'djvu-rs-v*']
 
