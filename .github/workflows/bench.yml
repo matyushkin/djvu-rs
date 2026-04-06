@@ -9,15 +9,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
 
-  # Update the baseline on every merge to main (same path filter).
+  # Update the baseline on every merge to main and on every release tag.
+  # No path filter here — main pushes are infrequent (one per merged PR)
+  # and tags should always produce fresh numbers regardless of what changed.
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'benches/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-    # Always run on release tags regardless of paths.
     tags:
       - 'v*'
 
