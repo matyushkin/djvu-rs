@@ -1488,7 +1488,30 @@ pub fn render_region(
     };
     composite_into(&ctx, &mut pm.data)?;
 
-    Ok(pm)
+    // Apply Lanczos-3 post-processing when requested (same logic as render_pixmap).
+    if opts.resampling == Resampling::Lanczos3 {
+        let need_scale = page.width() as u32 != full_w || page.height() as u32 != full_h;
+        if need_scale {
+            let native_opts = RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                scale: 1.0,
+                bold: opts.bold,
+                aa: false,
+                rotation: UserRotation::None,
+                permissive: opts.permissive,
+                resampling: Resampling::Bilinear,
+            };
+            if let Ok(native_pm) = render_region(page, region, &native_opts) {
+                pm = scale_lanczos3(&native_pm, out_w, out_h);
+            }
+        }
+    }
+
+    Ok(rotate_pixmap(
+        pm,
+        combine_rotations(page.rotation(), opts.rotation),
+    ))
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -2738,7 +2761,7 @@ mod tests {
         );
     }
 
-    /// `render_pixmap` still works and calls render_region internally.
+    /// `render_pixmap` still works correctly (regression guard).
     #[test]
     fn render_pixmap_still_works_after_refactor() {
         let doc = load_doc("chicken.djvu");
@@ -2752,5 +2775,39 @@ mod tests {
         assert_eq!(pm.width, 80);
         assert_eq!(pm.height, 60);
         assert_eq!(pm.data.len(), 80 * 60 * 4);
+    }
+
+    /// `render_region` applies page rotation the same way as `render_pixmap`.
+    ///
+    /// For a 90° CW rotation a non-square region of width×height is returned as
+    /// height×width — proving rotation was applied (not silently skipped).
+    #[test]
+    fn render_region_applies_rotation() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        // Request an explicit 90° CW user rotation.
+        let opts = RenderOptions {
+            width: 80,
+            height: 60,
+            rotation: UserRotation::Cw90,
+            ..Default::default()
+        };
+        // Non-square region so swapped dimensions are detectable.
+        let region = RenderRect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        };
+        let part = render_region(page, region, &opts).expect("region render should succeed");
+        // After CW90 rotation a 40×20 region becomes 20×40.
+        assert_eq!(
+            part.width, 20,
+            "expected width=20 (was region.height) after CW90 rotation"
+        );
+        assert_eq!(
+            part.height, 40,
+            "expected height=40 (was region.width) after CW90 rotation"
+        );
     }
 }
