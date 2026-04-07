@@ -115,8 +115,9 @@ pub mod djvu_document;
 
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
-/// Provides `djvu_render::RenderOptions`, `djvu_render::render_into`,
-/// `djvu_render::render_pixmap`, `djvu_render::render_coarse`, and
+/// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
+/// `djvu_render::render_into`, `djvu_render::render_pixmap`,
+/// `djvu_render::render_region`, `djvu_render::render_coarse`, and
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
