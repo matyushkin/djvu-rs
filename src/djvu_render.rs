@@ -779,6 +779,9 @@ fn best_iw44_subsample(scale: f32) -> u32 {
 /// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
 /// Use `best_iw44_subsample(opts.scale)` to pick an appropriate value.
 ///
+/// When `max_chunks == usize::MAX`, the decoded wavelet image is fetched from
+/// [`DjVuPage::decoded_bg44`]'s cache, avoiding repeated ZP arithmetic decode.
+///
 /// Returns `None` if there are no BG44 chunks.
 /// `max_chunks = usize::MAX` means decode all chunks.
 fn decode_background_chunks(
@@ -786,13 +789,27 @@ fn decode_background_chunks(
     max_chunks: usize,
     subsample: u32,
 ) -> Result<Option<Pixmap>, RenderError> {
-    let bg44_chunks = page.bg44_chunks();
-    if !bg44_chunks.is_empty() {
-        let mut img = Iw44Image::new();
-        for chunk_data in bg44_chunks.iter().take(max_chunks) {
-            img.decode_chunk(chunk_data)?;
+    // Fast path: use the cached fully-decoded Iw44Image when all chunks are wanted.
+    if max_chunks == usize::MAX {
+        let bg44_chunks = page.bg44_chunks();
+        if !bg44_chunks.is_empty() {
+            // BG44 chunks exist — cache must have a decoded image; None means decode
+            // failed (strict mode propagates the error).
+            let img = page
+                .decoded_bg44()
+                .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+            return Ok(Some(img.to_rgb_subsample(subsample)?));
         }
-        return Ok(Some(img.to_rgb_subsample(subsample)?));
+        // No BG44 chunks — fall through to the JPEG fallback below.
+    } else {
+        let bg44_chunks = page.bg44_chunks();
+        if !bg44_chunks.is_empty() {
+            let mut img = Iw44Image::new();
+            for chunk_data in bg44_chunks.iter().take(max_chunks) {
+                img.decode_chunk(chunk_data)?;
+            }
+            return Ok(Some(img.to_rgb_subsample(subsample)?));
+        }
     }
 
     // Fall back to JPEG-encoded background if present.
@@ -2896,6 +2913,54 @@ mod tests {
         assert_eq!(
             pm.data.len() as u64,
             opts.width as u64 * opts.height as u64 * 4
+        );
+    }
+
+    /// Second render of the same page produces identical pixels — confirms the
+    /// BG44 cache is used and does not corrupt output.
+    #[test]
+    fn decoded_bg44_cache_produces_identical_pixels_on_second_render() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..Default::default()
+        };
+        let pm1 = render_pixmap(page, &opts).expect("first render should succeed");
+        let pm2 = render_pixmap(page, &opts).expect("second render should succeed");
+        assert_eq!(
+            pm1.data, pm2.data,
+            "cached render must produce identical pixels"
+        );
+    }
+
+    /// After the first render the `decoded_bg44` cache is populated — the
+    /// image dimensions match the page's raw BG44 size.
+    #[test]
+    fn decoded_bg44_is_populated_after_render() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..Default::default()
+        };
+        // Trigger cache population.
+        render_pixmap(page, &opts).expect("render should succeed");
+        // Cache must now hold an image whose size matches the page's native size.
+        let cached = page
+            .decoded_bg44()
+            .expect("cache should be populated after render");
+        assert_eq!(
+            cached.width,
+            page.width() as u32,
+            "cached bg44 width must equal page width"
+        );
+        assert_eq!(
+            cached.height,
+            page.height() as u32,
+            "cached bg44 height must equal page height"
         );
     }
 
