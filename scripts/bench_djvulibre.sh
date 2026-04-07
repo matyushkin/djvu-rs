@@ -18,9 +18,12 @@
 set -uo pipefail
 
 OUT="${1:-.}"
-FILE="references/djvujs/library/assets/boy.djvu"
+# colorbook.djvu: 2260×3669 px, 400 dpi, color IW44 — representative document scan.
+# Rendered at 150 dpi → 848×1377 px output, comparable to watchmaker.djvu native.
+# boy.djvu (192×256) is too small to show djvu-rs's advantage over libdjvulibre.
+FILE="references/djvujs/library/assets/colorbook.djvu"
 BENCH_BIN="scripts/djvulibre_bench_ci"
-DPIS=(72 144 300)
+DPIS=(150)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
