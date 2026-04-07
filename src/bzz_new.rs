@@ -54,17 +54,56 @@ pub fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
     let mut block_ctx = [0u8; CTX_COUNT];
 
     loop {
-        // Read 24-bit block size (passthrough, no context)
         let block_size = decode_raw_bits(&mut zp, 24);
         if block_size == 0 {
-            // Size 0 = end-of-stream marker
             break;
         }
-
         let block = decode_one_block(&mut zp, &mut block_ctx, block_size as usize)?;
         output.extend_from_slice(&block);
     }
 
+    Ok(output)
+}
+
+/// Decode a BZZ-compressed byte slice, applying inverse BWT in parallel.
+///
+/// Requires the `parallel` feature (which enables `rayon`). The ZP arithmetic
+/// decoding and inverse-MTF phases are inherently sequential (ZP context state
+/// is shared across all blocks). Once all blocks are decoded into their
+/// BWT-encoded form, the independent inverse-BWT transforms are dispatched to
+/// the rayon thread pool.
+///
+/// For single-block streams the performance is identical to [`bzz_decode`].
+/// For multi-block streams each block's inverse-BWT runs on its own thread.
+#[cfg(feature = "parallel")]
+pub fn bzz_decode_parallel(data: &[u8]) -> Result<Vec<u8>, BzzError> {
+    use rayon::prelude::*;
+
+    let mut zp = ZpDecoder::new(data)?;
+    let mut block_ctx = [0u8; CTX_COUNT];
+
+    // Phase 1 — sequential: ZP decode + inverse-MTF → collect (bwt_data, marker_pos)
+    let mut bwt_blocks: Vec<(Vec<u8>, usize)> = Vec::new();
+    loop {
+        let block_size = decode_raw_bits(&mut zp, 24);
+        if block_size == 0 {
+            break;
+        }
+        let (bwt_data, marker_pos) =
+            decode_one_block_bwt_only(&mut zp, &mut block_ctx, block_size as usize)?;
+        bwt_blocks.push((bwt_data, marker_pos));
+    }
+
+    // Phase 2 — parallel: inverse-BWT per block (each block is independent)
+    let decoded_blocks: Result<Vec<Vec<u8>>, BzzError> = bwt_blocks
+        .into_par_iter()
+        .map(|(bwt_data, marker_pos)| inverse_bwt(&bwt_data, marker_pos))
+        .collect();
+
+    let mut output = Vec::new();
+    for block in decoded_blocks? {
+        output.extend_from_slice(&block);
+    }
     Ok(output)
 }
 
@@ -108,6 +147,20 @@ fn decode_context_bits(zp: &mut ZpDecoder, ctx: &mut [u8], ctx_base: usize, bit_
     n - limit
 }
 
+/// Decode one BZZ block, returning the raw BWT-encoded bytes and marker position.
+///
+/// Identical to [`decode_one_block`] except the inverse-BWT step is skipped.
+/// Used by [`bzz_decode_parallel`] to separate the sequential ZP/MTF phase
+/// from the parallelisable inverse-BWT phase.
+fn decode_one_block_bwt_only(
+    zp: &mut ZpDecoder,
+    ctx: &mut [u8; CTX_COUNT],
+    block_size: usize,
+) -> Result<(Vec<u8>, usize), BzzError> {
+    let (bwt_data, marker_pos) = decode_mtf_phase(zp, ctx, block_size)?;
+    Ok((bwt_data, marker_pos))
+}
+
 /// Decode one BZZ block of `block_size` symbols.
 ///
 /// The block shares ZP contexts across invocations (reset only once per stream,
@@ -117,6 +170,18 @@ fn decode_one_block(
     ctx: &mut [u8; CTX_COUNT],
     block_size: usize,
 ) -> Result<Vec<u8>, BzzError> {
+    let (bwt_data, marker_pos) = decode_mtf_phase(zp, ctx, block_size)?;
+    inverse_bwt(&bwt_data, marker_pos)
+}
+
+/// ZP + MTF decode phase: returns `(bwt_data, marker_pos)`.
+///
+/// Shared by [`decode_one_block`] and [`decode_one_block_bwt_only`].
+fn decode_mtf_phase(
+    zp: &mut ZpDecoder,
+    ctx: &mut [u8; CTX_COUNT],
+    block_size: usize,
+) -> Result<(Vec<u8>, usize), BzzError> {
     // Decode the frequency shift parameter (0, 1, or 2)
     // This controls how aggressively the MTF order adapts
     let mut freq_shift: u32 = 0;
@@ -271,9 +336,7 @@ fn decode_one_block(
     }
 
     let marker_pos = marker_at.ok_or(BzzError::MissingMarker)?;
-
-    // Inverse Burrows-Wheeler Transform
-    inverse_bwt(&bwt_data, marker_pos)
+    Ok((bwt_data, marker_pos))
 }
 
 /// Inverse Burrows-Wheeler Transform.
@@ -416,6 +479,24 @@ mod tests {
             decoded, expected,
             "decoded DIRM chunk does not match expected"
         );
+    }
+
+    /// Parallel BWT decode (feature = "parallel") produces identical output to
+    /// the sequential path on a multi-block fixture.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_bzz_matches_sequential() {
+        let compressed =
+            std::fs::read(golden_bzz_path().join("test_long.bzz")).expect("test fixture missing");
+        let expected =
+            std::fs::read(golden_bzz_path().join("test_long.txt")).expect("test fixture missing");
+
+        let seq = bzz_decode(&compressed).expect("sequential decode failed");
+        let par = bzz_decode_parallel(&compressed).expect("parallel decode failed");
+
+        assert_eq!(seq, expected, "sequential output mismatch");
+        assert_eq!(par, expected, "parallel output mismatch");
+        assert_eq!(seq, par, "parallel and sequential outputs differ");
     }
 
     #[test]
