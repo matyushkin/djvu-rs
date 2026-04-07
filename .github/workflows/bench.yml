@@ -82,6 +82,58 @@ jobs:
           echo "--- Render benchmarks ---"
           grep "bench:" render_bench.txt || echo "(no render results)"
 
+      # ── Compare against DjVuLibre ─────────────────────────────────────────
+      - name: Install DjVuLibre
+        run: sudo apt-get install -y --no-install-recommends libdjvulibre-dev djvulibre-bin
+        continue-on-error: true
+
+      - name: Build djvulibre_bench
+        run: |
+          cc -O2 -o scripts/djvulibre_bench_ci scripts/djvulibre_bench.c \
+            $(pkg-config --cflags --libs ddjvuapi) 2>&1 \
+            && echo "djvulibre_bench built OK" \
+            || echo "djvulibre_bench build FAILED (skipping comparison)"
+        continue-on-error: true
+
+      - name: Run DjVuLibre library benchmark
+        run: |
+          FILE=references/djvujs/library/assets/boy.djvu
+          BENCH=scripts/djvulibre_bench_ci
+          if [ ! -x "$BENCH" ] || [ ! -f "$FILE" ]; then
+            echo "skipped" > djvulibre_bench.txt
+            exit 0
+          fi
+          { "$BENCH" "$FILE" 1 20 72;
+            "$BENCH" "$FILE" 1 20 144;
+            "$BENCH" "$FILE" 1 20 300; } > djvulibre_bench.txt 2>&1
+          cat djvulibre_bench.txt
+        continue-on-error: true
+
+      - name: Run ddjvu CLI timing
+        run: |
+          FILE=references/djvujs/library/assets/boy.djvu
+          if ! command -v ddjvu &>/dev/null || [ ! -f "$FILE" ]; then
+            echo "skipped" > ddjvu_timing.txt
+            exit 0
+          fi
+          python3 - "$FILE" > ddjvu_timing.txt <<'PYEOF'
+          import subprocess, statistics, sys, time
+          file = sys.argv[1]
+          for dpi in [72, 144, 300]:
+              # warm-up
+              subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
+                             capture_output=True)
+              times = []
+              for _ in range(5):
+                  t0 = time.perf_counter()
+                  subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
+                                 capture_output=True)
+                  times.append((time.perf_counter() - t0) * 1000)
+              print(f"boy.djvu@{dpi}dpi: {statistics.mean(times):.1f} ms")
+          PYEOF
+          cat ddjvu_timing.txt
+        continue-on-error: true
+
       # ── Compare against baseline and generate Markdown table (PR only) ──────
       - name: Compare benchmarks
         if: github.event_name == 'pull_request'
@@ -94,6 +146,16 @@ jobs:
           echo "regression_exit=$?" >> "$GITHUB_OUTPUT"
           cat bench_comment.md
         continue-on-error: true  # don't skip comment posting on failure
+
+      - name: Append DjVuLibre comparison
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 scripts/djvulibre_compare.py \
+            --criterion target/criterion \
+            --djvulibre-bench djvulibre_bench.txt \
+            --ddjvu-timing ddjvu_timing.txt \
+            >> bench_comment.md 2>/dev/null || true
+        continue-on-error: true
 
       - name: Post benchmark comment
         if: github.event_name == 'pull_request'
@@ -132,6 +194,8 @@ jobs:
           path: |
             codec_bench.txt
             render_bench.txt
+            djvulibre_bench.txt
+            ddjvu_timing.txt
             target/criterion/
           retention-days: 30
 
