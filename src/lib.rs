@@ -166,7 +166,7 @@ pub mod tiff_export;
 /// so CPU-bound IW44/JB2 work runs on the blocking thread pool without
 /// blocking the async runtime.
 ///
-/// Key functions: [`djvu_async::render_pixmap_async`], [`djvu_async::render_gray8_async`].
+/// Key functions: [`djvu_async::render_pixmap_async`], [`djvu_async::render_gray8_async`], [`djvu_async::render_progressive_stream`].
 #[cfg(feature = "async")]
 pub mod djvu_async;
 

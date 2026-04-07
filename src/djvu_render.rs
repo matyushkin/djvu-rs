@@ -1694,6 +1694,26 @@ pub fn render_progressive(
         composite_into(&ctx, &mut pm.data)?;
     }
 
+    // Apply Lanczos-3 post-processing when requested (same logic as render_pixmap).
+    if opts.resampling == Resampling::Lanczos3 {
+        let need_scale = page.width() as u32 != w || page.height() as u32 != h;
+        if need_scale {
+            let native_opts = RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                scale: 1.0,
+                bold: opts.bold,
+                aa: false,
+                rotation: UserRotation::None,
+                permissive: opts.permissive,
+                resampling: Resampling::Bilinear,
+            };
+            if let Ok(native_pm) = render_progressive(page, &native_opts, chunk_n) {
+                pm = scale_lanczos3(&native_pm, w, h);
+            }
+        }
+    }
+
     Ok(rotate_pixmap(
         pm,
         combine_rotations(page.rotation(), opts.rotation),

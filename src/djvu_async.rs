@@ -13,6 +13,7 @@
 //!
 //! - [`render_pixmap_async`] — async wrapper around [`djvu_render::render_pixmap`]
 //! - [`render_gray8_async`] — async wrapper around [`djvu_render::render_gray8`]
+//! - [`render_progressive_stream`] — streaming progressive render yielding one frame per BG44 chunk
 //!
 //! ## Example: concurrent multi-page rendering
 //!
@@ -112,6 +113,74 @@ pub async fn render_gray8_async(
     })
     .await
     .map_err(|e| AsyncRenderError::Join(e.to_string()))?
+}
+
+/// Render a `DjVuPage` as a lazy progressive stream of [`Pixmap`] frames.
+///
+/// Yields one frame per BG44 wavelet refinement chunk: the first frame is the
+/// coarsest (fastest to produce), and each subsequent frame adds detail. The
+/// final frame is equivalent to [`render_pixmap`][djvu_render::render_pixmap].
+///
+/// If the page has no BG44 chunks (bilevel JB2-only pages), exactly one frame
+/// is yielded via [`render_pixmap`][djvu_render::render_pixmap].
+///
+/// Each frame is produced via [`tokio::task::spawn_blocking`] just before it is
+/// yielded, so the stream never blocks the async runtime thread.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() {
+/// use djvu_rs::djvu_document::DjVuDocument;
+/// use djvu_rs::djvu_render::RenderOptions;
+/// use djvu_rs::djvu_async::render_progressive_stream;
+/// use futures::StreamExt;
+///
+/// let data = std::fs::read("file.djvu").unwrap();
+/// let doc = DjVuDocument::parse(&data).unwrap();
+/// let page = doc.page(0).unwrap();
+/// let opts = RenderOptions { width: 800, height: 600, ..Default::default() };
+///
+/// let stream = render_progressive_stream(page, opts);
+/// futures::pin_mut!(stream);
+/// while let Some(pixmap) = stream.next().await {
+///     let pixmap = pixmap.unwrap();
+///     println!("{}×{}", pixmap.width, pixmap.height);
+/// }
+/// # }
+/// ```
+pub fn render_progressive_stream(
+    page: &DjVuPage,
+    opts: RenderOptions,
+) -> impl futures_core::Stream<Item = Result<Pixmap, AsyncRenderError>> {
+    let page = page.clone();
+    let n_chunks = page.bg44_chunks().len();
+
+    async_stream::stream! {
+        if n_chunks == 0 {
+            // No BG44 chunks (JB2-only page): yield a single frame.
+            let page = page.clone();
+            let opts = opts.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
+            })
+            .await
+            .map_err(|e| AsyncRenderError::Join(e.to_string()));
+            yield result.and_then(|r| r);
+        } else {
+            for chunk_n in 0..n_chunks {
+                let page = page.clone();
+                let opts = opts.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    djvu_render::render_progressive(&page, &opts, chunk_n)
+                        .map_err(AsyncRenderError::Render)
+                })
+                .await
+                .map_err(|e| AsyncRenderError::Join(e.to_string()));
+                yield result.and_then(|r| r);
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -242,5 +311,95 @@ mod tests {
             s.contains("render error"),
             "error must mention 'render error'"
         );
+    }
+
+    // ── render_progressive_stream tests ──────────────────────────────────────
+
+    /// Last frame from the progressive stream matches `render_pixmap`.
+    #[tokio::test]
+    async fn progressive_stream_last_frame_matches_pixmap() {
+        use futures::StreamExt;
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 100,
+            height: 80,
+            ..Default::default()
+        };
+
+        let stream = render_progressive_stream(page, opts.clone());
+        futures::pin_mut!(stream);
+
+        let mut frames: Vec<Pixmap> = Vec::new();
+        while let Some(result) = stream.next().await {
+            frames.push(result.expect("frame should succeed"));
+        }
+
+        assert!(!frames.is_empty(), "stream must yield at least one frame");
+
+        let expected = djvu_render::render_pixmap(page, &opts).expect("render_pixmap must succeed");
+        assert_eq!(
+            frames.last().unwrap().data,
+            expected.data,
+            "last frame must match render_pixmap"
+        );
+    }
+
+    /// Each successive frame has the same dimensions.
+    #[tokio::test]
+    async fn progressive_stream_consistent_dimensions() {
+        use futures::StreamExt;
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let n_chunks = page.bg44_chunks().len();
+        let opts = RenderOptions {
+            width: 100,
+            height: 80,
+            ..Default::default()
+        };
+
+        let stream = render_progressive_stream(page, opts);
+        futures::pin_mut!(stream);
+
+        let mut count = 0usize;
+        while let Some(result) = stream.next().await {
+            let frame = result.expect("frame should succeed");
+            assert_eq!(frame.width, 100);
+            assert_eq!(frame.height, 80);
+            count += 1;
+        }
+
+        let expected_count = if n_chunks == 0 { 1 } else { n_chunks };
+        assert_eq!(
+            count, expected_count,
+            "frame count must equal BG44 chunk count"
+        );
+    }
+
+    /// A JB2-only page (no BG44 chunks) yields exactly one frame.
+    #[tokio::test]
+    async fn progressive_stream_jb2_only_yields_one_frame() {
+        use futures::StreamExt;
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        if !page.bg44_chunks().is_empty() {
+            // Page is not JB2-only; skip
+            return;
+        }
+        let opts = RenderOptions {
+            width: 80,
+            height: 60,
+            ..Default::default()
+        };
+
+        let stream = render_progressive_stream(page, opts);
+        futures::pin_mut!(stream);
+
+        let mut count = 0;
+        while let Some(result) = stream.next().await {
+            result.expect("frame should succeed");
+            count += 1;
+        }
+        assert_eq!(count, 1, "JB2-only page must yield exactly one frame");
     }
 }
