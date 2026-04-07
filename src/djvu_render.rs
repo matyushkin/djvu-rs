@@ -938,6 +938,23 @@ fn decode_jpeg_to_pixmap(data: &[u8]) -> Result<Pixmap, RenderError> {
     })
 }
 
+/// A sub-rectangle within the full rendered output.
+///
+/// Used by [`render_region`] to select which portion of the page to render.
+/// `x` and `y` are pixel offsets within the output at `opts.width × opts.height`
+/// resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderRect {
+    /// X offset in output pixels.
+    pub x: u32,
+    /// Y offset in output pixels.
+    pub y: u32,
+    /// Width of the output region in pixels.
+    pub width: u32,
+    /// Height of the output region in pixels.
+    pub height: u32,
+}
+
 /// All decoded layers and options passed to the compositor.
 struct CompositeContext<'a> {
     opts: &'a RenderOptions,
@@ -950,6 +967,14 @@ struct CompositeContext<'a> {
     blit_map: Option<&'a [i32]>,
     fg44: Option<&'a Pixmap>,
     gamma_lut: &'a [u8; 256],
+    /// X offset within the full render (for region renders; 0 for full page).
+    offset_x: u32,
+    /// Y offset within the full render (for region renders; 0 for full page).
+    offset_y: u32,
+    /// Output width (may be smaller than opts.width for region renders).
+    out_w: u32,
+    /// Output height (may be smaller than opts.height for region renders).
+    out_h: u32,
 }
 
 /// Look up the palette color for a foreground pixel at (px, py).
@@ -1009,12 +1034,12 @@ fn composite_loop_bilinear(
     fy_step: u32,
 ) {
     for oy in 0..h {
-        let fy = oy * fy_step;
+        let fy = (oy + ctx.offset_y) * fy_step;
         let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
         let row_base = oy as usize * w as usize;
 
         for ox in 0..w {
-            let fx = ox * fx_step;
+            let fx = (ox + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
             let is_fg = ctx
@@ -1065,11 +1090,11 @@ fn composite_loop_area_avg(
     fy_step: u32,
 ) {
     for oy in 0..h {
-        let fy = oy * fy_step;
+        let fy = (oy + ctx.offset_y) * fy_step;
         let row_base = oy as usize * w as usize;
 
         for ox in 0..w {
-            let fx = ox * fx_step;
+            let fx = (ox + ctx.offset_x) * fx_step;
 
             let is_fg = ctx
                 .mask
@@ -1109,15 +1134,19 @@ fn composite_loop_area_avg(
 /// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
 ///
 /// This is a zero-allocation render path when `buf` is already the right size.
+/// For region renders, `ctx.out_w`/`ctx.out_h` give the output dimensions and
+/// `ctx.offset_x`/`ctx.offset_y` give the starting offset within the full render.
 fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), RenderError> {
-    let w = ctx.opts.width;
-    let h = ctx.opts.height;
+    let w = ctx.out_w;
+    let h = ctx.out_h;
+    let full_w = ctx.opts.width;
+    let full_h = ctx.opts.height;
     let page_w = ctx.page_w;
     let page_h = ctx.page_h;
 
-    // Fixed-point step: how many source pixels per output pixel
-    let fx_step = ((page_w as u64 * FRAC as u64) / w.max(1) as u64) as u32;
-    let fy_step = ((page_h as u64 * FRAC as u64) / h.max(1) as u64) as u32;
+    // Fixed-point step: how many source pixels per full-render output pixel
+    let fx_step = ((page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
+    let fy_step = ((page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
 
     // Downscaling when output is smaller than source (step > 1 pixel)
     if fx_step > FRAC || fy_step > FRAC {
@@ -1208,6 +1237,10 @@ pub fn render_into(
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
         gamma_lut: &gamma_lut,
+        offset_x: 0,
+        offset_y: 0,
+        out_w: w,
+        out_h: h,
     };
     composite_into(&ctx, buf)?;
 
@@ -1298,6 +1331,10 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
             gamma_lut: &gamma_lut,
+            offset_x: 0,
+            offset_y: 0,
+            out_w: w,
+            out_h: h,
         };
         composite_into(&ctx, &mut pm.data)?;
     }
@@ -1336,6 +1373,122 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm,
         combine_rotations(page.rotation(), opts.rotation),
     ))
+}
+
+/// Render a sub-rectangle of a page into a new [`Pixmap`].
+///
+/// Unlike [`render_pixmap`], which always allocates `opts.width × opts.height`
+/// pixels, `render_region` only allocates `region.width × region.height` pixels.
+/// This makes it efficient for thumbnails, viewport clips, and tile rendering.
+///
+/// `opts.width` and `opts.height` still define the **full-page** render dimensions
+/// used for scale calculation. `region` selects which sub-rectangle of that
+/// full render to output. The returned `Pixmap` has dimensions
+/// `region.width × region.height`.
+///
+/// # Errors
+///
+/// - [`RenderError::InvalidDimensions`] if `region.width == 0 || region.height == 0`
+/// - Propagates IW44 / JB2 decode errors.
+pub fn render_region(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    if region.width == 0 || region.height == 0 {
+        return Err(RenderError::InvalidDimensions {
+            width: region.width,
+            height: region.height,
+        });
+    }
+
+    let full_w = opts.width.max(1);
+    let full_h = opts.height.max(1);
+    let gamma_lut = build_gamma_lut(page.gamma());
+
+    let bg;
+    let fg_palette;
+    let mask;
+    let blit_map;
+    let fg44;
+
+    if opts.permissive {
+        bg = decode_background_chunks_permissive(page, usize::MAX);
+        fg_palette = decode_fg_palette_full(page).ok().flatten();
+        let indexed = if fg_palette.is_some() {
+            decode_mask_indexed(page).ok().flatten()
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = decode_mask(page).ok().flatten();
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page).ok().flatten();
+    } else {
+        bg = decode_background_chunks(page, usize::MAX)?;
+        fg_palette = decode_fg_palette_full(page)?;
+        let indexed_result = if fg_palette.is_some() {
+            decode_mask_indexed(page)?
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed_result {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = if fg_palette.is_none() {
+                decode_mask(page)?
+            } else {
+                None
+            };
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page)?;
+    }
+
+    let mask = if opts.bold > 0 {
+        mask.map(|m| {
+            let mut dilated = m;
+            for _ in 0..opts.bold {
+                dilated = dilated.dilate();
+            }
+            dilated
+        })
+    } else {
+        mask
+    };
+
+    let out_w = region.width;
+    let out_h = region.height;
+    let mut pm = Pixmap::white(out_w, out_h);
+
+    let region_opts = RenderOptions {
+        width: full_w,
+        height: full_h,
+        ..*opts
+    };
+    let ctx = CompositeContext {
+        opts: &region_opts,
+        page_w: page.width() as u32,
+        page_h: page.height() as u32,
+        bg: bg.as_ref(),
+        mask: mask.as_ref(),
+        fg_palette: fg_palette.as_ref(),
+        blit_map: blit_map.as_deref(),
+        fg44: fg44.as_ref(),
+        gamma_lut: &gamma_lut,
+        offset_x: region.x,
+        offset_y: region.y,
+        out_w,
+        out_h,
+    };
+    composite_into(&ctx, &mut pm.data)?;
+
+    Ok(pm)
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -1421,6 +1574,10 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             blit_map: None,
             fg44: None,
             gamma_lut: &gamma_lut,
+            offset_x: 0,
+            offset_y: 0,
+            out_w: w,
+            out_h: h,
         };
         composite_into(&ctx, &mut pm.data)?;
     }
@@ -1506,6 +1663,10 @@ pub fn render_progressive(
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
             gamma_lut: &gamma_lut,
+            offset_x: 0,
+            offset_y: 0,
+            out_w: w,
+            out_h: h,
         };
         composite_into(&ctx, &mut pm.data)?;
     }
@@ -2490,5 +2651,106 @@ mod tests {
     fn resampling_default_is_bilinear() {
         let opts = RenderOptions::default();
         assert_eq!(opts.resampling, Resampling::Bilinear);
+    }
+
+    // ── render_region tests ───────────────────────────────────────────────────
+
+    /// `render_region` allocates only the region-sized buffer (≤ 512 KB for 256×256).
+    #[test]
+    fn render_region_allocates_proportionally() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions::fit_to_width(page, 1000);
+        let region = RenderRect {
+            x: 0,
+            y: 0,
+            width: 256,
+            height: 256,
+        };
+        let pm = render_region(page, region, &opts).expect("render_region should succeed");
+        assert_eq!(pm.width, 256);
+        assert_eq!(pm.height, 256);
+        assert_eq!(pm.data.len(), 256 * 256 * 4);
+        assert!(
+            pm.data.len() <= 512 * 1024,
+            "region allocation {} exceeds 512 KB",
+            pm.data.len()
+        );
+    }
+
+    /// `render_region` pixels match the same pixels from `render_pixmap`.
+    #[test]
+    fn render_region_matches_full_render() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 100,
+            height: 80,
+            ..Default::default()
+        };
+        let full = render_pixmap(page, &opts).expect("full render should succeed");
+        let region = RenderRect {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 20,
+        };
+        let part = render_region(page, region, &opts).expect("region render should succeed");
+
+        assert_eq!(part.width, 30);
+        assert_eq!(part.height, 20);
+
+        for ry in 0..20u32 {
+            for rx in 0..30u32 {
+                let full_base = ((10 + ry) as usize * 100 + (10 + rx) as usize) * 4;
+                let part_base = (ry as usize * 30 + rx as usize) * 4;
+                assert_eq!(
+                    &full.data[full_base..full_base + 4],
+                    &part.data[part_base..part_base + 4],
+                    "pixel mismatch at region ({rx},{ry}) / full ({},{} )",
+                    10 + rx,
+                    10 + ry
+                );
+            }
+        }
+    }
+
+    /// `render_region` with invalid dimensions returns an error.
+    #[test]
+    fn render_region_invalid_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 100,
+            height: 100,
+            ..Default::default()
+        };
+        let region = RenderRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 50,
+        };
+        let err = render_region(page, region, &opts).unwrap_err();
+        assert!(
+            matches!(err, RenderError::InvalidDimensions { .. }),
+            "expected InvalidDimensions, got {err:?}"
+        );
+    }
+
+    /// `render_pixmap` still works and calls render_region internally.
+    #[test]
+    fn render_pixmap_still_works_after_refactor() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 80,
+            height: 60,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("render_pixmap should succeed");
+        assert_eq!(pm.width, 80);
+        assert_eq!(pm.height, 60);
+        assert_eq!(pm.data.len(), 80 * 60 * 4);
     }
 }
