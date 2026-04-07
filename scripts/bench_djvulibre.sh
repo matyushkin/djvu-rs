@@ -74,9 +74,10 @@ echo "→ Library benchmark (render_only, 20 runs per DPI): ${DPIS[*]} dpi"
 
 if command -v ddjvu &>/dev/null; then
   echo "→ ddjvu CLI timing (5 runs per DPI, warm-up included): ${DPIS[*]} dpi"
-  python3 - "$FILE" "${DPIS[@]}" | tee "$OUT/ddjvu_timing.txt" <<'PYEOF'
+  python3 - "$FILE" "${DPIS[@]}" <<'PYEOF' | tee "$OUT/ddjvu_timing.txt"
 import subprocess, statistics, sys, time
 file, *dpis = sys.argv[1], *[int(x) for x in sys.argv[2:]]
+basename = file.split("/")[-1]
 for dpi in dpis:
     # warm-up
     subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
@@ -87,7 +88,7 @@ for dpi in dpis:
         subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
                        capture_output=True)
         times.append((time.perf_counter() - t0) * 1000)
-    print(f"boy.djvu@{dpi}dpi: {statistics.mean(times):.1f} ms")
+    print(f"{basename}@{dpi}dpi: {statistics.mean(times):.1f} ms")
 PYEOF
 else
   echo "ddjvu CLI not found — skipping CLI timing"
