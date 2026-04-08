@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/matyushkin/djvu-rs/compare/v0.7.0...v0.7.1) (2026-04-08)
+
+
+### Performance Improvements
+
+* **iw44:** compact-plane wavelet for sub≥2 + correct start_scale (Issue [#115](https://github.com/matyushkin/djvu-rs/issues/115)) ([#116](https://github.com/matyushkin/djvu-rs/issues/116)) ([4fc8921](https://github.com/matyushkin/djvu-rs/commit/4fc8921a7892834b3be97ed952d30000ea467b21))
+
 ## [0.7.0](https://github.com/matyushkin/djvu-rs/compare/v0.6.0...v0.7.0) (2026-04-08)
 
 
