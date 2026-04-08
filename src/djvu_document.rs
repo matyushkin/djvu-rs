@@ -143,7 +143,11 @@ struct RawChunk {
 /// A lazy DjVu page handle.
 ///
 /// Raw chunk data is stored on construction. No image decoding is performed
-/// until the caller invokes `thumbnail()`.
+/// until the caller invokes `thumbnail()` or a render function.
+///
+/// The fully decoded BG44 wavelet image is cached after the first render so
+/// that subsequent renders skip the expensive ZP arithmetic decode and only
+/// run the wavelet inverse-transform and compositor.
 #[derive(Debug, Clone)]
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
@@ -156,6 +160,11 @@ pub struct DjVuPage {
     /// the page's INCL chunk, if present.  Stored here so that `extract_mask`
     /// can decode it without access to the parent document.
     shared_djbz: Option<Vec<u8>>,
+    /// Lazily decoded BG44 background wavelet image.  Populated on first use;
+    /// subsequent renders call `to_rgb_subsample` directly on the cached image.
+    /// Only available when the `std` feature is enabled (`OnceLock` requires std).
+    #[cfg(feature = "std")]
+    bg44_decoded: std::sync::OnceLock<Option<Iw44Image>>,
 }
 
 impl DjVuPage {
@@ -278,6 +287,41 @@ impl DjVuPage {
     /// Return all BG44 background chunk data slices, in order.
     pub fn bg44_chunks(&self) -> Vec<&[u8]> {
         self.find_chunks(b"BG44")
+    }
+
+    /// Return the fully decoded BG44 wavelet image, decoding and caching on first call.
+    ///
+    /// Returns `None` if the page has no BG44 chunks.  On decode error the error
+    /// is swallowed and `None` is returned (same semantics as the permissive render
+    /// path), so this method is infallible.
+    ///
+    /// The result is computed once (all ZP arithmetic decode + block assembly) and
+    /// then cached inside the page.  Subsequent calls return the cached value
+    /// immediately.  The wavelet inverse-transform and YCbCr→RGB conversion are
+    /// **not** cached; they are applied at each render at the appropriate subsample
+    /// level via [`Iw44Image::to_rgb_subsample`].
+    #[cfg(feature = "std")]
+    pub fn decoded_bg44(&self) -> Option<&Iw44Image> {
+        self.bg44_decoded
+            .get_or_init(|| {
+                let chunks = self.bg44_chunks();
+                if chunks.is_empty() {
+                    return None;
+                }
+                let mut img = Iw44Image::new();
+                for chunk_data in &chunks {
+                    if img.decode_chunk(chunk_data).is_err() {
+                        break;
+                    }
+                }
+                if img.width == 0 { None } else { Some(img) }
+            })
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_bg44(&self) -> Option<&Iw44Image> {
+        None
     }
 
     /// Return all FG44 foreground chunk data slices, in order.
@@ -801,6 +845,8 @@ fn parse_page_from_chunks(
         chunks: raw_chunks,
         index,
         shared_djbz,
+        #[cfg(feature = "std")]
+        bg44_decoded: std::sync::OnceLock::new(),
     })
 }
 

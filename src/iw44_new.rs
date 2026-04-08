@@ -215,6 +215,7 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
 ///
 /// Holds 32×32 block coefficients and the ZP context tables that persist
 /// across progressive slices.
+#[derive(Clone, Debug)]
 struct PlaneDecoder {
     width: usize,
     height: usize,
@@ -1159,6 +1160,7 @@ fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize,
 /// let pixmap = img.to_rgb()?;
 /// # Ok::<(), djvu_rs::Iw44Error>(())
 /// ```
+#[derive(Clone, Debug)]
 pub struct Iw44Image {
     /// Luma plane dimensions (pixels, before subsampling).
     pub width: u32,

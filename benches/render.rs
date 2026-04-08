@@ -257,6 +257,51 @@ fn bench_render_scaled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark rendering a large color page available in the references directory.
+///
+/// Uses `colorbook.djvu` (2260×3669 px, 400 dpi, color IW44), rendered at 150 dpi
+/// so the output (848×1377 px) is representative of a typical document-viewer request
+/// and comparable to the corpus `watchmaker.djvu` benchmark.
+fn bench_render_colorbook(c: &mut Criterion) {
+    let doc = match load_doc("colorbook.djvu") {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_render_colorbook: colorbook.djvu not found");
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_render_colorbook: failed to get page 0");
+            return;
+        }
+    };
+
+    let native_dpi = page.dpi() as f32;
+    let target_dpi = 150_f32;
+    let scale = target_dpi / native_dpi;
+    let w = ((page.width() as f32 * scale).round() as u32).max(1);
+    let h = ((page.height() as f32 * scale).round() as u32).max(1);
+
+    let opts = djvu_rs::djvu_render::RenderOptions {
+        width: w,
+        height: h,
+        scale,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+    };
+
+    c.bench_function("render_colorbook", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
+        });
+    });
+}
+
 /// Benchmark full DjVu→PDF export pipeline (render + DCTDecode JPEG compression).
 fn bench_pdf_export(c: &mut Criterion) {
     let path = corpus_path().join("watchmaker.djvu");
@@ -286,6 +331,7 @@ criterion_group!(
     benches,
     bench_render_at_dpi,
     bench_render_coarse,
+    bench_render_colorbook,
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
     bench_render_scaled,
