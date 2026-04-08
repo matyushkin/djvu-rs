@@ -465,6 +465,70 @@ impl PlaneDecoder {
     /// The returned vector is row-major, with stride = `width.div_ceil(32)*32`.
     /// `subsample` ≥ 1 controls the resolution (1 = full, 2 = half, etc.).
     fn reconstruct(&self, subsample: usize) -> FlatPlane {
+        // ── Fast path for sub≥2: compact plane ────────────────────────────────
+        //
+        // For subsample=2 the wavelet only ever reads/writes (even_row, even_col)
+        // positions — those with zigzag index i < 256 (see zigzag_row/col: both
+        // are even iff bits 8 and 9 of i are 0).  We can therefore:
+        //   1. Allocate a 4× smaller plane  (ceil(w/2) × ceil(h/2))
+        //   2. Scatter only i ∈ [0, coeff_limit) at (row/sub, col/sub)
+        //   3. Run the full wavelet (sub=1) on the compact plane, which now
+        //      includes the SIMD s=1 pass.
+        //
+        // This is equivalent to running the wavelet at sub=2 on the full plane
+        // and sampling every other position: each compact[k][c] equals the value
+        // that full[k·sub][c·sub] would hold after the sub=2 wavelet.
+        //
+        // The same logic holds for sub=4 (coeff_limit=64, quarter-plane) and
+        // sub=8 (coeff_limit=16, eighth-plane).
+        if (2..=8).contains(&subsample) && subsample.is_power_of_two() {
+            let sub = subsample;
+            // Number of coefficients whose (row, col) are both multiples of `sub`.
+            // For sub=2: 256; sub=4: 64; sub=8: 16.
+            let coeff_limit = 1024 / (sub * sub);
+
+            // Block structure: the compact plane inherits the same block grid but
+            // each 32×32 block contributes a (32/sub)×(32/sub) sub-block.
+            let block_rows = self.height.div_ceil(32);
+            let sub_block = 32 / sub; // 16 for sub=2, 8 for sub=4, 4 for sub=8
+
+            // Compact plane dimensions, aligned to the sub-block width.
+            let compact_stride = self.block_cols * sub_block;
+            let compact_rows = block_rows * sub_block;
+            // Logical image dimensions at the target resolution.
+            let compact_w = self.width.div_ceil(sub);
+            let compact_h = self.height.div_ceil(sub);
+
+            let mut plane = FlatPlane {
+                data: vec![0i16; compact_stride * compact_rows],
+                stride: compact_stride,
+            };
+
+            for r in 0..block_rows {
+                for c in 0..self.block_cols {
+                    let block = &self.blocks[r * self.block_cols + c];
+                    let row_base = r << 5;
+                    let col_base = c << 5;
+                    for i in 0..coeff_limit {
+                        // zigzag positions are even multiples of `sub`; divide
+                        // by `sub` to get compact-plane coordinates.
+                        let row = (ZIGZAG_ROW[i] as usize + row_base) / sub;
+                        let col = (ZIGZAG_COL[i] as usize + col_base) / sub;
+                        plane.data[row * compact_stride + col] = block[i];
+                    }
+                }
+            }
+
+            // Run the wavelet on the compact plane starting at scale 16/sub.
+            // compact s=k ↔ full s=k·sub, so the coarsest valid pass is
+            // s = 16/sub (e.g. s=8 for sub=2).  Starting at s=16 would add a
+            // spurious pass with no coefficients and introduce rounding noise.
+            let start_scale = 16 / sub;
+            inverse_wavelet_transform_from(&mut plane, compact_w, compact_h, 1, start_scale);
+            return plane;
+        }
+
+        // ── Default path (sub=1, or non-power-of-two sub) ─────────────────────
         let full_width = self.width.div_ceil(32) * 32;
         let full_height = self.height.div_ceil(32) * 32;
         let block_rows = self.height.div_ceil(32);
@@ -815,10 +879,26 @@ pub(crate) fn row_pass_inner(
 }
 
 fn inverse_wavelet_transform(plane: &mut FlatPlane, width: usize, height: usize, subsample: usize) {
+    inverse_wavelet_transform_from(plane, width, height, subsample, 16);
+}
+
+/// Like `inverse_wavelet_transform` but begins at `start_scale` instead of 16.
+///
+/// Use `start_scale = 16 / sub` when operating on a compact plane produced by
+/// subsampling the coefficient scatter by factor `sub`.  For example, the sub=2
+/// compact plane only contains coefficients up to scale 8, so the s=16 pass
+/// would be purely spurious.
+fn inverse_wavelet_transform_from(
+    plane: &mut FlatPlane,
+    width: usize,
+    height: usize,
+    subsample: usize,
+    start_scale: usize,
+) {
     let stride = plane.stride;
     let data = plane.data.as_mut_slice();
-    let mut s_degree: u32 = 4;
-    let mut s = 16usize;
+    let mut s = start_scale;
+    let mut s_degree: u32 = start_scale.trailing_zeros();
 
     let mut st0 = vec![0i32; width];
     let mut st1 = vec![0i32; width];
@@ -1468,15 +1548,51 @@ impl Iw44Image {
                 return Ok(pm);
             }
 
-            // General path: sub > 1 (coarse/thumbnail renders).
+            // Compact path: sub ≥ 2 with power-of-two subsample.
+            //
+            // `reconstruct(sub)` now returns a plane that is already at the
+            // target resolution (ceil(w/sub) × ceil(h/sub)), so we access it
+            // with sub=1 indexing.  Chroma planes are at the same output size
+            // (the chroma_half factor is absorbed into chroma_sub), so no
+            // chroma_half division is needed here.
+            //
+            // Uses SIMD via `ycbcr_row_to_rgba` (same as the sub=1 fast path).
+            if (2..=8).contains(&sub) && sub.is_power_of_two() {
+                let mut y_norm = vec![0i32; pw];
+                let mut cb_norm = vec![0i32; pw];
+                let mut cr_norm = vec![0i32; pw];
+
+                for row in 0..ph {
+                    let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
+                    let y_off = row * y_plane.stride;
+                    let c_off = row * cb_plane.stride;
+
+                    for (col, v) in y_norm.iter_mut().enumerate() {
+                        *v = normalize(y_plane.data[y_off + col]);
+                    }
+                    for col in 0..pw {
+                        cb_norm[col] = normalize(cb_plane.data[c_off + col]);
+                        cr_norm[col] = normalize(cr_plane.data[c_off + col]);
+                    }
+
+                    let row_start = out_row * pw * 4;
+                    ycbcr_row_to_rgba(
+                        &y_norm,
+                        &cb_norm,
+                        &cr_norm,
+                        &mut pm.data[row_start..row_start + pw * 4],
+                    );
+                }
+                return Ok(pm);
+            }
+
+            // Fallback scalar path for non-power-of-two or large sub values.
             for row in 0..h {
                 let out_row = h - 1 - row;
                 for col in 0..w {
                     let src_row = row as usize * sub;
                     let src_col = col as usize * sub;
                     let y_idx = src_row * y_plane.stride + src_col;
-                    // When chroma_half=true the chroma planes are at half
-                    // resolution, so divide src coordinates by 2.
                     let chroma_row = if self.chroma_half {
                         src_row / 2
                     } else {
@@ -1505,13 +1621,19 @@ impl Iw44Image {
             Ok(pm)
         } else {
             // Grayscale: only the Y plane is needed.
+            // For sub≥2 the plane is compact (at output resolution); for sub=1 it
+            // is full-resolution.  Use compact-aware indexing.
             let y_plane = y_dec.reconstruct(sub);
+            let is_compact = (2..=8).contains(&sub) && sub.is_power_of_two();
             let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
             for row in 0..h {
                 let out_row = h - 1 - row;
                 for col in 0..w {
-                    let src_row = row as usize * sub;
-                    let src_col = col as usize * sub;
+                    let (src_row, src_col) = if is_compact {
+                        (row as usize, col as usize)
+                    } else {
+                        (row as usize * sub, col as usize * sub)
+                    };
                     let idx = src_row * y_plane.stride + src_col;
                     let val = normalize(y_plane.data[idx]);
                     // Grayscale: DjVu luma 0 maps to black, −128 → white
@@ -1585,6 +1707,21 @@ mod tests {
             }
         }
         0
+    }
+
+    /// Compare `actual_ppm` against a golden file, creating it on first run.
+    ///
+    /// If the file doesn't exist it is written (first-time generation).
+    /// On subsequent runs an exact byte-for-byte comparison is enforced so that
+    /// any accidental change to the pixel output is caught immediately.
+    fn assert_or_create_golden(actual_ppm: &[u8], golden_file: &str) {
+        let path = golden_path().join(golden_file);
+        if !path.exists() {
+            std::fs::write(&path, actual_ppm)
+                .unwrap_or_else(|e| panic!("failed to write golden {golden_file}: {e}"));
+            return; // golden created — test passes on first run
+        }
+        assert_ppm_match(actual_ppm, golden_file);
     }
 
     fn assert_ppm_match(actual_ppm: &[u8], golden_file: &str) {
@@ -1718,6 +1855,55 @@ mod tests {
 
         let pm = img.to_rgb().expect("to_rgb failed");
         assert_ppm_match(&pm.to_ppm(), "chicken_bg.ppm");
+    }
+
+    /// `to_rgb_subsample(2)` on boy.djvu must produce a pixel-exact result.
+    ///
+    /// This golden test guards against any regression in the compact-plane sub=2
+    /// optimization path.  On first run the golden file is created from the
+    /// current (correct) output; subsequent runs compare against it.
+    #[test]
+    fn iw44_new_decode_boy_sub2() {
+        let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu not found");
+        let file = crate::iff::parse(&data).expect("failed to parse boy.djvu");
+        let chunks = extract_bg44_chunks(&file);
+
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+        assert_eq!(img.width, 192);
+        assert_eq!(img.height, 256);
+
+        let pm = img.to_rgb_subsample(2).expect("to_rgb_subsample(2) failed");
+        assert_eq!(pm.width, 96, "sub=2 width must be ceil(192/2)");
+        assert_eq!(pm.height, 128, "sub=2 height must be ceil(256/2)");
+
+        assert_or_create_golden(&pm.to_ppm(), "boy_bg_sub2.ppm");
+    }
+
+    /// `to_rgb_subsample(2)` on big-scanned-page.djvu (color IW44).
+    ///
+    /// Exercises the compact-plane path on a large color document.
+    #[test]
+    fn iw44_new_decode_big_scanned_sub2() {
+        let data = std::fs::read(assets_path().join("big-scanned-page.djvu"))
+            .expect("big-scanned-page.djvu not found");
+        let file = crate::iff::parse(&data).expect("failed to parse big-scanned-page.djvu");
+        let chunks = extract_bg44_chunks(&file);
+
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+        assert_eq!(img.width, 6780);
+        assert_eq!(img.height, 9148);
+
+        let pm = img.to_rgb_subsample(2).expect("to_rgb_subsample(2) failed");
+        assert_eq!(pm.width, 3390, "sub=2 width must be ceil(6780/2)");
+        assert_eq!(pm.height, 4574, "sub=2 height must be ceil(9148/2)");
+
+        assert_or_create_golden(&pm.to_ppm(), "big_scanned_sub2.ppm");
     }
 
     #[test]
