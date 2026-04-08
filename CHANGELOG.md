@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/matyushkin/djvu-rs/compare/v0.6.0...v0.7.0) (2026-04-08)
+
+
+### Features
+
+* **async:** progressive stream render API (Issue [#81](https://github.com/matyushkin/djvu-rs/issues/81)) ([#112](https://github.com/matyushkin/djvu-rs/issues/112)) ([eaff91d](https://github.com/matyushkin/djvu-rs/commit/eaff91d5f5b8ccfa3cf86429339e7c21bcde5f72))
+* **ci:** continuous benchmark tracking — PR regression detection (Issue [#88](https://github.com/matyushkin/djvu-rs/issues/88)) ([#109](https://github.com/matyushkin/djvu-rs/issues/109)) ([0dfade5](https://github.com/matyushkin/djvu-rs/commit/0dfade5a8c4ec125bac50ff9deb5df37a159c56f))
+* **render:** zero-copy region render — render_region API (Issue [#86](https://github.com/matyushkin/djvu-rs/issues/86)) ([#111](https://github.com/matyushkin/djvu-rs/issues/111)) ([b2aa2a8](https://github.com/matyushkin/djvu-rs/commit/b2aa2a860dc28a63409785af8ef2be55cca40a11))
+
+
+### Performance Improvements
+
+* **bzz:** parallel inverse-BWT via rayon (Issue [#89](https://github.com/matyushkin/djvu-rs/issues/89)) ([#110](https://github.com/matyushkin/djvu-rs/issues/110)) ([eb5bab0](https://github.com/matyushkin/djvu-rs/commit/eb5bab0024029e494a7ab069db46425e8e75b2f9))
+* **iw44:** SIMD row pass — 8 rows at a time with i32x8 ([#107](https://github.com/matyushkin/djvu-rs/issues/107)) ([1418ff4](https://github.com/matyushkin/djvu-rs/commit/1418ff4f3c2cdfd1e0ee7a1210bc3852d0240239))
+
 ## [0.6.0](https://github.com/matyushkin/djvu-rs/compare/v0.5.0...v0.6.0) (2026-04-06)
 
 
