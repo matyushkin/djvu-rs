@@ -10,7 +10,9 @@
  *       $(pkg-config --cflags --libs ddjvuapi)
  *
  * Usage:
- *   ./djvulibre_bench <file.djvu> [page_number_1based] [repeat_count]
+ *   ./djvulibre_bench <file.djvu> [page_number_1based] [repeat_count] [target_dpi]
+ *
+ * target_dpi: output DPI (scales the rendered rectangle).  0 = native DPI.
  */
 
 #include <libdjvu/ddjvuapi.h>
@@ -37,12 +39,13 @@ static void handle_messages(ddjvu_context_t *ctx, int wait) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <file.djvu> [page] [repeats]\n", argv[0]);
+        fprintf(stderr, "usage: %s <file.djvu> [page] [repeats] [target_dpi]\n", argv[0]);
         return 1;
     }
     const char *path  = argv[1];
     int page_no       = (argc >= 3) ? atoi(argv[2]) - 1 : 0;
     int repeats       = (argc >= 4) ? atoi(argv[3]) : 10;
+    int target_dpi    = (argc >= 5) ? atoi(argv[4]) : 0;  /* 0 = native */
 
     double t_open_start = now_ms();
 
@@ -67,10 +70,15 @@ int main(int argc, char **argv) {
     int h   = ddjvu_page_get_height(page);
     int dpi = ddjvu_page_get_resolution(page);
 
-    ddjvu_rect_t  prect = {0, 0, (unsigned)w, (unsigned)h};
-    ddjvu_rect_t  rrect = prect;
-    size_t        stride = (size_t)w * 3;
-    unsigned char *buf   = malloc(stride * (size_t)h);
+    /* Scale output rectangle when target_dpi is requested. */
+    int out_dpi = (target_dpi > 0) ? target_dpi : dpi;
+    int out_w   = (dpi > 0) ? (int)((double)w * out_dpi / dpi) : w;
+    int out_h   = (dpi > 0) ? (int)((double)h * out_dpi / dpi) : h;
+
+    ddjvu_rect_t  prect = {0, 0, (unsigned)w,     (unsigned)h};
+    ddjvu_rect_t  rrect = {0, 0, (unsigned)out_w, (unsigned)out_h};
+    size_t        stride = (size_t)out_w * 3;
+    unsigned char *buf   = malloc(stride * (size_t)out_h);
     if (!buf) { fprintf(stderr, "OOM\n"); return 1; }
 
     ddjvu_format_t *fmt = ddjvu_format_create(DDJVU_FORMAT_RGB24, 0, NULL);
@@ -89,15 +97,16 @@ int main(int argc, char **argv) {
     double t_render_end = now_ms();
 
     unsigned long sum = 0;
-    for (size_t i = 0; i < stride * (size_t)h; i++) sum += buf[i];
+    for (size_t i = 0; i < stride * (size_t)out_h; i++) sum += buf[i];
 
     double open_ms   = t_open_end   - t_open_start;
     double render_ms = (t_render_end - t_render_start) / repeats;
 
     printf("file   : %s (page %d)\n", path, page_no + 1);
-    printf("size   : %dx%d @%ddpi  checksum=%lu\n", w, h, dpi, sum);
+    printf("size   : %dx%d->%dx%d @%ddpi->%ddpi  checksum=%lu\n",
+           w, h, out_w, out_h, dpi, out_dpi, sum);
     printf("open+decode : %.2f ms  (parse file + decode page structure)\n", open_ms);
-    printf("render_only : %.3f ms  (median over %d runs, page already in memory)\n",
+    printf("render_only : %.3f ms  (mean over %d runs, page already in memory)\n",
            render_ms, repeats);
 
     ddjvu_format_release(fmt);

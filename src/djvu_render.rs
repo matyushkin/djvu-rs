@@ -751,21 +751,65 @@ fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
 
 // ── Core compositor ───────────────────────────────────────────────────────────
 
+/// Return the largest power-of-2 IW44 subsample factor for the given render
+/// scale such that the decoded resolution is still ≥ the target resolution
+/// (no upscaling required in the compositor).
+///
+/// Examples:
+/// - scale=1.0  → 1 (full resolution)
+/// - scale=0.5  → 2 (1/scale=2.0 → 2)
+/// - scale=0.375→ 2 (1/scale=2.67 → 2)
+/// - scale=0.25 → 4 (1/scale=4.0 → 4)
+/// - scale=0.1  → 8 (1/scale=10 → capped at 8)
+fn best_iw44_subsample(scale: f32) -> u32 {
+    if scale <= 0.0 || !scale.is_finite() || scale >= 1.0 {
+        return 1;
+    }
+    // Largest power of 2 s.t. s <= floor(1.0 / scale)
+    let max_sub = (1.0_f32 / scale) as u32; // truncating = floor for positive
+    let mut s = 1u32;
+    while s * 2 <= max_sub {
+        s *= 2;
+    }
+    s.min(8)
+}
+
 /// Decode background from BG44 chunks up to `max_chunks`.
+///
+/// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
+/// Use `best_iw44_subsample(opts.scale)` to pick an appropriate value.
+///
+/// When `max_chunks == usize::MAX`, the decoded wavelet image is fetched from
+/// [`DjVuPage::decoded_bg44`]'s cache, avoiding repeated ZP arithmetic decode.
 ///
 /// Returns `None` if there are no BG44 chunks.
 /// `max_chunks = usize::MAX` means decode all chunks.
 fn decode_background_chunks(
     page: &DjVuPage,
     max_chunks: usize,
+    subsample: u32,
 ) -> Result<Option<Pixmap>, RenderError> {
-    let bg44_chunks = page.bg44_chunks();
-    if !bg44_chunks.is_empty() {
-        let mut img = Iw44Image::new();
-        for chunk_data in bg44_chunks.iter().take(max_chunks) {
-            img.decode_chunk(chunk_data)?;
+    // Fast path: use the cached fully-decoded Iw44Image when all chunks are wanted.
+    if max_chunks == usize::MAX {
+        let bg44_chunks = page.bg44_chunks();
+        if !bg44_chunks.is_empty() {
+            // BG44 chunks exist — cache must have a decoded image; None means decode
+            // failed (strict mode propagates the error).
+            let img = page
+                .decoded_bg44()
+                .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+            return Ok(Some(img.to_rgb_subsample(subsample)?));
         }
-        return Ok(Some(img.to_rgb()?));
+        // No BG44 chunks — fall through to the JPEG fallback below.
+    } else {
+        let bg44_chunks = page.bg44_chunks();
+        if !bg44_chunks.is_empty() {
+            let mut img = Iw44Image::new();
+            for chunk_data in bg44_chunks.iter().take(max_chunks) {
+                img.decode_chunk(chunk_data)?;
+            }
+            return Ok(Some(img.to_rgb_subsample(subsample)?));
+        }
     }
 
     // Fall back to JPEG-encoded background if present.
@@ -782,7 +826,11 @@ fn decode_background_chunks(
 /// Returns whatever was decoded so far (may be blurry / incomplete).
 /// Returns `None` only when there are no BG44 chunks at all or even the
 /// first chunk fails to produce a valid image.
-fn decode_background_chunks_permissive(page: &DjVuPage, max_chunks: usize) -> Option<Pixmap> {
+fn decode_background_chunks_permissive(
+    page: &DjVuPage,
+    max_chunks: usize,
+    subsample: u32,
+) -> Option<Pixmap> {
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
         let mut img = Iw44Image::new();
@@ -791,7 +839,7 @@ fn decode_background_chunks_permissive(page: &DjVuPage, max_chunks: usize) -> Op
                 break; // stop on first error, use what we have
             }
         }
-        return img.to_rgb().ok();
+        return img.to_rgb_subsample(subsample).ok();
     }
 
     // Fall back to JPEG-encoded background if present.
@@ -961,6 +1009,9 @@ struct CompositeContext<'a> {
     page_w: u32,
     page_h: u32,
     bg: Option<&'a Pixmap>,
+    /// Subsample factor used when decoding `bg` (1 = full resolution, 2 = half, …).
+    /// Page-space coordinates are divided by this before indexing into `bg`.
+    bg_subsample: u32,
     mask: Option<&'a crate::bitmap::Bitmap>,
     fg_palette: Option<&'a FgbzPalette>,
     /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
@@ -1056,7 +1107,8 @@ fn composite_loop_bilinear(
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                sample_bilinear(bg, fx, fy)
+                let s = ctx.bg_subsample;
+                sample_bilinear(bg, fx / s, fy / s)
             } else {
                 (255, 255, 255)
             };
@@ -1111,7 +1163,8 @@ fn composite_loop_area_avg(
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                sample_area_avg(bg, fx, fy, fx_step, fy_step)
+                let s = ctx.bg_subsample;
+                sample_area_avg(bg, fx / s, fy / s, fx_step / s, fy_step / s)
             } else {
                 (255, 255, 255)
             };
@@ -1201,7 +1254,8 @@ pub fn render_into(
     let gamma_lut = build_gamma_lut(page.gamma());
 
     // Decode all layers
-    let bg = decode_background_chunks(page, usize::MAX)?;
+    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
     let fg_palette = decode_fg_palette_full(page)?;
 
     // Use indexed mask when we have a palette (for per-glyph colors)
@@ -1232,6 +1286,7 @@ pub fn render_into(
         page_w: page.width() as u32,
         page_h: page.height() as u32,
         bg: bg.as_ref(),
+        bg_subsample,
         mask: mask.as_ref(),
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
@@ -1268,8 +1323,10 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     let blit_map;
     let fg44;
 
+    let bg_subsample = best_iw44_subsample(opts.scale);
+
     if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX);
+        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
         fg_palette = decode_fg_palette_full(page).ok().flatten();
         let indexed = if fg_palette.is_some() {
             decode_mask_indexed(page).ok().flatten()
@@ -1285,7 +1342,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, usize::MAX)?;
+        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
         fg_palette = decode_fg_palette_full(page)?;
         let indexed_result = if fg_palette.is_some() {
             decode_mask_indexed(page)?
@@ -1326,6 +1383,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: bg.as_ref(),
+            bg_subsample,
             mask: mask.as_ref(),
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
@@ -1412,8 +1470,10 @@ pub fn render_region(
     let blit_map;
     let fg44;
 
+    let bg_subsample = best_iw44_subsample(opts.scale);
+
     if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX);
+        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
         fg_palette = decode_fg_palette_full(page).ok().flatten();
         let indexed = if fg_palette.is_some() {
             decode_mask_indexed(page).ok().flatten()
@@ -1429,7 +1489,7 @@ pub fn render_region(
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, usize::MAX)?;
+        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
         fg_palette = decode_fg_palette_full(page)?;
         let indexed_result = if fg_palette.is_some() {
             decode_mask_indexed(page)?
@@ -1476,6 +1536,7 @@ pub fn render_region(
         page_w: page.width() as u32,
         page_h: page.height() as u32,
         bg: bg.as_ref(),
+        bg_subsample,
         mask: mask.as_ref(),
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
@@ -1577,7 +1638,8 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
         });
     }
 
-    let bg = decode_background_chunks(page, 1)?;
+    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg = decode_background_chunks(page, 1, bg_subsample)?;
     let bg = match bg {
         Some(b) => b,
         None => return Ok(None),
@@ -1592,6 +1654,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: Some(&bg),
+            bg_subsample,
             mask: None,
             fg_palette: None,
             blit_map: None,
@@ -1649,7 +1712,8 @@ pub fn render_progressive(
     let gamma_lut = build_gamma_lut(page.gamma());
 
     // Decode background up to chunk_n + 1 chunks
-    let bg = decode_background_chunks(page, chunk_n + 1)?;
+    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg = decode_background_chunks(page, chunk_n + 1, bg_subsample)?;
     let fg_palette = decode_fg_palette_full(page)?;
 
     let (mask, blit_map) = if fg_palette.is_some() {
@@ -1681,6 +1745,7 @@ pub fn render_progressive(
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: bg.as_ref(),
+            bg_subsample,
             mask: mask.as_ref(),
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
@@ -2795,6 +2860,108 @@ mod tests {
         assert_eq!(pm.width, 80);
         assert_eq!(pm.height, 60);
         assert_eq!(pm.data.len(), 80 * 60 * 4);
+    }
+
+    /// `best_iw44_subsample` returns expected power-of-2 values.
+    #[test]
+    fn best_iw44_subsample_values() {
+        assert_eq!(best_iw44_subsample(1.0), 1, "scale=1.0 → subsample=1");
+        assert_eq!(best_iw44_subsample(0.5), 2, "scale=0.5 → subsample=2");
+        assert_eq!(
+            best_iw44_subsample(0.375),
+            2,
+            "scale=0.375 → subsample=2 (1/0.375=2.67)"
+        );
+        assert_eq!(best_iw44_subsample(0.25), 4, "scale=0.25 → subsample=4");
+        assert_eq!(
+            best_iw44_subsample(0.1),
+            8,
+            "scale=0.1 → subsample=8 (capped)"
+        );
+        assert_eq!(
+            best_iw44_subsample(0.0),
+            1,
+            "scale=0.0 → subsample=1 (edge case)"
+        );
+        assert_eq!(
+            best_iw44_subsample(-1.0),
+            1,
+            "scale<0 → subsample=1 (edge case)"
+        );
+        assert_eq!(
+            best_iw44_subsample(2.0),
+            1,
+            "scale>1.0 → subsample=1 (no upscaling needed)"
+        );
+    }
+
+    /// Rendering with bg_subsample=2 (scale=0.5) produces the correct output dimensions.
+    #[test]
+    fn render_pixmap_subsampled_bg_correct_dimensions() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        // scale=0.5 triggers bg_subsample=2 internally
+        let opts = RenderOptions {
+            width: (page.width() as f32 * 0.5) as u32,
+            height: (page.height() as f32 * 0.5) as u32,
+            scale: 0.5,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("subsampled render should succeed");
+        assert_eq!(pm.width, opts.width);
+        assert_eq!(pm.height, opts.height);
+        assert_eq!(
+            pm.data.len() as u64,
+            opts.width as u64 * opts.height as u64 * 4
+        );
+    }
+
+    /// Second render of the same page produces identical pixels — confirms the
+    /// BG44 cache is used and does not corrupt output.
+    #[test]
+    fn decoded_bg44_cache_produces_identical_pixels_on_second_render() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..Default::default()
+        };
+        let pm1 = render_pixmap(page, &opts).expect("first render should succeed");
+        let pm2 = render_pixmap(page, &opts).expect("second render should succeed");
+        assert_eq!(
+            pm1.data, pm2.data,
+            "cached render must produce identical pixels"
+        );
+    }
+
+    /// After the first render the `decoded_bg44` cache is populated — the
+    /// image dimensions match the page's raw BG44 size.
+    #[test]
+    fn decoded_bg44_is_populated_after_render() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..Default::default()
+        };
+        // Trigger cache population.
+        render_pixmap(page, &opts).expect("render should succeed");
+        // Cache must now hold an image whose size matches the page's native size.
+        let cached = page
+            .decoded_bg44()
+            .expect("cache should be populated after render");
+        assert_eq!(
+            cached.width,
+            page.width() as u32,
+            "cached bg44 width must equal page width"
+        );
+        assert_eq!(
+            cached.height,
+            page.height() as u32,
+            "cached bg44 height must equal page height"
+        );
     }
 
     /// `render_region` applies page rotation the same way as `render_pixmap`.
