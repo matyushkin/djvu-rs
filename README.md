@@ -22,6 +22,7 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 - **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
 - **hOCR / ALTO XML export** — text layer as hOCR or ALTO XML for OCR toolchains and archives
 - **Serde support** — `Serialize`/`Deserialize` on all public data types (feature flag `serde`)
+- **WebAssembly (WASM)** — `wasm-bindgen` bindings for use in browsers and Node.js (feature flag `wasm`)
 - **image-rs integration** — `image::ImageDecoder` impl for use with the `image` crate (feature flag `image`)
 - **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
 - `no_std` compatible — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
@@ -191,6 +192,31 @@ let img = DynamicImage::from_decoder(decoder)?;
 img.save("page.png")?;
 ```
 
+## WebAssembly
+
+Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
+
+```sh
+wasm-pack build --target bundler --features wasm
+```
+
+Then use in JavaScript/TypeScript:
+
+```js
+import init, { WasmDocument } from './pkg/djvu_rs.js';
+
+await init();
+const doc = WasmDocument.from_bytes(new Uint8Array(arrayBuffer));
+console.log(doc.page_count());
+
+const page = doc.page(0);
+const pixels = page.render(150);   // Uint8ClampedArray, RGBA
+const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
+ctx.putImageData(img, 0, 0);
+```
+
+See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo.
+
 ## Feature flags
 
 | Flag | Default | Description |
@@ -203,6 +229,7 @@ img.save("page.png")?;
 | `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
 | `serde` | disabled | `Serialize` + `Deserialize` for all public data types |
 | `image` | disabled | `image::ImageDecoder` impl via `DjVuDecoder` — integrates with the `image` crate |
+| `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`) |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
