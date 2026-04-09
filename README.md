@@ -22,6 +22,7 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 - **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
 - **hOCR / ALTO XML export** — text layer as hOCR or ALTO XML for OCR toolchains and archives
 - **Serde support** — `Serialize`/`Deserialize` on all public data types (feature flag `serde`)
+- **EPUB 3 export** — page images + invisible text overlay + bookmarks as navigation (feature flag `epub`)
 - **WebAssembly (WASM)** — `wasm-bindgen` bindings for use in browsers and Node.js (feature flag `wasm`)
 - **image-rs integration** — `image::ImageDecoder` impl for use with the `image` crate (feature flag `image`)
 - **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
@@ -192,6 +193,26 @@ let img = DynamicImage::from_decoder(decoder)?;
 img.save("page.png")?;
 ```
 
+## EPUB export
+
+Requires the `epub` feature flag: `djvu-rs = { version = "…", features = ["epub"] }`.
+
+```rust
+use djvu_rs::{DjVuDocument, epub::{djvu_to_epub, EpubOptions}};
+
+let data = std::fs::read("book.djvu")?;
+let doc = DjVuDocument::parse(&data)?;
+
+let epub_bytes = djvu_to_epub(&doc, &EpubOptions::default())?;
+std::fs::write("book.epub", epub_bytes)?;
+```
+
+CLI:
+
+```sh
+djvu render book.djvu --format epub --output book.epub
+```
+
 ## WebAssembly
 
 Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
@@ -229,6 +250,7 @@ See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo.
 | `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
 | `serde` | disabled | `Serialize` + `Deserialize` for all public data types |
 | `image` | disabled | `image::ImageDecoder` impl via `DjVuDecoder` — integrates with the `image` crate |
+| `epub` | disabled | EPUB 3 export via `djvu_to_epub` — page images, text overlay, bookmarks as nav |
 | `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`) |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
