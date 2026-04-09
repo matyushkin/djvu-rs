@@ -185,6 +185,9 @@ pub mod image_compat;
 #[cfg(feature = "std")]
 pub mod ocr_export;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
