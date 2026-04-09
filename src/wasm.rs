@@ -137,19 +137,32 @@ impl WasmPage {
         let w = ((page.width() as f32 * scale).round() as u32).max(1);
         let h = ((page.height() as f32 * scale).round() as u32).max(1);
 
+        // `aa: true` invokes `aa_downscale` which halves both dimensions,
+        // producing a (w/2)×(h/2) pixmap.  That would be inconsistent with
+        // `width_at` / `height_at` which return the full w×h.  Disable AA here
+        // so the caller can rely on `pixels.length == width_at(dpi) * height_at(dpi) * 4`.
+        // Proper supersampling (render at 2× → downscale to w×h) can be added
+        // as a separate quality option in a future release.
         let opts = RenderOptions {
             width: w,
             height: h,
             scale,
             bold: 0,
-            aa: true,
+            aa: false,
             rotation: UserRotation::None,
             permissive: true,
             resampling: Resampling::Bilinear,
         };
 
         let pm = render_pixmap(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(js_sys::Uint8ClampedArray::from(pm.data.as_slice()))
+        // Allocate a new JS-side Uint8ClampedArray and copy the RGBA bytes
+        // into it.  Using `Uint8ClampedArray::from(&[u8])` (which creates a
+        // view into WASM linear memory) causes incorrect `length` values in
+        // Node.js and with the externref ABI because the backing memory may
+        // be freed before the caller reads the length.
+        let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
+        arr.copy_from(&pm.data);
+        Ok(arr)
     }
 }
 
