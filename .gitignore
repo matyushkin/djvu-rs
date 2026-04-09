@@ -3,3 +3,5 @@
 Cargo.lock
 *.orig
 scripts/djvulibre_bench
+scripts/djvulibre_bench_ci
+examples/wasm/pkg/
