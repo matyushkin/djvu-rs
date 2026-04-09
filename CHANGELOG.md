@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/matyushkin/djvu-rs/compare/v0.8.0...v0.9.0) (2026-04-09)
+
+
+### Features
+
+* **epub:** EPUB 3 export — page images, text overlay, navigation (Issue [#74](https://github.com/matyushkin/djvu-rs/issues/74)) ([9a6d155](https://github.com/matyushkin/djvu-rs/commit/9a6d1555c43041b86a783c5967a55607e0090768))
+* **wasm:** add WasmPage::text_zones_json() — text selection overlay API ([e513bbf](https://github.com/matyushkin/djvu-rs/commit/e513bbfc4052161f0b61f0c2cc429c58869d7170)), closes [#119](https://github.com/matyushkin/djvu-rs/issues/119)
+* **wasm:** add WasmPage::text() — expose page text layer to JS ([35a776d](https://github.com/matyushkin/djvu-rs/commit/35a776d16804b39e1ae8cfddbf18073e4711204c))
+
+
+### Bug Fixes
+
+* **wasm:** correct render() pixel layout and Uint8ClampedArray allocation ([1a967d2](https://github.com/matyushkin/djvu-rs/commit/1a967d2003bb74f0e42bccc8f108b2f1303617c1))
+
 ## [0.8.0](https://github.com/matyushkin/djvu-rs/compare/v0.7.1...v0.8.0) (2026-04-09)
 
 
