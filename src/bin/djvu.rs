@@ -64,6 +64,8 @@ enum Format {
     Png,
     Pdf,
     Cbz,
+    /// EPUB 3 (preserves text, bookmarks, hyperlinks).
+    Epub,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -153,6 +155,16 @@ fn cmd_render(
         return render_pdf_structured(path, output);
     }
 
+    // EPUB uses the new DjVuDocument API directly
+    #[cfg(feature = "epub")]
+    if matches!(format, Format::Epub) {
+        return render_epub_structured(path, output);
+    }
+    #[cfg(not(feature = "epub"))]
+    if matches!(format, Format::Epub) {
+        return Err("epub feature not enabled; rebuild with --features epub".into());
+    }
+
     // Layer extraction uses the DjVuDocument API
     if !matches!(layer, Layer::Composite) {
         return render_layer(path, page, all, layer, output);
@@ -170,7 +182,7 @@ fn cmd_render(
 
     match format {
         Format::Png => render_png(&doc, page, all, dpi, count, output),
-        Format::Pdf => unreachable!(),
+        Format::Pdf | Format::Epub => unreachable!(),
         Format::Cbz => render_cbz(&doc, page, all, dpi, count, output),
     }
 }
@@ -302,6 +314,21 @@ fn render_pdf_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
     let pdf = djvu_rs::pdf::djvu_to_pdf(&doc)?;
     std::fs::write(output, pdf)?;
+    Ok(())
+}
+
+#[cfg(feature = "epub")]
+fn render_epub_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let data = std::fs::read(path)?;
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+    let epub = djvu_rs::epub::djvu_to_epub(&doc, &djvu_rs::epub::EpubOptions::default())?;
+    std::fs::write(output, epub)?;
     Ok(())
 }
 
