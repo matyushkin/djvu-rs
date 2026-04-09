@@ -151,6 +151,15 @@ pub mod metadata;
 #[cfg(feature = "std")]
 pub mod pdf;
 
+/// DjVu to EPUB 3 exporter.
+///
+/// Converts DjVu documents to EPUB 3 while preserving page images,
+/// invisible text overlay for search/copy, and NAVM bookmarks as navigation.
+///
+/// Key function: [`epub::djvu_to_epub`].
+#[cfg(feature = "epub")]
+pub mod epub;
+
 /// DjVu to TIFF exporter — phase 4 format extension.
 ///
 /// Converts DjVu documents to multi-page TIFF files in color (RGB8) or

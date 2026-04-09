@@ -111,6 +111,18 @@ impl WasmPage {
             .unwrap_or(1)
     }
 
+    /// Extract the plain text content of this page from the TXTz/TXTa layer.
+    ///
+    /// Returns `undefined` (JS `None`) if the page has no text layer.
+    /// Throws a JavaScript `Error` on decode failure.
+    pub fn text(&self) -> Result<Option<String>, JsError> {
+        let page = self
+            .doc
+            .page(self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        page.text().map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Render the page at `target_dpi` and return raw RGBA pixels
     /// (`Uint8ClampedArray`, suitable for `new ImageData(pixels, w, h)`).
     ///
