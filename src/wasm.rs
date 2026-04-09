@@ -123,6 +123,41 @@ impl WasmPage {
         page.text().map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Return text zone data for this page, scaled to match a render at `target_dpi`.
+    ///
+    /// Returns a JSON string — array of `{"t":"…","x":N,"y":N,"w":N,"h":N}` objects,
+    /// one per leaf text zone, with pixel coordinates identical to the canvas produced
+    /// by `render(target_dpi)`.  Leaf zones are the finest granularity stored in the
+    /// text layer (word-level for richly OCR'd files, line-level otherwise).
+    ///
+    /// Returns `null` if the page has no text layer.
+    /// Throws a JavaScript `Error` on decode failure.
+    pub fn text_zones_json(&self, target_dpi: u32) -> Result<Option<String>, JsError> {
+        let page = self
+            .doc
+            .page(self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let scale = target_dpi as f32 / page.dpi() as f32;
+        let render_w = ((page.width() as f32 * scale).round() as u32).max(1);
+        let render_h = ((page.height() as f32 * scale).round() as u32).max(1);
+
+        let Some(layer) = page
+            .text_layer_at_size(render_w, render_h)
+            .map_err(|e| JsError::new(&e.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        let mut buf = String::from("[");
+        let mut first = true;
+        for zone in &layer.zones {
+            collect_leaf_zones(zone, &mut buf, &mut first);
+        }
+        buf.push(']');
+        Ok(Some(buf))
+    }
+
     /// Render the page at `target_dpi` and return raw RGBA pixels
     /// (`Uint8ClampedArray`, suitable for `new ImageData(pixels, w, h)`).
     ///
@@ -163,6 +198,54 @@ impl WasmPage {
         let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
         arr.copy_from(&pm.data);
         Ok(arr)
+    }
+}
+
+// ── Text zone helpers ─────────────────────────────────────────────────────────
+
+/// Recursively collect leaf zones (zones without children) into a JSON array.
+fn collect_leaf_zones(zone: &crate::text::TextZone, buf: &mut String, first: &mut bool) {
+    if zone.children.is_empty() {
+        let t = zone.text.trim();
+        if t.is_empty() {
+            return;
+        }
+        if !*first {
+            buf.push(',');
+        }
+        *first = false;
+        buf.push_str("{\"t\":\"");
+        json_escape_into(t, buf);
+        buf.push_str("\",\"x\":");
+        buf.push_str(&zone.rect.x.to_string());
+        buf.push_str(",\"y\":");
+        buf.push_str(&zone.rect.y.to_string());
+        buf.push_str(",\"w\":");
+        buf.push_str(&zone.rect.width.to_string());
+        buf.push_str(",\"h\":");
+        buf.push_str(&zone.rect.height.to_string());
+        buf.push('}');
+    } else {
+        for child in &zone.children {
+            collect_leaf_zones(child, buf, first);
+        }
+    }
+}
+
+/// Append `s` to `buf` with JSON string escaping (no surrounding quotes).
+fn json_escape_into(s: &str, buf: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.push_str("\\\""),
+            '\\' => buf.push_str("\\\\"),
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            '\t' => buf.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                buf.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => buf.push(c),
+        }
     }
 }
 
