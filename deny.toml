@@ -3,7 +3,12 @@ targets = []
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # Transitive deps from optional OCR backends (tesseract, tract, candle).
+    # These are behind feature flags and not compiled by default.
+    "RUSTSEC-2025-0119", # number_prefix unmaintained (via indicatif → tokenizers)
+    "RUSTSEC-2024-0436", # paste unmaintained (via candle-core)
+]
 
 [licenses]
 version = 2
