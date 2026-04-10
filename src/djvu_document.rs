@@ -25,6 +25,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    format,
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -1092,13 +1093,23 @@ fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), DocError> {
     let bzz_data = data
         .get(pos..)
         .ok_or(DocError::Malformed("DIRM bzz data missing"))?;
-    let meta = bzz_decode(bzz_data)?;
+    let meta = bzz_decode(bzz_data).unwrap_or_default();
 
+    // If BZZ metadata is too short (e.g. from a minimal DIRM without full
+    // metadata), generate synthetic entries — callers derive types from FORM.
     // Layout: sizes(3 bytes × N), flags(1 byte × N), then null-terminated IDs…
     let mut mpos = nfiles * 3; // skip per-component sizes
 
     if mpos + nfiles > meta.len() {
-        return Err(DocError::Malformed("DIRM meta too short for flags"));
+        // Generate synthetic entries with unknown type — the caller will
+        // reassign types based on the actual FORM type (DJVU/DJVI/etc.)
+        let entries: Vec<DirmEntry> = (0..nfiles)
+            .map(|i| DirmEntry {
+                comp_type: ComponentType::Page,
+                id: format!("p{:04}", i),
+            })
+            .collect();
+        return Ok((entries, is_bundled));
     }
     let flags: Vec<u8> = meta
         .get(mpos..mpos + nfiles)
