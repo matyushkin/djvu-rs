@@ -40,7 +40,6 @@ use alloc::{vec, vec::Vec};
 
 use crate::djvu_document::DjVuPage;
 use crate::iw44_new::Iw44Image;
-use crate::jb2_new;
 use crate::pixmap::{GrayPixmap, Pixmap};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -852,37 +851,22 @@ fn decode_background_chunks_permissive(
 }
 
 /// Decode the JB2 mask (Sjbz chunk) without blit tracking.
+///
+/// Delegates to [`DjVuPage::extract_mask`] so that the shared DJVI dictionary
+/// (`shared_djbz`) is used as a fallback when there is no inline Djbz chunk.
 fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderError> {
-    let sjbz = match page.find_chunk(b"Sjbz") {
-        Some(data) => data,
-        None => return Ok(None),
-    };
-
-    let dict = match page.find_chunk(b"Djbz") {
-        Some(djbz) => Some(jb2_new::decode_dict(djbz, None)?),
-        None => None,
-    };
-
-    let bm = jb2_new::decode(sjbz, dict.as_ref())?;
-    Ok(Some(bm))
+    page.extract_mask().map_err(RenderError::from)
 }
 
 /// Decode the JB2 mask with per-pixel blit index tracking.
+///
+/// Delegates to [`DjVuPage::extract_mask_indexed`] so that the shared DJVI
+/// dictionary (`shared_djbz`) is used as a fallback when there is no inline
+/// Djbz chunk.
 fn decode_mask_indexed(
     page: &DjVuPage,
 ) -> Result<Option<(crate::bitmap::Bitmap, Vec<i32>)>, RenderError> {
-    let sjbz = match page.find_chunk(b"Sjbz") {
-        Some(data) => data,
-        None => return Ok(None),
-    };
-
-    let dict = match page.find_chunk(b"Djbz") {
-        Some(djbz) => Some(jb2_new::decode_dict(djbz, None)?),
-        None => None,
-    };
-
-    let (bm, blit_map) = jb2_new::decode_indexed(sjbz, dict.as_ref())?;
-    Ok(Some((bm, blit_map)))
+    page.extract_mask_indexed().map_err(RenderError::from)
 }
 
 /// Decode the FGbz foreground palette with per-blit color indices.
@@ -1269,13 +1253,7 @@ pub fn render_into(
     };
 
     let mask = if opts.bold > 0 {
-        mask.map(|m| {
-            let mut dilated = m;
-            for _ in 0..opts.bold {
-                dilated = dilated.dilate();
-            }
-            dilated
-        })
+        mask.map(|m| m.dilate_n(opts.bold as u32))
     } else {
         mask
     };
@@ -1364,13 +1342,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     }
 
     let mask = if opts.bold > 0 {
-        mask.map(|m| {
-            let mut dilated = m;
-            for _ in 0..opts.bold {
-                dilated = dilated.dilate();
-            }
-            dilated
-        })
+        mask.map(|m| m.dilate_n(opts.bold as u32))
     } else {
         mask
     };
@@ -1511,13 +1483,7 @@ pub fn render_region(
     }
 
     let mask = if opts.bold > 0 {
-        mask.map(|m| {
-            let mut dilated = m;
-            for _ in 0..opts.bold {
-                dilated = dilated.dilate();
-            }
-            dilated
-        })
+        mask.map(|m| m.dilate_n(opts.bold as u32))
     } else {
         mask
     };
@@ -1726,13 +1692,7 @@ pub fn render_progressive(
     };
 
     let mask = if opts.bold > 0 {
-        mask.map(|m| {
-            let mut dilated = m;
-            for _ in 0..opts.bold {
-                dilated = dilated.dilate();
-            }
-            dilated
-        })
+        mask.map(|m| m.dilate_n(opts.bold as u32))
     } else {
         mask
     };
