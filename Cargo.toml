@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "djvu-py"]
+
 [package]
 name = "djvu-rs"
 version = "0.9.0"
