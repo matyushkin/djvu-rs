@@ -194,6 +194,29 @@ pub mod image_compat;
 #[cfg(feature = "std")]
 pub mod ocr_export;
 
+/// Pluggable OCR backend trait and error types.
+///
+/// Provides [`ocr::OcrBackend`] — recognize text in rendered page images.
+/// Backend implementations are gated behind feature flags.
+#[cfg(feature = "std")]
+pub mod ocr;
+
+/// Tesseract OCR backend (requires `ocr-tesseract` feature).
+#[cfg(feature = "ocr-tesseract")]
+pub mod ocr_tesseract;
+
+/// ONNX OCR backend via tract (requires `ocr-onnx` feature).
+#[cfg(feature = "ocr-onnx")]
+pub mod ocr_onnx;
+
+/// Neural OCR backend via Candle (requires `ocr-neural` feature).
+#[cfg(feature = "ocr-neural")]
+pub mod ocr_neural;
+
+/// TXTa/TXTz text layer encoder — writes [`text::TextLayer`] back to DjVu binary format.
+#[cfg(feature = "std")]
+pub mod text_encode;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
