@@ -89,6 +89,10 @@ pub(crate) mod zp_impl;
 #[allow(dead_code)]
 pub mod bzz_new;
 
+/// DJVM document merge and split operations.
+#[cfg(feature = "std")]
+pub mod djvm;
+
 /// JB2 bilevel image decoder — clean-room implementation (phase 2b).
 ///
 /// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
