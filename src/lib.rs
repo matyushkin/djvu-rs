@@ -224,6 +224,15 @@ pub mod text_encode;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+/// C FFI bindings for foreign language integration.
+///
+/// Provides `extern "C"` functions with no-panic guarantees.
+/// Key functions: `djvu_doc_open`, `djvu_doc_free`, `djvu_page_render`,
+/// `djvu_pixmap_free`, `djvu_page_text`.
+#[cfg(feature = "std")]
+#[allow(unsafe_code)]
+pub mod ffi;
+
 // Re-export new phase-1 error types
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
