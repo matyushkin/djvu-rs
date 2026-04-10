@@ -62,7 +62,7 @@ jobs:
         uses: taiki-e/install-action@cargo-nextest
 
       - name: Test (default features)
-        run: cargo nextest run --workspace --exclude djvu-py
+        run: cargo nextest run --workspace --exclude djvu-py --features cli
 
       - name: Build (no_std check — no default features)
         run: cargo build --no-default-features
