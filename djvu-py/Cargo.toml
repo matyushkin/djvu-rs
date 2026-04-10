@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 djvu-rs = { path = "..", features = ["std"] }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.24", features = ["extension-module"] }
 
 [build-dependencies]
-pyo3-build-config = "0.23"
+pyo3-build-config = "0.24"
