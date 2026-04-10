@@ -2,6 +2,13 @@ use crate::bitmap::Bitmap;
 use crate::zp::ZPDecoder;
 
 /// Errors that can occur during JB2 decoding.
+/// Maximum number of symbols allowed in the dictionary to prevent unbounded
+/// memory growth on malformed input.
+const MAX_DICT_SYMBOLS: usize = 65_536;
+
+/// Maximum number of blit operations per page to prevent runaway decode loops.
+const MAX_BLITS: usize = 4_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     /// A flag bit in the image/dict header was set when it must be zero.
@@ -20,6 +27,10 @@ pub enum DecodeError {
     UnknownRecordType,
     /// An unexpected record type was encountered in a dictionary stream.
     UnexpectedDictRecordType,
+    /// The symbol dictionary exceeded the safety limit.
+    DictTooLarge,
+    /// The blit count exceeded the safety limit.
+    TooManyBlits,
 }
 
 impl core::fmt::Display for DecodeError {
@@ -41,6 +52,8 @@ impl core::fmt::Display for DecodeError {
             DecodeError::UnexpectedDictRecordType => {
                 write!(f, "JB2: unexpected record type in dict stream")
             }
+            DecodeError::DictTooLarge => write!(f, "JB2: symbol dictionary exceeded safety limit"),
+            DecodeError::TooManyBlits => write!(f, "JB2: blit count exceeded safety limit"),
         }
     }
 }
@@ -696,6 +709,15 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(bm.remove_empty_edges());
             }
             2 => {
@@ -703,6 +725,9 @@ fn decode_inner(
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(bm.remove_empty_edges());
             }
             3 => {
@@ -739,6 +764,9 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
             }
             4 => {
                 // Matched with refinement: add to dict AND blit
@@ -791,6 +819,12 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(cbm.remove_empty_edges());
             }
             5 => {
@@ -814,6 +848,9 @@ fn decode_inner(
                     cbm_h,
                     &dict[index],
                 );
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(cbm.remove_empty_edges());
             }
             6 => {
@@ -866,6 +903,9 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
             }
             7 => {
                 // Matched copy without refinement: blit
@@ -909,6 +949,9 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
             }
             8 => {
                 // Non-symbol data
@@ -934,6 +977,9 @@ fn decode_inner(
                     y,
                 );
                 blit_count += 1;
+                if blit_count as usize > MAX_BLITS {
+                    return Err(DecodeError::TooManyBlits);
+                }
             }
             9 => {}
             10 => {
@@ -1016,6 +1062,9 @@ pub fn decode_dict(data: &[u8], inherited: Option<&JB2Dict>) -> Result<JB2Dict, 
                 let w = decode_num(&mut zp, &mut symbol_width_ctx, 0, 262142);
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h);
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(bm.remove_empty_edges());
             }
             5 => {
@@ -1035,6 +1084,9 @@ pub fn decode_dict(data: &[u8], inherited: Option<&JB2Dict>) -> Result<JB2Dict, 
                     cbm_h,
                     &dict[index],
                 );
+                if dict.len() >= MAX_DICT_SYMBOLS {
+                    return Err(DecodeError::DictTooLarge);
+                }
                 dict.push(cbm.remove_empty_edges());
             }
             9 => {}

@@ -43,6 +43,8 @@
 //! }
 //! ```
 
+use std::sync::Arc;
+
 use crate::{
     djvu_document::DjVuPage,
     djvu_render::{self, RenderError, RenderOptions},
@@ -91,7 +93,7 @@ pub async fn render_pixmap_async(
     page: &DjVuPage,
     opts: RenderOptions,
 ) -> Result<Pixmap, AsyncRenderError> {
-    let page = page.clone();
+    let page = Arc::new(page.clone());
     tokio::task::spawn_blocking(move || {
         djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
     })
@@ -107,7 +109,7 @@ pub async fn render_gray8_async(
     page: &DjVuPage,
     opts: RenderOptions,
 ) -> Result<GrayPixmap, AsyncRenderError> {
-    let page = page.clone();
+    let page = Arc::new(page.clone());
     tokio::task::spawn_blocking(move || {
         djvu_render::render_gray8(&page, &opts).map_err(AsyncRenderError::Render)
     })
@@ -153,13 +155,14 @@ pub fn render_progressive_stream(
     page: &DjVuPage,
     opts: RenderOptions,
 ) -> impl futures_core::Stream<Item = Result<Pixmap, AsyncRenderError>> {
-    let page = page.clone();
+    // Single clone wrapped in Arc — all spawn_blocking closures share
+    // this one allocation instead of cloning the full page each time.
+    let page = Arc::new(page.clone());
     let n_chunks = page.bg44_chunks().len();
 
     async_stream::stream! {
         if n_chunks == 0 {
-            // No BG44 chunks (JB2-only page): yield a single frame.
-            let page = page.clone();
+            let page = Arc::clone(&page);
             let opts = opts.clone();
             let result = tokio::task::spawn_blocking(move || {
                 djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
@@ -169,7 +172,7 @@ pub fn render_progressive_stream(
             yield result.and_then(|r| r);
         } else {
             for chunk_n in 0..n_chunks {
-                let page = page.clone();
+                let page = Arc::clone(&page);
                 let opts = opts.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     djvu_render::render_progressive(&page, &opts, chunk_n)

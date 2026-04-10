@@ -37,10 +37,14 @@ use crate::{
     iff::{IffChunk, parse_form},
     info::PageInfo,
     iw44_new::Iw44Image,
+    jb2_new::Jb2Dict,
     metadata::{DjVuMetadata, MetadataError},
     pixmap::Pixmap,
     text::{TextError, TextLayer},
 };
+
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 // ---- Error type -------------------------------------------------------------
 
@@ -148,7 +152,6 @@ struct RawChunk {
 /// The fully decoded BG44 wavelet image is cached after the first render so
 /// that subsequent renders skip the expensive ZP arithmetic decode and only
 /// run the wavelet inverse-transform and compositor.
-#[derive(Debug, Clone)]
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
     info: PageInfo,
@@ -159,12 +162,50 @@ pub struct DjVuPage {
     /// Raw Djbz data from the DJVI shared dictionary component referenced via
     /// the page's INCL chunk, if present.  Stored here so that `extract_mask`
     /// can decode it without access to the parent document.
+    ///
+    /// Wrapped in `Arc` so that multi-page documents share one allocation
+    /// instead of cloning the bytes per page.
+    #[cfg(feature = "std")]
+    shared_djbz: Option<Arc<Vec<u8>>>,
+    #[cfg(not(feature = "std"))]
     shared_djbz: Option<Vec<u8>>,
     /// Lazily decoded BG44 background wavelet image.  Populated on first use;
     /// subsequent renders call `to_rgb_subsample` directly on the cached image.
     /// Only available when the `std` feature is enabled (`OnceLock` requires std).
     #[cfg(feature = "std")]
     bg44_decoded: std::sync::OnceLock<Option<Iw44Image>>,
+    /// Lazily decoded JB2 shared dictionary.  Populated on first use by
+    /// `decoded_shared_dict()` and reused on subsequent renders, avoiding
+    /// repeated multi-megabyte allocations.
+    #[cfg(feature = "std")]
+    jb2_dict_decoded: std::sync::OnceLock<Option<Jb2Dict>>,
+}
+
+impl Clone for DjVuPage {
+    fn clone(&self) -> Self {
+        DjVuPage {
+            info: self.info.clone(),
+            chunks: self.chunks.clone(),
+            index: self.index,
+            shared_djbz: self.shared_djbz.clone(),
+            // Caches are not cloned — they will be lazily recomputed.
+            #[cfg(feature = "std")]
+            bg44_decoded: std::sync::OnceLock::new(),
+            #[cfg(feature = "std")]
+            jb2_dict_decoded: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl core::fmt::Debug for DjVuPage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DjVuPage")
+            .field("info", &self.info)
+            .field("chunks", &self.chunks)
+            .field("index", &self.index)
+            .field("shared_djbz", &self.shared_djbz.as_ref().map(|v| v.len()))
+            .finish_non_exhaustive()
+    }
 }
 
 impl DjVuPage {
@@ -324,6 +365,26 @@ impl DjVuPage {
         None
     }
 
+    /// Return the decoded JB2 shared dictionary, decoding and caching on first call.
+    ///
+    /// Returns `None` if the page has no shared dictionary (no INCL reference).
+    /// The result is computed once and then cached so that repeated renders
+    /// do not re-decode the dictionary each time.
+    #[cfg(feature = "std")]
+    pub fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
+        self.jb2_dict_decoded
+            .get_or_init(|| {
+                let djbz = self.shared_djbz.as_deref()?;
+                crate::jb2_new::decode_dict(djbz, None).ok()
+            })
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
+        None
+    }
+
     /// Return all FG44 foreground chunk data slices, in order.
     pub fn fg44_chunks(&self) -> Vec<&[u8]> {
         self.find_chunks(b"FG44")
@@ -424,18 +485,42 @@ impl DjVuPage {
             None => return Ok(None),
         };
 
-        // Prefer an inline Djbz chunk; fall back to the shared DJVI dictionary
-        // that was resolved from the INCL chunk during document parse.
-        let dict = if let Some(djbz) = self.find_chunk(b"Djbz") {
-            Some(crate::jb2_new::decode_dict(djbz, None)?)
-        } else if let Some(djbz) = self.shared_djbz.as_deref() {
-            Some(crate::jb2_new::decode_dict(djbz, None)?)
+        // Prefer an inline Djbz chunk (decoded fresh — rare, usually small).
+        // Otherwise use the cached shared dictionary to avoid repeated multi-MB
+        // allocations on every render.
+        let inline_dict;
+        let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
+            inline_dict = crate::jb2_new::decode_dict(djbz, None)?;
+            Some(&inline_dict)
         } else {
-            None
+            self.decoded_shared_dict()
         };
 
-        let bm = crate::jb2_new::decode(sjbz, dict.as_ref())?;
+        let bm = crate::jb2_new::decode(sjbz, dict_ref)?;
         Ok(Some(bm))
+    }
+
+    /// Decode the JB2 foreground mask with per-pixel blit index tracking.
+    ///
+    /// Returns `Ok(None)` if the page has no Sjbz chunk.
+    pub fn extract_mask_indexed(
+        &self,
+    ) -> Result<Option<(crate::bitmap::Bitmap, Vec<i32>)>, DocError> {
+        let sjbz = match self.find_chunk(b"Sjbz") {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let inline_dict;
+        let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
+            inline_dict = crate::jb2_new::decode_dict(djbz, None)?;
+            Some(&inline_dict)
+        } else {
+            self.decoded_shared_dict()
+        };
+
+        let (bm, blit_map) = crate::jb2_new::decode_indexed(sjbz, dict_ref)?;
+        Ok(Some((bm, blit_map)))
     }
 
     /// Decode the IW44 foreground layer (FG44 chunks) if present.
@@ -587,6 +672,21 @@ impl DjVuDocument {
                     use alloc::collections::BTreeMap;
                     #[cfg(feature = "std")]
                     use std::collections::BTreeMap;
+                    // Wrap shared dict bytes in Arc (std) so all pages that
+                    // reference the same DJVI component share one allocation.
+                    #[cfg(feature = "std")]
+                    let djvi_djbz: BTreeMap<String, Arc<Vec<u8>>> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.comp_type == ComponentType::Shared)
+                        .filter_map(|(comp_idx, entry)| {
+                            let sf = sub_forms.get(comp_idx)?;
+                            let chunks = parse_sub_form(sf.data).ok()?;
+                            let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
+                            Some((entry.id.clone(), Arc::new(djbz.data.to_vec())))
+                        })
+                        .collect();
+                    #[cfg(not(feature = "std"))]
                     let djvi_djbz: BTreeMap<String, Vec<u8>> = entries
                         .iter()
                         .enumerate()
@@ -611,6 +711,14 @@ impl DjVuDocument {
                         let sub_chunks = parse_sub_form(sub_form.data)?;
 
                         // Resolve INCL reference to a shared DJVI dictionary.
+                        #[cfg(feature = "std")]
+                        let shared_djbz = sub_chunks
+                            .iter()
+                            .find(|c| &c.id == b"INCL")
+                            .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
+                            .and_then(|name| djvi_djbz.get(name))
+                            .cloned();
+                        #[cfg(not(feature = "std"))]
                         let shared_djbz = sub_chunks
                             .iter()
                             .find(|c| &c.id == b"INCL")
@@ -819,10 +927,11 @@ impl core::ops::Deref for MmapDocument {
 /// `shared_djbz` is the raw `Djbz` data from a referenced DJVI component
 /// (resolved from the page's INCL chunk by the caller); pass `None` if no
 /// shared dictionary is available.
+#[cfg(feature = "std")]
 fn parse_page_from_chunks(
     chunks: &[IffChunk<'_>],
     index: usize,
-    shared_djbz: Option<Vec<u8>>,
+    shared_djbz: Option<Arc<Vec<u8>>>,
 ) -> Result<DjVuPage, DocError> {
     let info_chunk = chunks
         .iter()
@@ -845,8 +954,37 @@ fn parse_page_from_chunks(
         chunks: raw_chunks,
         index,
         shared_djbz,
-        #[cfg(feature = "std")]
         bg44_decoded: std::sync::OnceLock::new(),
+        jb2_dict_decoded: std::sync::OnceLock::new(),
+    })
+}
+
+#[cfg(not(feature = "std"))]
+fn parse_page_from_chunks(
+    chunks: &[IffChunk<'_>],
+    index: usize,
+    shared_djbz: Option<Vec<u8>>,
+) -> Result<DjVuPage, DocError> {
+    let info_chunk = chunks
+        .iter()
+        .find(|c| &c.id == b"INFO")
+        .ok_or(DocError::MissingChunk("INFO"))?;
+
+    let info = PageInfo::parse(info_chunk.data)?;
+
+    let raw_chunks: Vec<RawChunk> = chunks
+        .iter()
+        .map(|c| RawChunk {
+            id: c.id,
+            data: c.data.to_vec(),
+        })
+        .collect();
+
+    Ok(DjVuPage {
+        info,
+        chunks: raw_chunks,
+        index,
+        shared_djbz,
     })
 }
 

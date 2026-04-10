@@ -38,6 +38,12 @@ const FREQ_SLOTS: usize = 4;
 /// Number of context IDs used for the first two MTF levels.
 const LEVEL_CTXIDS: usize = 3;
 
+/// Maximum allowed block size (4 MB), matching DjVuLibre's MAXBLOCK.
+const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Maximum allowed total decompressed output size (256 MB).
+const MAX_OUTPUT_SIZE: usize = 256 * 1024 * 1024;
+
 /// Decode a BZZ-compressed byte slice.
 ///
 /// BZZ streams consist of one or more blocks. Each block is preceded by a
@@ -61,7 +67,15 @@ pub fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
             break;
         }
 
-        let block = decode_one_block(&mut zp, &mut block_ctx, block_size as usize)?;
+        let block_size = block_size as usize;
+        if block_size > MAX_BLOCK_SIZE {
+            return Err(BzzError::BlockSizeTooLarge(block_size));
+        }
+
+        let block = decode_one_block(&mut zp, &mut block_ctx, block_size)?;
+        if output.len() + block.len() > MAX_OUTPUT_SIZE {
+            return Err(BzzError::OutputTooLarge);
+        }
         output.extend_from_slice(&block);
     }
 

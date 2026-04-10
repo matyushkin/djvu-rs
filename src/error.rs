@@ -206,6 +206,14 @@ pub enum BzzError {
     /// The BWT block did not contain an end-of-block marker.
     #[error("BZZ block is missing the end-of-block marker")]
     MissingMarker,
+
+    /// A single block's decoded size exceeds the safety limit (4 MB).
+    #[error("BZZ block size exceeds maximum allowed ({0} > 4 MB)")]
+    BlockSizeTooLarge(usize),
+
+    /// The total decompressed output exceeds the safety limit (256 MB).
+    #[error("BZZ total output size exceeds maximum allowed (256 MB)")]
+    OutputTooLarge,
 }
 
 // ---- Legacy error type (kept for backward compatibility) --------------------
