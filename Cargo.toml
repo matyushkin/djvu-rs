@@ -31,7 +31,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 thiserror = "2"
 wide = "0.7"
-# Used by the djvu CLI binary. Will move to a separate djvu-cli crate in v0.2.
+# Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
@@ -54,7 +54,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = ["dep:clap", "dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder"]
+std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder"]
+cli = ["std", "dep:clap"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]
@@ -77,7 +78,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 [[bin]]
 name = "djvu"
 path = "src/bin/djvu.rs"
-required-features = ["std"]
+required-features = ["cli"]
 
 [[bench]]
 name = "codecs"
