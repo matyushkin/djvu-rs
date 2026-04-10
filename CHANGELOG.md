@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/matyushkin/djvu-rs/compare/v0.9.0...v0.10.0) (2026-04-10)
+
+
+### Features
+
+* **djvm:** add merge and split commands for DjVu documents ([#126](https://github.com/matyushkin/djvu-rs/issues/126)) ([37eefd8](https://github.com/matyushkin/djvu-rs/commit/37eefd89f969ade36e3547fce0222a9d23d9c215)), closes [#76](https://github.com/matyushkin/djvu-rs/issues/76)
+* **ffi:** add C FFI bindings via extern "C" functions ([#127](https://github.com/matyushkin/djvu-rs/issues/127)) ([2226bdf](https://github.com/matyushkin/djvu-rs/commit/2226bdfad34ef39a08bb9a3b1b220cac2942b30a)), closes [#72](https://github.com/matyushkin/djvu-rs/issues/72)
+* **ocr:** pluggable OCR backend trait with Tesseract, ONNX, and Candle backends ([#125](https://github.com/matyushkin/djvu-rs/issues/125)) ([bf26603](https://github.com/matyushkin/djvu-rs/commit/bf26603b714d1721f63beedcf2ad54a5f95e21a0)), closes [#77](https://github.com/matyushkin/djvu-rs/issues/77)
+* **python:** add Python bindings via PyO3 ([#128](https://github.com/matyushkin/djvu-rs/issues/128)) ([e250fff](https://github.com/matyushkin/djvu-rs/commit/e250fffcef36531d8641e1ab8031198c30c7d372)), closes [#71](https://github.com/matyushkin/djvu-rs/issues/71)
+
+
+### Bug Fixes
+
+* eliminate memory leaks and add OOM protection ([25f041d](https://github.com/matyushkin/djvu-rs/commit/25f041d78c513f1e3dfbd87aa69dc4fc261488da))
+* **jb2:** prevent infinite loop in decode_num on corrupt streams ([d7bee1e](https://github.com/matyushkin/djvu-rs/commit/d7bee1e8c8c612583a055d40c4aa7a8c81666e47)), closes [#122](https://github.com/matyushkin/djvu-rs/issues/122)
+
 ## [0.9.0](https://github.com/matyushkin/djvu-rs/compare/v0.8.0...v0.9.0) (2026-04-09)
 
 
