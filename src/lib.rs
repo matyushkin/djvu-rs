@@ -114,6 +114,12 @@ pub mod jb2_new;
 #[path = "iw44_new.rs"]
 pub mod iw44_new;
 
+/// IW44 wavelet encoder — produces BG44/FG44/TH44 chunk payloads.
+///
+/// Provides [`iw44_encode::encode_iw44_color`] and [`iw44_encode::encode_iw44_gray`].
+#[cfg(feature = "std")]
+pub mod iw44_encode;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
