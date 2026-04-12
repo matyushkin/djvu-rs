@@ -226,6 +226,91 @@ fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Ve
     Ok(output)
 }
 
+/// Create an indirect (non-bundled) DJVM index file that references pages as
+/// separate files.
+///
+/// The returned bytes are a valid `FORM:DJVM` with a DIRM directory chunk whose
+/// `is_bundled` flag is **not** set.  Each entry in `page_names` becomes one
+/// `Page` component; there are no embedded `FORM:DJVU` sub-forms — the component
+/// data lives in separate files that must be passed to a resolver when parsing.
+///
+/// Shared-dictionary (DJVI) components are not supported by this helper; use
+/// [`merge`] to build a bundled document that includes them.
+///
+/// # Errors
+///
+/// Returns [`DjvmError::EmptyMerge`] if `page_names` is empty.
+pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
+    if page_names.is_empty() {
+        return Err(DjvmError::EmptyMerge);
+    }
+
+    let count = page_names.len();
+    let ids: Vec<String> = page_names.iter().map(|s| s.to_string()).collect();
+    // All entries are pages (flag = 1)
+    let flags: Vec<u8> = vec![1u8; count];
+
+    let dirm_data = build_dirm_indirect(count, &flags, &ids);
+
+    let mut body_size: usize = 4; // "DJVM"
+    body_size += 8 + dirm_data.len(); // DIRM chunk header + data
+    if !dirm_data.len().is_multiple_of(2) {
+        body_size += 1;
+    }
+
+    let mut output = Vec::with_capacity(4 + 4 + 4 + body_size);
+    output.extend_from_slice(b"AT&T");
+    output.extend_from_slice(b"FORM");
+    output.extend_from_slice(&(body_size as u32).to_be_bytes());
+    output.extend_from_slice(b"DJVM");
+    output.extend_from_slice(b"DIRM");
+    output.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
+    output.extend_from_slice(&dirm_data);
+    if !dirm_data.len().is_multiple_of(2) {
+        output.push(0);
+    }
+
+    Ok(output)
+}
+
+/// Build an indirect (non-bundled) DIRM chunk.
+///
+/// Unlike the bundled variant, there is no per-component offset table.
+fn build_dirm_indirect(count: usize, flags: &[u8], ids: &[String]) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // Flags byte: 0x00 = indirect (not bundled)
+    data.push(0x00);
+
+    // Component count (16-bit big-endian)
+    data.push((count >> 8) as u8);
+    data.push(count as u8);
+
+    // No offset table for indirect documents.
+
+    let mut meta = Vec::new();
+    for _ in 0..count {
+        meta.extend_from_slice(&[0, 0, 0]); // sizes (unused for indirect)
+    }
+    for &f in flags {
+        meta.push(f);
+    }
+    for id in ids {
+        meta.extend_from_slice(id.as_bytes());
+        meta.push(0);
+    }
+    for id in ids {
+        meta.extend_from_slice(id.as_bytes());
+        meta.push(0);
+    }
+    meta.extend(core::iter::repeat_n(0u8, count)); // empty titles
+
+    let compressed = crate::bzz_encode::bzz_encode(&meta);
+    data.extend_from_slice(&compressed);
+
+    data
+}
+
 /// Build the DIRM chunk data.
 ///
 /// Format:
@@ -344,5 +429,97 @@ mod tests {
         let data = std::fs::read(&path).expect("read fixture");
         let result = split(&data, 0, 5);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_indirect_empty_returns_error() {
+        let result = create_indirect(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_indirect_parses_with_resolver() {
+        // Build an indirect DJVM that references "chicken.djvu"
+        let indirect_bytes = create_indirect(&["chicken.djvu"]).expect("create_indirect");
+
+        // Verify it parses as FORM:DJVM
+        let form = iff::parse_form(&indirect_bytes).expect("parse form");
+        assert_eq!(&form.form_type, b"DJVM");
+
+        // Verify DIRM chunk has is_bundled = 0
+        let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
+        assert_eq!(
+            dirm.data[0] & 0x80,
+            0,
+            "indirect DIRM must not have bundled bit set"
+        );
+
+        // Parse with a resolver that supplies chicken.djvu
+        let chicken_path = fixture_path("chicken.djvu");
+        if !chicken_path.exists() {
+            return;
+        }
+        let chicken_data = std::fs::read(&chicken_path).expect("read chicken.djvu");
+        let doc = DjVuDocument::parse_with_resolver(
+            &indirect_bytes,
+            Some(
+                move |name: &str| -> Result<Vec<u8>, crate::djvu_document::DocError> {
+                    if name == "chicken.djvu" {
+                        Ok(chicken_data.clone())
+                    } else {
+                        Err(crate::djvu_document::DocError::IndirectResolve(
+                            name.to_string(),
+                        ))
+                    }
+                },
+            ),
+        )
+        .expect("parse indirect with resolver");
+
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.width(), 181);
+        assert_eq!(page.height(), 240);
+    }
+
+    #[test]
+    fn create_indirect_multipage() {
+        // 3-page indirect document
+        let indirect_bytes =
+            create_indirect(&["page1.djvu", "page2.djvu", "page3.djvu"]).expect("create_indirect");
+        let form = iff::parse_form(&indirect_bytes).expect("parse");
+        assert_eq!(&form.form_type, b"DJVM");
+
+        // Component count = 3 in DIRM
+        let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
+        let nfiles = u16::from_be_bytes([dirm.data[1], dirm.data[2]]) as usize;
+        assert_eq!(nfiles, 3);
+    }
+
+    #[test]
+    fn parse_from_dir_indirect() {
+        // Write an indirect DJVM index and chicken.djvu to a temp directory,
+        // then open it via parse_from_dir.
+        let chicken_path = fixture_path("chicken.djvu");
+        if !chicken_path.exists() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("djvu_indirect_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Copy chicken.djvu as the component
+        let component_name = "p0001.djvu";
+        std::fs::copy(&chicken_path, tmp.join(component_name)).unwrap();
+
+        // Build indirect index
+        let index_bytes = create_indirect(&[component_name]).expect("create_indirect");
+        let index_path = tmp.join("index.djvu");
+        std::fs::write(&index_path, &index_bytes).unwrap();
+
+        // Open via parse_from_dir
+        let index_data = std::fs::read(&index_path).unwrap();
+        let doc = DjVuDocument::parse_from_dir(&index_data, &tmp).expect("parse_from_dir");
+        assert_eq!(doc.page_count(), 1);
+        assert_eq!(doc.page(0).unwrap().width(), 181);
     }
 }

@@ -842,6 +842,36 @@ impl DjVuDocument {
     pub fn chunk_ids(&self) -> Vec<[u8; 4]> {
         self.global_chunks.iter().map(|c| c.id).collect()
     }
+
+    /// Parse an indirect DjVu document from bytes, resolving component files
+    /// relative to `base_dir`.
+    ///
+    /// For bundled documents this is equivalent to [`DjVuDocument::parse`].
+    /// For indirect documents, component names from the DIRM are resolved as
+    /// paths under `base_dir`, and each referenced file is read from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DocError::Io` if a component file cannot be read, or any parse
+    /// error from the component data.
+    #[cfg(feature = "std")]
+    pub fn parse_from_dir(
+        data: &[u8],
+        base_dir: impl AsRef<std::path::Path>,
+    ) -> Result<Self, DocError> {
+        let base = base_dir.as_ref().to_path_buf();
+        let resolver = move |name: &str| -> Result<Vec<u8>, DocError> {
+            // Strip any "file://" prefix
+            let name = name.strip_prefix("file://").unwrap_or(name);
+            let path = if std::path::Path::new(name).is_absolute() {
+                std::path::PathBuf::from(name)
+            } else {
+                base.join(name)
+            };
+            std::fs::read(&path).map_err(|_| DocError::IndirectResolve(name.to_string()))
+        };
+        Self::parse_with_resolver(data, Some(resolver))
+    }
 }
 
 // ---- Memory-mapped document -------------------------------------------------
@@ -894,6 +924,30 @@ impl MmapDocument {
         let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 
         let doc = DjVuDocument::parse(&mmap)?;
+        Ok(MmapDocument { _mmap: mmap, doc })
+    }
+
+    /// Open a DjVu file with automatic filesystem resolution for indirect pages.
+    ///
+    /// For bundled documents this is identical to [`MmapDocument::open`].
+    /// For indirect DJVM documents, component files named in the DIRM are
+    /// resolved relative to the directory containing `path`.
+    ///
+    /// # Safety contract
+    ///
+    /// The file at `path` **must not be modified or truncated** while the
+    /// returned `MmapDocument` is alive.
+    pub fn open_indirect(path: impl AsRef<std::path::Path>) -> Result<Self, DocError> {
+        let path = path.as_ref();
+        let file = std::fs::File::open(path)?;
+        #[allow(unsafe_code)]
+        let mmap = unsafe { memmap2::Mmap::map(&file) }?;
+
+        let base_dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let doc = DjVuDocument::parse_from_dir(&mmap, &base_dir)?;
         Ok(MmapDocument { _mmap: mmap, doc })
     }
 
