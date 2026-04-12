@@ -225,6 +225,10 @@ pub mod ocr_neural;
 #[cfg(feature = "std")]
 pub mod text_encode;
 
+/// NAVM bookmark encoder — serializes [`djvu_document::DjVuBookmark`] trees to BZZ-compressed binary.
+#[cfg(feature = "std")]
+pub mod navm_encode;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
