@@ -120,6 +120,12 @@ pub mod iw44_new;
 #[cfg(feature = "std")]
 pub mod iw44_encode;
 
+/// JB2 bilevel image encoder — produces Sjbz chunk payloads.
+///
+/// Provides [`jb2_encode::encode_jb2`].
+#[cfg(feature = "std")]
+pub mod jb2_encode;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
