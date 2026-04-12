@@ -229,6 +229,9 @@ pub mod text_encode;
 #[cfg(feature = "std")]
 pub mod navm_encode;
 
+/// Smmr chunk decoder — ITU-T G4 (MMR) bilevel image decompression.
+pub mod smmr;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
