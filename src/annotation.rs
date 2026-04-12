@@ -493,6 +493,102 @@ fn parse_color(s: &str) -> Result<Color, AnnotationError> {
     Ok(Color { r, g, b })
 }
 
+// ---- Encoder ----------------------------------------------------------------
+
+/// Serialize an [`Annotation`] and a list of [`MapArea`]s to ANTa text bytes.
+///
+/// Produces the plain-text S-expression format consumed by [`parse_annotations`].
+/// Returns an empty `Vec` if there is nothing to encode.
+pub fn encode_annotations(ann: &Annotation, areas: &[MapArea]) -> Vec<u8> {
+    let mut out = String::new();
+
+    if let Some(ref c) = ann.background {
+        out.push_str(&format!(
+            "(background #{:02x}{:02x}{:02x})\n",
+            c.r, c.g, c.b
+        ));
+    }
+    if let Some(z) = ann.zoom {
+        out.push_str(&format!("(zoom {z})\n"));
+    }
+    if let Some(ref m) = ann.mode {
+        out.push_str(&format!("(mode {m})\n"));
+    }
+
+    for ma in areas {
+        out.push_str(&encode_maparea(ma));
+        out.push('\n');
+    }
+
+    out.into_bytes()
+}
+
+/// Serialize an [`Annotation`] and map areas to ANTz bytes (BZZ-compressed ANTa).
+#[cfg(feature = "std")]
+pub fn encode_annotations_bzz(ann: &Annotation, areas: &[MapArea]) -> Vec<u8> {
+    let plain = encode_annotations(ann, areas);
+    if plain.is_empty() {
+        return Vec::new();
+    }
+    crate::bzz_encode::bzz_encode(&plain)
+}
+
+/// Serialize one maparea to its S-expression string (without trailing newline).
+fn encode_maparea(ma: &MapArea) -> String {
+    let mut s = String::from("(maparea ");
+    s.push_str(&quote_str(&ma.url));
+    s.push(' ');
+    s.push_str(&quote_str(&ma.description));
+    s.push(' ');
+    s.push_str(&encode_shape(&ma.shape));
+    if let Some(ref b) = ma.border {
+        s.push_str(&format!(" (border {})", b.style));
+    }
+    if let Some(ref h) = ma.highlight {
+        s.push_str(&format!(
+            " (hilite #{:02x}{:02x}{:02x})",
+            h.color.r, h.color.g, h.color.b
+        ));
+    }
+    s.push(')');
+    s
+}
+
+/// Serialize a [`Shape`] to its S-expression string.
+fn encode_shape(shape: &Shape) -> String {
+    match shape {
+        Shape::Rect(r) => format!("(rect {} {} {} {})", r.x, r.y, r.width, r.height),
+        Shape::Oval(r) => format!("(oval {} {} {} {})", r.x, r.y, r.width, r.height),
+        Shape::Text(r) => format!("(text {} {} {} {})", r.x, r.y, r.width, r.height),
+        Shape::Line(x1, y1, x2, y2) => format!("(line {x1} {y1} {x2} {y2})"),
+        Shape::Poly(pts) => {
+            let mut s = String::from("(poly");
+            for (x, y) in pts {
+                s.push_str(&format!(" {x} {y}"));
+            }
+            s.push(')');
+            s
+        }
+    }
+}
+
+/// Quote a string for use in the ANTa S-expression format.
+///
+/// Produces `"..."` with backslash-escaping for `"` and `\`.
+fn quote_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,5 +789,119 @@ mod tests {
         assert_eq!(areas.len(), 2);
         assert_eq!(areas[0].url, "a");
         assert_eq!(areas[1].url, "b");
+    }
+
+    // ── Encoder roundtrips ──────────────────────────────────────────────────
+
+    #[test]
+    fn encode_empty_is_empty() {
+        let ann = Annotation::default();
+        let out = encode_annotations(&ann, &[]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn encode_background_roundtrip() {
+        let ann = Annotation {
+            background: Some(Color {
+                r: 255,
+                g: 128,
+                b: 0,
+            }),
+            zoom: None,
+            mode: None,
+        };
+        let bytes = encode_annotations(&ann, &[]);
+        let (dec, _) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec.background, ann.background);
+    }
+
+    #[test]
+    fn encode_zoom_and_mode_roundtrip() {
+        let ann = Annotation {
+            background: None,
+            zoom: Some(150),
+            mode: Some("color".to_string()),
+        };
+        let bytes = encode_annotations(&ann, &[]);
+        let (dec, _) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec.zoom, Some(150));
+        assert_eq!(dec.mode, Some("color".to_string()));
+    }
+
+    #[test]
+    fn encode_maparea_rect_roundtrip() {
+        let ann = Annotation::default();
+        let areas = vec![MapArea {
+            url: "http://example.com".to_string(),
+            description: "a link".to_string(),
+            shape: Shape::Rect(Rect {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 50,
+            }),
+            border: None,
+            highlight: None,
+        }];
+        let bytes = encode_annotations(&ann, &areas);
+        let (_, dec_areas) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec_areas.len(), 1);
+        assert_eq!(dec_areas[0].url, "http://example.com");
+        assert_eq!(dec_areas[0].description, "a link");
+        assert!(matches!(&dec_areas[0].shape, Shape::Rect(r) if r.x == 10 && r.y == 20));
+    }
+
+    #[test]
+    fn encode_maparea_poly_roundtrip() {
+        let areas = vec![MapArea {
+            url: String::new(),
+            description: String::new(),
+            shape: Shape::Poly(vec![(0, 0), (10, 0), (5, 10)]),
+            border: None,
+            highlight: None,
+        }];
+        let bytes = encode_annotations(&Annotation::default(), &areas);
+        let (_, dec_areas) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec_areas.len(), 1);
+        assert!(matches!(&dec_areas[0].shape, Shape::Poly(pts) if pts == &[(0,0),(10,0),(5,10)]));
+    }
+
+    #[test]
+    fn encode_maparea_with_border_and_hilite_roundtrip() {
+        let areas = vec![MapArea {
+            url: "x".to_string(),
+            description: String::new(),
+            shape: Shape::Rect(Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+            border: Some(Border {
+                style: "xor".to_string(),
+            }),
+            highlight: Some(Highlight {
+                color: Color { r: 255, g: 0, b: 0 },
+            }),
+        }];
+        let bytes = encode_annotations(&Annotation::default(), &areas);
+        let (_, dec_areas) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec_areas[0].border.as_ref().unwrap().style, "xor");
+        assert_eq!(dec_areas[0].highlight.as_ref().unwrap().color.r, 255);
+    }
+
+    #[test]
+    fn encode_url_with_quotes_roundtrip() {
+        let areas = vec![MapArea {
+            url: r#"has "quotes" and \backslash"#.to_string(),
+            description: String::new(),
+            shape: Shape::Line(0, 0, 1, 1),
+            border: None,
+            highlight: None,
+        }];
+        let bytes = encode_annotations(&Annotation::default(), &areas);
+        let (_, dec_areas) = parse_annotations(&bytes).unwrap();
+        assert_eq!(dec_areas[0].url, r#"has "quotes" and \backslash"#);
     }
 }
