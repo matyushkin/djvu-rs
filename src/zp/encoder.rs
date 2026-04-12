@@ -66,6 +66,30 @@ impl ZpEncoder {
     }
 
     /// Encode one bit in passthrough (context-free) mode.
+    /// Encode one bit in passthrough mode using the IW44 variant threshold.
+    ///
+    /// Matches `ZpDecoder::decode_passthrough_iw44`: threshold `z = 0x8000 + 3a/8`.
+    pub(crate) fn encode_passthrough_iw44(&mut self, bit: bool) {
+        let z = 0x8000 + (3 * self.a / 8);
+        if !bit {
+            self.a = z;
+            if self.a >= 0x8000 {
+                self.zemit(1 - (self.subend >> 15) as i32);
+                self.subend = (self.subend << 1) & 0xffff;
+                self.a = (self.a << 1) & 0xffff;
+            }
+        } else {
+            let z_comp = 0x10000 - z;
+            self.subend += z_comp;
+            self.a += z_comp;
+            while self.a >= 0x8000 {
+                self.zemit(1 - (self.subend >> 15) as i32);
+                self.subend = (self.subend << 1) & 0xffff;
+                self.a = (self.a << 1) & 0xffff;
+            }
+        }
+    }
+
     pub(crate) fn encode_passthrough(&mut self, bit: bool) {
         let z = 0x8000 + (self.a >> 1);
         if !bit {
