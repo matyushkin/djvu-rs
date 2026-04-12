@@ -89,6 +89,10 @@ pub(crate) mod zp_impl;
 #[allow(dead_code)]
 pub mod bzz_new;
 
+/// BZZ compressor — encoding counterpart to `bzz_new`.
+#[cfg(feature = "std")]
+pub mod bzz_encode;
+
 /// DJVM document merge and split operations.
 #[cfg(feature = "std")]
 pub mod djvm;

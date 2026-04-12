@@ -84,6 +84,22 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Compress a file using BZZ encoding.
+    BzzEncode {
+        /// Input file to compress.
+        file: PathBuf,
+        /// Output file path.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Decompress a BZZ-encoded file.
+    BzzDecode {
+        /// BZZ-compressed input file.
+        file: PathBuf,
+        /// Output file path.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Extract the text layer from a DjVu document.
     Text {
         /// Path to the DjVu file.
@@ -181,6 +197,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             model,
             output,
         } => cmd_ocr(&file, backend, &lang, model.as_deref(), &output),
+        Cmd::BzzEncode { file, output } => cmd_bzz_encode(&file, &output),
+        Cmd::BzzDecode { file, output } => cmd_bzz_decode(&file, &output),
         Cmd::Merge { files, output } => cmd_merge(&files, &output),
         Cmd::Split {
             file,
@@ -775,4 +793,37 @@ fn page_idx(page: usize, count: usize) -> Result<usize, Box<dyn std::error::Erro
         return Err(format!("page {page} out of range (document has {count} pages)").into());
     }
     Ok(page - 1)
+}
+
+// ── bzz encode/decode ────────────────────────────────────────────────────────
+
+fn cmd_bzz_encode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(file)?;
+    let compressed = djvu_rs::bzz_encode::bzz_encode(&data);
+    std::fs::write(output, &compressed)?;
+    eprintln!(
+        "{}: {} → {} bytes ({:.1}%)",
+        file.display(),
+        data.len(),
+        compressed.len(),
+        if data.is_empty() {
+            0.0
+        } else {
+            compressed.len() as f64 / data.len() as f64 * 100.0
+        }
+    );
+    Ok(())
+}
+
+fn cmd_bzz_decode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(file)?;
+    let decoded = djvu_rs::bzz_new::bzz_decode(&data)?;
+    std::fs::write(output, &decoded)?;
+    eprintln!(
+        "{}: {} → {} bytes",
+        file.display(),
+        data.len(),
+        decoded.len(),
+    );
+    Ok(())
 }

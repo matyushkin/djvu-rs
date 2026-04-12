@@ -6,6 +6,8 @@
 //! Key public types:
 //! - [`ZpDecoder`] — the ZP decoder state machine
 
+#[cfg(feature = "std")]
+pub(crate) mod encoder;
 pub(crate) mod tables;
 
 use crate::error::BzzError;
