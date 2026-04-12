@@ -281,69 +281,10 @@ fn build_dirm(count: usize, flags: &[u8], ids: &[String]) -> Vec<u8> {
     // Encode the metadata using BZZ. We use a trivial BZZ stream:
     // the raw metadata is small enough that we can encode it directly
     // using the BZZ block format with a passthrough identity encoding.
-    let compressed = trivial_bzz_encode(&meta);
+    let compressed = crate::bzz_encode::bzz_encode(&meta);
     data.extend_from_slice(&compressed);
 
     data
-}
-
-/// Encode data as a minimal valid BZZ stream.
-///
-/// This produces a BZZ stream where each block is stored with an identity
-/// BWT (marker at position 0) and MTF position 0 for all bytes. This is
-/// NOT an efficient encoding, but it produces a valid stream that
-/// `bzz_decode` can decompress.
-///
-/// The actual implementation uses a trivial approach: since we only need
-/// this for small DIRM metadata (< 1KB typically), we construct the
-/// ZP-encoded BWT block by running our own minimal ZP emitter.
-fn trivial_bzz_encode(data: &[u8]) -> Vec<u8> {
-    if data.is_empty() {
-        // Minimal valid BZZ: block size 0 (end of stream)
-        // ZP passthrough encoding of 24 zero bits: produces specific bytes
-        // The simplest valid empty BZZ: two 0xFF bytes (ZP init) + enough padding
-        return vec![0xFF, 0xFF, 0xFF, 0xFF];
-    }
-
-    // For non-empty data, we use a simple approach:
-    // Write the raw data length as the block size, then encode the BWT+MTF data.
-    //
-    // Instead of implementing a full ZP encoder, we write raw bytes that the
-    // ZP decoder will interpret as the correct block structure.
-    //
-    // This is a placeholder that constructs a valid BZZ stream using
-    // the existing decoder as a validator.
-
-    // For now, use a pre-computed minimal BZZ stream approach:
-    // Encode each byte individually using single-byte BZZ blocks.
-    // This is highly inefficient but correct.
-
-    // Actually, the simplest correct approach: embed the metadata directly
-    // in the DIRM without BZZ compression, by patching the parser to
-    // handle raw metadata. But that would change the parser contract.
-    //
-    // Instead, we take advantage of the fact that our DjVuDocument parser
-    // derives page types from FORM types, not from DIRM flags. So we
-    // can write a DIRM with a BZZ section that decodes to a valid but
-    // minimal metadata block.
-
-    // The minimal valid BZZ-compressed payload: a single block containing
-    // the metadata, encoded with BWT where the original data is rotated
-    // such that the BWT output is trivial.
-    //
-    // For simplicity and correctness, we'll pre-construct a BZZ stream
-    // that matches what the DjVuLibre encoder would produce. Since the
-    // DIRM metadata is typically < 1KB, we can afford a simple approach.
-    //
-    // WORKAROUND: Write raw metadata with a 2-byte prefix that the ZP
-    // decoder interprets as block_size = 0 (end of stream), followed by
-    // the raw metadata. The parser will see bzz_decode return empty data,
-    // and we'll make the parser handle that gracefully.
-
-    // Return a minimal BZZ "empty" stream + raw metadata appended
-    // (the raw metadata is ignored by bzz_decode but we need the DIRM
-    // to be valid for our parser)
-    vec![0xFF, 0xFF, 0xFF, 0xFF]
 }
 
 #[cfg(test)]
