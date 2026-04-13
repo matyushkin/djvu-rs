@@ -378,17 +378,29 @@ fn decode_bitmap_direct(
         // r0: 2 bits from (row, col-2, col-1) — both 0 at col=0
         let mut r0: u32 = 0;
 
+        // Split into: safe suffix (last 4 cols need bounds-checked lookahead)
+        // and a fast middle path where col+3 < rp1.len() is guaranteed.
+        // When rp1/rp2 are shorter than w (near top of page), use all-safe path.
+        let mid_end = if rp1.len() >= w && rp2.len() >= w {
+            w.saturating_sub(4)
+        } else {
+            0 // degenerate: everything is "suffix"
+        };
+
         for (col, out) in row_slice.iter_mut().enumerate() {
-            // idx ≤ 1023 always: r2<8, r1<32, r0<4
-            // Single ctx access — eliminates the double get_mut/unwrap_or pattern.
-            let idx = ((r2 << 7) | (r1 << 2) | r0) as usize;
+            let idx = (((r2 << 7) | (r1 << 2) | r0) & 1023) as usize;
             let bit = zp.decode_bit(&mut ctx[idx]);
             if bit {
                 *out = 1;
             }
-            // Advance rolling windows; col+2/col+3 may exceed rp2/rp1 length → pix returns 0.
-            r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
-            r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
+            if col < mid_end {
+                // col+2 < rp2.len() and col+3 < rp1.len(): use direct indexing (no bounds check)
+                r2 = ((r2 << 1) & 0b111) | rp2[col + 2] as u32;
+                r1 = ((r1 << 1) & 0b11111) | rp1[col + 3] as u32;
+            } else {
+                r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
+                r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
+            }
             r0 = ((r0 << 1) & 0b11) | bit as u32;
         }
     }
