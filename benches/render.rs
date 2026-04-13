@@ -436,7 +436,14 @@ fn bench_pdf_export(c: &mut Criterion) {
         }
     };
 
-    c.bench_function("pdf_export_single_page", |b| {
+    c.bench_function("pdf_export_sequential", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+        });
+    });
+
+    #[cfg(feature = "parallel")]
+    c.bench_function("pdf_export_parallel", |b| {
         b.iter(|| {
             let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
         });
