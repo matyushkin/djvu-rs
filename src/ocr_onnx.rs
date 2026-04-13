@@ -3,11 +3,20 @@
 //! Runs any ONNX-format OCR model (e.g. TrOCR, PaddleOCR, docTR) using
 //! the `tract` inference engine — pure Rust, no Python or C++ runtime needed.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
 use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+
+type OnnxModel = tract_onnx::prelude::SimplePlan<
+    tract_onnx::prelude::TypedFact,
+    Box<dyn tract_onnx::prelude::TypedOp>,
+    tract_onnx::prelude::Graph<
+        tract_onnx::prelude::TypedFact,
+        Box<dyn tract_onnx::prelude::TypedOp>,
+    >,
+>;
 
 /// ONNX-based OCR backend using tract.
 ///
@@ -15,15 +24,7 @@ use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 /// text recognition output. The model format depends on the specific
 /// architecture (TrOCR, PaddleOCR, etc.).
 pub struct OnnxBackend {
-    model_path: PathBuf,
-    model: tract_onnx::prelude::SimplePlan<
-        tract_onnx::prelude::TypedFact,
-        Box<dyn tract_onnx::prelude::TypedOp>,
-        tract_onnx::prelude::Graph<
-            tract_onnx::prelude::TypedFact,
-            Box<dyn tract_onnx::prelude::TypedOp>,
-        >,
-    >,
+    model: OnnxModel,
     /// Character vocabulary for decoding model output.
     vocab: Vec<char>,
 }
@@ -35,8 +36,6 @@ impl OnnxBackend {
     /// a grayscale or RGB image tensor and outputs character probabilities.
     pub fn load(model_path: impl AsRef<Path>, vocab_path: Option<&Path>) -> Result<Self, OcrError> {
         use tract_onnx::prelude::*;
-
-        let model_path = model_path.as_ref().to_path_buf();
 
         let model = tract_onnx::onnx()
             .model_for_path(&model_path)
@@ -53,11 +52,7 @@ impl OnnxBackend {
             (' '..='~').collect()
         };
 
-        Ok(Self {
-            model_path,
-            model,
-            vocab,
-        })
+        Ok(Self { model, vocab })
     }
 
     /// Preprocess a pixmap into a normalized grayscale tensor for the model.
@@ -102,9 +97,7 @@ impl OnnxBackend {
 
             // Index 0 = CTC blank; skip duplicates
             if best_idx > 0 && Some(best_idx) != prev_idx {
-                if let Some(&ch) = self.vocab.get(best_idx - 1) {
-                    result.push(ch);
-                }
+                result.extend(self.vocab.get(best_idx - 1).copied());
             }
             prev_idx = Some(best_idx);
         }

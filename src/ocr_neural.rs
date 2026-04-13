@@ -10,7 +10,7 @@ use candle_nn::VarBuilder;
 
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
-use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+use crate::text::TextLayer;
 
 /// Neural OCR backend using Candle.
 ///
@@ -22,7 +22,6 @@ use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 pub struct CandleBackend {
     device: Device,
     model_dir: PathBuf,
-    tokenizer: tokenizers::Tokenizer,
 }
 
 impl CandleBackend {
@@ -34,18 +33,8 @@ impl CandleBackend {
     /// - `config.json` — model configuration
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, OcrError> {
         let model_dir = model_dir.as_ref().to_path_buf();
-
         let device = Device::Cpu;
-
-        let tokenizer_path = model_dir.join("tokenizer.json");
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| OcrError::ModelNotFound(format!("tokenizer: {e}")))?;
-
-        Ok(Self {
-            device,
-            model_dir,
-            tokenizer,
-        })
+        Ok(Self { device, model_dir })
     }
 
     /// Preprocess a pixmap into a normalized RGB tensor.
@@ -70,23 +59,18 @@ impl CandleBackend {
         Tensor::from_vec(data, &[1, 3, h, w], &self.device)
             .map_err(|e| OcrError::RecognitionFailed(format!("tensor creation: {e}")))
     }
-
-    /// Greedy decode token IDs to text.
-    fn decode_tokens(&self, token_ids: &[u32]) -> String {
-        self.tokenizer.decode(token_ids, true).unwrap_or_default()
-    }
 }
 
 impl OcrBackend for CandleBackend {
     fn recognize(&self, pixmap: &Pixmap, _options: &OcrOptions) -> Result<TextLayer, OcrError> {
         let _input = self.preprocess(pixmap)?;
 
-        // Load model weights
+        // Load model weights (from_buffered_safetensors is safe; from_mmaped_safetensors is unsafe)
         let weights_path = self.model_dir.join("model.safetensors");
-        let _vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&weights_path], DType::F32, &self.device)
-                .map_err(|e| OcrError::InitFailed(format!("weights: {e}")))?
-        };
+        let weights_data = std::fs::read(&weights_path)
+            .map_err(|e| OcrError::InitFailed(format!("weights: {e}")))?;
+        let _vb = VarBuilder::from_buffered_safetensors(weights_data, DType::F32, &self.device)
+            .map_err(|e| OcrError::InitFailed(format!("weights: {e}")))?;
 
         // NOTE: Full TrOCR encoder-decoder inference is model-specific.
         // This backend provides the framework; actual model architectures
