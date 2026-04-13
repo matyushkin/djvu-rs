@@ -365,14 +365,15 @@ djvu-rs outputs PNG; ddjvu outputs PPM. djvu-rs startup ≈ 5 ms vs ddjvu ≈ 25
 | Scenario | djvu-rs | DjVuLibre | Notes |
 |----------|---------|-----------|-------|
 | colorbook.djvu, **native** (2260×3669) | **37.4 ms** | — | full IW44 decode |
-| colorbook.djvu, **150 dpi** (848×1376) | 33.3 ms | **6.13 ms** | DjVuLibre uses partial IW44 decode |
+| colorbook.djvu, **150 dpi** (848×1376) | **6.5 ms** | 6.13 ms | ~6% gap after progressive optimizations |
 | Dense 600 dpi bilevel (page 260/520) | 35.6 ms | **13.8 ms** | sequential ZP decoder bottleneck |
 | Document open + parse (520 pages) | **1.9 ms** | ~24–60 ms | **10–30× faster** |
 
-**Key insight:** DjVuLibre uses *progressive IW44 decode* — for downscaled output it only
-decodes the wavelet bands needed for the target DPI, skipping high-frequency detail.
-djvu-rs always performs a full decode then resamples. Progressive decode is a planned
-optimization; until then DjVuLibre wins for low-DPI / thumbnail use cases.
+**Key insight:** The 150 dpi render path was optimized with a cascade of improvements:
+partial BG44 chunk decode (first chunk only for sub=4), a cached 1/4-resolution mask
+pyramid, and replacing runtime integer divisions with precomputed bit-shifts in the
+compositor inner loop.  djvu-rs now matches DjVuLibre within ~6% for the warm
+downscaled render path (the most common document-viewer scenario).
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full Criterion numbers and methodology.
 
