@@ -206,15 +206,23 @@ fn render_dims(native_w: u32, native_h: u32, native_dpi: f32, output_dpi: u32) -
 }
 
 /// Pre-rendered page data — all expensive compute done, ready for sequential PDF emit.
+///
+/// # Memory note
+///
+/// `djvu_to_pdf_impl` collects `RenderedPage` for every page before emitting any PDF
+/// objects (because `PdfWriter` is not `Send`). For large bilevel documents at native
+/// DPI (e.g. 520 pages × ~1 MB deflated mask each) peak RAM can be significant.
+/// A streaming/chunked approach is tracked in a separate issue.
 struct RenderedPage {
     pt_w: f32,
     pt_h: f32,
     is_bilevel_only: bool,
-    /// Fully encoded XObject body for the primary image.
-    /// For bilevel-only pages this is the 1-bit mask (/Im0); for mixed pages this is the
-    /// RGB background (/Im0).
-    bg_obj_body: Option<Vec<u8>>,
-    /// Fully encoded XObject body for the JB2 mask overlay (/Mask0).
+    /// Fully encoded XObject body written as PDF resource `/Im0`.
+    ///
+    /// For bilevel-only pages this is the 1-bit JB2 mask; for mixed pages it is the
+    /// RGB background image.
+    img0_body: Option<Vec<u8>>,
+    /// Fully encoded XObject body for the JB2 mask overlay (`/Mask0`).
     /// Only set for non-bilevel pages that have a Sjbz chunk.
     mask_obj_body: Option<Vec<u8>>,
     /// PDF content stream text operators (invisible text layer).
@@ -236,7 +244,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
 
     let is_bilevel_only = page.find_chunk(b"Sjbz").is_some() && page.find_chunk(b"BG44").is_none();
 
-    let (bg_obj_body, mask_obj_body) = if is_bilevel_only {
+    let (img0_body, mask_obj_body) = if is_bilevel_only {
         // Bilevel fast path: embed the 1-bit JB2 mask as the sole XObject.
         let mask = collect_mask_stream(page);
         (mask, None)
@@ -277,7 +285,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         pt_w,
         pt_h,
         is_bilevel_only,
-        bg_obj_body,
+        img0_body,
         mask_obj_body,
         text_ops,
         link_annot_bodies,
@@ -337,12 +345,13 @@ fn emit_page_objects(
     let pt_w = data.pt_w;
     let pt_h = data.pt_h;
 
-    let img_id = data.bg_obj_body.map(|body| w.add(body));
+    let img_id = data.img0_body.map(|body| w.add(body));
     let mask_img_id = data.mask_obj_body.map(|body| w.add(body));
 
     let mut content = String::new();
 
     if data.is_bilevel_only {
+        // img0 may still be None if JB2 decode failed at render time — render gracefully.
         if img_id.is_some() {
             content.push_str("1 1 1 rg\n");
             content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
