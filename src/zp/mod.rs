@@ -13,38 +13,6 @@ pub(crate) mod tables;
 use crate::error::BzzError;
 use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 
-/// Count of leading 1-bits in each possible byte value.
-///
-/// `LEADING_ONES[x]` gives the number of leading 1-bits in `x`.
-static LEADING_ONES: [u8; 256] = {
-    let mut tbl = [0u8; 256];
-    let mut i = 0u16;
-    while i < 256 {
-        let mut val = i as u8;
-        let mut count = 0u8;
-        while val & 0x80 != 0 {
-            count += 1;
-            val <<= 1;
-        }
-        tbl[i as usize] = count;
-        i += 1;
-    }
-    tbl
-};
-
-/// Count leading 1-bits in a 16-bit value.
-///
-/// Returns the number of consecutive 1-bits starting from the most significant
-/// bit. Used to determine the shift amount during renormalization.
-#[inline(always)]
-fn count_leading_ones(x: u16) -> u32 {
-    if x >= 0xff00 {
-        LEADING_ONES[(x & 0xff) as usize] as u32 + 8
-    } else {
-        LEADING_ONES[(x >> 8) as usize] as u32
-    }
-}
-
 /// ZP (Z-Prime) adaptive binary arithmetic decoder.
 ///
 /// Implements the decoder described in the DjVu v3 specification. The decoder
@@ -237,7 +205,7 @@ impl<'a> ZpDecoder<'a> {
     /// into `c` from the bit buffer.
     #[inline(always)]
     fn renormalize(&mut self) {
-        let shift = count_leading_ones(self.a);
+        let shift = self.a.leading_ones();
         self.bit_count -= shift as i32;
         self.a = ((self.a as u32) << shift) as u16;
         let mask = (1u32 << shift) - 1;
@@ -269,25 +237,6 @@ mod tests {
     fn zp_decoder_accepts_two_byte_input() {
         assert!(ZpDecoder::new(&[0x00, 0x00]).is_ok());
         assert!(ZpDecoder::new(&[0xff, 0xff]).is_ok());
-    }
-
-    #[test]
-    fn leading_ones_table_spot_checks() {
-        assert_eq!(LEADING_ONES[0x00], 0); // 00000000 → 0 leading 1s
-        assert_eq!(LEADING_ONES[0x80], 1); // 10000000 → 1 leading 1
-        assert_eq!(LEADING_ONES[0xC0], 2); // 11000000 → 2 leading 1s
-        assert_eq!(LEADING_ONES[0xFE], 7); // 11111110 → 7 leading 1s
-        assert_eq!(LEADING_ONES[0xFF], 8); // 11111111 → 8 leading 1s
-    }
-
-    #[test]
-    fn count_leading_ones_spot_checks() {
-        assert_eq!(count_leading_ones(0x0000), 0);
-        assert_eq!(count_leading_ones(0x8000), 1);
-        assert_eq!(count_leading_ones(0xC000), 2);
-        assert_eq!(count_leading_ones(0xFF00), 8);
-        assert_eq!(count_leading_ones(0xFF80), 9);
-        assert_eq!(count_leading_ones(0xFFFF), 16);
     }
 
     #[test]

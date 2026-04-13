@@ -327,7 +327,7 @@ fn check_blit_budget(sym: &Jbm, total: &mut usize) -> Result<(), Jb2Error> {
 
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
-    ctx: &mut [u8],
+    ctx: &mut [u8; 1024],
     width: i32,
     height: i32,
     pool: &mut Vec<u8>,
@@ -343,7 +343,6 @@ fn decode_bitmap_direct(
 
     let w = width as usize;
     let h = height as usize;
-    debug_assert_eq!(ctx.len(), 1024, "JB2 direct context must have 1024 entries");
     debug_assert_eq!(bm.data.len(), w * h);
 
     for row in (0..height).rev() {
@@ -417,7 +416,7 @@ fn decode_bitmap_direct(
 /// bitmap `mbm`. Center alignment is used per the DjVu spec.
 fn decode_bitmap_ref(
     zp: &mut ZpDecoder<'_>,
-    ctx: &mut [u8],
+    ctx: &mut [u8; 2048],
     width: i32,
     height: i32,
     mbm: &Jbm,
@@ -455,13 +454,9 @@ fn decode_bitmap_ref(
 
         for col in 0..width {
             let m_r2 = mbm.get(mr + 1, col + col_shift) as u32;
-            let idx = (c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0;
-            let ctx_byte = ctx.get(idx as usize).copied().unwrap_or(0);
-            let mut local_ctx = ctx_byte;
-            let bit = zp.decode_bit(&mut local_ctx);
-            if let Some(slot) = ctx.get_mut(idx as usize) {
-                *slot = local_ctx;
-            }
+            // idx ≤ 2047 always: c_r1<8, c_r0<2, m_r2<2, m_r1<8, m_r0<8
+            let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
+            let bit = zp.decode_bit(&mut ctx[idx as usize]);
             if bit {
                 cbm.set(row, col);
             }
@@ -799,8 +794,8 @@ fn decode_image_with_pool(
     let mut comment_octet_ctx = NumContext::new();
 
     let mut offset_type_ctx: u8 = 0;
-    let mut direct_bitmap_ctx = vec![0u8; 1024];
-    let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut direct_bitmap_ctx = [0u8; 1024];
+    let mut refinement_bitmap_ctx = [0u8; 2048];
     let mut total_sym_pixels = 0usize;
     let mut total_blit_pixels = 0usize;
 
@@ -1140,8 +1135,8 @@ fn decode_image_indexed_with_pool(
     let mut comment_octet_ctx = NumContext::new();
 
     let mut offset_type_ctx: u8 = 0;
-    let mut direct_bitmap_ctx = vec![0u8; 1024];
-    let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut direct_bitmap_ctx = [0u8; 1024];
+    let mut refinement_bitmap_ctx = [0u8; 2048];
     let mut total_sym_pixels = 0usize;
     let mut total_blit_pixels = 0usize;
 
@@ -1502,8 +1497,8 @@ fn decode_dictionary_with_pool(
     let mut comment_length_ctx = NumContext::new();
     let mut comment_octet_ctx = NumContext::new();
 
-    let mut direct_bitmap_ctx = vec![0u8; 1024];
-    let mut refinement_bitmap_ctx = vec![0u8; 2048];
+    let mut direct_bitmap_ctx = [0u8; 1024];
+    let mut refinement_bitmap_ctx = [0u8; 2048];
     let mut total_sym_pixels = 0usize;
 
     // Preamble
