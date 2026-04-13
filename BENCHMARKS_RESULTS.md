@@ -47,7 +47,7 @@ Corpus files: `tests/corpus/`, colorbook: `references/djvujs/library/assets/colo
 | Benchmark | File | Native size | Time (median) |
 |-----------|------|-------------|--------------|
 | `render_coarse` | boy.djvu | 192×256 | **1.34 ms** |
-| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **37.4 ms** |
+| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **34.5 ms** |
 | `render_corpus_color` | watchmaker.djvu | 2550×3301 | **73.9 ms** |
 | `render_corpus_bilevel` | cable_1973_100133.djvu | 2550×3301 | **69.1 ms** |
 | `pdf_export_single_page` | watchmaker.djvu | — | **1.88 s** |
@@ -101,7 +101,7 @@ Test file: `colorbook.djvu` — 2260×3669 px at 400 dpi, rendered to 848×1376 
 
 | | djvu-rs | DjVuLibre C API | Ratio |
 |-|---------|-----------------|-------|
-| colorbook, 150 dpi (848×1376 output) | 49.1 ms | **6.13 ms** | DjVuLibre ~8× faster |
+| colorbook, 150 dpi (848×1376 output) | 34.5 ms | **6.13 ms** | DjVuLibre ~5.6× faster |
 
 **Why DjVuLibre wins here:** DjVuLibre uses **progressive IW44 decode** — it only
 decodes the low-frequency wavelet bands needed for the target output resolution.
@@ -118,7 +118,7 @@ resamples — doing ~7× more decode work.
 |----------|--------|--------|
 | CLI (process startup included) | **djvu-rs** | ~2.5–10× |
 | Native-resolution render | comparable | — |
-| Downscaled render (< native DPI) | **DjVuLibre** | ~8× (partial IW44 decode) |
+| Downscaled render (< native DPI) | **DjVuLibre** | ~5.6× (partial IW44 decode) |
 | Dense 600 dpi bilevel (large JB2) | **DjVuLibre** | ~2.6× (sequential ZP decoder) |
 | Document open / parse | **djvu-rs** | ~10–30× |
 

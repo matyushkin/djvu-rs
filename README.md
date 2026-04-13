@@ -365,7 +365,7 @@ djvu-rs outputs PNG; ddjvu outputs PPM. djvu-rs startup ≈ 5 ms vs ddjvu ≈ 25
 | Scenario | djvu-rs | DjVuLibre | Notes |
 |----------|---------|-----------|-------|
 | colorbook.djvu, **native** (2260×3669) | **37.4 ms** | — | full IW44 decode |
-| colorbook.djvu, **150 dpi** (848×1376) | 49.1 ms | **6.13 ms** | DjVuLibre uses partial IW44 decode |
+| colorbook.djvu, **150 dpi** (848×1376) | 34.5 ms | **6.13 ms** | DjVuLibre uses partial IW44 decode |
 | Dense 600 dpi bilevel (page 260/520) | 35.6 ms | **13.8 ms** | sequential ZP decoder bottleneck |
 | Document open + parse (520 pages) | **1.9 ms** | ~24–60 ms | **10–30× faster** |
 

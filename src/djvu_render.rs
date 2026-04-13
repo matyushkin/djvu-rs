@@ -751,21 +751,28 @@ fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
 // ── Core compositor ───────────────────────────────────────────────────────────
 
 /// Return the largest power-of-2 IW44 subsample factor for the given render
-/// scale such that the decoded resolution is still ≥ the target resolution
-/// (no upscaling required in the compositor).
+/// scale, allowing up to 1.5× upscaling in the compositor.
 ///
-/// Examples:
+/// The compositor samples the decoded background at `pixel / subsample`, so a
+/// decoded plane that is slightly smaller than the output is fine — the
+/// compositor's nearest-neighbour lookup handles it naturally.  Allowing up to
+/// 1.5× upscaling lets us pick a coarser subsample in many common cases
+/// (e.g. 150 dpi from a 400 dpi source) and skip the high-frequency wavelet
+/// bands, matching the partial-decode strategy used by DjVuLibre.
+///
+/// Examples (with 1.5× tolerance):
 /// - scale=1.0  → 1 (full resolution)
-/// - scale=0.5  → 2 (1/scale=2.0 → 2)
-/// - scale=0.375→ 2 (1/scale=2.67 → 2)
-/// - scale=0.25 → 4 (1/scale=4.0 → 4)
-/// - scale=0.1  → 8 (1/scale=10 → capped at 8)
+/// - scale=0.5  → 2 (1.5/0.5=3.0 → 2)
+/// - scale=0.375→ 4 (1.5/0.375=4.0 → 4)   ← was 2 before fix
+/// - scale=0.25 → 4 (1.5/0.25=6.0 → 4)
+/// - scale=0.1  → 8 (1.5/0.1=15 → capped at 8)
 fn best_iw44_subsample(scale: f32) -> u32 {
     if scale <= 0.0 || !scale.is_finite() || scale >= 1.0 {
         return 1;
     }
-    // Largest power of 2 s.t. s <= floor(1.0 / scale)
-    let max_sub = (1.0_f32 / scale) as u32; // truncating = floor for positive
+    // Allow up to 1.5× upscaling: the compositor handles the coordinate
+    // division, so a slightly-too-small decoded plane is fine.
+    let max_sub = (1.5_f32 / scale) as u32; // truncating = floor for positive
     let mut s = 1u32;
     while s * 2 <= max_sub {
         s *= 2;
@@ -2829,8 +2836,8 @@ mod tests {
         assert_eq!(best_iw44_subsample(0.5), 2, "scale=0.5 → subsample=2");
         assert_eq!(
             best_iw44_subsample(0.375),
-            2,
-            "scale=0.375 → subsample=2 (1/0.375=2.67)"
+            4,
+            "scale=0.375 → subsample=4 (1.5/0.375=4.0, allows 1.5× upscale)"
         );
         assert_eq!(best_iw44_subsample(0.25), 4, "scale=0.25 → subsample=4");
         assert_eq!(
