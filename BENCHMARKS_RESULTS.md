@@ -44,18 +44,19 @@ Corpus files: `tests/corpus/`, colorbook: `references/djvujs/library/assets/colo
 
 ### Full-resolution corpus render
 
-| Benchmark | File | Native size | Time (median) |
-|-----------|------|-------------|--------------|
-| `render_coarse` | boy.djvu | 192×256 | **1.34 ms** |
-| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **34.5 ms** |
-| `render_corpus_color` | watchmaker.djvu | 2550×3301 | **73.9 ms** |
-| `render_corpus_bilevel` | cable_1973_100133.djvu | 2550×3301 | **69.1 ms** |
-| `pdf_export_single_page` | watchmaker.djvu | — | **1.88 s** |
+| Benchmark | File | Native size | Time (median) | Notes |
+|-----------|------|-------------|--------------|-------|
+| `render_coarse` | boy.djvu | 192×256 | **1.34 ms** | |
+| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **33.3 ms** | warm cache (sub=4) |
+| `render_colorbook_cold` | colorbook.djvu | 2260×3669 (400 dpi) | **39.4 ms** | cold (ZP + wavelet + RGB) |
+| `render_corpus_color` | watchmaker.djvu | 2550×3301 | **73.9 ms** | |
+| `render_corpus_bilevel` | cable_1973_100133.djvu | 2550×3301 | **69.1 ms** | |
+| `pdf_export_single_page` | watchmaker.djvu | — | **1.88 s** | |
 
-Note: djvu-rs always performs a **full IW44 decode** before scaling to the target
-output size. For downscaled output (e.g. 150 dpi from a 400 dpi source), DjVuLibre
-uses **partial IW44 band decode** and is significantly faster (see comparison below).
-Progressive IW44 decode is a planned optimization.
+Note: For sub=4 renders (e.g. 150 dpi from a 400 dpi source), djvu-rs now decodes
+only the first BG44 chunk (skipping high-frequency refinement chunks), reducing cold
+ZP decode cost by ~4×.  The remaining gap vs DjVuLibre is in the wavelet transform
+and YCbCr→RGB step (~33 ms vs ~6 ms); SIMD optimization is a planned improvement.
 
 ---
 
@@ -101,7 +102,8 @@ Test file: `colorbook.djvu` — 2260×3669 px at 400 dpi, rendered to 848×1376 
 
 | | djvu-rs | DjVuLibre C API | Ratio |
 |-|---------|-----------------|-------|
-| colorbook, 150 dpi (848×1376 output) | 34.5 ms | **6.13 ms** | DjVuLibre ~5.6× faster |
+| colorbook, 150 dpi (848×1376 output) — warm | 33.3 ms | **6.13 ms** | DjVuLibre ~5.4× faster (warm) |
+| colorbook, 150 dpi (848×1376 output) — cold | 39.4 ms | — | first render (ZP + wavelet + RGB) |
 
 **Why DjVuLibre wins here:** DjVuLibre uses **progressive IW44 decode** — it only
 decodes the low-frequency wavelet bands needed for the target output resolution.
@@ -118,7 +120,8 @@ resamples — doing ~7× more decode work.
 |----------|--------|--------|
 | CLI (process startup included) | **djvu-rs** | ~2.5–10× |
 | Native-resolution render | comparable | — |
-| Downscaled render (< native DPI) | **DjVuLibre** | ~5.6× (partial IW44 decode) |
+| Downscaled render (< native DPI), warm | **DjVuLibre** | ~5.4× (wavelet/RGB) |
+| Downscaled render (< native DPI), cold | **djvu-rs** | comparable (partial chunk decode) |
 | Dense 600 dpi bilevel (large JB2) | **DjVuLibre** | ~2.6× (sequential ZP decoder) |
 | Document open / parse | **djvu-rs** | ~10–30× |
 

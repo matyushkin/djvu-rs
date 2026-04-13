@@ -170,11 +170,16 @@ pub struct DjVuPage {
     shared_djbz: Option<Arc<Vec<u8>>>,
     #[cfg(not(feature = "std"))]
     shared_djbz: Option<Vec<u8>>,
-    /// Lazily decoded BG44 background wavelet image.  Populated on first use;
-    /// subsequent renders call `to_rgb_subsample` directly on the cached image.
+    /// Lazily decoded BG44 background wavelet image (all chunks).  Used for
+    /// full-resolution and half-resolution renders.  Populated on first use.
     /// Only available when the `std` feature is enabled (`OnceLock` requires std).
     #[cfg(feature = "std")]
     bg44_decoded: std::sync::OnceLock<Option<Iw44Image>>,
+    /// Lazily decoded BG44 background wavelet image from the first chunk only.
+    /// Used for sub=4 and sub=8 downscaled renders to avoid decoding the
+    /// high-frequency refinement chunks whose detail is invisible at 1/4 scale.
+    #[cfg(feature = "std")]
+    bg44_decoded_partial: std::sync::OnceLock<Option<Iw44Image>>,
     /// Lazily decoded JB2 shared dictionary.  Populated on first use by
     /// `decoded_shared_dict()` and reused on subsequent renders, avoiding
     /// repeated multi-megabyte allocations.
@@ -192,6 +197,8 @@ impl Clone for DjVuPage {
             // Caches are not cloned — they will be lazily recomputed.
             #[cfg(feature = "std")]
             bg44_decoded: std::sync::OnceLock::new(),
+            #[cfg(feature = "std")]
+            bg44_decoded_partial: std::sync::OnceLock::new(),
             #[cfg(feature = "std")]
             jb2_dict_decoded: std::sync::OnceLock::new(),
         }
@@ -363,6 +370,36 @@ impl DjVuPage {
 
     #[cfg(not(feature = "std"))]
     pub fn decoded_bg44(&self) -> Option<&Iw44Image> {
+        None
+    }
+
+    /// Return a partially-decoded BG44 background image, decoding and caching
+    /// on first call.  Only the first BG44 chunk is decoded — subsequent
+    /// refinement chunks are skipped.  This gives roughly 4× lower ZP decode
+    /// cost at the expense of coarser quantization, which is imperceptible at
+    /// sub=4 (quarter-resolution) or sub=8 output.
+    ///
+    /// Use this instead of [`decoded_bg44`] when `subsample >= 4`.
+    #[cfg(feature = "std")]
+    pub fn decoded_bg44_partial(&self) -> Option<&Iw44Image> {
+        self.bg44_decoded_partial
+            .get_or_init(|| {
+                let chunks = self.bg44_chunks();
+                if chunks.is_empty() {
+                    return None;
+                }
+                let mut img = Iw44Image::new();
+                // Decode only the first chunk; skip high-frequency refinement.
+                if img.decode_chunk(chunks[0]).is_err() {
+                    return None;
+                }
+                if img.width == 0 { None } else { Some(img) }
+            })
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_bg44_partial(&self) -> Option<&Iw44Image> {
         None
     }
 
@@ -1010,6 +1047,7 @@ fn parse_page_from_chunks(
         index,
         shared_djbz,
         bg44_decoded: std::sync::OnceLock::new(),
+        bg44_decoded_partial: std::sync::OnceLock::new(),
         jb2_dict_decoded: std::sync::OnceLock::new(),
     })
 }

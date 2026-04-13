@@ -795,15 +795,19 @@ fn decode_background_chunks(
     max_chunks: usize,
     subsample: u32,
 ) -> Result<Option<Pixmap>, RenderError> {
-    // Fast path: use the cached fully-decoded Iw44Image when all chunks are wanted.
+    // Fast path: use a cached Iw44Image when all chunks are wanted.
+    // For sub >= 4 we use the partial cache (first chunk only) — the high-frequency
+    // refinement in later chunks is imperceptible at quarter-scale output, and skipping
+    // them reduces cold ZP decode cost by ~4×.
     if max_chunks == usize::MAX {
         let bg44_chunks = page.bg44_chunks();
         if !bg44_chunks.is_empty() {
-            // BG44 chunks exist — cache must have a decoded image; None means decode
-            // failed (strict mode propagates the error).
-            let img = page
-                .decoded_bg44()
-                .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+            let img = if subsample >= 4 {
+                page.decoded_bg44_partial()
+            } else {
+                page.decoded_bg44()
+            };
+            let img = img.ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
             return Ok(Some(img.to_rgb_subsample(subsample)?));
         }
         // No BG44 chunks — fall through to the JPEG fallback below.
