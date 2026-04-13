@@ -1010,9 +1010,10 @@ struct CompositeContext<'a> {
     page_w: u32,
     page_h: u32,
     bg: Option<&'a Pixmap>,
-    /// Subsample factor used when decoding `bg` (1 = full resolution, 2 = half, …).
-    /// Page-space coordinates are divided by this before indexing into `bg`.
-    bg_subsample: u32,
+    /// `bg_subsample.trailing_zeros()` where bg_subsample is 1, 2, 4, or 8.
+    /// Using a shift instead of division avoids a UDIV for each `fx / bg_subsample`
+    /// in the inner pixel loop.
+    bg_shift: u32,
     mask: Option<&'a crate::bitmap::Bitmap>,
     /// `mask_sub.trailing_zeros()` where mask_sub is 1 (full-res) or 4 (1/4-res).
     /// Using a shift instead of division avoids a UDIV instruction in the hot path.
@@ -1116,8 +1117,7 @@ fn composite_loop_bilinear(
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                let s = ctx.bg_subsample;
-                sample_bilinear(bg, fx / s, fy / s)
+                sample_bilinear(bg, fx >> ctx.bg_shift, fy >> ctx.bg_shift)
             } else {
                 (255, 255, 255)
             };
@@ -1143,6 +1143,11 @@ fn composite_loop_area_avg(
     fx_step: u32,
     fy_step: u32,
 ) {
+    // Precompute bg step in bg-space (avoid per-pixel division in the inner loop).
+    let bg_sh = ctx.bg_shift;
+    let bg_fx_step = fx_step >> bg_sh;
+    let bg_fy_step = fy_step >> bg_sh;
+
     let row_stride = w as usize * 4;
     for (oy, row) in buf
         .chunks_exact_mut(row_stride)
@@ -1151,6 +1156,8 @@ fn composite_loop_area_avg(
     {
         let oy = oy as u32;
         let fy = (oy + ctx.offset_y) * fy_step;
+        // bg-space fy (shift replaces division by bg_subsample)
+        let bg_fy = fy >> bg_sh;
 
         for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
@@ -1177,8 +1184,9 @@ fn composite_loop_area_avg(
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                let s = ctx.bg_subsample;
-                sample_area_avg(bg, fx / s, fy / s, fx_step / s, fy_step / s)
+                // bg-space fx (shift replaces division by bg_subsample)
+                let bg_fx = fx >> bg_sh;
+                sample_area_avg(bg, bg_fx, bg_fy, bg_fx_step, bg_fy_step)
             } else {
                 (255, 255, 255)
             };
@@ -1296,7 +1304,7 @@ pub fn render_into(
         page_w: page.width() as u32,
         page_h: page.height() as u32,
         bg: bg.as_ref(),
-        bg_subsample,
+        bg_shift: bg_subsample.trailing_zeros(),
         mask: ctx_mask,
         mask_shift,
         fg_palette: fg_palette.as_ref(),
@@ -1397,7 +1405,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: bg.as_ref(),
-            bg_subsample,
+            bg_shift: bg_subsample.trailing_zeros(),
             mask: ctx_mask,
             mask_shift,
             fg_palette: fg_palette.as_ref(),
@@ -1545,7 +1553,7 @@ pub fn render_region(
         page_w: page.width() as u32,
         page_h: page.height() as u32,
         bg: bg.as_ref(),
-        bg_subsample,
+        bg_shift: bg_subsample.trailing_zeros(),
         mask: mask.as_ref(),
         mask_shift: 0,
         fg_palette: fg_palette.as_ref(),
@@ -1664,7 +1672,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: Some(&bg),
-            bg_subsample,
+            bg_shift: bg_subsample.trailing_zeros(),
             mask: None,
             mask_shift: 0,
             fg_palette: None,
@@ -1750,7 +1758,7 @@ pub fn render_progressive(
             page_w: page.width() as u32,
             page_h: page.height() as u32,
             bg: bg.as_ref(),
-            bg_subsample,
+            bg_shift: bg_subsample.trailing_zeros(),
             mask: mask.as_ref(),
             mask_shift: 0,
             fg_palette: fg_palette.as_ref(),
