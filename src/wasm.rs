@@ -12,9 +12,19 @@
 //! await init();
 //! const doc = WasmDocument.from_bytes(new Uint8Array(buffer));
 //! const page = doc.page(0);
+//!
+//! // Full render (all IW44 chunks)
 //! const pixels = page.render(150);   // Uint8ClampedArray, RGBA
 //! const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
 //! ctx.putImageData(img, 0, 0);
+//!
+//! // Progressive render: instant coarse preview, then refine
+//! const coarse = page.render_coarse(150); // undefined for bilevel pages
+//! if (coarse) ctx.putImageData(new ImageData(coarse, page.width_at(150), page.height_at(150)), 0, 0);
+//! for (let n = 0; n < page.bg44_chunk_count(); n++) {
+//!   const refined = page.render_progressive(150, n);
+//!   ctx.putImageData(new ImageData(refined, page.width_at(150), page.height_at(150)), 0, 0);
+//! }
 //! ```
 
 use std::sync::Arc;
@@ -174,7 +184,7 @@ impl WasmPage {
     /// Fast coarse render — decodes only the first BG44 chunk (~5 ms for a
     /// typical color page).
     ///
-    /// Returns `null` for bilevel-only pages (no BG44 data); use
+    /// Returns `undefined` for bilevel-only pages (no BG44 data); use
     /// [`render`] for those.  For color pages the result is a blurry but
     /// instantly visible preview; call [`render_progressive`] or [`render`]
     /// on a Web Worker to produce the final image.
