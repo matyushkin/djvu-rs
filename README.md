@@ -349,22 +349,32 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Measured on Apple M1 Max (Rust 1.92, release profile, `--features parallel`).
-Compared to DjVuLibre 3.5.29 C library (render-only, in-process):
+Measured on Apple M1 Max (Rust 1.92, release profile). DjVuLibre 3.5.29.
 
-| Page type | djvu-rs | libdjvulibre | Ratio |
-|-----------|---------|--------------|-------|
-| Color IW44, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
-| Bilevel JB2, 300 dpi (849×1100 px) | 3.2 ms | 37 ms | **~12× faster** |
-| Bilevel JB2, 600 dpi, sparse (2649×4530 px) | **10.5 ms** | 12.2 ms | **~1.2× faster** |
-| Bilevel JB2, 600 dpi, dense (2649×4530 px) | 36.2 ms | 13.8 ms | ~0.38× (libdjvulibre wins) |
+### CLI comparison (process startup included, 150 dpi output)
 
-Document open + parse: djvu-rs ≈ 1.9 ms vs libdjvulibre ≈ 24–60 ms — **10–30× faster**.
+| File | djvu-rs | ddjvu | Ratio |
+|------|---------|-------|-------|
+| watchmaker.djvu (color IW44, 2550×3301) | **35.8 ms** | 355.3 ms | **~10× faster** |
+| cable_1973.djvu (bilevel JB2, 2550×3301) | **29.5 ms** | 75.0 ms | **~2.5× faster** |
 
-Dense 600 dpi pages remain bottlenecked on the sequential ZP arithmetic decoder.
-All other page types match or beat the C library.
+djvu-rs outputs PNG; ddjvu outputs PPM. djvu-rs startup ≈ 5 ms vs ddjvu ≈ 25–35 ms.
 
-See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full details and methodology.
+### Library-level (render-only, no process overhead)
+
+| Scenario | djvu-rs | DjVuLibre | Notes |
+|----------|---------|-----------|-------|
+| colorbook.djvu, **native** (2260×3669) | **37.4 ms** | — | full IW44 decode |
+| colorbook.djvu, **150 dpi** (848×1376) | 49.1 ms | **6.13 ms** | DjVuLibre uses partial IW44 decode |
+| Dense 600 dpi bilevel (page 260/520) | 35.6 ms | **13.8 ms** | sequential ZP decoder bottleneck |
+| Document open + parse (520 pages) | **1.9 ms** | ~24–60 ms | **10–30× faster** |
+
+**Key insight:** DjVuLibre uses *progressive IW44 decode* — for downscaled output it only
+decodes the wavelet bands needed for the target DPI, skipping high-frequency detail.
+djvu-rs always performs a full decode then resamples. Progressive decode is a planned
+optimization; until then DjVuLibre wins for low-DPI / thumbnail use cases.
+
+See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full Criterion numbers and methodology.
 
 ## Minimum supported Rust version (MSRV)
 
