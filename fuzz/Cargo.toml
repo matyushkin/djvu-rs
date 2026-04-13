@@ -37,6 +37,8 @@ path = "fuzz_targets/fuzz_full.rs"
 test = false
 doc = false
 
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 djvu-rs = { path = ".." }
