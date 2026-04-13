@@ -1088,13 +1088,18 @@ fn composite_loop_bilinear(
     fx_step: u32,
     fy_step: u32,
 ) {
-    for oy in 0..h {
+    let row_stride = w as usize * 4;
+    for (oy, row) in buf
+        .chunks_exact_mut(row_stride)
+        .take(h as usize)
+        .enumerate()
+    {
+        let oy = oy as u32;
         let fy = (oy + ctx.offset_y) * fy_step;
         let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
-        let row_base = oy as usize * w as usize;
 
-        for ox in 0..w {
-            let fx = (ox + ctx.offset_x) * fx_step;
+        for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
+            let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
             let is_fg = ctx
@@ -1117,17 +1122,10 @@ fn composite_loop_bilinear(
                 (255, 255, 255)
             };
 
-            let r = ctx.gamma_lut[r as usize];
-            let g = ctx.gamma_lut[g as usize];
-            let b = ctx.gamma_lut[b as usize];
-
-            let base = (row_base + ox as usize) * 4;
-            if let Some(pixel) = buf.get_mut(base..base + 4) {
-                pixel[0] = r;
-                pixel[1] = g;
-                pixel[2] = b;
-                pixel[3] = 255;
-            }
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+            pixel[3] = 255;
         }
     }
 }
@@ -1145,12 +1143,17 @@ fn composite_loop_area_avg(
     fx_step: u32,
     fy_step: u32,
 ) {
-    for oy in 0..h {
+    let row_stride = w as usize * 4;
+    for (oy, row) in buf
+        .chunks_exact_mut(row_stride)
+        .take(h as usize)
+        .enumerate()
+    {
+        let oy = oy as u32;
         let fy = (oy + ctx.offset_y) * fy_step;
-        let row_base = oy as usize * w as usize;
 
-        for ox in 0..w {
-            let fx = (ox + ctx.offset_x) * fx_step;
+        for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
+            let fx = (ox as u32 + ctx.offset_x) * fx_step;
 
             let is_fg = ctx.mask.is_some_and(|m| {
                 if ctx.mask_sub > 1 {
@@ -1180,17 +1183,10 @@ fn composite_loop_area_avg(
                 (255, 255, 255)
             };
 
-            let r = ctx.gamma_lut[r as usize];
-            let g = ctx.gamma_lut[g as usize];
-            let b = ctx.gamma_lut[b as usize];
-
-            let base = (row_base + ox as usize) * 4;
-            if let Some(pixel) = buf.get_mut(base..base + 4) {
-                pixel[0] = r;
-                pixel[1] = g;
-                pixel[2] = b;
-                pixel[3] = 255;
-            }
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+            pixel[3] = 255;
         }
     }
 }
