@@ -311,6 +311,70 @@ fn bench_iw44_to_rgb_large(c: &mut Criterion) {
     });
 }
 
+/// Benchmark: `to_rgb_subsample(sub)` on a pre-decoded colorbook page.
+///
+/// Isolates wavelet reconstruction + YCbCr→RGBA from ZP decode.
+/// Uses the partial-decode path (first chunk only) to match the production path
+/// for sub=4 renders.
+fn bench_iw44_to_rgb_colorbook_sub(c: &mut Criterion) {
+    let path = assets_path().join("colorbook.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_iw44_to_rgb_colorbook_sub: colorbook.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => {
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => {
+            return;
+        }
+    };
+    let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
+    if chunks.is_empty() {
+        return;
+    }
+
+    // Decode only first chunk to match the partial-decode production path.
+    let mut img_partial = djvu_rs::iw44_new::Iw44Image::new();
+    if img_partial.decode_chunk(&chunks[0]).is_err() {
+        return;
+    }
+
+    // Decode all chunks for the full-resolution reference.
+    let mut img_full = djvu_rs::iw44_new::Iw44Image::new();
+    for chunk in &chunks {
+        if img_full.decode_chunk(chunk).is_err() {
+            break;
+        }
+    }
+
+    let mut group = c.benchmark_group("iw44_to_rgb_colorbook");
+    group.bench_function("sub1_full_decode", |b| {
+        b.iter(|| {
+            let _ = black_box(img_full.to_rgb());
+        });
+    });
+    group.bench_function("sub4_partial_decode", |b| {
+        b.iter(|| {
+            let _ = black_box(img_partial.to_rgb_subsample(4));
+        });
+    });
+    group.bench_function("sub2_partial_decode", |b| {
+        b.iter(|| {
+            let _ = black_box(img_partial.to_rgb_subsample(2));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -321,5 +385,6 @@ criterion_group!(
     bench_jb2_decode_large,
     bench_iw44_decode_large_all_chunks,
     bench_iw44_to_rgb_large,
+    bench_iw44_to_rgb_colorbook_sub,
 );
 criterion_main!(benches);

@@ -863,10 +863,19 @@ fn decode_background_chunks_permissive(
 
 /// Decode the JB2 mask (Sjbz chunk) without blit tracking.
 ///
-/// Delegates to [`DjVuPage::extract_mask`] so that the shared DJVI dictionary
-/// (`shared_djbz`) is used as a fallback when there is no inline Djbz chunk.
+/// Uses the page-level cache (`decoded_mask`) so that repeated renders of the
+/// same page (e.g. at different DPI levels) skip the ZP arithmetic decode.
+/// The cached `Bitmap` is cloned cheaply (1 MB memcopy) rather than re-running
+/// the full 8+ ms JB2 decode.
 fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderError> {
-    page.extract_mask().map_err(RenderError::from)
+    match page.decoded_mask() {
+        Some(bm) => Ok(Some(bm.clone())),
+        None if page.find_chunk(b"Sjbz").is_some() => {
+            // Cache miss means decode failed; propagate via fresh decode for the error.
+            page.extract_mask().map_err(RenderError::from)
+        }
+        None => Ok(None),
+    }
 }
 
 /// Decode the JB2 mask with per-pixel blit index tracking.
@@ -896,15 +905,12 @@ fn decode_fg_palette_full(page: &DjVuPage) -> Result<Option<FgbzPalette>, Render
 
 /// Decode the FG44 foreground layer.
 ///
-/// Falls back to FGjp (JPEG-encoded foreground) when no FG44 chunks are present.
+/// Uses the page-level cache (`decoded_fg44`) so that repeated renders skip
+/// the IW44 ZP decode. Falls back to FGjp (JPEG) when no FG44 chunks are present.
 fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
     let fg44_chunks = page.fg44_chunks();
     if !fg44_chunks.is_empty() {
-        let mut img = Iw44Image::new();
-        for chunk_data in &fg44_chunks {
-            img.decode_chunk(chunk_data)?;
-        }
-        return Ok(Some(img.to_rgb()?));
+        return Ok(page.decoded_fg44().cloned());
     }
 
     // Fall back to JPEG-encoded foreground if present.
@@ -1008,6 +1014,9 @@ struct CompositeContext<'a> {
     /// Page-space coordinates are divided by this before indexing into `bg`.
     bg_subsample: u32,
     mask: Option<&'a crate::bitmap::Bitmap>,
+    /// Subsample factor for `mask` (1 = full-resolution, 4 = 1/4-res max-pool).
+    /// Page-space coordinates are divided by this before the single-bit lookup.
+    mask_sub: u32,
     fg_palette: Option<&'a FgbzPalette>,
     /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
     blit_map: Option<&'a [i32]>,
@@ -1143,9 +1152,16 @@ fn composite_loop_area_avg(
         for ox in 0..w {
             let fx = (ox + ctx.offset_x) * fx_step;
 
-            let is_fg = ctx
-                .mask
-                .is_some_and(|m| mask_box_any(m, fx, fy, fx_step, fy_step));
+            let is_fg = ctx.mask.is_some_and(|m| {
+                if ctx.mask_sub > 1 {
+                    // Single-bit lookup in pre-downsampled mask
+                    let px = (fx >> FRACBITS) / ctx.mask_sub;
+                    let py = (fy >> FRACBITS) / ctx.mask_sub;
+                    px < m.width && py < m.height && m.get(px, py)
+                } else {
+                    mask_box_any(m, fx, fy, fx_step, fy_step)
+                }
+            });
 
             let (r, g, b) = if is_fg {
                 if let Some(pal) = ctx.fg_palette {
@@ -1270,13 +1286,23 @@ pub fn render_into(
     };
     let fg44 = decode_fg44(page)?;
 
+    // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
+    // 4-9 lookups per pixel in the full-res mask).
+    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
+    let (ctx_mask, mask_sub): (Option<&crate::bitmap::Bitmap>, u32) = if use_sub4_mask {
+        (page.decoded_mask_sub4(), 4)
+    } else {
+        (mask.as_ref().map(|m| m as &_), 1)
+    };
+
     let ctx = CompositeContext {
         opts,
         page_w: page.width() as u32,
         page_h: page.height() as u32,
         bg: bg.as_ref(),
         bg_subsample,
-        mask: mask.as_ref(),
+        mask: ctx_mask,
+        mask_sub,
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
@@ -1358,6 +1384,15 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         mask
     };
 
+    // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
+    // 4-9 lookups per pixel in the full-res mask).
+    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
+    let (ctx_mask, mask_sub): (Option<&crate::bitmap::Bitmap>, u32) = if use_sub4_mask {
+        (page.decoded_mask_sub4(), 4)
+    } else {
+        (mask.as_ref().map(|m| m as &_), 1)
+    };
+
     let mut pm = Pixmap::white(w, h);
 
     {
@@ -1367,7 +1402,8 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             page_h: page.height() as u32,
             bg: bg.as_ref(),
             bg_subsample,
-            mask: mask.as_ref(),
+            mask: ctx_mask,
+            mask_sub,
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
@@ -1515,6 +1551,7 @@ pub fn render_region(
         bg: bg.as_ref(),
         bg_subsample,
         mask: mask.as_ref(),
+        mask_sub: 1,
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
@@ -1633,6 +1670,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             bg: Some(&bg),
             bg_subsample,
             mask: None,
+            mask_sub: 1,
             fg_palette: None,
             blit_map: None,
             fg44: None,
@@ -1718,6 +1756,7 @@ pub fn render_progressive(
             bg: bg.as_ref(),
             bg_subsample,
             mask: mask.as_ref(),
+            mask_sub: 1,
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
