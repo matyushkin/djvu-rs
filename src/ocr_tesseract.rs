@@ -88,18 +88,18 @@ fn parse_hocr_to_zones(hocr: &str, page_w: u32, page_h: u32) -> Vec<TextZone> {
             }
         } else if line.contains("ocr_line") {
             // If we have accumulated words, flush them into a line zone
-            if !words.is_empty() {
-                if let Some(mut line_zone) = parse_hocr_element(line, TextZoneKind::Line) {
-                    line_zone.children = core::mem::take(&mut words);
-                    // Concatenate children text
-                    line_zone.text = line_zone
-                        .children
-                        .iter()
-                        .map(|w| w.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    lines.push(line_zone);
-                }
+            if !words.is_empty()
+                && let Some(mut line_zone) = parse_hocr_element(line, TextZoneKind::Line)
+            {
+                line_zone.children = core::mem::take(&mut words);
+                // Concatenate children text
+                line_zone.text = line_zone
+                    .children
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(line_zone);
             }
             words.clear();
         }
@@ -156,9 +156,7 @@ fn parse_hocr_element(html: &str, kind: TextZoneKind) -> Option<TextZone> {
 fn parse_bbox(s: &str) -> Option<Rect> {
     let idx = s.find("bbox ")?;
     let rest = &s[idx + 5..];
-    let end = rest
-        .find(|c: char| c == ';' || c == '"' || c == '\'')
-        .unwrap_or(rest.len());
+    let end = rest.find([';', '"', '\'']).unwrap_or(rest.len());
     let coords: Vec<u32> = rest[..end]
         .split_whitespace()
         .filter_map(|n| n.parse().ok())
