@@ -16,6 +16,12 @@ enum Cmd {
     Info {
         /// Path to the DjVu file.
         file: PathBuf,
+        /// Print only the page count as a plain integer (useful for scripting).
+        #[arg(short, long, conflicts_with = "json")]
+        count: bool,
+        /// Output info as JSON.
+        #[arg(short, long)]
+        json: bool,
     },
     /// Render pages to PNG, PDF, or CBZ.
     Render {
@@ -175,7 +181,7 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Cmd::Info { file } => cmd_info(&file),
+        Cmd::Info { file, count, json } => cmd_info(&file, count, json),
         Cmd::Render {
             file,
             page,
@@ -290,9 +296,35 @@ fn parse_page_range(s: &str) -> Result<(usize, usize), Box<dyn std::error::Error
 
 // ── info ──────────────────────────────────────────────────────────────────────
 
-fn cmd_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_info(path: &Path, count_only: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let doc = open(path)?;
     let count = doc.page_count();
+
+    if count_only {
+        println!("{count}");
+        return Ok(());
+    }
+
+    if json {
+        let mut out = String::from("{\"pages\":[");
+        for i in 0..count {
+            let page = doc.page(i)?;
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"page\":{},\"width\":{},\"height\":{},\"dpi\":{}}}",
+                i + 1,
+                page.width(),
+                page.height(),
+                page.dpi(),
+            ));
+        }
+        out.push_str(&format!("],\"count\":{count}}}"));
+        println!("{out}");
+        return Ok(());
+    }
+
     println!("Pages: {count}");
     for i in 0..count {
         let page = doc.page(i)?;
