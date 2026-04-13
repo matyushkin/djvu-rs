@@ -224,7 +224,30 @@ impl Jbm {
     /// This is the pool-aware alternative to `crop_to_content()`: it performs
     /// the same crop but moves the (now-unused) full-size backing buffer back
     /// into `pool` so it can be reused for the next symbol decode.
+    ///
+    /// Fast path: if all four border edges already have content (i.e. the bitmap
+    /// is already tight), skip the O(w×h) full scan and copy entirely — just
+    /// return `self` directly.  This handles the common case where the JB2
+    /// encoder already provided tight bounding box dimensions.
     fn crop_and_recycle(self, pool: &mut Vec<u8>) -> Jbm {
+        if self.width > 0 && self.height > 0 {
+            let w = self.width as usize;
+            let h = self.height as usize;
+            let data = &self.data;
+            // Check whether all four border edges contain at least one set pixel.
+            // If so the symbol is already tight and no cropping is needed.
+            let top_has = data[..w].iter().any(|&b| b != 0);
+            let bot_has = data[(h - 1) * w..h * w].iter().any(|&b| b != 0);
+            let left_has = (0..h).any(|r| data[r * w] != 0);
+            let right_has = (0..h).any(|r| data[r * w + w - 1] != 0);
+            if top_has && bot_has && left_has && right_has {
+                // Already tight — return self directly without copying.
+                // Pre-allocate the pool with the same capacity so the next
+                // new_from_pool call can reuse it without a realloc.
+                *pool = Vec::with_capacity(self.data.len());
+                return self;
+            }
+        }
         let cropped = self.crop_to_content();
         // Move our data buffer back to the pool (it may be larger than `cropped.data`)
         *pool = self.data;
@@ -316,14 +339,10 @@ fn check_blit_budget(sym: &Jbm, total: &mut usize) -> Result<(), Jb2Error> {
     }
     Ok(())
 }
-
 /// Decode one row of a direct-mode JB2 bitmap with inline ZP arithmetic.
 ///
-/// Copies the five hot ZP fields (`a`, `c`, `fence`, `bit_buf`, `bit_count`)
-/// into true stack-local variables so LLVM can keep them in ARM64/x86-64
-/// registers across the entire row without save/restore on every pixel.
-/// The `decode_bit` abstraction boundary prevents this otherwise: even with
-/// `#[inline(always)]`, the compiler conservatively spills through `&mut self`.
+/// Extracts the five hot ZP fields to true stack-locals so LLVM keeps them
+/// in registers throughout the row without spilling through the struct pointer.
 #[inline(never)]
 fn decode_direct_row(
     zp: &mut ZpDecoder<'_>,
@@ -334,16 +353,14 @@ fn decode_direct_row(
 ) {
     use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 
-    // ── Extract hot ZP state to true locals ──────────────────────────────────
-    let mut a = zp.a;
-    let mut c = zp.c;
-    let mut fence = zp.fence;
+    let mut a: u32 = zp.a;
+    let mut c: u32 = zp.c;
+    let mut fence: u32 = zp.fence;
     let mut bit_buf = zp.bit_buf;
     let mut bit_count = zp.bit_count;
     let data = zp.data;
     let mut pos = zp.pos;
 
-    // Inline read_byte: returns 0xFF on exhaustion (same as ZpDecoder::read_byte).
     macro_rules! read_byte {
         () => {{
             let b = if pos < data.len() { data[pos] } else { 0xff };
@@ -351,8 +368,6 @@ fn decode_direct_row(
             b as u32
         }};
     }
-
-    // Inline refill_buffer: fill bit_buf until bit_count > 24.
     macro_rules! refill {
         () => {
             while bit_count <= 24 {
@@ -361,15 +376,13 @@ fn decode_direct_row(
             }
         };
     }
-
-    // Inline renormalize (called after LPS event).
     macro_rules! renorm {
         () => {{
-            let shift = a.leading_ones();
+            let shift = (a as u16).leading_ones();
             bit_count -= shift as i32;
-            a = (a as u32).wrapping_shl(shift) as u16;
+            a = (a << shift) & 0xffff;
             let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-            c = ((c as u32) << shift | (bit_buf >> (bit_count as u32 & 31)) & mask) as u16;
+            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
             if bit_count < 16 {
                 refill!();
             }
@@ -377,74 +390,68 @@ fn decode_direct_row(
         }};
     }
 
-    // ── Rolling-window initialisation (same as decode_bitmap_direct) ─────────
     let pix = |row: &[u8], col: usize| -> u32 { row.get(col).copied().unwrap_or(0) as u32 };
     let w = row_slice.len();
     let mut r2 = pix(rp2, 0) << 1 | pix(rp2, 1);
     let mut r1 = pix(rp1, 0) << 2 | pix(rp1, 1) << 1 | pix(rp1, 2);
     let mut r0: u32 = 0;
-    let mid_end = if rp1.len() >= w && rp2.len() >= w {
-        w.saturating_sub(4)
+
+    let (rp2_off, rp1_off) = if w >= 3 && rp2.len() >= w && rp1.len() >= w {
+        (&rp2[2..w], &rp1[3..w])
     } else {
-        0
+        (&rp2[..0], &rp1[..0])
     };
+    let mid_end = rp2_off.len().min(rp1_off.len());
 
-    // ── Hot loop ─────────────────────────────────────────────────────────────
-    for (col, out) in row_slice.iter_mut().enumerate() {
-        let idx = (((r2 << 7) | (r1 << 2) | r0) & 1023) as usize;
-
-        // ── Inline decode_bit ──────────────────────────────────────────────
-        let state = ctx[idx] as usize;
-        let mps_bit = state & 1;
-        let z = a as u32 + PROB[state] as u32;
-
-        let bit = if z <= fence as u32 {
-            // Fast path: no renorm, no context update needed.
-            a = z as u16;
-            mps_bit != 0
-        } else {
-            let boundary = 0x6000u32 + ((a as u32 + z) >> 2);
-            let z_clamped = z.min(boundary);
-            if z_clamped > c as u32 {
-                // LPS event
-                let complement = 0x10000u32 - z_clamped;
-                a = a.wrapping_add(complement as u16);
-                c = c.wrapping_add(complement as u16);
-                ctx[idx] = LPS_NEXT[state];
-                renorm!();
-                (1 - mps_bit) != 0
-            } else {
-                // MPS event with possible state advance
-                if a >= THRESHOLD[state] {
-                    ctx[idx] = MPS_NEXT[state];
-                }
-                bit_count -= 1;
-                a = (z_clamped << 1) as u16;
-                c = ((c as u32) << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) as u16;
-                if bit_count < 16 {
-                    refill!();
-                }
-                fence = c.min(0x7fff);
+    macro_rules! decode_step {
+        ($out:expr, $n2:expr, $n1:expr) => {{
+            let idx = (((r2 << 7) | (r1 << 2) | r0) & 1023) as usize;
+            let state = ctx[idx] as usize;
+            let mps_bit = state & 1;
+            let z = a + PROB[state] as u32;
+            let bit = if z <= fence {
+                a = z;
                 mps_bit != 0
-            }
-        };
-
-        if bit {
-            *out = 1;
-        }
-
-        // Advance rolling windows (fast middle / safe suffix split).
-        if col < mid_end {
-            r2 = ((r2 << 1) & 0b111) | rp2[col + 2] as u32;
-            r1 = ((r1 << 1) & 0b11111) | rp1[col + 3] as u32;
-        } else {
-            r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
-            r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
-        }
-        r0 = ((r0 << 1) & 0b11) | bit as u32;
+            } else {
+                let boundary = 0x6000u32 + ((a + z) >> 2);
+                let z_clamped = z.min(boundary);
+                if z_clamped > c {
+                    let complement = 0x10000u32 - z_clamped;
+                    a = (a + complement) & 0xffff;
+                    c = (c + complement) & 0xffff;
+                    ctx[idx] = LPS_NEXT[state];
+                    renorm!();
+                    (1 - mps_bit) != 0
+                } else {
+                    if a >= THRESHOLD[state] as u32 {
+                        ctx[idx] = MPS_NEXT[state];
+                    }
+                    bit_count -= 1;
+                    a = (z_clamped << 1) & 0xffff;
+                    c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                    if bit_count < 16 {
+                        refill!();
+                    }
+                    fence = c.min(0x7fff);
+                    mps_bit != 0
+                }
+            };
+            *$out = bit as u8;
+            r2 = ((r2 << 1) & 0b111) | ($n2 as u32);
+            r1 = ((r1 << 1) & 0b11111) | ($n1 as u32);
+            r0 = ((r0 << 1) & 0b11) | bit as u32;
+        }};
     }
 
-    // ── Write ZP state back ───────────────────────────────────────────────────
+    let (fast_slice, slow_slice) = row_slice.split_at_mut(mid_end);
+    for (out, (n2, n1)) in fast_slice.iter_mut().zip(rp2_off.iter().zip(rp1_off)) {
+        decode_step!(out, *n2, *n1);
+    }
+    for (i, out) in slow_slice.iter_mut().enumerate() {
+        let col = i + mid_end;
+        decode_step!(out, pix(rp2, col + 2), pix(rp1, col + 3));
+    }
+
     zp.a = a;
     zp.c = c;
     zp.fence = fence;
@@ -464,6 +471,7 @@ fn decode_direct_row(
 fn decode_ref_row(
     zp: &mut ZpDecoder<'_>,
     ctx: &mut [u8; 2048],
+    ctx_p: &mut [u16; 2048],
     cbm_row_mut: &mut [u8],
     cbm_r1: &[u8],
     mbm_r2: &[u8],
@@ -476,9 +484,9 @@ fn decode_ref_row(
 ) {
     use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 
-    let mut a = zp.a;
-    let mut c = zp.c;
-    let mut fence = zp.fence;
+    let mut a: u32 = zp.a;
+    let mut c: u32 = zp.c;
+    let mut fence: u32 = zp.fence;
     let mut bit_buf = zp.bit_buf;
     let mut bit_count = zp.bit_count;
     let data = zp.data;
@@ -501,11 +509,11 @@ fn decode_ref_row(
     }
     macro_rules! renorm {
         () => {{
-            let shift = a.leading_ones();
+            let shift = (a as u16).leading_ones();
             bit_count -= shift as i32;
-            a = (a as u32).wrapping_shl(shift) as u16;
+            a = (a << shift) & 0xffff;
             let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-            c = ((c as u32) << shift | (bit_buf >> (bit_count as u32 & 31)) & mask) as u16;
+            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
             if bit_count < 16 {
                 refill!();
             }
@@ -532,29 +540,34 @@ fn decode_ref_row(
         let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
 
         let state = ctx[idx as usize] as usize;
+        let prob = ctx_p[idx as usize] as u32; // parallel load: precomputed PROB[state]
         let mps_bit = state & 1;
-        let z = a as u32 + PROB[state] as u32;
+        let z = a + prob;
 
-        let bit = if z <= fence as u32 {
-            a = z as u16;
+        let bit = if z <= fence {
+            a = z;
             mps_bit != 0
         } else {
-            let boundary = 0x6000u32 + ((a as u32 + z) >> 2);
+            let boundary = 0x6000u32 + ((a + z) >> 2);
             let z_clamped = z.min(boundary);
-            if z_clamped > c as u32 {
+            if z_clamped > c {
                 let complement = 0x10000u32 - z_clamped;
-                a = a.wrapping_add(complement as u16);
-                c = c.wrapping_add(complement as u16);
-                ctx[idx as usize] = LPS_NEXT[state];
+                a = (a + complement) & 0xffff;
+                c = (c + complement) & 0xffff;
+                let next = LPS_NEXT[state];
+                ctx[idx as usize] = next;
+                ctx_p[idx as usize] = PROB[next as usize];
                 renorm!();
                 (1 - mps_bit) != 0
             } else {
-                if a >= THRESHOLD[state] {
-                    ctx[idx as usize] = MPS_NEXT[state];
+                if a >= THRESHOLD[state] as u32 {
+                    let next = MPS_NEXT[state];
+                    ctx[idx as usize] = next;
+                    ctx_p[idx as usize] = PROB[next as usize];
                 }
                 bit_count -= 1;
-                a = (z_clamped << 1) as u16;
-                c = ((c as u32) << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) as u16;
+                a = (z_clamped << 1) & 0xffff;
+                c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
                 if bit_count < 16 {
                     refill!();
                 }
@@ -596,24 +609,17 @@ fn decode_bitmap_direct(
         return Ok(Jbm::new_from_pool(width, height, pool));
     }
     let mut bm = Jbm::new_from_pool(width, height, pool);
-
     let w = width as usize;
     let h = height as usize;
     debug_assert_eq!(bm.data.len(), w * h);
 
-    for row in (0..height).rev() {
-        let r = row as usize;
+    for row in (0..h).rev() {
+        let r = row;
         let row_off = r * w;
-        // row+1 and row+2 are always decoded before the current row (top-to-bottom).
-        // Split bm.data at the row+1 boundary so we can hold a mutable reference to
-        // the current row while reading from rows above — the slices are non-overlapping.
         let rp1_start = (r + 1) * w;
-        let total = bm.data.len();
-        let split = rp1_start.min(total);
+        let split = rp1_start.min(bm.data.len());
         let (lower, upper) = bm.data.split_at_mut(split);
-        // current row — always in bounds (r < h)
         let row_slice = &mut lower[row_off..row_off + w];
-        // row+1 and row+2: may be empty if near the top of the bitmap
         let rp1: &[u8] = if upper.len() >= w { &upper[..w] } else { upper };
         let rp2: &[u8] = if upper.len() >= 2 * w {
             &upper[w..2 * w]
@@ -622,7 +628,6 @@ fn decode_bitmap_direct(
         } else {
             &[]
         };
-
         decode_direct_row(zp, ctx, row_slice, rp1, rp2);
     }
     Ok(bm)
@@ -639,6 +644,7 @@ fn decode_bitmap_direct(
 fn decode_bitmap_ref(
     zp: &mut ZpDecoder<'_>,
     ctx: &mut [u8; 2048],
+    ctx_p: &mut [u16; 2048],
     width: i32,
     height: i32,
     mbm: &Jbm,
@@ -713,6 +719,7 @@ fn decode_bitmap_ref(
         decode_ref_row(
             zp,
             ctx,
+            ctx_p,
             cbm_row_mut,
             cbm_r1,
             mbm_r2,
@@ -821,46 +828,108 @@ fn blit_indexed(
     }
 }
 
-fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32) {
-    // Guard: negative/zero dimensions would wrap `width as usize` to a huge value
-    // in the fast-path loop, causing an effectively infinite iteration count.
-    if symbol.width <= 0 || symbol.height <= 0 {
+// ────────────────────────────────────────────────────────────────────────────
+// Blit symbol directly into a packed Bitmap (no intermediate byte-per-pixel buffer)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Blit a symbol into a packed Bitmap with JB2→bitmap coordinate flip.
+///
+/// JB2 uses y=0 at the bottom; `Bitmap` uses y=0 at the top.
+/// Symbol data is byte-per-pixel (0 = white, non-zero = black).
+fn blit_to_bitmap(bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32) {
+    if sym.width <= 0 || sym.height <= 0 {
         return;
     }
-    // Fast path: symbol completely within page bounds.
-    // Use checked_add to guard against i32 overflow in the bounds test.
-    let fits = x >= 0
+    let bw = bm.width as i32;
+    let bh = bm.height as i32;
+    let stride = bm.row_stride();
+    let sw = sym.width;
+    let sh = sym.height;
+
+    // Fast path: symbol completely within bitmap bounds.
+    if x >= 0
         && y >= 0
-        && x.checked_add(symbol.width).is_some_and(|v| v <= page_w)
-        && y.checked_add(symbol.height).is_some_and(|v| v <= page_h);
-    if fits {
-        let pw = page_w as usize;
-        let sw = symbol.width as usize;
-        for row in 0..symbol.height as usize {
-            let src_off = row * sw;
-            let dst_off = (y as usize + row) * pw + x as usize;
-            // Branchless OR: s is 0 or 1, so d |= s sets d to 1 if s is black.
-            // Eliminates the branch for LLVM auto-vectorization.
-            for (d, &s) in page[dst_off..dst_off + sw]
-                .iter_mut()
-                .zip(symbol.data[src_off..src_off + sw].iter())
-            {
-                *d |= s;
+        && x.checked_add(sw).is_some_and(|v| v <= bw)
+        && y.checked_add(sh).is_some_and(|v| v <= bh)
+    {
+        let x_off = x as usize;
+        let byte_off = x_off / 8;
+        let bit_off = x_off % 8;
+        let sw_u = sw as usize;
+        // sym_row 0 is the bottom row of the symbol in JB2 coords.
+        // In the Bitmap (top=row 0), it maps to row: bh-1-y.
+        let bm_y_base = (bm.height as usize) - 1 - y as usize;
+
+        if bit_off == 0 {
+            // Byte-aligned: use pack_byte for 8-pixel chunks.
+            let full = sw_u / 8;
+            let rem = sw_u % 8;
+            for sym_row in 0..sh as usize {
+                let bm_y = bm_y_base - sym_row;
+                let row_data = &sym.data[sym_row * sw_u..(sym_row + 1) * sw_u];
+                let out = &mut bm.data[bm_y * stride..];
+                for i in 0..full {
+                    let s: &[u8; 8] = row_data[i * 8..(i + 1) * 8].try_into().unwrap();
+                    out[byte_off + i] |= pack_byte(s);
+                }
+                if rem > 0 {
+                    let base = full * 8;
+                    let mut byte_val = 0u8;
+                    for j in 0..rem {
+                        if row_data[base + j] != 0 {
+                            byte_val |= 0x80u8 >> j;
+                        }
+                    }
+                    out[byte_off + full] |= byte_val;
+                }
+            }
+        } else {
+            // Unaligned: each 8-pixel packed byte straddles two output bytes.
+            let rshift = bit_off;
+            let lshift = 8 - bit_off;
+            let full = sw_u / 8;
+            let rem = sw_u % 8;
+            for sym_row in 0..sh as usize {
+                let bm_y = bm_y_base - sym_row;
+                let row_data = &sym.data[sym_row * sw_u..(sym_row + 1) * sw_u];
+                let row_off = bm_y * stride;
+                for i in 0..full {
+                    let s: &[u8; 8] = row_data[i * 8..(i + 1) * 8].try_into().unwrap();
+                    let packed = pack_byte(s);
+                    bm.data[row_off + byte_off + i] |= packed >> rshift;
+                    bm.data[row_off + byte_off + i + 1] |= packed << lshift;
+                }
+                if rem > 0 {
+                    let base = full * 8;
+                    let mut byte_val = 0u8;
+                    for j in 0..rem {
+                        if row_data[base + j] != 0 {
+                            byte_val |= 0x80u8 >> j;
+                        }
+                    }
+                    bm.data[row_off + byte_off + full] |= byte_val >> rshift;
+                    let overflow = row_off + byte_off + full + 1;
+                    if overflow < bm.data.len() {
+                        bm.data[overflow] |= byte_val << lshift;
+                    }
+                }
             }
         }
     } else {
-        // Slow path: clipped
-        for row in 0..symbol.height {
-            let py = y + row;
-            if py < 0 || py >= page_h {
+        // Slow path: clipped blit, per-pixel bounds checks.
+        for sym_row in 0..sh {
+            let bm_y = bh - 1 - y - sym_row;
+            if bm_y < 0 || bm_y >= bh {
                 continue;
             }
-            for col in 0..symbol.width {
-                if symbol.get(row, col) != 0 {
+            let bm_y = bm_y as usize;
+            let row_off = bm_y * stride;
+            for col in 0..sw {
+                if sym.data[(sym_row * sw + col) as usize] != 0 {
                     let px = x + col;
-                    if px >= 0 && px < page_w {
-                        let idx = (py * page_w + px) as usize;
-                        page[idx] = 1;
+                    if px >= 0 && px < bw {
+                        let px = px as usize;
+                        bm.data[row_off + px / 8] |= 0x80u8 >> (px % 8);
                     }
                 }
             }
@@ -871,6 +940,20 @@ fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32)
 // ────────────────────────────────────────────────────────────────────────────
 // Convert internal page buffer (row 0 = bottom) to Bitmap (row 0 = top)
 // ────────────────────────────────────────────────────────────────────────────
+
+/// Pack a single byte: each of the 8 input bytes (0 or 1) into one output byte.
+/// Bit 7 = src[0], bit 6 = src[1], …, bit 0 = src[7].
+#[inline(always)]
+fn pack_byte(s: &[u8; 8]) -> u8 {
+    ((s[0] != 0) as u8) << 7
+        | ((s[1] != 0) as u8) << 6
+        | ((s[2] != 0) as u8) << 5
+        | ((s[3] != 0) as u8) << 4
+        | ((s[4] != 0) as u8) << 3
+        | ((s[5] != 0) as u8) << 2
+        | ((s[6] != 0) as u8) << 1
+        | ((s[7] != 0) as u8)
+}
 
 fn page_to_bitmap(page: &[u8], width: i32, height: i32) -> Bitmap {
     let w = width as usize;
@@ -885,17 +968,17 @@ fn page_to_bitmap(page: &[u8], width: i32, height: i32) -> Bitmap {
         let dst_y = h - 1 - row; // flip: JB2 row 0=bottom → PBM row 0=top
         let dst_off = dst_y * stride;
 
+        // Process 8 source bytes → 1 packed byte.
+        // The fixed-size array slice tells LLVM the chunk is exactly 8 bytes,
+        // allowing it to vectorize the comparison+shift tree.
         for byte_idx in 0..full_bytes {
-            let base = byte_idx * 8;
-            let mut byte_val = 0u8;
-            for bit_pos in 0..8usize {
-                if src_row[base + bit_pos] != 0 {
-                    byte_val |= 0x80u8 >> bit_pos;
-                }
-            }
-            bm.data[dst_off + byte_idx] = byte_val;
+            let s: &[u8; 8] = src_row[byte_idx * 8..(byte_idx + 1) * 8]
+                .try_into()
+                .unwrap();
+            bm.data[dst_off + byte_idx] = pack_byte(s);
         }
 
+        // Partial last byte (< 8 pixels).
         if remaining > 0 {
             let base = full_bytes * 8;
             let mut byte_val = 0u8;
@@ -961,6 +1044,58 @@ fn decode_symbol_coords(
     baseline.add(y);
     *last_right = x + sym_width - 1;
     (x, y)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Working symbol table: zero-copy view of shared dict + local symbols
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Two-part symbol table used during JB2 image/dict decode.
+///
+/// The `shared` slice refers directly to the cached shared dictionary's symbols
+/// (no clone), while `local` holds symbols defined by the stream being decoded.
+/// This avoids deep-copying the (potentially large) shared dictionary on every
+/// `decode_mask()` call.
+struct JbmDict<'a> {
+    shared: &'a [Jbm],
+    local: Vec<Jbm>,
+}
+
+impl<'a> JbmDict<'a> {
+    fn new(shared: &'a [Jbm]) -> Self {
+        JbmDict {
+            shared,
+            local: Vec::new(),
+        }
+    }
+    fn len(&self) -> usize {
+        self.shared.len() + self.local.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.shared.is_empty() && self.local.is_empty()
+    }
+    fn push(&mut self, sym: Jbm) {
+        self.local.push(sym);
+    }
+    fn into_symbols(self) -> Vec<Jbm> {
+        // Used by decode_dictionary to return the complete symbol list.
+        let mut out = self.shared.to_vec();
+        out.extend(self.local);
+        out
+    }
+}
+
+impl core::ops::Index<usize> for JbmDict<'_> {
+    type Output = Jbm;
+    #[inline(always)]
+    fn index(&self, index: usize) -> &Jbm {
+        let n = self.shared.len();
+        if index < n {
+            &self.shared[index]
+        } else {
+            &self.local[index - n]
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1054,6 +1189,7 @@ fn decode_image_with_pool(
     let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = [0u8; 1024];
     let mut refinement_bitmap_ctx = [0u8; 2048];
+    let mut refinement_bitmap_ctx_p = [0x8000u16; 2048];
     let mut total_sym_pixels = 0usize;
     let mut total_blit_pixels = 0usize;
 
@@ -1084,27 +1220,33 @@ fn decode_image_with_pool(
         return Err(Jb2Error::BadHeaderFlag);
     }
 
-    // Populate initial dictionary from shared dict if requested
-    let mut dict: Vec<Jbm> = Vec::new();
-    if initial_dict_length > 0 {
+    // Populate initial dictionary from shared dict — zero-copy: borrow the
+    // cached dict's symbol slice directly rather than deep-cloning it.
+    let initial_symbols: &[Jbm] = if initial_dict_length > 0 {
         match shared_dict {
             Some(sd) => {
                 if initial_dict_length > sd.symbols.len() {
                     return Err(Jb2Error::InheritedDictTooLarge);
                 }
-                dict.extend_from_slice(&sd.symbols[..initial_dict_length]);
+                &sd.symbols[..initial_dict_length]
             }
             None => return Err(Jb2Error::MissingSharedDict),
         }
-    }
+    } else {
+        &[]
+    };
+    let mut dict = JbmDict::new(initial_symbols);
 
-    // Safety cap: ~64M pixels
+    // Safety cap: ~64M pixels (same guard, but now the backing store is 8× smaller).
     const MAX_PIXELS: usize = 64 * 1024 * 1024;
     let page_size = (image_width as usize).saturating_mul(image_height as usize);
     if page_size > MAX_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
-    let mut page = vec![0u8; page_size];
+    // Use a packed 1-bit-per-pixel bitmap as the page buffer instead of a
+    // byte-per-pixel Vec. This is 8× smaller (~1.8 MB vs ~14.5 MB for a 600 dpi
+    // page), fitting in L2 cache and dramatically reducing cache pressure during blits.
+    let mut page_bm = Bitmap::new(image_width as u32, image_height as u32);
 
     // Positioning state
     let mut first_left: i32 = -1;
@@ -1143,7 +1285,7 @@ fn decode_image_with_pool(
                     bm.height,
                 );
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, &bm, x, y);
+                blit_to_bitmap(&mut page_bm, &bm, x, y);
                 dict.push(bm.crop_and_recycle(pool));
             }
 
@@ -1177,7 +1319,7 @@ fn decode_image_with_pool(
                     bm.height,
                 );
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, &bm, x, y);
+                blit_to_bitmap(&mut page_bm, &bm, x, y);
                 bm.recycle_into(pool);
             }
 
@@ -1199,6 +1341,7 @@ fn decode_image_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1219,7 +1362,7 @@ fn decode_image_with_pool(
                     cbm.height,
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, &cbm, x, y);
+                blit_to_bitmap(&mut page_bm, &cbm, x, y);
                 dict.push(cbm.crop_and_recycle(pool));
             }
 
@@ -1241,6 +1384,7 @@ fn decode_image_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1267,6 +1411,7 @@ fn decode_image_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1287,7 +1432,7 @@ fn decode_image_with_pool(
                     cbm.height,
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, &cbm, x, y);
+                blit_to_bitmap(&mut page_bm, &cbm, x, y);
                 cbm.recycle_into(pool);
             }
 
@@ -1319,7 +1464,7 @@ fn decode_image_with_pool(
                 );
                 let sym = &dict[index];
                 check_blit_budget(sym, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, sym, x, y);
+                blit_to_bitmap(&mut page_bm, sym, x, y);
             }
 
             // 8 — non-symbol (halftone), absolute coordinates
@@ -1333,7 +1478,7 @@ fn decode_image_with_pool(
                 let x = left - 1;
                 let y = top - h;
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit(&mut page, image_width, image_height, &bm, x, y);
+                blit_to_bitmap(&mut page_bm, &bm, x, y);
                 bm.recycle_into(pool);
             }
 
@@ -1356,7 +1501,7 @@ fn decode_image_with_pool(
         }
     }
 
-    Ok(page_to_bitmap(&page, image_width, image_height))
+    Ok(page_bm)
 }
 
 /// Same as `decode_image` but tracks per-pixel blit indices.
@@ -1395,6 +1540,7 @@ fn decode_image_indexed_with_pool(
     let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = [0u8; 1024];
     let mut refinement_bitmap_ctx = [0u8; 2048];
+    let mut refinement_bitmap_ctx_p = [0x8000u16; 2048];
     let mut total_sym_pixels = 0usize;
     let mut total_blit_pixels = 0usize;
 
@@ -1420,18 +1566,20 @@ fn decode_image_indexed_with_pool(
         return Err(Jb2Error::BadHeaderFlag);
     }
 
-    let mut dict: Vec<Jbm> = Vec::new();
-    if initial_dict_length > 0 {
+    let initial_symbols_idx: &[Jbm] = if initial_dict_length > 0 {
         match shared_dict {
             Some(sd) => {
                 if initial_dict_length > sd.symbols.len() {
                     return Err(Jb2Error::InheritedDictTooLarge);
                 }
-                dict.extend_from_slice(&sd.symbols[..initial_dict_length]);
+                &sd.symbols[..initial_dict_length]
             }
             None => return Err(Jb2Error::MissingSharedDict),
         }
-    }
+    } else {
+        &[]
+    };
+    let mut dict = JbmDict::new(initial_symbols_idx);
 
     const MAX_PIXELS: usize = 64 * 1024 * 1024;
     let page_size = (image_width as usize).saturating_mul(image_height as usize);
@@ -1546,6 +1694,7 @@ fn decode_image_indexed_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1596,6 +1745,7 @@ fn decode_image_indexed_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1620,6 +1770,7 @@ fn decode_image_indexed_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1757,6 +1908,7 @@ fn decode_dictionary_with_pool(
 
     let mut direct_bitmap_ctx = [0u8; 1024];
     let mut refinement_bitmap_ctx = [0u8; 2048];
+    let mut refinement_bitmap_ctx_p = [0x8000u16; 2048];
     let mut total_sym_pixels = 0usize;
 
     // Preamble
@@ -1778,18 +1930,20 @@ fn decode_dictionary_with_pool(
         return Err(Jb2Error::BadHeaderFlag);
     }
 
-    let mut dict: Vec<Jbm> = Vec::new();
-    if initial_dict_length > 0 {
+    let initial_inh: &[Jbm] = if initial_dict_length > 0 {
         match inherited {
             Some(inh) => {
                 if initial_dict_length > inh.symbols.len() {
                     return Err(Jb2Error::InheritedDictTooLarge);
                 }
-                dict.extend_from_slice(&inh.symbols[..initial_dict_length]);
+                &inh.symbols[..initial_dict_length]
             }
             None => return Err(Jb2Error::MissingSharedDict),
         }
-    }
+    } else {
+        &[]
+    };
+    let mut dict = JbmDict::new(initial_inh);
 
     // Dict streams only accept types 2, 5, 9, 10, 11
     let mut record_count = 0usize;
@@ -1828,6 +1982,7 @@ fn decode_dictionary_with_pool(
                 let cbm = decode_bitmap_ref(
                     &mut zp,
                     &mut refinement_bitmap_ctx,
+                    &mut refinement_bitmap_ctx_p,
                     cbm_w,
                     cbm_h,
                     &dict[index],
@@ -1855,7 +2010,9 @@ fn decode_dictionary_with_pool(
         }
     }
 
-    Ok(Jb2Dict { symbols: dict })
+    Ok(Jb2Dict {
+        symbols: dict.into_symbols(),
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
