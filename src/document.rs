@@ -2,7 +2,7 @@ use crate::bitmap::Bitmap;
 use crate::error::Error;
 use crate::iff::{Chunk, DjvuFile};
 use crate::iw44::IW44Image;
-use crate::jb2::JB2Dict;
+use crate::jb2::Jb2Dict;
 use crate::pixmap::Pixmap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -125,7 +125,7 @@ pub struct Document {
     /// All pages that INCL the same DJVI component share one pointer → one decoded dict.
     /// The pointer is stable because `DjvuFile` owns the underlying byte buffer for the
     /// lifetime of `Document`.
-    dict_cache: RwLock<HashMap<usize, Arc<JB2Dict>>>,
+    dict_cache: RwLock<HashMap<usize, Arc<Jb2Dict>>>,
 }
 
 impl Document {
@@ -340,7 +340,7 @@ impl Document {
     /// The cache is keyed by the address of the raw Djbz bytes, which is stable for the
     /// lifetime of `Document` (the bytes are owned by `DjvuFile`).  All pages that INCL
     /// the same DJVI component point to the same bytes, so they share one cached decode.
-    fn get_or_decode_dict(&self, djbz_data: &[u8]) -> Result<Arc<JB2Dict>, Error> {
+    fn get_or_decode_dict(&self, djbz_data: &[u8]) -> Result<Arc<Jb2Dict>, Error> {
         let key = djbz_data.as_ptr() as usize;
 
         // Fast path: already cached (read lock only).
@@ -571,7 +571,7 @@ impl<'a> Page<'a> {
     /// Decodes the Djbz chunk on the first call and caches the result via
     /// [`Document::get_or_decode_dict`].  Subsequent calls for pages that share
     /// the same INCL component (or the same inline Djbz) are O(1) cache lookups.
-    fn resolve_shared_dict(&self) -> Result<Option<Arc<JB2Dict>>, Error> {
+    fn resolve_shared_dict(&self) -> Result<Option<Arc<Jb2Dict>>, Error> {
         // Check all INCL chunks for an external DJVI component with Djbz
         for incl in self.form.find_all(b"INCL") {
             let ref_id = std::str::from_utf8(incl.data())
