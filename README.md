@@ -5,7 +5,7 @@
 [![CI](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specification.
+Pure-Rust DjVu codec — decode and encode DjVu documents. MIT licensed, no GPL dependencies. Written from the DjVu v3 public specification.
 
 ## Features
 
