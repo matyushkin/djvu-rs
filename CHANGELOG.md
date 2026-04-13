@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/matyushkin/djvu-rs/compare/v0.10.0...v0.11.0) (2026-04-13)
+
+
+### Features
+
+* add BZZ encoder with ZP arithmetic coding ([582432f](https://github.com/matyushkin/djvu-rs/commit/582432f601cf546c9404228af1541ec2067b503e))
+* add NAVM bookmark encoder and ANTa/ANTz annotation encoder ([#133](https://github.com/matyushkin/djvu-rs/issues/133)) ([#136](https://github.com/matyushkin/djvu-rs/issues/136)) ([9e6bf66](https://github.com/matyushkin/djvu-rs/commit/9e6bf662125194fe57be02bed2ce42d87b8c16b7))
+* indirect DJVM — create_indirect() and parse_from_dir() ([#135](https://github.com/matyushkin/djvu-rs/issues/135)) ([#137](https://github.com/matyushkin/djvu-rs/issues/137)) ([d7fbf74](https://github.com/matyushkin/djvu-rs/commit/d7fbf74e45b9f5a85d0f162796709126131ab8a0))
+* IW44 wavelet encoder — BG44/FG44 chunk encoding (issue [#131](https://github.com/matyushkin/djvu-rs/issues/131)) ([#139](https://github.com/matyushkin/djvu-rs/issues/139)) ([10adc4f](https://github.com/matyushkin/djvu-rs/commit/10adc4f61bf8a79f9c4ba74559fb004b31d8968c))
+* JB2 bilevel image encoder — Sjbz chunk encoding (issue [#132](https://github.com/matyushkin/djvu-rs/issues/132)) ([#140](https://github.com/matyushkin/djvu-rs/issues/140)) ([cf280ba](https://github.com/matyushkin/djvu-rs/commit/cf280ba6e1356f1d8f7498c84c57e2759f603b3c))
+* **smmr:** add G4/MMR bilevel image decoder (issue [#134](https://github.com/matyushkin/djvu-rs/issues/134)) ([#138](https://github.com/matyushkin/djvu-rs/issues/138)) ([8bd6e41](https://github.com/matyushkin/djvu-rs/commit/8bd6e4157c885e7a03c0443657d294099fbe7619))
+
+
+### Bug Fixes
+
+* **ci:** enable cli feature for nextest to build djvu binary ([576f12f](https://github.com/matyushkin/djvu-rs/commit/576f12faf154662a3992ac3a20c3c126e32fc798))
+* **ci:** exclude djvu-py from nextest, fix audit advisories ([788b0d3](https://github.com/matyushkin/djvu-rs/commit/788b0d39fc04d1ed28dc5052f2bc88004f106117))
+* **ci:** exclude fuzz/ from workspace to fix cargo-fuzz builds ([330ff0a](https://github.com/matyushkin/djvu-rs/commit/330ff0a28a601629718cf0c12d4e90ab93524621))
+* **jb2_encode:** return empty Vec for zero-dimension bitmaps; unreachable dead branch ([#142](https://github.com/matyushkin/djvu-rs/issues/142)) ([#143](https://github.com/matyushkin/djvu-rs/issues/143)) ([091b657](https://github.com/matyushkin/djvu-rs/commit/091b6573467c67c3c8d487ee82dba24b7c59f136))
+
 ## [0.10.0](https://github.com/matyushkin/djvu-rs/compare/v0.9.0...v0.10.0) (2026-04-10)
 
 
