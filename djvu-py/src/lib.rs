@@ -179,8 +179,8 @@ impl Pixmap {
 }
 
 /// Python module definition.
-#[pymodule]
-fn djvu_rs_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "djvu_rs")]
+fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;
     m.add_class::<Pixmap>()?;
