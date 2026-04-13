@@ -1014,9 +1014,9 @@ struct CompositeContext<'a> {
     /// Page-space coordinates are divided by this before indexing into `bg`.
     bg_subsample: u32,
     mask: Option<&'a crate::bitmap::Bitmap>,
-    /// Subsample factor for `mask` (1 = full-resolution, 4 = 1/4-res max-pool).
-    /// Page-space coordinates are divided by this before the single-bit lookup.
-    mask_sub: u32,
+    /// `mask_sub.trailing_zeros()` where mask_sub is 1 (full-res) or 4 (1/4-res).
+    /// Using a shift instead of division avoids a UDIV instruction in the hot path.
+    mask_shift: u32,
     fg_palette: Option<&'a FgbzPalette>,
     /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
     blit_map: Option<&'a [i32]>,
@@ -1156,10 +1156,10 @@ fn composite_loop_area_avg(
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
 
             let is_fg = ctx.mask.is_some_and(|m| {
-                if ctx.mask_sub > 1 {
-                    // Single-bit lookup in pre-downsampled mask
-                    let px = (fx >> FRACBITS) / ctx.mask_sub;
-                    let py = (fy >> FRACBITS) / ctx.mask_sub;
+                if ctx.mask_shift > 0 {
+                    // Single-bit lookup in pre-downsampled mask (shift replaces division)
+                    let px = fx >> (FRACBITS + ctx.mask_shift);
+                    let py = fy >> (FRACBITS + ctx.mask_shift);
                     px < m.width && py < m.height && m.get(px, py)
                 } else {
                     mask_box_any(m, fx, fy, fx_step, fy_step)
@@ -1285,10 +1285,10 @@ pub fn render_into(
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
     let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
-    let (ctx_mask, mask_sub): (Option<&crate::bitmap::Bitmap>, u32) = if use_sub4_mask {
-        (page.decoded_mask_sub4(), 4)
+    let (ctx_mask, mask_shift) = if use_sub4_mask {
+        (page.decoded_mask_sub4(), 2u32) // sub=4 → shift by 2
     } else {
-        (mask.as_ref().map(|m| m as &_), 1)
+        (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
     };
 
     let ctx = CompositeContext {
@@ -1298,7 +1298,7 @@ pub fn render_into(
         bg: bg.as_ref(),
         bg_subsample,
         mask: ctx_mask,
-        mask_sub,
+        mask_shift,
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
@@ -1383,10 +1383,10 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
     let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
-    let (ctx_mask, mask_sub): (Option<&crate::bitmap::Bitmap>, u32) = if use_sub4_mask {
-        (page.decoded_mask_sub4(), 4)
+    let (ctx_mask, mask_shift) = if use_sub4_mask {
+        (page.decoded_mask_sub4(), 2u32) // sub=4 → shift by 2
     } else {
-        (mask.as_ref().map(|m| m as &_), 1)
+        (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
     };
 
     let mut pm = Pixmap::white(w, h);
@@ -1399,7 +1399,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             bg: bg.as_ref(),
             bg_subsample,
             mask: ctx_mask,
-            mask_sub,
+            mask_shift,
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
@@ -1547,7 +1547,7 @@ pub fn render_region(
         bg: bg.as_ref(),
         bg_subsample,
         mask: mask.as_ref(),
-        mask_sub: 1,
+        mask_shift: 0,
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
@@ -1666,7 +1666,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             bg: Some(&bg),
             bg_subsample,
             mask: None,
-            mask_sub: 1,
+            mask_shift: 0,
             fg_palette: None,
             blit_map: None,
             fg44: None,
@@ -1752,7 +1752,7 @@ pub fn render_progressive(
             bg: bg.as_ref(),
             bg_subsample,
             mask: mask.as_ref(),
-            mask_sub: 1,
+            mask_shift: 0,
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
