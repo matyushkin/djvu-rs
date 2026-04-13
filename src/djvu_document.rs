@@ -180,6 +180,20 @@ pub struct DjVuPage {
     /// high-frequency refinement chunks whose detail is invisible at 1/4 scale.
     #[cfg(feature = "std")]
     bg44_decoded_partial: std::sync::OnceLock<Option<Iw44Image>>,
+    /// Lazily decoded JB2 foreground mask (Sjbz chunk → full-resolution Bitmap).
+    /// Populated on the first call to `decoded_mask()`.  Subsequent renders at
+    /// any scale reuse the same Bitmap via the compositor's coordinate division.
+    #[cfg(feature = "std")]
+    mask_decoded: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
+    /// Lazily computed 1/4-resolution downsampled mask.  Populated on first call
+    /// to `decoded_mask_sub4()`.  Used by the compositor for sub=4 renders so
+    /// that each output pixel needs only one bit lookup instead of 4–9.
+    #[cfg(feature = "std")]
+    mask_decoded_sub4: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
+    /// Lazily decoded FG44 foreground color image (all FG44 chunks → Pixmap).
+    /// Populated on the first call to `decoded_fg44()`.
+    #[cfg(feature = "std")]
+    fg44_decoded: std::sync::OnceLock<Option<Pixmap>>,
     /// Lazily decoded JB2 shared dictionary.  Populated on first use by
     /// `decoded_shared_dict()` and reused on subsequent renders, avoiding
     /// repeated multi-megabyte allocations.
@@ -199,6 +213,12 @@ impl Clone for DjVuPage {
             bg44_decoded: std::sync::OnceLock::new(),
             #[cfg(feature = "std")]
             bg44_decoded_partial: std::sync::OnceLock::new(),
+            #[cfg(feature = "std")]
+            mask_decoded: std::sync::OnceLock::new(),
+            #[cfg(feature = "std")]
+            mask_decoded_sub4: std::sync::OnceLock::new(),
+            #[cfg(feature = "std")]
+            fg44_decoded: std::sync::OnceLock::new(),
             #[cfg(feature = "std")]
             jb2_dict_decoded: std::sync::OnceLock::new(),
         }
@@ -576,6 +596,64 @@ impl DjVuPage {
         }
         let pixmap = img.to_rgb()?;
         Ok(Some(pixmap))
+    }
+
+    /// Return the decoded JB2 mask (Sjbz), decoding and caching on first call.
+    ///
+    /// Unlike [`extract_mask`] this method caches the result so that repeated
+    /// renders of the same page — e.g. at different DPI levels — do not re-run
+    /// the ZP arithmetic + symbol decode.
+    ///
+    /// Returns `None` if the page has no Sjbz chunk or if decoding fails.
+    #[cfg(feature = "std")]
+    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+        self.mask_decoded
+            .get_or_init(|| self.extract_mask().ok().flatten())
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+        None
+    }
+
+    /// Return a 1/4-resolution downsampled version of the JB2 mask.
+    ///
+    /// Each bit in the result is 1 if ANY of the corresponding 4×4 block in the
+    /// full-resolution mask is 1 (max-pool downsample).  The compositor can use
+    /// this instead of the full-resolution mask for sub=4 renders, replacing
+    /// 4–9 bit lookups per output pixel with a single lookup.
+    ///
+    /// Computed once and cached alongside `mask_decoded`.
+    #[cfg(feature = "std")]
+    pub fn decoded_mask_sub4(&self) -> Option<&crate::bitmap::Bitmap> {
+        self.mask_decoded_sub4
+            .get_or_init(|| {
+                let src = self.decoded_mask()?;
+                Some(downsample_mask_4x(src))
+            })
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_mask_sub4(&self) -> Option<&crate::bitmap::Bitmap> {
+        None
+    }
+
+    /// Return the decoded FG44 foreground color layer, decoding and caching on
+    /// first call.  Subsequent renders reuse the cached `Pixmap`.
+    ///
+    /// Returns `None` if the page has no FG44 chunks or if decoding fails.
+    #[cfg(feature = "std")]
+    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
+        self.fg44_decoded
+            .get_or_init(|| self.extract_foreground().ok().flatten())
+            .as_ref()
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
+        None
     }
 
     /// Decode the IW44 background layer (BG44 chunks) if present.
@@ -1048,6 +1126,9 @@ fn parse_page_from_chunks(
         shared_djbz,
         bg44_decoded: std::sync::OnceLock::new(),
         bg44_decoded_partial: std::sync::OnceLock::new(),
+        mask_decoded: std::sync::OnceLock::new(),
+        mask_decoded_sub4: std::sync::OnceLock::new(),
+        fg44_decoded: std::sync::OnceLock::new(),
         jb2_dict_decoded: std::sync::OnceLock::new(),
     })
 }
@@ -1346,6 +1427,33 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
     core::str::from_utf8(bytes)
         .map(|s| s.to_string())
         .map_err(|_| DocError::InvalidUtf8)
+}
+
+/// Max-pool 4× downsample of a bilevel mask.
+///
+/// Each output pixel is 1 if ANY bit in the corresponding 4×4 block of `src`
+/// is set.  Used by [`DjVuPage::decoded_mask_sub4`] to build the 1/4-resolution
+/// mask cache, which lets the compositor avoid `mask_box_any` for sub=4 renders.
+#[cfg(feature = "std")]
+fn downsample_mask_4x(src: &crate::bitmap::Bitmap) -> crate::bitmap::Bitmap {
+    let out_w = src.width.div_ceil(4);
+    let out_h = src.height.div_ceil(4);
+    let mut out = crate::bitmap::Bitmap::new(out_w, out_h);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            'outer: for dy in 0..4u32 {
+                for dx in 0..4u32 {
+                    let sx = ox * 4 + dx;
+                    let sy = oy * 4 + dy;
+                    if sx < src.width && sy < src.height && src.get(sx, sy) {
+                        out.set(ox, oy, true);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---- Tests ------------------------------------------------------------------

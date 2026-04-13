@@ -302,6 +302,71 @@ fn bench_render_colorbook(c: &mut Criterion) {
     });
 }
 
+/// Micro-benchmarks for individual render pipeline stages on colorbook page 0.
+///
+/// Separates: background decode, mask decode, FG44 decode, composite.
+fn bench_render_colorbook_stages(c: &mut Criterion) {
+    let path = assets_path().join("colorbook.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_render_colorbook_stages: colorbook.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let native_dpi = page.dpi() as f32;
+    let target_dpi = 150_f32;
+    let scale = target_dpi / native_dpi;
+    let w = ((page.width() as f32 * scale).round() as u32).max(1);
+    let h = ((page.height() as f32 * scale).round() as u32).max(1);
+    let opts = djvu_rs::djvu_render::RenderOptions {
+        width: w,
+        height: h,
+        scale,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+    };
+
+    // Warm the bg cache (decoded_bg44_partial) — we want to measure each stage in isolation.
+    let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
+
+    let mut group = c.benchmark_group("render_colorbook_stages");
+
+    // Stage 1: full render (reference)
+    group.bench_function("full_render", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
+        });
+    });
+
+    // Stage 2: background only (BG44 → pixmap, warm cache)
+    group.bench_function("bg_only_warm", |b| {
+        b.iter(|| {
+            let _ = page.decoded_bg44_partial();
+        });
+    });
+
+    // Stage 3: JB2 mask decode only
+    group.bench_function("mask_decode", |b| {
+        b.iter(|| {
+            let _ = black_box(page.extract_mask());
+        });
+    });
+
+    group.finish();
+}
+
 /// Cold-path benchmark: parse document + render at 150 dpi inside the loop.
 ///
 /// Each iteration recreates the document (and therefore the IW44 decode cache),
@@ -383,6 +448,7 @@ criterion_group!(
     bench_render_at_dpi,
     bench_render_coarse,
     bench_render_colorbook,
+    bench_render_colorbook_stages,
     bench_render_colorbook_cold,
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
