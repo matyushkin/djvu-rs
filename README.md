@@ -11,12 +11,17 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 
 - **IFF container parser** — zero-copy, borrowing slices from input
 - **JB2 bilevel image decoder** — adaptive arithmetic coding (ZP coder) with symbol dictionary
+- **JB2 bilevel image encoder** — encode any `Bitmap` into a valid `Sjbz` chunk payload
 - **IW44 wavelet image decoder** — planar YCbCr storage, multiple refinement chunks
+- **IW44 wavelet image encoder** — encode color (`Pixmap`) or grayscale (`GrayPixmap`) into `BG44`/`FG44` chunk payloads
+- **G4/MMR bilevel image decoder** — ITU-T T.6 Group 4 fax decoder (`Smmr` chunks)
 - **BZZ decompressor** — ZP arithmetic coding + MTF + BWT (DIRM, NAVM, ANTz chunks)
 - **Text layer extraction** — TXTz/TXTa chunk parsing with zone hierarchy (page/column/region/paragraph/line/word/character)
 - **Annotation parsing** — ANTz/ANTa chunk parsing (hyperlinks, map areas, background color)
+- **Annotation encoding** — serialize `Annotation` + `MapArea` slices into ANTa or ANTz chunk payloads
 - **Bookmarks** — NAVM table-of-contents parsing
-- **Multi-page documents** — DJVM bundle format with DIRM directory chunk
+- **Bookmark encoding** — serialize `DjVuBookmark` trees into NAVM chunk payloads
+- **Multi-page documents** — DJVM bundle format with DIRM directory chunk; indirect DJVM creation and loading from directory
 - **Page rendering** — composite foreground + background into RGBA output
 - **PDF export** — selectable text, lossless IW44/JB2 embedding, bookmarks, hyperlinks
 - **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
@@ -26,7 +31,7 @@ Pure-Rust DjVu decoder. MIT licensed. Written from the DjVu v3 public specificat
 - **WebAssembly (WASM)** — `wasm-bindgen` bindings for use in browsers and Node.js (feature flag `wasm`)
 - **image-rs integration** — `image::ImageDecoder` impl for use with the `image` crate (feature flag `image`)
 - **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
-- `no_std` compatible — IFF/BZZ/JB2/IW44/ZP modules work with `alloc` only
+- `no_std` compatible — IFF/BZZ/JB2/IW44/ZP codec modules work with `alloc` only
 
 ## Quick start
 
@@ -112,6 +117,92 @@ println!("FORM type: {:?}", std::str::from_utf8(&form.form_type));
 for chunk in &form.chunks {
     println!("  chunk {:?} ({} bytes)", std::str::from_utf8(&chunk.id), chunk.data.len());
 }
+```
+
+## Encoding
+
+### JB2 bilevel image encoder
+
+```rust
+use djvu_rs::{bitmap::Bitmap, jb2_encode::encode_jb2};
+
+let mut bm = Bitmap::new(800, 1000);
+// ... fill bitmap pixels ...
+let sjbz_payload = encode_jb2(&bm);
+// Wrap in a Sjbz IFF chunk and embed in a DjVu FORM:DJVU.
+```
+
+### IW44 wavelet encoder
+
+```rust
+use djvu_rs::{djvu_render::Pixmap, iw44_encode::{encode_iw44_color, Iw44EncodeOptions}};
+
+let pixmap: Pixmap = /* ... your RGBA/YCbCr image ... */;
+let chunks: Vec<Vec<u8>> = encode_iw44_color(&pixmap, &Iw44EncodeOptions::default());
+// Each Vec<u8> is a BG44 chunk payload; wrap each in a BG44 IFF tag.
+```
+
+Grayscale:
+
+```rust
+use djvu_rs::{djvu_render::GrayPixmap, iw44_encode::{encode_iw44_gray, Iw44EncodeOptions}};
+
+let gray: GrayPixmap = /* ... */;
+let chunks: Vec<Vec<u8>> = encode_iw44_gray(&gray, &Iw44EncodeOptions::default());
+```
+
+`Iw44EncodeOptions` fields (all have sensible defaults):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `slices_per_chunk` | 10 | Slices packed into each BG44/FG44 chunk |
+| `total_slices` | 100 | Total refinement slices to encode |
+| `chroma_delay` | 0 | Y slices before Cb/Cr encoding begins |
+| `chroma_half` | true | Encode chroma at half resolution |
+
+### Bookmark encoder
+
+```rust
+use djvu_rs::{djvu_document::DjVuBookmark, navm_encode::encode_navm};
+
+let bookmarks = vec![
+    DjVuBookmark { title: "Chapter 1".into(), url: "#page=1".into(), children: vec![] },
+];
+let navm_payload = encode_navm(&bookmarks);
+```
+
+### Annotation encoder
+
+```rust
+use djvu_rs::annotation::{Annotation, MapArea, encode_annotations, encode_annotations_bzz};
+
+let ann = Annotation::default();
+let areas: Vec<MapArea> = vec![/* ... */];
+
+let anta_payload = encode_annotations(&ann, &areas);      // uncompressed ANTa
+let antz_payload = encode_annotations_bzz(&ann, &areas);  // BZZ-compressed ANTz
+```
+
+## Indirect multi-page documents
+
+Create an indirect DJVM index file that references per-page `.djvu` files:
+
+```rust
+use djvu_rs::djvm::create_indirect;
+
+let index = create_indirect(&["page001.djvu", "page002.djvu", "page003.djvu"])?;
+std::fs::write("book.djvu", index)?;
+// Distribute book.djvu alongside the individual page files.
+```
+
+Load an indirect document by resolving component files from a directory:
+
+```rust
+use djvu_rs::DjVuDocument;
+
+let index = std::fs::read("book.djvu")?;
+let doc = DjVuDocument::parse_from_dir(&index, "/path/to/pages")?;
+println!("{} pages", doc.page_count());
 ```
 
 ## CLI
