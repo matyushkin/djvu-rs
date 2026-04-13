@@ -24,19 +24,19 @@ use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 /// the current MPS; the remaining bits encode the probability state.
 pub(crate) struct ZpDecoder<'a> {
     /// Current interval width register.
-    a: u16,
+    pub(crate) a: u16,
     /// Current code (value within the interval) register.
-    c: u16,
+    pub(crate) c: u16,
     /// Cached upper bound for the fast decode path (= min(c, 0x7fff)).
-    fence: u16,
+    pub(crate) fence: u16,
     /// Bit buffer for feeding bits into the code register.
-    bit_buf: u32,
+    pub(crate) bit_buf: u32,
     /// Number of valid bits remaining in `bit_buf`.
-    bit_count: i32,
+    pub(crate) bit_count: i32,
     /// Compressed input bytes.
-    data: &'a [u8],
+    pub(crate) data: &'a [u8],
     /// Current read position within `data`.
-    pos: usize,
+    pub(crate) pos: usize,
 }
 
 impl<'a> ZpDecoder<'a> {
