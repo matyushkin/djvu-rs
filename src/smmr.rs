@@ -600,7 +600,7 @@ mod tests {
         push_bits(&mut bits, 0b000000000001, 12);
         push_bits(&mut bits, 0b000000000001, 12);
 
-        let nbytes = (bits.len() + 7) / 8;
+        let nbytes = bits.len().div_ceil(8);
         let mut data = vec![0u8; 4 + nbytes];
         data[0] = (ncols >> 8) as u8;
         data[1] = ncols as u8;
