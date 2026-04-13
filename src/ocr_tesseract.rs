@@ -45,7 +45,7 @@ impl OcrBackend for TesseractBackend {
             .map_err(|e| OcrError::InitFailed(e.to_string()))?;
 
         api = api
-            .set_image_from_mem(
+            .set_frame(
                 &rgb,
                 pixmap.width as i32,
                 pixmap.height as i32,
