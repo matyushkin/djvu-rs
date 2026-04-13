@@ -197,14 +197,6 @@ impl Jbm {
         self.data[(row * self.width + col) as usize]
     }
 
-    /// Set pixel (row, col) to 1 (black); silently ignores out-of-bounds.
-    #[inline(always)]
-    fn set(&mut self, row: i32, col: i32) {
-        if row >= 0 && row < self.height && col >= 0 && col < self.width {
-            self.data[(row * self.width + col) as usize] = 1;
-        }
-    }
-
     /// Construct a `Jbm` using a reusable scratch buffer.
     ///
     /// The buffer is grown to at least `width * height` bytes (never shrunk),
@@ -426,6 +418,9 @@ fn decode_bitmap_ref(
     if pixels > MAX_SYMBOL_PIXELS {
         return Err(Jb2Error::ImageTooLarge);
     }
+    if width <= 0 || height <= 0 {
+        return Ok(Jbm::new_from_pool(width, height, pool));
+    }
     let mut cbm = Jbm::new_from_pool(width, height, pool);
 
     // Center alignment: anchor the reference bitmap at the center of the child.
@@ -436,35 +431,72 @@ fn decode_bitmap_ref(
     let row_shift = mrow - crow;
     let col_shift = mcol - ccol;
 
+    // Access a pre-sliced row at a possibly-negative column index; returns 0 for OOB.
+    let pix_row = |row_slice: &[u8], col: i32| -> u32 {
+        if col < 0 {
+            return 0;
+        }
+        row_slice.get(col as usize).copied().unwrap_or(0) as u32
+    };
+
+    // Return a slice for a row of `bm` at `row`; empty slice for out-of-bounds row.
+    let mbm_row = |r: i32| -> &[u8] {
+        if r < 0 || r >= mbm.height {
+            return &[];
+        }
+        let off = r as usize * mbm.width as usize;
+        &mbm.data[off..off + mbm.width as usize]
+    };
+
+    let cw = width as usize;
+
     for row in (0..height).rev() {
         let mr = row + row_shift;
 
+        // Pre-slice the three reference rows of mbm (constant across the inner loop).
+        let mbm_r2 = mbm_row(mr + 1); // row above in reference
+        let mbm_r1 = mbm_row(mr); // current reference row
+        let mbm_r0 = mbm_row(mr - 1); // row below in reference
+
+        // Split cbm so we can hold a mutable ref to the current row while reading row+1.
+        let row_off = row as usize * cw;
+        let rp1_start = (row as usize + 1) * cw;
+        let total = cbm.data.len();
+        let split = rp1_start.min(total);
+        let (lower_cbm, upper_cbm) = cbm.data.split_at_mut(split);
+        let cbm_row_mut = &mut lower_cbm[row_off..row_off + cw];
+        let cbm_r1: &[u8] = if upper_cbm.len() >= cw {
+            &upper_cbm[..cw]
+        } else {
+            upper_cbm
+        };
+
         // cbm row+1: 3 bits at (col-1, col, col+1) — col-1=-1 starts as 0
-        let mut c_r1 = (cbm.get(row + 1, 0) as u32) << 1 | cbm.get(row + 1, 1) as u32;
+        let mut c_r1 = pix_row(cbm_r1, 0) << 1 | pix_row(cbm_r1, 1);
         // cbm current row, col-1: single bit, starts as 0
         let mut c_r0: u32 = 0;
         // mbm (mr, col+cs-1..col+cs+1): 3 bits
-        let mut m_r1 = (mbm.get(mr, col_shift - 1) as u32) << 2
-            | (mbm.get(mr, col_shift) as u32) << 1
-            | mbm.get(mr, col_shift + 1) as u32;
+        let mut m_r1 = pix_row(mbm_r1, col_shift - 1) << 2
+            | pix_row(mbm_r1, col_shift) << 1
+            | pix_row(mbm_r1, col_shift + 1);
         // mbm (mr-1, col+cs-1..col+cs+1): 3 bits
-        let mut m_r0 = (mbm.get(mr - 1, col_shift - 1) as u32) << 2
-            | (mbm.get(mr - 1, col_shift) as u32) << 1
-            | mbm.get(mr - 1, col_shift + 1) as u32;
+        let mut m_r0 = pix_row(mbm_r0, col_shift - 1) << 2
+            | pix_row(mbm_r0, col_shift) << 1
+            | pix_row(mbm_r0, col_shift + 1);
 
         for col in 0..width {
-            let m_r2 = mbm.get(mr + 1, col + col_shift) as u32;
+            let m_r2 = pix_row(mbm_r2, col + col_shift);
             // idx ≤ 2047 always: c_r1<8, c_r0<2, m_r2<2, m_r1<8, m_r0<8
             let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
             let bit = zp.decode_bit(&mut ctx[idx as usize]);
             if bit {
-                cbm.set(row, col);
+                cbm_row_mut[col as usize] = 1;
             }
             // Advance rolling windows
-            c_r1 = ((c_r1 << 1) & 0b111) | cbm.get(row + 1, col + 2) as u32;
+            c_r1 = ((c_r1 << 1) & 0b111) | pix_row(cbm_r1, col + 2);
             c_r0 = bit as u32;
-            m_r1 = ((m_r1 << 1) & 0b111) | mbm.get(mr, col + col_shift + 2) as u32;
-            m_r0 = ((m_r0 << 1) & 0b111) | mbm.get(mr - 1, col + col_shift + 2) as u32;
+            m_r1 = ((m_r1 << 1) & 0b111) | pix_row(mbm_r1, col + col_shift + 2);
+            m_r0 = ((m_r0 << 1) & 0b111) | pix_row(mbm_r0, col + col_shift + 2);
         }
     }
     Ok(cbm)
@@ -582,12 +614,13 @@ fn blit(page: &mut [u8], page_w: i32, page_h: i32, symbol: &Jbm, x: i32, y: i32)
         for row in 0..symbol.height as usize {
             let src_off = row * sw;
             let dst_off = (y as usize + row) * pw + x as usize;
-            for col in 0..sw {
-                if symbol.data.get(src_off + col).copied().unwrap_or(0) != 0
-                    && let Some(cell) = page.get_mut(dst_off + col)
-                {
-                    *cell = 1;
-                }
+            // Branchless OR: s is 0 or 1, so d |= s sets d to 1 if s is black.
+            // Eliminates the branch for LLVM auto-vectorization.
+            for (d, &s) in page[dst_off..dst_off + sw]
+                .iter_mut()
+                .zip(symbol.data[src_off..src_off + sw].iter())
+            {
+                *d |= s;
             }
         }
     } else {
