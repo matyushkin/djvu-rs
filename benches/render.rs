@@ -436,7 +436,19 @@ fn bench_pdf_export(c: &mut Criterion) {
         }
     };
 
-    c.bench_function("pdf_export_single_page", |b| {
+    c.bench_function("pdf_export_sequential", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+        });
+    });
+
+    // pdf_export_parallel calls the same API as pdf_export_sequential; the difference
+    // is that this binary was compiled with --features parallel, so djvu_to_pdf uses
+    // rayon internally. To compare the two, run each in a separate cargo bench invocation:
+    //   cargo bench --bench render --features std          -- pdf_export_sequential
+    //   cargo bench --bench render --features std,parallel -- pdf_export_parallel
+    #[cfg(feature = "parallel")]
+    c.bench_function("pdf_export_parallel", |b| {
         b.iter(|| {
             let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
         });

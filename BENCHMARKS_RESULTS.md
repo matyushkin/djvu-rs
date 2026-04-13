@@ -51,7 +51,8 @@ Corpus files: `tests/corpus/`, colorbook: `references/djvujs/library/assets/colo
 | `render_colorbook_cold` | colorbook.djvu | 2260×3669 (400 dpi) | **28.6 ms** | cold (ZP + wavelet + RGB, first render) |
 | `render_corpus_color` | watchmaker.djvu | 2550×3301 | **65 ms** | native 600 dpi, full IW44 |
 | `render_corpus_bilevel` | cable_1973_100133.djvu | 2550×3301 | **64 ms** | native 600 dpi, bilevel JB2 |
-| `pdf_export_single_page` | watchmaker.djvu | — | **1.88 s** | |
+| `pdf_export_sequential` | watchmaker.djvu | — | **906 ms** | 12 pages, `output_dpi=150`, DCTDecode JPEG-80 |
+| `pdf_export_parallel` | watchmaker.djvu | — | **162 ms** | same, `--features parallel` (rayon), **5.6× faster** |
 
 Note: The `render_colorbook` benchmark renders at 150 dpi (848×1376 output). For sub=4
 renders djvu-rs applies a cascade of optimizations: (1) partial BG44 decode (first chunk
