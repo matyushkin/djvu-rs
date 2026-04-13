@@ -157,9 +157,7 @@ fn encode_num(zp: &mut ZpEncoder, ctx: &mut NumContext, low: i32, high: i32, val
                     cutoff -= 1;
                 }
             }
-            _ => {
-                range = range.saturating_sub(1);
-            }
+            _ => unreachable!(),
         }
     }
 }
@@ -233,6 +231,10 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
 
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+
     let mut zp = ZpEncoder::new();
 
     // ── Contexts (mirrors decode_image_with_pool) ──────────────────────────
@@ -250,11 +252,8 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     // Record type 0: start-of-image.
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 0);
 
-    // Image dimensions (0 is treated as 200 by the decoder, so always encode real dims).
-    let enc_w = if w == 0 { 1 } else { w };
-    let enc_h = if h == 0 { 1 } else { h };
-    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, enc_w);
-    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, enc_h);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, w);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, h);
 
     // Reserved flag bit — must be 0.
     zp.encode_bit(&mut flag_ctx, false);
@@ -264,13 +263,11 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 3);
 
     // Symbol dimensions.
-    encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, enc_w);
-    encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, enc_h);
+    encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, w);
+    encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, h);
 
     // Bitmap data.
-    if enc_w > 0 && enc_h > 0 {
-        encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, bitmap);
-    }
+    encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, bitmap);
 
     // Coordinates: new_line=true, hoff=1, voff=0.
     //
@@ -382,5 +379,12 @@ mod tests {
         let src = Bitmap::new(8, 8);
         let encoded = encode_jb2(&src);
         assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn zero_dimension_returns_empty() {
+        assert!(encode_jb2(&Bitmap::new(0, 0)).is_empty());
+        assert!(encode_jb2(&Bitmap::new(8, 0)).is_empty());
+        assert!(encode_jb2(&Bitmap::new(0, 8)).is_empty());
     }
 }
