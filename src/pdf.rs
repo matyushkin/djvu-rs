@@ -205,34 +205,51 @@ fn render_dims(native_w: u32, native_h: u32, native_dpi: f32, output_dpi: u32) -
     (rw, rh)
 }
 
-/// Build PDF objects for one page. Returns the page object ID.
+/// Pre-rendered page data — all expensive compute done, ready for sequential PDF emit.
 ///
-/// Bilevel-only pages (Sjbz present, no BG44) skip RGB render entirely and
-/// embed the decoded 1-bit JB2 bitmap directly as a FlateDecode ImageMask.
-fn build_page_objects(
-    w: &mut PdfWriter,
-    page: &DjVuPage,
-    pages_id: usize,
-    font_id: usize,
-    pdf_opts: &PdfOptions,
-) -> Result<usize, PdfError> {
+/// # Memory note
+///
+/// `djvu_to_pdf_impl` collects `RenderedPage` for every page before emitting any PDF
+/// objects (because `PdfWriter` is not `Send`). For large bilevel documents at native
+/// DPI (e.g. 520 pages × ~1 MB deflated mask each) peak RAM can be significant.
+/// A streaming/chunked approach is tracked in a separate issue.
+struct RenderedPage {
+    pt_w: f32,
+    pt_h: f32,
+    is_bilevel_only: bool,
+    /// Fully encoded XObject body written as PDF resource `/Im0`.
+    ///
+    /// For bilevel-only pages this is the 1-bit JB2 mask; for mixed pages it is the
+    /// RGB background image.
+    img0_body: Option<Vec<u8>>,
+    /// Fully encoded XObject body for the JB2 mask overlay (`/Mask0`).
+    /// Only set for non-bilevel pages that have a Sjbz chunk.
+    mask_obj_body: Option<Vec<u8>>,
+    /// PDF content stream text operators (invisible text layer).
+    text_ops: String,
+    /// Pre-built annotation object bodies, one per hyperlink.
+    link_annot_bodies: Vec<Vec<u8>>,
+}
+
+/// Render one page into a [`RenderedPage`].
+///
+/// This is the expensive step (pixel render, JPEG encode, JB2 decode, deflate)
+/// and can safely run in parallel across pages.
+fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, PdfError> {
     let pw = page.width() as u32;
     let ph = page.height() as u32;
     let dpi = page.dpi().max(1) as f32;
-    // PDF MediaBox always uses native page dimensions (in points)
     let pt_w = px_to_pt(pw as f32, dpi);
     let pt_h = px_to_pt(ph as f32, dpi);
 
-    // Bilevel-only fast path: Sjbz present, no BG44 → skip RGB render.
     let is_bilevel_only = page.find_chunk(b"Sjbz").is_some() && page.find_chunk(b"BG44").is_none();
 
-    let (img_id, mask_img_id) = if is_bilevel_only {
-        // Embed the 1-bit JB2 mask as the sole XObject (white background implied).
-        let mid = build_mask_image(w, page, pw, ph);
-        (mid, None::<usize>)
+    let (img0_body, mask_obj_body) = if is_bilevel_only {
+        // Bilevel fast path: embed the 1-bit JB2 mask as the sole XObject.
+        let mask = collect_mask_stream(page);
+        (mask, None)
     } else {
-        // Compute output image dimensions (may be downscaled from native DPI).
-        let (rw, rh) = render_dims(pw, ph, dpi, pdf_opts.output_dpi);
+        let (rw, rh) = render_dims(pw, ph, dpi, opts.output_dpi);
         let render_opts = RenderOptions {
             width: rw,
             height: rh,
@@ -245,7 +262,7 @@ fn build_page_objects(
             " /Type /XObject /Subtype /Image /Width {rw} /Height {rh}\
              /ColorSpace /DeviceRGB /BitsPerComponent 8"
         );
-        let img_body = match pdf_opts.jpeg_quality {
+        let img_body = match opts.jpeg_quality {
             Some(quality) => {
                 let jpeg = encode_rgb_to_jpeg(&rgb, rw, rh, quality);
                 if jpeg.is_empty() {
@@ -256,46 +273,107 @@ fn build_page_objects(
             }
             None => make_deflate_stream(&img_dict, &rgb),
         };
-        let iid = w.add(img_body);
 
-        // JB2 mask overlay (if page also has a foreground mask)
-        let mid = build_mask_image(w, page, pw, ph);
-        (Some(iid), mid)
+        let mask = collect_mask_stream(page);
+        (Some(img_body), mask)
     };
 
-    // Content stream
+    let text_ops = build_text_content(page, dpi, pt_h);
+    let link_annot_bodies = collect_link_annot_bodies(page, dpi, pt_h);
+
+    Ok(RenderedPage {
+        pt_w,
+        pt_h,
+        is_bilevel_only,
+        img0_body,
+        mask_obj_body,
+        text_ops,
+        link_annot_bodies,
+    })
+}
+
+/// Decode and deflate the JB2 foreground mask into a PDF ImageMask XObject body.
+fn collect_mask_stream(page: &DjVuPage) -> Option<Vec<u8>> {
+    let sjbz = page.find_chunk(b"Sjbz")?;
+    let dict = page
+        .find_chunk(b"Djbz")
+        .and_then(|djbz| crate::jb2_new::decode_dict(djbz, None).ok());
+    let bitmap = crate::jb2_new::decode(sjbz, dict.as_ref()).ok()?;
+    let bw = bitmap.width;
+    let bh = bitmap.height;
+    // Bitmap data is already packed 1-bit MSB-first, which is what PDF expects
+    // for an ImageMask with /Decode [1 0] (1=black=marked).
+    let dict_extra = format!(
+        " /Type /XObject /Subtype /Image /Width {bw} /Height {bh}\
+         /ImageMask true /BitsPerComponent 1 /Decode [1 0]"
+    );
+    Some(make_deflate_stream(&dict_extra, &bitmap.data))
+}
+
+/// Build pre-serialized annotation bodies for all hyperlinks on a page.
+fn collect_link_annot_bodies(page: &DjVuPage, dpi: f32, pt_h: f32) -> Vec<Vec<u8>> {
+    let hyperlinks = match page.hyperlinks() {
+        Ok(links) => links,
+        Err(_) => return Vec::new(),
+    };
+    hyperlinks
+        .iter()
+        .filter_map(|link| {
+            let rect = shape_to_pdf_rect(&link.shape, dpi, pt_h)?;
+            let url_escaped = pdf_escape_string(&link.url);
+            Some(
+                format!(
+                    "<< /Type /Annot /Subtype /Link\n\
+                       /Rect [{:.4} {:.4} {:.4} {:.4}]\n\
+                       /Border [0 0 0]\n\
+                       /A << /S /URI /URI ({url_escaped}) >> >>",
+                    rect.0, rect.1, rect.2, rect.3
+                )
+                .into_bytes(),
+            )
+        })
+        .collect()
+}
+
+/// Emit a pre-rendered page into `PdfWriter` (sequential). Returns the page object ID.
+fn emit_page_objects(
+    w: &mut PdfWriter,
+    data: RenderedPage,
+    pages_id: usize,
+    font_id: usize,
+) -> usize {
+    let pt_w = data.pt_w;
+    let pt_h = data.pt_h;
+
+    let img_id = data.img0_body.map(|body| w.add(body));
+    let mask_img_id = data.mask_obj_body.map(|body| w.add(body));
+
     let mut content = String::new();
 
-    if is_bilevel_only {
-        // White background + black 1-bit mask as image mask stencil
-        if let Some(mid) = img_id {
-            content.push_str("1 1 1 rg\n"); // white fill
+    if data.is_bilevel_only {
+        // img0 may still be None if JB2 decode failed at render time — render gracefully.
+        if img_id.is_some() {
+            content.push_str("1 1 1 rg\n");
             content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
-            let _ = mid;
         }
     } else {
-        if let Some(iid) = img_id {
+        if img_id.is_some() {
             content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
-            let _ = iid;
         }
-        if let Some(mid) = mask_img_id {
+        if mask_img_id.is_some() {
             content.push_str(&format!(
                 "q 0 0 0 rg {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Mask0 Do Q\n"
             ));
-            let _ = mid;
         }
     }
 
-    // Invisible text layer
-    let text_ops = build_text_content(page, dpi, pt_h);
-    if !text_ops.is_empty() {
-        content.push_str(&text_ops);
+    if !data.text_ops.is_empty() {
+        content.push_str(&data.text_ops);
     }
 
     let content_body = make_deflate_stream("", content.as_bytes());
     let content_id = w.add(content_body);
 
-    // Resources dictionary
     let mut resources = String::from("/XObject <<");
     if let Some(id) = img_id {
         resources.push_str(&format!(" /Im0 {id} 0 R"));
@@ -304,12 +382,15 @@ fn build_page_objects(
         resources.push_str(&format!(" /Mask0 {mid} 0 R"));
     }
     resources.push_str(" >>");
-    if !text_ops.is_empty() {
+    if !data.text_ops.is_empty() {
         resources.push_str(&format!(" /Font << /F1 {font_id} 0 R >>"));
     }
 
-    // Annotations (hyperlinks)
-    let annot_ids = build_link_annotations(w, page, dpi, pt_h);
+    let annot_ids: Vec<usize> = data
+        .link_annot_bodies
+        .into_iter()
+        .map(|body| w.add(body))
+        .collect();
     let mut annots_str = String::new();
     if !annot_ids.is_empty() {
         annots_str.push_str(" /Annots [");
@@ -319,7 +400,7 @@ fn build_page_objects(
         annots_str.push_str(" ]");
     }
 
-    let page_id = w.add(
+    w.add(
         format!(
             "<< /Type /Page /Parent {pages_id} 0 R\n\
                /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
@@ -327,33 +408,7 @@ fn build_page_objects(
                /Resources << {resources} >>{annots_str} >>"
         )
         .into_bytes(),
-    );
-
-    Ok(page_id)
-}
-
-/// Build a 1-bit image mask from the JB2 foreground mask.
-fn build_mask_image(w: &mut PdfWriter, page: &DjVuPage, _pw: u32, _ph: u32) -> Option<usize> {
-    // Decode JB2 mask
-    let sjbz = page.find_chunk(b"Sjbz")?;
-    let dict = page
-        .find_chunk(b"Djbz")
-        .and_then(|djbz| crate::jb2_new::decode_dict(djbz, None).ok());
-    let bitmap = crate::jb2_new::decode(sjbz, dict.as_ref()).ok()?;
-
-    let bw = bitmap.width;
-    let bh = bitmap.height;
-
-    // Bitmap data is already packed 1-bit MSB-first, which is what PDF expects
-    // for an ImageMask with /Decode [1 0] (1=black=marked).
-    // PDF ImageMask: painted where sample = 1 in the image data.
-    let dict_extra = format!(
-        " /Type /XObject /Subtype /Image /Width {bw} /Height {bh}\
-         /ImageMask true /BitsPerComponent 1 /Decode [1 0]"
-    );
-    let body = make_deflate_stream(&dict_extra, &bitmap.data);
-    let id = w.add(body);
-    Some(id)
+    )
 }
 
 /// Build invisible text operators for the text layer.
@@ -457,31 +512,6 @@ fn pdf_escape_string(s: &str) -> String {
         }
     }
     out
-}
-
-/// Build PDF link annotation objects for hyperlinks from the ANTz layer.
-fn build_link_annotations(w: &mut PdfWriter, page: &DjVuPage, dpi: f32, pt_h: f32) -> Vec<usize> {
-    let hyperlinks = match page.hyperlinks() {
-        Ok(links) => links,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut ids = Vec::new();
-    for link in &hyperlinks {
-        if let Some(rect) = shape_to_pdf_rect(&link.shape, dpi, pt_h) {
-            let url_escaped = pdf_escape_string(&link.url);
-            let body = format!(
-                "<< /Type /Annot /Subtype /Link\n\
-                   /Rect [{:.4} {:.4} {:.4} {:.4}]\n\
-                   /Border [0 0 0]\n\
-                   /A << /S /URI /URI ({url_escaped}) >> >>",
-                rect.0, rect.1, rect.2, rect.3
-            );
-            let id = w.add(body.into_bytes());
-            ids.push(id);
-        }
-    }
-    ids
 }
 
 /// Convert a DjVu shape to a PDF rectangle [x1, y1, x2, y2] in points.
@@ -746,14 +776,40 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
     let font_id = w.alloc_id(); // 3
     w.add_obj(font_id, font_dict());
 
-    // Build page objects (tolerate per-page errors with blank fallback)
-    let mut page_obj_ids = Vec::new();
-    for i in 0..doc.page_count() {
-        let page = doc.page(i)?;
-        let page_id = match build_page_objects(&mut w, page, pages_id, font_id, opts) {
-            Ok(id) => id,
-            Err(_) => {
+    let page_count = doc.page_count();
+
+    // Render all pages (expensive: pixel render, encode, deflate).
+    // With the `parallel` feature, pages are rendered concurrently via rayon.
+    #[cfg(feature = "parallel")]
+    let rendered_pages: Vec<Option<RenderedPage>> = {
+        use rayon::prelude::*;
+        (0..page_count)
+            .into_par_iter()
+            .map(|i| {
+                doc.page(i)
+                    .ok()
+                    .and_then(|p| render_page_data(p, opts).ok())
+            })
+            .collect()
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let rendered_pages: Vec<Option<RenderedPage>> = (0..page_count)
+        .map(|i| {
+            doc.page(i)
+                .ok()
+                .and_then(|p| render_page_data(p, opts).ok())
+        })
+        .collect();
+
+    // Emit page objects sequentially (PdfWriter is not Send).
+    let mut page_obj_ids = Vec::with_capacity(page_count);
+    for (i, rendered) in rendered_pages.into_iter().enumerate() {
+        let page_id = match rendered {
+            Some(data) => emit_page_objects(&mut w, data, pages_id, font_id),
+            None => {
                 // Fallback: blank page at native dimensions
+                let page = doc.page(i)?;
                 let dpi = page.dpi().max(1) as f32;
                 let pt_w = px_to_pt(page.width() as f32, dpi);
                 let pt_h = px_to_pt(page.height() as f32, dpi);
