@@ -12,9 +12,19 @@
 //! await init();
 //! const doc = WasmDocument.from_bytes(new Uint8Array(buffer));
 //! const page = doc.page(0);
+//!
+//! // Full render (all IW44 chunks)
 //! const pixels = page.render(150);   // Uint8ClampedArray, RGBA
 //! const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
 //! ctx.putImageData(img, 0, 0);
+//!
+//! // Progressive render: instant coarse preview, then refine
+//! const coarse = page.render_coarse(150); // undefined for bilevel pages
+//! if (coarse) ctx.putImageData(new ImageData(coarse, page.width_at(150), page.height_at(150)), 0, 0);
+//! for (let n = 0; n < page.bg44_chunk_count(); n++) {
+//!   const refined = page.render_progressive(150, n);
+//!   ctx.putImageData(new ImageData(refined, page.width_at(150), page.height_at(150)), 0, 0);
+//! }
 //! ```
 
 use std::sync::Arc;
@@ -23,7 +33,9 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     djvu_document::DjVuDocument,
-    djvu_render::{RenderOptions, Resampling, UserRotation, render_pixmap},
+    djvu_render::{
+        RenderOptions, Resampling, UserRotation, render_coarse, render_pixmap, render_progressive,
+    },
 };
 
 // ── WasmDocument ─────────────────────────────────────────────────────────────
@@ -158,6 +170,74 @@ impl WasmPage {
         Ok(Some(buf))
     }
 
+    /// Number of BG44 background chunks on this page.
+    ///
+    /// Determines how many refinement steps are available via
+    /// [`render_progressive`]. Returns `0` for bilevel-only pages.
+    pub fn bg44_chunk_count(&self) -> u32 {
+        self.doc
+            .page(self.index)
+            .map(|p| p.bg44_chunks().len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Fast coarse render — decodes only the first BG44 chunk (~5 ms for a
+    /// typical color page).
+    ///
+    /// Returns `undefined` for bilevel-only pages (no BG44 data); use
+    /// [`render`] for those.  For color pages the result is a blurry but
+    /// instantly visible preview; call [`render_progressive`] or [`render`]
+    /// on a Web Worker to produce the final image.
+    ///
+    /// Throws on decode error.
+    pub fn render_coarse(
+        &self,
+        target_dpi: u32,
+    ) -> Result<Option<js_sys::Uint8ClampedArray>, JsError> {
+        let page = self
+            .doc
+            .page(self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let opts = render_opts_for_dpi(page, target_dpi);
+        let pm = render_coarse(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(pm.map(|p| {
+            let arr = js_sys::Uint8ClampedArray::new_with_length(p.data.len() as u32);
+            arr.copy_from(&p.data);
+            arr
+        }))
+    }
+
+    /// Progressive render — decodes BG44 chunks 0..=`chunk_n` plus all
+    /// foreground layers (JB2 mask, text).
+    ///
+    /// `chunk_n = 0` is equivalent to [`render_coarse`] but also composites
+    /// the mask. Each subsequent call with `chunk_n += 1` adds one more
+    /// wavelet refinement pass. After the last chunk the result is identical
+    /// to [`render`].
+    ///
+    /// Use [`bg44_chunk_count`] to find the maximum valid `chunk_n`
+    /// (`bg44_chunk_count() - 1`).
+    ///
+    /// Throws on decode error or if `chunk_n` is out of range.
+    pub fn render_progressive(
+        &self,
+        target_dpi: u32,
+        chunk_n: u32,
+    ) -> Result<js_sys::Uint8ClampedArray, JsError> {
+        let page = self
+            .doc
+            .page(self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let opts = render_opts_for_dpi(page, target_dpi);
+        let pm = render_progressive(page, &opts, chunk_n as usize)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
+        arr.copy_from(&pm.data);
+        Ok(arr)
+    }
+
     /// Render the page at `target_dpi` and return raw RGBA pixels
     /// (`Uint8ClampedArray`, suitable for `new ImageData(pixels, w, h)`).
     ///
@@ -168,27 +248,7 @@ impl WasmPage {
             .page(self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        let scale = target_dpi as f32 / page.dpi() as f32;
-        let w = ((page.width() as f32 * scale).round() as u32).max(1);
-        let h = ((page.height() as f32 * scale).round() as u32).max(1);
-
-        // `aa: true` invokes `aa_downscale` which halves both dimensions,
-        // producing a (w/2)×(h/2) pixmap.  That would be inconsistent with
-        // `width_at` / `height_at` which return the full w×h.  Disable AA here
-        // so the caller can rely on `pixels.length == width_at(dpi) * height_at(dpi) * 4`.
-        // Proper supersampling (render at 2× → downscale to w×h) can be added
-        // as a separate quality option in a future release.
-        let opts = RenderOptions {
-            width: w,
-            height: h,
-            scale,
-            bold: 0,
-            aa: false,
-            rotation: UserRotation::None,
-            permissive: true,
-            resampling: Resampling::Bilinear,
-        };
-
+        let opts = render_opts_for_dpi(page, target_dpi);
         let pm = render_pixmap(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
         // Allocate a new JS-side Uint8ClampedArray and copy the RGBA bytes
         // into it.  Using `Uint8ClampedArray::from(&[u8])` (which creates a
@@ -198,6 +258,28 @@ impl WasmPage {
         let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
         arr.copy_from(&pm.data);
         Ok(arr)
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build [`RenderOptions`] for a given page and target DPI.
+///
+/// AA is disabled so `pixels.length == width_at(dpi) * height_at(dpi) * 4`
+/// always holds (see [`WasmPage::render`] for details).
+fn render_opts_for_dpi(page: &crate::djvu_document::DjVuPage, target_dpi: u32) -> RenderOptions {
+    let scale = target_dpi as f32 / page.dpi() as f32;
+    let w = ((page.width() as f32 * scale).round() as u32).max(1);
+    let h = ((page.height() as f32 * scale).round() as u32).max(1);
+    RenderOptions {
+        width: w,
+        height: h,
+        scale,
+        bold: 0,
+        aa: false,
+        rotation: UserRotation::None,
+        permissive: true,
+        resampling: Resampling::Bilinear,
     }
 }
 
@@ -324,6 +406,44 @@ mod native_tests {
             resampling: Resampling::Bilinear,
         };
         let pm = render_pixmap(page, &opts).expect("render failed");
+        assert_eq!(pm.data.len(), (w * h * 4) as usize);
+    }
+
+    /// render_coarse on a color page returns Some with correct pixel count.
+    #[test]
+    fn wasm_render_coarse_color_page() {
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let scale = 150_f32 / page.dpi() as f32;
+        let w = ((page.width() as f32 * scale).round() as u32).max(1);
+        let h = ((page.height() as f32 * scale).round() as u32).max(1);
+        let opts = render_opts_for_dpi(page, 150);
+        let result = render_coarse(page, &opts).expect("render_coarse failed");
+        // boy.djvu has BG44 chunks — coarse result must be Some
+        let pm = result.expect("expected Some for color page");
+        assert_eq!(pm.data.len(), (w * h * 4) as usize);
+    }
+
+    /// bg44_chunk_count is > 0 for a color page.
+    #[test]
+    fn wasm_bg44_chunk_count_color_page() {
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        assert!(doc.page(0).unwrap().bg44_chunks().len() > 0);
+    }
+
+    /// render_progressive with chunk_n = 0 succeeds and returns correct pixel count.
+    #[test]
+    fn wasm_render_progressive_chunk0() {
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let scale = 150_f32 / page.dpi() as f32;
+        let w = ((page.width() as f32 * scale).round() as u32).max(1);
+        let h = ((page.height() as f32 * scale).round() as u32).max(1);
+        let opts = render_opts_for_dpi(page, 150);
+        let pm = render_progressive(page, &opts, 0).expect("render_progressive failed");
         assert_eq!(pm.data.len(), (w * h * 4) as usize);
     }
 }
