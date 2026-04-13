@@ -191,7 +191,24 @@ fn px_to_pt(px: f32, dpi: f32) -> f32 {
 
 // ---- Page rendering ---------------------------------------------------------
 
-/// Build PDF objects for one page. Returns (page_obj_id, list of annotation obj ids).
+/// Compute render dimensions for a page given `output_dpi` option.
+///
+/// Returns `(render_w, render_h)` in pixels. When `output_dpi == 0` the native
+/// page resolution is returned unchanged.
+fn render_dims(native_w: u32, native_h: u32, native_dpi: f32, output_dpi: u32) -> (u32, u32) {
+    if output_dpi == 0 || output_dpi as f32 >= native_dpi {
+        return (native_w, native_h);
+    }
+    let scale = output_dpi as f32 / native_dpi;
+    let rw = ((native_w as f32 * scale).round() as u32).max(1);
+    let rh = ((native_h as f32 * scale).round() as u32).max(1);
+    (rw, rh)
+}
+
+/// Build PDF objects for one page. Returns the page object ID.
+///
+/// Bilevel-only pages (Sjbz present, no BG44) skip RGB render entirely and
+/// embed the decoded 1-bit JB2 bitmap directly as a FlateDecode ImageMask.
 fn build_page_objects(
     w: &mut PdfWriter,
     page: &DjVuPage,
@@ -202,54 +219,71 @@ fn build_page_objects(
     let pw = page.width() as u32;
     let ph = page.height() as u32;
     let dpi = page.dpi().max(1) as f32;
+    // PDF MediaBox always uses native page dimensions (in points)
     let pt_w = px_to_pt(pw as f32, dpi);
     let pt_h = px_to_pt(ph as f32, dpi);
 
-    // Render page to RGB
-    let render_opts = RenderOptions {
-        width: pw,
-        height: ph,
-        ..RenderOptions::default()
-    };
-    let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
-    let rgb = pixmap.to_rgb();
+    // Bilevel-only fast path: Sjbz present, no BG44 → skip RGB render.
+    let is_bilevel_only = page.find_chunk(b"Sjbz").is_some() && page.find_chunk(b"BG44").is_none();
 
-    // Background image XObject — DCTDecode (JPEG) when quality is set,
-    // FlateDecode (deflate+RGB) otherwise.
-    let img_dict = format!(
-        " /Type /XObject /Subtype /Image /Width {pw} /Height {ph}\
-         /ColorSpace /DeviceRGB /BitsPerComponent 8"
-    );
-    let img_body = match pdf_opts.jpeg_quality {
-        Some(quality) => {
-            let jpeg = encode_rgb_to_jpeg(&rgb, pw, ph, quality);
-            if jpeg.is_empty() {
-                // JPEG encoding failed — fall back to deflate
-                make_deflate_stream(&img_dict, &rgb)
-            } else {
-                make_dct_stream(&img_dict, &jpeg)
+    let (img_id, mask_img_id) = if is_bilevel_only {
+        // Embed the 1-bit JB2 mask as the sole XObject (white background implied).
+        let mid = build_mask_image(w, page, pw, ph);
+        (mid, None::<usize>)
+    } else {
+        // Compute output image dimensions (may be downscaled from native DPI).
+        let (rw, rh) = render_dims(pw, ph, dpi, pdf_opts.output_dpi);
+        let render_opts = RenderOptions {
+            width: rw,
+            height: rh,
+            ..RenderOptions::default()
+        };
+        let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
+        let rgb = pixmap.to_rgb();
+
+        let img_dict = format!(
+            " /Type /XObject /Subtype /Image /Width {rw} /Height {rh}\
+             /ColorSpace /DeviceRGB /BitsPerComponent 8"
+        );
+        let img_body = match pdf_opts.jpeg_quality {
+            Some(quality) => {
+                let jpeg = encode_rgb_to_jpeg(&rgb, rw, rh, quality);
+                if jpeg.is_empty() {
+                    make_deflate_stream(&img_dict, &rgb)
+                } else {
+                    make_dct_stream(&img_dict, &jpeg)
+                }
             }
-        }
-        None => make_deflate_stream(&img_dict, &rgb),
+            None => make_deflate_stream(&img_dict, &rgb),
+        };
+        let iid = w.add(img_body);
+
+        // JB2 mask overlay (if page also has a foreground mask)
+        let mid = build_mask_image(w, page, pw, ph);
+        (Some(iid), mid)
     };
-    let img_id = w.add(img_body);
 
-    // JB2 mask as 1-bit image (if present)
-    let mask_img_id = build_mask_image(w, page, pw, ph);
-
-    // Content stream: draw background image, then mask overlay, then invisible text
+    // Content stream
     let mut content = String::new();
 
-    // Draw background image filling the page
-    content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
-
-    // Draw mask overlay (black foreground on transparent)
-    if let Some(mask_id) = mask_img_id {
-        // Use the mask as a stencil: set fill color to black, then draw mask as image mask
-        content.push_str(&format!(
-            "q 0 0 0 rg {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Mask0 Do Q\n"
-        ));
-        let _ = mask_id; // used in resources below
+    if is_bilevel_only {
+        // White background + black 1-bit mask as image mask stencil
+        if let Some(mid) = img_id {
+            content.push_str("1 1 1 rg\n"); // white fill
+            content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
+            let _ = mid;
+        }
+    } else {
+        if let Some(iid) = img_id {
+            content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
+            let _ = iid;
+        }
+        if let Some(mid) = mask_img_id {
+            content.push_str(&format!(
+                "q 0 0 0 rg {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Mask0 Do Q\n"
+            ));
+            let _ = mid;
+        }
     }
 
     // Invisible text layer
@@ -258,13 +292,14 @@ fn build_page_objects(
         content.push_str(&text_ops);
     }
 
-    // Content stream object
-    let content_bytes = content.as_bytes();
-    let content_body = make_deflate_stream("", content_bytes);
+    let content_body = make_deflate_stream("", content.as_bytes());
     let content_id = w.add(content_body);
 
     // Resources dictionary
-    let mut resources = format!("/XObject << /Im0 {img_id} 0 R");
+    let mut resources = String::from("/XObject <<");
+    if let Some(id) = img_id {
+        resources.push_str(&format!(" /Im0 {id} 0 R"));
+    }
     if let Some(mid) = mask_img_id {
         resources.push_str(&format!(" /Mask0 {mid} 0 R"));
     }
@@ -284,7 +319,6 @@ fn build_page_objects(
         annots_str.push_str(" ]");
     }
 
-    // Page object
     let page_id = w.add(
         format!(
             "<< /Type /Page /Parent {pages_id} 0 R\n\
@@ -631,9 +665,11 @@ fn resolve_bookmark_dest(url: &str, page_ids: &[usize]) -> String {
 ///
 /// Options for DjVu → PDF conversion.
 ///
-/// Use `PdfOptions::default()` for sensible defaults (DCTDecode background
-/// at quality 80, which produces much smaller files than the FlateDecode path
-/// with comparable visual quality).
+/// Use `PdfOptions::default()` for sensible defaults:
+/// - 150 DPI output (screen-quality, ~16× fewer pixels than native 600 DPI)
+/// - DCTDecode (JPEG quality 80) for color backgrounds
+/// - 1-bit FlateDecode for bilevel masks
+/// - Bilevel-only pages skip RGB render entirely (direct 1-bit embed)
 #[derive(Debug, Clone)]
 pub struct PdfOptions {
     /// JPEG quality for background image encoding (1–100).
@@ -641,12 +677,33 @@ pub struct PdfOptions {
     /// Higher values produce better quality at larger file sizes.
     /// Set to `None` to use lossless FlateDecode (PNG-like, larger output).
     pub jpeg_quality: Option<u8>,
+
+    /// Output resolution in DPI.
+    ///
+    /// Controls the pixel dimensions of embedded images. Lower values produce
+    /// smaller files and faster exports; higher values preserve more detail.
+    ///
+    /// - `150` — screen quality (default); ~16× fewer pixels than native 600 DPI
+    /// - `300` — print quality
+    /// - `0` — use native page DPI (maximum quality, slowest)
+    pub output_dpi: u32,
 }
 
 impl Default for PdfOptions {
     fn default() -> Self {
         PdfOptions {
             jpeg_quality: Some(80),
+            output_dpi: 150,
+        }
+    }
+}
+
+impl PdfOptions {
+    /// High-quality archival preset: native DPI, JPEG quality 90.
+    pub fn archival() -> Self {
+        PdfOptions {
+            jpeg_quality: Some(90),
+            output_dpi: 0,
         }
     }
 }
@@ -1008,11 +1065,18 @@ mod tests {
             &doc,
             &PdfOptions {
                 jpeg_quality: Some(75),
+                output_dpi: 150,
             },
         )
         .expect("DCT conversion must succeed");
-        let flat_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None })
-            .expect("FlateDecode conversion must succeed");
+        let flat_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                jpeg_quality: None,
+                output_dpi: 150,
+            },
+        )
+        .expect("FlateDecode conversion must succeed");
         assert!(
             dct_pdf.len() < flat_pdf.len(),
             "DCT PDF ({} bytes) must be smaller than FlateDecode PDF ({} bytes)",
@@ -1029,6 +1093,7 @@ mod tests {
             &doc,
             &PdfOptions {
                 jpeg_quality: Some(80),
+                output_dpi: 150,
             },
         )
         .unwrap();
@@ -1040,7 +1105,14 @@ mod tests {
     #[test]
     fn pdf_without_dct_has_no_dctdecode() {
         let doc = load_doc("chicken.djvu");
-        let pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None }).unwrap();
+        let pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                jpeg_quality: None,
+                output_dpi: 150,
+            },
+        )
+        .unwrap();
         let has_dct = pdf.windows(9).any(|w| w == b"DCTDecode");
         assert!(!has_dct, "FlateDecode PDF must not contain DCTDecode");
     }
@@ -1050,7 +1122,14 @@ mod tests {
     fn default_djvu_to_pdf_is_dct() {
         let doc = load_doc("chicken.djvu");
         let default_pdf = djvu_to_pdf(&doc).unwrap();
-        let flat_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions { jpeg_quality: None }).unwrap();
+        let flat_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                jpeg_quality: None,
+                output_dpi: 150,
+            },
+        )
+        .unwrap();
         assert!(
             default_pdf.len() < flat_pdf.len(),
             "default PDF must use DCT and be smaller than FlateDecode"
