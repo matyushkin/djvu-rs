@@ -302,6 +302,57 @@ fn bench_render_colorbook(c: &mut Criterion) {
     });
 }
 
+/// Cold-path benchmark: parse document + render at 150 dpi inside the loop.
+///
+/// Each iteration recreates the document (and therefore the IW44 decode cache),
+/// measuring the true first-render cost: ZP arithmetic decode + wavelet + RGB.
+/// This is the scenario that benefits most from partial chunk decode.
+fn bench_render_colorbook_cold(c: &mut Criterion) {
+    let path = assets_path().join("colorbook.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_render_colorbook_cold: colorbook.djvu not found");
+            return;
+        }
+    };
+
+    // Parse once to read page geometry; re-parse inside iter to reset caches.
+    let doc0 = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page0 = match doc0.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let native_dpi = page0.dpi() as f32;
+    let target_dpi = 150_f32;
+    let scale = target_dpi / native_dpi;
+    let w = ((page0.width() as f32 * scale).round() as u32).max(1);
+    let h = ((page0.height() as f32 * scale).round() as u32).max(1);
+
+    let opts = djvu_rs::djvu_render::RenderOptions {
+        width: w,
+        height: h,
+        scale,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+    };
+
+    c.bench_function("render_colorbook_cold", |b| {
+        b.iter(|| {
+            // Re-parse to get a fresh page with empty caches.
+            let doc = djvu_rs::DjVuDocument::parse(black_box(&data)).unwrap();
+            let page = doc.page(0).unwrap();
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
+        });
+    });
+}
+
 /// Benchmark full DjVu→PDF export pipeline (render + DCTDecode JPEG compression).
 fn bench_pdf_export(c: &mut Criterion) {
     let path = corpus_path().join("watchmaker.djvu");
@@ -332,6 +383,7 @@ criterion_group!(
     bench_render_at_dpi,
     bench_render_coarse,
     bench_render_colorbook,
+    bench_render_colorbook_cold,
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
     bench_render_scaled,
