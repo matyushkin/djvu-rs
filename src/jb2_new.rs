@@ -317,6 +317,270 @@ fn check_blit_budget(sym: &Jbm, total: &mut usize) -> Result<(), Jb2Error> {
     Ok(())
 }
 
+/// Decode one row of a direct-mode JB2 bitmap with inline ZP arithmetic.
+///
+/// Copies the five hot ZP fields (`a`, `c`, `fence`, `bit_buf`, `bit_count`)
+/// into true stack-local variables so LLVM can keep them in ARM64/x86-64
+/// registers across the entire row without save/restore on every pixel.
+/// The `decode_bit` abstraction boundary prevents this otherwise: even with
+/// `#[inline(always)]`, the compiler conservatively spills through `&mut self`.
+#[inline(never)]
+fn decode_direct_row(
+    zp: &mut ZpDecoder<'_>,
+    ctx: &mut [u8; 1024],
+    row_slice: &mut [u8],
+    rp1: &[u8],
+    rp2: &[u8],
+) {
+    use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+    // ── Extract hot ZP state to true locals ──────────────────────────────────
+    let mut a = zp.a;
+    let mut c = zp.c;
+    let mut fence = zp.fence;
+    let mut bit_buf = zp.bit_buf;
+    let mut bit_count = zp.bit_count;
+    let data = zp.data;
+    let mut pos = zp.pos;
+
+    // Inline read_byte: returns 0xFF on exhaustion (same as ZpDecoder::read_byte).
+    macro_rules! read_byte {
+        () => {{
+            let b = if pos < data.len() { data[pos] } else { 0xff };
+            pos = pos.wrapping_add(1);
+            b as u32
+        }};
+    }
+
+    // Inline refill_buffer: fill bit_buf until bit_count > 24.
+    macro_rules! refill {
+        () => {
+            while bit_count <= 24 {
+                bit_buf = (bit_buf << 8) | read_byte!();
+                bit_count += 8;
+            }
+        };
+    }
+
+    // Inline renormalize (called after LPS event).
+    macro_rules! renorm {
+        () => {{
+            let shift = a.leading_ones();
+            bit_count -= shift as i32;
+            a = (a as u32).wrapping_shl(shift) as u16;
+            let mask = (1u32 << (shift & 31)).wrapping_sub(1);
+            c = ((c as u32) << shift | (bit_buf >> (bit_count as u32 & 31)) & mask) as u16;
+            if bit_count < 16 {
+                refill!();
+            }
+            fence = c.min(0x7fff);
+        }};
+    }
+
+    // ── Rolling-window initialisation (same as decode_bitmap_direct) ─────────
+    let pix = |row: &[u8], col: usize| -> u32 { row.get(col).copied().unwrap_or(0) as u32 };
+    let w = row_slice.len();
+    let mut r2 = pix(rp2, 0) << 1 | pix(rp2, 1);
+    let mut r1 = pix(rp1, 0) << 2 | pix(rp1, 1) << 1 | pix(rp1, 2);
+    let mut r0: u32 = 0;
+    let mid_end = if rp1.len() >= w && rp2.len() >= w {
+        w.saturating_sub(4)
+    } else {
+        0
+    };
+
+    // ── Hot loop ─────────────────────────────────────────────────────────────
+    for (col, out) in row_slice.iter_mut().enumerate() {
+        let idx = (((r2 << 7) | (r1 << 2) | r0) & 1023) as usize;
+
+        // ── Inline decode_bit ──────────────────────────────────────────────
+        let state = ctx[idx] as usize;
+        let mps_bit = state & 1;
+        let z = a as u32 + PROB[state] as u32;
+
+        let bit = if z <= fence as u32 {
+            // Fast path: no renorm, no context update needed.
+            a = z as u16;
+            mps_bit != 0
+        } else {
+            let boundary = 0x6000u32 + ((a as u32 + z) >> 2);
+            let z_clamped = z.min(boundary);
+            if z_clamped > c as u32 {
+                // LPS event
+                let complement = 0x10000u32 - z_clamped;
+                a = a.wrapping_add(complement as u16);
+                c = c.wrapping_add(complement as u16);
+                ctx[idx] = LPS_NEXT[state];
+                renorm!();
+                (1 - mps_bit) != 0
+            } else {
+                // MPS event with possible state advance
+                if a >= THRESHOLD[state] {
+                    ctx[idx] = MPS_NEXT[state];
+                }
+                bit_count -= 1;
+                a = (z_clamped << 1) as u16;
+                c = ((c as u32) << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) as u16;
+                if bit_count < 16 {
+                    refill!();
+                }
+                fence = c.min(0x7fff);
+                mps_bit != 0
+            }
+        };
+
+        if bit {
+            *out = 1;
+        }
+
+        // Advance rolling windows (fast middle / safe suffix split).
+        if col < mid_end {
+            r2 = ((r2 << 1) & 0b111) | rp2[col + 2] as u32;
+            r1 = ((r1 << 1) & 0b11111) | rp1[col + 3] as u32;
+        } else {
+            r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
+            r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
+        }
+        r0 = ((r0 << 1) & 0b11) | bit as u32;
+    }
+
+    // ── Write ZP state back ───────────────────────────────────────────────────
+    zp.a = a;
+    zp.c = c;
+    zp.fence = fence;
+    zp.bit_buf = bit_buf;
+    zp.bit_count = bit_count;
+    zp.pos = pos;
+}
+
+/// Decode one row of a refinement-mode JB2 bitmap with inline ZP arithmetic.
+///
+/// Same local-variable register-allocation trick as `decode_direct_row`,
+/// but uses the 11-bit refinement context (ctx: [u8; 2048]).
+/// Rolling-window initial values (`init_c_r1`, `init_m_r1`, `init_m_r0`) are
+/// pre-computed by the caller at the start of each outer (row) iteration.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn decode_ref_row(
+    zp: &mut ZpDecoder<'_>,
+    ctx: &mut [u8; 2048],
+    cbm_row_mut: &mut [u8],
+    cbm_r1: &[u8],
+    mbm_r2: &[u8],
+    mbm_r1: &[u8],
+    mbm_r0: &[u8],
+    col_shift: i32,
+    init_c_r1: u32,
+    init_m_r1: u32,
+    init_m_r0: u32,
+) {
+    use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+    let mut a = zp.a;
+    let mut c = zp.c;
+    let mut fence = zp.fence;
+    let mut bit_buf = zp.bit_buf;
+    let mut bit_count = zp.bit_count;
+    let data = zp.data;
+    let mut pos = zp.pos;
+
+    macro_rules! read_byte {
+        () => {{
+            let b = if pos < data.len() { data[pos] } else { 0xff };
+            pos = pos.wrapping_add(1);
+            b as u32
+        }};
+    }
+    macro_rules! refill {
+        () => {
+            while bit_count <= 24 {
+                bit_buf = (bit_buf << 8) | read_byte!();
+                bit_count += 8;
+            }
+        };
+    }
+    macro_rules! renorm {
+        () => {{
+            let shift = a.leading_ones();
+            bit_count -= shift as i32;
+            a = (a as u32).wrapping_shl(shift) as u16;
+            let mask = (1u32 << (shift & 31)).wrapping_sub(1);
+            c = ((c as u32) << shift | (bit_buf >> (bit_count as u32 & 31)) & mask) as u16;
+            if bit_count < 16 {
+                refill!();
+            }
+            fence = c.min(0x7fff);
+        }};
+    }
+
+    let pix_row = |row_slice: &[u8], col: i32| -> u32 {
+        if col < 0 {
+            return 0;
+        }
+        row_slice.get(col as usize).copied().unwrap_or(0) as u32
+    };
+
+    // c_r0 = previous decoded pixel in this row (starts 0; advances with `bit`).
+    let mut c_r0: u32 = 0;
+    let mut c_r1 = init_c_r1;
+    let mut m_r1 = init_m_r1;
+    let mut m_r0 = init_m_r0;
+
+    for col in 0..cbm_row_mut.len() as i32 {
+        let m_r2 = pix_row(mbm_r2, col + col_shift);
+        // idx ≤ 2047: c_r1<8, c_r0<2, m_r2<2, m_r1<8, m_r0<8
+        let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
+
+        let state = ctx[idx as usize] as usize;
+        let mps_bit = state & 1;
+        let z = a as u32 + PROB[state] as u32;
+
+        let bit = if z <= fence as u32 {
+            a = z as u16;
+            mps_bit != 0
+        } else {
+            let boundary = 0x6000u32 + ((a as u32 + z) >> 2);
+            let z_clamped = z.min(boundary);
+            if z_clamped > c as u32 {
+                let complement = 0x10000u32 - z_clamped;
+                a = a.wrapping_add(complement as u16);
+                c = c.wrapping_add(complement as u16);
+                ctx[idx as usize] = LPS_NEXT[state];
+                renorm!();
+                (1 - mps_bit) != 0
+            } else {
+                if a >= THRESHOLD[state] {
+                    ctx[idx as usize] = MPS_NEXT[state];
+                }
+                bit_count -= 1;
+                a = (z_clamped << 1) as u16;
+                c = ((c as u32) << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) as u16;
+                if bit_count < 16 {
+                    refill!();
+                }
+                fence = c.min(0x7fff);
+                mps_bit != 0
+            }
+        };
+
+        if bit {
+            cbm_row_mut[col as usize] = 1;
+        }
+
+        c_r1 = ((c_r1 << 1) & 0b111) | pix_row(cbm_r1, col + 2);
+        c_r0 = bit as u32;
+        m_r1 = ((m_r1 << 1) & 0b111) | pix_row(mbm_r1, col + col_shift + 2);
+        m_r0 = ((m_r0 << 1) & 0b111) | pix_row(mbm_r0, col + col_shift + 2);
+    }
+
+    zp.a = a;
+    zp.c = c;
+    zp.fence = fence;
+    zp.bit_buf = bit_buf;
+    zp.bit_count = bit_count;
+    zp.pos = pos;
+}
+
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
     ctx: &mut [u8; 1024],
@@ -359,41 +623,7 @@ fn decode_bitmap_direct(
             &[]
         };
 
-        // Read pixel from a row slice at column index; returns 0 for OOB.
-        let pix = |row: &[u8], col: usize| -> u32 { row.get(col).copied().unwrap_or(0) as u32 };
-
-        // r2: 3 bits from (row+2, col-1..col+1) — col-1=-1 gives 0 at col=0
-        let mut r2 = pix(rp2, 0) << 1 | pix(rp2, 1);
-        // r1: 5 bits from (row+1, col-2..col+2) — col-2,-1 give 0 at col=0
-        let mut r1 = pix(rp1, 0) << 2 | pix(rp1, 1) << 1 | pix(rp1, 2);
-        // r0: 2 bits from (row, col-2, col-1) — both 0 at col=0
-        let mut r0: u32 = 0;
-
-        // Split into: safe suffix (last 4 cols need bounds-checked lookahead)
-        // and a fast middle path where col+3 < rp1.len() is guaranteed.
-        // When rp1/rp2 are shorter than w (near top of page), use all-safe path.
-        let mid_end = if rp1.len() >= w && rp2.len() >= w {
-            w.saturating_sub(4)
-        } else {
-            0 // degenerate: everything is "suffix"
-        };
-
-        for (col, out) in row_slice.iter_mut().enumerate() {
-            let idx = (((r2 << 7) | (r1 << 2) | r0) & 1023) as usize;
-            let bit = zp.decode_bit(&mut ctx[idx]);
-            if bit {
-                *out = 1;
-            }
-            if col < mid_end {
-                // col+2 < rp2.len() and col+3 < rp1.len(): use direct indexing (no bounds check)
-                r2 = ((r2 << 1) & 0b111) | rp2[col + 2] as u32;
-                r1 = ((r1 << 1) & 0b11111) | rp1[col + 3] as u32;
-            } else {
-                r2 = ((r2 << 1) & 0b111) | pix(rp2, col + 2);
-                r1 = ((r1 << 1) & 0b11111) | pix(rp1, col + 3);
-            }
-            r0 = ((r0 << 1) & 0b11) | bit as u32;
-        }
+        decode_direct_row(zp, ctx, row_slice, rp1, rp2);
     }
     Ok(bm)
 }
@@ -471,33 +701,28 @@ fn decode_bitmap_ref(
             upper_cbm
         };
 
-        // cbm row+1: 3 bits at (col-1, col, col+1) — col-1=-1 starts as 0
-        let mut c_r1 = pix_row(cbm_r1, 0) << 1 | pix_row(cbm_r1, 1);
-        // cbm current row, col-1: single bit, starts as 0
-        let mut c_r0: u32 = 0;
-        // mbm (mr, col+cs-1..col+cs+1): 3 bits
-        let mut m_r1 = pix_row(mbm_r1, col_shift - 1) << 2
+        // Compute rolling-window initial values for this row (before the inner loop).
+        let init_c_r1 = pix_row(cbm_r1, 0) << 1 | pix_row(cbm_r1, 1);
+        let init_m_r1 = pix_row(mbm_r1, col_shift - 1) << 2
             | pix_row(mbm_r1, col_shift) << 1
             | pix_row(mbm_r1, col_shift + 1);
-        // mbm (mr-1, col+cs-1..col+cs+1): 3 bits
-        let mut m_r0 = pix_row(mbm_r0, col_shift - 1) << 2
+        let init_m_r0 = pix_row(mbm_r0, col_shift - 1) << 2
             | pix_row(mbm_r0, col_shift) << 1
             | pix_row(mbm_r0, col_shift + 1);
 
-        for col in 0..width {
-            let m_r2 = pix_row(mbm_r2, col + col_shift);
-            // idx ≤ 2047 always: c_r1<8, c_r0<2, m_r2<2, m_r1<8, m_r0<8
-            let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
-            let bit = zp.decode_bit(&mut ctx[idx as usize]);
-            if bit {
-                cbm_row_mut[col as usize] = 1;
-            }
-            // Advance rolling windows
-            c_r1 = ((c_r1 << 1) & 0b111) | pix_row(cbm_r1, col + 2);
-            c_r0 = bit as u32;
-            m_r1 = ((m_r1 << 1) & 0b111) | pix_row(mbm_r1, col + col_shift + 2);
-            m_r0 = ((m_r0 << 1) & 0b111) | pix_row(mbm_r0, col + col_shift + 2);
-        }
+        decode_ref_row(
+            zp,
+            ctx,
+            cbm_row_mut,
+            cbm_r1,
+            mbm_r2,
+            mbm_r1,
+            mbm_r0,
+            col_shift,
+            init_c_r1,
+            init_m_r1,
+            init_m_r0,
+        );
     }
     Ok(cbm)
 }
