@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1](https://github.com/matyushkin/djvu-rs/compare/v0.11.0...v0.11.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **fuzz:** add [workspace] to fuzz/Cargo.toml to fix cargo-fuzz build ([be7a5a8](https://github.com/matyushkin/djvu-rs/commit/be7a5a80d23ca77c6c326c1c9065e1498ab41b5d))
+* **smmr:** replace manual div_ceil with .div_ceil() per clippy ([a8d24ca](https://github.com/matyushkin/djvu-rs/commit/a8d24ca5fa470e9f9c59bee7ef7a605786a8fe79))
+
 ## [0.11.0](https://github.com/matyushkin/djvu-rs/compare/v0.10.0...v0.11.0) (2026-04-13)
 
 
