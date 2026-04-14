@@ -299,21 +299,25 @@ pub mod zp;
 pub use bitmap::Bitmap;
 pub use pixmap::{GrayPixmap, Pixmap};
 
-// Re-export legacy types (only with std feature)
+// Re-export text types from the new pipeline
 #[cfg(feature = "std")]
-pub use document::{Bookmark, TextLayer, TextZone, TextZoneKind};
+pub use text::{TextLayer, TextZone, TextZoneKind};
+
+// Bookmark type alias — same shape as DjVuBookmark
+#[cfg(feature = "std")]
+pub type Bookmark = DjVuBookmark;
 
 // Legacy error type (re-exported from legacy_error module included via error.rs)
 #[cfg(feature = "std")]
 pub use error::LegacyError as Error;
 
 /// A parsed DjVu document. Owns the parsed structure.
-#[cfg(feature = "std")]
 ///
 /// Parsing happens once at construction time. All subsequent `page()` and
 /// `render()` calls reuse the parsed chunk tree with zero re-parsing overhead.
+#[cfg(feature = "std")]
 pub struct Document {
-    doc: document::Document,
+    doc: DjVuDocument,
 }
 
 #[cfg(feature = "std")]
@@ -337,13 +341,13 @@ impl Document {
 
     /// Parse a DjVu document from owned bytes.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, Error> {
-        let doc = document::Document::parse(&data)?;
+        let doc = DjVuDocument::parse(&data).map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Document { doc })
     }
 
     /// Parse the NAVM bookmarks (table of contents).
     pub fn bookmarks(&self) -> Result<Vec<Bookmark>, Error> {
-        self.doc.bookmarks()
+        Ok(self.doc.bookmarks().to_vec())
     }
 
     /// Number of pages.
@@ -353,60 +357,55 @@ impl Document {
 
     /// Access a page by 0-based index.
     pub fn page(&self, index: usize) -> Result<Page<'_>, Error> {
-        let inner = self.doc.page(index)?;
-        Ok(Page {
-            width: inner.info.width,
-            height: inner.info.height,
-            dpi: inner.info.dpi,
-            rotation: inner.info.rotation,
-            index,
-            doc: self,
-        })
+        let page = self
+            .doc
+            .page(index)
+            .map_err(|e| Error::FormatError(e.to_string()))?;
+        Ok(Page { page, index })
     }
 }
 
 /// A page within a DjVu document.
 #[cfg(feature = "std")]
 pub struct Page<'a> {
-    width: u16,
-    height: u16,
-    dpi: u16,
-    rotation: document::Rotation,
+    page: &'a DjVuPage,
     index: usize,
-    doc: &'a Document,
 }
 
 #[cfg(feature = "std")]
 impl<'a> Page<'a> {
     /// Page width in pixels (before rotation).
     pub fn width(&self) -> u32 {
-        self.width as u32
+        self.page.width() as u32
     }
 
     /// Page height in pixels (before rotation).
     pub fn height(&self) -> u32 {
-        self.height as u32
+        self.page.height() as u32
     }
 
     /// Effective page width after rotation.
     pub fn display_width(&self) -> u32 {
-        match self.rotation {
-            document::Rotation::Cw90 | document::Rotation::Cw270 => self.height as u32,
-            _ => self.width as u32,
-        }
+        self.display_dims().0
     }
 
     /// Effective page height after rotation.
     pub fn display_height(&self) -> u32 {
-        match self.rotation {
-            document::Rotation::Cw90 | document::Rotation::Cw270 => self.width as u32,
-            _ => self.height as u32,
+        self.display_dims().1
+    }
+
+    fn display_dims(&self) -> (u32, u32) {
+        let w = self.page.width() as u32;
+        let h = self.page.height() as u32;
+        match self.page.rotation() {
+            info::Rotation::Cw90 | info::Rotation::Ccw90 => (h, w),
+            _ => (w, h),
         }
     }
 
     /// Page resolution in dots per inch.
     pub fn dpi(&self) -> u16 {
-        self.dpi
+        self.page.dpi()
     }
 
     /// The 0-based index of this page within the document.
@@ -415,40 +414,64 @@ impl<'a> Page<'a> {
     }
 
     /// Page rotation from the INFO chunk.
-    pub fn rotation(&self) -> document::Rotation {
-        self.rotation
+    pub fn rotation(&self) -> info::Rotation {
+        self.page.rotation()
     }
 
-    /// Decode the JB2 mask layer only (no compositing).
+    fn render_err(e: djvu_render::RenderError) -> Error {
+        Error::FormatError(e.to_string())
+    }
+
+    /// Decode the JB2/G4 mask layer only (no compositing).
     ///
-    /// Returns `None` when the page has no Sjbz chunk (pure IW44 background page).
-    /// Useful for benchmarking the decode phase in isolation.
+    /// Returns `None` when the page has no mask chunk (pure IW44 background page).
     pub fn decode_mask(&self) -> Result<Option<Bitmap>, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        page.decode_mask()
+        self.page
+            .extract_mask()
+            .map_err(|e| Error::FormatError(e.to_string()))
     }
 
     /// Render the page to an RGBA pixmap at native resolution.
     pub fn render(&self) -> Result<Pixmap, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        render::render(&page)
+        let (w, h) = self.display_dims();
+        let opts = djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale: 1.0,
+            ..Default::default()
+        };
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Render the page to an RGBA pixmap at a target size.
     pub fn render_to_size(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size(&page, width, height)
+        let (dw, dh) = self.display_dims();
+        let scale = if dw > 0 {
+            width as f32 / dw as f32
+        } else {
+            1.0
+        };
+        let _ = dh;
+        let opts = djvu_render::RenderOptions {
+            width,
+            height,
+            scale,
+            ..Default::default()
+        };
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Render the page at native resolution with mask dilation for bolder text.
     pub fn render_bold(&self, dilate_passes: u32) -> Result<Pixmap, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size_bold(
-            &page,
-            page.info.width as u32,
-            page.info.height as u32,
-            dilate_passes,
-        )
+        let (w, h) = self.display_dims();
+        let opts = djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale: 1.0,
+            bold: dilate_passes.min(255) as u8,
+            ..Default::default()
+        };
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Render the page to a target size with mask dilation for bolder text.
@@ -458,25 +481,52 @@ impl<'a> Page<'a> {
         height: u32,
         dilate_passes: u32,
     ) -> Result<Pixmap, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size_bold(&page, width, height, dilate_passes)
+        let (dw, _dh) = self.display_dims();
+        let scale = if dw > 0 {
+            width as f32 / dw as f32
+        } else {
+            1.0
+        };
+        let opts = djvu_render::RenderOptions {
+            width,
+            height,
+            scale,
+            bold: dilate_passes.min(255) as u8,
+            ..Default::default()
+        };
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Render the page at a target size with anti-aliased downscaling.
-    pub fn render_aa(&self, width: u32, height: u32, boldness: f32) -> Result<Pixmap, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        render::render_aa(&page, width, height, boldness)
+    pub fn render_aa(&self, width: u32, height: u32, _boldness: f32) -> Result<Pixmap, Error> {
+        let (dw, _dh) = self.display_dims();
+        let scale = if dw > 0 {
+            width as f32 / dw as f32
+        } else {
+            1.0
+        };
+        let opts = djvu_render::RenderOptions {
+            width,
+            height,
+            scale,
+            aa: true,
+            ..Default::default()
+        };
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Decode the page thumbnail, if available.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
-        self.doc.doc.thumbnail(self.index)
+        self.page
+            .thumbnail()
+            .map_err(|e| Error::FormatError(e.to_string()))
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, Error> {
-        let page = self.doc.doc.page(self.index)?;
-        page.text_layer()
+        self.page
+            .text_layer()
+            .map_err(|e| Error::FormatError(e.to_string()))
     }
 
     /// Extract the plain text content of the page.
@@ -486,44 +536,55 @@ impl<'a> Page<'a> {
 
     /// Fast coarse render: decode only the first BG44 chunk (blurry preview).
     pub fn render_scaled_coarse(&self, scale: f32) -> Result<Option<Pixmap>, Error> {
-        let dw = self.display_width();
-        let dh = self.display_height();
+        let (dw, dh) = self.display_dims();
         let w = ((dw as f32 * scale).round() as u32).max(1);
         let h = ((dh as f32 * scale).round() as u32).max(1);
-        let (tw, th) = match self.rotation {
-            document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
-            _ => (w, h),
+        let opts = djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale,
+            ..Default::default()
         };
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size_coarse(&page, tw, th)
+        djvu_render::render_coarse(self.page, &opts).map_err(Self::render_err)
     }
 
     /// Progressive rendering: returns increasingly refined pixmaps.
     pub fn render_scaled_progressive(&self, scale: f32) -> Result<Vec<Pixmap>, Error> {
-        let dw = self.display_width();
-        let dh = self.display_height();
+        let (dw, dh) = self.display_dims();
         let w = ((dw as f32 * scale).round() as u32).max(1);
         let h = ((dh as f32 * scale).round() as u32).max(1);
-        let (tw, th) = match self.rotation {
-            document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
-            _ => (w, h),
+        let opts = djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale,
+            ..Default::default()
         };
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size_progressive(&page, tw, th)
+        let n_bg44 = self.page.bg44_chunks().len();
+        if n_bg44 == 0 {
+            let pixmap = djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)?;
+            return Ok(vec![pixmap]);
+        }
+        let mut result = Vec::with_capacity(n_bg44);
+        for chunk_n in 0..n_bg44 {
+            let pixmap = djvu_render::render_progressive(self.page, &opts, chunk_n)
+                .map_err(Self::render_err)?;
+            result.push(pixmap);
+        }
+        Ok(result)
     }
 
     /// Render the page scaled by a factor (e.g. 0.5 = half size, 2.0 = double).
     pub fn render_scaled(&self, scale: f32) -> Result<Pixmap, Error> {
-        let dw = self.display_width();
-        let dh = self.display_height();
+        let (dw, dh) = self.display_dims();
         let w = ((dw as f32 * scale).round() as u32).max(1);
         let h = ((dh as f32 * scale).round() as u32).max(1);
-        let (tw, th) = match self.rotation {
-            document::Rotation::Cw90 | document::Rotation::Cw270 => (h, w),
-            _ => (w, h),
+        let opts = djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale,
+            ..Default::default()
         };
-        let page = self.doc.doc.page(self.index)?;
-        render::render_to_size(&page, tw, th)
+        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
     }
 }
 
