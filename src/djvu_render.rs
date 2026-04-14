@@ -1811,24 +1811,6 @@ mod tests {
             .join("references/djvujs/library/assets")
     }
 
-    fn load_page(filename: &str) -> DjVuPage {
-        let data = std::fs::read(assets_path().join(filename))
-            .unwrap_or_else(|_| panic!("{filename} must exist"));
-        let doc = DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"));
-        // Return owned page — DjVuDocument owns the pages, access them by value
-        // by re-parsing with index 0
-        let _ = doc.page(0).expect("page 0 must exist");
-        // For tests, we re-parse and use doc directly
-        let data2 = std::fs::read(assets_path().join(filename)).unwrap();
-        let doc2 = DjVuDocument::parse(&data2).unwrap();
-        // We need an owned DjVuPage. Since DjVuDocument stores them,
-        // and page() returns &DjVuPage, we use a helper that owns the doc.
-        // For test simplicity, we rely on the static lifetime via owned doc.
-        // Build a wrapper struct to hold the doc and return a usable page.
-        drop(doc2);
-        panic!("use load_doc_page instead")
-    }
-
     /// Helper that returns an owned document so tests can borrow pages from it.
     fn load_doc(filename: &str) -> DjVuDocument {
         let data = std::fs::read(assets_path().join(filename))
@@ -2247,13 +2229,6 @@ mod tests {
         // AA downscales the output
         assert_eq!(pm.width, 20);
         assert_eq!(pm.height, 27);
-    }
-
-    // Remove the unused helper that panics
-    #[allow(dead_code)]
-    fn _unused_load_page(_: &str) -> ! {
-        let _ = load_page; // suppress dead code warning
-        panic!("use load_doc instead")
     }
 
     // -- Rotation tests -------------------------------------------------------

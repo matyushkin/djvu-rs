@@ -152,27 +152,6 @@ fn decode_raw_bits(zp: &mut ZpDecoder, bit_count: u32) -> u32 {
     n - limit
 }
 
-/// Decode `bit_count` bits using a context binary tree.
-///
-/// `ctx_base` is the index of the first context in the subtree (0-indexed
-/// after the subtree root). The decoding traverses the binary tree by
-/// accumulating the decoded bit into an integer, starting from 1.
-///
-/// Used only by callers outside `decode_mtf_phase` (e.g. tests).  The hot
-/// path inside `decode_mtf_phase` uses inlined ZP locals via a macro.
-#[allow(dead_code)]
-fn decode_context_bits(zp: &mut ZpDecoder, ctx: &mut [u8], ctx_base: usize, bit_count: u32) -> u32 {
-    // The subtree root is at ctx_base - 1; children at ctx_base, ctx_base+1, ...
-    let subtree_offset = ctx_base.wrapping_sub(1);
-    let limit = 1u32 << bit_count;
-    let mut n = 1u32;
-    while n < limit {
-        let bit = zp.decode_bit(&mut ctx[subtree_offset + n as usize]) as u32;
-        n = (n << 1) | bit;
-    }
-    n - limit
-}
-
 /// Decode one BZZ block, returning the raw BWT-encoded bytes and marker position.
 ///
 /// Identical to [`decode_one_block`] except the inverse-BWT step is skipped.
