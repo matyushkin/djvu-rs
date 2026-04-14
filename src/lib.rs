@@ -76,10 +76,8 @@ pub(crate) mod info;
 
 /// ZP arithmetic coder — clean-room implementation (phase 2a).
 ///
-/// Provides `ZpDecoder` for use by the new BZZ decompressor and future
-/// phase decoders (JB2, IW44). Not yet wired into the legacy rendering path.
+/// Provides `ZpDecoder` used by BZZ, JB2, and IW44 decoders.
 #[path = "zp/mod.rs"]
-#[allow(dead_code)]
 pub(crate) mod zp_impl;
 
 /// BZZ decompressor — clean-room implementation.
