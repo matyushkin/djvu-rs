@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/matyushkin/djvu-rs/compare/v0.11.1...v0.12.0) (2026-04-14)
+
+
+### Features
+
+* **pdf:** parallel page rendering with rayon ([#148](https://github.com/matyushkin/djvu-rs/issues/148)) ([ae79a7c](https://github.com/matyushkin/djvu-rs/commit/ae79a7c6539fd2173885b18aa4e3beb7146b70b4))
+* **wasm:** progressive IW44 render API ([#150](https://github.com/matyushkin/djvu-rs/issues/150)) ([35d3a30](https://github.com/matyushkin/djvu-rs/commit/35d3a30d285fd699781d9c4e5373b584b29f544d))
+
+
+### Bug Fixes
+
+* **ocr:** resolve all clippy errors in ocr_neural, ocr_onnx, ocr_tesseract ([65a0cee](https://github.com/matyushkin/djvu-rs/commit/65a0cee338411a608c0c8a92d02c3638cb18c153))
+* update tesseract API and optimize JB2 inner loop ([f64d884](https://github.com/matyushkin/djvu-rs/commit/f64d88423aff0d4861a6dd50c1ec7a4c45e1d10b))
+
+
+### Performance Improvements
+
+* allow 1.5× upscale in IW44 subsample selection for faster downscaled renders ([8f0baa2](https://github.com/matyushkin/djvu-rs/commit/8f0baa2a06eadce23974d973b7ee635b5939a5f0))
+* downsampled mask pyramid for composite — 8 ms vs 23 ms for 150 dpi renders ([1374f27](https://github.com/matyushkin/djvu-rs/commit/1374f2707ead48b1db2a0eea48c12c8872bf9527))
+* eliminate bounds checks in JB2 hot loops and ZP renormalize ([7e94000](https://github.com/matyushkin/djvu-rs/commit/7e94000ace8ed67b5410586563e7168031fa595e))
+* **jb2:** close performance gap vs DjVuLibre + CLI improvements ([#159](https://github.com/matyushkin/djvu-rs/issues/159)) ([3efc430](https://github.com/matyushkin/djvu-rs/commit/3efc430234f8848ecc597302c7f6ece8ae9ac887))
+* **jb2:** local-copy ZP state for register-allocation + hardware CLZ ([0590d3c](https://github.com/matyushkin/djvu-rs/commit/0590d3cd00dce042132d8759204421a7b1750f33))
+* partial BG44 chunk decode for sub=4 renders — skip high-frequency refinement ([b371e4e](https://github.com/matyushkin/djvu-rs/commit/b371e4eebe5cd766114d81dac3480430bc8712ed))
+* **pdf:** output_dpi option + bilevel fast path — 2× faster export ([cfccbc6](https://github.com/matyushkin/djvu-rs/commit/cfccbc6deefbf288bcd2055ee27c3fed5d7c9b54)), closes [#147](https://github.com/matyushkin/djvu-rs/issues/147)
+* replace bg_subsample division with shift in composite hot path ([0e0f2a3](https://github.com/matyushkin/djvu-rs/commit/0e0f2a3aa52da045126588ec4094fe436ce739c3))
+* replace mask division with bit-shift in composite hot path ([e4b7982](https://github.com/matyushkin/djvu-rs/commit/e4b7982903dbaa040e3285ecb5ace4f24ca06b73))
+* use chunks_exact_mut in composite loops — eliminate per-pixel bounds checks ([0176860](https://github.com/matyushkin/djvu-rs/commit/01768603ded218496c95678c40b5cc892a9dae9e))
+
 ## [0.11.1](https://github.com/matyushkin/djvu-rs/compare/v0.11.0...v0.11.1) (2026-04-13)
 
 
