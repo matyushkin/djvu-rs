@@ -23,12 +23,12 @@ use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 /// (most probable symbol) value. The low bit of the context byte indicates
 /// the current MPS; the remaining bits encode the probability state.
 pub(crate) struct ZpDecoder<'a> {
-    /// Current interval width register.
-    pub(crate) a: u16,
-    /// Current code (value within the interval) register.
-    pub(crate) c: u16,
+    /// Current interval width register (16-bit value held in low 16 bits).
+    pub(crate) a: u32,
+    /// Current code (value within the interval) register (16-bit value held in low 16 bits).
+    pub(crate) c: u32,
     /// Cached upper bound for the fast decode path (= min(c, 0x7fff)).
-    pub(crate) fence: u16,
+    pub(crate) fence: u32,
     /// Bit buffer for feeding bits into the code register.
     pub(crate) bit_buf: u32,
     /// Number of valid bits remaining in `bit_buf`.
@@ -63,8 +63,8 @@ impl<'a> ZpDecoder<'a> {
         };
 
         // Load the initial code register from the first two bytes
-        let high = dec.read_byte() as u16;
-        let low = dec.read_byte() as u16;
+        let high = dec.read_byte() as u32;
+        let low = dec.read_byte() as u32;
         dec.c = (high << 8) | low;
 
         // Pre-fill the bit buffer
@@ -108,36 +108,35 @@ impl<'a> ZpDecoder<'a> {
     pub(crate) fn decode_bit(&mut self, ctx: &mut u8) -> bool {
         let state = *ctx as usize;
         let mps_bit = state & 1; // low bit encodes the current MPS
-        // Compute updated interval (may overflow u16)
-        let z = self.a as u32 + PROB[state] as u32;
+        let z = self.a + PROB[state] as u32;
 
         // Fast path: interval stays within the fence — no renormalization needed
-        if z <= self.fence as u32 {
-            self.a = z as u16;
+        if z <= self.fence {
+            self.a = z;
             return mps_bit != 0;
         }
 
         // Clamp to the decision boundary
-        let boundary = 0x6000u32 + ((self.a as u32 + z) >> 2);
+        let boundary = 0x6000u32 + ((self.a + z) >> 2);
         let z_clamped = z.min(boundary);
 
-        if z_clamped > self.c as u32 {
+        if z_clamped > self.c {
             // LPS event: decoded bit is opposite of MPS
             let lps_bit = 1 - mps_bit;
             let complement = 0x10000u32 - z_clamped;
-            self.a = self.a.wrapping_add(complement as u16);
-            self.c = self.c.wrapping_add(complement as u16);
+            self.a = (self.a + complement) & 0xffff;
+            self.c = (self.c + complement) & 0xffff;
             *ctx = LPS_NEXT[state];
             self.renormalize();
             lps_bit != 0
         } else {
             // MPS event: decoded bit matches MPS
-            if self.a >= THRESHOLD[state] {
+            if self.a >= THRESHOLD[state] as u32 {
                 *ctx = MPS_NEXT[state];
             }
             self.bit_count -= 1;
-            self.a = (z_clamped << 1) as u16;
-            self.c = ((self.c as u32) << 1 | ((self.bit_buf >> self.bit_count as u32) & 1)) as u16;
+            self.a = (z_clamped << 1) & 0xffff;
+            self.c = (self.c << 1 | (self.bit_buf >> self.bit_count as u32) & 1) & 0xffff;
             if self.bit_count < 16 {
                 self.refill_buffer();
             }
@@ -163,7 +162,7 @@ impl<'a> ZpDecoder<'a> {
     /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
     pub(crate) fn decode_passthrough(&mut self) -> bool {
-        let z = 0x8000u16.wrapping_add(self.a >> 1);
+        let z = (0x8000u32 + (self.a >> 1)) as u16;
         self.passthrough_with_threshold(z)
     }
 
@@ -172,25 +171,25 @@ impl<'a> ZpDecoder<'a> {
     /// The threshold is `z = 0x8000 + (3 * a / 8)`.
     #[inline(always)]
     pub(crate) fn decode_passthrough_iw44(&mut self) -> bool {
-        let z = (0x8000u32 + (3u32 * self.a as u32) / 8) as u16;
+        let z = (0x8000u32 + (3u32 * self.a) / 8) as u16;
         self.passthrough_with_threshold(z)
     }
 
     /// Internal passthrough decode with an explicit threshold `z`.
     #[inline(always)]
     fn passthrough_with_threshold(&mut self, z: u16) -> bool {
-        if z > self.c {
+        if z as u32 > self.c {
             // Bit is 1
             let complement = 0x10000u32 - z as u32;
-            self.a = self.a.wrapping_add(complement as u16);
-            self.c = self.c.wrapping_add(complement as u16);
+            self.a = (self.a + complement) & 0xffff;
+            self.c = (self.c + complement) & 0xffff;
             self.renormalize();
             true
         } else {
             // Bit is 0
             self.bit_count -= 1;
-            self.a = z.wrapping_mul(2);
-            self.c = ((self.c as u32) << 1 | ((self.bit_buf >> self.bit_count as u32) & 1)) as u16;
+            self.a = (z as u32 * 2) & 0xffff;
+            self.c = (self.c << 1 | (self.bit_buf >> self.bit_count as u32) & 1) & 0xffff;
             if self.bit_count < 16 {
                 self.refill_buffer();
             }
@@ -205,12 +204,11 @@ impl<'a> ZpDecoder<'a> {
     /// into `c` from the bit buffer.
     #[inline(always)]
     fn renormalize(&mut self) {
-        let shift = self.a.leading_ones();
+        let shift = (self.a as u16).leading_ones();
         self.bit_count -= shift as i32;
-        self.a = ((self.a as u32) << shift) as u16;
+        self.a = (self.a << shift) & 0xffff;
         let mask = (1u32 << shift) - 1;
-        self.c =
-            ((self.c as u32) << shift | ((self.bit_buf >> self.bit_count as u32) & mask)) as u16;
+        self.c = ((self.c << shift) | (self.bit_buf >> self.bit_count as u32) & mask) & 0xffff;
         if self.bit_count < 16 {
             self.refill_buffer();
         }
