@@ -405,32 +405,42 @@ impl<'a> Page<'a> {
         self.form.find_first(b"FGbz").is_some()
     }
 
-    /// Decode the JB2 mask layer, resolving shared dictionaries via INCL.
+    /// Decode the foreground mask layer.
+    ///
+    /// Handles both JB2 (`Sjbz`) and G4/MMR (`Smmr`) encoded masks.
     pub fn decode_mask(&self) -> Result<Option<Bitmap>, Error> {
-        let sjbz = match self.form.find_first(b"Sjbz") {
-            Some(c) => c.data(),
-            None => return Ok(None),
-        };
-
-        let shared_dict = self.resolve_shared_dict()?;
-
-        let bitmap = crate::jb2::decode(sjbz, shared_dict.as_deref())
-            .map_err(|e| Error::FormatError(e.to_string()))?;
-        Ok(Some(bitmap))
+        if let Some(c) = self.form.find_first(b"Sjbz") {
+            let shared_dict = self.resolve_shared_dict()?;
+            let bitmap = crate::jb2::decode(c.data(), shared_dict.as_deref())
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            return Ok(Some(bitmap));
+        }
+        if let Some(c) = self.form.find_first(b"Smmr") {
+            let bitmap = crate::smmr::decode_smmr(c.data())
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            return Ok(Some(bitmap));
+        }
+        Ok(None)
     }
 
     /// Decode the JB2 mask with per-pixel blit index map (for FGbz palette compositing).
+    ///
+    /// Falls back to a plain `Smmr` mask (without blit indices) when only an
+    /// `Smmr` chunk is present; in that case all blit indices are set to `0`.
     pub fn decode_mask_indexed(&self) -> Result<Option<(Bitmap, Vec<i32>)>, Error> {
-        let sjbz = match self.form.find_first(b"Sjbz") {
-            Some(c) => c.data(),
-            None => return Ok(None),
-        };
-
-        let shared_dict = self.resolve_shared_dict()?;
-
-        let result = crate::jb2::decode_indexed(sjbz, shared_dict.as_deref())
-            .map_err(|e| Error::FormatError(e.to_string()))?;
-        Ok(Some(result))
+        if let Some(c) = self.form.find_first(b"Sjbz") {
+            let shared_dict = self.resolve_shared_dict()?;
+            let result = crate::jb2::decode_indexed(c.data(), shared_dict.as_deref())
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            return Ok(Some(result));
+        }
+        if let Some(c) = self.form.find_first(b"Smmr") {
+            let bitmap = crate::smmr::decode_smmr(c.data())
+                .map_err(|e| Error::FormatError(e.to_string()))?;
+            let len = (bitmap.width * bitmap.height) as usize;
+            return Ok(Some((bitmap, vec![0i32; len])));
+        }
+        Ok(None)
     }
 
     /// Decode the IW44 background layer.
