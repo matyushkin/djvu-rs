@@ -101,6 +101,10 @@ pub enum DocError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// G4/MMR mask decoding error.
+    #[error("Smmr decode error: {0}")]
+    Smmr(String),
+
     /// Text layer parse error.
     #[error("text layer error: {0}")]
     Text(#[from] TextError),
@@ -537,48 +541,57 @@ impl DjVuPage {
     /// Decode the JB2 foreground mask as a 1-bit [`Bitmap`](crate::bitmap::Bitmap).
     ///
     /// Returns `Ok(None)` if the page has no Sjbz (JB2 mask) chunk.
+    /// Decode the foreground mask layer.
+    ///
+    /// Handles both JB2 (`Sjbz`) and G4/MMR (`Smmr`) encoded masks.
+    /// Returns `Ok(None)` if the page has neither chunk.
     pub fn extract_mask(&self) -> Result<Option<crate::bitmap::Bitmap>, DocError> {
-        let sjbz = match self.find_chunk(b"Sjbz") {
-            Some(data) => data,
-            None => return Ok(None),
-        };
-
-        // Prefer an inline Djbz chunk (decoded fresh — rare, usually small).
-        // Otherwise use the cached shared dictionary to avoid repeated multi-MB
-        // allocations on every render.
-        let inline_dict;
-        let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
-            inline_dict = crate::jb2::decode_dict(djbz, None)?;
-            Some(&inline_dict)
-        } else {
-            self.decoded_shared_dict()
-        };
-
-        let bm = crate::jb2::decode(sjbz, dict_ref)?;
-        Ok(Some(bm))
+        if let Some(sjbz) = self.find_chunk(b"Sjbz") {
+            // Prefer an inline Djbz chunk (decoded fresh — rare, usually small).
+            // Otherwise use the cached shared dictionary to avoid repeated multi-MB
+            // allocations on every render.
+            let inline_dict;
+            let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
+                inline_dict = crate::jb2::decode_dict(djbz, None)?;
+                Some(&inline_dict)
+            } else {
+                self.decoded_shared_dict()
+            };
+            let bm = crate::jb2::decode(sjbz, dict_ref)?;
+            return Ok(Some(bm));
+        }
+        if let Some(smmr) = self.find_chunk(b"Smmr") {
+            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            return Ok(Some(bm));
+        }
+        Ok(None)
     }
 
-    /// Decode the JB2 foreground mask with per-pixel blit index tracking.
+    /// Decode the foreground mask with per-pixel blit index tracking.
     ///
-    /// Returns `Ok(None)` if the page has no Sjbz chunk.
+    /// Falls back to a plain `Smmr` mask (without blit indices) when only an
+    /// `Smmr` chunk is present; in that case all blit indices are set to `0`.
+    /// Returns `Ok(None)` if the page has neither chunk.
     pub fn extract_mask_indexed(
         &self,
     ) -> Result<Option<(crate::bitmap::Bitmap, Vec<i32>)>, DocError> {
-        let sjbz = match self.find_chunk(b"Sjbz") {
-            Some(data) => data,
-            None => return Ok(None),
-        };
-
-        let inline_dict;
-        let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
-            inline_dict = crate::jb2::decode_dict(djbz, None)?;
-            Some(&inline_dict)
-        } else {
-            self.decoded_shared_dict()
-        };
-
-        let (bm, blit_map) = crate::jb2::decode_indexed(sjbz, dict_ref)?;
-        Ok(Some((bm, blit_map)))
+        if let Some(sjbz) = self.find_chunk(b"Sjbz") {
+            let inline_dict;
+            let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
+                inline_dict = crate::jb2::decode_dict(djbz, None)?;
+                Some(&inline_dict)
+            } else {
+                self.decoded_shared_dict()
+            };
+            let (bm, blit_map) = crate::jb2::decode_indexed(sjbz, dict_ref)?;
+            return Ok(Some((bm, blit_map)));
+        }
+        if let Some(smmr) = self.find_chunk(b"Smmr") {
+            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            let len = (bm.width * bm.height) as usize;
+            return Ok(Some((bm, vec![0i32; len])));
+        }
+        Ok(None)
     }
 
     /// Decode the IW44 foreground layer (FG44 chunks) if present.
