@@ -29,7 +29,8 @@
 
 use std::io::Cursor;
 
-use tiff::encoder::{TiffEncoder, colortype};
+use tiff::encoder::{Rational, TiffEncoder, colortype};
+use tiff::tags::ResolutionUnit;
 
 use crate::{
     djvu_document::{DjVuDocument, DjVuPage, DocError},
@@ -148,7 +149,10 @@ fn write_color_page<W: std::io::Write + std::io::Seek>(
         .flat_map(|c| [c[0], c[1], c[2]])
         .collect();
 
-    encoder.write_image::<colortype::RGB8>(w, h, &rgb)?;
+    let dpi = (page.dpi() as f32 * scale).round() as u32;
+    let mut img = encoder.new_image::<colortype::RGB8>(w, h)?;
+    img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
+    img.write_data(&rgb)?;
     Ok(())
 }
 
@@ -166,7 +170,10 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
 
     // Try to extract the JB2 mask directly from the page chunks.
     let gray = extract_bilevel_pixels(page, w, h);
-    encoder.write_image::<colortype::Gray8>(w, h, &gray)?;
+    let dpi = page.dpi() as u32;
+    let mut img = encoder.new_image::<colortype::Gray8>(w, h)?;
+    img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
+    img.write_data(&gray)?;
     Ok(())
 }
 
