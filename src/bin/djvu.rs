@@ -322,6 +322,9 @@ fn cmd_info(path: &Path, count_only: bool, json: bool) -> Result<(), Box<dyn std
     }
 
     if json {
+        // All fields are numeric — no JSON string escaping needed.
+        // If string fields (e.g. title, filename) are added in the future,
+        // use a proper JSON library (e.g. serde_json) to avoid injection.
         let mut out = String::from("{\"pages\":[");
         for i in 0..count {
             let page = doc.page(i)?;

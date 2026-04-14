@@ -126,8 +126,8 @@ fn decode_num(zp: &mut ZpDecoder<'_>, ctx: &mut NumContext, low: i32, high: i32)
                 if !decision {
                     phase = 3;
                     range = ((cutoff + 1) / 2) as u32;
-                    if range <= 1 {
-                        range = 1;
+                    if range == 1 {
+                        // range is already 1; set cutoff to 0 to terminate the loop.
                         cutoff = 0;
                     } else {
                         cutoff -= (range / 2) as i32;
