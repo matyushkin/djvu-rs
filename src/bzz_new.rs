@@ -157,6 +157,10 @@ fn decode_raw_bits(zp: &mut ZpDecoder, bit_count: u32) -> u32 {
 /// `ctx_base` is the index of the first context in the subtree (0-indexed
 /// after the subtree root). The decoding traverses the binary tree by
 /// accumulating the decoded bit into an integer, starting from 1.
+///
+/// Used only by callers outside `decode_mtf_phase` (e.g. tests).  The hot
+/// path inside `decode_mtf_phase` uses inlined ZP locals via a macro.
+#[allow(dead_code)]
 fn decode_context_bits(zp: &mut ZpDecoder, ctx: &mut [u8], ctx_base: usize, bit_count: u32) -> u32 {
     // The subtree root is at ctx_base - 1; children at ctx_base, ctx_base+1, ...
     let subtree_offset = ctx_base.wrapping_sub(1);
@@ -199,89 +203,194 @@ fn decode_one_block(
 /// ZP + MTF decode phase: returns `(bwt_data, marker_pos)`.
 ///
 /// Shared by [`decode_one_block`] and [`decode_one_block_bwt_only`].
+///
+/// The five hot ZP fields (`a`, `c`, `fence`, `bit_buf`, `bit_count`) are
+/// extracted into stack locals at the top so LLVM can keep them in registers
+/// throughout the block loop without spilling through the struct pointer.
+#[inline(never)]
+#[allow(unused_assignments)] // `fence` is primed by the first passthrough before decode_bit reads it
 fn decode_mtf_phase(
     zp: &mut ZpDecoder,
     ctx: &mut [u8; CTX_COUNT],
     block_size: usize,
 ) -> Result<(Vec<u8>, usize), BzzError> {
-    // Decode the frequency shift parameter (0, 1, or 2)
-    // This controls how aggressively the MTF order adapts
+    use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+    // ── Extract ZP state into locals ─────────────────────────────────────────
+    let mut a = zp.a;
+    let mut c = zp.c;
+    let mut fence = c.min(0x7fff); // same invariant as zp.fence
+    let mut bit_buf = zp.bit_buf;
+    let mut bit_count = zp.bit_count;
+    let data = zp.data;
+    let mut pos = zp.pos;
+
+    // ── ZP helper macros ──────────────────────────────────────────────────────
+    macro_rules! read_byte {
+        () => {{
+            let b = if pos < data.len() { data[pos] } else { 0xff };
+            pos = pos.wrapping_add(1);
+            b as u32
+        }};
+    }
+    macro_rules! refill {
+        () => {
+            while bit_count <= 24 {
+                bit_buf = (bit_buf << 8) | read_byte!();
+                bit_count += 8;
+            }
+        };
+    }
+    macro_rules! renorm {
+        () => {{
+            let shift = (a as u16).leading_ones();
+            bit_count -= shift as i32;
+            a = (a << shift) & 0xffff;
+            let mask = (1u32 << (shift & 31)).wrapping_sub(1);
+            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
+            if bit_count < 16 {
+                refill!();
+            }
+            fence = c.min(0x7fff);
+        }};
+    }
+
+    /// Decode one adaptive bit using `ctx_byte` as the context.
+    /// Returns `true` for the MPS event, `false` for LPS.
+    macro_rules! decode_bit {
+        ($ctx_byte:expr) => {{
+            let state = $ctx_byte as usize;
+            let mps = state & 1;
+            let z = a + PROB[state] as u32;
+            if z <= fence {
+                a = z;
+                mps != 0
+            } else {
+                let boundary = 0x6000u32 + ((a + z) >> 2);
+                let z_clamped = z.min(boundary);
+                if z_clamped > c {
+                    let complement = 0x10000u32 - z_clamped;
+                    a = (a + complement) & 0xffff;
+                    c = (c + complement) & 0xffff;
+                    $ctx_byte = LPS_NEXT[state];
+                    renorm!();
+                    (1 - mps) != 0
+                } else {
+                    if a >= THRESHOLD[state] as u32 {
+                        $ctx_byte = MPS_NEXT[state];
+                    }
+                    bit_count -= 1;
+                    a = (z_clamped << 1) & 0xffff;
+                    c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                    if bit_count < 16 {
+                        refill!();
+                    }
+                    fence = c.min(0x7fff);
+                    mps != 0
+                }
+            }
+        }};
+    }
+
+    /// Decode one passthrough bit (no context).
+    /// Threshold: z = 0x8000 + (a >> 1).
+    macro_rules! decode_passthrough {
+        () => {{
+            let z = (0x8000u32 + (a >> 1)) as u16;
+            if (z as u32) > c {
+                let complement = 0x10000u32 - z as u32;
+                a = (a + complement) & 0xffff;
+                c = (c + complement) & 0xffff;
+                renorm!();
+                true
+            } else {
+                bit_count -= 1;
+                a = (z as u32 * 2) & 0xffff;
+                c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                if bit_count < 16 {
+                    refill!();
+                }
+                fence = c.min(0x7fff);
+                false
+            }
+        }};
+    }
+
+    /// Decode `$n_bits` bits from a context sub-tree rooted at `ctx[$base - 1]`.
+    /// Returns a `u32` in `[0, 2^n_bits)`.
+    macro_rules! decode_ctx_bits {
+        ($base:expr, $n_bits:expr) => {{
+            let subtree_offset = ($base as usize).wrapping_sub(1);
+            let limit = 1u32 << $n_bits;
+            let mut nn = 1u32;
+            while nn < limit {
+                let bit = decode_bit!(ctx[subtree_offset + nn as usize]) as u32;
+                nn = (nn << 1) | bit;
+            }
+            nn - limit
+        }};
+    }
+
+    // ── Decode frequency-shift parameter ─────────────────────────────────────
     let mut freq_shift: u32 = 0;
-    if zp.decode_passthrough() {
+    if decode_passthrough!() {
         freq_shift += 1;
-        if zp.decode_passthrough() {
+        if decode_passthrough!() {
             freq_shift += 1;
         }
     }
 
-    // Per-block MTF state
+    // ── Per-block MTF state ───────────────────────────────────────────────────
     let mut mtf_order: [u8; 256] = core::array::from_fn(|i| i as u8);
     let mut freq_counts = [0u32; FREQ_SLOTS];
     let mut freq_add: u32 = 4;
     let mut last_mtf_pos: u32 = 3;
     let mut marker_at: Option<usize> = None;
 
-    // Decode N symbols, where N = block_size (includes the BWT marker)
     let mut bwt_data = vec![0u8; block_size];
 
     for (sym_idx, output_byte) in bwt_data.iter_mut().enumerate() {
-        // Determine context ID based on last MTF position (clamped to 0..LEVEL_CTXIDS-1)
         let ctx_id = (last_mtf_pos.min(LEVEL_CTXIDS as u32 - 1)) as usize;
 
-        // Hierarchical MTF position decoding
-        // Each level asks: "is the MTF position in this range?"
-        // The contexts advance through the `ctx` array as we descend.
         let mtf_position;
         let mut ctx_offset: usize = 0;
 
-        if zp.decode_bit(&mut ctx[ctx_offset + ctx_id]) {
-            // Level 0: position is 0
+        if decode_bit!(ctx[ctx_offset + ctx_id]) {
             mtf_position = 0;
         } else {
             ctx_offset += LEVEL_CTXIDS;
-            if zp.decode_bit(&mut ctx[ctx_offset + ctx_id]) {
-                // Level 1: position is 1
+            if decode_bit!(ctx[ctx_offset + ctx_id]) {
                 mtf_position = 1;
             } else {
                 ctx_offset += LEVEL_CTXIDS;
-                if zp.decode_bit(&mut ctx[ctx_offset]) {
-                    // Level 2: position in [2, 3]
-                    mtf_position = 2 + decode_context_bits(zp, ctx, ctx_offset + 1, 1);
+                if decode_bit!(ctx[ctx_offset]) {
+                    mtf_position = 2 + decode_ctx_bits!(ctx_offset + 1, 1);
                 } else {
                     ctx_offset += 2;
-                    if zp.decode_bit(&mut ctx[ctx_offset]) {
-                        // Level 3: position in [4, 7]
-                        mtf_position = 4 + decode_context_bits(zp, ctx, ctx_offset + 1, 2);
+                    if decode_bit!(ctx[ctx_offset]) {
+                        mtf_position = 4 + decode_ctx_bits!(ctx_offset + 1, 2);
                     } else {
                         ctx_offset += 4;
-                        if zp.decode_bit(&mut ctx[ctx_offset]) {
-                            // Level 4: position in [8, 15]
-                            mtf_position = 8 + decode_context_bits(zp, ctx, ctx_offset + 1, 3);
+                        if decode_bit!(ctx[ctx_offset]) {
+                            mtf_position = 8 + decode_ctx_bits!(ctx_offset + 1, 3);
                         } else {
                             ctx_offset += 8;
-                            if zp.decode_bit(&mut ctx[ctx_offset]) {
-                                // Level 5: position in [16, 31]
-                                mtf_position = 16 + decode_context_bits(zp, ctx, ctx_offset + 1, 4);
+                            if decode_bit!(ctx[ctx_offset]) {
+                                mtf_position = 16 + decode_ctx_bits!(ctx_offset + 1, 4);
                             } else {
                                 ctx_offset += 16;
-                                if zp.decode_bit(&mut ctx[ctx_offset]) {
-                                    // Level 6: position in [32, 63]
-                                    mtf_position =
-                                        32 + decode_context_bits(zp, ctx, ctx_offset + 1, 5);
+                                if decode_bit!(ctx[ctx_offset]) {
+                                    mtf_position = 32 + decode_ctx_bits!(ctx_offset + 1, 5);
                                 } else {
                                     ctx_offset += 32;
-                                    if zp.decode_bit(&mut ctx[ctx_offset]) {
-                                        // Level 7: position in [64, 127]
-                                        mtf_position =
-                                            64 + decode_context_bits(zp, ctx, ctx_offset + 1, 6);
+                                    if decode_bit!(ctx[ctx_offset]) {
+                                        mtf_position = 64 + decode_ctx_bits!(ctx_offset + 1, 6);
                                     } else {
                                         ctx_offset += 64;
-                                        if zp.decode_bit(&mut ctx[ctx_offset]) {
-                                            // Level 8: position in [128, 255]
-                                            mtf_position = 128
-                                                + decode_context_bits(zp, ctx, ctx_offset + 1, 7);
+                                        if decode_bit!(ctx[ctx_offset]) {
+                                            mtf_position =
+                                                128 + decode_ctx_bits!(ctx_offset + 1, 7);
                                         } else {
-                                            // Level 9: BWT end-of-block marker (position 256)
                                             mtf_position = 256;
                                         }
                                     }
@@ -296,17 +405,14 @@ fn decode_mtf_phase(
         last_mtf_pos = mtf_position;
 
         if mtf_position == 256 {
-            // BWT marker: records where the marker byte sits in the block
             *output_byte = 0;
             marker_at = Some(sym_idx);
         } else {
-            // Retrieve the byte at this MTF position
             let sym = *mtf_order
                 .get(mtf_position as usize)
                 .ok_or(BzzError::InvalidBlockSize)?;
             *output_byte = sym;
 
-            // Update frequency tracking
             freq_add = freq_add.wrapping_add(freq_add >> freq_shift);
             if freq_add > 0x1000_0000 {
                 freq_add >>= 24;
@@ -320,7 +426,6 @@ fn decode_mtf_phase(
                 combined_freq = combined_freq.saturating_add(freq_counts[mtf_position as usize]);
             }
 
-            // Bubble the symbol toward the front of the MTF order
             let mut insert_at = mtf_position as usize;
             while insert_at >= FREQ_SLOTS {
                 *mtf_order
@@ -356,6 +461,14 @@ fn decode_mtf_phase(
             }
         }
     }
+
+    // ── Write ZP state back ───────────────────────────────────────────────────
+    zp.a = a;
+    zp.c = c;
+    zp.fence = fence;
+    zp.bit_buf = bit_buf;
+    zp.bit_count = bit_count;
+    zp.pos = pos;
 
     let marker_pos = marker_at.ok_or(BzzError::MissingMarker)?;
     Ok((bwt_data, marker_pos))
