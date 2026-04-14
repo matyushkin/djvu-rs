@@ -4,7 +4,7 @@
 //! - Page images as PNG (one per page)
 //! - Invisible text overlay for search and copy
 //! - NAVM bookmarks as EPUB navigation (`nav.xhtml`)
-//! - ANTz hyperlinks as `<a href>` in page XHTML
+//! - ANTz/ANTa hyperlinks as `<a href>` overlays on each page
 //!
 //! # Example
 //!
@@ -23,6 +23,7 @@ use std::io::Write;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
+    annotation::{MapArea, Shape},
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
     text::TextZoneKind,
@@ -58,6 +59,11 @@ pub struct EpubOptions {
     pub author: String,
     /// DPI for page rendering. Defaults to 150.
     pub dpi: u32,
+    /// BCP-47 language tag for `<dc:language>`. Defaults to `"en"`.
+    pub language: String,
+    /// ISO 8601 timestamp for `dcterms:modified` (e.g. `"2026-04-14T00:00:00Z"`).
+    /// When `None`, the current UTC time is used (computed from `std::time::SystemTime`).
+    pub modified: Option<String>,
 }
 
 impl Default for EpubOptions {
@@ -66,6 +72,8 @@ impl Default for EpubOptions {
             title: "DjVu Document".to_owned(),
             author: String::new(),
             dpi: 150,
+            language: "en".to_owned(),
+            modified: None,
         }
     }
 }
@@ -133,19 +141,26 @@ fn write_page(
     index: usize,
     opts: &EpubOptions,
 ) -> Result<(), EpubError> {
+    // Native page dimensions in DjVu pixels
     let pw = page.width() as u32;
     let ph = page.height() as u32;
-    let dpi = page.dpi().max(1) as f32;
+    let page_dpi = page.dpi().max(1) as f32;
+
+    // Scale to the requested output DPI
+    let scale = opts.dpi as f32 / page_dpi;
+    let w = ((pw as f32 * scale).round() as u32).max(1);
+    let h = ((ph as f32 * scale).round() as u32).max(1);
 
     let render_opts = RenderOptions {
-        width: pw,
-        height: ph,
+        width: w,
+        height: h,
+        scale,
         ..RenderOptions::default()
     };
     let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
 
     // Encode as PNG
-    let png_bytes = encode_rgba_to_png(&pixmap.data, pw, ph);
+    let png_bytes = encode_rgba_to_png(&pixmap.data, w, h);
 
     let page_num = index + 1;
     let img_name = format!("page_{page_num:04}.png");
@@ -157,11 +172,14 @@ fn write_page(
     )?;
     zip.write_all(&png_bytes)?;
 
-    // Build text overlay from text layer
-    let text_overlay = build_text_overlay(page, dpi, pw, ph);
+    // Text overlay (invisible selectable text)
+    let text_overlay = build_text_overlay(page, pw, ph);
+
+    // Hyperlink overlays from ANTz/ANTa annotations
+    let hyperlinks = page.hyperlinks().unwrap_or_default();
 
     // Build XHTML page
-    let xhtml = build_page_xhtml(&img_name, pw, ph, &text_overlay, opts);
+    let xhtml = build_page_xhtml(&img_name, w, h, pw, ph, &text_overlay, &hyperlinks);
     let xhtml_path = format!("OEBPS/pages/page_{page_num:04}.xhtml");
 
     zip.start_file(
@@ -190,14 +208,11 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 
 // ── Text overlay ─────────────────────────────────────────────────────────────
 
-/// Returns a Vec of `(x_pct, y_pct, w_pct, h_pct, text)` for word/char zones.
-/// Coordinates are expressed as percentages of page dimensions for CSS positioning.
-fn build_text_overlay(
-    page: &DjVuPage,
-    _dpi: f32,
-    pw: u32,
-    ph: u32,
-) -> Vec<(f32, f32, f32, f32, String)> {
+/// Returns `(x_pct, y_pct, w_pct, h_pct, text)` for word/char zones.
+///
+/// Coordinates are CSS percentages of the rendered image dimensions.
+/// DjVu text zones use bottom-left origin; the y-axis is inverted for CSS.
+fn build_text_overlay(page: &DjVuPage, pw: u32, ph: u32) -> Vec<(f32, f32, f32, f32, String)> {
     let text_layer = match page.text_layer() {
         Ok(Some(tl)) => tl,
         _ => return Vec::new(),
@@ -219,7 +234,8 @@ fn build_text_overlay(
                     }
                     let r = &zone.rect;
                     let x = r.x as f32 / pw as f32 * 100.0;
-                    let y = r.y as f32 / ph as f32 * 100.0;
+                    // DjVu y is bottom-left origin; invert for CSS top
+                    let y = (ph.saturating_sub(r.y + r.height)) as f32 / ph as f32 * 100.0;
                     let w = r.width as f32 / pw as f32 * 100.0;
                     let h = r.height as f32 / ph as f32 * 100.0;
                     if w > 0.0 && h > 0.0 {
@@ -239,10 +255,12 @@ fn build_text_overlay(
 
 fn build_page_xhtml(
     img_name: &str,
+    w: u32,
+    h: u32,
     pw: u32,
     ph: u32,
     text_overlay: &[(f32, f32, f32, f32, String)],
-    _opts: &EpubOptions,
+    hyperlinks: &[MapArea],
 ) -> String {
     let mut html = String::new();
     html.push_str(
@@ -254,7 +272,7 @@ fn build_page_xhtml(
 <title>Page</title>
 <style>
 body { margin: 0; padding: 0; }
-.djvu-page { position: relative; display: block; width: 100%; }
+.djvu-page { position: relative; display: block; }
 .djvu-page img { display: block; width: 100%; height: auto; }
 .djvu-text {
   position: absolute;
@@ -264,6 +282,10 @@ body { margin: 0; padding: 0; }
   overflow: hidden;
   pointer-events: none;
 }
+.djvu-link {
+  position: absolute;
+  display: block;
+}
 </style>
 </head>
 <body>
@@ -271,20 +293,84 @@ body { margin: 0; padding: 0; }
     );
 
     html.push_str(&format!(
-        r#"<div class="djvu-page" style="width:{pw}px; height:{ph}px;">"#
+        r#"<div class="djvu-page" style="width:{w}px; height:{h}px;">"#
     ));
     html.push_str(&format!(
-        r#"<img src="../images/{img_name}" alt="page" width="{pw}" height="{ph}"/>"#
+        r#"<img src="../images/{img_name}" alt="page" width="{w}" height="{h}"/>"#
     ));
 
-    for (x, y, w, h, text) in text_overlay {
+    for (x, y, ww, hh, text) in text_overlay {
         html.push_str(&format!(
-            r#"<span class="djvu-text" aria-hidden="true" style="left:{x:.3}%;top:{y:.3}%;width:{w:.3}%;height:{h:.3}%;">{text}</span>"#
+            r#"<span class="djvu-text" aria-hidden="true" style="left:{x:.3}%;top:{y:.3}%;width:{ww:.3}%;height:{hh:.3}%;">{text}</span>"#
         ));
+    }
+
+    for ma in hyperlinks {
+        if let Some((x, y, ww, hh)) = map_area_to_css(ma, pw, ph) {
+            let href = resolve_link_href(&ma.url);
+            let title = xml_escape(&ma.description);
+            html.push_str(&format!(
+                r#"<a class="djvu-link" href="{href}" title="{title}" style="left:{x:.3}%;top:{y:.3}%;width:{ww:.3}%;height:{hh:.3}%;"></a>"#
+            ));
+        }
     }
 
     html.push_str("</div>\n</body>\n</html>\n");
     html
+}
+
+/// Convert a `MapArea` shape to CSS percentage coordinates `(left, top, width, height)`.
+///
+/// Returns `None` for unsupported or degenerate shapes.
+/// DjVu annotation y is bottom-left origin; the result is flipped for CSS.
+fn map_area_to_css(ma: &MapArea, pw: u32, ph: u32) -> Option<(f32, f32, f32, f32)> {
+    let rect = match &ma.shape {
+        Shape::Rect(r) | Shape::Oval(r) | Shape::Text(r) => r,
+        Shape::Poly(pts) => {
+            // Bounding box of polygon
+            let (min_x, min_y, max_x, max_y) = pts.iter().fold(
+                (u32::MAX, u32::MAX, 0u32, 0u32),
+                |(mnx, mny, mxx, mxy), &(px, py)| {
+                    (mnx.min(px), mny.min(py), mxx.max(px), mxy.max(py))
+                },
+            );
+            if max_x <= min_x || max_y <= min_y {
+                return None;
+            }
+            let w = max_x - min_x;
+            let h = max_y - min_y;
+            let x = (min_x as f32 / pw as f32) * 100.0;
+            let y = (ph.saturating_sub(max_y) as f32 / ph as f32) * 100.0;
+            let ww = (w as f32 / pw as f32) * 100.0;
+            let hh = (h as f32 / ph as f32) * 100.0;
+            return Some((x, y, ww, hh));
+        }
+        Shape::Line(x1, y1, x2, y2) => {
+            let min_x = (*x1).min(*x2);
+            let min_y = (*y1).min(*y2);
+            let max_y = (*y1).max(*y2);
+            let w = ((*x1 as i64 - *x2 as i64).unsigned_abs() as u32).max(1);
+            let h = ((*y1 as i64 - *y2 as i64).unsigned_abs() as u32).max(1);
+            let x = (min_x as f32 / pw as f32) * 100.0;
+            let y = (ph.saturating_sub(max_y + h) as f32 / ph as f32) * 100.0;
+            let ww = (w as f32 / pw as f32) * 100.0;
+            let hh = (h as f32 / ph as f32) * 100.0;
+            return Some((x, y, ww, hh));
+        }
+    };
+    if rect.width == 0 || rect.height == 0 || pw == 0 || ph == 0 {
+        return None;
+    }
+    let x = (rect.x as f32 / pw as f32) * 100.0;
+    let y = (ph.saturating_sub(rect.y + rect.height) as f32 / ph as f32) * 100.0;
+    let ww = (rect.width as f32 / pw as f32) * 100.0;
+    let hh = (rect.height as f32 / ph as f32) * 100.0;
+    Some((x, y, ww, hh))
+}
+
+/// Resolve a DjVu annotation URL to an EPUB-relative href.
+fn resolve_link_href(url: &str) -> String {
+    bookmark_href(url)
 }
 
 // ── OPF package ──────────────────────────────────────────────────────────────
@@ -292,6 +378,12 @@ body { margin: 0; padding: 0; }
 fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
     let title = xml_escape(&opts.title);
     let author = xml_escape(&opts.author);
+    let language = xml_escape(&opts.language);
+    let modified = opts
+        .modified
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(current_timestamp);
 
     let mut manifest_items = String::new();
     let mut spine_items = String::new();
@@ -302,13 +394,24 @@ fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
 "#,
     );
 
+    // cover image (first page)
+    if page_count > 0 {
+        manifest_items.push_str(
+            r#"    <item id="cover-image" href="images/page_0001.png" media-type="image/png" properties="cover-image"/>
+"#,
+        );
+    }
+
     for i in 1..=page_count {
         let pid = format!("page_{i:04}");
+        // skip the cover-image item (already added above) but still add the page entry
+        if i > 1 {
+            manifest_items.push_str(&format!(
+                "    <item id=\"img_{pid}\" href=\"images/page_{i:04}.png\" media-type=\"image/png\"/>\n"
+            ));
+        }
         manifest_items.push_str(&format!(
             "    <item id=\"{pid}\" href=\"pages/page_{i:04}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
-        ));
-        manifest_items.push_str(&format!(
-            "    <item id=\"img_{pid}\" href=\"images/page_{i:04}.png\" media-type=\"image/png\"/>\n"
         ));
         spine_items.push_str(&format!("    <itemref idref=\"{pid}\"/>\n"));
     }
@@ -320,9 +423,9 @@ fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>{title}</dc:title>
     <dc:creator>{author}</dc:creator>
-    <dc:language>en</dc:language>
+    <dc:language>{language}</dc:language>
     <dc:identifier id="uid">djvu-rs-export</dc:identifier>
-    <meta property="dcterms:modified">2024-01-01T00:00:00Z</meta>
+    <meta property="dcterms:modified">{modified}</meta>
   </metadata>
   <manifest>
 {manifest_items}  </manifest>
@@ -331,6 +434,45 @@ fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
 </package>
 "#
     )
+}
+
+/// Return an ISO 8601 UTC timestamp for the current time.
+///
+/// Uses only `std::time::SystemTime` — no external crate dependency.
+fn current_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Compute Y/M/D H:M:S from Unix timestamp (no leap seconds, Gregorian)
+    let (y, mo, d, hh, mm, ss) = unix_secs_to_parts(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Decompose a Unix timestamp (seconds since 1970-01-01 00:00:00 UTC) into
+/// `(year, month, day, hour, min, sec)`.
+fn unix_secs_to_parts(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let ss = (secs % 60) as u32;
+    let mins = secs / 60;
+    let mm = (mins % 60) as u32;
+    let hours = mins / 60;
+    let hh = (hours % 24) as u32;
+    let days = (hours / 24) as u32;
+
+    // Days since 1970-01-01 → Gregorian date (algorithm by Henry Fliegel)
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    (y, mo, d, hh, mm, ss)
 }
 
 // ── Navigation document ───────────────────────────────────────────────────────
@@ -468,5 +610,72 @@ mod tests {
         assert!(nav.contains("epub:type=\"toc\""));
         assert!(nav.contains("page_0001.xhtml"));
         assert!(nav.contains("page_0002.xhtml"));
+    }
+
+    #[test]
+    fn current_timestamp_looks_like_iso8601() {
+        let ts = current_timestamp();
+        // e.g. "2026-04-14T12:34:56Z"
+        assert_eq!(ts.len(), 20);
+        assert!(ts.ends_with('Z'));
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+    }
+
+    #[test]
+    fn unix_secs_epoch() {
+        let (y, mo, d, hh, mm, ss) = unix_secs_to_parts(0);
+        assert_eq!((y, mo, d, hh, mm, ss), (1970, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn unix_secs_known_date() {
+        // 2026-04-14T00:00:00Z = 1776124800
+        let (y, mo, d, hh, mm, ss) = unix_secs_to_parts(1_776_124_800);
+        assert_eq!((y, mo, d, hh, mm, ss), (2026, 4, 14, 0, 0, 0));
+    }
+
+    #[test]
+    fn epub_options_default_language_is_en() {
+        assert_eq!(EpubOptions::default().language, "en");
+    }
+
+    #[test]
+    fn epub_options_default_modified_is_none() {
+        assert!(EpubOptions::default().modified.is_none());
+    }
+
+    #[test]
+    fn opf_contains_cover_image_for_nonempty_doc() {
+        let opf = build_opf(&EpubOptions::default(), 3);
+        assert!(opf.contains("cover-image"));
+        assert!(opf.contains("properties=\"cover-image\""));
+    }
+
+    #[test]
+    fn opf_no_cover_image_for_empty_doc() {
+        let opf = build_opf(&EpubOptions::default(), 0);
+        assert!(!opf.contains("cover-image"));
+    }
+
+    #[test]
+    fn opf_uses_custom_language() {
+        let opts = EpubOptions {
+            language: "ru".to_owned(),
+            ..Default::default()
+        };
+        let opf = build_opf(&opts, 1);
+        assert!(opf.contains("<dc:language>ru</dc:language>"));
+    }
+
+    #[test]
+    fn opf_uses_custom_modified() {
+        let opts = EpubOptions {
+            modified: Some("2025-01-01T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        let opf = build_opf(&opts, 1);
+        assert!(opf.contains("2025-01-01T00:00:00Z"));
     }
 }
