@@ -1,5 +1,5 @@
 use crate::pixmap::Pixmap;
-use crate::zp::ZPDecoder;
+use crate::zp_impl::ZpDecoder;
 
 /// Errors that can occur during IW44 decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +157,7 @@ impl IWDecoder {
         }
     }
 
-    fn decode_slice(&mut self, zp: &mut ZPDecoder) {
+    fn decode_slice(&mut self, zp: &mut ZpDecoder) {
         if !self.is_null_slice() {
             for block_idx in 0..self.blocks.len() {
                 self.preliminary_flag_computation(block_idx);
@@ -224,19 +224,19 @@ impl IWDecoder {
         }
     }
 
-    fn block_band_decoding_pass(&mut self, zp: &mut ZPDecoder) -> bool {
+    fn block_band_decoding_pass(&mut self, zp: &mut ZpDecoder) -> bool {
         let (from, to) = BAND_BUCKETS[self.curband];
         let bcount = to - from + 1;
         let should_mark_new = bcount < 16
             || (self.bbstate & ACTIVE) != 0
-            || ((self.bbstate & UNK) != 0 && zp.decode(&mut self.decode_bucket_ctx[0]));
+            || ((self.bbstate & UNK) != 0 && zp.decode_bit(&mut self.decode_bucket_ctx[0]));
         if should_mark_new {
             self.bbstate |= NEW;
         }
         (self.bbstate & NEW) != 0
     }
 
-    fn bucket_decoding_pass(&mut self, zp: &mut ZPDecoder, block_idx: usize) {
+    fn bucket_decoding_pass(&mut self, zp: &mut ZpDecoder, block_idx: usize) {
         let (from, to) = BAND_BUCKETS[self.curband];
         for (boff, i) in (from..=to).enumerate() {
             if (self.bucketstate[boff] & UNK) == 0 {
@@ -257,13 +257,13 @@ impl IWDecoder {
             if (self.bbstate & ACTIVE) != 0 {
                 n |= 4;
             }
-            if zp.decode(&mut self.decode_coef_ctx[n + self.curband * 8]) {
+            if zp.decode_bit(&mut self.decode_coef_ctx[n + self.curband * 8]) {
                 self.bucketstate[boff] |= NEW;
             }
         }
     }
 
-    fn newly_active_coefficient_decoding_pass(&mut self, zp: &mut ZPDecoder, block_idx: usize) {
+    fn newly_active_coefficient_decoding_pass(&mut self, zp: &mut ZpDecoder, block_idx: usize) {
         let (from, to) = BAND_BUCKETS[self.curband];
         let mut step = self.quant_hi[self.curband];
         for (boff, i) in (from..=to).enumerate() {
@@ -282,8 +282,12 @@ impl IWDecoder {
                 for j in 0..16 {
                     if (self.coeffstate[boff][j] & UNK) != 0 {
                         let ip = np.min(7);
-                        if zp.decode(&mut self.activate_coef_ctx[shift + ip]) {
-                            let sign = if zp.decode_iw() { -1i32 } else { 1i32 };
+                        if zp.decode_bit(&mut self.activate_coef_ctx[shift + ip]) {
+                            let sign = if zp.decode_passthrough_iw44() {
+                                -1i32
+                            } else {
+                                1i32
+                            };
                             np = 0;
                             if self.curband == 0 {
                                 step = self.quant_lo[j];
@@ -301,7 +305,7 @@ impl IWDecoder {
 
     fn previously_active_coefficient_decoding_pass(
         &mut self,
-        zp: &mut ZPDecoder,
+        zp: &mut ZpDecoder,
         block_idx: usize,
     ) {
         let (from, to) = BAND_BUCKETS[self.curband];
@@ -316,11 +320,11 @@ impl IWDecoder {
                     let mut abs_coef = coef.unsigned_abs() as i32;
                     let s = step as i32;
                     let des = if abs_coef <= 3 * s {
-                        let d = zp.decode(&mut self.increase_coef_ctx[0]);
+                        let d = zp.decode_bit(&mut self.increase_coef_ctx[0]);
                         abs_coef += s >> 2;
                         d
                     } else {
-                        zp.decode_iw()
+                        zp.decode_passthrough_iw44()
                     };
                     if des {
                         abs_coef += s >> 1;
@@ -738,7 +742,16 @@ impl IW44Image {
         }
 
         let zp_data = &data[payload_start..];
-        let mut zp = ZPDecoder::new(zp_data);
+        // ZpDecoder requires ≥ 2 bytes; pad with 0xff (same as legacy decoder's
+        // `read_byte` fallback) so that zero-length ZP payloads are handled
+        // gracefully rather than rejected.
+        const EMPTY_ZP: &[u8] = &[0xff, 0xff];
+        let zp_init = if zp_data.len() >= 2 {
+            zp_data
+        } else {
+            EMPTY_ZP
+        };
+        let mut zp = ZpDecoder::new(zp_init).expect("zp_init is at least 2 bytes");
 
         for _ in 0..slices {
             self.cslice += 1;
@@ -1022,7 +1035,7 @@ mod tests {
             }
 
             let zp_data = &data[payload_start..];
-            let mut zp = ZPDecoder::new(zp_data);
+            let mut zp = ZpDecoder::new(zp_data).map_err(|_| DecodeError::ChunkTooShort)?;
 
             for _ in 0..slices {
                 img.cslice += 1;
@@ -1110,7 +1123,7 @@ mod tests {
             }
 
             let zp_data = &data[payload_start..];
-            let mut zp = ZPDecoder::new(zp_data);
+            let mut zp = ZpDecoder::new(zp_data).map_err(|_| DecodeError::ChunkTooShort)?;
 
             for _ in 0..slices {
                 img.cslice += 1;
