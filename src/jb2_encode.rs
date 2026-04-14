@@ -1,6 +1,6 @@
 //! JB2 bilevel image encoder — produces Sjbz chunk payloads.
 //!
-//! Encodes a [`Bitmap`] into a JB2 stream decodable by [`crate::jb2_new::decode`].
+//! Encodes a [`Bitmap`] into a JB2 stream decodable by [`crate::jb2::decode`].
 //!
 //! ## Encoding strategy
 //!
@@ -8,7 +8,7 @@
 //! direct, blit only") record.  This produces valid output without requiring
 //! connected-component analysis or a symbol dictionary.
 //!
-//! ## Binary format summary (see jb2_new.rs for full spec)
+//! ## Binary format summary (see jb2.rs for full spec)
 //!
 //! ```text
 //! encode_num(record_type_ctx, [0,11], 0)  — start-of-image
@@ -178,7 +178,7 @@ fn pix_bm(bm: &Bitmap, col: i32, y: i32) -> u32 {
 
 /// Encode a bitmap using the direct 10-pixel-context method.
 ///
-/// Mirrors `decode_bitmap_direct` in `jb2_new` exactly.  Iterates rows
+/// Mirrors `decode_bitmap_direct` in `jb2` exactly.  Iterates rows
 /// top-to-bottom (jbm_row = height-1 down to 0), which corresponds to
 /// Bitmap y = 0 (top) up to height-1 (bottom).
 fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
@@ -221,7 +221,7 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
 /// Encode a bilevel [`Bitmap`] into a JB2 stream (Sjbz chunk payload).
 ///
 /// The returned bytes can be embedded directly in a `Sjbz` IFF chunk.
-/// Decoding with [`crate::jb2_new::decode`] will reconstruct the original bitmap.
+/// Decoding with [`crate::jb2::decode`] will reconstruct the original bitmap.
 ///
 /// ## Encoding
 ///
@@ -292,7 +292,7 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::bitmap::Bitmap;
-    use crate::jb2_new;
+    use crate::jb2;
 
     fn make_bitmap(w: u32, h: u32, f: impl Fn(u32, u32) -> bool) -> Bitmap {
         let mut bm = Bitmap::new(w, h);
@@ -306,7 +306,7 @@ mod tests {
 
     fn roundtrip(bm: &Bitmap) -> Bitmap {
         let encoded = encode_jb2(bm);
-        jb2_new::decode(&encoded, None).expect("decode failed")
+        jb2::decode(&encoded, None).expect("decode failed")
     }
 
     #[test]

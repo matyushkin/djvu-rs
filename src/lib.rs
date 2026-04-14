@@ -97,14 +97,17 @@ pub mod bzz_encode;
 #[cfg(feature = "std")]
 pub mod djvm;
 
-/// JB2 bilevel image decoder — clean-room implementation (phase 2b).
+/// JB2 bilevel image decoder — clean-room implementation.
 ///
 /// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
 /// ZP adaptive arithmetic coding with a symbol dictionary.
 ///
-/// Key public types: `jb2_new::Jb2Dict`, `jb2_new::decode`, `jb2_new::decode_dict`.
-#[path = "jb2_new.rs"]
-pub mod jb2_new;
+/// Key public types: `jb2::Jb2Dict`, `jb2::decode`, `jb2::decode_dict`.
+pub mod jb2;
+
+/// Alias kept for downstream compatibility — use `jb2` instead.
+#[deprecated(since = "0.12.0", note = "use `djvu_rs::jb2` instead")]
+pub use jb2 as jb2_new;
 
 /// IW44 wavelet image decoder — clean-room implementation (phase 2c).
 ///
@@ -281,10 +284,6 @@ pub mod document;
 #[cfg(feature = "std")]
 #[doc(hidden)]
 pub mod iw44;
-
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub mod jb2;
 
 #[doc(hidden)]
 pub(crate) mod pixmap;
