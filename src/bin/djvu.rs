@@ -16,6 +16,12 @@ enum Cmd {
     Info {
         /// Path to the DjVu file.
         file: PathBuf,
+        /// Print only the page count as a plain integer (useful for scripting).
+        #[arg(short, long, conflicts_with = "json")]
+        count: bool,
+        /// Output info as JSON.
+        #[arg(short, long)]
+        json: bool,
     },
     /// Render pages to PNG, PDF, or CBZ.
     Render {
@@ -36,6 +42,9 @@ enum Cmd {
         /// Layer to extract: composite (default), mask, foreground, background.
         #[arg(short, long, default_value = "composite", value_enum)]
         layer: Layer,
+        /// Additional rotation applied on top of the INFO chunk rotation.
+        #[arg(short, long, default_value = "none", value_enum)]
+        rotate: RotateArg,
         /// Output file (single page) or directory (--all, PNG only).
         #[arg(short, long)]
         output: PathBuf,
@@ -154,6 +163,18 @@ enum OcrBackendChoice {
 }
 
 #[derive(Clone, ValueEnum)]
+enum RotateArg {
+    /// No additional rotation (only INFO chunk rotation applies).
+    None,
+    /// Rotate 90° clockwise.
+    Cw90,
+    /// Rotate 180°.
+    Rot180,
+    /// Rotate 90° counter-clockwise (270° clockwise).
+    Ccw90,
+}
+
+#[derive(Clone, ValueEnum)]
 enum Layer {
     /// Full composite render (default).
     Composite,
@@ -175,7 +196,7 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Cmd::Info { file } => cmd_info(&file),
+        Cmd::Info { file, count, json } => cmd_info(&file, count, json),
         Cmd::Render {
             file,
             page,
@@ -183,8 +204,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dpi,
             format,
             layer,
+            rotate,
             output,
-        } => cmd_render(&file, page, all, dpi, format, layer, &output),
+        } => cmd_render(&file, page, all, dpi, format, layer, rotate, &output),
         #[cfg(any(
             feature = "ocr-tesseract",
             feature = "ocr-onnx",
@@ -290,9 +312,38 @@ fn parse_page_range(s: &str) -> Result<(usize, usize), Box<dyn std::error::Error
 
 // ── info ──────────────────────────────────────────────────────────────────────
 
-fn cmd_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_info(path: &Path, count_only: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let doc = open(path)?;
     let count = doc.page_count();
+
+    if count_only {
+        println!("{count}");
+        return Ok(());
+    }
+
+    if json {
+        // All fields are numeric — no JSON string escaping needed.
+        // If string fields (e.g. title, filename) are added in the future,
+        // use a proper JSON library (e.g. serde_json) to avoid injection.
+        let mut out = String::from("{\"pages\":[");
+        for i in 0..count {
+            let page = doc.page(i)?;
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"page\":{},\"width\":{},\"height\":{},\"dpi\":{}}}",
+                i + 1,
+                page.width(),
+                page.height(),
+                page.dpi(),
+            ));
+        }
+        out.push_str(&format!("],\"count\":{count}}}"));
+        println!("{out}");
+        return Ok(());
+    }
+
     println!("Pages: {count}");
     for i in 0..count {
         let page = doc.page(i)?;
@@ -309,6 +360,16 @@ fn cmd_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── render ────────────────────────────────────────────────────────────────────
 
+fn to_user_rotation(r: &RotateArg) -> djvu_rs::djvu_render::UserRotation {
+    use djvu_rs::djvu_render::UserRotation;
+    match r {
+        RotateArg::None => UserRotation::None,
+        RotateArg::Cw90 => UserRotation::Cw90,
+        RotateArg::Rot180 => UserRotation::Rot180,
+        RotateArg::Ccw90 => UserRotation::Ccw90,
+    }
+}
+
 fn cmd_render(
     path: &Path,
     page: usize,
@@ -316,6 +377,7 @@ fn cmd_render(
     dpi: u32,
     format: Format,
     layer: Layer,
+    rotate: RotateArg,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // PDF uses the new DjVuDocument API directly (preserves text, bookmarks, links)
@@ -347,11 +409,12 @@ fn cmd_render(
 
     let doc = open(path)?;
     let count = doc.page_count();
+    let user_rot = to_user_rotation(&rotate);
 
     match format {
-        Format::Png => render_png(&doc, page, all, dpi, count, output),
+        Format::Png => render_png(&doc, page, all, dpi, count, user_rot, output),
         Format::Pdf | Format::Epub => unreachable!(),
-        Format::Cbz => render_cbz(&doc, page, all, dpi, count, output),
+        Format::Cbz => render_cbz(&doc, page, all, dpi, count, user_rot, output),
     }
 }
 
@@ -433,6 +496,75 @@ fn render_layer(
     Ok(())
 }
 
+/// Apply user-requested rotation to a rendered pixmap (post-render, on top of INFO rotation).
+fn apply_user_rotation(
+    src: djvu_rs::Pixmap,
+    rot: djvu_rs::djvu_render::UserRotation,
+) -> djvu_rs::Pixmap {
+    use djvu_rs::djvu_render::UserRotation;
+    match rot {
+        UserRotation::None => src,
+        UserRotation::Cw90 => rotate_pixmap_cw90(src),
+        UserRotation::Rot180 => rotate_pixmap_180(src),
+        UserRotation::Ccw90 => rotate_pixmap_ccw90(src),
+    }
+}
+
+fn rotate_pixmap_cw90(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
+    let (w, h) = (src.width, src.height);
+    let mut dst = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let src_off = ((y * w + x) * 4) as usize;
+            let dst_x = h - 1 - y;
+            let dst_y = x;
+            let dst_off = ((dst_y * h + dst_x) * 4) as usize;
+            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
+        }
+    }
+    djvu_rs::Pixmap {
+        width: h,
+        height: w,
+        data: dst,
+    }
+}
+
+fn rotate_pixmap_180(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
+    let (w, h) = (src.width, src.height);
+    let mut dst = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let src_off = ((y * w + x) * 4) as usize;
+            let dst_off = (((h - 1 - y) * w + (w - 1 - x)) * 4) as usize;
+            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
+        }
+    }
+    djvu_rs::Pixmap {
+        width: w,
+        height: h,
+        data: dst,
+    }
+}
+
+fn rotate_pixmap_ccw90(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
+    let (w, h) = (src.width, src.height);
+    let mut dst = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let src_off = ((y * w + x) * 4) as usize;
+            let dst_x = y;
+            let dst_y = w - 1 - x;
+            let dst_off = ((dst_y * h + dst_x) * 4) as usize;
+            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
+        }
+    }
+    djvu_rs::Pixmap {
+        width: h,
+        height: w,
+        data: dst,
+    }
+}
+
 /// Convert an RGB Pixmap to RGBA bytes.
 fn pixmap_to_rgba(pm: &djvu_rs::Pixmap) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((pm.width * pm.height * 4) as usize);
@@ -451,13 +583,14 @@ fn render_png(
     all: bool,
     dpi: u32,
     count: usize,
+    rotate: djvu_rs::djvu_render::UserRotation,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if all {
         std::fs::create_dir_all(output)?;
         for i in 0..count {
             let out = output.join(format!("page_{:04}.png", i + 1));
-            render_page_png(doc, i, dpi, &out)?;
+            render_page_png(doc, i, dpi, rotate, &out)?;
         }
     } else {
         let idx = page_idx(page, count)?;
@@ -466,7 +599,7 @@ fn render_png(
         {
             std::fs::create_dir_all(parent)?;
         }
-        render_page_png(doc, idx, dpi, output)?;
+        render_page_png(doc, idx, dpi, rotate, output)?;
     }
     Ok(())
 }
@@ -506,6 +639,7 @@ fn render_cbz(
     all: bool,
     dpi: u32,
     count: usize,
+    rotate: djvu_rs::djvu_render::UserRotation,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pages: Vec<usize> = if all {
@@ -532,6 +666,7 @@ fn render_cbz(
         let w = ((p.width() as f32 * scale).round() as u32).max(1);
         let h = ((p.height() as f32 * scale).round() as u32).max(1);
         let pixmap = p.render_to_size(w, h)?;
+        let pixmap = apply_user_rotation(pixmap, rotate);
 
         let mut png_buf = Vec::new();
         encode_png(&mut png_buf, pixmap.width, pixmap.height, &pixmap.data)?;
@@ -577,6 +712,7 @@ fn render_page_png(
     doc: &Document,
     idx: usize,
     dpi: u32,
+    rotate: djvu_rs::djvu_render::UserRotation,
     out: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(idx)?;
@@ -585,6 +721,7 @@ fn render_page_png(
     let w = ((page.width() as f32 * scale).round() as u32).max(1);
     let h = ((page.height() as f32 * scale).round() as u32).max(1);
     let pixmap = page.render_to_size(w, h)?;
+    let pixmap = apply_user_rotation(pixmap, rotate);
     let file = std::fs::File::create(out)?;
     let mut writer = std::io::BufWriter::new(file);
     encode_png(&mut writer, pixmap.width, pixmap.height, &pixmap.data)?;

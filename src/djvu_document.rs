@@ -38,7 +38,7 @@ use crate::{
     iff::{IffChunk, parse_form},
     info::PageInfo,
     iw44_new::Iw44Image,
-    jb2_new::Jb2Dict,
+    jb2::Jb2Dict,
     metadata::{DjVuMetadata, MetadataError},
     pixmap::Pixmap,
     text::{TextError, TextLayer},
@@ -433,7 +433,7 @@ impl DjVuPage {
         self.jb2_dict_decoded
             .get_or_init(|| {
                 let djbz = self.shared_djbz.as_deref()?;
-                crate::jb2_new::decode_dict(djbz, None).ok()
+                crate::jb2::decode_dict(djbz, None).ok()
             })
             .as_ref()
     }
@@ -548,13 +548,13 @@ impl DjVuPage {
         // allocations on every render.
         let inline_dict;
         let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
-            inline_dict = crate::jb2_new::decode_dict(djbz, None)?;
+            inline_dict = crate::jb2::decode_dict(djbz, None)?;
             Some(&inline_dict)
         } else {
             self.decoded_shared_dict()
         };
 
-        let bm = crate::jb2_new::decode(sjbz, dict_ref)?;
+        let bm = crate::jb2::decode(sjbz, dict_ref)?;
         Ok(Some(bm))
     }
 
@@ -571,13 +571,13 @@ impl DjVuPage {
 
         let inline_dict;
         let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
-            inline_dict = crate::jb2_new::decode_dict(djbz, None)?;
+            inline_dict = crate::jb2::decode_dict(djbz, None)?;
             Some(&inline_dict)
         } else {
             self.decoded_shared_dict()
         };
 
-        let (bm, blit_map) = crate::jb2_new::decode_indexed(sjbz, dict_ref)?;
+        let (bm, blit_map) = crate::jb2::decode_indexed(sjbz, dict_ref)?;
         Ok(Some((bm, blit_map)))
     }
 
