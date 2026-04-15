@@ -264,27 +264,38 @@ fn display_dimensions(page: &crate::djvu_document::DjVuPage) -> (u32, u32) {
 
 // ── Gamma LUT ─────────────────────────────────────────────────────────────────
 
+/// Standard sRGB / CRT display gamma assumed for rendering output.
+const DISPLAY_GAMMA: f32 = 2.2;
+
 /// Precompute a gamma-correction look-up table for values 0..255.
 ///
-/// The LUT converts linear 8-bit values to display-corrected values using the
-/// gamma exponent from the INFO chunk (e.g. 2.2).
+/// Matches DjVuLibre's correction formula: the exponent is
+/// `document_gamma / DISPLAY_GAMMA` so that documents created on a
+/// standard gamma-2.2 device need no correction (identity LUT), while
+/// documents from linear-light (gamma=1.0) sources are brightened to
+/// compensate for the display gamma.
 ///
-/// `lut[i] = round(255 * (i/255)^(1/gamma))`
+/// `lut[i] = round(255 * (i/255)^(gamma / DISPLAY_GAMMA))`
 ///
-/// When `gamma <= 0.0` or not finite, falls back to identity (no correction).
+/// When `gamma <= 0.0`, not finite, or approximately equal to
+/// `DISPLAY_GAMMA`, the LUT is the identity function (no correction).
 fn build_gamma_lut(gamma: f32) -> [u8; 256] {
     let mut lut = [0u8; 256];
-    if gamma <= 0.0 || !gamma.is_finite() || (gamma - 1.0).abs() < 1e-4 {
+    let exponent = if gamma <= 0.0 || !gamma.is_finite() {
+        1.0_f32 // invalid — no correction
+    } else {
+        gamma / DISPLAY_GAMMA
+    };
+    if (exponent - 1.0).abs() < 1e-4 {
         // Identity
         for (i, v) in lut.iter_mut().enumerate() {
             *v = i as u8;
         }
         return lut;
     }
-    let inv_gamma = 1.0 / gamma;
     for (i, v) in lut.iter_mut().enumerate() {
         let linear = i as f32 / 255.0;
-        let corrected = linear.powf(inv_gamma);
+        let corrected = linear.powf(exponent);
         *v = (corrected * 255.0 + 0.5) as u8;
     }
     lut
@@ -2002,35 +2013,31 @@ mod tests {
         );
     }
 
-    /// Gamma correction changes pixel values vs identity (no-gamma).
+    /// gamma=2.2 (most DjVu files) produces an identity LUT — no correction needed
+    /// for a standard display gamma=2.2.
     #[test]
-    fn gamma_correction_changes_pixels() {
-        // Build gamma LUT for gamma=2.2 and identity
-        let lut_gamma = build_gamma_lut(2.2);
-        let lut_identity = build_gamma_lut(1.0);
-
-        // For midtone value, gamma-corrected should differ from identity
-        let mid = 128u8;
-        let corrected = lut_gamma[mid as usize];
-        let identity = lut_identity[mid as usize];
-
-        // Identity LUT should map 128 → 128
-        assert_eq!(identity, mid, "identity LUT must be identity");
-
-        // Gamma-corrected midtone should be brighter (gamma decode = lighter)
-        assert!(
-            corrected > mid,
-            "gamma-corrected midtone ({corrected}) should be > identity ({mid})"
-        );
+    fn gamma_lut_standard_is_identity() {
+        let lut = build_gamma_lut(2.2);
+        for (i, &val) in lut.iter().enumerate() {
+            assert_eq!(
+                val, i as u8,
+                "gamma=2.2 LUT at {i}: expected {i}, got {val}"
+            );
+        }
     }
 
-    /// Gamma LUT for identity (gamma=1.0) is the identity function.
+    /// A linear-light source (gamma=1.0) is corrected: midtones become brighter
+    /// (exponent=1/2.2<1 raises sub-unity values toward 1.0) to compensate
+    /// for the display gamma-2.2 encoding needed for correct appearance.
     #[test]
-    fn gamma_lut_identity() {
-        let lut = build_gamma_lut(1.0);
-        for (i, &val) in lut.iter().enumerate() {
-            assert_eq!(val, i as u8, "identity LUT at {i}: expected {i}, got {val}");
-        }
+    fn gamma_lut_linear_source_brightens() {
+        let lut_linear = build_gamma_lut(1.0); // linear source → needs brightening
+        let mid = 128u8;
+        let corrected = lut_linear[mid as usize];
+        assert!(
+            corrected > mid,
+            "linear-source LUT at mid ({corrected}) should be brighter than {mid}"
+        );
     }
 
     /// Gamma LUT for gamma=0.0 (invalid) falls back to identity.
