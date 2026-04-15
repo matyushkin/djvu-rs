@@ -319,10 +319,31 @@ pub struct Document {
 #[cfg(feature = "std")]
 impl Document {
     /// Open a DjVu file from disk.
+    ///
+    /// For **indirect** multi-page DJVM files (where component pages live in
+    /// separate files next to the index), use [`Document::open_dir`] instead.
+    /// This method uses `DjVuDocument::parse` which only handles bundled
+    /// (self-contained) files; it will return an error for indirect documents.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let data = std::fs::read(path.as_ref())
             .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
         Self::from_bytes(data)
+    }
+
+    /// Open an indirect DJVM document from disk, resolving component pages
+    /// from the same directory as the index file.
+    ///
+    /// Use this when the DjVu file is an *indirect* multi-page document where
+    /// individual page files (e.g. `page001.djvu`) live alongside the index.
+    /// For self-contained (bundled) files, [`Document::open`] is sufficient.
+    pub fn open_dir(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let data = std::fs::read(path)
+            .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
+        let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let doc = DjVuDocument::parse_from_dir(&data, base_dir)
+            .map_err(|e| Error::FormatError(e.to_string()))?;
+        Ok(Document { doc })
     }
 
     /// Parse a DjVu document from a reader (reads all bytes into memory).

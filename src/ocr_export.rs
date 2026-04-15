@@ -44,8 +44,11 @@ pub enum OcrExportError {
 pub struct HocrOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
-    /// Reserved for future DPI-based coordinate scaling. Currently unused;
-    /// coordinates are always emitted in native page pixels.
+    /// Target DPI for coordinate scaling. When set, page dimensions and all
+    /// text zone coordinates are scaled so that 1 pixel equals 1/dpi inches
+    /// at the specified resolution. Useful when the hOCR output must align
+    /// with a rendered image at a specific DPI. When `None`, coordinates are
+    /// emitted in native page pixels.
     pub dpi: Option<u32>,
 }
 
@@ -54,8 +57,11 @@ pub struct HocrOptions {
 pub struct AltoOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
-    /// Reserved for future DPI-based coordinate scaling. Currently unused;
-    /// coordinates are always emitted in native page pixels.
+    /// Target DPI for coordinate scaling. When set, page dimensions and all
+    /// text zone coordinates are scaled so that 1 pixel equals 1/dpi inches
+    /// at the specified resolution. Useful when the ALTO output must align
+    /// with a rendered image at a specific DPI. When `None`, coordinates are
+    /// emitted in native page pixels.
     pub dpi: Option<u32>,
 }
 
@@ -95,18 +101,29 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, OcrExpo
         let page = doc.page(page_idx)?;
         let pw = page.width() as u32;
         let ph = page.height() as u32;
+        let page_dpi = page.dpi() as u32;
+        let (out_w, out_h) = if let Some(target_dpi) = opts.dpi {
+            (pw * target_dpi / page_dpi, ph * target_dpi / page_dpi)
+        } else {
+            (pw, ph)
+        };
 
         // bbox for the full page
         write!(
             out,
             r#"  <div class="ocr_page" id="page_{idx}" title="image page_{idx}.djvu; bbox 0 0 {w} {h}; ppageno {idx}">"#,
             idx = page_idx,
-            w = pw,
-            h = ph,
+            w = out_w,
+            h = out_h,
         )?;
         writeln!(out)?;
 
-        if let Some(layer) = page.text_layer()? {
+        let layer_opt = if opts.dpi.is_some() {
+            page.text_layer_at_size(out_w, out_h)?
+        } else {
+            page.text_layer()?
+        };
+        if let Some(layer) = layer_opt {
             write_hocr_zones(&mut out, &layer, page_idx)?;
         }
 
@@ -160,22 +177,33 @@ pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, OcrExpo
         let page = doc.page(page_idx)?;
         let pw = page.width() as u32;
         let ph = page.height() as u32;
+        let page_dpi = page.dpi() as u32;
+        let (out_w, out_h) = if let Some(target_dpi) = opts.dpi {
+            (pw * target_dpi / page_dpi, ph * target_dpi / page_dpi)
+        } else {
+            (pw, ph)
+        };
 
         writeln!(
             out,
             r#"    <Page ID="page_{idx}" WIDTH="{w}" HEIGHT="{h}" PHYSICAL_IMG_NR="{idx}">"#,
             idx = page_idx,
-            w = pw,
-            h = ph,
+            w = out_w,
+            h = out_h,
         )?;
         writeln!(
             out,
             "      <PrintSpace WIDTH=\"{w}\" HEIGHT=\"{h}\" HPOS=\"0\" VPOS=\"0\">",
-            w = pw,
-            h = ph
+            w = out_w,
+            h = out_h
         )?;
 
-        if let Some(layer) = page.text_layer()? {
+        let layer_opt = if opts.dpi.is_some() {
+            page.text_layer_at_size(out_w, out_h)?
+        } else {
+            page.text_layer()?
+        };
+        if let Some(layer) = layer_opt {
             write_alto_zones(&mut out, &layer, page_idx)?;
         }
 

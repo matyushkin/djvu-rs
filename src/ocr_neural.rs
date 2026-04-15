@@ -1,5 +1,11 @@
 //! Neural OCR backend via Candle (requires `ocr-neural` feature).
 //!
+//! > ⚠️ **Not yet implemented.** The `recognize` method always returns
+//! > `Err(OcrError::RecognitionFailed)`. Enabling the `ocr-neural` feature
+//! > adds large transitive dependencies (`candle-core`, `candle-nn`,
+//! > `tokenizers`) without providing functional OCR output.
+//! > See <https://github.com/matyushkin/djvu-rs/issues/163>.
+//!
 //! Uses the `candle` deep learning framework to run HuggingFace
 //! transformer-based OCR models (e.g. TrOCR) in pure Rust.
 
