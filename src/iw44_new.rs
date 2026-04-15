@@ -411,11 +411,114 @@ impl PlaneDecoder {
         }
     }
 
+    /// Hot inner loop for refining already-active coefficients.
+    ///
+    /// Uses local copies of all ZP state fields so LLVM can keep them in
+    /// registers for the duration of the double-loop, avoiding struct-pointer
+    /// round-trips on every `decode_bit` / `decode_passthrough_iw44` call.
+    #[inline(never)]
     fn previously_active_coefficient_decoding_pass(
         &mut self,
         zp: &mut ZpDecoder<'_>,
         block_idx: usize,
     ) {
+        use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+        // Extract ZP state to true stack-locals — LLVM keeps these in registers.
+        let mut a = zp.a;
+        let mut c = zp.c;
+        let mut fence = zp.fence;
+        let mut bit_buf = zp.bit_buf;
+        let mut bit_count = zp.bit_count;
+        let data = zp.data;
+        let mut pos = zp.pos;
+
+        macro_rules! read_byte {
+            () => {{
+                let b = if pos < data.len() { data[pos] } else { 0xff };
+                pos = pos.wrapping_add(1);
+                b as u32
+            }};
+        }
+        macro_rules! refill {
+            () => {
+                while bit_count <= 24 {
+                    bit_buf = (bit_buf << 8) | read_byte!();
+                    bit_count += 8;
+                }
+            };
+        }
+        macro_rules! renorm {
+            () => {{
+                let shift = (a as u16).leading_ones();
+                bit_count -= shift as i32;
+                a = (a << shift) & 0xffff;
+                let mask = (1u32 << (shift & 31)).wrapping_sub(1);
+                c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
+                if bit_count < 16 {
+                    refill!();
+                }
+                fence = c.min(0x7fff);
+            }};
+        }
+        // Decode one bit using an adaptive context byte.
+        macro_rules! decode_bit_ctx {
+            ($ctx:expr) => {{
+                let state = ($ctx) as usize;
+                let mps_bit = state & 1;
+                let z = a + PROB[state] as u32;
+                if z <= fence {
+                    a = z;
+                    mps_bit != 0
+                } else {
+                    let boundary = 0x6000u32 + ((a + z) >> 2);
+                    let z_clamped = z.min(boundary);
+                    if z_clamped > c {
+                        let complement = 0x10000u32 - z_clamped;
+                        a = (a + complement) & 0xffff;
+                        c = (c + complement) & 0xffff;
+                        $ctx = LPS_NEXT[state];
+                        renorm!();
+                        (1 - mps_bit) != 0
+                    } else {
+                        if a >= THRESHOLD[state] as u32 {
+                            $ctx = MPS_NEXT[state];
+                        }
+                        bit_count -= 1;
+                        a = (z_clamped << 1) & 0xffff;
+                        c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                        if bit_count < 16 {
+                            refill!();
+                        }
+                        fence = c.min(0x7fff);
+                        mps_bit != 0
+                    }
+                }
+            }};
+        }
+        // Decode one bit in IW44 passthrough mode (threshold = 0x8000 + 3a/8).
+        macro_rules! decode_passthrough_iw44 {
+            () => {{
+                let z = (0x8000u32 + (3u32 * a) / 8) as u16;
+                if z as u32 > c {
+                    let complement = 0x10000u32 - z as u32;
+                    a = (a + complement) & 0xffff;
+                    c = (c + complement) & 0xffff;
+                    renorm!();
+                    true
+                } else {
+                    bit_count -= 1;
+                    a = (z as u32 * 2) & 0xffff;
+                    c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                    if bit_count < 16 {
+                        refill!();
+                    }
+                    fence = c.min(0x7fff);
+                    false
+                }
+            }};
+        }
+
         let (from, to) = BAND_BUCKETS[self.curband];
         let mut step = self.quant_hi[self.curband];
         for (boff, i) in (from..=to).enumerate() {
@@ -428,11 +531,11 @@ impl PlaneDecoder {
                     let mut abs_coef = coef.unsigned_abs() as i32;
                     let s = step as i32;
                     let des = if abs_coef <= 3 * s {
-                        let d = zp.decode_bit(&mut self.ctx_increase_coef[0]);
+                        let d = decode_bit_ctx!(self.ctx_increase_coef[0]);
                         abs_coef += s >> 2;
                         d
                     } else {
-                        zp.decode_passthrough_iw44()
+                        decode_passthrough_iw44!()
                     };
                     if des {
                         abs_coef += s >> 1;
@@ -447,6 +550,14 @@ impl PlaneDecoder {
                 }
             }
         }
+
+        // Write back ZP state so subsequent calls see the updated arithmetic.
+        zp.a = a;
+        zp.c = c;
+        zp.fence = fence;
+        zp.bit_buf = bit_buf;
+        zp.bit_count = bit_count;
+        zp.pos = pos;
     }
 
     /// Advance quantization step and band counter after one slice.
