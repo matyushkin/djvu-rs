@@ -20,6 +20,7 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: crates-io
     steps:
       - name: Resolve ref
@@ -66,12 +67,12 @@ jobs:
         if: env.ALREADY_PUBLISHED == 'false'
         run: cargo package --allow-dirty
 
-      - name: Run tests
+      - name: Install cargo-nextest
         if: env.ALREADY_PUBLISHED == 'false'
         uses: taiki-e/install-action@cargo-nextest
-      - name: cargo nextest run
+      - name: Run tests
         if: env.ALREADY_PUBLISHED == 'false'
-        run: cargo nextest run --workspace
+        run: cargo nextest run --profile ci --workspace
 
       - name: Publish to crates.io
         if: env.ALREADY_PUBLISHED == 'false'
