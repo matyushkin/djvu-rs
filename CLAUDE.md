@@ -75,13 +75,13 @@ Composite pipeline (src/djvu_render.rs):
 
 | Component | Idea | Expected | Risk |
 |-----------|------|----------|------|
-| ZP | SIMD decode of multiple symbols in parallel (8-wide) | large | complex, breaking |
+| ZP | SIMD decode of multiple symbols in parallel (8-wide) (#183) | large | complex, breaking |
 | ZP | branch-free decode_bit via cmov (#179) | ✗ reverted — see log | LPS function call overhead worse than inline |
-| IW44 | column_pass SIMD at s=2 (stride-2 gather, follow-up to #180) | small | needs load8_strided (vld2q_s16 on NEON) |
-| JB2 | bit-pack bitmap → smaller memory/cache footprint | medium | complex |
-| render | pre-decode JB2 bitmap on a separate thread | medium | requires Arc |
+| IW44 | column_pass SIMD at s=2 (stride-2 gather, follow-up to #180) (#184) | small | needs load8_strided (vld2q_s16 on NEON) |
+| JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
+| render | pre-decode JB2 bitmap on a separate thread (#186) | medium | requires Arc |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
-| IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks | large (−40–80% for large pages) | must verify output correctness vs reference; bit_buf still valid after pos exhaustion |
+| IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | large (−40–80% for large pages) | must verify output correctness vs reference; bit_buf still valid after pos exhaustion |
 
 ---
 
@@ -132,7 +132,7 @@ Early-exit in `decode_slice` when `zp.is_exhausted()` AND no block in the curren
 
 **Risk:** `is_exhausted()` checks `pos >= data.len()` but bit_buf may still hold up to 32 cached bits; the first few blocks after exhaustion may legitimately decode as "true". Must benchmark correctness against reference output before landing.
 
-Tracking issue: → Hypothesis added below.
+Tracking issue: #182
 
 ---
 
