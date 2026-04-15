@@ -709,21 +709,23 @@ pub(crate) fn row_pass_inner(
     let kmax = (width - 1) >> sd;
     let border = kmax.saturating_sub(3);
 
-    // ── SIMD path: 8 rows at a time (only when s == 1, i.e. sd == 0) ─────────
-    let simd_rows = if use_simd && s == 1 {
-        height / 8 * 8
-    } else {
-        0
-    };
+    // ── SIMD path: 8 active rows at a time ───────────────────────────────────
+    //
+    // At s=1 the 8 rows are consecutive (o[i] = (row_base + i) * stride).
+    // At s=2 they are spaced by 2  (o[i] = (row_base + i*2) * stride), etc.
+    // Column accesses use `k << sd` so the logical k loop is unchanged.
+    let simd_active = if use_simd { height / s / 8 * 8 } else { 0 };
+    let simd_rows = simd_active * s;
 
-    for row_base in (0..simd_rows).step_by(8) {
-        let o: [usize; 8] = core::array::from_fn(|i| (row_base + i) * stride);
+    for group in 0..simd_active / 8 {
+        let row_base = group * 8 * s;
+        let o: [usize; 8] = core::array::from_fn(|i| (row_base + i * s) * stride);
 
         // — Lifting (even k) ——————————————————————————————————————————————————
         let mut prev1v = i32x8::splat(0);
         let mut next1v = i32x8::splat(0);
         let mut next3v = if kmax >= 1 {
-            load_rows8(data, &o, 1)
+            load_rows8(data, &o, 1 << sd)
         } else {
             i32x8::splat(0)
         };
@@ -734,15 +736,15 @@ pub(crate) fn row_pass_inner(
             prev1v = next1v;
             next1v = next3v;
             next3v = if k + 3 <= kmax {
-                load_rows8(data, &o, k + 3)
+                load_rows8(data, &o, (k + 3) << sd)
             } else {
                 i32x8::splat(0)
             };
-            let cur = load_rows8(data, &o, k);
+            let cur = load_rows8(data, &o, k << sd);
             store_rows8(
                 data,
                 &o,
-                k,
+                k << sd,
                 lifting_even(cur, prev1v, next1v, prev3v, next3v),
             );
             k += 2;
@@ -751,20 +753,20 @@ pub(crate) fn row_pass_inner(
         // — Prediction (odd k) ————————————————————————————————————————————————
         if kmax >= 1 {
             let mut k = 1usize;
-            prev1v = load_rows8(data, &o, k - 1); // data[0] per row
+            prev1v = load_rows8(data, &o, (k - 1) << sd);
             if k < kmax {
-                next1v = load_rows8(data, &o, k + 1);
-                let cur = load_rows8(data, &o, k);
-                store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+                next1v = load_rows8(data, &o, (k + 1) << sd);
+                let cur = load_rows8(data, &o, k << sd);
+                store_rows8(data, &o, k << sd, predict_avg(cur, prev1v, next1v));
             } else {
                 // k == kmax: boundary — only one odd sample, += prev
-                let cur = load_rows8(data, &o, k);
-                store_rows8(data, &o, k, cur + prev1v);
+                let cur = load_rows8(data, &o, k << sd);
+                store_rows8(data, &o, k << sd, cur + prev1v);
                 next1v = i32x8::splat(0);
             }
 
             next3v = if border >= 3 {
-                load_rows8(data, &o, k + 3)
+                load_rows8(data, &o, (k + 3) << sd)
             } else {
                 i32x8::splat(0)
             };
@@ -774,12 +776,12 @@ pub(crate) fn row_pass_inner(
                 prev3v = prev1v;
                 prev1v = next1v;
                 next1v = next3v;
-                next3v = load_rows8(data, &o, k + 3);
-                let cur = load_rows8(data, &o, k);
+                next3v = load_rows8(data, &o, (k + 3) << sd);
+                let cur = load_rows8(data, &o, k << sd);
                 store_rows8(
                     data,
                     &o,
-                    k,
+                    k << sd,
                     predict_inner(cur, prev1v, next1v, prev3v, next3v),
                 );
                 k += 2;
@@ -789,11 +791,11 @@ pub(crate) fn row_pass_inner(
                 prev1v = next1v;
                 next1v = next3v;
                 next3v = i32x8::splat(0);
-                let cur = load_rows8(data, &o, k);
+                let cur = load_rows8(data, &o, k << sd);
                 if k < kmax {
-                    store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+                    store_rows8(data, &o, k << sd, predict_avg(cur, prev1v, next1v));
                 } else {
-                    store_rows8(data, &o, k, cur + prev1v);
+                    store_rows8(data, &o, k << sd, cur + prev1v);
                 }
                 k += 2;
             }
@@ -907,7 +909,8 @@ fn inverse_wavelet_transform_from(
     while s >= subsample {
         let sd = s_degree as usize;
 
-        // When s == 1, column indices are contiguous → use SIMD.
+        // Column pass SIMD requires contiguous column access, so only at s == 1.
+        // Row pass SIMD is generalised to any s (see row_pass_inner).
         let use_simd = s == 1;
 
         // ── Column pass (transposed) ──────────────────────────────────────────
@@ -1213,7 +1216,8 @@ fn inverse_wavelet_transform_from(
         }
 
         // ── Row pass ─────────────────────────────────────────────────────────
-        row_pass_inner(data, width, height, stride, s, sd, use_simd);
+        // Row pass SIMD works for any s — always enable it.
+        row_pass_inner(data, width, height, stride, s, sd, true);
 
         s >>= 1;
         s_degree = s_degree.saturating_sub(1);
@@ -2155,6 +2159,34 @@ mod tests {
         assert_eq!(
             scalar_data, simd_data,
             "SIMD row pass must produce identical output to scalar"
+        );
+    }
+
+    /// Same as `simd_row_pass_matches_scalar` but for s=2 (sd=1).
+    ///
+    /// Active rows are every other row; active columns are every other column.
+    /// The generalised SIMD path (8 active rows at a time with stride s) must
+    /// produce the same result as the pure scalar path.
+    #[test]
+    fn simd_row_pass_s2_matches_scalar() {
+        let width = 64usize;
+        let height = 32usize;
+        let stride = width;
+        let n = stride * height;
+        let s = 2usize;
+        let sd = 1usize;
+
+        let initial: Vec<i16> = (0..n).map(|i| ((i * 7 + 13) % 511) as i16 - 255).collect();
+
+        let mut scalar_data = initial.clone();
+        super::row_pass_inner(&mut scalar_data, width, height, stride, s, sd, false);
+
+        let mut simd_data = initial.clone();
+        super::row_pass_inner(&mut simd_data, width, height, stride, s, sd, true);
+
+        assert_eq!(
+            scalar_data, simd_data,
+            "SIMD row pass (s=2) must produce identical output to scalar"
         );
     }
 }
