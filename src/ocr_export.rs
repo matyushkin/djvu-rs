@@ -13,6 +13,12 @@
 //! - [`to_hocr`] — generate hOCR HTML string for a document
 //! - [`to_alto`] — generate ALTO XML string for a document
 //! - [`OcrExportError`] — typed errors from this module
+//!
+//! [`HocrOptions`]: crate::ocr_export::HocrOptions
+//! [`AltoOptions`]: crate::ocr_export::AltoOptions
+//! [`to_hocr`]: crate::ocr_export::to_hocr
+//! [`to_alto`]: crate::ocr_export::to_alto
+//! [`OcrExportError`]: crate::ocr_export::OcrExportError
 
 use std::fmt::Write as FmtWrite;
 
