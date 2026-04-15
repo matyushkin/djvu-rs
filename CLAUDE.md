@@ -29,14 +29,14 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after NEON prelim_flags)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after NEON prelim_flags all bands)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
-| `iw44_decode_first_chunk` | **582 µs** | −21% (was 734 µs) |
-| `iw44_decode_corpus_color` | **667 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.55 ms** | — |
+| `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
+| `iw44_decode_corpus_color` | **650 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.84 ms** | — |
 | `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.35 ms** | — |
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **821 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
@@ -69,6 +69,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | skip `previously_active_coefficient_decoding_pass` when `bbstate & ACTIVE == 0` | iw44_first_chunk −13% (714→623 µs); iw44_corpus_color −46% (2.30→1.25 ms) — avoids function call + ZP register flush for all-zero/UNK blocks (dominant case in sparse/early chunks) |
 | 2026-04 | IW44 | local-copy ZP state in `previously_active_coefficient_decoding_pass` (same JB2 pattern) | sub1 −2.1% (13.24→12.96 ms); sub2 −1.5%; sub4 −2.4%; corpus_color −2.4% — LLVM keeps a/c/fence/bit_buf/bit_count in registers for entire coefficient refinement inner loop; small function body avoids I-cache thrash that killed the full-pass inlining attempt |
 | 2026-04 | IW44 | NEON-vectorize `preliminary_flag_computation` band≠0 path: 16 i16 coefs → 16 u8 flags in ~14 NEON instructions vs 64 scalar ops | corpus_color −48% (1.25→0.67 ms); first_chunk −7% (623→582 µs); sub1 −3.2% (12.96→12.55 ms) — LLVM was scalar-unrolling the 16-iter loop; explicit NEON (vld1q×2, vceq×2, vmvn×2, vand×2, veor×2, vmovn×2, vst1q + horizontal OR) reduces per-bucket work ~3× on M1 NEON; bands 1-9 each call this per block so corpus_color (many bands) sees the largest gain |
+| 2026-04 | IW44 | NEON-vectorize `preliminary_flag_computation` band-0 path: vbslq_u8 blend to handle conditional update for ZERO-state entries | corpus_color −3.9% (667→650 µs); sub1/first_chunk flat — band-0 conditional update (skip ZERO entries) done with vceqq_u8 + vmvnq_u8 mask + vbslq blend; ~20 NEON instructions vs 48 scalar |
 
 ### ✗ Reverted
 
@@ -82,6 +83,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | column_pass SIMD at s=2 via runtime `s==1` dispatch + `load8_stride2`/`store8_stride2` (#184 attempt 1) | +5% `iw44_decode_first_chunk` (623→654 µs), −2.4% `iw44_decode_corpus_color`; sub1 +6.5%, sub2 +6.8% — I-cache pressure from doubled dispatch code in large column-pass body; net negative |
 | 2026-04 | IW44 | column_pass SIMD at s=2 via const-generic `column_pass<const S>` monomorphization (#184 attempt 2) | sub1 +22% (13.24→16.2 ms), sub2 +25%, corpus_color −3.2% — extracting column_pass as non-inlined function loses LLVM register allocation across outer s-loop; column pass too tightly coupled to outer loop for safe extraction without inlining |
 | 2026-04 | IW44 | local-copy ZP state in `bucket_decoding_pass` + `newly_active_coefficient_decoding_pass` (extending JB2 pattern) | first_chunk +4%, corpus_color +3.3% — extract/writeback overhead (14 register-move ops × 74 880 blocks ≈ 328 µs) exceeds ZP-in-register savings; breakeven requires ≥7 ZP calls/block avg; `bucket_decoding_pass` avg 1-4 calls, `newly_active` rare (most blocks are UNK/ZERO not NEW) — net negative for both |
+| 2026-04 | IW44 | bucket-level early exit in `previously_active_coefficient_decoding_pass` (skip bucket if `bucketstate[boff] & ACTIVE == 0`) | corpus_color +1.5%, sub1 +1.1% — benchmark corpus files are dense (most buckets ACTIVE in later slices); branch overhead per bucket exceeds savings; only helps for very sparse images |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
