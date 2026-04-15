@@ -298,6 +298,46 @@ unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mu
     vget_lane_u8::<0>(v0)
 }
 
+/// NEON-vectorized band-0 path of `preliminary_flag_computation`.
+///
+/// Band 0 differs from bands 1-9: only update entries where `old_flags[k] != ZERO (1)`.
+/// Uses `vbslq_u8` to blend new flags (UNK/ACTIVE from coef) with old flags (keep ZERO).
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    // Load old coeffstate[0] (u8 flags: ZERO=1, UNK=8, ACTIVE=2).
+    let old_u8 = vld1q_u8(old_flags.as_ptr());
+    // should_update mask: 0xFF where old_flags[k] != ZERO(1), 0x00 where == ZERO
+    let one_u8 = vdupq_n_u8(1);
+    let is_zero_state = vceqq_u8(old_u8, one_u8); // 0xFF where ZERO, 0x00 elsewhere
+    let should_update = vmvnq_u8(is_zero_state); // 0xFF where not-ZERO
+    // Compute new flags from first 16 coefs (same as prelim_flags_bucket_neon with base=0).
+    let ptr = block.as_ptr();
+    let c0 = vreinterpretq_u16_s16(vld1q_s16(ptr));
+    let c1 = vreinterpretq_u16_s16(vld1q_s16(ptr.add(8)));
+    let zero16 = vdupq_n_u16(0);
+    let nz0 = vmvnq_u16(vceqq_u16(c0, zero16));
+    let nz1 = vmvnq_u16(vceqq_u16(c1, zero16));
+    let xv = vdupq_n_u16(10); // UNK ^ ACTIVE = 10
+    let uv = vdupq_n_u16(8); // UNK = 8
+    let r0 = veorq_u16(uv, vandq_u16(xv, nz0));
+    let r1 = veorq_u16(uv, vandq_u16(xv, nz1));
+    let new_flags = vcombine_u8(vmovn_u16(r0), vmovn_u16(r1));
+    // Blend: where should_update, take new_flags; where ZERO state, keep old.
+    let result = vbslq_u8(should_update, new_flags, old_u8);
+    vst1q_u8(old_flags.as_mut_ptr(), result);
+    // Horizontal OR of final flags for bstatetmp.
+    let lo = vget_low_u8(result);
+    let hi = vget_high_u8(result);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
 impl PlaneDecoder {
     fn new(width: usize, height: usize) -> Self {
         let block_cols = width.div_ceil(32);
@@ -368,17 +408,27 @@ impl PlaneDecoder {
                 self.bbstate |= bstatetmp;
             }
         } else {
-            let mut bstatetmp: u8 = 0;
-            for k in 0..16 {
-                if self.coeffstate[0][k] != ZERO {
-                    if self.blocks[block_idx][k] == 0 {
-                        self.coeffstate[0][k] = UNK;
-                    } else {
-                        self.coeffstate[0][k] = ACTIVE;
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON always available on aarch64; block[0..16] valid by construction.
+            #[allow(unsafe_code)]
+            let bstatetmp = unsafe {
+                prelim_flags_band0_neon(&self.blocks[block_idx], &mut self.coeffstate[0])
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let bstatetmp = {
+                let mut b = 0u8;
+                for k in 0..16 {
+                    if self.coeffstate[0][k] != ZERO {
+                        self.coeffstate[0][k] = if self.blocks[block_idx][k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
                     }
+                    b |= self.coeffstate[0][k];
                 }
-                bstatetmp |= self.coeffstate[0][k];
-            }
+                b
+            };
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
