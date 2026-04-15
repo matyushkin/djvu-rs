@@ -38,11 +38,15 @@ jobs:
         with:
           key: fuzz-${{ matrix.target }}
 
-      # taiki-e/install-action downloads a pre-built binary — much faster than cargo install
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2
+      # Cache the cargo-fuzz binary so cargo install --locked is a no-op on cache hit
+      - name: Cache cargo-fuzz binary
+        uses: actions/cache@v4
         with:
-          tool: cargo-fuzz
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       - name: Run ${{ matrix.target }} for 60 s
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
