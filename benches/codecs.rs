@@ -105,7 +105,7 @@ fn bench_jb2_decode(c: &mut Criterion) {
 
     c.bench_function("jb2_decode", |b| {
         b.iter(|| {
-            let _ = djvu_rs::jb2_new::decode(black_box(&sjbz), None);
+            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
         });
     });
 }
@@ -157,7 +157,7 @@ fn bench_jb2_decode_corpus(c: &mut Criterion) {
     };
     c.bench_function("jb2_decode_corpus_bilevel", |b| {
         b.iter(|| {
-            let _ = djvu_rs::jb2_new::decode(black_box(&sjbz), None);
+            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
         });
     });
 }
@@ -210,7 +210,7 @@ fn bench_jb2_decode_large(c: &mut Criterion) {
     eprintln!("bench_jb2_decode_large: Sjbz chunk = {} bytes", sjbz.len());
     c.bench_function("jb2_decode_large_600dpi", |b| {
         b.iter(|| {
-            let _ = djvu_rs::jb2_new::decode(black_box(&sjbz), None);
+            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
         });
     });
 }
