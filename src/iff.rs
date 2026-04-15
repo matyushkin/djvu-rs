@@ -25,8 +25,7 @@
 //! [n] data    (padded to even number of bytes if length is odd)
 //! ```
 
-// ---- Legacy iff types (re-exported for backward compatibility) --------------
-// These are used by crate::document, crate::render, etc.
+// ---- IFF chunk types --------------------------------------------------------
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
