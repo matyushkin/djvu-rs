@@ -57,6 +57,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | ZP/JB2 | local-copy ZP state (register alloc) + hardware CLZ | −15% JB2 |
 | 2026-04 | ZP/JB2 | устранение bounds checks в горячих циклах JB2 + ZP renormalize | значимо |
 | 2026-04 | ZP | a/c/fence: u16→u32, убраны все as u16 касты в hot loop | jb2 −2%, iw44_color −1.8%, jb2_encode −2.2% |
+| 2026-04 | IW44 | row_pass SIMD обобщён на s=2/4/8 (было только s=1) | sub2_decode −3.1% (p=0.00); sub1 noise |
 | 2026-04 | BZZ | inline ZP state locals в MTF decode | значимо |
 | 2026-04 | render | downsampled mask pyramid для composite | 8ms→23ms на 150dpi |
 | 2026-04 | render | partial BG44 decode для sub=4 | пропуск высоких частот |
@@ -78,7 +79,7 @@ Composite pipeline (src/djvu_render.rs):
 |-----------|------|----------|------|
 | ZP | SIMD decode нескольких символов за раз (8-wide) | большой | сложно, breaking |
 | ZP | branch-free decode_bit с cmov (#179) | ✗ отменено — см. журнал | LPS function call overhead хуже чем inline |
-| IW44 | SIMD для IW44 butterfly transform (#180) | большой | сложная реализация |
+| IW44 | column_pass SIMD при s=2 (stride-2 gather, #180 продолжение) | небольшой | нужен load8_strided (vld2q_s16 на NEON) |
 | JB2 | битовая упаковка bitmap → меньше памяти/cache | средний | сложно |
 | render | предвычисление JB2 bitmap на отдельном потоке | средний | требует Arc |
 | ZP | LUT для частых состояний (#181) | небольшой | cache pressure |
