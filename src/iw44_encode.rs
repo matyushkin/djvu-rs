@@ -428,8 +428,10 @@ impl PlaneEncoder {
                 for i in 0..1024 {
                     let row = ZIGZAG_ROW[i] as usize + row_base;
                     let col = ZIGZAG_COL[i] as usize + col_base;
-                    let safe_idx = (row * stride + col).min(plane.len() - 1);
-                    block[i] = plane[safe_idx];
+                    // Pad with zero beyond image boundaries (not with last sample)
+                    // to avoid inflating energy in high-frequency subbands at edges.
+                    let idx = row * stride + col;
+                    block[i] = if idx < plane.len() { plane[idx] } else { 0 };
                 }
             }
         }
@@ -778,23 +780,24 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
     // DjVu stores images bottom-to-top: wavelet row 0 = image bottom row.
     // The decoder's to_rgb flips via out_row = h-1-row, so mirror that here.
     // Scale by 64 because normalize() divides by 64 on decode.
-    for row in 0..h {
-        let wavelet_row = h - 1 - row;
-        for col in 0..w {
-            let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
-            let (y, _cb, _cr) = rgb_to_ycbcr(r, g, b);
-            y_plane[wavelet_row * stride + col] = (y as i32 * 64) as i16;
-        }
-    }
+    //
+    // Single pass: compute Y for every pixel; if chroma_half, accumulate 2×2
+    // box-filter for Cb/Cr (matches DjVuLibre's chroma downsampling).
     if opts.chroma_half {
-        for row in (0..h).step_by(2) {
-            let wavelet_row = (h - 1 - row) / 2;
-            for col in (0..w).step_by(2) {
+        // Single pass: fill Y and accumulate 2×2 box-filter chroma (matches
+        // DjVuLibre's c44 downsampling).  Each chroma output cell receives
+        // contributions from up to 4 source pixels with weight 16 each, so
+        // a full 2×2 block sums to 64 — the same scale used by the 1:1 path.
+        for row in 0..h {
+            let wavelet_row = h - 1 - row;
+            for col in 0..w {
                 let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
-                let (_y, cb, cr) = rgb_to_ycbcr(r, g, b);
-                let cc2 = col / 2;
-                cb_plane[wavelet_row * c_stride + cc2] = (cb as i32 * 64) as i16;
-                cr_plane[wavelet_row * c_stride + cc2] = (cr as i32 * 64) as i16;
+                let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
+                y_plane[wavelet_row * stride + col] = (y as i32 * 64) as i16;
+                let cc = col / 2;
+                let cr_row = wavelet_row / 2;
+                cb_plane[cr_row * c_stride + cc] += (cb as i32 * 16) as i16;
+                cr_plane[cr_row * c_stride + cc] += (cr as i32 * 16) as i16;
             }
         }
     } else {
@@ -802,7 +805,8 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
             let wavelet_row = h - 1 - row;
             for col in 0..w {
                 let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
-                let (_y, cb, cr) = rgb_to_ycbcr(r, g, b);
+                let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
+                y_plane[wavelet_row * stride + col] = (y as i32 * 64) as i16;
                 cb_plane[wavelet_row * c_stride + col] = (cb as i32 * 64) as i16;
                 cr_plane[wavelet_row * c_stride + col] = (cr as i32 * 64) as i16;
             }
