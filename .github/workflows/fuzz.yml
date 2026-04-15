@@ -15,6 +15,7 @@ jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -31,11 +32,17 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
 
+      # Per-target key: each fuzz binary compiles different code, avoid cache contention
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
 
+      # taiki-e/install-action downloads a pre-built binary — much faster than cargo install
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Run ${{ matrix.target }} for 60 s
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10

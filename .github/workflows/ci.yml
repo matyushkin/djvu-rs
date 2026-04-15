@@ -19,6 +19,7 @@ jobs:
   lint:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -41,16 +42,16 @@ jobs:
   test-stable:
     name: Test (stable)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # No extra key — shares cache with the lint job (same toolchain + Cargo.lock hash)
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          key: stable
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -67,7 +68,7 @@ jobs:
           cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
-      - name: Build (no_std check — no default features)
+      - name: Build (no_std check)
         run: cargo build --no-default-features
 
   # beta: push to main only — rarely catches different issues from stable
@@ -75,6 +76,7 @@ jobs:
     name: Test (beta)
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -89,18 +91,17 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
+      # beta only checks fast tests — no_std and slow PDF/IW44 are covered by test-stable
       - name: Test fast
         run: >
           cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
-      - name: Build (no_std check — no default features)
-        run: cargo build --no-default-features
-
   # ── MSRV ─────────────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -121,6 +122,7 @@ jobs:
   wasm:
     name: wasm32 build check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -141,6 +143,8 @@ jobs:
   ocr-tesseract:
     name: OCR (tesseract)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -161,23 +165,19 @@ jobs:
       - name: Test (ocr-tesseract integration)
         run: cargo test --test ocr_tesseract --features ocr-tesseract
 
-  # ── Licenses & audit ─────────────────────────────────────────────────────────
-  deny:
-    name: Licenses & advisories (cargo deny)
+  # ── Licenses & security audit (combined — both are fast, one runner) ─────────
+  deps-check:
+    name: Dependencies (deny + audit)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
 
-  audit:
-    name: Security audit (cargo audit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Licenses & advisories (cargo deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
 
-      - name: Audit dependencies
+      - name: Security audit (cargo audit)
         run: cargo audit
