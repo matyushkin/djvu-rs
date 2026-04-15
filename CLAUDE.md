@@ -35,7 +35,10 @@ Composite pipeline (src/djvu_render.rs):
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **623 µs** | −15% (was 734 µs) |
-| `iw44_decode_corpus_color` | **1.25 ms** | — |
+| `iw44_decode_corpus_color` | **1.22 ms** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.96 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.34 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **828 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.16 ms** | — |
@@ -64,6 +67,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | render | x86_64 SSE2/SSSE3 fast paths (alpha fill, RGB→RGBA) | significant on x86_64 |
 | 2026-04 | render | parallel BG+mask+FG44 decode via `rayon::join` in `render_pixmap`/`render_region` (#186) | cold render −30% (23.6→16.5 ms); warm-cache +13% overhead (240→272 µs) — rayon::join ~30 µs cost dominates when caches are warm; acceptable because cold render is the dominant real-world case |
 | 2026-04 | IW44 | skip `previously_active_coefficient_decoding_pass` when `bbstate & ACTIVE == 0` | iw44_first_chunk −13% (714→623 µs); iw44_corpus_color −46% (2.30→1.25 ms) — avoids function call + ZP register flush for all-zero/UNK blocks (dominant case in sparse/early chunks) |
+| 2026-04 | IW44 | local-copy ZP state in `previously_active_coefficient_decoding_pass` (same JB2 pattern) | sub1 −2.1% (13.24→12.96 ms); sub2 −1.5%; sub4 −2.4%; corpus_color −2.4% — LLVM keeps a/c/fence/bit_buf/bit_count in registers for entire coefficient refinement inner loop; small function body avoids I-cache thrash that killed the full-pass inlining attempt |
 
 ### ✗ Reverted
 
@@ -74,6 +78,8 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | early-exit `decode_slice` when `zp.is_exhausted() && bbstate & ACTIVE == 0` (#182) | 99.2% pixel mismatch — `is_exhausted()` fires mid-stream (not end-of-decisions); skipping decode_bit corrupts ZP arithmetic state for all subsequent calls; the ZP stream is a continuous encoding of ALL block decisions; can't skip any call without desynchronising |
 | 2026-04 | IW44 | local-copy ZP state + inline all 4 ZP sub-passes in `decode_slice` (macro-based, same pattern as JB2) | +7% `iw44_decode_first_chunk`, +25% `iw44_decode_corpus_color` — I-cache thrash from large inlined function body; IW44 block-loop body is much larger than JB2 row-loop, so I-cache pressure dominates any register-allocation gain |
 | 2026-04 | IW44 | `any_coef_nonzero` flag to skip block-data scan in `preliminary_flag_computation` for all-zero images | +5% `iw44_decode_first_chunk` regression — adding bool to `PlaneDecoder` struct increases cache pressure; branch overhead in tight loop + `fill(UNK)` not faster than vectorized load-compare-store |
+| 2026-04 | IW44 | column_pass SIMD at s=2 via runtime `s==1` dispatch + `load8_stride2`/`store8_stride2` (#184 attempt 1) | +5% `iw44_decode_first_chunk` (623→654 µs), −2.4% `iw44_decode_corpus_color`; sub1 +6.5%, sub2 +6.8% — I-cache pressure from doubled dispatch code in large column-pass body; net negative |
+| 2026-04 | IW44 | column_pass SIMD at s=2 via const-generic `column_pass<const S>` monomorphization (#184 attempt 2) | sub1 +22% (13.24→16.2 ms), sub2 +25%, corpus_color −3.2% — extracting column_pass as non-inlined function loses LLVM register allocation across outer s-loop; column pass too tightly coupled to outer loop for safe extraction without inlining |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
@@ -83,7 +89,7 @@ Composite pipeline (src/djvu_render.rs):
 |-----------|------|----------|------|
 | ZP | SIMD decode of multiple symbols in parallel (8-wide) (#183) | large | complex, breaking |
 | ZP | branch-free decode_bit via cmov (#179) | ✗ reverted — see log | LPS function call overhead worse than inline |
-| IW44 | column_pass SIMD at s=2 (stride-2 gather, follow-up to #180) (#184) | small | needs load8_strided (vld2q_s16 on NEON) |
+| IW44 | column_pass SIMD at s=2 (#184) | ✗ reverted — see log | column_pass too tightly coupled to outer s-loop; both runtime-dispatch and const-generic extraction regress sub1/sub2 benchmarks |
 | JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
 | render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
