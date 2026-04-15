@@ -800,33 +800,99 @@ struct FlatPlane {
 
 use wide::i32x8;
 
-/// Load 8 contiguous `i16` values from `slice[off..]` into an `i32x8`.
+/// Load 8 `i16` values at stride `s` starting at `slice[phys_off]`.
+///
+/// Reads `slice[phys_off + j*s]` for j = 0..7. For s=1 this is identical to
+/// [`load8`]. For s=2 and s=4 the AArch64 path uses `ld2`/`ld4` to deinterleave
+/// in a single instruction; other targets use scalar loads that LLVM may
+/// auto-vectorize.
 #[inline(always)]
-fn load8(slice: &[i16], off: usize) -> i32x8 {
+fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
+    #[cfg(target_arch = "aarch64")]
+    if s == 1 || s == 2 || s == 4 {
+        #[allow(unsafe_code)]
+        return unsafe { load8s_neon(slice, phys_off, s) };
+    }
     i32x8::from([
-        slice[off] as i32,
-        slice[off + 1] as i32,
-        slice[off + 2] as i32,
-        slice[off + 3] as i32,
-        slice[off + 4] as i32,
-        slice[off + 5] as i32,
-        slice[off + 6] as i32,
-        slice[off + 7] as i32,
+        slice[phys_off] as i32,
+        slice[phys_off + s] as i32,
+        slice[phys_off + 2 * s] as i32,
+        slice[phys_off + 3 * s] as i32,
+        slice[phys_off + 4 * s] as i32,
+        slice[phys_off + 5 * s] as i32,
+        slice[phys_off + 6 * s] as i32,
+        slice[phys_off + 7 * s] as i32,
     ])
 }
 
-/// Store 8 values from an `i32x8` into contiguous `i16` slots at `slice[off..]`.
+/// Store 8 `i32x8` values (truncated to `i16`) at stride `s` starting at `slice[phys_off]`.
+///
+/// Writes `slice[phys_off + j*s] = v[j] as i16` for j = 0..7. Interleaved positions
+/// (those not at multiples of `s`) are left unchanged.
 #[inline(always)]
-fn store8(slice: &mut [i16], off: usize, v: i32x8) {
+fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
+    #[cfg(target_arch = "aarch64")]
+    if s == 1 || s == 2 || s == 4 {
+        #[allow(unsafe_code)]
+        return unsafe { store8s_neon(slice, phys_off, s, v) };
+    }
     let a = v.to_array();
-    slice[off] = a[0] as i16;
-    slice[off + 1] = a[1] as i16;
-    slice[off + 2] = a[2] as i16;
-    slice[off + 3] = a[3] as i16;
-    slice[off + 4] = a[4] as i16;
-    slice[off + 5] = a[5] as i16;
-    slice[off + 6] = a[6] as i16;
-    slice[off + 7] = a[7] as i16;
+    for j in 0..8 {
+        slice[phys_off + j * s] = a[j] as i16;
+    }
+}
+
+// ---- AArch64 NEON stride load/store -----------------------------------------
+//
+// ld2 deinterleaves 16 consecutive i16s into two vectors (even, odd).
+// ld4 deinterleaves 32 consecutive i16s into four vectors.
+// After widening the target lane to i32, `lifting_even` / `predict_inner`
+// run on i32x8 exactly as for s=1.
+// On store, we re-interleave the updated even lane with the unchanged odd lanes.
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn load8s_neon(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
+    use core::arch::aarch64::*;
+    let ptr = slice.as_ptr().add(phys_off);
+    let target: int16x8_t = match s {
+        1 => vld1q_s16(ptr),
+        2 => vld2q_s16(ptr).0,
+        4 => vld4q_s16(ptr).0,
+        _ => unreachable!(),
+    };
+    // Widen i16x8 → two i32x4, then reinterpret as [i32;8] → i32x8
+    let lo = vmovl_s16(vget_low_s16(target));
+    let hi = vmovl_high_s16(target);
+    let arr = core::mem::transmute::<[int32x4_t; 2], [i32; 8]>([lo, hi]);
+    i32x8::from(arr)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn store8s_neon(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
+    use core::arch::aarch64::*;
+    let ptr = slice.as_mut_ptr().add(phys_off);
+    // Narrow v (i32x8) back to i16x8 via vmovn (truncate low 16 bits)
+    let v_arr = core::mem::transmute::<[i32; 8], [int32x4_t; 2]>(v.to_array());
+    let new_vals = vcombine_s16(vmovn_s32(v_arr[0]), vmovn_s32(v_arr[1]));
+    match s {
+        1 => vst1q_s16(ptr, new_vals),
+        // For s=2,4: scatter-store 8 i16s to stride-s positions.
+        // Using 8 individual str h avoids the extra vld2/vld4 that would be needed
+        // to preserve interleaved odd lanes before a vst2/vst4.
+        // Each str h targets the same ~16-byte cache region (already hot from load8s).
+        2 | 4 => {
+            // Extract all 8 lanes as a [i16; 8] and write at stride s
+            let a: [i16; 8] = core::mem::transmute(new_vals);
+            for (j, &val) in a.iter().enumerate() {
+                *ptr.add(j * s) = val;
+            }
+        }
+        _ => unreachable!(),
+    }
 }
 
 /// Load 8 contiguous `i32` values from `slice[off..]` into an `i32x8`.
@@ -1133,9 +1199,10 @@ fn inverse_wavelet_transform_from(
     while s >= subsample {
         let sd = s_degree as usize;
 
-        // Column pass SIMD requires contiguous column access, so only at s == 1.
-        // Row pass SIMD is generalised to any s (see row_pass_inner).
-        let use_simd = s == 1;
+        // Column pass SIMD: enabled for s=1,2,4 using stride-aware load8s/store8s.
+        // For s=2 the load uses vld2q_s16 (deinterleave even/odd), for s=4 vld4q_s16.
+        // The scalar else-branches below are now only reached for s>4 (s=8, s=16).
+        let use_simd = s <= 4;
 
         // ── Column pass (transposed) ──────────────────────────────────────────
         {
@@ -1155,10 +1222,10 @@ fn inverse_wavelet_transform_from(
                 let off = (1 << sd) * stride;
                 if use_simd {
                     for ci in (0..simd_cols).step_by(8) {
-                        store8_i32(&mut st2, ci, load8(data, off + ci));
+                        store8_i32(&mut st2, ci, load8s(data, off + ci * s, s));
                     }
                     for ci in simd_cols..num_cols {
-                        st2[ci] = data[off + ci] as i32;
+                        st2[ci] = data[off + ci * s] as i32;
                     }
                 } else {
                     for (ci, col) in (0..width).step_by(s).enumerate() {
@@ -1185,26 +1252,35 @@ fn inverse_wavelet_transform_from(
                         let vp1 = load8_i32(&st1, ci);
                         let vn1 = load8_i32(&st2, ci);
                         let vn3 = if has_n3 {
-                            load8(data, n3_off + ci)
+                            load8s(data, n3_off + ci * s, s)
                         } else {
                             zero8
                         };
-                        let cur = load8(data, k_off + ci);
-                        store8(data, k_off + ci, lifting_even(cur, vp1, vn1, vp3, vn3));
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(
+                            data,
+                            k_off + ci * s,
+                            s,
+                            lifting_even(cur, vp1, vn1, vp3, vn3),
+                        );
                         store8_i32(&mut st0, ci, vp1);
                         store8_i32(&mut st1, ci, vn1);
                         store8_i32(&mut st2, ci, vn3);
                         ci += 8;
                     }
-                    // scalar tail
+                    // scalar tail (num_cols not a multiple of 8)
                     while ci < num_cols {
                         let p3 = st0[ci];
                         let p1 = st1[ci];
                         let n1 = st2[ci];
-                        let n3 = if has_n3 { data[n3_off + ci] as i32 } else { 0 };
+                        let n3 = if has_n3 {
+                            data[n3_off + ci * s] as i32
+                        } else {
+                            0
+                        };
                         let a = p1 + n1;
                         let c = p3 + n3;
-                        let idx = k_off + ci;
+                        let idx = k_off + ci * s;
                         data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
                         st0[ci] = p1;
                         st1[ci] = n1;
@@ -1242,18 +1318,18 @@ fn inverse_wavelet_transform_from(
                     if use_simd {
                         let mut ci = 0usize;
                         while ci < simd_cols {
-                            let vp = load8(data, km1_off + ci);
-                            let vn = load8(data, kp1_off + ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                            let vp = load8s(data, km1_off + ci * s, s);
+                            let vn = load8s(data, kp1_off + ci * s, s);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(data, k_off + ci * s, s, predict_avg(cur, vp, vn));
                             store8_i32(&mut st0, ci, vp);
                             store8_i32(&mut st1, ci, vn);
                             ci += 8;
                         }
                         while ci < num_cols {
-                            let p = data[km1_off + ci] as i32;
-                            let n = data[kp1_off + ci] as i32;
-                            let idx = k_off + ci;
+                            let p = data[km1_off + ci * s] as i32;
+                            let n = data[kp1_off + ci * s] as i32;
+                            let idx = k_off + ci * s;
                             data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
                             st0[ci] = p;
                             st1[ci] = n;
@@ -1272,9 +1348,9 @@ fn inverse_wavelet_transform_from(
                 } else if use_simd {
                     let mut ci = 0usize;
                     while ci < simd_cols {
-                        let vp = load8(data, km1_off + ci);
-                        let cur = load8(data, k_off + ci);
-                        store8(data, k_off + ci, cur + vp);
+                        let vp = load8s(data, km1_off + ci * s, s);
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(data, k_off + ci * s, s, cur + vp);
                         store8_i32(&mut st0, ci, vp);
                         ci += 8;
                     }
@@ -1282,8 +1358,8 @@ fn inverse_wavelet_transform_from(
                         *v = 0;
                     }
                     while ci < num_cols {
-                        let p = data[km1_off + ci] as i32;
-                        let idx = k_off + ci;
+                        let p = data[km1_off + ci * s] as i32;
+                        let idx = k_off + ci * s;
                         data[idx] = (data[idx] as i32 + p) as i16;
                         st0[ci] = p;
                         st1[ci] = 0;
@@ -1304,11 +1380,11 @@ fn inverse_wavelet_transform_from(
                     if use_simd {
                         let mut ci = 0usize;
                         while ci < simd_cols {
-                            store8_i32(&mut st2, ci, load8(data, off + ci));
+                            store8_i32(&mut st2, ci, load8s(data, off + ci * s, s));
                             ci += 8;
                         }
                         while ci < num_cols {
-                            st2[ci] = data[off + ci] as i32;
+                            st2[ci] = data[off + ci * s] as i32;
                             ci += 1;
                         }
                     } else {
@@ -1330,9 +1406,14 @@ fn inverse_wavelet_transform_from(
                             let vp3 = load8_i32(&st0, ci);
                             let vp1 = load8_i32(&st1, ci);
                             let vn1 = load8_i32(&st2, ci);
-                            let vn3 = load8(data, n3_off + ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, predict_inner(cur, vp1, vn1, vp3, vn3));
+                            let vn3 = load8s(data, n3_off + ci * s, s);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(
+                                data,
+                                k_off + ci * s,
+                                s,
+                                predict_inner(cur, vp1, vn1, vp3, vn3),
+                            );
                             store8_i32(&mut st0, ci, vp1);
                             store8_i32(&mut st1, ci, vn1);
                             store8_i32(&mut st2, ci, vn3);
@@ -1342,9 +1423,9 @@ fn inverse_wavelet_transform_from(
                             let p3 = st0[ci];
                             let p1 = st1[ci];
                             let n1 = st2[ci];
-                            let n3 = data[n3_off + ci] as i32;
+                            let n3 = data[n3_off + ci * s] as i32;
                             let a = p1 + n1;
-                            let idx = k_off + ci;
+                            let idx = k_off + ci * s;
                             data[idx] =
                                 (data[idx] as i32 + (((a << 3) + a - (p3 + n3) + 8) >> 4)) as i16;
                             st0[ci] = p1;
@@ -1382,8 +1463,8 @@ fn inverse_wavelet_transform_from(
                             while ci < simd_cols {
                                 let vp = load8_i32(&st1, ci);
                                 let vn = load8_i32(&st2, ci);
-                                let cur = load8(data, k_off + ci);
-                                store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                                let cur = load8s(data, k_off + ci * s, s);
+                                store8s(data, k_off + ci * s, s, predict_avg(cur, vp, vn));
                                 store8_i32(&mut st1, ci, vn);
                                 store8_i32(&mut st2, ci, i32x8::splat(0));
                                 ci += 8;
@@ -1391,7 +1472,7 @@ fn inverse_wavelet_transform_from(
                             while ci < num_cols {
                                 let p = st1[ci];
                                 let n = st2[ci];
-                                let idx = k_off + ci;
+                                let idx = k_off + ci * s;
                                 data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
                                 st1[ci] = n;
                                 st2[ci] = 0;
@@ -1411,15 +1492,15 @@ fn inverse_wavelet_transform_from(
                         let mut ci = 0usize;
                         while ci < simd_cols {
                             let vp = load8_i32(&st1, ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, cur + vp);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(data, k_off + ci * s, s, cur + vp);
                             store8_i32(&mut st1, ci, load8_i32(&st2, ci));
                             store8_i32(&mut st2, ci, i32x8::splat(0));
                             ci += 8;
                         }
                         while ci < num_cols {
                             let p = st1[ci];
-                            let idx = k_off + ci;
+                            let idx = k_off + ci * s;
                             data[idx] = (data[idx] as i32 + p) as i16;
                             st1[ci] = st2[ci];
                             st2[ci] = 0;

@@ -29,19 +29,19 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after NEON prelim_flags all bands)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after IW44 column-pass SIMD s≤4)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.84 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.35 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **821 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.06 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.25 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **793 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
-| `iw44_encode_color` | **2.16 ms** | — |
+| `iw44_encode_color` | **2.13 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
 | `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
@@ -70,6 +70,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | local-copy ZP state in `previously_active_coefficient_decoding_pass` (same JB2 pattern) | sub1 −2.1% (13.24→12.96 ms); sub2 −1.5%; sub4 −2.4%; corpus_color −2.4% — LLVM keeps a/c/fence/bit_buf/bit_count in registers for entire coefficient refinement inner loop; small function body avoids I-cache thrash that killed the full-pass inlining attempt |
 | 2026-04 | IW44 | NEON-vectorize `preliminary_flag_computation` band≠0 path: 16 i16 coefs → 16 u8 flags in ~14 NEON instructions vs 64 scalar ops | corpus_color −48% (1.25→0.67 ms); first_chunk −7% (623→582 µs); sub1 −3.2% (12.96→12.55 ms) — LLVM was scalar-unrolling the 16-iter loop; explicit NEON (vld1q×2, vceq×2, vmvn×2, vand×2, veor×2, vmovn×2, vst1q + horizontal OR) reduces per-bucket work ~3× on M1 NEON; bands 1-9 each call this per block so corpus_color (many bands) sees the largest gain |
 | 2026-04 | IW44 | NEON-vectorize `preliminary_flag_computation` band-0 path: vbslq_u8 blend to handle conditional update for ZERO-state entries | corpus_color −3.9% (667→650 µs); sub1/first_chunk flat — band-0 conditional update (skip ZERO entries) done with vceqq_u8 + vmvnq_u8 mask + vbslq blend; ~20 NEON instructions vs 48 scalar |
+| 2026-04 | IW44 | Extend column-pass SIMD from `s=1` to `s≤4`: `vld2q_s16`/`vld4q_s16` gather for s=2/4 loads, scatter `str h` for stores (s=2,4 can't use vst2/vst4 without extra read-back load) | sub1 −6.1% (12.84→12.06 ms); sub2 −3% (3.35→3.25 ms); sub4 −3.4% (821→793 µs) — NEON deinterleave reduces scalar i16-to-i32 widening overhead at coarser levels; scatter stores avoid extra vld2q reload that tripled memory traffic in initial vst2q approach |
 
 ### ✗ Reverted
 
@@ -93,7 +94,7 @@ Composite pipeline (src/djvu_render.rs):
 |-----------|------|----------|------|
 | ZP | SIMD decode of multiple symbols in parallel (8-wide) (#183) | large | complex, breaking |
 | ZP | branch-free decode_bit via cmov (#179) | ✗ reverted — see log | LPS function call overhead worse than inline |
-| IW44 | column_pass SIMD at s=2 (#184) | ✗ reverted — see log | column_pass too tightly coupled to outer s-loop; both runtime-dispatch and const-generic extraction regress sub1/sub2 benchmarks |
+| IW44 | column_pass SIMD at s=2 (#184) | ✓ kept (attempt 3) — see log | `load8s`/`store8s` with `vld2q_s16`/`vld4q_s16` + scatter-stores within existing `use_simd = s <= 4` body; no extraction, no dispatch overhead |
 | JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
 | render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
