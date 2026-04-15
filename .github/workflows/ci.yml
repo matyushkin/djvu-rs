@@ -107,6 +107,30 @@ jobs:
       - name: cargo check --target wasm32-unknown-unknown
         run: cargo check --target wasm32-unknown-unknown --features wasm
 
+  # ── Tesseract OCR integration ────────────────────────────────────────────────
+  ocr-tesseract:
+    name: OCR (tesseract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ocr-tesseract
+
+      - name: Install Tesseract and English language data
+        run: sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+
+      - name: Build (ocr-tesseract feature)
+        run: cargo build --features ocr-tesseract
+
+      - name: Test (ocr-tesseract integration)
+        run: cargo test --test ocr_tesseract --features ocr-tesseract
+
   # ── Licenses & audit ─────────────────────────────────────────────────────────
   deny:
     name: Licenses & advisories (cargo deny)

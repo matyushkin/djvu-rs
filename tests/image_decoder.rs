@@ -139,8 +139,9 @@ mod image_tests {
         let rh = 30u32;
         let bytes_per_pixel = 4usize; // Rgba8
         let mut rect_buf = vec![0u8; (rw * rh) as usize * bytes_per_pixel];
+        let row_pitch = rw as usize * bytes_per_pixel;
         full_decoder
-            .read_rect(rx, ry, rw, rh, &mut rect_buf)
+            .read_rect(rx, ry, rw, rh, &mut rect_buf, row_pitch)
             .expect("read_rect should succeed");
 
         // Extract the same region from the full image manually
@@ -167,7 +168,7 @@ mod image_tests {
 
         // Request a rect that goes beyond the page width (181px)
         let mut buf = vec![0u8; 100 * 100 * 4];
-        let result = decoder.read_rect(150, 0, 100, 100, &mut buf);
+        let result = decoder.read_rect(150, 0, 100, 100, &mut buf, 100 * 4);
         assert!(
             result.is_err(),
             "read_rect out of bounds should return an error"
