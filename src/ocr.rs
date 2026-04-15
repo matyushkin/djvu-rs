@@ -5,6 +5,8 @@
 //! - `ocr-tesseract` — system Tesseract via `tesseract-rs`
 //! - `ocr-onnx` — ONNX models via `tract`
 //! - `ocr-neural` — HuggingFace models via `candle`
+//!
+//! [`OcrBackend`]: crate::ocr::OcrBackend
 
 use crate::pixmap::Pixmap;
 use crate::text::TextLayer;

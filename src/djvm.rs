@@ -2,6 +2,9 @@
 //!
 //! Provides [`merge`] to combine multiple DjVu documents into a single
 //! bundled DJVM, and [`split`] to extract page ranges from a document.
+//!
+//! [`merge`]: crate::djvm::merge
+//! [`split`]: crate::djvm::split
 
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};

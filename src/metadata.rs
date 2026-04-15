@@ -24,6 +24,10 @@
 //!
 //! This module accepts arbitrary key names; well-known keys populate dedicated
 //! fields while anything else goes into [`DjVuMetadata::extra`].
+//!
+//! [`DjVuMetadata`]: crate::metadata::DjVuMetadata
+//! [`MetadataError`]: crate::metadata::MetadataError
+//! [`DjVuMetadata::extra`]: crate::metadata::DjVuMetadata::extra
 
 #[cfg(not(feature = "std"))]
 use alloc::{
