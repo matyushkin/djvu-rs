@@ -81,6 +81,58 @@ Composite pipeline (src/djvu_render.rs):
 | JB2 | bit-pack bitmap → smaller memory/cache footprint | medium | complex |
 | render | pre-decode JB2 bitmap on a separate thread | medium | requires Arc |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
+| IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks | large (−40–80% for large pages) | must verify output correctness vs reference; bit_buf still valid after pos exhaustion |
+
+---
+
+## Investigations
+
+### IW44 vs JB2 "17× slower" mystery (2026-04-15)
+
+**Question:** Why is `iw44_decode_corpus_color` (2.30 ms) ~17× slower than `jb2_decode` (131 µs)?
+
+**TL;DR:** The comparison is mostly apples-to-oranges (173× more pixels). The remaining real gap is dominated by per-block ZP overhead on padding bytes, not algorithmic inefficiency.
+
+#### 1. The files are completely different sizes
+
+| Benchmark | File | Page size | Blocks (32×32) |
+|-----------|------|-----------|----------------|
+| `jb2_decode` | `boy_jb2.djvu` | 192×256 | 48 |
+| `iw44_decode_corpus_color` | `watchmaker.djvu` | 2550×3301 | **8 320** |
+
+Page area ratio: 8 673 300 / 49 152 = **176×**. The two benchmarks simply measure different amounts of work; the 17× wall-clock difference is mild given that fact.
+
+#### 2. Breakdown of watchmaker.djvu first-chunk decode (2252 µs measured)
+
+| Phase | Cost | % total |
+|-------|------|---------|
+| Block allocation (8320 × 1024 × i16 = 17 MB) | ~298 µs | 13% |
+| ZP decode overhead on padding bytes | ~1 955 µs | 87% |
+
+The entire first chunk is only **819 bytes** of BG44 payload. That is enough ZP data to make real block decisions, but the decoder must iterate all 8 320 blocks × 9 bands afterward anyway.
+
+#### 3. Root cause: 74 880 forced `decode_bit` calls on 0xFF padding
+
+In `block_band_decoding_pass` (iw44_new.rs):
+```rust
+let should_mark_new = bcount < 16          // false for bands 1–9 (bcount ≥ 16)
+    || (self.bbstate & ACTIVE) != 0        // false: fresh image, all UNK
+    || ((self.bbstate & UNK) != 0 && zp.decode_bit(&mut self.ctx_decode_bucket[0]));
+```
+
+For a freshly initialized image all blocks start as `UNK`. Bands 1–9 have `bcount ≥ 16`, so the third arm fires for every one of the 8 320 blocks, calling `decode_bit` once each. That is **9 × 8 320 = 74 880 calls**. After the 819-byte input is consumed the ZP decoder continues with deterministic 0xFF padding — still executing the full arithmetic-coder state machine each call.
+
+At ~26 ns/call (measured): 74 880 × 26 ns ≈ **1.95 ms** — matches the observed overhead.
+
+JB2 does not have this problem: it decodes a token stream that terminates on an end-of-image symbol, so it never iterates over all possible pixel positions.
+
+#### 4. Optimization opportunity
+
+Early-exit in `decode_slice` when `zp.is_exhausted()` AND no block in the current sweep has produced a "new" mark yet AND no block has `ACTIVE` state → all remaining blocks are guaranteed to produce false (the ZP stream was already terminated by the encoder).
+
+**Risk:** `is_exhausted()` checks `pos >= data.len()` but bit_buf may still hold up to 32 cached bits; the first few blocks after exhaustion may legitimately decode as "true". Must benchmark correctness against reference output before landing.
+
+Tracking issue: → Hypothesis added below.
 
 ---
 
