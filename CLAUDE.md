@@ -1,90 +1,93 @@
-# Notes for Claude Code
+# CLAUDE.md — агентная память проекта
 
-This file logs performance experiments and their outcomes.
-Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted + reason)").
+Этот файл — лабораторный журнал для Claude. Обновляй его ПЕРЕД коммитом каждого
+значимого эксперимента. Цель: не тратить токены на повтор уже пройденных путей.
 
-## Performance experiments
+---
 
-Each entry: issue, approach, numbers, decision, reason.
+## Архитектура горячих путей
 
-### #185 — perf(jb2): bit-pack Jbm to 1 bit/pixel — **Kept** (2026-04-18)
+```
+DjVu decode pipeline:
+  IFF parse → chunk dispatch
+    ├─ JB2  (bilevel):  ZpDecoder → jb2.rs → bitmap
+    ├─ IW44 (color):   ZpDecoder → iw44_new.rs → YCbCr tiles → RGB
+    └─ BZZ  (text):    ZpDecoder → MTF/Huffman → UTF-8
 
-**Approach.** Changed the internal `Jbm` working bitmap from 1 byte/pixel
-(`Vec<u8>` of `w * h`) to 1 bit/pixel packed (`Vec<u8>` of
-`((w + 7) / 8) * h`, MSB-first within byte) — matching `Bitmap`'s public
-convention. 8× memory reduction on the symbol dict.
+ZpDecoder (src/zp/mod.rs) — самый горячий путь:
+  decode_bit() вызывается миллионы раз на страницу
+  поля: a (interval), c (code), fence (cached bound), bit_buf, bit_count
+  renormalize() — вызывается при каждом LPS событии
 
-Decoder hot path uses **Variant A**: `decode_bitmap_direct` and
-`decode_bitmap_ref` keep rolling unpacked scratch rows (3 for direct,
-3 mbm + 2 cbm for ref) and pack into `Jbm.data` once per row. The ZP
-inner loop is unchanged. New helpers: `pack_row_into`, `unpack_row_into`.
+Composite pipeline (src/djvu_render.rs):
+  JB2 bitmap + IW44 background → final pixmap
+  горячий путь: composite_bilevel(), composite_color()
+```
 
-`blit_indexed`: reads packed source with a byte-at-a-time skip of
-all-zero bytes (common for sparse symbols). `blit_to_bitmap`: source and
-dest are both packed MSB-first; byte-aligned branch becomes a direct `|=`
-row copy, unaligned branch is a shift-and-OR.
+**Профилировщик:** `cargo bench --bench codecs` (Criterion, ~2 мин)  
+**Сравнение с DjVuLibre:** `bash scripts/bench_djvulibre.sh .`
 
-**Bench** (`cargo bench`, 100 samples, Linux x86_64, Criterion p-values):
+---
 
-| Benchmark                    | Baseline  | Packed    | Δ      | p    |
-|------------------------------|-----------|-----------|--------|------|
-| `jb2_decode`                 | 187.93 µs | 188.79 µs | +0.5%  | 0.31 |
-| `jb2_decode_corpus_bilevel`  | 813.80 µs | 782.21 µs | −3.9%  | 0.00 |
-| `jb2_decode_large_600dpi`    | 4.37 µs   | 4.27 µs   | −2.3%  | 0.06 |
-| `render_corpus_bilevel`      | 189.76 ms | 191.36 ms | +0.8%  | 0.19 |
+## Базовые метрики (Apple M1 Max, 2026-04-15, после ZP u16→u32)
 
-No regression anywhere; `jb2_decode_corpus_bilevel` is significantly
-faster (p = 0.00), consistent with reduced L2 pressure on the decoded
-symbol dict.
+| Benchmark | Результат | vs BENCHMARKS.md (v0.4.1) |
+|-----------|-----------|---------------------------|
+| `jb2_decode` | **131.8 µs** | −42% (было 228 µs) |
+| `iw44_decode_first_chunk` | **725 µs** | −1.2% (было 734 µs) |
+| `iw44_decode_corpus_color` | **2.30 ms** | — |
+| `jb2_decode_corpus_bilevel` | **421 µs** | — |
+| `jb2_encode` | **182 µs** | — |
+| `iw44_encode_color` | **2.16 ms** | — |
+| `render_page/dpi/72` | 1.21 ms | (из BENCHMARKS.md) |
+| `render_page/dpi/300` | 4.02 ms | (из BENCHMARKS.md) |
 
-**Reason kept.** 8× memory reduction on working bitmaps with neutral-to-
-positive decode/render perf. The scratch allocation in the hot path
-(three `Vec<u8>` × `width` bytes per symbol decode, reused across rows)
-adds no measurable overhead vs the previous direct-indexed `bm.data`
-split. All 324 library + 71 integration tests pass.
+> Числа из Criterion на M1 Max. Полная таблица с x86_64 и DjVuLibre → BENCHMARKS.md
 
-**Notes.** The issue suggested `Vec<u32>` + 32-bit row alignment for SIMD
-potential. That was relaxed to byte-aligned `Vec<u8>` to match `Bitmap`
-exactly (avoiding the byte→bit packing step in `blit_to_bitmap`). A
-follow-up could explore word-granular compositing once there is a
-workload that stresses the unaligned `blit_to_bitmap` branch.
+---
 
-### #184 — perf(iw44): column_pass SIMD at s=2 — **Reverted** (2026-04-18)
+## Журнал экспериментов
 
-**Approach.** Generalised the existing `s == 1` SIMD fast path in the column
-pass of `inverse_wavelet_transform_from` to `s ∈ {1, 2}`. Introduced
-stride-aware helpers `load8_col_s` / `store8_col_s` that gather/scatter 8
-`i16` samples at stride `s`, threaded an `allow_simd` parameter for
-comparability, and added a golden test
-(`simd_inverse_wavelet_transform_matches_scalar`) that confirmed bit-exact
-parity with the scalar path on 32×32 and 33×32 planes.
+Формат: `дата | компонент | изменение | результат | вердикт`
 
-**Bench** (`cargo bench --bench codecs -- 'iw44_decode_first_chunk|iw44_decode_corpus_color'`,
-release, 100 samples, Linux x86_64):
+### ✓ Оставлено
 
-| Benchmark                  | Scalar   | SIMD s=2 | Δ     |
-|----------------------------|----------|----------|-------|
-| `iw44_decode_first_chunk`  | 1.226 ms | 1.206 ms | −1.6% |
-| `iw44_decode_corpus_color` | 3.747 ms | 3.669 ms | −2.1% |
+| Дата | Компонент | Изменение | Эффект |
+|------|-----------|-----------|--------|
+| 2026-04 | ZP/JB2 | local-copy ZP state (register alloc) + hardware CLZ | −15% JB2 |
+| 2026-04 | ZP/JB2 | устранение bounds checks в горячих циклах JB2 + ZP renormalize | значимо |
+| 2026-04 | ZP | a/c/fence: u16→u32, убраны все as u16 касты в hot loop | jb2 −2%, iw44_color −1.8%, jb2_encode −2.2% |
+| 2026-04 | BZZ | inline ZP state locals в MTF decode | значимо |
+| 2026-04 | render | downsampled mask pyramid для composite | 8ms→23ms на 150dpi |
+| 2026-04 | render | partial BG44 decode для sub=4 | пропуск высоких частот |
+| 2026-04 | render | chunks_exact_mut → убраны per-pixel bounds checks | небольшой |
+| 2026-04 | render | x86_64 SSE2/SSSE3 fast paths (alpha fill, RGB→RGBA) | значимо на x86_64 |
 
-Run-to-run noise on the same build was ±2–5% (e.g. `iw44_decode_corpus_color`
-ranged 3.31 ms → 3.81 ms across consecutive runs). Criterion's change test
-came back non-significant (`p ∈ {0.09, 0.20, 0.24, 0.36, 0.68}`) once the
-cold-start outlier was excluded.
+### ✗ Отменено / Откатано
 
-**Reason.** On x86_64, the implementation must fall back to 8 scalar loads
-assembled into an `i32x8` — `wide::i32x8` exposes no strided / gather load for
-`i16`, and no native `_mm*_i16gather_*` intrinsic exists for 16-bit lanes.
-The arithmetic savings at `s == 2` (which already processes half as many
-columns as `s == 1`) do not exceed the gather overhead.
+| Дата | Компонент | Что пробовали | Почему откатили |
+|------|-----------|---------------|-----------------|
+| 2026-04 | render | bilevel composite fast path (#165) | регрессия — восстановлено в #169 |
+| — | — | — | — |
 
-The issue expected the win to come from ARM64 NEON `vld2q_s16` / `vst2q_s16`,
-which are not reachable through `wide` and would require raw
-`core::arch::aarch64` intrinsics. Without that, there is no benefit on the
-x86_64 CI host. The stride-aware helpers would be reusable if the ARM64
-follow-up lands, but committing them today costs complexity for zero measured
-gain.
+> **Важно:** если что-то откатываешь — записывай сюда с причиной, иначе это будет попробовано снова.
 
-**Next step.** Re-attempt on ARM64 (M1) with raw NEON `vld2q_s16`, measure
-against the baseline `iw44_decode_first_chunk` (715 µs) on the reference
-hardware listed in `BENCHMARKS_RESULTS.md`.
+### → Гипотезы (не измеряли)
+
+| Компонент | Идея | Ожидание | Риск |
+|-----------|------|----------|------|
+| ZP | SIMD decode нескольких символов за раз (8-wide) | большой | сложно, breaking |
+| ZP | branch-free decode_bit с cmov (#179) | небольшой | может не помочь на ARM |
+| IW44 | SIMD для IW44 butterfly transform (#180) | большой | сложная реализация |
+| JB2 | битовая упаковка bitmap → меньше памяти/cache | средний | сложно |
+| render | предвычисление JB2 bitmap на отдельном потоке | средний | требует Arc |
+| ZP | LUT для частых состояний (#181) | небольшой | cache pressure |
+
+---
+
+## Правила ведения журнала
+
+1. После отката — **сразу** добавь строку в "Отменено" с причиной
+2. После замера — обнови числа в "Базовых метриках" если изменились >5%
+3. Перед началом эксперимента — проверь "Гипотезы" и "Отменено" чтобы не дублировать
+4. Гипотезу после реализации — перемести в "Оставлено" или "Отменено"
