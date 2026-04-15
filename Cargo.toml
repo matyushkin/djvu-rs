@@ -76,7 +76,12 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys", "std"]
 epub = ["std"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "std"]
-ocr-neural = ["dep:candle-core", "dep:candle-nn", "dep:tokenizers", "std"]
+# ocr-neural: lightweight stub — enables the NeuralBackend API without
+# pulling in Candle/tokenizers. Always returns Err until a model is wired up.
+ocr-neural = ["std"]
+# ocr-neural-candle: adds the actual Candle ML runtime (+~400 transitive deps).
+# Enable this when you want to experiment with wiring a real TrOCR model.
+ocr-neural-candle = ["ocr-neural", "dep:candle-core", "dep:candle-nn", "dep:tokenizers"]
 
 [dev-dependencies]
 criterion = "0.5"

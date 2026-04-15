@@ -1,18 +1,15 @@
-//! Neural OCR backend via Candle (requires `ocr-neural` feature).
+//! Neural OCR backend (requires `ocr-neural` feature).
 //!
 //! > ⚠️ **Not yet implemented.** The `recognize` method always returns
-//! > `Err(OcrError::RecognitionFailed)`. Enabling the `ocr-neural` feature
-//! > adds large transitive dependencies (`candle-core`, `candle-nn`,
-//! > `tokenizers`) without providing functional OCR output.
-//! > See <https://github.com/matyushkin/djvu-rs/issues/163>.
-//!
-//! Uses the `candle` deep learning framework to run HuggingFace
-//! transformer-based OCR models (e.g. TrOCR) in pure Rust.
+//! > `Err(OcrError::RecognitionFailed)`. Enabling `ocr-neural` adds **no**
+//! > heavy dependencies — the feature is a lightweight stub.
+//! >
+//! > To experiment with actual Candle/TrOCR inference, enable the
+//! > **`ocr-neural-candle`** feature, which additionally pulls in
+//! > `candle-core`, `candle-nn`, and `tokenizers` (~400 transitive crates).
+//! > See <https://github.com/matyushkin/djvu-rs/issues/162>.
 
 use std::path::{Path, PathBuf};
-
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
 
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
@@ -20,36 +17,66 @@ use crate::text::TextLayer;
 
 /// Neural OCR backend using Candle.
 ///
-/// Loads a TrOCR-style encoder-decoder model from safetensors weights.
-/// The model must include:
-/// - A vision encoder (ViT-based)
-/// - A text decoder (GPT2/BART-based)
-/// - A tokenizer vocabulary
+/// With only the `ocr-neural` feature every call to
+/// [`recognize`][OcrBackend::recognize] returns `Err`.  Enable
+/// `ocr-neural-candle` to additionally compile the Candle tensor pipeline;
+/// it still returns `Err` until a model-specific forward pass is wired in.
 pub struct CandleBackend {
-    device: Device,
+    // Only accessed by the ocr-neural-candle feature; suppress dead_code otherwise.
+    #[cfg_attr(not(feature = "ocr-neural-candle"), allow(dead_code))]
     model_dir: PathBuf,
 }
 
 impl CandleBackend {
-    /// Load a Candle OCR model from a local directory.
+    /// Load a (future) Candle OCR model from a local directory.
     ///
-    /// The directory should contain:
+    /// Expected contents when a real model is wired up:
     /// - `model.safetensors` — model weights
     /// - `tokenizer.json` — HuggingFace tokenizer
     /// - `config.json` — model configuration
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, OcrError> {
-        let model_dir = model_dir.as_ref().to_path_buf();
-        let device = Device::Cpu;
-        Ok(Self { device, model_dir })
+        Ok(Self {
+            model_dir: model_dir.as_ref().to_path_buf(),
+        })
     }
+}
 
-    /// Preprocess a pixmap into a normalized RGB tensor.
-    fn preprocess(&self, pixmap: &Pixmap) -> Result<Tensor, OcrError> {
+impl OcrBackend for CandleBackend {
+    fn recognize(&self, pixmap: &Pixmap, _options: &OcrOptions) -> Result<TextLayer, OcrError> {
+        // With ocr-neural-candle, attempt the tensor pipeline (still returns Err
+        // until a full model forward pass is implemented).
+        #[cfg(feature = "ocr-neural-candle")]
+        {
+            let input = self.preprocess(pixmap)?;
+            return self.run_inference(&input);
+        }
+
+        // Without candle, return a clear error immediately.
+        #[cfg(not(feature = "ocr-neural-candle"))]
+        {
+            let _ = pixmap;
+            return Err(OcrError::RecognitionFailed(
+                "candle backend requires the `ocr-neural-candle` feature; \
+                 see ocr_neural module docs"
+                    .into(),
+            ));
+        }
+    }
+}
+
+// ---- Candle tensor pipeline (compiled only with ocr-neural-candle) ----------
+
+#[cfg(feature = "ocr-neural-candle")]
+impl CandleBackend {
+    /// Preprocess a pixmap into a normalized RGB tensor `[1, 3, H, W]`.
+    fn preprocess(&self, pixmap: &Pixmap) -> Result<candle_core::Tensor, OcrError> {
+        use candle_core::{Device, Tensor};
+
+        let device = Device::Cpu;
         let rgb = pixmap.to_rgb();
         let w = pixmap.width as usize;
         let h = pixmap.height as usize;
 
-        // Normalize to ImageNet mean/std
         let mean = [0.5f32, 0.5, 0.5];
         let std = [0.5f32, 0.5, 0.5];
 
@@ -61,32 +88,24 @@ impl CandleBackend {
             }
         }
 
-        // Shape: [1, 3, H, W]
-        Tensor::from_vec(data, &[1, 3, h, w], &self.device)
+        Tensor::from_vec(data, &[1, 3, h, w], &device)
             .map_err(|e| OcrError::RecognitionFailed(format!("tensor creation: {e}")))
     }
-}
 
-impl OcrBackend for CandleBackend {
-    fn recognize(&self, pixmap: &Pixmap, _options: &OcrOptions) -> Result<TextLayer, OcrError> {
-        let _input = self.preprocess(pixmap)?;
+    /// Stub forward pass — loads weights and returns Err until a real
+    /// architecture (TrOCR, Donut, Nougat …) is implemented.
+    fn run_inference(&self, _input: &candle_core::Tensor) -> Result<TextLayer, OcrError> {
+        use candle_core::{DType, Device};
+        use candle_nn::VarBuilder;
 
-        // Load model weights (from_buffered_safetensors is safe; from_mmaped_safetensors is unsafe)
         let weights_path = self.model_dir.join("model.safetensors");
         let weights_data = std::fs::read(&weights_path)
             .map_err(|e| OcrError::InitFailed(format!("weights: {e}")))?;
-        let _vb = VarBuilder::from_buffered_safetensors(weights_data, DType::F32, &self.device)
+        let _vb = VarBuilder::from_buffered_safetensors(weights_data, DType::F32, &Device::Cpu)
             .map_err(|e| OcrError::InitFailed(format!("weights: {e}")))?;
 
-        // NOTE: Full TrOCR encoder-decoder inference is model-specific.
-        // This backend provides the framework; actual model architectures
-        // (TrOCR, Donut, Nougat) need dedicated forward pass implementations.
-        //
-        // For now, return an error indicating the model type is needed.
-        // Users should subclass or configure with a specific model architecture.
-
         Err(OcrError::RecognitionFailed(
-            "candle backend requires a model-specific forward pass implementation; \
+            "candle backend requires a model-specific forward pass; \
              see ocr_neural module docs for supported architectures"
                 .into(),
         ))
