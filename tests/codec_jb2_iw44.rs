@@ -1,4 +1,4 @@
-//! Integration tests for `jb2_new` and `iw44_new` decoders.
+//! Integration tests for `jb2` and `iw44_new` decoders.
 //!
 //! Single-page fixture files use the IFF parser to reach raw Sjbz/BG44 chunks
 //! and feed them directly to the codec layer. Multi-page corpus files use the
@@ -8,7 +8,7 @@ use djvu_rs::Document;
 use djvu_rs::error::{Iw44Error, Jb2Error};
 use djvu_rs::iff::parse_form;
 use djvu_rs::iw44_new::Iw44Image;
-use djvu_rs::jb2_new;
+use djvu_rs::jb2 as jb2_new;
 
 // ── JB2 ───────────────────────────────────────────────────────────────────────
 

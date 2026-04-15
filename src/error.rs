@@ -4,7 +4,8 @@
 //! - [`DjVuError`] — the new top-level error type for phase-1+ code
 //! - [`IffError`] — errors from the new IFF container parser
 //! - [`BzzError`] — errors from the BZZ decompressor (phase 2a)
-//! - [`Jb2Error`], [`Iw44Error`] — stubs for future decoders
+//! - [`Jb2Error`] — errors from the JB2 bilevel image decoder
+//! - [`Iw44Error`] — errors from the IW44 wavelet image decoder
 //! - `LegacyError` — the original error type, kept for backward compatibility
 //! - `TextError` — errors from the text layer parser (phase 4, see `text` module)
 //! - `AnnotationError` — errors from the annotation parser (phase 4, see `annotation` module)
@@ -21,11 +22,11 @@ pub enum DjVuError {
     #[error("IFF error: {0}")]
     Iff(#[from] IffError),
 
-    /// A JB2 bitonal image decoding error (stub).
+    /// A JB2 bitonal image decoding error.
     #[error("JB2 error: {0}")]
     Jb2(#[from] Jb2Error),
 
-    /// An IW44 wavelet image decoding error (stub).
+    /// An IW44 wavelet image decoding error.
     #[error("IW44 error: {0}")]
     Iw44(#[from] Iw44Error),
 

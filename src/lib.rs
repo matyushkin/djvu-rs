@@ -103,10 +103,6 @@ pub mod djvm;
 /// Key public types: `jb2::Jb2Dict`, `jb2::decode`, `jb2::decode_dict`.
 pub mod jb2;
 
-/// Alias kept for downstream compatibility — use `jb2` instead.
-#[deprecated(since = "0.12.0", note = "use `djvu_rs::jb2` instead")]
-pub use jb2 as jb2_new;
-
 /// IW44 wavelet image decoder — clean-room implementation (phase 2c).
 ///
 /// Provides `iw44_new::Iw44Image` for decoding BG44/FG44/TH44 chunks.

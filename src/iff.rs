@@ -44,7 +44,7 @@ pub enum Chunk {
         /// The secondary ID (e.g., b"DJVU", b"DJVM", b"DJVI", b"THUM").
         secondary_id: ChunkId,
         /// Total byte length of the FORM payload (from the IFF length field).
-        #[allow(dead_code)]
+        /// Includes the 4-byte secondary ID and all child chunk bytes.
         length: u32,
         /// Child chunks within this FORM.
         children: Vec<Chunk>,
@@ -72,6 +72,18 @@ impl Chunk {
         match self {
             Chunk::Form { children, .. } => children,
             Chunk::Leaf { .. } => &[],
+        }
+    }
+
+    /// Return the declared payload length from the IFF length field.
+    ///
+    /// For `Form` chunks, this is the value read from the IFF header — it
+    /// covers the secondary ID (4 bytes) and all children.  For `Leaf`
+    /// chunks, this equals `data().len()`.
+    pub fn payload_length(&self) -> u32 {
+        match self {
+            Chunk::Form { length, .. } => *length,
+            Chunk::Leaf { data, .. } => data.len() as u32,
         }
     }
 

@@ -297,8 +297,8 @@ fn collect_mask_stream(page: &DjVuPage) -> Option<Vec<u8>> {
     let sjbz = page.find_chunk(b"Sjbz")?;
     let dict = page
         .find_chunk(b"Djbz")
-        .and_then(|djbz| crate::jb2_new::decode_dict(djbz, None).ok());
-    let bitmap = crate::jb2_new::decode(sjbz, dict.as_ref()).ok()?;
+        .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
+    let bitmap = crate::jb2::decode(sjbz, dict.as_ref()).ok()?;
     let bw = bitmap.width;
     let bh = bitmap.height;
     // Bitmap data is already packed 1-bit MSB-first, which is what PDF expects
