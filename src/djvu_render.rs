@@ -1078,17 +1078,9 @@ fn lookup_palette_color(
 
 /// Bilinear composite loop — used when upscaling or at 1:1 (step ≤ 1 pixel).
 /// Single-pixel mask check per output pixel.
-#[allow(clippy::too_many_arguments)]
-fn composite_loop_bilinear(
-    ctx: &CompositeContext<'_>,
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    page_w: u32,
-    page_h: u32,
-    fx_step: u32,
-    fy_step: u32,
-) {
+fn composite_loop_bilinear(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: u32, fy_step: u32) {
+    let (w, h) = (ctx.out_w, ctx.out_h);
+    let (page_w, page_h) = (ctx.page_w, ctx.page_h);
     let row_stride = w as usize * 4;
     for (oy, row) in buf
         .chunks_exact_mut(row_stride)
@@ -1132,17 +1124,8 @@ fn composite_loop_bilinear(
 
 /// Area-averaging composite loop — used when downscaling (step > 1 pixel).
 /// Uses box filter for background sampling and checks a box of mask pixels.
-#[allow(clippy::too_many_arguments)]
-fn composite_loop_area_avg(
-    ctx: &CompositeContext<'_>,
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    _page_w: u32,
-    _page_h: u32,
-    fx_step: u32,
-    fy_step: u32,
-) {
+fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: u32, fy_step: u32) {
+    let (w, h) = (ctx.out_w, ctx.out_h);
     // Precompute bg step in bg-space (avoid per-pixel division in the inner loop).
     let bg_sh = ctx.bg_shift;
     let bg_fx_step = fx_step >> bg_sh;
@@ -1205,22 +1188,18 @@ fn composite_loop_area_avg(
 /// For region renders, `ctx.out_w`/`ctx.out_h` give the output dimensions and
 /// `ctx.offset_x`/`ctx.offset_y` give the starting offset within the full render.
 fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), RenderError> {
-    let w = ctx.out_w;
-    let h = ctx.out_h;
     let full_w = ctx.opts.width;
     let full_h = ctx.opts.height;
-    let page_w = ctx.page_w;
-    let page_h = ctx.page_h;
 
     // Fixed-point step: how many source pixels per full-render output pixel
-    let fx_step = ((page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
-    let fy_step = ((page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
+    let fx_step = ((ctx.page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
+    let fy_step = ((ctx.page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
 
     // Downscaling when output is smaller than source (step > 1 pixel)
     if fx_step > FRAC || fy_step > FRAC {
-        composite_loop_area_avg(ctx, buf, w, h, page_w, page_h, fx_step, fy_step);
+        composite_loop_area_avg(ctx, buf, fx_step, fy_step);
     } else {
-        composite_loop_bilinear(ctx, buf, w, h, page_w, page_h, fx_step, fy_step);
+        composite_loop_bilinear(ctx, buf, fx_step, fy_step);
     }
 
     Ok(())
