@@ -36,10 +36,12 @@ jobs:
       - name: Clippy (all targets)
         run: cargo clippy --all-targets -- -D warnings
 
-  # ── Tests (run in parallel with lint) ────────────────────────────────────────
+  # ── Tests ────────────────────────────────────────────────────────────────────
+  # stable: every push + PRs; beta: push to main only (rarely catches different issues)
   test:
     name: Test (${{ matrix.rust }})
     runs-on: ubuntu-latest
+    if: matrix.rust == 'stable' || github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -61,8 +63,18 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
-      - name: Test (default features)
-        run: cargo nextest run --workspace --exclude djvu-py --features cli
+      # Fast tests — every push, ~1 min
+      - name: Test fast
+        run: >
+          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
+          --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
+
+      # Slow tests (PDF export + large IW44) — stable + push to main only
+      - name: Test slow (PDF export + large IW44 decode)
+        if: matrix.rust == 'stable' && github.ref == 'refs/heads/main'
+        run: >
+          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
+          --filter-expr 'binary(pdf_conversion) or test(iw44_new_decode_big)'
 
       - name: Build (no_std check — no default features)
         run: cargo build --no-default-features
