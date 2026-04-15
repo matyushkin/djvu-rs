@@ -68,7 +68,7 @@ Composite pipeline (src/djvu_render.rs):
 | Дата | Компонент | Что пробовали | Почему откатили |
 |------|-----------|---------------|-----------------|
 | 2026-04 | render | bilevel composite fast path (#165) | регрессия — восстановлено в #169 |
-| — | — | — | — |
+| 2026-04 | ZP | `#[cold] #[inline(never)]` для LPS-ветки + cmov-friendly context update | iw44 +4%, jb2_encode +2% — function call overhead > I-cache выигрыш; LPS 10-15% слишком часто для out-of-line |
 
 > **Важно:** если что-то откатываешь — записывай сюда с причиной, иначе это будет попробовано снова.
 
@@ -77,7 +77,7 @@ Composite pipeline (src/djvu_render.rs):
 | Компонент | Идея | Ожидание | Риск |
 |-----------|------|----------|------|
 | ZP | SIMD decode нескольких символов за раз (8-wide) | большой | сложно, breaking |
-| ZP | branch-free decode_bit с cmov (#179) | небольшой | может не помочь на ARM |
+| ZP | branch-free decode_bit с cmov (#179) | ✗ отменено — см. журнал | LPS function call overhead хуже чем inline |
 | IW44 | SIMD для IW44 butterfly transform (#180) | большой | сложная реализация |
 | JB2 | битовая упаковка bitmap → меньше памяти/cache | средний | сложно |
 | render | предвычисление JB2 bitmap на отдельном потоке | средний | требует Arc |
