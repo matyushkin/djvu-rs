@@ -169,7 +169,7 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
     let h = page.height() as u32;
 
     // Try to extract the JB2 mask directly from the page chunks.
-    let gray = extract_bilevel_pixels(page, w, h);
+    let gray = extract_bilevel_pixels(page, w, h)?;
     let dpi = page.dpi() as u32;
     let mut img = encoder.new_image::<colortype::Gray8>(w, h)?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
@@ -179,23 +179,20 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
 
 /// Extract the JB2 Sjbz mask as 8-bit grayscale (0=white, 255=black).
 ///
-/// Returns a blank white buffer if no Sjbz chunk is present.
-fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Vec<u8> {
-    use crate::jb2_new;
-
+/// Returns a blank white buffer if no Sjbz chunk is present (pure IW44 page).
+/// Returns `Err` if an Sjbz chunk exists but decoding fails.
+fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Result<Vec<u8>, TiffError> {
     let sjbz = match page.find_chunk(b"Sjbz") {
         Some(d) => d,
-        None => return vec![0u8; (w * h) as usize],
+        None => return Ok(vec![0u8; (w * h) as usize]),
     };
 
     let dict = page
         .find_chunk(b"Djbz")
-        .and_then(|djbz| jb2_new::decode_dict(djbz, None).ok());
+        .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
 
-    let bm = match jb2_new::decode(sjbz, dict.as_ref()) {
-        Ok(b) => b,
-        Err(_) => return vec![0u8; (w * h) as usize],
-    };
+    let bm = crate::jb2::decode(sjbz, dict.as_ref())
+        .map_err(|e| TiffError::Encode(format!("JB2 decode failed: {e}")))?;
 
     // Bitmap pixels: true = black foreground, false = white background.
     let mut pixels = Vec::with_capacity((w * h) as usize);
@@ -204,7 +201,7 @@ fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Vec<u8> {
             pixels.push(if bm.get(x, y) { 255u8 } else { 0u8 });
         }
     }
-    pixels
+    Ok(pixels)
 }
 
 // ---- Tests ------------------------------------------------------------------

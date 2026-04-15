@@ -702,15 +702,13 @@ fn lerp8(a: u8, b: u8, f: usize) -> u8 {
 fn copy_row_set_alpha(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: M1/M4/Apple Silicon always has NEON; all ptrs are in-bounds.
-        if src.len() >= 16 {
-            #[allow(unsafe_code)]
-            unsafe {
-                copy_row_set_alpha_neon(src, dst)
-            }
-            return;
+    if src.len() >= 16 && std::arch::is_aarch64_feature_detected!("neon") {
+        // Safety: NEON availability confirmed at runtime; slices are in-bounds.
+        #[allow(unsafe_code)]
+        unsafe {
+            copy_row_set_alpha_neon(src, dst)
         }
+        return;
     }
     copy_row_set_alpha_scalar(src, dst);
 }
@@ -760,14 +758,13 @@ fn lerp_rows(row0: &[u8], row1: &[u8], dst: &mut [u8], fy: usize) {
         return;
     }
     #[cfg(target_arch = "aarch64")]
-    {
-        if row0.len() >= 16 {
-            #[allow(unsafe_code)]
-            unsafe {
-                lerp_rows_neon(row0, row1, dst, fy as u16)
-            }
-            return;
+    if row0.len() >= 16 && std::arch::is_aarch64_feature_detected!("neon") {
+        // Safety: NEON availability confirmed at runtime; slices are in-bounds.
+        #[allow(unsafe_code)]
+        unsafe {
+            lerp_rows_neon(row0, row1, dst, fy as u16)
         }
+        return;
     }
     lerp_rows_scalar(row0, row1, dst, fy);
 }

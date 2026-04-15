@@ -56,7 +56,7 @@ impl OnnxBackend {
     }
 
     /// Preprocess a pixmap into a normalized grayscale tensor for the model.
-    fn preprocess(&self, pixmap: &Pixmap) -> tract_onnx::prelude::Tensor {
+    fn preprocess(&self, pixmap: &Pixmap) -> Result<tract_onnx::prelude::Tensor, OcrError> {
         use tract_onnx::prelude::*;
 
         let gray = pixmap.to_gray8();
@@ -68,8 +68,8 @@ impl OnnxBackend {
 
         // Shape: [1, 1, H, W] (batch, channels, height, width)
         tract_ndarray::Array4::from_shape_vec((1, 1, h, w), data)
-            .expect("shape mismatch")
-            .into_tensor()
+            .map_err(|e| OcrError::RecognitionFailed(format!("tensor shape error: {e}")))
+            .map(|arr| arr.into_tensor())
     }
 
     /// Decode CTC output into text using greedy decoding.
@@ -110,7 +110,7 @@ impl OcrBackend for OnnxBackend {
     fn recognize(&self, pixmap: &Pixmap, _options: &OcrOptions) -> Result<TextLayer, OcrError> {
         use tract_onnx::prelude::*;
 
-        let input = self.preprocess(pixmap);
+        let input = self.preprocess(pixmap)?;
         let result = self
             .model
             .run(tvec![input.into()])
