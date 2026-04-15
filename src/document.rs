@@ -7,9 +7,6 @@ use crate::pixmap::Pixmap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[cfg(test)]
-pub use crate::iw44::NormalizedPlanes;
-
 /// A bookmark entry from the NAVM chunk (table of contents).
 #[derive(Debug, Clone)]
 pub struct Bookmark {
@@ -531,18 +528,6 @@ impl<'a> Page<'a> {
             .to_pixmap()
             .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Some(pm))
-    }
-
-    #[cfg(test)]
-    pub fn decode_background_planes(&self) -> Result<Option<NormalizedPlanes>, Error> {
-        let img = match self.decode_iw44_layer(b"BG44")? {
-            Some(img) => img,
-            None => return Ok(None),
-        };
-        let planes = img
-            .to_normalized_planes_subsample(1)
-            .map_err(|e| Error::FormatError(e.to_string()))?;
-        Ok(Some(planes))
     }
 
     /// Parse the FGbz palette chunk.
