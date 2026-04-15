@@ -403,7 +403,7 @@ impl DjVuPage {
     /// cost at the expense of coarser quantization, which is imperceptible at
     /// sub=4 (quarter-resolution) or sub=8 output.
     ///
-    /// Use this instead of [`decoded_bg44`] when `subsample >= 4`.
+    /// Use this instead of [`Self::decoded_bg44`] when `subsample >= 4`.
     #[cfg(feature = "std")]
     pub fn decoded_bg44_partial(&self) -> Option<&Iw44Image> {
         self.bg44_decoded_partial
@@ -613,7 +613,7 @@ impl DjVuPage {
 
     /// Return the decoded JB2 mask (Sjbz), decoding and caching on first call.
     ///
-    /// Unlike [`extract_mask`] this method caches the result so that repeated
+    /// Unlike [`Self::extract_mask`] this method caches the result so that repeated
     /// renders of the same page — e.g. at different DPI levels — do not re-run
     /// the ZP arithmetic + symbol decode.
     ///
