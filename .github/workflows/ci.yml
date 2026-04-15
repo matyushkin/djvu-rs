@@ -123,7 +123,7 @@ jobs:
           key: ocr-tesseract
 
       - name: Install Tesseract and English language data
-        run: sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev
 
       - name: Build (ocr-tesseract feature)
         run: cargo build --features ocr-tesseract
