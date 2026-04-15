@@ -238,6 +238,66 @@ struct PlaneDecoder {
     bbstate: u8,
 }
 
+/// Map 16 i16 coefficients at `block[base..]` to UNK/ACTIVE flags, store in `bucket`,
+/// and return the OR of all flag bytes (bstatetmp).
+///
+/// Scalar fallback used on non-aarch64 targets.
+#[allow(unsafe_code)]
+#[inline(always)]
+fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is mandatory on aarch64; `base + 16 <= 1024` is guaranteed by
+    // BAND_BUCKETS (max bucket index 63, so base = 63 * 16 = 1008, 1008 + 16 = 1024).
+    return unsafe { prelim_flags_bucket_neon(block, base, bucket) };
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut bstate = 0u8;
+        for k in 0..16 {
+            let f = if block[base + k] == 0 { UNK } else { ACTIVE };
+            bucket[k] = f;
+            bstate |= f;
+        }
+        bstate
+    }
+}
+
+/// NEON-vectorized version of `prelim_flags_bucket` for aarch64.
+///
+/// Loads 16 i16 values, compares to zero with NEON, narrows to u8 flags
+/// (UNK=8 for zero, ACTIVE=2 for non-zero), stores, and OR-reduces to bstatetmp.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    let ptr = block.as_ptr().add(base);
+    // Load as u16 — zero-comparison is the same for signed and unsigned 16-bit.
+    let c0 = vreinterpretq_u16_s16(vld1q_s16(ptr));
+    let c1 = vreinterpretq_u16_s16(vld1q_s16(ptr.add(8)));
+    // nz: 0xFFFF where coef != 0, 0x0000 where coef == 0
+    let zero = vdupq_n_u16(0);
+    let nz0 = vmvnq_u16(vceqq_u16(c0, zero));
+    let nz1 = vmvnq_u16(vceqq_u16(c1, zero));
+    // result = UNK ^ ((UNK ^ ACTIVE) & nz)  ⟹  UNK(8) if zero, ACTIVE(2) if nonzero
+    // UNK ^ ACTIVE = 8 ^ 2 = 10
+    let xv = vdupq_n_u16(10);
+    let uv = vdupq_n_u16(8);
+    let r0 = veorq_u16(uv, vandq_u16(xv, nz0));
+    let r1 = veorq_u16(uv, vandq_u16(xv, nz1));
+    // Narrow u16 → u8 (values 2 and 8 both fit; high byte of each lane is 0)
+    let out = vcombine_u8(vmovn_u16(r0), vmovn_u16(r1));
+    vst1q_u8(bucket.as_mut_ptr(), out);
+    // Horizontal OR: fold 16 u8 lanes to 1
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
 impl PlaneDecoder {
     fn new(width: usize, height: usize) -> Self {
         let block_cols = width.div_ceil(32);
@@ -303,15 +363,11 @@ impl PlaneDecoder {
 
         if self.curband != 0 {
             for (boff, j) in (from..=to).enumerate() {
-                let mut bstatetmp: u8 = 0;
-                for k in 0..16 {
-                    if self.blocks[block_idx][(j << 4) | k] == 0 {
-                        self.coeffstate[boff][k] = UNK;
-                    } else {
-                        self.coeffstate[boff][k] = ACTIVE;
-                    }
-                    bstatetmp |= self.coeffstate[boff][k];
-                }
+                let bstatetmp = prelim_flags_bucket(
+                    &self.blocks[block_idx],
+                    j << 4,
+                    &mut self.coeffstate[boff],
+                );
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }

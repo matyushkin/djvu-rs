@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after ACTIVE guard)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after NEON prelim_flags)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
-| `iw44_decode_first_chunk` | **623 µs** | −15% (was 734 µs) |
-| `iw44_decode_corpus_color` | **1.22 ms** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.96 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.34 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **828 µs** | — |
+| `iw44_decode_first_chunk` | **582 µs** | −21% (was 734 µs) |
+| `iw44_decode_corpus_color` | **667 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **12.55 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **3.35 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **821 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.16 ms** | — |
@@ -68,6 +68,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | render | parallel BG+mask+FG44 decode via `rayon::join` in `render_pixmap`/`render_region` (#186) | cold render −30% (23.6→16.5 ms); warm-cache +13% overhead (240→272 µs) — rayon::join ~30 µs cost dominates when caches are warm; acceptable because cold render is the dominant real-world case |
 | 2026-04 | IW44 | skip `previously_active_coefficient_decoding_pass` when `bbstate & ACTIVE == 0` | iw44_first_chunk −13% (714→623 µs); iw44_corpus_color −46% (2.30→1.25 ms) — avoids function call + ZP register flush for all-zero/UNK blocks (dominant case in sparse/early chunks) |
 | 2026-04 | IW44 | local-copy ZP state in `previously_active_coefficient_decoding_pass` (same JB2 pattern) | sub1 −2.1% (13.24→12.96 ms); sub2 −1.5%; sub4 −2.4%; corpus_color −2.4% — LLVM keeps a/c/fence/bit_buf/bit_count in registers for entire coefficient refinement inner loop; small function body avoids I-cache thrash that killed the full-pass inlining attempt |
+| 2026-04 | IW44 | NEON-vectorize `preliminary_flag_computation` band≠0 path: 16 i16 coefs → 16 u8 flags in ~14 NEON instructions vs 64 scalar ops | corpus_color −48% (1.25→0.67 ms); first_chunk −7% (623→582 µs); sub1 −3.2% (12.96→12.55 ms) — LLVM was scalar-unrolling the 16-iter loop; explicit NEON (vld1q×2, vceq×2, vmvn×2, vand×2, veor×2, vmovn×2, vst1q + horizontal OR) reduces per-bucket work ~3× on M1 NEON; bands 1-9 each call this per block so corpus_color (many bands) sees the largest gain |
 
 ### ✗ Reverted
 
