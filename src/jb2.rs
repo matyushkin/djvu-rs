@@ -1009,40 +1009,72 @@ fn flip_blit_map(blit_map: &mut [i32], width: usize, height: usize) {
 // Symbol coordinate decoding
 // ────────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+/// ZP coder contexts used exclusively for symbol coordinate decoding.
+struct CoordContexts {
+    offset_type: u8,
+    hoff: NumContext,
+    voff: NumContext,
+    shoff: NumContext,
+    svoff: NumContext,
+}
+
+impl CoordContexts {
+    fn new() -> Self {
+        Self {
+            offset_type: 0,
+            hoff: NumContext::new(),
+            voff: NumContext::new(),
+            shoff: NumContext::new(),
+            svoff: NumContext::new(),
+        }
+    }
+}
+
+/// Running layout state for symbol positioning within a JB2 image.
+struct LayoutState {
+    first_left: i32,
+    first_bottom: i32,
+    last_right: i32,
+    baseline: Baseline,
+}
+
+impl LayoutState {
+    fn new(image_height: i32) -> Self {
+        Self {
+            first_left: -1,
+            first_bottom: image_height - 1,
+            last_right: 0,
+            baseline: Baseline::new(),
+        }
+    }
+}
+
 fn decode_symbol_coords(
     zp: &mut ZpDecoder<'_>,
-    offset_type_ctx: &mut u8,
-    hoff_ctx: &mut NumContext,
-    voff_ctx: &mut NumContext,
-    shoff_ctx: &mut NumContext,
-    svoff_ctx: &mut NumContext,
-    first_left: &mut i32,
-    first_bottom: &mut i32,
-    last_right: &mut i32,
-    baseline: &mut Baseline,
+    coord_ctx: &mut CoordContexts,
+    layout: &mut LayoutState,
     sym_width: i32,
     sym_height: i32,
 ) -> (i32, i32) {
-    let new_line = zp.decode_bit(offset_type_ctx);
+    let new_line = zp.decode_bit(&mut coord_ctx.offset_type);
 
     let (x, y) = if new_line {
-        let hoff = decode_num(zp, hoff_ctx, -262143, 262142);
-        let voff = decode_num(zp, voff_ctx, -262143, 262142);
-        let nx = *first_left + hoff;
-        let ny = *first_bottom + voff - sym_height + 1;
-        *first_left = nx;
-        *first_bottom = ny;
-        baseline.fill(ny);
+        let hoff = decode_num(zp, &mut coord_ctx.hoff, -262143, 262142);
+        let voff = decode_num(zp, &mut coord_ctx.voff, -262143, 262142);
+        let nx = layout.first_left + hoff;
+        let ny = layout.first_bottom + voff - sym_height + 1;
+        layout.first_left = nx;
+        layout.first_bottom = ny;
+        layout.baseline.fill(ny);
         (nx, ny)
     } else {
-        let hoff = decode_num(zp, shoff_ctx, -262143, 262142);
-        let voff = decode_num(zp, svoff_ctx, -262143, 262142);
-        (*last_right + hoff, baseline.get_val() + voff)
+        let hoff = decode_num(zp, &mut coord_ctx.shoff, -262143, 262142);
+        let voff = decode_num(zp, &mut coord_ctx.svoff, -262143, 262142);
+        (layout.last_right + hoff, layout.baseline.get_val() + voff)
     };
 
-    baseline.add(y);
-    *last_right = x + sym_width - 1;
+    layout.baseline.add(y);
+    layout.last_right = x + sym_width - 1;
     (x, y)
 }
 
@@ -1174,10 +1206,7 @@ fn decode_image_with_pool(
     let mut symbol_width_ctx = NumContext::new();
     let mut symbol_height_ctx = NumContext::new();
     let mut inherit_dict_size_ctx = NumContext::new();
-    let mut hoff_ctx = NumContext::new();
-    let mut voff_ctx = NumContext::new();
-    let mut shoff_ctx = NumContext::new();
-    let mut svoff_ctx = NumContext::new();
+    let mut coord_ctx = CoordContexts::new();
     let mut symbol_index_ctx = NumContext::new();
     let mut symbol_width_diff_ctx = NumContext::new();
     let mut symbol_height_diff_ctx = NumContext::new();
@@ -1186,7 +1215,6 @@ fn decode_image_with_pool(
     let mut comment_length_ctx = NumContext::new();
     let mut comment_octet_ctx = NumContext::new();
 
-    let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = [0u8; 1024];
     let mut refinement_bitmap_ctx = [0u8; 2048];
     let mut refinement_bitmap_ctx_p = [0x8000u16; 2048];
@@ -1248,11 +1276,7 @@ fn decode_image_with_pool(
     // page), fitting in L2 cache and dramatically reducing cache pressure during blits.
     let mut page_bm = Bitmap::new(image_width as u32, image_height as u32);
 
-    // Positioning state
-    let mut first_left: i32 = -1;
-    let mut first_bottom: i32 = image_height - 1;
-    let mut last_right: i32 = 0;
-    let mut baseline = Baseline::new();
+    let mut layout = LayoutState::new(image_height);
 
     // Main decode loop — capped to prevent infinite spin when ZP input is exhausted
     let mut record_count = 0usize;
@@ -1270,20 +1294,8 @@ fn decode_image_with_pool(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
-                let (x, y) = decode_symbol_coords(
-                    &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
-                    bm.width,
-                    bm.height,
-                );
+                let (x, y) =
+                    decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_to_bitmap(&mut page_bm, &bm, x, y);
                 dict.push(bm.crop_and_recycle(pool));
@@ -1304,20 +1316,8 @@ fn decode_image_with_pool(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
-                let (x, y) = decode_symbol_coords(
-                    &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
-                    bm.width,
-                    bm.height,
-                );
+                let (x, y) =
+                    decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_to_bitmap(&mut page_bm, &bm, x, y);
                 bm.recycle_into(pool);
@@ -1349,15 +1349,8 @@ fn decode_image_with_pool(
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
+                    &mut coord_ctx,
+                    &mut layout,
                     cbm.width,
                     cbm.height,
                 );
@@ -1419,15 +1412,8 @@ fn decode_image_with_pool(
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
+                    &mut coord_ctx,
+                    &mut layout,
                     cbm.width,
                     cbm.height,
                 );
@@ -1448,20 +1434,7 @@ fn decode_image_with_pool(
                 }
                 let bm_w = dict[index].width;
                 let bm_h = dict[index].height;
-                let (x, y) = decode_symbol_coords(
-                    &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
-                    bm_w,
-                    bm_h,
-                );
+                let (x, y) = decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm_w, bm_h);
                 let sym = &dict[index];
                 check_blit_budget(sym, &mut total_blit_pixels)?;
                 blit_to_bitmap(&mut page_bm, sym, x, y);
@@ -1525,10 +1498,7 @@ fn decode_image_indexed_with_pool(
     let mut symbol_width_ctx = NumContext::new();
     let mut symbol_height_ctx = NumContext::new();
     let mut inherit_dict_size_ctx = NumContext::new();
-    let mut hoff_ctx = NumContext::new();
-    let mut voff_ctx = NumContext::new();
-    let mut shoff_ctx = NumContext::new();
-    let mut svoff_ctx = NumContext::new();
+    let mut coord_ctx = CoordContexts::new();
     let mut symbol_index_ctx = NumContext::new();
     let mut symbol_width_diff_ctx = NumContext::new();
     let mut symbol_height_diff_ctx = NumContext::new();
@@ -1537,7 +1507,6 @@ fn decode_image_indexed_with_pool(
     let mut comment_length_ctx = NumContext::new();
     let mut comment_octet_ctx = NumContext::new();
 
-    let mut offset_type_ctx: u8 = 0;
     let mut direct_bitmap_ctx = [0u8; 1024];
     let mut refinement_bitmap_ctx = [0u8; 2048];
     let mut refinement_bitmap_ctx_p = [0x8000u16; 2048];
@@ -1589,10 +1558,7 @@ fn decode_image_indexed_with_pool(
     let mut page = vec![0u8; page_size];
     let mut blit_map = vec![-1i32; page_size];
 
-    let mut first_left: i32 = -1;
-    let mut first_bottom: i32 = image_height - 1;
-    let mut last_right: i32 = 0;
-    let mut baseline = Baseline::new();
+    let mut layout = LayoutState::new(image_height);
     let mut blit_count: i32 = 0;
 
     let mut record_count = 0usize;
@@ -1609,20 +1575,8 @@ fn decode_image_indexed_with_pool(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
-                let (x, y) = decode_symbol_coords(
-                    &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
-                    bm.width,
-                    bm.height,
-                );
+                let (x, y) =
+                    decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
@@ -1649,20 +1603,8 @@ fn decode_image_indexed_with_pool(
                 let h = decode_num(&mut zp, &mut symbol_height_ctx, 0, 262142);
                 check_pixel_budget(w, h, &mut total_sym_pixels)?;
                 let bm = decode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, w, h, pool)?;
-                let (x, y) = decode_symbol_coords(
-                    &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
-                    bm.width,
-                    bm.height,
-                );
+                let (x, y) =
+                    decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
                 blit_indexed(
                     &mut page,
@@ -1702,15 +1644,8 @@ fn decode_image_indexed_with_pool(
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
+                    &mut coord_ctx,
+                    &mut layout,
                     cbm.width,
                     cbm.height,
                 );
@@ -1778,15 +1713,8 @@ fn decode_image_indexed_with_pool(
                 )?;
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
+                    &mut coord_ctx,
+                    &mut layout,
                     cbm.width,
                     cbm.height,
                 );
@@ -1815,15 +1743,8 @@ fn decode_image_indexed_with_pool(
                 }
                 let (x, y) = decode_symbol_coords(
                     &mut zp,
-                    &mut offset_type_ctx,
-                    &mut hoff_ctx,
-                    &mut voff_ctx,
-                    &mut shoff_ctx,
-                    &mut svoff_ctx,
-                    &mut first_left,
-                    &mut first_bottom,
-                    &mut last_right,
-                    &mut baseline,
+                    &mut coord_ctx,
+                    &mut layout,
                     dict[index].width,
                     dict[index].height,
                 );
