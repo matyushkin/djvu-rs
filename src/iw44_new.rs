@@ -270,7 +270,11 @@ impl PlaneDecoder {
                     self.bucket_decoding_pass(zp, block_idx);
                     self.newly_active_coefficient_decoding_pass(zp, block_idx);
                 }
-                self.previously_active_coefficient_decoding_pass(zp, block_idx);
+                // Skip the inner loop entirely when no ACTIVE coefficients exist
+                // (avoids function call + zp register flush for fresh/sparse blocks).
+                if (self.bbstate & ACTIVE) != 0 {
+                    self.previously_active_coefficient_decoding_pass(zp, block_idx);
+                }
             }
         }
         self.finish_slice();
