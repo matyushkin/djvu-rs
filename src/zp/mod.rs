@@ -166,9 +166,11 @@ impl<'a> ZpDecoder<'a> {
         self.passthrough_with_threshold(z)
     }
 
-    /// Decode one bit in passthrough mode using the IW44 variant threshold.
+    /// Decode one bit in IW44 passthrough mode.
     ///
     /// The threshold is `z = 0x8000 + (3 * a / 8)`.
+    ///
+    /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
     pub(crate) fn decode_passthrough_iw44(&mut self) -> bool {
         let z = (0x8000u32 + (3u32 * self.a) / 8) as u16;
