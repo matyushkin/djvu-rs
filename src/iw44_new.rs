@@ -266,8 +266,7 @@ impl PlaneDecoder {
         if !self.is_null_slice() {
             for block_idx in 0..self.blocks.len() {
                 self.preliminary_flag_computation(block_idx);
-                if self.block_band_decoding_pass(zp) {
-                    self.bucket_decoding_pass(zp, block_idx);
+                if self.block_band_decoding_pass(zp) && self.bucket_decoding_pass(zp, block_idx) {
                     self.newly_active_coefficient_decoding_pass(zp, block_idx);
                 }
                 self.previously_active_coefficient_decoding_pass(zp, block_idx);
@@ -341,8 +340,10 @@ impl PlaneDecoder {
         (self.bbstate & NEW) != 0
     }
 
-    fn bucket_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) {
+    /// Returns `true` if any bucket was newly marked active (NEW bit set).
+    fn bucket_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) -> bool {
         let (from, to) = BAND_BUCKETS[self.curband];
+        let mut any_new = false;
         for (boff, i) in (from..=to).enumerate() {
             if (self.bucketstate[boff] & UNK) == 0 {
                 continue;
@@ -364,8 +365,10 @@ impl PlaneDecoder {
             }
             if zp.decode_bit(&mut self.ctx_decode_coef[n + self.curband * 8]) {
                 self.bucketstate[boff] |= NEW;
+                any_new = true;
             }
         }
+        any_new
     }
 
     fn newly_active_coefficient_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) {
