@@ -375,6 +375,66 @@ fn bench_iw44_to_rgb_colorbook_sub(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark IW44 color encode: decode boy.djvu page to Pixmap, then encode back.
+fn bench_iw44_encode_color(c: &mut Criterion) {
+    let path = assets_path().join("boy.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_iw44_encode_color: boy.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let opts = djvu_rs::djvu_render::RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        ..Default::default()
+    };
+    let pixmap = match djvu_rs::djvu_render::render_pixmap(page, &opts) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let enc_opts = djvu_rs::iw44_encode::Iw44EncodeOptions::default();
+    c.bench_function("iw44_encode_color", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::iw44_encode::encode_iw44_color(black_box(&pixmap), &enc_opts);
+        });
+    });
+}
+
+/// Benchmark JB2 encode: decode a bilevel page, then encode the mask.
+fn bench_jb2_encode(c: &mut Criterion) {
+    let path = assets_path().join("boy_jb2.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_jb2_encode: boy_jb2.djvu not found");
+            return;
+        }
+    };
+    let sjbz = match first_sjbz_chunk(&data) {
+        Some(c) => c,
+        None => return,
+    };
+    let bitmap = match djvu_rs::jb2::decode(&sjbz, None) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    c.bench_function("jb2_encode", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::jb2_encode::encode_jb2(black_box(&bitmap));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -386,5 +446,7 @@ criterion_group!(
     bench_iw44_decode_large_all_chunks,
     bench_iw44_to_rgb_large,
     bench_iw44_to_rgb_colorbook_sub,
+    bench_iw44_encode_color,
+    bench_jb2_encode,
 );
 criterion_main!(benches);

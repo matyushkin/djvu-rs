@@ -315,6 +315,7 @@ const FRAC_MASK: u32 = FRAC - 1;
 /// On x86_64 with SSE2 (universally available since 2003): processes 4 pixels
 /// (16 bytes) per instruction via `_mm_or_si128`.  Falls back to a scalar loop
 /// on other targets.
+#[allow(unsafe_code)]
 #[inline]
 fn fill_alpha_255(buf: &mut [u8]) {
     debug_assert_eq!(buf.len() % 4, 0);
@@ -333,21 +334,26 @@ fn fill_alpha_255(buf: &mut [u8]) {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
 #[target_feature(enable = "sse2")]
 unsafe fn fill_alpha_255_sse2(buf: &mut [u8]) {
     use std::arch::x86_64::*;
 
     // Each 32-bit pixel: OR with 0xFF000000 to set the high byte (alpha) to 255.
-    let alpha_mask = _mm_set1_epi32(0xFF000000u32 as i32);
+    // SAFETY: caller guarantees SSE2 is available (ABI requirement on x86_64);
+    // buf is valid for its entire length; i * 16 is in-bounds by construction.
+    let alpha_mask = unsafe { _mm_set1_epi32(0xFF000000u32 as i32) };
     let ptr = buf.as_mut_ptr();
     let chunks = buf.len() / 16; // 4 RGBA pixels per 128-bit register
 
     for i in 0..chunks {
-        let p = ptr.add(i * 16) as *mut __m128i;
-        _mm_storeu_si128(
-            p,
-            _mm_or_si128(_mm_loadu_si128(p as *const __m128i), alpha_mask),
-        );
+        unsafe {
+            let p = ptr.add(i * 16) as *mut __m128i;
+            _mm_storeu_si128(
+                p,
+                _mm_or_si128(_mm_loadu_si128(p as *const __m128i), alpha_mask),
+            );
+        }
     }
 
     // Scalar tail (0–3 remaining pixels)
@@ -364,6 +370,7 @@ unsafe fn fill_alpha_255_sse2(buf: &mut [u8]) {
 /// `src` must hold exactly `pixel_count * 3` bytes;
 /// `dst` must hold exactly `pixel_count * 4` bytes.
 #[cfg(feature = "std")]
+#[allow(unsafe_code)]
 #[inline]
 fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
     let pixel_count = src.len() / 3;
@@ -389,26 +396,35 @@ fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[allow(unsafe_code)]
 #[target_feature(enable = "ssse3")]
 unsafe fn rgb_to_rgba_ssse3(src: &[u8], dst: &mut [u8], pixel_count: usize, safe_chunks: usize) {
     use std::arch::x86_64::*;
 
+    // SAFETY: caller guarantees SSSE3 availability; safe_chunks * 12 + 16 <= src.len()
+    // and safe_chunks * 16 <= dst.len() (enforced by rgb_to_rgba).
     // Shuffle 12 packed RGB bytes into 16 RGBA bytes (4 pixels), zero in alpha slot.
     // _mm_set_epi8 arguments are byte 15 (highest) down to byte 0 (lowest).
-    let shuf = _mm_set_epi8(
-        -1, 11, 10, 9, // pixel 3: [R,G,B,0]
-        -1, 8, 7, 6, // pixel 2
-        -1, 5, 4, 3, // pixel 1
-        -1, 2, 1, 0, // pixel 0
-    );
-    let alpha_or = _mm_set1_epi32(0xFF000000u32 as i32);
+    let (shuf, alpha_or) = unsafe {
+        (
+            _mm_set_epi8(
+                -1, 11, 10, 9, // pixel 3: [R,G,B,0]
+                -1, 8, 7, 6, // pixel 2
+                -1, 5, 4, 3, // pixel 1
+                -1, 2, 1, 0, // pixel 0
+            ),
+            _mm_set1_epi32(0xFF000000u32 as i32),
+        )
+    };
 
     for i in 0..safe_chunks {
-        let v = _mm_loadu_si128(src.as_ptr().add(i * 12) as *const __m128i);
-        _mm_storeu_si128(
-            dst.as_mut_ptr().add(i * 16) as *mut __m128i,
-            _mm_or_si128(_mm_shuffle_epi8(v, shuf), alpha_or),
-        );
+        unsafe {
+            let v = _mm_loadu_si128(src.as_ptr().add(i * 12) as *const __m128i);
+            _mm_storeu_si128(
+                dst.as_mut_ptr().add(i * 16) as *mut __m128i,
+                _mm_or_si128(_mm_shuffle_epi8(v, shuf), alpha_or),
+            );
+        }
     }
 
     rgb_to_rgba_scalar(src, dst, safe_chunks * 4, pixel_count);
