@@ -1313,6 +1313,106 @@ fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
     }
 }
 
+/// Bilevel fast path: JB2-only page with no IW44 background or FG44 layer.
+///
+/// Fills `buf` with white (255,255,255,255), then paints foreground pixels
+/// black (0,0,0,255).  Avoids bilinear sampling, gamma LUT lookups, and the
+/// full per-pixel branch tree of `composite_loop_bilinear` — the only work per
+/// pixel is a single mask-bit read and a conditional 3-byte write.
+///
+/// Handles both upscale/1:1 (`fx_step ≤ FRAC`) and downscale cases.
+fn composite_loop_bilevel(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: u32, fy_step: u32) {
+    let mask = match ctx.mask {
+        Some(m) => m,
+        None => {
+            // No mask, no bg: pure white page — just fill.
+            for chunk in buf.chunks_exact_mut(4) {
+                chunk[0] = 255;
+                chunk[1] = 255;
+                chunk[2] = 255;
+                chunk[3] = 255;
+            }
+            return;
+        }
+    };
+
+    let w = ctx.out_w;
+    let h = ctx.out_h;
+    let row_stride = w as usize * 4;
+
+    // ── 1:1 scale fast path ────────────────────────────────────────────────────
+    // Skips fixed-point arithmetic entirely; reads bitmap bytes directly.
+    if fx_step == FRAC && fy_step == FRAC {
+        let stride = mask.row_stride();
+        for (oy, row) in buf
+            .chunks_exact_mut(row_stride)
+            .take(h as usize)
+            .enumerate()
+        {
+            let py = (oy as u32 + ctx.offset_y).min(ctx.page_h.saturating_sub(1)) as usize;
+            let mask_row = &mask.data[py * stride..(py + 1) * stride];
+            for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
+                let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
+                let is_black = (mask_row[px / 8] >> (7 - (px % 8))) & 1 != 0;
+                if is_black {
+                    pixel[0] = 0;
+                    pixel[1] = 0;
+                    pixel[2] = 0;
+                    pixel[3] = 255;
+                } else {
+                    pixel[0] = 255;
+                    pixel[1] = 255;
+                    pixel[2] = 255;
+                    pixel[3] = 255;
+                }
+            }
+        }
+        return;
+    }
+
+    // ── Scaled path (upscale > 1:1, or downscale) ─────────────────────────────
+    let downscale = fx_step > FRAC || fy_step > FRAC;
+
+    for (oy, row) in buf
+        .chunks_exact_mut(row_stride)
+        .take(h as usize)
+        .enumerate()
+    {
+        let oy = oy as u32;
+        let fy = (oy + ctx.offset_y) * fy_step;
+        let py = (fy >> FRACBITS).min(ctx.page_h.saturating_sub(1));
+
+        for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
+            let fx = (ox as u32 + ctx.offset_x) * fx_step;
+            let px = (fx >> FRACBITS).min(ctx.page_w.saturating_sub(1));
+
+            let is_fg = if downscale {
+                if ctx.mask_shift > 0 {
+                    let dpx = fx >> (FRACBITS + ctx.mask_shift);
+                    let dpy = fy >> (FRACBITS + ctx.mask_shift);
+                    dpx < mask.width && dpy < mask.height && mask.get(dpx, dpy)
+                } else {
+                    mask_box_any(mask, fx, fy, fx_step, fy_step)
+                }
+            } else {
+                px < mask.width && py < mask.height && mask.get(px, py)
+            };
+
+            if is_fg {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+                pixel[3] = 255;
+            } else {
+                pixel[0] = 255;
+                pixel[1] = 255;
+                pixel[2] = 255;
+                pixel[3] = 255;
+            }
+        }
+    }
+}
+
 /// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
 ///
 /// This is a zero-allocation render path when `buf` is already the right size.
@@ -1325,6 +1425,13 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     // Fixed-point step: how many source pixels per full-render output pixel
     let fx_step = ((ctx.page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
     let fy_step = ((ctx.page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
+
+    // Bilevel fast path: JB2-only page (no IW44 bg, no FG44, no palette).
+    // Skips bilinear sampling and gamma LUT — just white fill + black mask writes.
+    if ctx.bg.is_none() && ctx.fg44.is_none() && ctx.fg_palette.is_none() {
+        composite_loop_bilevel(ctx, buf, fx_step, fy_step);
+        return Ok(());
+    }
 
     // Downscaling when output is smaller than source (step > 1 pixel)
     if fx_step > FRAC || fy_step > FRAC {
