@@ -33,7 +33,7 @@ jobs:
             echo "PUBLISH_REF=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.PUBLISH_REF }}
 
