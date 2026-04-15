@@ -56,11 +56,9 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-// ---- New phase-1 modules ---------------------------------------------------
+// ---- Phase-1 modules -------------------------------------------------------
 //
-// These are the new clean-room implementations written from the DjVu spec.
-// They are exposed under their natural names. The legacy modules that conflict
-// are kept under different names below.
+// Clean-room implementations written from the DjVu spec.
 
 /// IFF container parser (phase 1, written from spec).
 pub mod iff;
@@ -271,27 +269,9 @@ pub use info::{PageInfo, Rotation};
 #[doc(hidden)]
 pub(crate) mod bitmap;
 
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub mod document;
-
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub mod iw44;
-
 #[doc(hidden)]
 pub(crate) mod pixmap;
 
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub mod render;
-
-#[cfg(feature = "std")]
-#[doc(hidden)]
-#[path = "zp_legacy/mod.rs"]
-pub mod zp;
-
-// Re-export types needed by both legacy and new phase modules
 pub use bitmap::Bitmap;
 pub use pixmap::{GrayPixmap, Pixmap};
 
