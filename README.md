@@ -364,16 +364,17 @@ djvu-rs outputs PNG; ddjvu outputs PPM. djvu-rs startup ≈ 5 ms vs ddjvu ≈ 25
 
 | Scenario | djvu-rs | DjVuLibre | Notes |
 |----------|---------|-----------|-------|
-| colorbook.djvu, **native** (2260×3669) | **37.4 ms** | — | full IW44 decode |
-| colorbook.djvu, **150 dpi** (848×1376) | **6.5 ms** | 6.13 ms | ~6% gap after progressive optimizations |
-| Dense 600 dpi bilevel (page 260/520) | 35.6 ms | **13.8 ms** | sequential ZP decoder bottleneck |
-| Document open + parse (520 pages) | **1.9 ms** | ~24–60 ms | **10–30× faster** |
+| colorbook.djvu, **native** (2260×3669) | **22.5 ms** | — | first render, full IW44 decode |
+| colorbook.djvu, **150 dpi** (848×1376) | **6.75 ms** | 6.13 ms | within ~10% after progressive optimizations |
+| Dense 600 dpi bilevel (page 260/520) | **10.8 ms** | **13.8 ms** | ZP u32 widening eliminated bottleneck |
+| Document open + parse (520 pages) | **2.2 ms** | ~24–60 ms | **10–30× faster** |
 
-**Key insight:** The 150 dpi render path was optimized with a cascade of improvements:
-partial BG44 chunk decode (first chunk only for sub=4), a cached 1/4-resolution mask
-pyramid, and replacing runtime integer divisions with precomputed bit-shifts in the
-compositor inner loop.  djvu-rs now matches DjVuLibre within ~6% for the warm
-downscaled render path (the most common document-viewer scenario).
+**Key insight:** Two complementary optimizations define djvu-rs's bilevel performance:
+(1) the ZP arithmetic decoder uses 32-bit registers for `a`/`c`/`fence`, eliminating
+u16 truncations in the inner loop and enabling better register allocation — reducing
+dense JB2 page renders from 35.6 ms → 10.8 ms (3.3×); (2) the 150 dpi render path
+uses partial BG44 chunk decode, a cached 1/4-resolution mask pyramid, and bit-shifts
+instead of divisions in the compositor inner loop.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full Criterion numbers and methodology.
 
