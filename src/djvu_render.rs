@@ -338,7 +338,7 @@ fn fill_alpha_255(buf: &mut [u8]) {
 // SAFETY: caller guarantees SSE2 is available (ABI requirement on x86_64);
 // buf is valid for its entire length; i * 16 is in-bounds by construction.
 unsafe fn fill_alpha_255_sse2(buf: &mut [u8]) {
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
 
     // Each 32-bit pixel: OR with 0xFF000000 to set the high byte (alpha) to 255.
     let alpha_mask = _mm_set1_epi32(0xFF000000u32 as i32);
@@ -398,7 +398,7 @@ fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
 // SAFETY: caller guarantees SSSE3 availability; safe_chunks * 12 + 16 <= src.len()
 // and safe_chunks * 16 <= dst.len() (enforced by rgb_to_rgba).
 unsafe fn rgb_to_rgba_ssse3(src: &[u8], dst: &mut [u8], pixel_count: usize, safe_chunks: usize) {
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
 
     // Shuffle 12 packed RGB bytes into 16 RGBA bytes (4 pixels), zero in alpha slot.
     // _mm_set_epi8 arguments are byte 15 (highest) down to byte 0 (lowest).
