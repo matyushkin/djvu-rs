@@ -39,8 +39,9 @@ Composite pipeline (src/djvu_render.rs):
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.16 ms** | — |
-| `render_page/dpi/72` | 1.21 ms | (from BENCHMARKS.md) |
+| `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
+| `render_colorbook_cold` (150 dpi, `parallel`) | **16.5 ms** | −30% vs sequential (23.6 ms) |
 
 > Criterion numbers on M1 Max. Full table with x86_64 and DjVuLibre → BENCHMARKS.md
 
@@ -61,6 +62,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | render | partial BG44 decode for sub=4 (skip high-frequency bands) | skip unnecessary work |
 | 2026-04 | render | chunks_exact_mut → eliminate per-pixel bounds checks | small |
 | 2026-04 | render | x86_64 SSE2/SSSE3 fast paths (alpha fill, RGB→RGBA) | significant on x86_64 |
+| 2026-04 | render | parallel BG+mask+FG44 decode via `rayon::join` in `render_pixmap`/`render_region` (#186) | cold render −30% (23.6→16.5 ms); warm-cache +13% overhead (240→272 µs) — rayon::join ~30 µs cost dominates when caches are warm; acceptable because cold render is the dominant real-world case |
 
 ### ✗ Reverted
 
@@ -80,7 +82,7 @@ Composite pipeline (src/djvu_render.rs):
 | ZP | branch-free decode_bit via cmov (#179) | ✗ reverted — see log | LPS function call overhead worse than inline |
 | IW44 | column_pass SIMD at s=2 (stride-2 gather, follow-up to #180) (#184) | small | needs load8_strided (vld2q_s16 on NEON) |
 | JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
-| render | pre-decode JB2 bitmap on a separate thread (#186) | medium | requires Arc |
+| render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
 | IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | ✗ reverted — see log | ZP stream is a continuous encoding of all decisions; skipping any call desynchronises state |
 

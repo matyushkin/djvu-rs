@@ -1590,25 +1590,66 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+        // FGbz palette decode is cheap (BZZ) and determines the mask variant
+        // (plain vs indexed).  Do it first so both cfg branches can use it.
         fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::join;
+            let has_palette = fg_palette.is_some();
+            // Decode BG (IW44), mask (JB2), and FG44 (IW44) in parallel.
+            // All three are independent once fg_palette is known.
+            let (bg_r, (mask_r, fg44_r)) = join(
+                || decode_background_chunks(page, usize::MAX, bg_subsample),
+                || {
+                    join(
+                        || {
+                            if has_palette {
+                                match decode_mask_indexed(page) {
+                                    Ok(Some((bm, bm_map))) => Ok((Some(bm), Some(bm_map))),
+                                    Ok(None) => Ok((None, None)),
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                match decode_mask(page) {
+                                    Ok(Some(bm)) => Ok((Some(bm), None::<Vec<i32>>)),
+                                    Ok(None) => Ok((None, None)),
+                                    Err(e) => Err(e),
+                                }
+                            }
+                        },
+                        || decode_fg44(page),
+                    )
+                },
+            );
+            bg = bg_r?;
+            fg44 = fg44_r?;
+            let (m, bm) = mask_r?;
+            mask = m;
+            blit_map = bm;
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+            let indexed_result = if fg_palette.is_some() {
+                decode_mask_indexed(page)?
             } else {
                 None
             };
-            blit_map = None;
+            if let Some((bm, bm_map)) = indexed_result {
+                mask = Some(bm);
+                blit_map = Some(bm_map);
+            } else {
+                mask = if fg_palette.is_none() {
+                    decode_mask(page)?
+                } else {
+                    None
+                };
+                blit_map = None;
+            }
+            fg44 = decode_fg44(page)?;
         }
-        fg44 = decode_fg44(page)?;
     }
 
     let mask = if opts.bold > 0 {
@@ -1741,25 +1782,62 @@ pub fn render_region(
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
         fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::join;
+            let has_palette = fg_palette.is_some();
+            let (bg_r, (mask_r, fg44_r)) = join(
+                || decode_background_chunks(page, usize::MAX, bg_subsample),
+                || {
+                    join(
+                        || {
+                            if has_palette {
+                                match decode_mask_indexed(page) {
+                                    Ok(Some((bm, bm_map))) => Ok((Some(bm), Some(bm_map))),
+                                    Ok(None) => Ok((None, None)),
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                match decode_mask(page) {
+                                    Ok(Some(bm)) => Ok((Some(bm), None::<Vec<i32>>)),
+                                    Ok(None) => Ok((None, None)),
+                                    Err(e) => Err(e),
+                                }
+                            }
+                        },
+                        || decode_fg44(page),
+                    )
+                },
+            );
+            bg = bg_r?;
+            fg44 = fg44_r?;
+            let (m, bm) = mask_r?;
+            mask = m;
+            blit_map = bm;
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+            let indexed_result = if fg_palette.is_some() {
+                decode_mask_indexed(page)?
             } else {
                 None
             };
-            blit_map = None;
+            if let Some((bm, bm_map)) = indexed_result {
+                mask = Some(bm);
+                blit_map = Some(bm_map);
+            } else {
+                mask = if fg_palette.is_none() {
+                    decode_mask(page)?
+                } else {
+                    None
+                };
+                blit_map = None;
+            }
+            fg44 = decode_fg44(page)?;
         }
-        fg44 = decode_fg44(page)?;
     }
 
     let mask = if opts.bold > 0 {
