@@ -68,6 +68,7 @@ Composite pipeline (src/djvu_render.rs):
 |------|-----------|----------------|--------------|
 | 2026-04 | render | bilevel composite fast path (#165) | regression — restored in #169 |
 | 2026-04 | ZP | `#[cold] #[inline(never)]` for LPS branch + cmov-friendly context update | iw44 +4%, jb2_encode +2% — function call overhead > I-cache gain; LPS fires 10-15% of calls, too frequent for out-of-line |
+| 2026-04 | IW44 | early-exit `decode_slice` when `zp.is_exhausted() && bbstate & ACTIVE == 0` (#182) | 99.2% pixel mismatch — `is_exhausted()` fires mid-stream (not end-of-decisions); skipping decode_bit corrupts ZP arithmetic state for all subsequent calls; the ZP stream is a continuous encoding of ALL block decisions; can't skip any call without desynchronising |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
@@ -81,7 +82,7 @@ Composite pipeline (src/djvu_render.rs):
 | JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
 | render | pre-decode JB2 bitmap on a separate thread (#186) | medium | requires Arc |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
-| IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | large (−40–80% for large pages) | must verify output correctness vs reference; bit_buf still valid after pos exhaustion |
+| IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | ✗ reverted — see log | ZP stream is a continuous encoding of all decisions; skipping any call desynchronises state |
 
 ---
 
@@ -126,13 +127,13 @@ At ~26 ns/call (measured): 74 880 × 26 ns ≈ **1.95 ms** — matches the obser
 
 JB2 does not have this problem: it decodes a token stream that terminates on an end-of-image symbol, so it never iterates over all possible pixel positions.
 
-#### 4. Optimization opportunity
+#### 4. Optimization attempt — #182 (REVERTED 2026-04-15)
 
-Early-exit in `decode_slice` when `zp.is_exhausted()` AND no block in the current sweep has produced a "new" mark yet AND no block has `ACTIVE` state → all remaining blocks are guaranteed to produce false (the ZP stream was already terminated by the encoder).
+Tried early-exit in `decode_slice`: `if zp.is_exhausted() && (bbstate & ACTIVE) == 0 { continue }`.
 
-**Risk:** `is_exhausted()` checks `pos >= data.len()` but bit_buf may still hold up to 32 cached bits; the first few blocks after exhaustion may legitimately decode as "true". Must benchmark correctness against reference output before landing.
+Result: **99.2% pixel mismatch** (big_scanned, chicken). Root cause: `is_exhausted()` checks only the byte buffer (`pos >= data.len()`), but the ZP coder is a **continuous bit stream** — each `decode_bit` call advances a shared arithmetic state. Skipping any call desynchronises all subsequent calls for that chunk. `is_exhausted()` can fire mid-stream (e.g. when 0.088 bits/block compression means 819 bytes cover block 1 through ~74 000 of 74 880 total), so blocks well before the end of the sweep get the wrong decisions.
 
-Tracking issue: #182
+No safe early-exit is possible without changing the encoding format.
 
 ---
 
