@@ -73,6 +73,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | ZP | `#[cold] #[inline(never)]` for LPS branch + cmov-friendly context update | iw44 +4%, jb2_encode +2% — function call overhead > I-cache gain; LPS fires 10-15% of calls, too frequent for out-of-line |
 | 2026-04 | IW44 | early-exit `decode_slice` when `zp.is_exhausted() && bbstate & ACTIVE == 0` (#182) | 99.2% pixel mismatch — `is_exhausted()` fires mid-stream (not end-of-decisions); skipping decode_bit corrupts ZP arithmetic state for all subsequent calls; the ZP stream is a continuous encoding of ALL block decisions; can't skip any call without desynchronising |
 | 2026-04 | IW44 | local-copy ZP state + inline all 4 ZP sub-passes in `decode_slice` (macro-based, same pattern as JB2) | +7% `iw44_decode_first_chunk`, +25% `iw44_decode_corpus_color` — I-cache thrash from large inlined function body; IW44 block-loop body is much larger than JB2 row-loop, so I-cache pressure dominates any register-allocation gain |
+| 2026-04 | IW44 | `any_coef_nonzero` flag to skip block-data scan in `preliminary_flag_computation` for all-zero images | +5% `iw44_decode_first_chunk` regression — adding bool to `PlaneDecoder` struct increases cache pressure; branch overhead in tight loop + `fill(UNK)` not faster than vectorized load-compare-store |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
