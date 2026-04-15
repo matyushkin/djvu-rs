@@ -29,19 +29,19 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-15, after ZP u16→u32)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after ACTIVE guard)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
-| `iw44_decode_first_chunk` | **725 µs** | −1.2% (was 734 µs) |
-| `iw44_decode_corpus_color` | **2.30 ms** | — |
+| `iw44_decode_first_chunk` | **623 µs** | −15% (was 734 µs) |
+| `iw44_decode_corpus_color` | **1.25 ms** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.16 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
-| `render_colorbook_cold` (150 dpi, `parallel`) | **16.5 ms** | −30% vs sequential (23.6 ms) |
+| `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
 
 > Criterion numbers on M1 Max. Full table with x86_64 and DjVuLibre → BENCHMARKS.md
 
@@ -63,6 +63,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | render | chunks_exact_mut → eliminate per-pixel bounds checks | small |
 | 2026-04 | render | x86_64 SSE2/SSSE3 fast paths (alpha fill, RGB→RGBA) | significant on x86_64 |
 | 2026-04 | render | parallel BG+mask+FG44 decode via `rayon::join` in `render_pixmap`/`render_region` (#186) | cold render −30% (23.6→16.5 ms); warm-cache +13% overhead (240→272 µs) — rayon::join ~30 µs cost dominates when caches are warm; acceptable because cold render is the dominant real-world case |
+| 2026-04 | IW44 | skip `previously_active_coefficient_decoding_pass` when `bbstate & ACTIVE == 0` | iw44_first_chunk −13% (714→623 µs); iw44_corpus_color −46% (2.30→1.25 ms) — avoids function call + ZP register flush for all-zero/UNK blocks (dominant case in sparse/early chunks) |
 
 ### ✗ Reverted
 
@@ -71,6 +72,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | render | bilevel composite fast path (#165) | regression — restored in #169 |
 | 2026-04 | ZP | `#[cold] #[inline(never)]` for LPS branch + cmov-friendly context update | iw44 +4%, jb2_encode +2% — function call overhead > I-cache gain; LPS fires 10-15% of calls, too frequent for out-of-line |
 | 2026-04 | IW44 | early-exit `decode_slice` when `zp.is_exhausted() && bbstate & ACTIVE == 0` (#182) | 99.2% pixel mismatch — `is_exhausted()` fires mid-stream (not end-of-decisions); skipping decode_bit corrupts ZP arithmetic state for all subsequent calls; the ZP stream is a continuous encoding of ALL block decisions; can't skip any call without desynchronising |
+| 2026-04 | IW44 | local-copy ZP state + inline all 4 ZP sub-passes in `decode_slice` (macro-based, same pattern as JB2) | +7% `iw44_decode_first_chunk`, +25% `iw44_decode_corpus_color` — I-cache thrash from large inlined function body; IW44 block-loop body is much larger than JB2 row-loop, so I-cache pressure dominates any register-allocation gain |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
