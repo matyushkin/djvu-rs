@@ -965,32 +965,46 @@ unsafe fn store8s_neon(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
 }
 
 /// Load 8 contiguous `i32` values from `slice[off..]` into an `i32x8`.
+///
+/// # Safety
+/// Caller must ensure `off + 7 < slice.len()`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn load8_i32(slice: &[i32], off: usize) -> i32x8 {
-    i32x8::from([
-        slice[off],
-        slice[off + 1],
-        slice[off + 2],
-        slice[off + 3],
-        slice[off + 4],
-        slice[off + 5],
-        slice[off + 6],
-        slice[off + 7],
-    ])
+    // SAFETY: caller guarantees off+7 is in bounds.
+    unsafe {
+        i32x8::from([
+            *slice.get_unchecked(off),
+            *slice.get_unchecked(off + 1),
+            *slice.get_unchecked(off + 2),
+            *slice.get_unchecked(off + 3),
+            *slice.get_unchecked(off + 4),
+            *slice.get_unchecked(off + 5),
+            *slice.get_unchecked(off + 6),
+            *slice.get_unchecked(off + 7),
+        ])
+    }
 }
 
 /// Store 8 values from an `i32x8` into contiguous `i32` slots at `slice[off..]`.
+///
+/// # Safety
+/// Caller must ensure `off + 7 < slice.len()`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn store8_i32(slice: &mut [i32], off: usize, v: i32x8) {
     let a = v.to_array();
-    slice[off] = a[0];
-    slice[off + 1] = a[1];
-    slice[off + 2] = a[2];
-    slice[off + 3] = a[3];
-    slice[off + 4] = a[4];
-    slice[off + 5] = a[5];
-    slice[off + 6] = a[6];
-    slice[off + 7] = a[7];
+    // SAFETY: caller guarantees off+7 is in bounds.
+    unsafe {
+        *slice.get_unchecked_mut(off) = a[0];
+        *slice.get_unchecked_mut(off + 1) = a[1];
+        *slice.get_unchecked_mut(off + 2) = a[2];
+        *slice.get_unchecked_mut(off + 3) = a[3];
+        *slice.get_unchecked_mut(off + 4) = a[4];
+        *slice.get_unchecked_mut(off + 5) = a[5];
+        *slice.get_unchecked_mut(off + 6) = a[6];
+        *slice.get_unchecked_mut(off + 7) = a[7];
+    }
 }
 
 /// Gather one `i16` value from each of 8 consecutive rows at column index `k`.
