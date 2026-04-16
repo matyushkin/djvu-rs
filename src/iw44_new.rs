@@ -842,11 +842,17 @@ impl PlaneDecoder {
             // Row-major scatter via compact inverse zigzag tables: write
             // sub_block consecutive i16 per row before advancing, maximising
             // write-combine efficiency (one cache line per row for sub=2).
+            // Safety invariants for get_unchecked below:
+            //   inv: inv_base+col = row*sub_block+col, row,col ∈ 0..sub_block → < sub_block²
+            //        = compact_inv.len(); block[i]: compact_inv values < sub_block² ≤ 256
+            //        < 1024 = block.len(); plane[dst_base+col]: sequential within
+            //        (base_row+row)*compact_stride+base_col+[0,sub_block) — all in bounds.
             let compact_inv: &[u8] = match sub {
                 2 => &ZIGZAG_INV_SUB2,
                 4 => &ZIGZAG_INV_SUB4,
                 _ => &ZIGZAG_INV_SUB8, // sub=8
             };
+            #[allow(unsafe_code)]
             for r in 0..block_rows {
                 for c in 0..self.block_cols {
                     let block = &self.blocks[r * self.block_cols + c];
@@ -856,8 +862,12 @@ impl PlaneDecoder {
                         let dst_base = (base_row + row) * compact_stride + base_col;
                         let inv_base = row * sub_block;
                         for col in 0..sub_block {
-                            let i = compact_inv[inv_base + col] as usize;
-                            plane.data[dst_base + col] = block[i];
+                            // Safety: see invariants above.
+                            let i = unsafe { *compact_inv.get_unchecked(inv_base + col) } as usize;
+                            unsafe {
+                                *plane.data.get_unchecked_mut(dst_base + col) =
+                                    *block.get_unchecked(i);
+                            }
                         }
                     }
                 }
