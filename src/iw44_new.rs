@@ -1062,12 +1062,266 @@ fn predict_avg(cur: i32x8, p: i32x8, n: i32x8) -> i32x8 {
     cur + ((p + n + c1) >> 1)
 }
 
+/// AArch64 NEON horizontal row pass for s=1.
+///
+/// Processes each row independently using `vld2q_s16` to deinterleave even/odd
+/// positions and `vextq_s16` for the 5-tap sliding-window neighbors, eliminating
+/// the scatter loads (`8×ldrh`) used by the vertical 8-rows-at-a-time path.
+///
+/// # Even pass (lifting)
+/// For each chunk of 8 even positions (`chunk*16 .. chunk*16+15`):
+/// ```text
+///   vld2q_s16(chunk*16)     → curr_even[0..8], curr_odd[0..8]
+///   vld2q_s16((chunk+1)*16) → next_even (for n3)
+///   p1 = vextq_s16(prev_odd, curr_odd, 7)
+///   n1 = curr_odd
+///   p3 = vextq_s16(prev_odd, curr_odd, 6)
+///   n3 = vextq_s16(curr_odd, next_odd, 1)
+/// ```
+///
+/// # Odd pass (prediction)
+/// For each chunk of 8 inner odd positions at `3+chunk*16, 5+..., 17+chunk*16`:
+/// ```text
+///   pair1 = vld2q_s16(chunk*16)     → p3=.0, odds_lo=.1
+///   pair2 = vld2q_s16((chunk+1)*16) → next_even=.0, odds_hi=.1
+///   curr_odds = vextq_s16(odds_lo, odds_hi, 1)
+///   p1 = vextq_s16(p3, next_even, 1)
+///   n1 = vextq_s16(p3, next_even, 2)
+///   n3 = vextq_s16(p3, next_even, 3)
+/// ```
+///
+/// # Safety
+/// `data[row_off .. row_off+width]` must be valid. `width >= 1`.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, width: usize) {
+    use core::arch::aarch64::*;
+
+    let kmax = width - 1;
+    let border = kmax.saturating_sub(3);
+    let ptr = data.as_mut_ptr().add(row_off);
+
+    // Number of NEON even chunks: need next chunk fully in bounds for n3.
+    // Condition: (chunk+1)*16+15 < width  →  chunk < (width-31)/16.
+    let even_chunks = if width >= 32 { (width - 31) / 16 } else { 0 };
+
+    // ── Even pass (lifting) ────────────────────────────────────────────────────
+
+    let mut prev_odd = vdupq_n_s16(0i16);
+
+    if even_chunks > 0 {
+        let mut curr_pair = vld2q_s16(ptr as *const i16);
+
+        for chunk in 0..even_chunks {
+            let next_pair = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+            let curr_even = curr_pair.0;
+            let curr_odd = curr_pair.1;
+            let next_odd = next_pair.1;
+
+            let p1 = vextq_s16::<7>(prev_odd, curr_odd);
+            let n1 = curr_odd;
+            let p3 = vextq_s16::<6>(prev_odd, curr_odd);
+            let n3 = vextq_s16::<1>(curr_odd, next_odd);
+
+            // cur -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)
+            macro_rules! lift {
+                ($ce:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                    let a = vaddq_s32($p1, $n1);
+                    let c = vaddq_s32($p3, $n3);
+                    let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                    let delta =
+                        vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(16i32)), c));
+                    vsubq_s32($ce, delta)
+                }};
+            }
+
+            let new_lo = lift!(
+                vmovl_s16(vget_low_s16(curr_even)),
+                vmovl_s16(vget_low_s16(p1)),
+                vmovl_s16(vget_low_s16(n1)),
+                vmovl_s16(vget_low_s16(p3)),
+                vmovl_s16(vget_low_s16(n3))
+            );
+            let new_hi = lift!(
+                vmovl_high_s16(curr_even),
+                vmovl_high_s16(p1),
+                vmovl_high_s16(n1),
+                vmovl_high_s16(p3),
+                vmovl_high_s16(n3)
+            );
+            let new_evens = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+            vst2q_s16(ptr.add(chunk * 16), int16x8x2_t(new_evens, curr_odd));
+
+            prev_odd = curr_odd;
+            curr_pair = next_pair;
+        }
+    }
+
+    // Scalar even tail: k = even_chunks*16, +2, ... <= kmax.
+    // State just before the first advance: prev1=prev_odd[6], next1=prev_odd[7], next3=data[k+1].
+    {
+        let k_start = even_chunks * 16;
+        let mut prev1 = if even_chunks > 0 {
+            vgetq_lane_s16::<6>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next1 = if even_chunks > 0 {
+            vgetq_lane_s16::<7>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next3 = if k_start < kmax {
+            *data.get_unchecked(row_off + k_start + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_start;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let a = prev1 + next1;
+            let c = prev3 + next3;
+            let idx = row_off + k;
+            *data.get_unchecked_mut(idx) =
+                (*data.get_unchecked(idx) as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+            k += 2;
+        }
+    }
+
+    // ── Odd pass (prediction) ──────────────────────────────────────────────────
+
+    if kmax < 1 {
+        return;
+    }
+
+    // k=1: always predict_avg (or +=prev if k==kmax)
+    {
+        let p1 = *data.get_unchecked(row_off) as i32;
+        let idx1 = row_off + 1;
+        if 1 < kmax {
+            let n1 = *data.get_unchecked(row_off + 2) as i32;
+            *data.get_unchecked_mut(idx1) =
+                (*data.get_unchecked(idx1) as i32 + ((p1 + n1 + 1) >> 1)) as i16;
+        } else {
+            *data.get_unchecked_mut(idx1) = (*data.get_unchecked(idx1) as i32 + p1) as i16;
+        }
+    }
+
+    // NEON inner odd chunks: predict_inner for k=3,5,...,17+chunk*16.
+    // Safety: need (chunk+1)*16+15 < width AND 17+chunk*16 <= border (= kmax-3).
+    // Combined: chunk < (width-31)/16 (same as even_chunks).
+    // Inner check: 17+chunk*16 <= kmax-3  →  chunk <= (kmax-20)/16.
+    let odd_chunks = if kmax >= 20 {
+        even_chunks.min((kmax - 20) / 16 + 1)
+    } else {
+        0
+    };
+
+    for chunk in 0..odd_chunks {
+        // pair1: evens[chunk*8..+7] in .0, odds[chunk*8..+7] in .1
+        let pair1 = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        // pair2: evens[(chunk+1)*8..+7] in .0, odds[(chunk+1)*8..+7] in .1
+        let pair2 = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+
+        // 8 inner odds at physical positions 3+chunk*16, 5+..., 17+chunk*16
+        let curr_odds = vextq_s16::<1>(pair1.1, pair2.1);
+
+        // Even neighbors for predict_inner:
+        // p3[i] = even at k_odd-3 = chunk*16+2i → pair1.0[i]
+        // p1[i] = even at k_odd-1 = chunk*16+2i+2 → vextq(pair1.0, pair2.0, 1)[i]
+        // n1[i] = even at k_odd+1 = chunk*16+2i+4 → vextq(pair1.0, pair2.0, 2)[i]
+        // n3[i] = even at k_odd+3 = chunk*16+2i+6 → vextq(pair1.0, pair2.0, 3)[i]
+        let p3_e = pair1.0;
+        let p1_e = vextq_s16::<1>(pair1.0, pair2.0); // also = unchanged evens for store
+        let n1_e = vextq_s16::<2>(pair1.0, pair2.0);
+        let n3_e = vextq_s16::<3>(pair1.0, pair2.0);
+
+        // cur += ((9*(p1+n1) - (p3+n3) + 8) >> 4)
+        macro_rules! predict {
+            ($co:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<4>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(8i32)), c));
+                vaddq_s32($co, delta)
+            }};
+        }
+
+        let new_lo = predict!(
+            vmovl_s16(vget_low_s16(curr_odds)),
+            vmovl_s16(vget_low_s16(p1_e)),
+            vmovl_s16(vget_low_s16(n1_e)),
+            vmovl_s16(vget_low_s16(p3_e)),
+            vmovl_s16(vget_low_s16(n3_e))
+        );
+        let new_hi = predict!(
+            vmovl_high_s16(curr_odds),
+            vmovl_high_s16(p1_e),
+            vmovl_high_s16(n1_e),
+            vmovl_high_s16(p3_e),
+            vmovl_high_s16(n3_e)
+        );
+        let new_odds = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        // Store: evens at chunk*16+2,+4,...,+16 unchanged (= p1_e), odds updated.
+        vst2q_s16(ptr.add(chunk * 16 + 2), int16x8x2_t(p1_e, new_odds));
+    }
+
+    // Scalar odd tail: k = 3+odd_chunks*16, ..., kmax (inner then boundary).
+    // State before the advance at k_scalar: prev1=data[k-3], next1=data[k-1], next3=data[k+1].
+    if kmax >= 3 {
+        let k_scalar = 3 + odd_chunks * 16;
+        let mut prev1 = *data.get_unchecked(row_off + k_scalar - 3) as i32;
+        let mut next1 = *data.get_unchecked(row_off + k_scalar - 1) as i32;
+        let mut next3 = if k_scalar < kmax {
+            *data.get_unchecked(row_off + k_scalar + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_scalar;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let idx = row_off + k;
+            if k <= border {
+                let a = prev1 + next1;
+                let c = prev3 + next3;
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 + (((a << 3) + a - c + 8) >> 4)) as i16;
+            } else if k < kmax {
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
+            } else {
+                *data.get_unchecked_mut(idx) = (*data.get_unchecked(idx) as i32 + prev1) as i16;
+            }
+            k += 2;
+        }
+    }
+}
+
 /// Apply the row-direction wavelet pass for one resolution level.
 ///
-/// When `use_simd` is `true` and `s == 1` (`sd == 0`), the first
-/// `height / 8 * 8` rows are processed 8 at a time using `i32x8` SIMD.
-/// The remaining rows (and all rows when `s > 1` or `use_simd` is false) use
-/// the scalar path.
+/// When `use_simd` is `true` and `s == 1` (`sd == 0`), on AArch64 the
+/// horizontal NEON path (`row_pass_neon_s1_row`) is used for each row,
+/// processing 8 even/odd positions at a time with `vld2q_s16` instead of
+/// scatter loads. For `s > 1` and non-AArch64, the vertical 8-rows-at-a-time
+/// `i32x8` path is used. The remaining rows (and all rows when `use_simd` is
+/// false) use the scalar path.
 ///
 /// `s` — step between active samples (power of two); `sd = log2(s)`.
 pub(crate) fn row_pass_inner(
@@ -1079,6 +1333,19 @@ pub(crate) fn row_pass_inner(
     sd: usize,
     use_simd: bool,
 ) {
+    // AArch64 horizontal NEON path: at s=1, process each row using vld2q_s16
+    // (sequential deinterleave) instead of scatter loads across 8 rows.
+    #[cfg(target_arch = "aarch64")]
+    if use_simd && s == 1 {
+        for row in (0..height).step_by(s) {
+            #[allow(unsafe_code)]
+            unsafe {
+                row_pass_neon_s1_row(data, row * stride, width);
+            }
+        }
+        return;
+    }
+
     let kmax = (width - 1) >> sd;
     let border = kmax.saturating_sub(3);
 

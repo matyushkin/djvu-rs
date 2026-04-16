@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after row_pass get_unchecked)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after horizontal row-pass NEON)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **9.98 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.68 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **656 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **9.47 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.47 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **619 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.13 ms** | — |
@@ -73,6 +73,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | Extend column-pass SIMD from `s=1` to `s≤4`: `vld2q_s16`/`vld4q_s16` gather for s=2/4 loads, scatter `str h` for stores (s=2,4 can't use vst2/vst4 without extra read-back load) | sub1 −6.1% (12.84→12.06 ms); sub2 −3% (3.35→3.25 ms); sub4 −3.4% (821→793 µs) — NEON deinterleave reduces scalar i16-to-i32 widening overhead at coarser levels; scatter stores avoid extra vld2q reload that tripled memory traffic in initial vst2q approach |
 | 2026-04 | IW44 | NEON-vectorize `ycbcr_row_to_rgba`: explicit `vld1q_s32`×6 + SIMD arithmetic + `vst4_u8` replaces LLVM-generated code that emitted 80+ bounds-check branches per 8 pixels | sub1 −7.3% (12.06→11.51 ms); sub2 −8.3% (3.25→2.98 ms); sub4 −7.7% (793→733 µs) — profiling (samply, 6522 samples) showed ycbcr_row_to_rgba at 12.5% self-time; assembly revealed `memset_pattern16` init + massive cmp/b.hs forest from `wide::i32x8::from([scalar...])` constructors; `vst4_u8` writes 32 interleaved RGBA bytes in one instruction vs 32 individual strb |
 | 2026-04 | IW44 | `get_unchecked` in `load_rows8`/`store_rows8` (row-pass scatter/gather) | sub1 −13.3% (11.51→9.98 ms); sub2 −10% (2.98→2.68 ms); sub4 −10.5% (733→656 µs) — assembly showed 5× `cmp+b.hs` per load cluster + `fmov+mov.s×7` scalar-to-vector; removing bounds checks let LLVM eliminate conditional branches and improve instruction scheduling across the scatter loop |
+| 2026-04 | IW44 | Horizontal row-pass NEON (s=1): `row_pass_neon_s1_row` replaces 8-rows-at-a-time scatter with `vld2q_s16` + `vextq_s16` sliding window per row | sub1 −5.1% (9.98→9.47 ms); sub2 −7.8% (2.68→2.47 ms); sub4 −5.6% (656→619 µs) — eliminates `8×ldrh + 7×fmov/mov.s` scatter per column position; even pass: 3 loads (`vld2q_s16` ×2 + `vld2q_s16` ahead) + 4 `vextq_s16` for all neighbors of 8 evens; odd pass: 2 loads + 4 `vextq_s16`; scalar tail handles boundary; `vst2q_s16` reinterleaves updated even/odd back in one store |
 
 ### ✗ Reverted
 
