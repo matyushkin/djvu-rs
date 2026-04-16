@@ -792,8 +792,13 @@ impl PlaneDecoder {
             let compact_w = self.width.div_ceil(sub);
             let compact_h = self.height.div_ceil(sub);
 
+            // Safety: ZIGZAG_ROW[i]/sub × ZIGZAG_COL[i]/sub for i in 0..coeff_limit
+            // is a bijection over [0..sub_block) × [0..sub_block) (bits 8/9 of i are
+            // 0 → both zigzag values are even; dividing by sub tiles all sub_block²
+            // positions per block → every element is written before the wavelet reads).
+            #[allow(unsafe_code)]
             let mut plane = FlatPlane {
-                data: vec![0i16; compact_stride * compact_rows],
+                data: unsafe { uninit_i16_vec(compact_stride * compact_rows) },
                 stride: compact_stride,
             };
 
@@ -825,8 +830,12 @@ impl PlaneDecoder {
         let full_width = self.width.div_ceil(32) * 32;
         let full_height = self.height.div_ceil(32) * 32;
         let block_rows = self.height.div_ceil(32);
+        // Safety: ZIGZAG_ROW/COL for i in 0..1024 is a bijection over [0..32)×[0..32)
+        // (odd-indexed bits → row, even-indexed bits → col, non-overlapping). The
+        // scatter below writes every element before the wavelet reads any of them.
+        #[allow(unsafe_code)]
         let mut plane = FlatPlane {
-            data: vec![0i16; full_width * full_height],
+            data: unsafe { uninit_i16_vec(full_width * full_height) },
             stride: full_width,
         };
 
@@ -850,6 +859,24 @@ impl PlaneDecoder {
 }
 
 // ---- Flat plane helper -------------------------------------------------------
+
+/// Allocate `n` uninitialized `i16` elements.
+///
+/// Uses `Vec<MaybeUninit<i16>>` (the clippy-blessed pattern) and reinterprets
+/// as `Vec<i16>`.
+///
+/// # Safety
+/// Caller must write every element before reading it.
+#[allow(unsafe_code)]
+unsafe fn uninit_i16_vec(n: usize) -> Vec<i16> {
+    use core::mem::MaybeUninit;
+    let mut v: Vec<MaybeUninit<i16>> = Vec::with_capacity(n);
+    // Safety: MaybeUninit<i16> requires no initialization; len will equal capacity.
+    unsafe { v.set_len(n) };
+    let mut md = core::mem::ManuallyDrop::new(v);
+    // Safety: MaybeUninit<i16> and i16 have identical layout; capacity unchanged.
+    unsafe { Vec::from_raw_parts(md.as_mut_ptr().cast::<i16>(), md.len(), md.capacity()) }
+}
 
 struct FlatPlane {
     data: Vec<i16>,
