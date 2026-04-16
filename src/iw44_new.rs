@@ -337,18 +337,20 @@ unsafe fn ycbcr_neon_raw(
     w: usize,
 ) {
     use core::arch::aarch64::*;
-    // normalize clamp bounds at i16 resolution
+    // After normalize+clamp all values ∈ [-128, 127].  The YCbCr arithmetic
+    // intermediates all fit in i16 (proof: y128∈[0,255], t2∈[-192,190],
+    // t3∈[-31,287], r16∈[-192,445], g16∈[-126,383], b16∈[-287,541]).
+    // vqmovun_s16 saturates signed i16 → unsigned u8, clamping to [0,255]
+    // in one instruction — no separate min/max clamp ops needed.
     let n_min = vdupq_n_s16(-128);
     let n_max = vdupq_n_s16(127);
-    let c128 = vdupq_n_s32(128);
-    let c0 = vdupq_n_s32(0);
-    let c255 = vdupq_n_s32(255);
+    let c128 = vdupq_n_s16(128);
     let alpha = vdup_n_u8(255);
 
     let full8 = w / 8;
     for i in 0..full8 {
         let off = i * 8;
-        // Load + normalize (rounded right-shift by 6) + clamp to [-128,127] at i16
+        // Load + normalize (rounded right-shift by 6) + clamp to [-128, 127] at i16
         let yc = vmaxq_s16(
             vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(yp.add(off))), n_max),
             n_min,
@@ -361,39 +363,23 @@ unsafe fn ycbcr_neon_raw(
             vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(crp.add(off))), n_max),
             n_min,
         );
-        // Widen to i32
-        let y_lo = vmovl_s16(vget_low_s16(yc));
-        let y_hi = vmovl_high_s16(yc);
-        let cb_lo = vmovl_s16(vget_low_s16(cbc));
-        let cb_hi = vmovl_high_s16(cbc);
-        let cr_lo = vmovl_s16(vget_low_s16(crc));
-        let cr_hi = vmovl_high_s16(crc);
-        // YCbCr → RGB
-        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
-        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
-        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
-        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
-        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
-        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
-        let g_lo = vminq_s32(
-            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
-            c255,
-        );
-        let g_hi = vminq_s32(
-            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
-            c255,
-        );
-        let b_lo = vminq_s32(
-            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
-            c255,
-        );
-        let b_hi = vminq_s32(
-            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
-            c255,
-        );
-        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
-        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
-        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+        // All arithmetic stays at i16 — no widening to i32 needed.
+        // y128 = y + 128, range [0, 255]
+        let y128 = vaddq_s16(yc, c128);
+        // t2 = cr + (cr >> 1) = 1.5·cr, range [-192, 190]
+        let t2 = vaddq_s16(crc, vshrq_n_s16::<1>(crc));
+        // t3 = y128 - (cb >> 2), range [-31, 287]
+        let t3 = vsubq_s16(y128, vshrq_n_s16::<2>(cbc));
+        // R = y128 + t2, range [-192, 445]
+        let r16 = vaddq_s16(y128, t2);
+        // G = t3 - (t2 >> 1), range [-126, 383]
+        let g16 = vsubq_s16(t3, vshrq_n_s16::<1>(t2));
+        // B = t3 + 2·cb, range [-287, 541]
+        let b16 = vaddq_s16(t3, vshlq_n_s16::<1>(cbc));
+        // Saturating narrow signed i16 → unsigned u8 (clamps to [0, 255])
+        let r8 = vqmovun_s16(r16);
+        let g8 = vqmovun_s16(g16);
+        let b8 = vqmovun_s16(b16);
         vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
     }
     // Scalar tail
@@ -426,11 +412,10 @@ unsafe fn ycbcr_neon_raw_half(
     w: usize,
 ) {
     use core::arch::aarch64::*;
+    // Same i16 arithmetic as ycbcr_neon_raw — all intermediates fit in i16.
     let n_min = vdupq_n_s16(-128);
     let n_max = vdupq_n_s16(127);
-    let c128 = vdupq_n_s32(128);
-    let c0 = vdupq_n_s32(0);
-    let c255 = vdupq_n_s32(255);
+    let c128 = vdupq_n_s16(128);
     let alpha = vdup_n_u8(255);
 
     let full8 = w / 8;
@@ -461,39 +446,16 @@ unsafe fn ycbcr_neon_raw_half(
         // Upsample: interleave low 4 lanes with themselves → [a,a,b,b,c,c,d,d]
         let cbc = vzip1q_s16(cb4, cb4);
         let crc = vzip1q_s16(cr4, cr4);
-        // Widen to i32
-        let y_lo = vmovl_s16(vget_low_s16(yc));
-        let y_hi = vmovl_high_s16(yc);
-        let cb_lo = vmovl_s16(vget_low_s16(cbc));
-        let cb_hi = vmovl_high_s16(cbc);
-        let cr_lo = vmovl_s16(vget_low_s16(crc));
-        let cr_hi = vmovl_high_s16(crc);
-        // YCbCr → RGB
-        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
-        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
-        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
-        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
-        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
-        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
-        let g_lo = vminq_s32(
-            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
-            c255,
-        );
-        let g_hi = vminq_s32(
-            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
-            c255,
-        );
-        let b_lo = vminq_s32(
-            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
-            c255,
-        );
-        let b_hi = vminq_s32(
-            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
-            c255,
-        );
-        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
-        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
-        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+        // All arithmetic at i16 level (same ranges as non-half path after upsample)
+        let y128 = vaddq_s16(yc, c128);
+        let t2 = vaddq_s16(crc, vshrq_n_s16::<1>(crc));
+        let t3 = vsubq_s16(y128, vshrq_n_s16::<2>(cbc));
+        let r16 = vaddq_s16(y128, t2);
+        let g16 = vsubq_s16(t3, vshrq_n_s16::<1>(t2));
+        let b16 = vaddq_s16(t3, vshlq_n_s16::<1>(cbc));
+        let r8 = vqmovun_s16(r16);
+        let g8 = vqmovun_s16(g16);
+        let b8 = vqmovun_s16(b16);
         vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
     }
     // Scalar tail
