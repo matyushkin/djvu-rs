@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after fused normalize+YCbCr)
+## Baseline metrics (Apple M1 Max, 2026-04-17, after i16 YCbCr arithmetic)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **6.40 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.51 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **395 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **6.10 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.45 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **370 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.13 ms** | — |
@@ -80,7 +80,8 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | Row-major scatter in `reconstruct` compact path via `ZIGZAG_INV_SUB2/4/8` tables | sub2 −7.2% (2.23→2.12 ms, p=0.00); sub4 −6.5% (560→540 µs, p=0.00); sub1 flat — same write-combine benefit as full-res path but larger relative gain because compact blocks are smaller (16×16/8×8/4×4): fewer open cache lines during scatter means greater contention relief; `ZIGZAG_INV_SUBn` tables use u8 (max index 255) totaling 336 bytes (fits in L1 data cache) |
 | 2026-04 | IW44 | `get_unchecked` in compact scatter (after row-major rewrite; sequential writes now enable vectorization) | sub2 −6.6% (2.12→1.98 ms, p=0.00); sub4 −5.4% (540→511 µs, p=0.00); sub1 flat — profile showed 9.3% self-time in `panic_fmt`/`fmt::Debug` (bounds-check speculation overhead) from compact scatter; with row-major writes, LLVM can vectorize the sequential store side once bounds checks are removed; previous attempt (zigzag scatter, non-sequential writes) was +4.4% worse — write-side non-sequential was the blocker then |
 | 2026-04 | IW44 | `const` rounding constants for `lifting_even`/`predict_inner`/`predict_avg` (replace `i32x8::splat(N)` with `const C: i32x8 = unsafe { transmute([N; 8]) }`) | sub1 −22% (8.20→6.40 ms); sub2 −20% (1.98→1.58 ms); sub4 −22% (511→399 µs) — `i32x8::splat(N)` compiled to `bl memcpy` (PLT stub, 32-byte `.rodata` copy) inside the hot k-loop for each of lifting_even/predict_inner/predict_avg; LLVM treated `splat()` as non-pure and didn't hoist or inline to `movi.4s`; `const` transmute produces a static rodata entry that LLVM loads with `ldp q`/`ldr q` (1-2 instructions) and hoists out of the loop; samply profile showed ~20% of samples in Debug/panic infra from the memcpy overhead |
-| 2026-04 | IW44 | fused normalize+YCbCr: `ycbcr_neon_raw`/`ycbcr_neon_raw_half` read i16 plane data directly, inline `vrshrq_n_s16` normalization, eliminate 3 intermediate i32 buffers and separate normalize loops | sub2 −6.2% (1.58→1.51 ms, p=0.00); sub4 −0.9% (399→395 µs, p=0.03); sub1 flat (+1.2% noise, p=0.08) — sub2/sub4 use `ycbcr_neon_raw` (non-half, straightforward); sub1 uses `ycbcr_neon_raw_half` (colorbook.djvu has `chroma_half=true`): `vzip1q_s16` upsample cost offsets normalize savings, net flat; parallel path also eliminates 3 `vec![0i32; pw]` allocations per row; `vrshrq_n_s16` replaces LLVM's 4-wide `sshr.4s + smax.4s + smin.4s` with 8-wide i16 rounding-shift + clamp |
+| 2026-04 | IW44 | fused normalize+YCbCr: `ycbcr_neon_raw`/`ycbcr_neon_raw_half` read i16 plane data directly, inline `vrshrq_n_s16` normalization, eliminate 3 intermediate i32 buffers and separate normalize loops | sub2 −6.2% (1.58→1.51 ms, p=0.00); sub4 −0.9% (399→395 µs, p=0.03); sub1 flat (+1.2% noise, p=0.08) — colorbook.djvu has `chroma_half=false` (minor=1): sub1 uses `ycbcr_neon_raw` (non-half) but `ycbcr_neon_raw_half` is never reached by this file; parallel path also eliminates 3 `vec![0i32; pw]` allocations per row |
+| 2026-04 | IW44 | i16 YCbCr arithmetic in `ycbcr_neon_raw`/`ycbcr_neon_raw_half`: after normalize+clamp all intermediates fit in i16 (r16∈[-192,445], g16∈[-126,383], b16∈[-287,541]); `vqmovun_s16` saturates i16→u8 in one op, eliminating 6 `vmovl` widenings + 12 i32 arithmetic ops + 12 i32 min/max ops + 9 narrows per 8 pixels (42→13 ops for arithmetic+clamp+narrow) | sub1 −5.0% (6.40→6.10 ms, p=0.00); sub2 −4.6% (1.51→1.45 ms, p=0.00); sub4 −8.2% (395→370 µs, p=0.00) — profiling (samply, 7087 samples) showed `ycbcr_neon_raw` at 8.8% leaf time; larger sub4 gain because YCbCr fraction grows as wavelet work shrinks at coarser levels |
 
 ### ✗ Reverted
 
