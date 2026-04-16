@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after row-major scatter via ZIGZAG_INV)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after compact row-major scatter via ZIGZAG_INV_SUBn)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.20 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.23 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **560 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.16 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.12 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **540 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.13 ms** | — |
@@ -77,6 +77,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | `get_unchecked` in `load8_i32`/`store8_i32` (column-pass st0/st1/st2 temporary arrays) | sub1 −8.4% (9.47→8.67 ms); sub2 −4.8% (2.47→2.35 ms); sub4 −7.8% (619→569 µs) — profile showed `fmt::Debug`+`panic_fmt` at 6.7% self-time; identical pattern to `load_rows8` bounds-check overhead; `ci+7 < simd_cols ≤ num_cols` invariant guarantees safety at all call sites |
 | 2026-04 | IW44 | Skip zero-init in `reconstruct` plane allocation (uninit Vec + set_len) | sub1 −3.7% (8.67→8.34 ms); sub2 −3.4% (2.35→2.23 ms); sub4 −2.2% (569→560 µs) — ZIGZAG_ROW/COL is a bijection: i∈[0,1024) maps to every position in a 32×32 block exactly once; for compact path, i∈[0,coeff_limit) maps to every position in sub_block² exactly once; so vec![0i16;n] is pure redundant memset (~3–9 MB/to_rgb() across 3 planes); replaced with Vec::with_capacity + set_len |
 | 2026-04 | IW44 | Row-major scatter in `reconstruct` full-res path via `ZIGZAG_INV` table | sub1 −2.0% (8.34→8.20 ms); sub2/sub4 unaffected (compact path unchanged) — zigzag order spreads writes across all 32 rows of a block simultaneously, preventing write-combine buffer coalescing; row-major order fills 1 cache line (32 i16 = 64 bytes) per row before advancing; reads from 2 KB `block` array remain in L1 |
+| 2026-04 | IW44 | Row-major scatter in `reconstruct` compact path via `ZIGZAG_INV_SUB2/4/8` tables | sub2 −7.2% (2.23→2.12 ms, p=0.00); sub4 −6.5% (560→540 µs, p=0.00); sub1 flat — same write-combine benefit as full-res path but larger relative gain because compact blocks are smaller (16×16/8×8/4×4): fewer open cache lines during scatter means greater contention relief; `ZIGZAG_INV_SUBn` tables use u8 (max index 255) totaling 336 bytes (fits in L1 data cache) |
 
 ### ✗ Reverted
 
