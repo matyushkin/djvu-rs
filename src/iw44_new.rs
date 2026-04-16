@@ -1923,24 +1923,22 @@ fn inverse_wavelet_transform_from(
                 }
             }
 
+            // Split even pass into: main (k+3 <= kmax → n3 always in-bounds) and
+            // tail (k+3 > kmax → n3 = 0), mirroring the odd pass structure.
+            // This hoists the `has_n3` branch out of the ci inner loop so that
+            // the hot path (≥97% of k-iterations) has no runtime conditional.
             let mut k = 0usize;
-            while k <= kmax {
+            // Main: n3 always available
+            while k + 3 <= kmax {
                 let k_off = (k << sd) * stride;
-                let has_n3 = k + 3 <= kmax;
-                let n3_off = if has_n3 { ((k + 3) << sd) * stride } else { 0 };
-
+                let n3_off = ((k + 3) << sd) * stride;
                 if use_simd {
-                    let zero8 = i32x8::splat(0);
                     let mut ci = 0usize;
                     while ci < simd_cols {
                         let vp3 = load8_i32(&st0, ci);
                         let vp1 = load8_i32(&st1, ci);
                         let vn1 = load8_i32(&st2, ci);
-                        let vn3 = if has_n3 {
-                            load8s(data, n3_off + ci * s, s)
-                        } else {
-                            zero8
-                        };
+                        let vn3 = load8s(data, n3_off + ci * s, s);
                         let cur = load8s(data, k_off + ci * s, s);
                         store8s(
                             data,
@@ -1953,20 +1951,15 @@ fn inverse_wavelet_transform_from(
                         store8_i32(&mut st2, ci, vn3);
                         ci += 8;
                     }
-                    // scalar tail (num_cols not a multiple of 8)
                     while ci < num_cols {
                         let p3 = st0[ci];
                         let p1 = st1[ci];
                         let n1 = st2[ci];
-                        let n3 = if has_n3 {
-                            data[n3_off + ci * s] as i32
-                        } else {
-                            0
-                        };
+                        let n3 = data[n3_off + ci * s] as i32;
                         let a = p1 + n1;
-                        let c = p3 + n3;
                         let idx = k_off + ci * s;
-                        data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+                        data[idx] =
+                            (data[idx] as i32 - (((a << 3) + a - (p3 + n3) + 16) >> 5)) as i16;
                         st0[ci] = p1;
                         st1[ci] = n1;
                         st2[ci] = n3;
@@ -1977,16 +1970,63 @@ fn inverse_wavelet_transform_from(
                         let p3 = st0[ci];
                         let p1 = st1[ci];
                         let n1 = st2[ci];
-                        let n3 = if has_n3 { data[n3_off + col] as i32 } else { 0 };
-
+                        let n3 = data[n3_off + col] as i32;
                         let a = p1 + n1;
                         let c = p3 + n3;
                         let idx = k_off + col;
                         data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
-
                         st0[ci] = p1;
                         st1[ci] = n1;
                         st2[ci] = n3;
+                    }
+                }
+                k += 2;
+            }
+            // Tail: k+3 > kmax → n3 = 0
+            while k <= kmax {
+                let k_off = (k << sd) * stride;
+                if use_simd {
+                    let zero8 = i32x8::splat(0);
+                    let mut ci = 0usize;
+                    while ci < simd_cols {
+                        let vp3 = load8_i32(&st0, ci);
+                        let vp1 = load8_i32(&st1, ci);
+                        let vn1 = load8_i32(&st2, ci);
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(
+                            data,
+                            k_off + ci * s,
+                            s,
+                            lifting_even(cur, vp1, vn1, vp3, zero8),
+                        );
+                        store8_i32(&mut st0, ci, vp1);
+                        store8_i32(&mut st1, ci, vn1);
+                        store8_i32(&mut st2, ci, zero8);
+                        ci += 8;
+                    }
+                    while ci < num_cols {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let a = p1 + n1;
+                        let idx = k_off + ci * s;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - p3 + 16) >> 5)) as i16;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = 0;
+                        ci += 1;
+                    }
+                } else {
+                    for (ci, col) in (0..width).step_by(s).enumerate() {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let a = p1 + n1;
+                        let idx = k_off + col;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - p3 + 16) >> 5)) as i16;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = 0;
                     }
                 }
                 k += 2;

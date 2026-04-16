@@ -101,6 +101,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | split `int16x8x2_t curr_pair` into `curr_even`/`curr_odd` in even-pass loop to eliminate "redundant" ld2.8h carry across iterations | sub1 −1.3% (p=0.00) but sub2 +2.1% (p=0.00) — net negative; the "redundant" ld2 is a sequential L1 hit (~free on M1); restructuring hurts LLVM's instr scheduling for sub2; "carry-in-registers" only wins for very long row bodies, not here |
 | 2026-04 | IW44 | replace `vmovl_s16×2 + vaddq_s32` with `vaddl_s16` in even-pass lift (saves 8 instr/chunk) | sub1 +1.7% (p=0.00) — `saddl` has 2/cycle throughput on M1 vs 4/cycle for `sxtl`; using a lower-throughput instruction to save instruction count is a net loss; M1's even-pass lift is throughput-bound on `add.4s`/`sxtl`-class instructions (4/cycle units) |
 | 2026-04 | IW44 | `srshr5_i32x8`/`srshr4_i32x8` wrappers using `vrshrq_n_s32` to fold bias into rounding shift (save 2 `add.4s` per even/odd lifting iteration) | sub1 +1.2%, sub2 −0.9%, sub4 −0.6% — all within noise (Criterion p=0.00 but tiny magnitude); assembly confirms `srshr.4s #5` for `lifting_even` but `srshr.4s #4` for `predict_inner` is absent (LLVM absorbs it into narrowing path); ~2 M fewer instructions but M1's column pass is not instruction-count-bound at this level; complex unsafe transmute code not justified by zero measurable gain |
+| 2026-04 | IW44 | `row_pass_neon_s2_all`: gather active (even physical) columns into temp buffer via `vld2q_s16`, run `row_pass_neon_s1_row` on contiguous buffer, scatter back with 8 × `vst1_lane_s16` per chunk — intended to reduce L1 pressure from 8-rows-at-a-time i32x8 path (36 KB stride span vs 6 KB) | sub2 +8.4%, sub4 +8.8%, sub1 +3.8% — all regressions; `vst1_lane_s16` scatter stores each write a single 2-byte lane to a non-sequential address (8 independent str h per chunk); this produces 8 distinct cache-line writes per 16-element group vs 1 vst2q write in the i32x8 path; M1's prefetcher handles the strided 36 KB working set efficiently; Vec allocation per to_rgb() call also adds heap overhead |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
@@ -115,7 +116,7 @@ Composite pipeline (src/djvu_render.rs):
 | render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
 | IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | ✗ reverted — see log | ZP stream is a continuous encoding of all decisions; skipping any call desynchronises state |
-| IW44 | horizontal row-pass NEON for s=2: `vld2q_s16` → active+inactive; second `uzpq_s16` to get logical even/odd within active; apply same lifting formula; `vst2q_s16` | ~1-2% sub1 | complex; s=2 processes 1/4 of s=1 data; two-level deinterleave needed |
+| IW44 | horizontal row-pass NEON for s=2: gather/scatter via temp buffer | ✗ reverted — see log | `vst1_lane_s16` scatter produces 8 independent cache-line writes per chunk; worse than i32x8 path which M1 prefetcher handles fine |
 
 ---
 
