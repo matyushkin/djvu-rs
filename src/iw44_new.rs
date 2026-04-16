@@ -1141,28 +1141,36 @@ fn store_rows8(data: &mut [i16], offs: &[usize; 8], k: usize, v: i32x8) {
     }
 }
 
+// Compile-time rounding constants — avoids the `memcpy` call that
+// `i32x8::splat(N)` generates on AArch64 (LLVM doesn't hoist splat to movi.4s).
+// SAFETY: [i32; 8] and i32x8 have identical representations (8 × 4-byte i32,
+// 32-byte size); the transmute is value-preserving.
+#[allow(unsafe_code)]
+const C16: i32x8 = unsafe { core::mem::transmute([16i32; 8]) };
+#[allow(unsafe_code)]
+const C8: i32x8 = unsafe { core::mem::transmute([8i32; 8]) };
+#[allow(unsafe_code)]
+const C1: i32x8 = unsafe { core::mem::transmute([1i32; 8]) };
+
 /// Lifting filter: `data[idx] -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)`
 #[inline(always)]
 fn lifting_even(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
     let a = p1 + n1;
     let c = p3 + n3;
-    let c16 = i32x8::splat(16);
-    cur - (((a << 3) + a - c + c16) >> 5)
+    cur - (((a << 3) + a - c + C16) >> 5)
 }
 
 /// Prediction filter (inner): `data[idx] += ((9*(p1+n1) - (p3+n3) + 8) >> 4)`
 #[inline(always)]
 fn predict_inner(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
     let a = p1 + n1;
-    let c8 = i32x8::splat(8);
-    cur + (((a << 3) + a - (p3 + n3) + c8) >> 4)
+    cur + (((a << 3) + a - (p3 + n3) + C8) >> 4)
 }
 
 /// Prediction filter (boundary): `data[idx] += ((p + n + 1) >> 1)`
 #[inline(always)]
 fn predict_avg(cur: i32x8, p: i32x8, n: i32x8) -> i32x8 {
-    let c1 = i32x8::splat(1);
-    cur + ((p + n + c1) >> 1)
+    cur + ((p + n + C1) >> 1)
 }
 
 /// AArch64 NEON horizontal row pass for s=1.
@@ -1213,53 +1221,48 @@ unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, width: usize) {
 
     let mut prev_odd = vdupq_n_s16(0i16);
 
-    if even_chunks > 0 {
-        let mut curr_pair = vld2q_s16(ptr as *const i16);
+    for chunk in 0..even_chunks {
+        let curr_pair = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        let next_pair = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+        let curr_even = curr_pair.0;
+        let curr_odd = curr_pair.1;
+        let next_odd = next_pair.1;
 
-        for chunk in 0..even_chunks {
-            let next_pair = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
-            let curr_even = curr_pair.0;
-            let curr_odd = curr_pair.1;
-            let next_odd = next_pair.1;
+        let p1 = vextq_s16::<7>(prev_odd, curr_odd);
+        let n1 = curr_odd;
+        let p3 = vextq_s16::<6>(prev_odd, curr_odd);
+        let n3 = vextq_s16::<1>(curr_odd, next_odd);
 
-            let p1 = vextq_s16::<7>(prev_odd, curr_odd);
-            let n1 = curr_odd;
-            let p3 = vextq_s16::<6>(prev_odd, curr_odd);
-            let n3 = vextq_s16::<1>(curr_odd, next_odd);
-
-            // cur -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)
-            macro_rules! lift {
-                ($ce:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
-                    let a = vaddq_s32($p1, $n1);
-                    let c = vaddq_s32($p3, $n3);
-                    let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
-                    let delta =
-                        vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(16i32)), c));
-                    vsubq_s32($ce, delta)
-                }};
-            }
-
-            let new_lo = lift!(
-                vmovl_s16(vget_low_s16(curr_even)),
-                vmovl_s16(vget_low_s16(p1)),
-                vmovl_s16(vget_low_s16(n1)),
-                vmovl_s16(vget_low_s16(p3)),
-                vmovl_s16(vget_low_s16(n3))
-            );
-            let new_hi = lift!(
-                vmovl_high_s16(curr_even),
-                vmovl_high_s16(p1),
-                vmovl_high_s16(n1),
-                vmovl_high_s16(p3),
-                vmovl_high_s16(n3)
-            );
-            let new_evens = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
-
-            vst2q_s16(ptr.add(chunk * 16), int16x8x2_t(new_evens, curr_odd));
-
-            prev_odd = curr_odd;
-            curr_pair = next_pair;
+        // cur -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)
+        macro_rules! lift {
+            ($ce:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(16i32)), c));
+                vsubq_s32($ce, delta)
+            }};
         }
+
+        let new_lo = lift!(
+            vmovl_s16(vget_low_s16(curr_even)),
+            vmovl_s16(vget_low_s16(p1)),
+            vmovl_s16(vget_low_s16(n1)),
+            vmovl_s16(vget_low_s16(p3)),
+            vmovl_s16(vget_low_s16(n3))
+        );
+        let new_hi = lift!(
+            vmovl_high_s16(curr_even),
+            vmovl_high_s16(p1),
+            vmovl_high_s16(n1),
+            vmovl_high_s16(p3),
+            vmovl_high_s16(n3)
+        );
+        let new_evens = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        vst2q_s16(ptr.add(chunk * 16), int16x8x2_t(new_evens, curr_odd));
+
+        prev_odd = curr_odd;
     }
 
     // Scalar even tail: k = even_chunks*16, +2, ... <= kmax.
