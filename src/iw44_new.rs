@@ -996,32 +996,46 @@ fn store8_i32(slice: &mut [i32], off: usize, v: i32x8) {
 /// Gather one `i16` value from each of 8 consecutive rows at column index `k`.
 ///
 /// `offs[i]` is the start offset `row_i * stride` for row `i`.
+///
+/// # Safety
+/// Caller must ensure `offs[i] + k < data.len()` for all `i in 0..8`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn load_rows8(data: &[i16], offs: &[usize; 8], k: usize) -> i32x8 {
-    i32x8::from([
-        data[offs[0] + k] as i32,
-        data[offs[1] + k] as i32,
-        data[offs[2] + k] as i32,
-        data[offs[3] + k] as i32,
-        data[offs[4] + k] as i32,
-        data[offs[5] + k] as i32,
-        data[offs[6] + k] as i32,
-        data[offs[7] + k] as i32,
-    ])
+    // SAFETY: caller guarantees offs[i]+k is in bounds for all i.
+    unsafe {
+        i32x8::from([
+            *data.get_unchecked(offs[0] + k) as i32,
+            *data.get_unchecked(offs[1] + k) as i32,
+            *data.get_unchecked(offs[2] + k) as i32,
+            *data.get_unchecked(offs[3] + k) as i32,
+            *data.get_unchecked(offs[4] + k) as i32,
+            *data.get_unchecked(offs[5] + k) as i32,
+            *data.get_unchecked(offs[6] + k) as i32,
+            *data.get_unchecked(offs[7] + k) as i32,
+        ])
+    }
 }
 
 /// Scatter one value from `v` to each of 8 consecutive rows at column index `k`.
+///
+/// # Safety
+/// Caller must ensure `offs[i] + k < data.len()` for all `i in 0..8`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn store_rows8(data: &mut [i16], offs: &[usize; 8], k: usize, v: i32x8) {
     let a = v.to_array();
-    data[offs[0] + k] = a[0] as i16;
-    data[offs[1] + k] = a[1] as i16;
-    data[offs[2] + k] = a[2] as i16;
-    data[offs[3] + k] = a[3] as i16;
-    data[offs[4] + k] = a[4] as i16;
-    data[offs[5] + k] = a[5] as i16;
-    data[offs[6] + k] = a[6] as i16;
-    data[offs[7] + k] = a[7] as i16;
+    // SAFETY: caller guarantees offs[i]+k is in bounds for all i.
+    unsafe {
+        *data.get_unchecked_mut(offs[0] + k) = a[0] as i16;
+        *data.get_unchecked_mut(offs[1] + k) = a[1] as i16;
+        *data.get_unchecked_mut(offs[2] + k) = a[2] as i16;
+        *data.get_unchecked_mut(offs[3] + k) = a[3] as i16;
+        *data.get_unchecked_mut(offs[4] + k) = a[4] as i16;
+        *data.get_unchecked_mut(offs[5] + k) = a[5] as i16;
+        *data.get_unchecked_mut(offs[6] + k) = a[6] as i16;
+        *data.get_unchecked_mut(offs[7] + k) = a[7] as i16;
+    }
 }
 
 /// Lifting filter: `data[idx] -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)`
