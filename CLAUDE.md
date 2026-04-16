@@ -29,7 +29,7 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after load8s/store8s s=1 fast path)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after NEON encoder preliminary_flag_computation)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
@@ -41,7 +41,7 @@ Composite pipeline (src/djvu_render.rs):
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **342 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
-| `iw44_encode_color` | **2.11 ms** | — |
+| `iw44_encode_color` | **2.04 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
 | `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
@@ -84,6 +84,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | i16 YCbCr arithmetic in `ycbcr_neon_raw`/`ycbcr_neon_raw_half`: after normalize+clamp all intermediates fit in i16 (r16∈[-192,445], g16∈[-126,383], b16∈[-287,541]); `vqmovun_s16` saturates i16→u8 in one op, eliminating 6 `vmovl` widenings + 12 i32 arithmetic ops + 12 i32 min/max ops + 9 narrows per 8 pixels (42→13 ops for arithmetic+clamp+narrow) | sub1 −5.0% (6.40→6.10 ms, p=0.00); sub2 −4.6% (1.51→1.45 ms, p=0.00); sub4 −8.2% (395→370 µs, p=0.00) — profiling (samply, 7087 samples) showed `ycbcr_neon_raw` at 8.8% leaf time; larger sub4 gain because YCbCr fraction grows as wavelet work shrinks at coarser levels |
 | 2026-04 | IW44 | Hoist `has_n3` branch out of even-pass ci inner loop: split `while k <= kmax` into main loop (`while k+3 <= kmax`, no conditional) + tail loop (`while k <= kmax`, zero n3) | sub1/sub2/sub4 within noise — structurally cleaner but M1 branch predictor handles the original perfectly; no measurable effect |
 | 2026-04 | IW44 | `load8s`/`store8s` s=1 fast path: move `if s == 1` check to top with `core::ptr::read/write<[i16;8]>` for contiguous load/store, bypassing 5-branch `match s` dispatch chain inside `load8s_neon`/`store8s_neon` | sub1 −6.2% (5.80→5.46 ms, p=0.00); sub2 −11.4% (1.48→1.31 ms, p=0.00); sub4 −9.1% (376→342 µs, p=0.00) — assembly: s=1 hot path reduced from 5-branch `match`-dispatch to single `cmp+b.ne` before `ldp d18,d19+sshll×2`; each ci-iteration saves 4 dispatch branches × 3 calls (2 loads + 1 store) = 12 fewer branches; `ldp d,d` (2×64-bit) generates same memory traffic as `ldr q` (1×128-bit); sub2/sub4 gain larger because their wavelet planes are smaller and fit better in L1 after branch reduction |
+| 2026-04 | IW44 encoder | NEON-vectorize encoder's `preliminary_flag_computation` band≠0 and band-0 paths (i32 recon data): 4 × `vld1q_s32` + `vceqq_s32` + narrowing chain `vmovn_u32→vmovn_u16` + `veorq_u8`/`vandq_u8` + `vst1q_u8`; band-0 uses `vbslq_u8` blend to preserve ZERO entries | `iw44_encode_color` −5.3% (2.11→2.04 ms, p=0.00) — scalar loop not auto-vectorized by LLVM due to `bstatetmp |= ...` accumulation; i32 source requires 4 × `vld1q_s32` (vs decoder's 2 × `vld1q_s16`); ~25 NEON instructions replaces 48+ scalar ops per 16-element bucket |
 
 ### ✗ Reverted
 
@@ -100,10 +101,12 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | bucket-level early exit in `previously_active_coefficient_decoding_pass` (skip bucket if `bucketstate[boff] & ACTIVE == 0`) | corpus_color +1.5%, sub1 +1.1% — benchmark corpus files are dense (most buckets ACTIVE in later slices); branch overhead per bucket exceeds savings; only helps for very sparse images |
 | 2026-04 | IW44 | `get_unchecked` on zigzag scatter in `PlaneDecoder::reconstruct` (both compact and full-res paths) | compact path +4.4% sub4 (consistent, p=0.00); full-res path flat ±0% — scatter loop is memory-bound (writes to non-sequential addresses in 3.2 MB plane); cache-miss latency dominates; no benefit from removing bounds-check branches unlike `load8_i32` arithmetic loops |
 | 2026-04 | IW44 | `get_unchecked` on full-res scatter (after row-major rewrite) | sub1 +2.1% (p=0.00); sub2/sub4 flat — LLVM generates slightly worse instruction scheduling for full-res path without bounds checks; full-res scatter over 1 MB plane is still memory-latency-bound even with sequential writes; compact path benefits but full-res does not |
+| 2026-04 | IW44 encoder | local-copy ZP state in `previously_active_encoding_pass` (macro-based: outbit + zemit + encode_bit + encode_passthrough_iw44 inlined) | `iw44_encode_color` +1.8% (2.11→2.15 ms, p=0.00) — I-cache pressure from expanded macro body (7 encoder state fields + zemit/outbit chains) exceeds register-allocation gain; encoder slow paths (zemit → outbit → Vec::push) generate more code than decoder's renorm; breakeven never reached even though ≤64 ZP calls/block when fully ACTIVE |
 | 2026-04 | IW44 | split `int16x8x2_t curr_pair` into `curr_even`/`curr_odd` in even-pass loop to eliminate "redundant" ld2.8h carry across iterations | sub1 −1.3% (p=0.00) but sub2 +2.1% (p=0.00) — net negative; the "redundant" ld2 is a sequential L1 hit (~free on M1); restructuring hurts LLVM's instr scheduling for sub2; "carry-in-registers" only wins for very long row bodies, not here |
 | 2026-04 | IW44 | replace `vmovl_s16×2 + vaddq_s32` with `vaddl_s16` in even-pass lift (saves 8 instr/chunk) | sub1 +1.7% (p=0.00) — `saddl` has 2/cycle throughput on M1 vs 4/cycle for `sxtl`; using a lower-throughput instruction to save instruction count is a net loss; M1's even-pass lift is throughput-bound on `add.4s`/`sxtl`-class instructions (4/cycle units) |
 | 2026-04 | IW44 | `srshr5_i32x8`/`srshr4_i32x8` wrappers using `vrshrq_n_s32` to fold bias into rounding shift (save 2 `add.4s` per even/odd lifting iteration) | sub1 +1.2%, sub2 −0.9%, sub4 −0.6% — all within noise (Criterion p=0.00 but tiny magnitude); assembly confirms `srshr.4s #5` for `lifting_even` but `srshr.4s #4` for `predict_inner` is absent (LLVM absorbs it into narrowing path); ~2 M fewer instructions but M1's column pass is not instruction-count-bound at this level; complex unsafe transmute code not justified by zero measurable gain |
 | 2026-04 | IW44 | `row_pass_neon_s2_all`: gather active (even physical) columns into temp buffer via `vld2q_s16`, run `row_pass_neon_s1_row` on contiguous buffer, scatter back with 8 × `vst1_lane_s16` per chunk — intended to reduce L1 pressure from 8-rows-at-a-time i32x8 path (36 KB stride span vs 6 KB) | sub2 +8.4%, sub4 +8.8%, sub1 +3.8% — all regressions; `vst1_lane_s16` scatter stores each write a single 2-byte lane to a non-sequential address (8 independent str h per chunk); this produces 8 distinct cache-line writes per 16-element group vs 1 vst2q write in the i32x8 path; M1's prefetcher handles the strided 36 KB working set efficiently; Vec allocation per to_rgb() call also adds heap overhead |
+| 2026-04 | IW44 | `row_pass_neon_s2_row`: horizontal NEON row pass for s=2 using `vld4q_s16` to deinterleave active-even (.0) and active-odd (.2) from 32 consecutive physical i16s; even pass stored back with `vst4q_s16` (preserving inactive lanes); odd pass via 8 × `vst1_lane_s16` scatter stores at stride 4 | sub1 +4.6% (p=0.00), sub2 +2.7% (p=0.00), sub4 flat — regression; even pass with `vst4q` is clean, but odd pass scatter stores (8 × `str h` to non-sequential physical 6,10,...,34 within chunk) are the bottleneck; same scatter-store cost as `row_pass_neon_s2_all` kills the gain from better even-pass cache behaviour; M1 store buffer saturates on 8 independent partial-cache-line writes per 16 logical positions |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
@@ -118,7 +121,7 @@ Composite pipeline (src/djvu_render.rs):
 | render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
 | IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | ✗ reverted — see log | ZP stream is a continuous encoding of all decisions; skipping any call desynchronises state |
-| IW44 | horizontal row-pass NEON for s=2: gather/scatter via temp buffer | ✗ reverted — see log | `vst1_lane_s16` scatter produces 8 independent cache-line writes per chunk; worse than i32x8 path which M1 prefetcher handles fine |
+| IW44 | horizontal row-pass NEON for s=2 (any approach) | ✗ reverted × 2 — see log | both `row_pass_neon_s2_all` (temp-buffer) and `row_pass_neon_s2_row` (vld4q_s16 in-place) regress; fundamental bottleneck: odd-pass must scatter 8 values at stride 4 → 8 independent `str h` per chunk regardless of how evens are loaded; M1 store buffer saturates on partial cache-line writes; the existing i32x8 8-rows-at-a-time path with NEON load8s is already well-optimised for this stride pattern |
 
 ---
 

@@ -369,6 +369,101 @@ fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (i16, i16, i16) {
 //   - When encoding a previously-active coefficient: apply the same delta that
 //     the decoder will apply, choosing the bit that minimises |true - decoded|.
 
+// ---- NEON helpers for preliminary_flag_computation --------------------------
+
+/// NEON-vectorized band≠0 bucket flag update for the encoder.
+///
+/// Reads 16 i32 reconstruction values at `base`, writes 16 u8 flags (UNK or
+/// ACTIVE), and returns the bitwise-OR of all written flags.
+///
+/// Mirrors `prelim_flags_bucket_neon` in iw44_new but uses 4 × `vld1q_s32`
+/// (i32 input) instead of 2 × `vld1q_s16` (i16 input).
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_bucket_enc_neon(
+    recon: &[i32; 1024],
+    base: usize,
+    bucket: &mut [u8; 16],
+) -> u8 {
+    use core::arch::aarch64::*;
+    let ptr = recon.as_ptr().add(base);
+    let c0 = vld1q_s32(ptr);
+    let c1 = vld1q_s32(ptr.add(4));
+    let c2 = vld1q_s32(ptr.add(8));
+    let c3 = vld1q_s32(ptr.add(12));
+    // eq: 0xFFFFFFFF where coef == 0, 0x00000000 where coef != 0
+    let zero32 = vdupq_n_s32(0);
+    let eq0 = vceqq_s32(c0, zero32); // uint32x4_t
+    let eq1 = vceqq_s32(c1, zero32);
+    let eq2 = vceqq_s32(c2, zero32);
+    let eq3 = vceqq_s32(c3, zero32);
+    // Narrow u32x4 → u16x4 → u8x8 in two steps (low bytes: 0xFF or 0x00)
+    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1)); // uint16x8_t
+    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
+    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23)); // 0xFF where ==0
+    let is_nonzero = vmvnq_u8(is_zero); // 0xFF where !=0
+    // result = UNK(8) if zero, ACTIVE(2) if nonzero
+    // = UNK ^ ((UNK ^ ACTIVE) & is_nonzero) = 8 ^ (10 & is_nonzero)
+    let xv = vdupq_n_u8(10);
+    let uv = vdupq_n_u8(8);
+    let out = veorq_u8(uv, vandq_u8(xv, is_nonzero));
+    vst1q_u8(bucket.as_mut_ptr(), out);
+    // Horizontal OR of 16 lanes
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
+/// NEON-vectorized band-0 flag update for the encoder.
+///
+/// Like `prelim_flags_bucket_enc_neon` but only updates entries where the
+/// existing flag is not ZERO (1) — matches the decoder's `prelim_flags_band0_neon`.
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_band0_enc_neon(recon: &[i32; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    // Load old flags; build mask: 0xFF where flag != ZERO(1), else 0x00
+    let old_u8 = vld1q_u8(old_flags.as_ptr());
+    let one_u8 = vdupq_n_u8(1);
+    let is_zero_state = vceqq_u8(old_u8, one_u8); // 0xFF where old==ZERO
+    let should_update = vmvnq_u8(is_zero_state); // 0xFF where should update
+    // Load 16 i32 reconstruction values for band 0 (indices 0..16)
+    let ptr = recon.as_ptr();
+    let c0 = vld1q_s32(ptr);
+    let c1 = vld1q_s32(ptr.add(4));
+    let c2 = vld1q_s32(ptr.add(8));
+    let c3 = vld1q_s32(ptr.add(12));
+    let zero32 = vdupq_n_s32(0);
+    let eq0 = vceqq_s32(c0, zero32);
+    let eq1 = vceqq_s32(c1, zero32);
+    let eq2 = vceqq_s32(c2, zero32);
+    let eq3 = vceqq_s32(c3, zero32);
+    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1));
+    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
+    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23));
+    let is_nonzero = vmvnq_u8(is_zero);
+    let xv = vdupq_n_u8(10);
+    let uv = vdupq_n_u8(8);
+    let new_flags = veorq_u8(uv, vandq_u8(xv, is_nonzero)); // UNK or ACTIVE
+    // Blend: where should_update==0xFF take new_flags, else keep old_u8
+    let out = vbslq_u8(should_update, new_flags, old_u8);
+    vst1q_u8(old_flags.as_mut_ptr(), out);
+    // Horizontal OR
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
 #[cfg(feature = "std")]
 struct PlaneEncoder {
     /// True wavelet coefficients (read-only after `gather`).
@@ -463,32 +558,57 @@ impl PlaneEncoder {
         let (from, to) = BAND_BUCKETS[self.curband];
         if self.curband != 0 {
             for (boff, j) in (from..=to).enumerate() {
-                let mut bstatetmp: u8 = 0;
-                for k in 0..16 {
-                    // Use recon (decoder reconstruction) not blocks (true value)
-                    if self.recon[block_idx][(j << 4) | k] == 0 {
-                        self.coeffstate[boff][k] = UNK;
-                    } else {
-                        self.coeffstate[boff][k] = ACTIVE;
+                let base = j << 4;
+                #[cfg(target_arch = "aarch64")]
+                // SAFETY: NEON always available on aarch64; base+16 <= 1024 (max j=63).
+                #[allow(unsafe_code)]
+                let bstatetmp = unsafe {
+                    prelim_flags_bucket_enc_neon(
+                        &self.recon[block_idx],
+                        base,
+                        &mut self.coeffstate[boff],
+                    )
+                };
+                #[cfg(not(target_arch = "aarch64"))]
+                let bstatetmp = {
+                    let mut b = 0u8;
+                    for k in 0..16 {
+                        let f = if self.recon[block_idx][base + k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
+                        self.coeffstate[boff][k] = f;
+                        b |= f;
                     }
-                    bstatetmp |= self.coeffstate[boff][k];
-                }
+                    b
+                };
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
         } else {
             // Band 0: coeffstate[0] is pre-initialized by is_null_slice
-            let mut bstatetmp: u8 = 0;
-            for k in 0..16 {
-                if self.coeffstate[0][k] != ZERO {
-                    if self.recon[block_idx][k] == 0 {
-                        self.coeffstate[0][k] = UNK;
-                    } else {
-                        self.coeffstate[0][k] = ACTIVE;
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON always available on aarch64; recon[0..16] is valid.
+            #[allow(unsafe_code)]
+            let bstatetmp = unsafe {
+                prelim_flags_band0_enc_neon(&self.recon[block_idx], &mut self.coeffstate[0])
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let bstatetmp = {
+                let mut b = 0u8;
+                for k in 0..16 {
+                    if self.coeffstate[0][k] != ZERO {
+                        self.coeffstate[0][k] = if self.recon[block_idx][k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
                     }
+                    b |= self.coeffstate[0][k];
                 }
-                bstatetmp |= self.coeffstate[0][k];
-            }
+                b
+            };
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
