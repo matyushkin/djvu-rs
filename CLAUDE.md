@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after get_unchecked in load8_i32/store8_i32)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after uninit plane allocation in reconstruct)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.67 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.35 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **569 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.34 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.23 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **560 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.13 ms** | — |
@@ -75,6 +75,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | `get_unchecked` in `load_rows8`/`store_rows8` (row-pass scatter/gather) | sub1 −13.3% (11.51→9.98 ms); sub2 −10% (2.98→2.68 ms); sub4 −10.5% (733→656 µs) — assembly showed 5× `cmp+b.hs` per load cluster + `fmov+mov.s×7` scalar-to-vector; removing bounds checks let LLVM eliminate conditional branches and improve instruction scheduling across the scatter loop |
 | 2026-04 | IW44 | Horizontal row-pass NEON (s=1): `row_pass_neon_s1_row` replaces 8-rows-at-a-time scatter with `vld2q_s16` + `vextq_s16` sliding window per row | sub1 −5.1% (9.98→9.47 ms); sub2 −7.8% (2.68→2.47 ms); sub4 −5.6% (656→619 µs) — eliminates `8×ldrh + 7×fmov/mov.s` scatter per column position; even pass: 3 loads (`vld2q_s16` ×2 + `vld2q_s16` ahead) + 4 `vextq_s16` for all neighbors of 8 evens; odd pass: 2 loads + 4 `vextq_s16`; scalar tail handles boundary; `vst2q_s16` reinterleaves updated even/odd back in one store |
 | 2026-04 | IW44 | `get_unchecked` in `load8_i32`/`store8_i32` (column-pass st0/st1/st2 temporary arrays) | sub1 −8.4% (9.47→8.67 ms); sub2 −4.8% (2.47→2.35 ms); sub4 −7.8% (619→569 µs) — profile showed `fmt::Debug`+`panic_fmt` at 6.7% self-time; identical pattern to `load_rows8` bounds-check overhead; `ci+7 < simd_cols ≤ num_cols` invariant guarantees safety at all call sites |
+| 2026-04 | IW44 | Skip zero-init in `reconstruct` plane allocation (uninit Vec + set_len) | sub1 −3.7% (8.67→8.34 ms); sub2 −3.4% (2.35→2.23 ms); sub4 −2.2% (569→560 µs) — ZIGZAG_ROW/COL is a bijection: i∈[0,1024) maps to every position in a 32×32 block exactly once; for compact path, i∈[0,coeff_limit) maps to every position in sub_block² exactly once; so vec![0i16;n] is pure redundant memset (~3–9 MB/to_rgb() across 3 planes); replaced with Vec::with_capacity + set_len |
 
 ### ✗ Reverted
 
@@ -89,6 +90,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | column_pass SIMD at s=2 via const-generic `column_pass<const S>` monomorphization (#184 attempt 2) | sub1 +22% (13.24→16.2 ms), sub2 +25%, corpus_color −3.2% — extracting column_pass as non-inlined function loses LLVM register allocation across outer s-loop; column pass too tightly coupled to outer loop for safe extraction without inlining |
 | 2026-04 | IW44 | local-copy ZP state in `bucket_decoding_pass` + `newly_active_coefficient_decoding_pass` (extending JB2 pattern) | first_chunk +4%, corpus_color +3.3% — extract/writeback overhead (14 register-move ops × 74 880 blocks ≈ 328 µs) exceeds ZP-in-register savings; breakeven requires ≥7 ZP calls/block avg; `bucket_decoding_pass` avg 1-4 calls, `newly_active` rare (most blocks are UNK/ZERO not NEW) — net negative for both |
 | 2026-04 | IW44 | bucket-level early exit in `previously_active_coefficient_decoding_pass` (skip bucket if `bucketstate[boff] & ACTIVE == 0`) | corpus_color +1.5%, sub1 +1.1% — benchmark corpus files are dense (most buckets ACTIVE in later slices); branch overhead per bucket exceeds savings; only helps for very sparse images |
+| 2026-04 | IW44 | `get_unchecked` on zigzag scatter in `PlaneDecoder::reconstruct` (both compact and full-res paths) | compact path +4.4% sub4 (consistent, p=0.00); full-res path flat ±0% — scatter loop is memory-bound (writes to non-sequential addresses in 3.2 MB plane); cache-miss latency dominates; no benefit from removing bounds-check branches unlike `load8_i32` arithmetic loops |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
