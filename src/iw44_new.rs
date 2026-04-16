@@ -1195,8 +1195,28 @@ use wide::i32x8;
 /// auto-vectorize.
 #[inline(always)]
 fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
+    // s=1 fast path: single contiguous load + sign-extend.  Checked FIRST so that
+    // the s=1 branch is a single cmp+b (not taken on s≠1) rather than a 5-branch
+    // dispatch chain inside load8s_neon.
+    if s == 1 {
+        #[allow(unsafe_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let arr: [i16; 8] = core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
+            i32x8::from([
+                arr[0] as i32,
+                arr[1] as i32,
+                arr[2] as i32,
+                arr[3] as i32,
+                arr[4] as i32,
+                arr[5] as i32,
+                arr[6] as i32,
+                arr[7] as i32,
+            ])
+        };
+    }
     #[cfg(target_arch = "aarch64")]
-    if s == 1 || s == 2 || s == 4 {
+    if s == 2 || s == 4 {
         #[allow(unsafe_code)]
         return unsafe { load8s_neon(slice, phys_off, s) };
     }
@@ -1218,8 +1238,27 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
 /// (those not at multiples of `s`) are left unchanged.
 #[inline(always)]
 fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
+    // s=1 fast path: narrow and store contiguously.  Same reasoning as load8s.
+    if s == 1 {
+        #[allow(unsafe_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let a = v.to_array();
+            let narrow: [i16; 8] = [
+                a[0] as i16,
+                a[1] as i16,
+                a[2] as i16,
+                a[3] as i16,
+                a[4] as i16,
+                a[5] as i16,
+                a[6] as i16,
+                a[7] as i16,
+            ];
+            core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
+        };
+    }
     #[cfg(target_arch = "aarch64")]
-    if s == 1 || s == 2 || s == 4 {
+    if s == 2 || s == 4 {
         #[allow(unsafe_code)]
         return unsafe { store8s_neon(slice, phys_off, s, v) };
     }
@@ -1238,16 +1277,18 @@ fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
 // On store, we re-interleave the updated even lane with the unchanged odd lanes.
 
 #[cfg(target_arch = "aarch64")]
+// s=1 is now handled directly in load8s/store8s (single ldr/str q without dispatch).
+// This function only needs to handle s=2 and s=4.
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "neon")]
 unsafe fn load8s_neon(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
     use core::arch::aarch64::*;
     let ptr = slice.as_ptr().add(phys_off);
-    let target: int16x8_t = match s {
-        1 => vld1q_s16(ptr),
-        2 => vld2q_s16(ptr).0,
-        4 => vld4q_s16(ptr).0,
-        _ => unreachable!(),
+    let target: int16x8_t = if s == 2 {
+        vld2q_s16(ptr).0
+    } else {
+        // s == 4
+        vld4q_s16(ptr).0
     };
     // Widen i16x8 → two i32x4, then reinterpret as [i32;8] → i32x8
     let lo = vmovl_s16(vget_low_s16(target));
@@ -1265,20 +1306,13 @@ unsafe fn store8s_neon(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
     // Narrow v (i32x8) back to i16x8 via vmovn (truncate low 16 bits)
     let v_arr = core::mem::transmute::<[i32; 8], [int32x4_t; 2]>(v.to_array());
     let new_vals = vcombine_s16(vmovn_s32(v_arr[0]), vmovn_s32(v_arr[1]));
-    match s {
-        1 => vst1q_s16(ptr, new_vals),
-        // For s=2,4: scatter-store 8 i16s to stride-s positions.
-        // Using 8 individual str h avoids the extra vld2/vld4 that would be needed
-        // to preserve interleaved odd lanes before a vst2/vst4.
-        // Each str h targets the same ~16-byte cache region (already hot from load8s).
-        2 | 4 => {
-            // Extract all 8 lanes as a [i16; 8] and write at stride s
-            let a: [i16; 8] = core::mem::transmute(new_vals);
-            for (j, &val) in a.iter().enumerate() {
-                *ptr.add(j * s) = val;
-            }
-        }
-        _ => unreachable!(),
+    // For s=2,4: scatter-store 8 i16s to stride-s positions.
+    // Using 8 individual str h avoids the extra vld2/vld4 that would be needed
+    // to preserve interleaved odd lanes before a vst2/vst4.
+    // Each str h targets the same ~16-byte cache region (already hot from load8s).
+    let a: [i16; 8] = core::mem::transmute(new_vals);
+    for (j, &val) in a.iter().enumerate() {
+        *ptr.add(j * s) = val;
     }
 }
 

@@ -29,19 +29,19 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-17, after i16 YCbCr arithmetic)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after load8s/store8s s=1 fast path)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
-| `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **6.10 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.45 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **370 µs** | — |
+| `iw44_decode_corpus_color` | **648 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **5.46 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.31 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **342 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
-| `iw44_encode_color` | **2.13 ms** | — |
+| `iw44_encode_color` | **2.11 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
 | `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
@@ -82,6 +82,8 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | `const` rounding constants for `lifting_even`/`predict_inner`/`predict_avg` (replace `i32x8::splat(N)` with `const C: i32x8 = unsafe { transmute([N; 8]) }`) | sub1 −22% (8.20→6.40 ms); sub2 −20% (1.98→1.58 ms); sub4 −22% (511→399 µs) — `i32x8::splat(N)` compiled to `bl memcpy` (PLT stub, 32-byte `.rodata` copy) inside the hot k-loop for each of lifting_even/predict_inner/predict_avg; LLVM treated `splat()` as non-pure and didn't hoist or inline to `movi.4s`; `const` transmute produces a static rodata entry that LLVM loads with `ldp q`/`ldr q` (1-2 instructions) and hoists out of the loop; samply profile showed ~20% of samples in Debug/panic infra from the memcpy overhead |
 | 2026-04 | IW44 | fused normalize+YCbCr: `ycbcr_neon_raw`/`ycbcr_neon_raw_half` read i16 plane data directly, inline `vrshrq_n_s16` normalization, eliminate 3 intermediate i32 buffers and separate normalize loops | sub2 −6.2% (1.58→1.51 ms, p=0.00); sub4 −0.9% (399→395 µs, p=0.03); sub1 flat (+1.2% noise, p=0.08) — colorbook.djvu has `chroma_half=false` (minor=1): sub1 uses `ycbcr_neon_raw` (non-half) but `ycbcr_neon_raw_half` is never reached by this file; parallel path also eliminates 3 `vec![0i32; pw]` allocations per row |
 | 2026-04 | IW44 | i16 YCbCr arithmetic in `ycbcr_neon_raw`/`ycbcr_neon_raw_half`: after normalize+clamp all intermediates fit in i16 (r16∈[-192,445], g16∈[-126,383], b16∈[-287,541]); `vqmovun_s16` saturates i16→u8 in one op, eliminating 6 `vmovl` widenings + 12 i32 arithmetic ops + 12 i32 min/max ops + 9 narrows per 8 pixels (42→13 ops for arithmetic+clamp+narrow) | sub1 −5.0% (6.40→6.10 ms, p=0.00); sub2 −4.6% (1.51→1.45 ms, p=0.00); sub4 −8.2% (395→370 µs, p=0.00) — profiling (samply, 7087 samples) showed `ycbcr_neon_raw` at 8.8% leaf time; larger sub4 gain because YCbCr fraction grows as wavelet work shrinks at coarser levels |
+| 2026-04 | IW44 | Hoist `has_n3` branch out of even-pass ci inner loop: split `while k <= kmax` into main loop (`while k+3 <= kmax`, no conditional) + tail loop (`while k <= kmax`, zero n3) | sub1/sub2/sub4 within noise — structurally cleaner but M1 branch predictor handles the original perfectly; no measurable effect |
+| 2026-04 | IW44 | `load8s`/`store8s` s=1 fast path: move `if s == 1` check to top with `core::ptr::read/write<[i16;8]>` for contiguous load/store, bypassing 5-branch `match s` dispatch chain inside `load8s_neon`/`store8s_neon` | sub1 −6.2% (5.80→5.46 ms, p=0.00); sub2 −11.4% (1.48→1.31 ms, p=0.00); sub4 −9.1% (376→342 µs, p=0.00) — assembly: s=1 hot path reduced from 5-branch `match`-dispatch to single `cmp+b.ne` before `ldp d18,d19+sshll×2`; each ci-iteration saves 4 dispatch branches × 3 calls (2 loads + 1 store) = 12 fewer branches; `ldp d,d` (2×64-bit) generates same memory traffic as `ldr q` (1×128-bit); sub2/sub4 gain larger because their wavelet planes are smaller and fit better in L1 after branch reduction |
 
 ### ✗ Reverted
 
