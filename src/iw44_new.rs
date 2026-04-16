@@ -196,6 +196,81 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
     ycbcr_portable(y_row, cb_row, cr_row, out, w);
 }
 
+/// Convert raw i16 plane row data to RGBA, fusing normalize + YCbCr in one pass.
+///
+/// Uses `ycbcr_neon_raw` on AArch64 (avoids three intermediate i32 buffers and
+/// the separate normalize loops).  Falls back to two-pass on other targets.
+///
+/// `y`, `cb`, `cr` must all have the same length `w`; `out` must hold `w * 4` bytes.
+#[inline]
+fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
+    let w = y.len();
+    debug_assert_eq!(cb.len(), w);
+    debug_assert_eq!(cr.len(), w);
+    debug_assert_eq!(out.len(), w * 4);
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), out.as_mut_ptr(), w);
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut y_norm = vec![0i32; w];
+        let mut cb_norm = vec![0i32; w];
+        let mut cr_norm = vec![0i32; w];
+        for (col, v) in y_norm.iter_mut().enumerate() {
+            *v = normalize(y[col]);
+        }
+        for col in 0..w {
+            cb_norm[col] = normalize(cb[col]);
+            cr_norm[col] = normalize(cr[col]);
+        }
+        ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, out);
+    }
+}
+
+/// Convert raw i16 plane row data to RGBA with chroma at half horizontal resolution.
+///
+/// `y` has length ≥ `w`; `cb_half`/`cr_half` have length ≥ `(w+1)/2`.  Each
+/// chroma sample is nearest-neighbour upsampled to two adjacent output pixels.
+/// Uses `ycbcr_neon_raw_half` on AArch64; two-pass fallback elsewhere.
+#[inline]
+fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mut [u8], w: usize) {
+    debug_assert!(y.len() >= w);
+    debug_assert_eq!(out.len(), w * 4);
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon_raw_half(
+                y.as_ptr(),
+                cb_half.as_ptr(),
+                cr_half.as_ptr(),
+                out.as_mut_ptr(),
+                w,
+            );
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut y_norm = vec![0i32; w];
+        let mut cb_norm = vec![0i32; w];
+        let mut cr_norm = vec![0i32; w];
+        for (col, v) in y_norm.iter_mut().enumerate() {
+            *v = normalize(y[col]);
+        }
+        for col in 0..w {
+            cb_norm[col] = normalize(cb_half[col / 2]);
+            cr_norm[col] = normalize(cr_half[col / 2]);
+        }
+        ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, out);
+    }
+}
+
 /// Portable YCbCr→RGBA using chunks_exact so LLVM sees exact 8-element slices.
 #[inline(always)]
 fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8], w: usize) {
@@ -240,6 +315,198 @@ fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8],
         out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
         out[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
         out[col * 4 + 3] = 255;
+    }
+}
+
+/// AArch64 NEON fused normalize + YCbCr→RGBA from raw i16 plane data (non-chroma-half).
+///
+/// Loads 8 i16 per channel, applies `normalize()` inline using `vrshrq_n_s16`
+/// (rounding-shift by 6, i.e. `(v+32)>>6`) and clamps to `[-128,127]`, then
+/// runs the YCbCr→RGBA formula.  Eliminates the separate normalize pass and the
+/// three intermediate i32 buffers.
+///
+/// `cbp` and `crp` must point to `w` values each (same stride as `yp`).
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon_raw(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::aarch64::*;
+    // normalize clamp bounds at i16 resolution
+    let n_min = vdupq_n_s16(-128);
+    let n_max = vdupq_n_s16(127);
+    let c128 = vdupq_n_s32(128);
+    let c0 = vdupq_n_s32(0);
+    let c255 = vdupq_n_s32(255);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        // Load + normalize (rounded right-shift by 6) + clamp to [-128,127] at i16
+        let yc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(yp.add(off))), n_max),
+            n_min,
+        );
+        let cbc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(cbp.add(off))), n_max),
+            n_min,
+        );
+        let crc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(crp.add(off))), n_max),
+            n_min,
+        );
+        // Widen to i32
+        let y_lo = vmovl_s16(vget_low_s16(yc));
+        let y_hi = vmovl_high_s16(yc);
+        let cb_lo = vmovl_s16(vget_low_s16(cbc));
+        let cb_hi = vmovl_high_s16(cbc);
+        let cr_lo = vmovl_s16(vget_low_s16(crc));
+        let cr_hi = vmovl_high_s16(crc);
+        // YCbCr → RGB
+        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
+        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
+        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
+        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
+        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
+        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
+        let g_lo = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
+            c255,
+        );
+        let g_hi = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
+            c255,
+        );
+        let b_lo = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
+            c255,
+        );
+        let b_hi = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
+            c255,
+        );
+        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
+        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
+        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col));
+        let r = normalize(*crp.add(col));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// AArch64 NEON fused normalize + YCbCr→RGBA from raw i16 plane data (chroma-half).
+///
+/// `cbp` and `crp` point to chroma planes at half the horizontal resolution.
+/// Each chroma sample is nearest-neighbour upsampled to two luma columns.
+/// 8 output pixels are produced per iteration, consuming 8 Y samples and 4 Cb/Cr samples.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon_raw_half(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::aarch64::*;
+    let n_min = vdupq_n_s16(-128);
+    let n_max = vdupq_n_s16(127);
+    let c128 = vdupq_n_s32(128);
+    let c0 = vdupq_n_s32(0);
+    let c255 = vdupq_n_s32(255);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        let c_off = i * 4;
+        // Load + normalize Y (8 consecutive)
+        let yc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(yp.add(off))), n_max),
+            n_min,
+        );
+        // Load 4 chroma values, normalize at i16 level, then upsample 4→8 by
+        // duplicating each value: [a,b,c,d] → [a,a,b,b,c,c,d,d] via vzip1q
+        let cb4 = vmaxq_s16(
+            vminq_s16(
+                vrshrq_n_s16::<6>(vcombine_s16(vld1_s16(cbp.add(c_off)), vdup_n_s16(0))),
+                n_max,
+            ),
+            n_min,
+        );
+        let cr4 = vmaxq_s16(
+            vminq_s16(
+                vrshrq_n_s16::<6>(vcombine_s16(vld1_s16(crp.add(c_off)), vdup_n_s16(0))),
+                n_max,
+            ),
+            n_min,
+        );
+        // Upsample: interleave low 4 lanes with themselves → [a,a,b,b,c,c,d,d]
+        let cbc = vzip1q_s16(cb4, cb4);
+        let crc = vzip1q_s16(cr4, cr4);
+        // Widen to i32
+        let y_lo = vmovl_s16(vget_low_s16(yc));
+        let y_hi = vmovl_high_s16(yc);
+        let cb_lo = vmovl_s16(vget_low_s16(cbc));
+        let cb_hi = vmovl_high_s16(cbc);
+        let cr_lo = vmovl_s16(vget_low_s16(crc));
+        let cr_hi = vmovl_high_s16(crc);
+        // YCbCr → RGB
+        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
+        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
+        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
+        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
+        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
+        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
+        let g_lo = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
+            c255,
+        );
+        let g_hi = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
+            c255,
+        );
+        let b_lo = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
+            c255,
+        );
+        let b_hi = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
+            c255,
+        );
+        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
+        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
+        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col / 2));
+        let r = normalize(*crp.add(col / 2));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
     }
 }
 
@@ -2244,70 +2511,55 @@ impl Iw44Image {
                         .for_each(|(out_row, row_data)| {
                             let row = ph - 1 - out_row; // DjVu rows are bottom-to-top
                             let y_off = row * y_plane.stride;
-                            let mut y_norm = vec![0i32; pw];
-                            let mut cb_norm = vec![0i32; pw];
-                            let mut cr_norm = vec![0i32; pw];
-                            for (col, v) in y_norm.iter_mut().enumerate() {
-                                *v = normalize(y_plane.data[y_off + col]);
-                            }
                             if chroma_half {
                                 let c_row = row / 2;
                                 let cb_off = c_row * cb_plane.stride;
                                 let cr_off = c_row * cr_plane.stride;
-                                for col in 0..pw {
-                                    let c_col = col / 2;
-                                    cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
-                                    cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
-                                }
+                                ycbcr_row_from_i16_half(
+                                    &y_plane.data[y_off..y_off + pw],
+                                    &cb_plane.data[cb_off..],
+                                    &cr_plane.data[cr_off..],
+                                    row_data,
+                                    pw,
+                                );
                             } else {
                                 let c_off = row * cb_plane.stride;
-                                for col in 0..pw {
-                                    cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                                    cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                                }
+                                ycbcr_row_from_i16(
+                                    &y_plane.data[y_off..y_off + pw],
+                                    &cb_plane.data[c_off..c_off + pw],
+                                    &cr_plane.data[c_off..c_off + pw],
+                                    row_data,
+                                );
                             }
-                            ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, row_data);
                         });
                 }
                 #[cfg(not(feature = "parallel"))]
                 {
-                    let mut y_norm = vec![0i32; pw];
-                    let mut cb_norm = vec![0i32; pw];
-                    let mut cr_norm = vec![0i32; pw];
-
                     for row in 0..ph {
                         let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                         let y_off = row * y_plane.stride;
-
-                        for (col, v) in y_norm.iter_mut().enumerate() {
-                            *v = normalize(y_plane.data[y_off + col]);
-                        }
+                        let row_start = out_row * pw * 4;
 
                         if self.chroma_half {
-                            // Chroma plane is half-resolution: index with row/2, col/2.
                             let c_row = row / 2;
                             let cb_off = c_row * cb_plane.stride;
                             let cr_off = c_row * cr_plane.stride;
-                            for col in 0..pw {
-                                let c_col = col / 2;
-                                cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
-                                cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
-                            }
+                            ycbcr_row_from_i16_half(
+                                &y_plane.data[y_off..y_off + pw],
+                                &cb_plane.data[cb_off..],
+                                &cr_plane.data[cr_off..],
+                                &mut pm.data[row_start..row_start + pw * 4],
+                                pw,
+                            );
                         } else {
                             let c_off = row * cb_plane.stride;
-                            for col in 0..pw {
-                                cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                                cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                            }
+                            ycbcr_row_from_i16(
+                                &y_plane.data[y_off..y_off + pw],
+                                &cb_plane.data[c_off..c_off + pw],
+                                &cr_plane.data[c_off..c_off + pw],
+                                &mut pm.data[row_start..row_start + pw * 4],
+                            );
                         }
-
-                        let row_start = out_row * pw * 4;
-                        ycbcr_row_to_rgba(
-                            &y_norm,
-                            &cb_norm,
-                            &cr_norm,
-                            &mut pm.data[row_start..row_start + pw * 4],
-                        );
                     }
                 }
                 return Ok(pm);
@@ -2323,28 +2575,15 @@ impl Iw44Image {
             //
             // Uses SIMD via `ycbcr_row_to_rgba` (same as the sub=1 fast path).
             if (2..=8).contains(&sub) && sub.is_power_of_two() {
-                let mut y_norm = vec![0i32; pw];
-                let mut cb_norm = vec![0i32; pw];
-                let mut cr_norm = vec![0i32; pw];
-
                 for row in 0..ph {
                     let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                     let y_off = row * y_plane.stride;
                     let c_off = row * cb_plane.stride;
-
-                    for (col, v) in y_norm.iter_mut().enumerate() {
-                        *v = normalize(y_plane.data[y_off + col]);
-                    }
-                    for col in 0..pw {
-                        cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                        cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                    }
-
                     let row_start = out_row * pw * 4;
-                    ycbcr_row_to_rgba(
-                        &y_norm,
-                        &cb_norm,
-                        &cr_norm,
+                    ycbcr_row_from_i16(
+                        &y_plane.data[y_off..y_off + pw],
+                        &cb_plane.data[c_off..c_off + pw],
+                        &cr_plane.data[c_off..c_off + pw],
                         &mut pm.data[row_start..row_start + pw * 4],
                     );
                 }
