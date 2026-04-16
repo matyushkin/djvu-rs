@@ -82,28 +82,8 @@ const fn zigzag_col(i: usize) -> u8 {
     b0 * 16 + b2 * 8 + b4 * 4 + b6 * 2 + b8
 }
 
-static ZIGZAG_ROW: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        table[i] = zigzag_row(i);
-        i += 1;
-    }
-    table
-};
-
-static ZIGZAG_COL: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        table[i] = zigzag_col(i);
-        i += 1;
-    }
-    table
-};
-
 /// Inverse zigzag: `ZIGZAG_INV[row * 32 + col]` is the index `i` such that
-/// `ZIGZAG_ROW[i] == row as u8 && ZIGZAG_COL[i] == col as u8`.
+/// `zigzag_row(i) == row as u8 && zigzag_col(i) == col as u8`.
 ///
 /// Enables row-major scatter (sequential writes to the plane) at the cost of
 /// gathering block coefficients in zigzag order (2 KB block fits in L1).
@@ -114,6 +94,49 @@ static ZIGZAG_INV: [u16; 1024] = {
         let r = zigzag_row(i) as usize;
         let c = zigzag_col(i) as usize;
         table[r * 32 + c] = i as u16;
+        i += 1;
+    }
+    table
+};
+
+/// Compact inverse zigzag for sub=2 (16×16 sub-block, 256 entries).
+/// `ZIGZAG_INV_SUB2[row * 16 + col]` = index `i` in 0..256 such that
+/// `zigzag_row(i) >> 1 == row && zigzag_col(i) >> 1 == col`.
+static ZIGZAG_INV_SUB2: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let r = (zigzag_row(i) >> 1) as usize;
+        let c = (zigzag_col(i) >> 1) as usize;
+        table[r * 16 + c] = i as u8;
+        i += 1;
+    }
+    table
+};
+
+/// Compact inverse zigzag for sub=4 (8×8 sub-block, 64 entries).
+/// `ZIGZAG_INV_SUB4[row * 8 + col]` = index `i` in 0..64.
+static ZIGZAG_INV_SUB4: [u8; 64] = {
+    let mut table = [0u8; 64];
+    let mut i = 0usize;
+    while i < 64 {
+        let r = (zigzag_row(i) >> 2) as usize;
+        let c = (zigzag_col(i) >> 2) as usize;
+        table[r * 8 + c] = i as u8;
+        i += 1;
+    }
+    table
+};
+
+/// Compact inverse zigzag for sub=8 (4×4 sub-block, 16 entries).
+/// `ZIGZAG_INV_SUB8[row * 4 + col]` = index `i` in 0..16.
+static ZIGZAG_INV_SUB8: [u8; 16] = {
+    let mut table = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        let r = (zigzag_row(i) >> 3) as usize;
+        let c = (zigzag_col(i) >> 3) as usize;
+        table[r * 4 + c] = i as u8;
         i += 1;
     }
     table
@@ -781,7 +804,8 @@ impl PlaneDecoder {
         // positions — those with zigzag index i < 256 (see zigzag_row/col: both
         // are even iff bits 8 and 9 of i are 0).  We can therefore:
         //   1. Allocate a 4× smaller plane  (ceil(w/2) × ceil(h/2))
-        //   2. Scatter only i ∈ [0, coeff_limit) at (row/sub, col/sub)
+        //   2. Scatter only the sub_block² low-frequency coefficients per block
+        //      (zigzag indices 0..sub_block² map to even multiples of sub)
         //   3. Run the full wavelet (sub=1) on the compact plane, which now
         //      includes the SIMD s=1 pass.
         //
@@ -789,13 +813,9 @@ impl PlaneDecoder {
         // and sampling every other position: each compact[k][c] equals the value
         // that full[k·sub][c·sub] would hold after the sub=2 wavelet.
         //
-        // The same logic holds for sub=4 (coeff_limit=64, quarter-plane) and
-        // sub=8 (coeff_limit=16, eighth-plane).
+        // The same logic holds for sub=4 (8×8 sub-block) and sub=8 (4×4 sub-block).
         if (2..=8).contains(&subsample) && subsample.is_power_of_two() {
             let sub = subsample;
-            // Number of coefficients whose (row, col) are both multiples of `sub`.
-            // For sub=2: 256; sub=4: 64; sub=8: 16.
-            let coeff_limit = 1024 / (sub * sub);
 
             // Block structure: the compact plane inherits the same block grid but
             // each 32×32 block contributes a (32/sub)×(32/sub) sub-block.
@@ -809,7 +829,7 @@ impl PlaneDecoder {
             let compact_w = self.width.div_ceil(sub);
             let compact_h = self.height.div_ceil(sub);
 
-            // Safety: ZIGZAG_ROW[i]/sub × ZIGZAG_COL[i]/sub for i in 0..coeff_limit
+            // Safety: zigzag_row(i)/sub × zigzag_col(i)/sub for i in 0..sub_block²
             // is a bijection over [0..sub_block) × [0..sub_block) (bits 8/9 of i are
             // 0 → both zigzag values are even; dividing by sub tiles all sub_block²
             // positions per block → every element is written before the wavelet reads).
@@ -819,17 +839,26 @@ impl PlaneDecoder {
                 stride: compact_stride,
             };
 
+            // Row-major scatter via compact inverse zigzag tables: write
+            // sub_block consecutive i16 per row before advancing, maximising
+            // write-combine efficiency (one cache line per row for sub=2).
+            let compact_inv: &[u8] = match sub {
+                2 => &ZIGZAG_INV_SUB2,
+                4 => &ZIGZAG_INV_SUB4,
+                _ => &ZIGZAG_INV_SUB8, // sub=8
+            };
             for r in 0..block_rows {
                 for c in 0..self.block_cols {
                     let block = &self.blocks[r * self.block_cols + c];
-                    let row_base = r << 5;
-                    let col_base = c << 5;
-                    for i in 0..coeff_limit {
-                        // zigzag positions are even multiples of `sub`; divide
-                        // by `sub` to get compact-plane coordinates.
-                        let row = (ZIGZAG_ROW[i] as usize + row_base) / sub;
-                        let col = (ZIGZAG_COL[i] as usize + col_base) / sub;
-                        plane.data[row * compact_stride + col] = block[i];
+                    let base_row = r * sub_block;
+                    let base_col = c * sub_block;
+                    for row in 0..sub_block {
+                        let dst_base = (base_row + row) * compact_stride + base_col;
+                        let inv_base = row * sub_block;
+                        for col in 0..sub_block {
+                            let i = compact_inv[inv_base + col] as usize;
+                            plane.data[dst_base + col] = block[i];
+                        }
                     }
                 }
             }
