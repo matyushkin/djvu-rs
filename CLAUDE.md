@@ -29,16 +29,16 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after compact scatter get_unchecked)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after const rounding constants fix)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.20 ms** | — |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.98 ms** | — |
-| `iw44_to_rgb_colorbook/sub4_partial_decode` | **511 µs** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **6.40 ms** | — |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.58 ms** | — |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **399 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
 | `iw44_encode_color` | **2.13 ms** | — |
@@ -79,6 +79,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | Row-major scatter in `reconstruct` full-res path via `ZIGZAG_INV` table | sub1 −2.0% (8.34→8.20 ms); sub2/sub4 unaffected (compact path unchanged) — zigzag order spreads writes across all 32 rows of a block simultaneously, preventing write-combine buffer coalescing; row-major order fills 1 cache line (32 i16 = 64 bytes) per row before advancing; reads from 2 KB `block` array remain in L1 |
 | 2026-04 | IW44 | Row-major scatter in `reconstruct` compact path via `ZIGZAG_INV_SUB2/4/8` tables | sub2 −7.2% (2.23→2.12 ms, p=0.00); sub4 −6.5% (560→540 µs, p=0.00); sub1 flat — same write-combine benefit as full-res path but larger relative gain because compact blocks are smaller (16×16/8×8/4×4): fewer open cache lines during scatter means greater contention relief; `ZIGZAG_INV_SUBn` tables use u8 (max index 255) totaling 336 bytes (fits in L1 data cache) |
 | 2026-04 | IW44 | `get_unchecked` in compact scatter (after row-major rewrite; sequential writes now enable vectorization) | sub2 −6.6% (2.12→1.98 ms, p=0.00); sub4 −5.4% (540→511 µs, p=0.00); sub1 flat — profile showed 9.3% self-time in `panic_fmt`/`fmt::Debug` (bounds-check speculation overhead) from compact scatter; with row-major writes, LLVM can vectorize the sequential store side once bounds checks are removed; previous attempt (zigzag scatter, non-sequential writes) was +4.4% worse — write-side non-sequential was the blocker then |
+| 2026-04 | IW44 | `const` rounding constants for `lifting_even`/`predict_inner`/`predict_avg` (replace `i32x8::splat(N)` with `const C: i32x8 = unsafe { transmute([N; 8]) }`) | sub1 −22% (8.20→6.40 ms); sub2 −20% (1.98→1.58 ms); sub4 −22% (511→399 µs) — `i32x8::splat(N)` compiled to `bl memcpy` (PLT stub, 32-byte `.rodata` copy) inside the hot k-loop for each of lifting_even/predict_inner/predict_avg; LLVM treated `splat()` as non-pure and didn't hoist or inline to `movi.4s`; `const` transmute produces a static rodata entry that LLVM loads with `ldp q`/`ldr q` (1-2 instructions) and hoists out of the loop; samply profile showed ~20% of samples in Debug/panic infra from the memcpy overhead |
 
 ### ✗ Reverted
 
@@ -95,6 +96,8 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | bucket-level early exit in `previously_active_coefficient_decoding_pass` (skip bucket if `bucketstate[boff] & ACTIVE == 0`) | corpus_color +1.5%, sub1 +1.1% — benchmark corpus files are dense (most buckets ACTIVE in later slices); branch overhead per bucket exceeds savings; only helps for very sparse images |
 | 2026-04 | IW44 | `get_unchecked` on zigzag scatter in `PlaneDecoder::reconstruct` (both compact and full-res paths) | compact path +4.4% sub4 (consistent, p=0.00); full-res path flat ±0% — scatter loop is memory-bound (writes to non-sequential addresses in 3.2 MB plane); cache-miss latency dominates; no benefit from removing bounds-check branches unlike `load8_i32` arithmetic loops |
 | 2026-04 | IW44 | `get_unchecked` on full-res scatter (after row-major rewrite) | sub1 +2.1% (p=0.00); sub2/sub4 flat — LLVM generates slightly worse instruction scheduling for full-res path without bounds checks; full-res scatter over 1 MB plane is still memory-latency-bound even with sequential writes; compact path benefits but full-res does not |
+| 2026-04 | IW44 | split `int16x8x2_t curr_pair` into `curr_even`/`curr_odd` in even-pass loop to eliminate "redundant" ld2.8h carry across iterations | sub1 −1.3% (p=0.00) but sub2 +2.1% (p=0.00) — net negative; the "redundant" ld2 is a sequential L1 hit (~free on M1); restructuring hurts LLVM's instr scheduling for sub2; "carry-in-registers" only wins for very long row bodies, not here |
+| 2026-04 | IW44 | replace `vmovl_s16×2 + vaddq_s32` with `vaddl_s16` in even-pass lift (saves 8 instr/chunk) | sub1 +1.7% (p=0.00) — `saddl` has 2/cycle throughput on M1 vs 4/cycle for `sxtl`; using a lower-throughput instruction to save instruction count is a net loss; M1's even-pass lift is throughput-bound on `add.4s`/`sxtl`-class instructions (4/cycle units) |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
