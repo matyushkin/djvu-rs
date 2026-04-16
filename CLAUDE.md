@@ -29,14 +29,14 @@ Composite pipeline (src/djvu_render.rs):
 
 ---
 
-## Baseline metrics (Apple M1 Max, 2026-04-16, after uninit plane allocation in reconstruct)
+## Baseline metrics (Apple M1 Max, 2026-04-16, after row-major scatter via ZIGZAG_INV)
 
 | Benchmark | Result | vs BENCHMARKS.md (v0.4.1) |
 |-----------|--------|---------------------------|
 | `jb2_decode` | **131.8 µs** | −42% (was 228 µs) |
 | `iw44_decode_first_chunk` | **578 µs** | −21% (was 734 µs) |
 | `iw44_decode_corpus_color` | **650 µs** | — |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.34 ms** | — |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **8.20 ms** | — |
 | `iw44_to_rgb_colorbook/sub2_partial_decode` | **2.23 ms** | — |
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **560 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
@@ -76,6 +76,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | Horizontal row-pass NEON (s=1): `row_pass_neon_s1_row` replaces 8-rows-at-a-time scatter with `vld2q_s16` + `vextq_s16` sliding window per row | sub1 −5.1% (9.98→9.47 ms); sub2 −7.8% (2.68→2.47 ms); sub4 −5.6% (656→619 µs) — eliminates `8×ldrh + 7×fmov/mov.s` scatter per column position; even pass: 3 loads (`vld2q_s16` ×2 + `vld2q_s16` ahead) + 4 `vextq_s16` for all neighbors of 8 evens; odd pass: 2 loads + 4 `vextq_s16`; scalar tail handles boundary; `vst2q_s16` reinterleaves updated even/odd back in one store |
 | 2026-04 | IW44 | `get_unchecked` in `load8_i32`/`store8_i32` (column-pass st0/st1/st2 temporary arrays) | sub1 −8.4% (9.47→8.67 ms); sub2 −4.8% (2.47→2.35 ms); sub4 −7.8% (619→569 µs) — profile showed `fmt::Debug`+`panic_fmt` at 6.7% self-time; identical pattern to `load_rows8` bounds-check overhead; `ci+7 < simd_cols ≤ num_cols` invariant guarantees safety at all call sites |
 | 2026-04 | IW44 | Skip zero-init in `reconstruct` plane allocation (uninit Vec + set_len) | sub1 −3.7% (8.67→8.34 ms); sub2 −3.4% (2.35→2.23 ms); sub4 −2.2% (569→560 µs) — ZIGZAG_ROW/COL is a bijection: i∈[0,1024) maps to every position in a 32×32 block exactly once; for compact path, i∈[0,coeff_limit) maps to every position in sub_block² exactly once; so vec![0i16;n] is pure redundant memset (~3–9 MB/to_rgb() across 3 planes); replaced with Vec::with_capacity + set_len |
+| 2026-04 | IW44 | Row-major scatter in `reconstruct` full-res path via `ZIGZAG_INV` table | sub1 −2.0% (8.34→8.20 ms); sub2/sub4 unaffected (compact path unchanged) — zigzag order spreads writes across all 32 rows of a block simultaneously, preventing write-combine buffer coalescing; row-major order fills 1 cache line (32 i16 = 64 bytes) per row before advancing; reads from 2 KB `block` array remain in L1 |
 
 ### ✗ Reverted
 
@@ -105,10 +106,26 @@ Composite pipeline (src/djvu_render.rs):
 | render | pre-decode JB2 bitmap on a separate thread (#186) | ✓ kept — see log | −30% cold render |
 | ZP | LUT for frequent states (#181) | small | cache pressure |
 | IW44 | early-exit in `decode_slice` when ZP exhausted + no ACTIVE blocks (#182) | ✗ reverted — see log | ZP stream is a continuous encoding of all decisions; skipping any call desynchronises state |
+| IW44 | horizontal row-pass NEON for s=2: `vld2q_s16` → active+inactive; second `uzpq_s16` to get logical even/odd within active; apply same lifting formula; `vst2q_s16` | ~1-2% sub1 | complex; s=2 processes 1/4 of s=1 data; two-level deinterleave needed |
 
 ---
 
 ## Investigations
+
+### IW44 `to_rgb()` profile breakdown (2026-04-16)
+
+**Setup:** 500 iters of `img.to_rgb()` on colorbook.djvu, samply @ ~1 ksample/s.
+
+| Function | Self% | Notes |
+|----------|-------|-------|
+| `inverse_wavelet_transform_from` | **63.8%** | All wavelet passes inlined (~20 KB). Hot spots at +0x214c/+0x2164: NEON odd-prediction inner loop (`ld2.8h`+`smull`+`ext.16b`+`st2.8h`). |
+| `PlaneDecoder::reconstruct` | **19.8%** | Scatter loop (full-res Y plane). Memory-bound; row-major ZIGZAG_INV reduced by ~2% via write-combine. |
+| `Iw44Image::to_rgb_subsample` | 6.6% | YCbCr→RGBA conversion + orchestration. |
+| `panic_fmt` / `Debug::fmt` | ~3% | Remaining bounds-check overhead somewhere in wavelet code. |
+
+**Key finding:** The wavelet (63.8%) is the dominant cost. It's already NEON-optimized for s=1 column+row passes and s=2,4 column passes. Row pass for s=2 uses the vertical 8-row SIMD (not horizontal NEON). The hottest instruction-level bottleneck is the NEON `smull`/`smlal` throughput in the s=1 odd prediction pass — this is probably throughput-saturated on M1.
+
+---
 
 ### IW44 vs JB2 "17× slower" mystery (2026-04-15)
 

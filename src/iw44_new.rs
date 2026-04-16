@@ -102,6 +102,23 @@ static ZIGZAG_COL: [u8; 1024] = {
     table
 };
 
+/// Inverse zigzag: `ZIGZAG_INV[row * 32 + col]` is the index `i` such that
+/// `ZIGZAG_ROW[i] == row as u8 && ZIGZAG_COL[i] == col as u8`.
+///
+/// Enables row-major scatter (sequential writes to the plane) at the cost of
+/// gathering block coefficients in zigzag order (2 KB block fits in L1).
+static ZIGZAG_INV: [u16; 1024] = {
+    let mut table = [0u16; 1024];
+    let mut i = 0usize;
+    while i < 1024 {
+        let r = zigzag_row(i) as usize;
+        let c = zigzag_col(i) as usize;
+        table[r * 32 + c] = i as u16;
+        i += 1;
+    }
+    table
+};
+
 // ---- Normalization -----------------------------------------------------------
 
 /// Map a raw wavelet coefficient to a signed pixel offset in `[-128, 127]`.
@@ -839,16 +856,22 @@ impl PlaneDecoder {
             stride: full_width,
         };
 
-        // Scatter block coefficients into the flat plane via zigzag
+        // Row-major scatter via ZIGZAG_INV: write 32 consecutive i16 per row
+        // (= 1 cache line) before advancing, maximising write-combine efficiency.
+        // block[ZIGZAG_INV[row*32+col]] is a gathered read from a 2 KB array
+        // that fits in L1, so the scatter cost is minimal.
         for r in 0..block_rows {
             for c in 0..self.block_cols {
                 let block = &self.blocks[r * self.block_cols + c];
                 let row_base = r << 5;
                 let col_base = c << 5;
-                for i in 0..1024 {
-                    let row = ZIGZAG_ROW[i] as usize + row_base;
-                    let col = ZIGZAG_COL[i] as usize + col_base;
-                    plane.data[row * full_width + col] = block[i];
+                for row in 0..32usize {
+                    let dst_base = (row_base + row) * full_width + col_base;
+                    let inv_base = row * 32;
+                    for col in 0..32usize {
+                        let i = ZIGZAG_INV[inv_base + col] as usize;
+                        plane.data[dst_base + col] = block[i];
+                    }
                 }
             }
         }
