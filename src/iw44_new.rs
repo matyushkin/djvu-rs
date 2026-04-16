@@ -130,73 +130,67 @@ fn normalize(val: i16) -> i32 {
 /// B     = clamp(t3 + (Cb << 1),     0, 255)
 /// ```
 pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8]) {
-    use wide::i32x8;
     debug_assert_eq!(y_row.len(), cb_row.len());
     debug_assert_eq!(y_row.len(), cr_row.len());
     debug_assert_eq!(out.len(), y_row.len() * 4);
 
+    let w = y_row.len();
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon(
+                y_row.as_ptr(),
+                cb_row.as_ptr(),
+                cr_row.as_ptr(),
+                out.as_mut_ptr(),
+                w,
+            )
+        };
+        return;
+    }
+
+    // Portable path: chunks_exact eliminates per-element bounds checks.
+    #[allow(unreachable_code)]
+    ycbcr_portable(y_row, cb_row, cr_row, out, w);
+}
+
+/// Portable YCbCr→RGBA using chunks_exact so LLVM sees exact 8-element slices.
+#[inline(always)]
+fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8], w: usize) {
+    use wide::i32x8;
     let c128 = i32x8::splat(128);
     let c0 = i32x8::splat(0);
     let c255 = i32x8::splat(255);
 
-    let w = y_row.len();
-    let full_chunks = w / 8;
-
-    for chunk in 0..full_chunks {
-        let base = chunk * 8;
-        let ys = i32x8::from([
-            y_row[base],
-            y_row[base + 1],
-            y_row[base + 2],
-            y_row[base + 3],
-            y_row[base + 4],
-            y_row[base + 5],
-            y_row[base + 6],
-            y_row[base + 7],
-        ]);
+    let full8 = w / 8;
+    for (((yc, cbc), crc), outc) in y_row[..full8 * 8]
+        .chunks_exact(8)
+        .zip(cb_row[..full8 * 8].chunks_exact(8))
+        .zip(cr_row[..full8 * 8].chunks_exact(8))
+        .zip(out[..full8 * 32].chunks_exact_mut(32))
+    {
+        let ys = i32x8::from([yc[0], yc[1], yc[2], yc[3], yc[4], yc[5], yc[6], yc[7]]);
         let bs = i32x8::from([
-            cb_row[base],
-            cb_row[base + 1],
-            cb_row[base + 2],
-            cb_row[base + 3],
-            cb_row[base + 4],
-            cb_row[base + 5],
-            cb_row[base + 6],
-            cb_row[base + 7],
+            cbc[0], cbc[1], cbc[2], cbc[3], cbc[4], cbc[5], cbc[6], cbc[7],
         ]);
         let rs = i32x8::from([
-            cr_row[base],
-            cr_row[base + 1],
-            cr_row[base + 2],
-            cr_row[base + 3],
-            cr_row[base + 4],
-            cr_row[base + 5],
-            cr_row[base + 6],
-            cr_row[base + 7],
+            crc[0], crc[1], crc[2], crc[3], crc[4], crc[5], crc[6], crc[7],
         ]);
-
         let t2 = rs + (rs >> 1_i32);
         let t3 = ys + c128 - (bs >> 2_i32);
-
-        let red: i32x8 = (ys + c128 + t2).max(c0).min(c255);
-        let green: i32x8 = (t3 - (t2 >> 1_i32)).max(c0).min(c255);
-        let blue: i32x8 = (t3 + (bs << 1_i32)).max(c0).min(c255);
-
-        let reds = red.to_array();
-        let greens = green.to_array();
-        let blues = blue.to_array();
-
-        let out_base = base * 4;
+        let red = (ys + c128 + t2).max(c0).min(c255).to_array();
+        let grn = (t3 - (t2 >> 1_i32)).max(c0).min(c255).to_array();
+        let blu = (t3 + (bs << 1_i32)).max(c0).min(c255).to_array();
         for i in 0..8 {
-            out[out_base + i * 4] = reds[i] as u8;
-            out[out_base + i * 4 + 1] = greens[i] as u8;
-            out[out_base + i * 4 + 2] = blues[i] as u8;
-            out[out_base + i * 4 + 3] = 255;
+            outc[i * 4] = red[i] as u8;
+            outc[i * 4 + 1] = grn[i] as u8;
+            outc[i * 4 + 2] = blu[i] as u8;
+            outc[i * 4 + 3] = 255;
         }
     }
-
-    // Scalar tail — fewer than 8 pixels remaining.
-    for col in (full_chunks * 8)..w {
+    for col in (full8 * 8)..w {
         let y = y_row[col];
         let b = cb_row[col];
         let r = cr_row[col];
@@ -206,6 +200,81 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
         out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
         out[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
         out[col * 4 + 3] = 255;
+    }
+}
+
+/// AArch64 NEON: 6× vld1q_s32 + SIMD arithmetic + vst4_u8 per 8 pixels.
+/// Replaces 80+ bounds-check branches per 8 pixels in the LLVM-generated portable code.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon(yp: *const i32, cbp: *const i32, crp: *const i32, outp: *mut u8, w: usize) {
+    use core::arch::aarch64::*;
+    let c128 = vdupq_n_s32(128);
+    let c0 = vdupq_n_s32(0);
+    let c255 = vdupq_n_s32(255);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        // Load 8 × i32 from each channel (2 × vld1q_s32 = one cache line per channel)
+        let y_lo = vld1q_s32(yp.add(off));
+        let y_hi = vld1q_s32(yp.add(off + 4));
+        let cb_lo = vld1q_s32(cbp.add(off));
+        let cb_hi = vld1q_s32(cbp.add(off + 4));
+        let cr_lo = vld1q_s32(crp.add(off));
+        let cr_hi = vld1q_s32(crp.add(off + 4));
+
+        // t2 = cr + (cr >> 1)
+        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
+        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
+        // t3 = y + 128 - (cb >> 2)
+        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
+        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
+
+        // red = clamp(y + 128 + t2)
+        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
+        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
+        // green = clamp(t3 - (t2 >> 1))
+        let g_lo = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
+            c255,
+        );
+        let g_hi = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
+            c255,
+        );
+        // blue = clamp(t3 + (cb << 1))
+        let b_lo = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
+            c255,
+        );
+        let b_hi = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
+            c255,
+        );
+
+        // Narrow i32×4 → i16×4 → u8×8 for each channel
+        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
+        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
+        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+
+        // Store 8 RGBA pixels (32 bytes) interleaved via vst4_u8
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = *yp.add(col);
+        let b = *cbp.add(col);
+        let r = *crp.add(col);
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
     }
 }
 
