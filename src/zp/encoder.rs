@@ -71,13 +71,14 @@ impl ZpEncoder {
     /// Matches `ZpDecoder::decode_passthrough_iw44`: threshold `z = 0x8000 + 3a/8`.
     pub(crate) fn encode_passthrough_iw44(&mut self, bit: bool) {
         let z = 0x8000 + (3 * self.a / 8);
+        // Invariant: self.a < 0x8000 (all encode paths maintain this).
+        // Therefore z = 0x8000 + 3a/8 ∈ [0x8000, 0xB000) — always ≥ 0x8000.
         if !bit {
             self.a = z;
-            if self.a >= 0x8000 {
-                self.zemit(1 - (self.subend >> 15) as i32);
-                self.subend = (self.subend << 1) & 0xffff;
-                self.a = (self.a << 1) & 0xffff;
-            }
+            // z ≥ 0x8000 always — single unconditional shift
+            self.zemit(1 - (self.subend >> 15) as i32);
+            self.subend = (self.subend << 1) & 0xffff;
+            self.a = (self.a << 1) & 0xffff;
         } else {
             let z_comp = 0x10000 - z;
             self.subend += z_comp;
@@ -92,14 +93,13 @@ impl ZpEncoder {
 
     pub(crate) fn encode_passthrough(&mut self, bit: bool) {
         let z = 0x8000 + (self.a >> 1);
+        // Invariant: self.a < 0x8000, so z = 0x8000 + a/2 ∈ [0x8000, 0xC000) — always ≥ 0x8000.
         if !bit {
-            // false (MPS-like): a = z, single shift
+            // false (MPS-like): a = z, single unconditional shift
             self.a = z;
-            if self.a >= 0x8000 {
-                self.zemit(1 - (self.subend >> 15) as i32);
-                self.subend = (self.subend << 1) & 0xffff;
-                self.a = (self.a << 1) & 0xffff;
-            }
+            self.zemit(1 - (self.subend >> 15) as i32);
+            self.subend = (self.subend << 1) & 0xffff;
+            self.a = (self.a << 1) & 0xffff;
         } else {
             // true (LPS-like): z_comp = 0x10000 - z
             let z_comp = 0x10000 - z;

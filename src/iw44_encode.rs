@@ -883,20 +883,27 @@ impl PlaneEncoder {
     }
 
     /// Gather wavelet coefficients from a flat plane into zigzag blocks.
+    #[allow(unsafe_code)]
     fn gather(&mut self, plane: &[i16], stride: usize) {
+        // Safety invariant: `stride` = block_cols*32, `plane.len()` = stride * block_rows*32.
+        // For any r < block_rows, c < block_cols, i < 1024:
+        //   row  = ZIGZAG_ROW[i]  (∈ [0,31]) + r*32  ≤ block_rows*32 - 1
+        //   col  = ZIGZAG_COL[i]  (∈ [0,31]) + c*32  ≤ stride - 1
+        //   idx  = row * stride + col ≤ plane.len() - 1
+        // The idx-in-bounds check is therefore always true; use get_unchecked to
+        // eliminate the dead branch from the inner loop.
         let block_rows = self.blocks.len() / self.block_cols;
         for r in 0..block_rows {
             for c in 0..self.block_cols {
                 let block = &mut self.blocks[r * self.block_cols + c];
                 let row_base = r << 5;
                 let col_base = c << 5;
-                for i in 0..1024 {
-                    let row = ZIGZAG_ROW[i] as usize + row_base;
-                    let col = ZIGZAG_COL[i] as usize + col_base;
-                    // Pad with zero beyond image boundaries (not with last sample)
-                    // to avoid inflating energy in high-frequency subbands at edges.
+                for (i, dst) in block.iter_mut().enumerate() {
+                    let row = unsafe { *ZIGZAG_ROW.get_unchecked(i) } as usize + row_base;
+                    let col = unsafe { *ZIGZAG_COL.get_unchecked(i) } as usize + col_base;
                     let idx = row * stride + col;
-                    block[i] = if idx < plane.len() { plane[idx] } else { 0 };
+                    // SAFETY: see invariant above — idx < plane.len() always holds.
+                    *dst = unsafe { *plane.get_unchecked(idx) };
                 }
             }
         }
