@@ -1305,16 +1305,66 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
         }
     }
 
-    forward_wavelet_transform(&mut y_plane, w, h, stride);
-    forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
-    forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
-
-    let mut y_enc = PlaneEncoder::new(w, h);
-    let mut cb_enc = PlaneEncoder::new(cw, ch);
-    let mut cr_enc = PlaneEncoder::new(cw, ch);
-    y_enc.gather(&y_plane, stride);
-    cb_enc.gather(&cb_plane, c_stride);
-    cr_enc.gather(&cr_plane, c_stride);
+    // Transform + gather all three planes.  Each plane is independent, so with
+    // the `parallel` feature they run concurrently on rayon threads, reducing
+    // wall-time from Y+Cb+Cr sequential to max(Y, Cb, Cr).
+    //
+    // The threshold (512×512 = 262 144 px) ensures rayon overhead (~30 µs) is
+    // only paid when the work per plane is large enough to justify it.  Below
+    // that threshold sequential is faster (verified on M1 with 192×256 images).
+    #[cfg(feature = "parallel")]
+    let (mut y_enc, mut cb_enc, mut cr_enc) = if w * h > 512 * 512 {
+        use rayon::join;
+        let (ye, (cbe, cre)) = join(
+            move || {
+                forward_wavelet_transform(&mut y_plane, w, h, stride);
+                let mut enc = PlaneEncoder::new(w, h);
+                enc.gather(&y_plane, stride);
+                enc
+            },
+            move || {
+                join(
+                    move || {
+                        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+                        let mut enc = PlaneEncoder::new(cw, ch);
+                        enc.gather(&cb_plane, c_stride);
+                        enc
+                    },
+                    move || {
+                        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+                        let mut enc = PlaneEncoder::new(cw, ch);
+                        enc.gather(&cr_plane, c_stride);
+                        enc
+                    },
+                )
+            },
+        );
+        (ye, cbe, cre)
+    } else {
+        forward_wavelet_transform(&mut y_plane, w, h, stride);
+        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+        let mut y_enc = PlaneEncoder::new(w, h);
+        let mut cb_enc = PlaneEncoder::new(cw, ch);
+        let mut cr_enc = PlaneEncoder::new(cw, ch);
+        y_enc.gather(&y_plane, stride);
+        cb_enc.gather(&cb_plane, c_stride);
+        cr_enc.gather(&cr_plane, c_stride);
+        (y_enc, cb_enc, cr_enc)
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (mut y_enc, mut cb_enc, mut cr_enc) = {
+        forward_wavelet_transform(&mut y_plane, w, h, stride);
+        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+        let mut y_enc = PlaneEncoder::new(w, h);
+        let mut cb_enc = PlaneEncoder::new(cw, ch);
+        let mut cr_enc = PlaneEncoder::new(cw, ch);
+        y_enc.gather(&y_plane, stride);
+        cb_enc.gather(&cb_plane, c_stride);
+        cr_enc.gather(&cr_plane, c_stride);
+        (y_enc, cb_enc, cr_enc)
+    };
 
     encode_chunks(
         &mut y_enc,
