@@ -102,6 +102,9 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | `get_unchecked` on zigzag scatter in `PlaneDecoder::reconstruct` (both compact and full-res paths) | compact path +4.4% sub4 (consistent, p=0.00); full-res path flat ±0% — scatter loop is memory-bound (writes to non-sequential addresses in 3.2 MB plane); cache-miss latency dominates; no benefit from removing bounds-check branches unlike `load8_i32` arithmetic loops |
 | 2026-04 | IW44 | `get_unchecked` on full-res scatter (after row-major rewrite) | sub1 +2.1% (p=0.00); sub2/sub4 flat — LLVM generates slightly worse instruction scheduling for full-res path without bounds checks; full-res scatter over 1 MB plane is still memory-latency-bound even with sequential writes; compact path benefits but full-res does not |
 | 2026-04 | IW44 encoder | local-copy ZP state in `previously_active_encoding_pass` (macro-based: outbit + zemit + encode_bit + encode_passthrough_iw44 inlined) | `iw44_encode_color` +1.8% (2.11→2.15 ms, p=0.00) — I-cache pressure from expanded macro body (7 encoder state fields + zemit/outbit chains) exceeds register-allocation gain; encoder slow paths (zemit → outbit → Vec::push) generate more code than decoder's renorm; breakeven never reached even though ≤64 ZP calls/block when fully ACTIVE |
+| 2026-04 | IW44 encoder | `get_unchecked` in `forward_row_pass` and `forward_col_pass` inner loops (data array + prev3/prev1/next1 Vec accesses) | flat: 0.3% improvement, p=0.10 — eliminates 35 `panic_bounds_check` symbols and enables partial LLVM NEON auto-vectorization (9 NEON instructions vs 0), but M1 branch predictor handles the original bounds-check branches at effectively zero cost; lifting sliding-window dependency (prev3/prev1/next1 sequential read-write) prevents full vectorization of the hottest loop regardless |
+| 2026-04 | IW44 encoder | `#[inline(always)]` on `ZpEncoder::zemit` and `outbit` (samply profile shows zemit at 15.2% leaf time = not inlined, top=0 fast path is just `nrun++` = dominated by call overhead) | `iw44_encode_color` +3.1% (p=0.00) — same I-cache pressure as local-copy regression: zemit+outbit expand into encode_lps/encode_mps, which are already inlined into encode_bit, which is inlined into encode_slice; the expanded function body for encode_slice grows past I-cache line boundaries; call overhead for zemit is ~5 cycles/call but function body saving is outweighed by I-cache miss cost |
+| 2026-04 | IW44 encoder | NEON `rgba_to_ycbcr_row_neon`: explicit `vld4_u8` + `vmovl_u8` + arithmetic + `vst1q_s16×3` per 8 pixels to replace scalar RGB→YCbCr loop (encode_iw44_color 8.5% leaf) | `iw44_encode_color` +2.9% (p=0.00) — LLVM already auto-vectorizes the original scalar loop with `ld4.8b` NEON; explicit NEON function is no faster and may introduce overhead from different register spilling or loop structure; assembly confirmed `ld4.8b { v1-v4 }, [x13], #32` in original code |
 | 2026-04 | IW44 | split `int16x8x2_t curr_pair` into `curr_even`/`curr_odd` in even-pass loop to eliminate "redundant" ld2.8h carry across iterations | sub1 −1.3% (p=0.00) but sub2 +2.1% (p=0.00) — net negative; the "redundant" ld2 is a sequential L1 hit (~free on M1); restructuring hurts LLVM's instr scheduling for sub2; "carry-in-registers" only wins for very long row bodies, not here |
 | 2026-04 | IW44 | replace `vmovl_s16×2 + vaddq_s32` with `vaddl_s16` in even-pass lift (saves 8 instr/chunk) | sub1 +1.7% (p=0.00) — `saddl` has 2/cycle throughput on M1 vs 4/cycle for `sxtl`; using a lower-throughput instruction to save instruction count is a net loss; M1's even-pass lift is throughput-bound on `add.4s`/`sxtl`-class instructions (4/cycle units) |
 | 2026-04 | IW44 | `srshr5_i32x8`/`srshr4_i32x8` wrappers using `vrshrq_n_s32` to fold bias into rounding shift (save 2 `add.4s` per even/odd lifting iteration) | sub1 +1.2%, sub2 −0.9%, sub4 −0.6% — all within noise (Criterion p=0.00 but tiny magnitude); assembly confirms `srshr.4s #5` for `lifting_even` but `srshr.4s #4` for `predict_inner` is absent (LLVM absorbs it into narrowing path); ~2 M fewer instructions but M1's column pass is not instruction-count-bound at this level; complex unsafe transmute code not justified by zero measurable gain |
@@ -188,6 +191,22 @@ Tried early-exit in `decode_slice`: `if zp.is_exhausted() && (bbstate & ACTIVE) 
 Result: **99.2% pixel mismatch** (big_scanned, chicken). Root cause: `is_exhausted()` checks only the byte buffer (`pos >= data.len()`), but the ZP coder is a **continuous bit stream** — each `decode_bit` call advances a shared arithmetic state. Skipping any call desynchronises all subsequent calls for that chunk. `is_exhausted()` can fire mid-stream (e.g. when 0.088 bits/block compression means 819 bytes cover block 1 through ~74 000 of 74 880 total), so blocks well before the end of the sweep get the wrong decisions.
 
 No safe early-exit is possible without changing the encoding format.
+
+---
+
+### IW44 encoder `encode_iw44_color` profile breakdown (2026-04-17)
+
+**Setup:** 200 iters of `encode_iw44_color` on boy.djvu (192×256), samply @ ~1 ksample/s.
+
+| Function | Self% | Notes |
+|----------|-------|-------|
+| `PlaneEncoder::encode_slice` | **56.3%** | Main ZP encoding loop. Inlined coefficient scan + ZP dispatch. |
+| `ZpEncoder::zemit` | **15.2%** | Carry-propagation buffer flush. NOT inlined (LLVM skips due to slow-path Vec::push size). Hot path is top=0 (nrun++). |
+| `forward_wavelet_transform` | **13.5%** | Scalar only — no NEON. 35 bounds-check calls eliminated by get_unchecked but no measured benefit. Lifting sliding-window prevents full auto-vectorization. |
+| `encode_iw44_color` (orchestration) | 8.5% | RGB→YCbCr, block gather, overhead. |
+| `ZpEncoder::encode_bit` | 4.3% | Fast path (a=z, no shift) — already fast. |
+
+**Key finding:** zemit at 15.2% looks like a target, but `#[inline(always)]` causes +3.1% regression. The encoder is fundamentally I-cache-limited in its hot path — any attempt to expand the inline chain into encode_slice degrades performance. The remaining wins must come from reducing work (NEON wavelet, faster gather/scatter) rather than ZP encoding speed.
 
 ---
 
