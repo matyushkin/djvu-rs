@@ -172,6 +172,7 @@ fn encode_num(zp: &mut ZpEncoder, ctx: &mut NumContext, low: i32, high: i32, val
 /// The bitmap is first expanded to a flat byte-per-pixel array with 2 zero rows
 /// above the image and 4 zero columns to the right of each row.  This eliminates
 /// all per-pixel bounds checking and bit-manipulation in the inner loop.
+#[allow(unsafe_code)]
 fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
     debug_assert_eq!(ctx.len(), 1024);
     let w = bm.width as usize;
@@ -207,7 +208,10 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
         for col in 0..w {
             let idx = ((r2 << 7) | (r1 << 2) | r0) as usize;
             let bit = row_cur[col] != 0;
-            zp.encode_bit(&mut ctx[idx], bit);
+            // Safety: r2 ≤ 7, r1 ≤ 31, r0 ≤ 3 by the & masks above,
+            // so idx ≤ (7<<7)|(31<<2)|3 = 1023 < ctx.len() = 1024.
+            let ctx_byte = unsafe { ctx.get_unchecked_mut(idx) };
+            zp.encode_bit(ctx_byte, bit);
 
             // Advance rolling windows — no bounds checks: col+2 < w+2 < pw, col+3 < w+3 < pw.
             r2 = ((r2 << 1) & 0b111) | row_p2[col + 2] as u32;
