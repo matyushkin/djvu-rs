@@ -5,16 +5,20 @@
 //! <https://www.sndjvu.org/spec.html>.
 //!
 //! Key public types (all `pub(crate)` constants):
-//! - [`PROB`] — probability estimates (251 entries, u16)
-//! - [`THRESHOLD`] — adaptation thresholds (251 entries, u16)
-//! - [`MPS_NEXT`] — state transitions on MPS (most probable symbol) (251 entries, u8)
-//! - [`LPS_NEXT`] — state transitions on LPS (least probable symbol) (251 entries, u8)
+//! - [`PROB`] — probability estimates (256 entries, u16)
+//! - [`THRESHOLD`] — adaptation thresholds (256 entries, u16)
+//! - [`MPS_NEXT`] — state transitions on MPS (most probable symbol) (256 entries, u8)
+//! - [`LPS_NEXT`] — state transitions on LPS (least probable symbol) (256 entries, u8)
+//!
+//! Each table has 256 entries (5 padding entries at indices 251–255) so that LLVM
+//! can prove `state < 256` for any `u8`-derived index and eliminate bounds checks.
 
-/// Probability estimates `p[state]` for each ZP coder state (251 entries).
+/// Probability estimates `p[state]` for each ZP coder state.
 ///
+/// 251 valid entries + 5 padding entries (indices 251–255, never accessed).
 /// Each entry gives the probability that the next decoded bit is the MPS (most
 /// probable symbol). Values are unsigned 16-bit fractions in the range [0, 0x8000].
-pub(crate) const PROB: [u16; 251] = [
+pub(crate) const PROB: [u16; 256] = [
     0x8000, 0x8000, 0x8000, 0x6bbd, 0x6bbd, 0x5d45, 0x5d45, 0x51b9, 0x51b9, 0x4813, 0x4813, 0x3fd5,
     0x3fd5, 0x38b1, 0x38b1, 0x3275, 0x3275, 0x2cfd, 0x2cfd, 0x2825, 0x2825, 0x23ab, 0x23ab, 0x1f87,
     0x1f87, 0x1bbb, 0x1bbb, 0x1845, 0x1845, 0x1523, 0x1523, 0x1253, 0x1253, 0x0fcf, 0x0fcf, 0x0d95,
@@ -36,13 +40,17 @@ pub(crate) const PROB: [u16; 251] = [
     0x24ef, 0x00e1, 0x320e, 0x0094, 0x432a, 0x0188, 0x447d, 0x0252, 0x5ece, 0x0383, 0x8000, 0x0547,
     0x481a, 0x07e2, 0x3579, 0x0bc0, 0x24ef, 0x1178, 0x1978, 0x19da, 0x2865, 0x24ef, 0x3987, 0x320e,
     0x2c99, 0x432a, 0x3b5f, 0x447d, 0x5695, 0x5ece, 0x8000, 0x8000, 0x5695, 0x481a, 0x481a,
+    // 5 padding entries (indices 251–255, never accessed during correct operation)
+    0x8000, 0x8000, 0x8000, 0x8000, 0x8000,
 ];
 
-/// Adaptation threshold `m[state]` for each ZP coder state (251 entries).
+/// Adaptation threshold `m[state]` for each ZP coder state.
+///
+/// 251 valid entries + 5 padding entries (indices 251–255, never accessed).
 ///
 /// When `a >= m[state]`, the MPS transition updates the context state using
 /// [`MPS_NEXT`]. Entries beyond state 82 are 0 (no threshold-based update).
-pub(crate) const THRESHOLD: [u16; 251] = [
+pub(crate) const THRESHOLD: [u16; 256] = [
     0x0000, 0x0000, 0x0000, 0x10a5, 0x10a5, 0x1f28, 0x1f28, 0x2bd3, 0x2bd3, 0x36e3, 0x36e3, 0x408c,
     0x408c, 0x48fd, 0x48fd, 0x505d, 0x505d, 0x56d0, 0x56d0, 0x5c71, 0x5c71, 0x615b, 0x615b, 0x65a5,
     0x65a5, 0x6962, 0x6962, 0x6ca2, 0x6ca2, 0x6f74, 0x6f74, 0x71e6, 0x71e6, 0x7404, 0x7404, 0x75d6,
@@ -64,13 +72,15 @@ pub(crate) const THRESHOLD: [u16; 251] = [
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    // 5 padding entries (indices 251–255, never accessed during correct operation)
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
 /// Next state on MPS (most probable symbol) occurrence.
 ///
 /// When the decoded bit matches the MPS and `a >= m[state]`, the context is
 /// updated to `MPS_NEXT[state]`.
-pub(crate) const MPS_NEXT: [u8; 251] = [
+pub(crate) const MPS_NEXT: [u8; 256] = [
     84, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
     51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
@@ -83,13 +93,15 @@ pub(crate) const MPS_NEXT: [u8; 251] = [
     58, 205, 54, 207, 50, 209, 46, 211, 40, 213, 36, 215, 30, 217, 26, 219, 20, 71, 14, 61, 14, 57,
     8, 53, 228, 49, 230, 45, 232, 39, 234, 35, 138, 29, 24, 25, 240, 19, 22, 13, 16, 13, 10, 7,
     244, 249, 10, 89, 230,
+    // 5 padding entries (indices 251–255, never accessed during correct operation)
+    0, 0, 0, 0, 0,
 ];
 
 /// Next state on LPS (least probable symbol) occurrence.
 ///
 /// When the decoded bit does not match the MPS, the context is updated to
 /// `LPS_NEXT[state]`.
-pub(crate) const LPS_NEXT: [u8; 251] = [
+pub(crate) const LPS_NEXT: [u8; 256] = [
     145, 4, 3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
     24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
@@ -102,6 +114,8 @@ pub(crate) const LPS_NEXT: [u8; 251] = [
     64, 239, 56, 237, 52, 235, 48, 233, 44, 231, 38, 229, 34, 227, 28, 225, 22, 223, 16, 221, 220,
     63, 8, 55, 224, 51, 2, 47, 87, 43, 246, 37, 244, 33, 238, 27, 236, 21, 16, 15, 8, 241, 242, 7,
     10, 245, 2, 1, 83, 250, 2, 143, 246,
+    // 5 padding entries (indices 251–255, never accessed during correct operation)
+    0, 0, 0, 0, 0,
 ];
 
 #[cfg(test)]
@@ -110,10 +124,10 @@ mod tests {
 
     #[test]
     fn tables_have_correct_length() {
-        assert_eq!(PROB.len(), 251);
-        assert_eq!(THRESHOLD.len(), 251);
-        assert_eq!(MPS_NEXT.len(), 251);
-        assert_eq!(LPS_NEXT.len(), 251);
+        assert_eq!(PROB.len(), 256);
+        assert_eq!(THRESHOLD.len(), 256);
+        assert_eq!(MPS_NEXT.len(), 256);
+        assert_eq!(LPS_NEXT.len(), 256);
     }
 
     #[test]
