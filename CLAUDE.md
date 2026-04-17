@@ -41,7 +41,7 @@ Composite pipeline (src/djvu_render.rs):
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **342 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
-| `iw44_encode_color` | **2.04 ms** | — |
+| `iw44_encode_color` | **1.99 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
 | `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
@@ -85,6 +85,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | Hoist `has_n3` branch out of even-pass ci inner loop: split `while k <= kmax` into main loop (`while k+3 <= kmax`, no conditional) + tail loop (`while k <= kmax`, zero n3) | sub1/sub2/sub4 within noise — structurally cleaner but M1 branch predictor handles the original perfectly; no measurable effect |
 | 2026-04 | IW44 | `load8s`/`store8s` s=1 fast path: move `if s == 1` check to top with `core::ptr::read/write<[i16;8]>` for contiguous load/store, bypassing 5-branch `match s` dispatch chain inside `load8s_neon`/`store8s_neon` | sub1 −6.2% (5.80→5.46 ms, p=0.00); sub2 −11.4% (1.48→1.31 ms, p=0.00); sub4 −9.1% (376→342 µs, p=0.00) — assembly: s=1 hot path reduced from 5-branch `match`-dispatch to single `cmp+b.ne` before `ldp d18,d19+sshll×2`; each ci-iteration saves 4 dispatch branches × 3 calls (2 loads + 1 store) = 12 fewer branches; `ldp d,d` (2×64-bit) generates same memory traffic as `ldr q` (1×128-bit); sub2/sub4 gain larger because their wavelet planes are smaller and fit better in L1 after branch reduction |
 | 2026-04 | IW44 encoder | NEON-vectorize encoder's `preliminary_flag_computation` band≠0 and band-0 paths (i32 recon data): 4 × `vld1q_s32` + `vceqq_s32` + narrowing chain `vmovn_u32→vmovn_u16` + `veorq_u8`/`vandq_u8` + `vst1q_u8`; band-0 uses `vbslq_u8` blend to preserve ZERO entries | `iw44_encode_color` −5.3% (2.11→2.04 ms, p=0.00) — scalar loop not auto-vectorized by LLVM due to `bstatetmp |= ...` accumulation; i32 source requires 4 × `vld1q_s32` (vs decoder's 2 × `vld1q_s16`); ~25 NEON instructions replaces 48+ scalar ops per 16-element bucket |
+| 2026-04 | IW44 encoder | NEON `forward_row_neon_s1_row` + `forward_col_predict_neon` for `forward_wavelet_transform` at s=1: mirror of decoder's `row_pass_neon_s1_row` with sign-dual ops (predict subtracts, lift adds, odd pass first then even pass); col pass inner predict uses 5 × `vld1q_s16` + `vmovl_s16`/`vshlq_n_s32`/`vshrq_n_s32`/`vsubq_s16` + `vst1q_s16` per 8 columns | `iw44_encode_color` −5.1% (2.04→1.99 ms, p=0.00) — LLVM generated pure scalar `ldrsh`/`strh` for both row and col passes; explicit NEON processes 8 positions per iteration; assembly confirmed 0 vector instructions before this change; row pass NEON matches decoder's `smull.4s + rshrn.4h` form after inlining |
 
 ### ✗ Reverted
 
