@@ -410,6 +410,35 @@ fn bench_iw44_encode_color(c: &mut Criterion) {
     });
 }
 
+/// Benchmark IW44 color encode on a large synthetic 1024×1024 gradient pixmap.
+///
+/// The synthetic pixmap guarantees:
+///   - w × h = 1 048 576 > 512 × 512, so the `parallel` feature parallel path fires.
+///   - Non-trivial gradient content exercises realistic wavelet coefficients.
+///
+/// Compare sequential vs parallel:
+///   cargo bench --bench codecs iw44_encode_large
+///   cargo bench --bench codecs --features parallel iw44_encode_large
+fn bench_iw44_encode_large(c: &mut Criterion) {
+    const W: u32 = 1024;
+    const H: u32 = 1024;
+    let mut pixmap = djvu_rs::Pixmap::new(W, H, 0, 0, 0, 255);
+    for y in 0..H {
+        for x in 0..W {
+            let r = ((x * 255) / W) as u8;
+            let g = ((y * 255) / H) as u8;
+            let b = (((x + y) * 127) / (W + H)) as u8;
+            pixmap.set_rgb(x, y, r, g, b);
+        }
+    }
+    let enc_opts = djvu_rs::iw44_encode::Iw44EncodeOptions::default();
+    c.bench_function("iw44_encode_large_1024x1024", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::iw44_encode::encode_iw44_color(black_box(&pixmap), &enc_opts);
+        });
+    });
+}
+
 /// Benchmark JB2 encode: decode a bilevel page, then encode the mask.
 fn bench_jb2_encode(c: &mut Criterion) {
     let path = assets_path().join("boy_jb2.djvu");
@@ -447,6 +476,7 @@ criterion_group!(
     bench_iw44_to_rgb_large,
     bench_iw44_to_rgb_colorbook_sub,
     bench_iw44_encode_color,
+    bench_iw44_encode_large,
     bench_jb2_encode,
 );
 criterion_main!(benches);
