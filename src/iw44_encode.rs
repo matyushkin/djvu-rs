@@ -993,7 +993,9 @@ impl PlaneEncoder {
                     self.bucket_encoding_pass(zp, block_idx);
                     self.newly_active_encoding_pass(zp, block_idx);
                 }
-                self.previously_active_encoding_pass(zp, block_idx);
+                if (self.bbstate & ACTIVE) != 0 {
+                    self.previously_active_encoding_pass(zp, block_idx);
+                }
             }
         }
         self.finish_slice();
