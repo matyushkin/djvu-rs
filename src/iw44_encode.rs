@@ -475,6 +475,77 @@ unsafe fn forward_col_predict_neon(
     }
 }
 
+/// NEON col-pass lift for s=1: one even row, 8 consecutive columns per iteration.
+///
+/// State slices (`prev3`, `prev1`, `next1`) are i16 (values bounded by i16 after
+/// predict).  Performs:
+///   data[k0+col] += ((9*(p1+n1) - (p3+n3) + 16) >> 5)
+/// then advances state: prev3 ← prev1, prev1 ← next1, next1 ← n3.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, clippy::too_many_arguments)]
+#[target_feature(enable = "neon")]
+unsafe fn forward_col_lift_neon_row(
+    data: &mut [i16],
+    k0_off: usize,
+    n3_off: usize, // ignored when !has_n3
+    has_n3: bool,
+    prev3: &mut [i16],
+    prev1: &mut [i16],
+    next1: &mut [i16],
+    width: usize,
+) {
+    use core::arch::aarch64::*;
+    let ptr = data.as_mut_ptr();
+    let p3p = prev3.as_mut_ptr();
+    let p1p = prev1.as_mut_ptr();
+    let n1p = next1.as_mut_ptr();
+    let d16 = vdupq_n_s32(16i32);
+    let mut col = 0usize;
+    while col + 8 <= width {
+        let p3_s = vld1q_s16(p3p.add(col) as *const i16);
+        let p1_s = vld1q_s16(p1p.add(col) as *const i16);
+        let n1_s = vld1q_s16(n1p.add(col) as *const i16);
+        let n3_s = if has_n3 {
+            vld1q_s16(ptr.add(n3_off + col) as *const i16)
+        } else {
+            vdupq_n_s16(0)
+        };
+        let cur_s = vld1q_s16(ptr.add(k0_off + col) as *const i16);
+        let a_lo = vaddq_s32(vmovl_s16(vget_low_s16(p1_s)), vmovl_s16(vget_low_s16(n1_s)));
+        let a_hi = vaddq_s32(vmovl_high_s16(p1_s), vmovl_high_s16(n1_s));
+        let c_lo = vaddq_s32(vmovl_s16(vget_low_s16(p3_s)), vmovl_s16(vget_low_s16(n3_s)));
+        let c_hi = vaddq_s32(vmovl_high_s16(p3_s), vmovl_high_s16(n3_s));
+        let nine_a_lo = vaddq_s32(vshlq_n_s32::<3>(a_lo), a_lo);
+        let nine_a_hi = vaddq_s32(vshlq_n_s32::<3>(a_hi), a_hi);
+        let delta_lo = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a_lo, d16), c_lo));
+        let delta_hi = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a_hi, d16), c_hi));
+        let delta_s = vcombine_s16(vmovn_s32(delta_lo), vmovn_s32(delta_hi));
+        vst1q_s16(ptr.add(k0_off + col), vaddq_s16(cur_s, delta_s));
+        // advance state
+        vst1q_s16(p3p.add(col), p1_s);
+        vst1q_s16(p1p.add(col), n1_s);
+        vst1q_s16(n1p.add(col), n3_s);
+        col += 8;
+    }
+    // scalar tail
+    while col < width {
+        let p3 = *prev3.get_unchecked(col) as i32;
+        let p1 = *prev1.get_unchecked(col) as i32;
+        let n1 = *next1.get_unchecked(col) as i32;
+        let n3 = if has_n3 {
+            *data.get_unchecked(n3_off + col) as i32
+        } else {
+            0
+        };
+        *data.get_unchecked_mut(k0_off + col) =
+            lift(*data.get_unchecked(k0_off + col) as i32, p1, n1, p3, n3) as i16;
+        *prev3.get_unchecked_mut(col) = p1 as i16;
+        *prev1.get_unchecked_mut(col) = n1 as i16;
+        *next1.get_unchecked_mut(col) = n3 as i16;
+        col += 1;
+    }
+}
+
 /// Forward column pass (analysis) at scale `s`.
 fn forward_col_pass(data: &mut [i16], width: usize, height: usize, stride: usize, s: usize) {
     let sd = s.trailing_zeros() as usize;
@@ -552,6 +623,31 @@ fn forward_col_pass(data: &mut [i16], width: usize, height: usize, stride: usize
     }
 
     // Step 2: undo lifting — even rows (k=0,2,4,...)
+    // AArch64 NEON path at s=1: i16 state, 8 columns/iter
+    #[cfg(target_arch = "aarch64")]
+    if s == 1 {
+        let mut prev3: Vec<i16> = vec![0i16; width];
+        let mut prev1: Vec<i16> = vec![0i16; width];
+        let mut next1: Vec<i16> = if kmax >= 1 {
+            data[stride..stride + width].to_vec()
+        } else {
+            vec![0i16; width]
+        };
+        let mut k = 0usize;
+        while k <= kmax {
+            let k0_off = k * stride;
+            let has_n3 = k + 3 <= kmax;
+            let n3_off = if has_n3 { (k + 3) * stride } else { 0 };
+            #[allow(unsafe_code)]
+            unsafe {
+                forward_col_lift_neon_row(
+                    data, k0_off, n3_off, has_n3, &mut prev3, &mut prev1, &mut next1, width,
+                );
+            }
+            k += 2;
+        }
+        return;
+    }
     {
         let num_cols = width.div_ceil(col_step);
         let mut prev3: Vec<i32> = vec![0i32; num_cols];
