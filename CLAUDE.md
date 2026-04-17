@@ -41,7 +41,7 @@ Composite pipeline (src/djvu_render.rs):
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **342 µs** | — |
 | `jb2_decode_corpus_bilevel` | **421 µs** | — |
 | `jb2_encode` | **182 µs** | — |
-| `iw44_encode_color` | **1.83 ms** | — |
+| `iw44_encode_color` | **1.74 ms** | — |
 | `render_page/dpi/72` | **240 µs** (warm cache) | (was 1.21 ms in BENCHMARKS.md — major gains since v0.4.1) |
 | `render_page/dpi/300` | 4.02 ms | (from BENCHMARKS.md) |
 | `render_colorbook_cold` (150 dpi, `parallel`) | **14.1 ms** | −40% vs sequential (23.6 ms before #186) |
