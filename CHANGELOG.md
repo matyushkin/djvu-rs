@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/matyushkin/djvu-rs/compare/v0.12.0...v0.13.0) (2026-04-18)
+
+
+### Features
+
+* **ci:** add ocr-tesseract integration test + CI job ([#178](https://github.com/matyushkin/djvu-rs/issues/178)) ([220671d](https://github.com/matyushkin/djvu-rs/commit/220671d0ae6d21f05a2a847945e062ae27eb931c))
+* **epub:** DPI-aware rendering, language tag, hyperlinks, cover image ([191e386](https://github.com/matyushkin/djvu-rs/commit/191e3869623a091998d75761f9be30d75c9576a8))
+* **mask:** wire Smmr (G4/MMR) decoder into both render pipelines ([07272b3](https://github.com/matyushkin/djvu-rs/commit/07272b32f44da9b4382bd9f1d4ff7828ce6223d3))
+* **tiff:** embed DPI resolution tags in exported TIFF files ([87efb14](https://github.com/matyushkin/djvu-rs/commit/87efb140cc603a3ad4bd0f13b5e7a12c995ca516))
+
+
+### Bug Fixes
+
+* **ci:** install libleptonica-dev + libtesseract-dev for ocr-tesseract job ([0410f70](https://github.com/matyushkin/djvu-rs/commit/0410f70f0ed73be0425906685c3af1e0b6397374))
+* **ci:** split test into test-stable + test-beta jobs (matrix.rust not allowed in job if) ([0d60c76](https://github.com/matyushkin/djvu-rs/commit/0d60c7662a78bff90dad81d9847e07d93dfb3b15))
+* **docs:** resolve all remaining broken intra-doc links (0 warnings) ([4ac8bb1](https://github.com/matyushkin/djvu-rs/commit/4ac8bb162d922529ac4e58757155d556fbe3e7fc))
+* **docs:** resolve broken intra-doc links in djvu_document ([8dbfda0](https://github.com/matyushkin/djvu-rs/commit/8dbfda050a72df34dbe3f149427aec4a6e4252a9))
+* **fuzz:** revert to cargo install cargo-fuzz, add explicit binary cache ([84e6eef](https://github.com/matyushkin/djvu-rs/commit/84e6eef4b18c6f957f327d34fc2f87ab560a5f3c))
+* **fuzz:** use correct public module djvu_rs::jb2 in fuzz_jb2 target ([9133de6](https://github.com/matyushkin/djvu-rs/commit/9133de69f3af8ee05f2c8f9239efcf87e2ed0a76))
+* **pdf:** Unicode-aware glyph width for invisible text layer ([2398c38](https://github.com/matyushkin/djvu-rs/commit/2398c3851d8cef9c5a2b41dbcdaf5352baf9575a))
+* **render:** add #[allow(unsafe_code)] + unsafe blocks for Rust 2024 SIMD ([#169](https://github.com/matyushkin/djvu-rs/issues/169)) ([179d171](https://github.com/matyushkin/djvu-rs/commit/179d17132c31b5ec31eaa99156acc4ac4cdda1f6))
+* **render:** correct gamma LUT formula to match DjVuLibre ([#161](https://github.com/matyushkin/djvu-rs/issues/161)) ([cd3228d](https://github.com/matyushkin/djvu-rs/commit/cd3228d812e77f6d9bdcc48e1d9a92f8ff34077e))
+* **render:** resolve unsafe_code / unsafe_op_in_unsafe_fn CI conflicts ([889f28f](https://github.com/matyushkin/djvu-rs/commit/889f28fb67c5b13c8f5b4a66ae32b1546a498988))
+* **render:** restore bilevel composite fast path, recover 2× regression from [#165](https://github.com/matyushkin/djvu-rs/issues/165) ([46b6931](https://github.com/matyushkin/djvu-rs/commit/46b69318d0e1181d4eec5d9fc428cc5eee9723f6))
+* **render:** use core::arch instead of std::arch for no_std compatibility ([122b989](https://github.com/matyushkin/djvu-rs/commit/122b989708e475658a764b2b145a887605590e37))
+* resolve issues [#164](https://github.com/matyushkin/djvu-rs/issues/164) [#169](https://github.com/matyushkin/djvu-rs/issues/169) [#170](https://github.com/matyushkin/djvu-rs/issues/170) [#174](https://github.com/matyushkin/djvu-rs/issues/174) [#176](https://github.com/matyushkin/djvu-rs/issues/176) [#177](https://github.com/matyushkin/djvu-rs/issues/177) ([774cbdb](https://github.com/matyushkin/djvu-rs/commit/774cbdb834c703c27ca82ed9f8f3bb4a17504aeb))
+* wasm CI job, open_dir API, DPI scaling in OCR export, jb2_new cleanup ([6cbe038](https://github.com/matyushkin/djvu-rs/commit/6cbe038909858f4c523f13d7204998a7109cd84d))
+* **zp:** widen a/c/fence fields from u16 to u32 to match jb2 inline decoder ([fb0db12](https://github.com/matyushkin/djvu-rs/commit/fb0db122daa4dccd97f49a971103de0add5a2366))
+
+
+### Performance Improvements
+
+* **bzz:** inline ZP state locals in MTF decode hot loop ([bad5b21](https://github.com/matyushkin/djvu-rs/commit/bad5b215bfa5384589f2252b3da2ee0ecb9a3ac2))
+* **ci:** single nextest pass on main avoids sequential overhead ([f17d901](https://github.com/matyushkin/djvu-rs/commit/f17d901b1055c3cc2fb8e6dbfa3b6d445b6aa357))
+* **deps:** split ocr-neural into lightweight stub + ocr-neural-candle ([#175](https://github.com/matyushkin/djvu-rs/issues/175)) ([3a930b2](https://github.com/matyushkin/djvu-rs/commit/3a930b2e38ca939eb15af2eefbb55156a158224b))
+* **jb2:** bit-pack Jbm to 1 bit/pixel — 8x memory, corpus −3.9% ([#187](https://github.com/matyushkin/djvu-rs/issues/187)) ([17f331f](https://github.com/matyushkin/djvu-rs/commit/17f331f3d44e9e8b6f2d179b77e7212ba5b47433))
+* **render:** x86_64 SSE2/SSSE3 fast paths for alpha fill and RGB→RGBA ([#169](https://github.com/matyushkin/djvu-rs/issues/169)) ([0ea3f3e](https://github.com/matyushkin/djvu-rs/commit/0ea3f3e674ae1eb112fb73368038e3fd0b2e0dde))
+
 ## [0.12.0](https://github.com/matyushkin/djvu-rs/compare/v0.11.1...v0.12.0) (2026-04-14)
 
 
