@@ -268,8 +268,8 @@ impl Jbm {
             let top_has = data[..stride].iter().any(|&b| b != 0);
             let bot_has = data[(h - 1) * stride..h * stride].iter().any(|&b| b != 0);
             let left_has = (0..h).any(|r| (data[r * stride] & 0x80) != 0);
-            let right_has = (0..h)
-                .any(|r| (data[r * stride + last_col / 8] & (0x80u8 >> (last_col & 7))) != 0);
+            let right_has =
+                (0..h).any(|r| (data[r * stride + last_col / 8] & (0x80u8 >> (last_col & 7))) != 0);
             if top_has && bot_has && left_has && right_has {
                 // Already tight — return self directly without copying.
                 // Pre-allocate the pool with the same capacity so the next
@@ -725,11 +725,7 @@ fn decode_bitmap_direct(
     for row in (0..h).rev() {
         s_curr.iter_mut().for_each(|b| *b = 0);
         decode_direct_row(zp, ctx, &mut s_curr, &s_prev1, &s_prev2);
-        pack_row_into(
-            &s_curr,
-            w,
-            &mut bm.data[row * stride..(row + 1) * stride],
-        );
+        pack_row_into(&s_curr, w, &mut bm.data[row * stride..(row + 1) * stride]);
         // Rotate: prev2 ← prev1, prev1 ← curr, curr ← (old prev2, re-used).
         core::mem::swap(&mut s_prev2, &mut s_prev1);
         core::mem::swap(&mut s_prev1, &mut s_curr);
