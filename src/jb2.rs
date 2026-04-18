@@ -163,12 +163,15 @@ fn decode_num(zp: &mut ZpDecoder<'_>, ctx: &mut NumContext, low: i32, high: i32)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Jbm: internal 1-byte-per-pixel working bitmap (row 0 = bottom of page)
+// Jbm: internal bit-packed working bitmap (row 0 = bottom of page)
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Internal working bitmap used during JB2 decoding.
 ///
-/// Pixels are stored as 1 byte each (0 = white, 1 = black).
+/// Pixels are stored bit-packed: 1 bit per pixel, MSB-first within each byte,
+/// rows padded to byte boundary (`row_stride_bytes`). Matches `Bitmap`'s
+/// convention, which makes blit into `Bitmap` a shift-align copy rather than
+/// a byte→bit pack.
 /// Row 0 is the **bottom** of the image (DjVu convention).
 #[derive(Clone)]
 struct Jbm {
@@ -178,8 +181,23 @@ struct Jbm {
 }
 
 impl Jbm {
+    #[inline(always)]
+    fn row_stride_bytes(width: i32) -> usize {
+        (width.max(0) as usize).div_ceil(8)
+    }
+
+    #[inline(always)]
+    fn stride(&self) -> usize {
+        Self::row_stride_bytes(self.width)
+    }
+
+    #[inline(always)]
+    fn storage_bytes(width: i32, height: i32) -> usize {
+        Self::row_stride_bytes(width).saturating_mul(height.max(0) as usize)
+    }
+
     fn new(width: i32, height: i32) -> Self {
-        let len = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
+        let len = Self::storage_bytes(width, height);
         Jbm {
             width,
             height,
@@ -193,25 +211,34 @@ impl Jbm {
         if row < 0 || row >= self.height || col < 0 || col >= self.width {
             return 0;
         }
-        // SAFETY: bounds checked above
-        self.data[(row * self.width + col) as usize]
+        let stride = self.stride();
+        let byte = self.data[row as usize * stride + (col as usize / 8)];
+        (byte >> (7 - (col as usize & 7))) & 1
+    }
+
+    /// Set pixel at (row, col) to black (1). Caller must ensure in-bounds.
+    #[inline(always)]
+    fn set_black(&mut self, row: usize, col: usize) {
+        let stride = self.stride();
+        self.data[row * stride + (col / 8)] |= 0x80u8 >> (col & 7);
     }
 
     /// Construct a `Jbm` using a reusable scratch buffer.
     ///
-    /// The buffer is grown to at least `width * height` bytes (never shrunk),
-    /// and the used portion is zeroed.  The old buffer contents are taken via
-    /// `std::mem::take` so `pool` is left empty on return; the caller regains
-    /// the buffer by calling [`Jbm::crop_and_recycle`] or [`Jbm::recycle_into`].
+    /// The buffer is grown to at least `storage_bytes(width, height)` bytes
+    /// (never shrunk), and the used portion is zeroed.  The old buffer
+    /// contents are taken via `std::mem::take` so `pool` is left empty on
+    /// return; the caller regains the buffer by calling
+    /// [`Jbm::crop_and_recycle`] or [`Jbm::recycle_into`].
     fn new_from_pool(width: i32, height: i32, pool: &mut Vec<u8>) -> Self {
-        let pixels = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
-        if pool.len() < pixels {
-            pool.resize(pixels, 0u8);
+        let bytes = Self::storage_bytes(width, height);
+        if pool.len() < bytes {
+            pool.resize(bytes, 0u8);
         }
         // Zero the portion we will use (including any bytes reused from a previous symbol).
-        pool[..pixels].fill(0u8);
+        pool[..bytes].fill(0u8);
         let mut data = core::mem::take(pool);
-        data.truncate(pixels);
+        data.truncate(bytes);
         Jbm {
             width,
             height,
@@ -233,13 +260,16 @@ impl Jbm {
         if self.width > 0 && self.height > 0 {
             let w = self.width as usize;
             let h = self.height as usize;
+            let stride = self.stride();
+            let last_col = w - 1;
             let data = &self.data;
-            // Check whether all four border edges contain at least one set pixel.
-            // If so the symbol is already tight and no cropping is needed.
-            let top_has = data[..w].iter().any(|&b| b != 0);
-            let bot_has = data[(h - 1) * w..h * w].iter().any(|&b| b != 0);
-            let left_has = (0..h).any(|r| data[r * w] != 0);
-            let right_has = (0..h).any(|r| data[r * w + w - 1] != 0);
+            // Any bit set in the row's stride bytes. Padding bits (if any) are
+            // guaranteed zero, so OR-ing the whole row is safe.
+            let top_has = data[..stride].iter().any(|&b| b != 0);
+            let bot_has = data[(h - 1) * stride..h * stride].iter().any(|&b| b != 0);
+            let left_has = (0..h).any(|r| (data[r * stride] & 0x80) != 0);
+            let right_has =
+                (0..h).any(|r| (data[r * stride + last_col / 8] & (0x80u8 >> (last_col & 7))) != 0);
             if top_has && bot_has && left_has && right_has {
                 // Already tight — return self directly without copying.
                 // Pre-allocate the pool with the same capacity so the next
@@ -263,19 +293,39 @@ impl Jbm {
 
     /// Return a new Jbm with surrounding empty rows/columns removed.
     fn crop_to_content(&self) -> Jbm {
+        if self.width <= 0 || self.height <= 0 {
+            return Jbm::new(0, 0);
+        }
+        let stride = self.stride();
         let mut min_row = self.height;
         let mut max_row: i32 = -1;
         let mut min_col = self.width;
         let mut max_col: i32 = -1;
 
         for row in 0..self.height {
-            for col in 0..self.width {
-                if self.data[(row * self.width + col) as usize] != 0 {
-                    min_row = min_row.min(row);
-                    max_row = max_row.max(row);
-                    min_col = min_col.min(col);
-                    max_col = max_col.max(col);
+            let row_bytes = &self.data[row as usize * stride..(row as usize + 1) * stride];
+            // Find first/last nonzero byte in the row, then refine to column index.
+            let mut byte_min: Option<usize> = None;
+            let mut byte_max: Option<usize> = None;
+            for (i, &b) in row_bytes.iter().enumerate() {
+                if b != 0 {
+                    if byte_min.is_none() {
+                        byte_min = Some(i);
+                    }
+                    byte_max = Some(i);
                 }
+            }
+            if let (Some(bmin), Some(bmax)) = (byte_min, byte_max) {
+                let col_lo = bmin * 8 + row_bytes[bmin].leading_zeros() as usize;
+                // leading zeros in a reversed sense: for MSB-first, the first set
+                // bit position within the byte is `leading_zeros`.
+                let col_hi = bmax * 8 + (7 - row_bytes[bmax].trailing_zeros() as usize);
+                let col_hi = col_hi.min(self.width as usize - 1) as i32;
+                let col_lo = col_lo as i32;
+                min_row = min_row.min(row);
+                max_row = max_row.max(row);
+                min_col = min_col.min(col_lo);
+                max_col = max_col.max(col_hi);
             }
         }
 
@@ -289,8 +339,11 @@ impl Jbm {
 
         for row in min_row..=max_row {
             for col in min_col..=max_col {
-                if self.data[(row * self.width + col) as usize] != 0 {
-                    out.data[((row - min_row) * nw + (col - min_col)) as usize] = 1;
+                let src_byte = self.data[row as usize * stride + (col as usize / 8)];
+                if (src_byte >> (7 - (col as usize & 7))) & 1 != 0 {
+                    let out_row = (row - min_row) as usize;
+                    let out_col = (col - min_col) as usize;
+                    out.set_black(out_row, out_col);
                 }
             }
         }
@@ -594,6 +647,55 @@ fn decode_ref_row(
     zp.pos = pos;
 }
 
+/// Pack one decoded row (1 byte per pixel, 0 or 1) into packed Jbm storage
+/// (1 bit per pixel, MSB-first within byte).
+#[inline]
+fn pack_row_into(src: &[u8], width: usize, dst: &mut [u8]) {
+    let full_bytes = width / 8;
+    let rem = width % 8;
+    for i in 0..full_bytes {
+        let s: &[u8; 8] = src[i * 8..(i + 1) * 8].try_into().unwrap();
+        dst[i] = pack_byte(s);
+    }
+    if rem > 0 {
+        let base = full_bytes * 8;
+        let mut byte_val = 0u8;
+        for j in 0..rem {
+            if src[base + j] != 0 {
+                byte_val |= 0x80u8 >> j;
+            }
+        }
+        dst[full_bytes] = byte_val;
+    }
+}
+
+/// Unpack one Jbm row (packed, MSB-first) into a 1-byte-per-pixel scratch
+/// buffer. Caller ensures `dst.len() >= width`.
+#[inline]
+fn unpack_row_into(src: &[u8], width: usize, dst: &mut [u8]) {
+    let full_bytes = width / 8;
+    let rem = width % 8;
+    for i in 0..full_bytes {
+        let b = src[i];
+        let out = &mut dst[i * 8..(i + 1) * 8];
+        out[0] = (b >> 7) & 1;
+        out[1] = (b >> 6) & 1;
+        out[2] = (b >> 5) & 1;
+        out[3] = (b >> 4) & 1;
+        out[4] = (b >> 3) & 1;
+        out[5] = (b >> 2) & 1;
+        out[6] = (b >> 1) & 1;
+        out[7] = b & 1;
+    }
+    if rem > 0 {
+        let b = src[full_bytes];
+        let base = full_bytes * 8;
+        for j in 0..rem {
+            dst[base + j] = (b >> (7 - j)) & 1;
+        }
+    }
+}
+
 fn decode_bitmap_direct(
     zp: &mut ZpDecoder<'_>,
     ctx: &mut [u8; 1024],
@@ -611,24 +713,22 @@ fn decode_bitmap_direct(
     let mut bm = Jbm::new_from_pool(width, height, pool);
     let w = width as usize;
     let h = height as usize;
-    debug_assert_eq!(bm.data.len(), w * h);
+    let stride = bm.stride();
+    debug_assert_eq!(bm.data.len(), stride * h);
+
+    // Scratch rows: 1 byte per pixel. Rotated each iteration so the decoder
+    // can read the two previously-decoded rows without unpacking from storage.
+    let mut s_curr = vec![0u8; w];
+    let mut s_prev1 = vec![0u8; w];
+    let mut s_prev2 = vec![0u8; w];
 
     for row in (0..h).rev() {
-        let r = row;
-        let row_off = r * w;
-        let rp1_start = (r + 1) * w;
-        let split = rp1_start.min(bm.data.len());
-        let (lower, upper) = bm.data.split_at_mut(split);
-        let row_slice = &mut lower[row_off..row_off + w];
-        let rp1: &[u8] = if upper.len() >= w { &upper[..w] } else { upper };
-        let rp2: &[u8] = if upper.len() >= 2 * w {
-            &upper[w..2 * w]
-        } else if upper.len() > w {
-            &upper[w..]
-        } else {
-            &[]
-        };
-        decode_direct_row(zp, ctx, row_slice, rp1, rp2);
+        s_curr.iter_mut().for_each(|b| *b = 0);
+        decode_direct_row(zp, ctx, &mut s_curr, &s_prev1, &s_prev2);
+        pack_row_into(&s_curr, w, &mut bm.data[row * stride..(row + 1) * stride]);
+        // Rotate: prev2 ← prev1, prev1 ← curr, curr ← (old prev2, re-used).
+        core::mem::swap(&mut s_prev2, &mut s_prev1);
+        core::mem::swap(&mut s_prev1, &mut s_curr);
     }
     Ok(bm)
 }
@@ -675,39 +775,52 @@ fn decode_bitmap_ref(
         row_slice.get(col as usize).copied().unwrap_or(0) as u32
     };
 
-    // Return a slice for a row of `bm` at `row`; empty slice for out-of-bounds row.
-    let mbm_row = |r: i32| -> &[u8] {
-        if r < 0 || r >= mbm.height {
-            return &[];
+    let cw = width as usize;
+    let cstride = cbm.stride();
+    let mw = mbm.width.max(0) as usize;
+    let mstride = mbm.stride();
+
+    // Rolling scratch (1 byte/pixel) for the three mbm reference rows.
+    // Each slot holds the unpacked content of rows `mr+1`, `mr`, `mr-1` relative
+    // to the current iteration's `mr = row + row_shift`. Empty slice when OOB.
+    let mut s_mbm_r2 = vec![0u8; mw];
+    let mut s_mbm_r1 = vec![0u8; mw];
+    let mut s_mbm_r0 = vec![0u8; mw];
+    let mut have_r2;
+    let mut have_r1;
+    let mut have_r0;
+
+    // Scratch for cbm: current row being decoded, and previously-decoded row.
+    let mut s_cbm_curr = vec![0u8; cw];
+    let mut s_cbm_prev1 = vec![0u8; cw];
+
+    let unpack_mbm_row = |r: i32, buf: &mut [u8]| -> bool {
+        if r < 0 || r >= mbm.height || mw == 0 {
+            return false;
         }
-        let off = r as usize * mbm.width as usize;
-        &mbm.data[off..off + mbm.width as usize]
+        let off = r as usize * mstride;
+        unpack_row_into(&mbm.data[off..off + mstride], mw, buf);
+        true
     };
 
-    let cw = width as usize;
+    // Prime the rolling mbm scratch before the first iteration (row = height-1):
+    // mbm_r2 = mbm[mr+1], mbm_r1 = mbm[mr], mbm_r0 = mbm[mr-1], with mr = (height-1) + row_shift.
+    let first_mr = (height - 1) + row_shift;
+    have_r2 = unpack_mbm_row(first_mr + 1, &mut s_mbm_r2);
+    have_r1 = unpack_mbm_row(first_mr, &mut s_mbm_r1);
+    have_r0 = unpack_mbm_row(first_mr - 1, &mut s_mbm_r0);
 
     for row in (0..height).rev() {
         let mr = row + row_shift;
 
-        // Pre-slice the three reference rows of mbm (constant across the inner loop).
-        let mbm_r2 = mbm_row(mr + 1); // row above in reference
-        let mbm_r1 = mbm_row(mr); // current reference row
-        let mbm_r0 = mbm_row(mr - 1); // row below in reference
+        // Empty slice when the row is OOB (matches previous behaviour).
+        let mbm_r2: &[u8] = if have_r2 { &s_mbm_r2 } else { &[] };
+        let mbm_r1: &[u8] = if have_r1 { &s_mbm_r1 } else { &[] };
+        let mbm_r0: &[u8] = if have_r0 { &s_mbm_r0 } else { &[] };
 
-        // Split cbm so we can hold a mutable ref to the current row while reading row+1.
-        let row_off = row as usize * cw;
-        let rp1_start = (row as usize + 1) * cw;
-        let total = cbm.data.len();
-        let split = rp1_start.min(total);
-        let (lower_cbm, upper_cbm) = cbm.data.split_at_mut(split);
-        let cbm_row_mut = &mut lower_cbm[row_off..row_off + cw];
-        let cbm_r1: &[u8] = if upper_cbm.len() >= cw {
-            &upper_cbm[..cw]
-        } else {
-            upper_cbm
-        };
+        let cbm_r1: &[u8] = if row + 1 < height { &s_cbm_prev1 } else { &[] };
+        s_cbm_curr.iter_mut().for_each(|b| *b = 0);
 
-        // Compute rolling-window initial values for this row (before the inner loop).
         let init_c_r1 = pix_row(cbm_r1, 0) << 1 | pix_row(cbm_r1, 1);
         let init_m_r1 = pix_row(mbm_r1, col_shift - 1) << 2
             | pix_row(mbm_r1, col_shift) << 1
@@ -720,7 +833,7 @@ fn decode_bitmap_ref(
             zp,
             ctx,
             ctx_p,
-            cbm_row_mut,
+            &mut s_cbm_curr,
             cbm_r1,
             mbm_r2,
             mbm_r1,
@@ -730,6 +843,27 @@ fn decode_bitmap_ref(
             init_m_r1,
             init_m_r0,
         );
+
+        // Pack current cbm row into storage.
+        pack_row_into(
+            &s_cbm_curr,
+            cw,
+            &mut cbm.data[row as usize * cstride..(row as usize + 1) * cstride],
+        );
+
+        // Rotate cbm scratch: prev1 ← curr, curr ← (old prev1, reused next iteration).
+        core::mem::swap(&mut s_cbm_prev1, &mut s_cbm_curr);
+
+        // Rotate mbm scratch: r2 ← r1, r1 ← r0, r0 ← freshly unpacked mr-2.
+        //   After this, new mr = mr-1, so:
+        //     new r2 = mbm[new mr + 1]   = mbm[mr]       = old r1
+        //     new r1 = mbm[new mr]       = mbm[mr-1]     = old r0
+        //     new r0 = mbm[new mr - 1]   = mbm[mr-2]     = needs unpack
+        core::mem::swap(&mut s_mbm_r2, &mut s_mbm_r1);
+        have_r2 = have_r1;
+        core::mem::swap(&mut s_mbm_r1, &mut s_mbm_r0);
+        have_r1 = have_r0;
+        have_r0 = unpack_mbm_row(mr - 2, &mut s_mbm_r0);
     }
     Ok(cbm)
 }
@@ -798,13 +932,35 @@ fn blit_indexed(
     if x >= 0 && y >= 0 && x + symbol.width <= page_w && y + symbol.height <= page_h {
         let pw = page_w as usize;
         let sw = symbol.width as usize;
+        let sym_stride = symbol.stride();
+        let full_bytes = sw / 8;
+        let rem = sw & 7;
         for row in 0..symbol.height as usize {
-            let src_off = row * sw;
+            let src_row_off = row * sym_stride;
             let dst_off = (y as usize + row) * pw + x as usize;
-            for col in 0..sw {
-                if symbol.data[src_off + col] != 0 {
-                    page[dst_off + col] = 1;
-                    blit_map[dst_off + col] = blit_idx;
+            for byte_i in 0..full_bytes {
+                let b = symbol.data[src_row_off + byte_i];
+                if b == 0 {
+                    continue;
+                }
+                let base_col = byte_i * 8;
+                for j in 0..8 {
+                    if (b >> (7 - j)) & 1 != 0 {
+                        page[dst_off + base_col + j] = 1;
+                        blit_map[dst_off + base_col + j] = blit_idx;
+                    }
+                }
+            }
+            if rem > 0 {
+                let b = symbol.data[src_row_off + full_bytes];
+                if b != 0 {
+                    let base_col = full_bytes * 8;
+                    for j in 0..rem {
+                        if (b >> (7 - j)) & 1 != 0 {
+                            page[dst_off + base_col + j] = 1;
+                            blit_map[dst_off + base_col + j] = blit_idx;
+                        }
+                    }
                 }
             }
         }
@@ -835,16 +991,19 @@ fn blit_indexed(
 /// Blit a symbol into a packed Bitmap with JB2→bitmap coordinate flip.
 ///
 /// JB2 uses y=0 at the bottom; `Bitmap` uses y=0 at the top.
-/// Symbol data is byte-per-pixel (0 = white, non-zero = black).
+/// Both source (`Jbm`) and destination (`Bitmap`) are 1-bit-per-pixel,
+/// MSB-first within byte, byte-aligned rows. Fast path is a shift-align
+/// byte OR; no bit packing needed.
 fn blit_to_bitmap(bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32) {
     if sym.width <= 0 || sym.height <= 0 {
         return;
     }
     let bw = bm.width as i32;
     let bh = bm.height as i32;
-    let stride = bm.row_stride();
+    let bm_stride = bm.row_stride();
     let sw = sym.width;
     let sh = sym.height;
+    let sym_stride = sym.stride();
 
     // Fast path: symbol completely within bitmap bounds.
     if x >= 0
@@ -854,63 +1013,44 @@ fn blit_to_bitmap(bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32) {
     {
         let x_off = x as usize;
         let byte_off = x_off / 8;
-        let bit_off = x_off % 8;
+        let bit_off = x_off & 7;
         let sw_u = sw as usize;
-        // sym_row 0 is the bottom row of the symbol in JB2 coords.
-        // In the Bitmap (top=row 0), it maps to row: bh-1-y.
+        let full = sw_u / 8;
+        let rem = sw_u & 7;
         let bm_y_base = (bm.height as usize) - 1 - y as usize;
 
         if bit_off == 0 {
-            // Byte-aligned: use pack_byte for 8-pixel chunks.
-            let full = sw_u / 8;
-            let rem = sw_u % 8;
             for sym_row in 0..sh as usize {
                 let bm_y = bm_y_base - sym_row;
-                let row_data = &sym.data[sym_row * sw_u..(sym_row + 1) * sw_u];
-                let out = &mut bm.data[bm_y * stride..];
+                let src = &sym.data[sym_row * sym_stride..sym_row * sym_stride + sym_stride];
+                let dst = &mut bm.data[bm_y * bm_stride..];
                 for i in 0..full {
-                    let s: &[u8; 8] = row_data[i * 8..(i + 1) * 8].try_into().unwrap();
-                    out[byte_off + i] |= pack_byte(s);
+                    dst[byte_off + i] |= src[i];
                 }
                 if rem > 0 {
-                    let base = full * 8;
-                    let mut byte_val = 0u8;
-                    for j in 0..rem {
-                        if row_data[base + j] != 0 {
-                            byte_val |= 0x80u8 >> j;
-                        }
-                    }
-                    out[byte_off + full] |= byte_val;
+                    // Last byte of packed source: its high `rem` bits are valid
+                    // pixels; low `8 - rem` bits are padding (guaranteed 0 by
+                    // construction), so OR-ing the whole byte is correct.
+                    dst[byte_off + full] |= src[full];
                 }
             }
         } else {
-            // Unaligned: each 8-pixel packed byte straddles two output bytes.
-            let rshift = bit_off;
-            let lshift = 8 - bit_off;
-            let full = sw_u / 8;
-            let rem = sw_u % 8;
+            let rshift = bit_off as u32;
+            let lshift = 8 - bit_off as u32;
             for sym_row in 0..sh as usize {
                 let bm_y = bm_y_base - sym_row;
-                let row_data = &sym.data[sym_row * sw_u..(sym_row + 1) * sw_u];
-                let row_off = bm_y * stride;
-                for i in 0..full {
-                    let s: &[u8; 8] = row_data[i * 8..(i + 1) * 8].try_into().unwrap();
-                    let packed = pack_byte(s);
-                    bm.data[row_off + byte_off + i] |= packed >> rshift;
-                    bm.data[row_off + byte_off + i + 1] |= packed << lshift;
+                let src = &sym.data[sym_row * sym_stride..sym_row * sym_stride + sym_stride];
+                let row_off = bm_y * bm_stride;
+                for (i, &s) in src.iter().enumerate().take(full) {
+                    bm.data[row_off + byte_off + i] |= s >> rshift;
+                    bm.data[row_off + byte_off + i + 1] |= s << lshift;
                 }
                 if rem > 0 {
-                    let base = full * 8;
-                    let mut byte_val = 0u8;
-                    for j in 0..rem {
-                        if row_data[base + j] != 0 {
-                            byte_val |= 0x80u8 >> j;
-                        }
-                    }
-                    bm.data[row_off + byte_off + full] |= byte_val >> rshift;
+                    let s = src[full];
+                    bm.data[row_off + byte_off + full] |= s >> rshift;
                     let overflow = row_off + byte_off + full + 1;
                     if overflow < bm.data.len() {
-                        bm.data[overflow] |= byte_val << lshift;
+                        bm.data[overflow] |= s << lshift;
                     }
                 }
             }
@@ -923,13 +1063,15 @@ fn blit_to_bitmap(bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32) {
                 continue;
             }
             let bm_y = bm_y as usize;
-            let row_off = bm_y * stride;
+            let row_off = bm_y * bm_stride;
+            let src_row_off = sym_row as usize * sym_stride;
             for col in 0..sw {
-                if sym.data[(sym_row * sw + col) as usize] != 0 {
+                let b = sym.data[src_row_off + (col as usize / 8)];
+                if (b >> (7 - (col as usize & 7))) & 1 != 0 {
                     let px = x + col;
                     if px >= 0 && px < bw {
                         let px = px as usize;
-                        bm.data[row_off + px / 8] |= 0x80u8 >> (px % 8);
+                        bm.data[row_off + px / 8] |= 0x80u8 >> (px & 7);
                     }
                 }
             }
