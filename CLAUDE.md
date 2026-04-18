@@ -7,6 +7,48 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #185 — perf(jb2): bit-pack Jbm to 1 bit/pixel — **Kept** (2026-04-18)
+
+**Approach.** Changed the internal `Jbm` working bitmap from 1 byte/pixel
+(`Vec<u8>` of `w * h`) to 1 bit/pixel packed (`Vec<u8>` of
+`((w + 7) / 8) * h`, MSB-first within byte) — matching `Bitmap`'s public
+convention. 8× memory reduction on the symbol dict.
+
+Decoder hot path uses **Variant A**: `decode_bitmap_direct` and
+`decode_bitmap_ref` keep rolling unpacked scratch rows (3 for direct,
+3 mbm + 2 cbm for ref) and pack into `Jbm.data` once per row. The ZP
+inner loop is unchanged. New helpers: `pack_row_into`, `unpack_row_into`.
+
+`blit_indexed`: reads packed source with a byte-at-a-time skip of
+all-zero bytes (common for sparse symbols). `blit_to_bitmap`: source and
+dest are both packed MSB-first; byte-aligned branch becomes a direct `|=`
+row copy, unaligned branch is a shift-and-OR.
+
+**Bench** (`cargo bench`, 100 samples, Linux x86_64, Criterion p-values):
+
+| Benchmark                    | Baseline  | Packed    | Δ      | p    |
+|------------------------------|-----------|-----------|--------|------|
+| `jb2_decode`                 | 187.93 µs | 188.79 µs | +0.5%  | 0.31 |
+| `jb2_decode_corpus_bilevel`  | 813.80 µs | 782.21 µs | −3.9%  | 0.00 |
+| `jb2_decode_large_600dpi`    | 4.37 µs   | 4.27 µs   | −2.3%  | 0.06 |
+| `render_corpus_bilevel`      | 189.76 ms | 191.36 ms | +0.8%  | 0.19 |
+
+No regression anywhere; `jb2_decode_corpus_bilevel` is significantly
+faster (p = 0.00), consistent with reduced L2 pressure on the decoded
+symbol dict.
+
+**Reason kept.** 8× memory reduction on working bitmaps with neutral-to-
+positive decode/render perf. The scratch allocation in the hot path
+(three `Vec<u8>` × `width` bytes per symbol decode, reused across rows)
+adds no measurable overhead vs the previous direct-indexed `bm.data`
+split. All 324 library + 71 integration tests pass.
+
+**Notes.** The issue suggested `Vec<u32>` + 32-bit row alignment for SIMD
+potential. That was relaxed to byte-aligned `Vec<u8>` to match `Bitmap`
+exactly (avoiding the byte→bit packing step in `blit_to_bitmap`). A
+follow-up could explore word-granular compositing once there is a
+workload that stresses the unaligned `blit_to_bitmap` branch.
+
 ### #184 — perf(iw44): column_pass SIMD at s=2 — **Reverted** (2026-04-18)
 
 **Approach.** Generalised the existing `s == 1` SIMD fast path in the column
