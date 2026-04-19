@@ -240,19 +240,24 @@ enum SExpr {
     List(Vec<SExpr>),
 }
 
+const MAX_SEXPR_DEPTH: usize = 64;
+
 /// Parse tokens into a list of top-level S-expressions.
 fn parse_sexprs(tokens: &[Token<'_>]) -> Vec<SExpr> {
     let mut result = Vec::new();
     let mut pos = 0usize;
     while pos < tokens.len() {
-        if let Some(expr) = parse_one(tokens, &mut pos) {
+        if let Some(expr) = parse_one(tokens, &mut pos, 0) {
             result.push(expr);
         }
     }
     result
 }
 
-fn parse_one(tokens: &[Token<'_>], pos: &mut usize) -> Option<SExpr> {
+fn parse_one(tokens: &[Token<'_>], pos: &mut usize, depth: usize) -> Option<SExpr> {
+    if depth > MAX_SEXPR_DEPTH {
+        return None;
+    }
     match tokens.get(*pos) {
         Some(Token::LParen) => {
             *pos += 1;
@@ -265,7 +270,7 @@ fn parse_one(tokens: &[Token<'_>], pos: &mut usize) -> Option<SExpr> {
                     }
                     None => break,
                     _ => {
-                        if let Some(child) = parse_one(tokens, pos) {
+                        if let Some(child) = parse_one(tokens, pos, depth + 1) {
                             items.push(child);
                         } else {
                             break;
@@ -780,6 +785,16 @@ mod tests {
         let input = b"(unknown_key value)(zoom 100)";
         let (ann, _) = parse_annotations(input).unwrap();
         assert_eq!(ann.zoom, Some(100));
+    }
+
+    #[test]
+    fn test_parse_deeply_nested_does_not_overflow() {
+        // 200 open parens deeper than MAX_SEXPR_DEPTH — must not stack-overflow.
+        let input = format!("{}{}", "(".repeat(200), ")".repeat(200));
+        let tokens = tokenize(&input);
+        let result = parse_sexprs(&tokens);
+        // Doesn't matter what we get back — the point is we return without crashing.
+        let _ = result;
     }
 
     #[test]
