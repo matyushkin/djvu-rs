@@ -24,7 +24,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use djvu_rs::{DjVuDocument, jb2, jb2_encode::encode_jb2};
+use djvu_rs::{
+    DjVuDocument, jb2,
+    jb2_encode::{encode_jb2, encode_jb2_dict},
+};
 
 #[derive(Copy, Clone, Debug)]
 enum RoundtripStatus {
@@ -52,7 +55,9 @@ struct PageResult {
     height: u32,
     orig_sjbz_bytes: usize,
     rs_sjbz_bytes: usize,
+    rs_dict_sjbz_bytes: usize,
     roundtrip: RoundtripStatus,
+    roundtrip_dict: RoundtripStatus,
 }
 
 fn process_file(path: &Path) -> Vec<PageResult> {
@@ -87,8 +92,19 @@ fn process_file(path: &Path) -> Vec<PageResult> {
         };
 
         let rs_encoded = encode_jb2(&bitmap);
+        let rs_dict_encoded = encode_jb2_dict(&bitmap);
 
         let roundtrip = match jb2::decode(&rs_encoded, None) {
+            Ok(b) => {
+                if b.width == bitmap.width && b.height == bitmap.height && b.data == bitmap.data {
+                    RoundtripStatus::Ok
+                } else {
+                    RoundtripStatus::Mismatch
+                }
+            }
+            Err(_) => RoundtripStatus::DecodeError,
+        };
+        let roundtrip_dict = match jb2::decode(&rs_dict_encoded, None) {
             Ok(b) => {
                 if b.width == bitmap.width && b.height == bitmap.height && b.data == bitmap.data {
                     RoundtripStatus::Ok
@@ -106,7 +122,9 @@ fn process_file(path: &Path) -> Vec<PageResult> {
             height: bitmap.height,
             orig_sjbz_bytes: orig_sjbz.len(),
             rs_sjbz_bytes: rs_encoded.len(),
+            rs_dict_sjbz_bytes: rs_dict_encoded.len(),
             roundtrip,
+            roundtrip_dict,
         });
     }
     out
@@ -140,19 +158,24 @@ fn main() -> ExitCode {
     for r in &all {
         println!(
             "{{\"file\":\"{}\",\"page\":{},\"width\":{},\"height\":{},\
-             \"orig_sjbz_bytes\":{},\"rs_sjbz_bytes\":{},\
-             \"bpp_orig\":{:.4},\"bpp_rs\":{:.4},\
-             \"size_ratio\":{:.3},\"roundtrip\":\"{}\"}}",
+             \"orig_sjbz_bytes\":{},\"rs_sjbz_bytes\":{},\"rs_dict_sjbz_bytes\":{},\
+             \"bpp_orig\":{:.4},\"bpp_rs\":{:.4},\"bpp_rs_dict\":{:.4},\
+             \"size_ratio\":{:.3},\"size_ratio_dict\":{:.3},\
+             \"roundtrip\":\"{}\",\"roundtrip_dict\":\"{}\"}}",
             r.file,
             r.page,
             r.width,
             r.height,
             r.orig_sjbz_bytes,
             r.rs_sjbz_bytes,
+            r.rs_dict_sjbz_bytes,
             bpp(r.orig_sjbz_bytes, r.width, r.height),
             bpp(r.rs_sjbz_bytes, r.width, r.height),
+            bpp(r.rs_dict_sjbz_bytes, r.width, r.height),
             r.rs_sjbz_bytes as f64 / r.orig_sjbz_bytes.max(1) as f64,
+            r.rs_dict_sjbz_bytes as f64 / r.orig_sjbz_bytes.max(1) as f64,
             r.roundtrip.as_str(),
+            r.roundtrip_dict.as_str(),
         );
     }
 
@@ -163,7 +186,9 @@ fn main() -> ExitCode {
 
     let total_orig: usize = all.iter().map(|r| r.orig_sjbz_bytes).sum();
     let total_rs: usize = all.iter().map(|r| r.rs_sjbz_bytes).sum();
+    let total_rs_dict: usize = all.iter().map(|r| r.rs_dict_sjbz_bytes).sum();
     let total_pixels: u64 = all.iter().map(|r| r.width as u64 * r.height as u64).sum();
+
     let roundtrip_ok = all
         .iter()
         .filter(|r| matches!(r.roundtrip, RoundtripStatus::Ok))
@@ -177,31 +202,61 @@ fn main() -> ExitCode {
         .filter(|r| matches!(r.roundtrip, RoundtripStatus::DecodeError))
         .count();
 
+    let roundtrip_dict_ok = all
+        .iter()
+        .filter(|r| matches!(r.roundtrip_dict, RoundtripStatus::Ok))
+        .count();
+    let roundtrip_dict_mismatch = all
+        .iter()
+        .filter(|r| matches!(r.roundtrip_dict, RoundtripStatus::Mismatch))
+        .count();
+    let roundtrip_dict_decode_err = all
+        .iter()
+        .filter(|r| matches!(r.roundtrip_dict, RoundtripStatus::DecodeError))
+        .count();
+
     eprintln!();
     eprintln!("=== JB2 encoder quality summary ===");
-    eprintln!("pages:                {}", all.len());
-    eprintln!("roundtrip ok:         {}", roundtrip_ok);
-    eprintln!("roundtrip mismatch:   {}", roundtrip_mismatch);
+    eprintln!("pages:                  {}", all.len());
+    eprintln!();
+    eprintln!("-- direct (record type 3, whole image) --");
+    eprintln!("roundtrip ok:           {}", roundtrip_ok);
+    eprintln!("roundtrip mismatch:     {}", roundtrip_mismatch);
     eprintln!(
-        "roundtrip decode err: {}   (issue #198: encoder > 1 MP single-symbol)",
+        "roundtrip decode err:   {}   (issue #198: >1 MP single-symbol)",
         roundtrip_decode_err
     );
     eprintln!(
-        "total orig size:   {:>10} bytes  ({:.4} bpp)",
-        total_orig,
-        (total_orig as f64 * 8.0) / total_pixels.max(1) as f64
-    );
-    eprintln!(
-        "total rs size:     {:>10} bytes  ({:.4} bpp)",
+        "total rs size:       {:>10} bytes  ({:.4} bpp)",
         total_rs,
         (total_rs as f64 * 8.0) / total_pixels.max(1) as f64
     );
     eprintln!(
-        "ratio rs / orig:   {:.3}×  (>1 = djvu-rs encoder worse)",
+        "ratio rs / orig:     {:.3}×",
         total_rs as f64 / total_orig.max(1) as f64
     );
+    eprintln!();
+    eprintln!("-- dict (CC + rec types 1+7) --");
+    eprintln!("roundtrip ok:           {}", roundtrip_dict_ok);
+    eprintln!("roundtrip mismatch:     {}", roundtrip_dict_mismatch);
+    eprintln!("roundtrip decode err:   {}", roundtrip_dict_decode_err);
+    eprintln!(
+        "total rs-dict size:  {:>10} bytes  ({:.4} bpp)",
+        total_rs_dict,
+        (total_rs_dict as f64 * 8.0) / total_pixels.max(1) as f64
+    );
+    eprintln!(
+        "ratio rs-dict / orig: {:.3}×  (>1 = djvu-rs encoder worse)",
+        total_rs_dict as f64 / total_orig.max(1) as f64
+    );
+    eprintln!();
+    eprintln!(
+        "total orig size:     {:>10} bytes  ({:.4} bpp)",
+        total_orig,
+        (total_orig as f64 * 8.0) / total_pixels.max(1) as f64
+    );
 
-    if roundtrip_mismatch > 0 {
+    if roundtrip_mismatch > 0 || roundtrip_dict_mismatch > 0 {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

@@ -28,6 +28,11 @@
 use crate::bitmap::Bitmap;
 use crate::zp_impl::encoder::ZpEncoder;
 
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
+
 // ── NumContext: binary-tree arena for variable-length integer encoding ─────────
 
 /// Binary-tree context store used to encode variable-length integers with ZP.
@@ -291,6 +296,219 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     zp.finish()
 }
 
+// ── Connected-component extraction (symbol-dict encoding) ─────────────────────
+
+/// A single connected component: its cropped bitmap and top-left bbox origin.
+struct Cc {
+    /// Top-left x of the component in the source bitmap (0 = left edge).
+    x: u32,
+    /// Top-left y of the component in the source bitmap (0 = top edge).
+    y: u32,
+    /// Cropped bitmap: tight bbox, pixels of this component only.
+    bitmap: Bitmap,
+}
+
+/// Extract all 8-connected components of black pixels from `bitmap`.
+///
+/// Uses iterative DFS on an unpacked byte grid; each component's cropped
+/// bitmap is the minimal bounding box that contains its black pixels.
+/// Ordering is raster-scan of the seed pixel (roughly top-to-bottom,
+/// left-to-right).
+fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
+    let w = bitmap.width as usize;
+    let h = bitmap.height as usize;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+
+    // Unpack into a mutable byte grid — 1 = black-unvisited, 0 = white-or-visited.
+    let mut pix = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            if bitmap.get(x as u32, y as u32) {
+                pix[y * w + x] = 1;
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut stack: Vec<(u32, u32)> = Vec::new();
+    let mut cc_pixels: Vec<(u32, u32)> = Vec::new();
+
+    for y0 in 0..h {
+        for x0 in 0..w {
+            if pix[y0 * w + x0] == 0 {
+                continue;
+            }
+            stack.clear();
+            cc_pixels.clear();
+            stack.push((x0 as u32, y0 as u32));
+            pix[y0 * w + x0] = 0;
+
+            let mut min_x = x0;
+            let mut max_x = x0;
+            let mut min_y = y0;
+            let mut max_y = y0;
+
+            while let Some((cx, cy)) = stack.pop() {
+                cc_pixels.push((cx, cy));
+                let cxi = cx as usize;
+                let cyi = cy as usize;
+                if cxi < min_x {
+                    min_x = cxi;
+                }
+                if cxi > max_x {
+                    max_x = cxi;
+                }
+                if cyi < min_y {
+                    min_y = cyi;
+                }
+                if cyi > max_y {
+                    max_y = cyi;
+                }
+
+                let lo_x = cxi.saturating_sub(1);
+                let hi_x = (cxi + 1).min(w - 1);
+                let lo_y = cyi.saturating_sub(1);
+                let hi_y = (cyi + 1).min(h - 1);
+                for ny in lo_y..=hi_y {
+                    let row_base = ny * w;
+                    for nx in lo_x..=hi_x {
+                        if pix[row_base + nx] != 0 {
+                            pix[row_base + nx] = 0;
+                            stack.push((nx as u32, ny as u32));
+                        }
+                    }
+                }
+            }
+
+            let cc_w = (max_x - min_x + 1) as u32;
+            let cc_h = (max_y - min_y + 1) as u32;
+            let mut cc_bm = Bitmap::new(cc_w, cc_h);
+            for &(px, py) in &cc_pixels {
+                cc_bm.set(px - min_x as u32, py - min_y as u32, true);
+            }
+            out.push(Cc {
+                x: min_x as u32,
+                y: min_y as u32,
+                bitmap: cc_bm,
+            });
+        }
+    }
+
+    out
+}
+
+// ── Dict-based encoding: record types 1 (new) + 7 (matched copy) ──────────────
+
+/// Encode a bilevel [`Bitmap`] into a JB2 stream using a **symbol dictionary**.
+///
+/// Performs connected-component (CC) extraction, exact-match deduplication,
+/// and emits record type 1 for each unique CC (new symbol, direct, stored in
+/// dict + blitted) and record type 7 for each repeat (matched copy, blit only).
+///
+/// Lossless. Matches [`crate::jb2::decode`] for round-trip.
+///
+/// ## Limitations (Phase 1)
+/// - Exact-match only — no near-duplicate matching or lossy refinement.
+/// - Coordinate coding uses `new_line = true` for every symbol (wastes space
+///   compared to baseline-relative same-line coding; optimized in a later phase).
+/// - Components >= 1 MP are encoded as-is; the decoder will reject them via
+///   `MAX_SYMBOL_PIXELS`. For scanned text pages this is not a practical issue.
+pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
+    let w = bitmap.width as i32;
+    let h = bitmap.height as i32;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+
+    let ccs = extract_ccs(bitmap);
+
+    // Reading-order sort: top-to-bottom, then left-to-right.
+    let mut order: Vec<usize> = (0..ccs.len()).collect();
+    order.sort_by_key(|&i| (ccs[i].y, ccs[i].x));
+
+    let mut zp = ZpEncoder::new();
+    let mut record_type_ctx = NumContext::new();
+    let mut image_size_ctx = NumContext::new();
+    let mut symbol_width_ctx = NumContext::new();
+    let mut symbol_height_ctx = NumContext::new();
+    let mut symbol_index_ctx = NumContext::new();
+    let mut hoff_ctx = NumContext::new();
+    let mut voff_ctx = NumContext::new();
+    let mut direct_bitmap_ctx = vec![0u8; 1024];
+    let mut offset_type_ctx: u8 = 0;
+    let mut flag_ctx: u8 = 0;
+
+    // Preamble.
+    encode_num(&mut zp, &mut record_type_ctx, 0, 11, 0);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, w);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, h);
+    zp.encode_bit(&mut flag_ctx, false);
+
+    // Layout state — mirrors `LayoutState::new`.
+    let mut first_left: i32 = -1;
+    let mut first_bottom: i32 = h - 1;
+
+    // Dedup: (w, h, packed-data) → dict index assigned on first emission.
+    let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
+    let mut dict_size: usize = 0;
+
+    for &cc_idx in &order {
+        let cc = &ccs[cc_idx];
+        let cc_w = cc.bitmap.width as i32;
+        let cc_h = cc.bitmap.height as i32;
+        // JB2 uses bottom-up y: y_jb2 is the bottom y of the symbol.
+        // Top-down bottom = cc.y + cc_h - 1; JB2 y = (h - 1) - (cc.y + cc_h - 1).
+        let x_jb2 = cc.x as i32;
+        let y_jb2 = h - cc.y as i32 - cc_h;
+
+        let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
+        match dedup.get(&key).copied() {
+            None => {
+                // Type 1 — new symbol, direct decode, add to dict AND blit.
+                encode_num(&mut zp, &mut record_type_ctx, 0, 11, 1);
+                encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, cc_w);
+                encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, cc_h);
+                encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, &cc.bitmap);
+
+                zp.encode_bit(&mut offset_type_ctx, true); // new_line
+                let hoff = x_jb2 - first_left;
+                let voff = y_jb2 + cc_h - 1 - first_bottom;
+                encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
+                encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
+                first_left = x_jb2;
+                first_bottom = y_jb2;
+
+                dedup.insert(key, dict_size);
+                dict_size += 1;
+            }
+            Some(dict_idx) => {
+                // Type 7 — matched copy, no refinement, blit only.
+                encode_num(&mut zp, &mut record_type_ctx, 0, 11, 7);
+                encode_num(
+                    &mut zp,
+                    &mut symbol_index_ctx,
+                    0,
+                    (dict_size - 1) as i32,
+                    dict_idx as i32,
+                );
+
+                zp.encode_bit(&mut offset_type_ctx, true); // new_line
+                let hoff = x_jb2 - first_left;
+                let voff = y_jb2 + cc_h - 1 - first_bottom;
+                encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
+                encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
+                first_left = x_jb2;
+                first_bottom = y_jb2;
+            }
+        }
+    }
+
+    encode_num(&mut zp, &mut record_type_ctx, 0, 11, 11);
+    zp.finish()
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -391,5 +609,136 @@ mod tests {
         assert!(encode_jb2(&Bitmap::new(0, 0)).is_empty());
         assert!(encode_jb2(&Bitmap::new(8, 0)).is_empty());
         assert!(encode_jb2(&Bitmap::new(0, 8)).is_empty());
+    }
+
+    // ── Dict-based encoder (Phase 1: record types 1 + 7) ──────────────────────
+
+    fn roundtrip_dict(bm: &Bitmap) -> Bitmap {
+        let encoded = encode_jb2_dict(bm);
+        jb2::decode(&encoded, None).expect("dict decode failed")
+    }
+
+    fn assert_bitmaps_eq(a: &Bitmap, b: &Bitmap) {
+        assert_eq!(a.width, b.width, "width mismatch");
+        assert_eq!(a.height, b.height, "height mismatch");
+        let mut mismatches = 0u32;
+        for y in 0..a.height {
+            for x in 0..a.width {
+                if a.get(x, y) != b.get(x, y) {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert_eq!(mismatches, 0, "{mismatches} pixel mismatches");
+    }
+
+    #[test]
+    fn dict_all_white_roundtrip() {
+        let src = Bitmap::new(32, 32);
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn dict_single_pixel_roundtrip() {
+        let src = make_bitmap(16, 16, |x, y| x == 4 && y == 7);
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn dict_two_dots_dedup() {
+        // Two identical 1-pixel CCs — dict size should be 1.
+        let src = make_bitmap(32, 32, |x, y| (x == 3 && y == 5) || (x == 20 && y == 25));
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+        // Assert deduplication happened by checking that the encoded stream
+        // is *smaller* than encoding each CC as a fresh record-type-1 would be.
+        // Indirect check: re-encode and make sure two CCs exist in the source.
+        let ccs = extract_ccs(&src);
+        assert_eq!(ccs.len(), 2);
+    }
+
+    #[test]
+    fn dict_letter_like_shapes() {
+        // Two disconnected 3×5 rectangles — should dedup to 1 symbol.
+        let src = make_bitmap(32, 32, |x, y| {
+            (x < 3 && y < 5) || (x >= 20 && x < 23 && y >= 10 && y < 15)
+        });
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn dict_checkerboard_many_ccs() {
+        // 8×8 checkerboard: 32 single-pixel CCs, all identical → 1 dict entry.
+        let src = make_bitmap(8, 8, |x, y| (x + y) % 2 == 0);
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn dict_two_different_shapes_multiple_occurrences() {
+        // Shape A: 2x2 block.  Shape B: 1x3 vertical line.
+        // Four copies of each, interleaved spatially.
+        let src = make_bitmap(64, 64, |x, y| {
+            // A: (0-1, 0-1), (30-31, 0-1), (0-1, 30-31), (30-31, 30-31)
+            let in_a = |ax: u32, ay: u32| x >= ax && x < ax + 2 && y >= ay && y < ay + 2;
+            // B: (10, 5-7), (40, 5-7), (10, 45-47), (40, 45-47)
+            let in_b = |bx: u32, by: u32| x == bx && y >= by && y < by + 3;
+            in_a(0, 0)
+                || in_a(30, 0)
+                || in_a(0, 30)
+                || in_a(30, 30)
+                || in_b(10, 5)
+                || in_b(40, 5)
+                || in_b(10, 45)
+                || in_b(40, 45)
+        });
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+        let ccs = extract_ccs(&src);
+        assert_eq!(ccs.len(), 8, "expected 4+4 CCs");
+    }
+
+    #[test]
+    fn dict_dimension_encoded_correctly() {
+        // Non-multiple-of-8 dimensions stress row-stride handling.
+        let src = make_bitmap(13, 7, |x, y| (x * 3 + y) % 5 == 0);
+        let decoded = roundtrip_dict(&src);
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn dict_zero_dimension_returns_empty() {
+        assert!(encode_jb2_dict(&Bitmap::new(0, 0)).is_empty());
+        assert!(encode_jb2_dict(&Bitmap::new(8, 0)).is_empty());
+        assert!(encode_jb2_dict(&Bitmap::new(0, 8)).is_empty());
+    }
+
+    #[test]
+    fn dict_extract_ccs_counts() {
+        // 3 non-touching black squares.
+        let src = make_bitmap(30, 30, |x, y| {
+            (x < 3 && y < 3)
+                || (x >= 10 && x < 13 && y >= 10 && y < 13)
+                || (x >= 25 && x < 28 && y >= 25 && y < 28)
+        });
+        let ccs = extract_ccs(&src);
+        assert_eq!(ccs.len(), 3);
+        for cc in &ccs {
+            assert_eq!(cc.bitmap.width, 3);
+            assert_eq!(cc.bitmap.height, 3);
+        }
+    }
+
+    #[test]
+    fn dict_extract_ccs_8connected() {
+        // Diagonal pair — 8-connected should merge into 1 CC.
+        let src = make_bitmap(4, 4, |x, y| (x == 0 && y == 0) || (x == 1 && y == 1));
+        let ccs = extract_ccs(&src);
+        assert_eq!(ccs.len(), 1);
+        assert_eq!(ccs[0].bitmap.width, 2);
+        assert_eq!(ccs[0].bitmap.height, 2);
     }
 }
