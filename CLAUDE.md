@@ -124,6 +124,7 @@ Composite pipeline (src/djvu_render.rs):
 | 2026-04 | IW44 | `row_pass_neon_s2_row`: horizontal NEON row pass for s=2 using `vld4q_s16` to deinterleave active-even (.0) and active-odd (.2) from 32 consecutive physical i16s; even pass stored back with `vst4q_s16` (preserving inactive lanes); odd pass via 8 × `vst1_lane_s16` scatter stores at stride 4 | sub1 +4.6% (p=0.00), sub2 +2.7% (p=0.00), sub4 flat — regression; even pass with `vst4q` is clean, but odd pass scatter stores (8 × `str h` to non-sequential physical 6,10,...,34 within chunk) are the bottleneck; same scatter-store cost as `row_pass_neon_s2_all` kills the gain from better even-pass cache behaviour; M1 store buffer saturates on 8 independent partial-cache-line writes per 16 logical positions |
 | 2026-04 | ZP encoder | `encode_passthrough_iw44`/`encode_passthrough` bit=true while→loop conversion: `while a >= 0x8000 { ... }` → `loop { ...; if a < 0x8000 { break } }` (do-while form, initial condition provably true) | `iw44_encode_large` +4% (17.5→18.2 ms, p=0.00) — LLVM generates worse code for `loop { body; if !cond { break } }` than for `while cond { body }` in this context; the `while` form enables LLVM to prove the loop terminates and schedule instructions across the exit; reverted to `while` |
 | 2026-04 | JB2 encoder | local-copy ZP state in `encode_bitmap_direct` via `encode_step!` macro (mirrors JB2 decoder's pattern: copy `a` to local, inline fast path `a = z`, call `zp.encode_bit()` for slow paths with write-back/reload) | inconclusive — high system load (load avg 22) made Criterion results unreliable (first run −7.5%, subsequent runs +20-30%); theoretical basis questionable: `zp: &mut ZpEncoder` and `ctx: &mut [u8]` are provably non-aliasing to LLVM (Rust borrow checker), so LLVM can already keep `zp.a` in registers without explicit local-copy; the decoder's local-copy works because the aliasing situation is structurally different (ZpDecoder holds `&[u8]` input, not `&mut`); reverted pending stable benchmarking environment |
+| 2026-04 | ZP | 8-wide SIMD `decode_bit8` across parallel lanes (#183) | not implemented — fundamental misconception in the issue: a single ZP stream has one shared `(a, c, fence, bit_buf, bit_count, pos)` register; there are no 8 independent `(a, c)` tuples to put in lanes (JB2/IW44/BZZ all use one stream per chunk, `decode_bit` N+1 has hard data-dep on N). Viable reformulation = speculative fast-path prefix-sum batching (gather `PROB[ctx]`, prefix sum, threshold vs `fence`, ctz to find first LPS, scalar tail), but: (1) fast path already ~1–2 ns on M1 (~5–6 instr); (2) batch setup (gather+prefix+ctz+dispatch) ~15–25 ns ≈ full 8-call saving; (3) avg fast-path run ~7–10 before LPS; (4) only `previously_active_coefficient_decoding_pass` has structurally batchable ctx sequences among all callers, and it's already hand-tuned with local-copy ZP state — further body expansion triggers the same I-cache regression pattern that killed `#[cold]` LPS (+4%), 4-pass inlined decode_slice (+25%), branch-free cmov, and local-copy in `bucket_decoding_pass`/`newly_active` (+4%/+3.3%). Realistic ceiling 1–2% on `iw44_decode_corpus_color`, below Criterion noise. Issue closed. |
 
 > **Rule:** if you revert something, add a row here with the reason — otherwise it will be tried again.
 
@@ -131,7 +132,7 @@ Composite pipeline (src/djvu_render.rs):
 
 | Component | Idea | Expected | Risk |
 |-----------|------|----------|------|
-| ZP | SIMD decode of multiple symbols in parallel (8-wide) (#183) | large | complex, breaking |
+| ZP | SIMD decode of multiple symbols in parallel (8-wide) (#183) | ✗ not viable — see log | single stream has one shared (a,c); fast-path already ~1-2 ns; I-cache pattern regresses |
 | ZP | branch-free decode_bit via cmov (#179) | ✗ reverted — see log | LPS function call overhead worse than inline |
 | IW44 | column_pass SIMD at s=2 (#184) | ✓ kept (attempt 3) — see log | `load8s`/`store8s` with `vld2q_s16`/`vld4q_s16` + scatter-stores within existing `use_simd = s <= 4` body; no extraction, no dispatch overhead |
 | JB2 | bit-pack bitmap → smaller memory/cache footprint (#185) | medium | complex |
@@ -143,6 +144,27 @@ Composite pipeline (src/djvu_render.rs):
 ---
 
 ## Investigations
+
+### JB2 encoder quality baseline vs cjb2 (2026-04-24)
+
+**Setup:** `examples/encode_quality_jb2.rs` re-encodes every Sjbz chunk from `tests/corpus/*.djvu` (36 JB2 pages, originally produced by cjb2 at archival time) via djvu-rs's `encode_jb2` and compares payload sizes.
+
+| Metric | cjb2 (original) | djvu-rs (re-encoded) | Ratio |
+|--------|-----------------|----------------------|-------|
+| Total payload | 182 950 B (0.0019 bpp) | 627 218 B (0.0065 bpp) | **3.43× worse** |
+
+**Per-page ratios range:** 1.004× (dense text) to 2.15× (near-empty pages with overhead). The gap is smaller than the 5–10× I predicted — adaptive ZP arithmetic coding alone already recovers most of the compression on redundant bilevel content.
+
+**Root cause** of the gap, per `src/jb2_encode.rs:9`:
+> «The encoder emits the entire image as a single record type 3 ("new symbol, direct, blit only") record. This produces valid output without requiring connected-component analysis or a symbol dictionary.»
+
+A CC-analysis + symbol dictionary encoder (#188) should close ≥80% of this gap; remaining ≤20% from refinement matching + multi-page shared dict (#194).
+
+**Side-finding: self-incompatibility bug (#198)**. All 36 re-encoded streams hit `Jb2Error::ImageTooLarge` when fed back through djvu-rs's decoder. Decoder has `MAX_SYMBOL_PIXELS = 1 MP` DoS guard (jb2.rs:362) but encoder emits full-image symbols up to 64 MP. DjVuLibre `ddjvu` likely accepts the output fine — not verified yet. Fix tracked as #198 (tiled direct-blit, few dozen LOC) — naturally obsoleted by #188 once it lands.
+
+**Baseline to track:** total ratio **3.43×**. Any encoder change should measurably reduce this; track per-release.
+
+---
 
 ### IW44 `to_rgb()` profile breakdown (2026-04-16)
 
