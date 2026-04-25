@@ -166,6 +166,32 @@ A CC-analysis + symbol dictionary encoder (#188) should close ≥80% of this gap
 
 ---
 
+### JB2 symbol-dictionary encoder Phase 1 (#188, 2026-04-25)
+
+**Setup:** Same harness (`encode_quality_jb2`), now measuring both `encode_jb2` (single record-type-3, direct) and `encode_jb2_dict` (CC extraction + record types 1 + 7, exact-match dedup). `tests/corpus/*.djvu` (36 JB2 pages).
+
+| Encoder | Total payload | bpp | Ratio vs cjb2 |
+|---------|---------------|-----|---------------|
+| cjb2 (original) | 182 950 B | 0.0019 | 1.000× |
+| djvu-rs direct (single record-3) | 627 218 B | 0.0065 | **3.43× worse** |
+| **djvu-rs dict (record 1 + 7)** | **209 024 B** | **0.0022** | **1.143× worse** |
+
+- **3× improvement** over direct encoding (3.43× → 1.143×). Essentially meets #188 expected outcome of "80–100% of cjb2 compression" on the first phase.
+- **#198 naturally bypassed**: all 36 pages roundtrip OK (0 decode errors, 0 mismatches). Individual CCs are tiny (≪ 1 MP), so the decoder's `MAX_SYMBOL_PIXELS` guard never fires.
+- On sparse / low-content pages, dict encoder is already *better* than cjb2 (e.g. page 20 of `conquete_paix.djvu`: **0.947×**, page 4: 0.960×). cjb2 has fixed dict-preamble overhead; ours doesn't emit a dict record.
+- On dense text pages (#188's target), we close most of the gap but not all — e.g. `conquete_paix` page 1: 6.42× → 1.36×. The remaining gap comes from:
+  1. `new_line = true` coordinate coding for every symbol (Phase 1 MVP simplification; optimize with baseline-relative same-line later).
+  2. No refinement matching (record type 2/4) — every near-duplicate glyph emits its own dict entry.
+
+**Implementation:** `src/jb2_encode.rs` — `extract_ccs()` (8-connected iterative DFS on unpacked byte grid) + `encode_jb2_dict()` (dedup via `BTreeMap<(w, h, data), dict_idx>`, emit rec 1 on first sight, rec 7 on repeat). 10 new round-trip unit tests pass. ~220 LOC added.
+
+**Next phases of #188:**
+- Phase 2 (same-line coord coding): reuse `shoff`/`svoff` contexts, cluster CCs into baselines, expect −10-20% on dense text.
+- Phase 3 (refinement matching, rec type 4): near-duplicate clustering (Hamming distance), expect further −10-20%, target 0.9–1.0× parity on scanned books.
+- Phase 4 (multi-page shared Djbz #194): archival ratio ≤ cjb2.
+
+---
+
 ### IW44 `to_rgb()` profile breakdown (2026-04-16)
 
 **Setup:** 500 iters of `img.to_rgb()` on colorbook.djvu, samply @ ~1 ksample/s.
