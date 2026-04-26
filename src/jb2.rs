@@ -360,7 +360,11 @@ impl Jbm {
 /// Decodes top-to-bottom using an incremental rolling window that avoids
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 1024 * 1024; // 1 MP per symbol — prevents DoS via huge bitmaps
-const MAX_TOTAL_SYMBOL_PIXELS: usize = 16 * 1024 * 1024; // 16 MP total across all symbols in one stream
+// 64 MP — matches the per-image MAX_PIXELS cap so any valid JB2 stream for a
+// representable image (incl. tiled direct-blit, see jb2_encode::encode_jb2)
+// fits the budget. Was 16 MP, raised in #198 to support naive tiled encoding
+// of full-page bitonal images that have one decoded symbol per tile.
+const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length

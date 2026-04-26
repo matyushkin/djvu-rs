@@ -308,8 +308,15 @@ fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bit
 ///
 /// ## Encoding
 ///
-/// The entire image is encoded as a single direct-bitmap record (type 3).
+/// Images with `width * height ≤ 1 MP` are emitted as a single direct-bitmap
+/// record (type 3). Larger images are split into ≤ 1024×1024 tiles, each
+/// emitted as its own record-3 — this keeps every symbol within the decoder's
+/// `MAX_SYMBOL_PIXELS = 1 MP` DoS guard so the output round-trips through
+/// [`crate::jb2::decode`] for any size up to `MAX_PIXELS = 64 MP`.
+///
 /// No connected-component analysis or symbol dictionary is used.
+/// For substantially better compression on text-heavy bitmaps see
+/// [`encode_jb2_dict`].
 pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
@@ -341,32 +348,80 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
     // Reserved flag bit — must be 0.
     zp.encode_bit(&mut flag_ctx, false);
 
-    // ── Single direct-bitmap record ────────────────────────────────────────
-    // Record type 3: new symbol, direct, blit to page, NOT stored in dict.
-    encode_num(&mut zp, &mut record_type_ctx, 0, 11, 3);
-
-    // Symbol dimensions.
-    encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, w);
-    encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, h);
-
-    // Bitmap data.
-    encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, bitmap);
-
-    // Coordinates: new_line=true, hoff=1, voff=0.
+    // ── Direct-bitmap records, tiled to stay under MAX_SYMBOL_PIXELS ───────
     //
-    // Decoder initial state: first_left=-1, first_bottom=image_height-1.
-    // new_line=true:
-    //   x = first_left + hoff = -1 + 1 = 0
-    //   y = first_bottom + voff - h + 1 = (image_height-1) + 0 - h + 1 = 0
-    // So the symbol lands at (0, 0) — bottom-left of the JB2 page. ✓
-    zp.encode_bit(&mut offset_type_ctx, true); // new_line = true
-    encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, 1);
-    encode_num(&mut zp, &mut voff_ctx, -262143, 262142, 0);
+    // Tile size: 1024 — equal to the decoder's MAX_SYMBOL_PIXELS = 1024*1024,
+    // and the per-symbol check is `pixels > MAX`, so tile_w*tile_h ≤ 1 MP is
+    // accepted. Layout state mirrors the decoder (jb2.rs:LayoutState):
+    //   first_left = -1, first_bottom = image_height - 1.
+    //
+    // JB2 stream coords are y-flipped relative to image coords: blit_to_bitmap
+    // uses bm_y = (image_height - 1 - jb2_y) - sym_row. For a tile of height
+    // th to land with its top row at image_y = ty (top-down convention), the
+    // required JB2 stream coord is jb2_y = h - th - ty. With new_line=true:
+    //   nx = first_left + hoff          → hoff = tx - first_left
+    //   ny = first_bottom + voff - th+1 → voff = (h - th - ty) + th - 1 - first_bottom
+    //                                          = h - 1 - ty - first_bottom
+    // After emit: first_left = nx, first_bottom = ny.
+    const TILE: u32 = 1024;
+    let mut first_left: i32 = -1;
+    let mut first_bottom: i32 = h - 1;
+
+    let mut ty: u32 = 0;
+    while ty < bitmap.height {
+        let th = TILE.min(bitmap.height - ty);
+        let mut tx: u32 = 0;
+        while tx < bitmap.width {
+            let tw = TILE.min(bitmap.width - tx);
+
+            // Record type 3: new symbol, direct, blit to page, NOT stored in dict.
+            encode_num(&mut zp, &mut record_type_ctx, 0, 11, 3);
+
+            // Symbol dimensions.
+            encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, tw as i32);
+            encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, th as i32);
+
+            // Bitmap data — crop tile from source.
+            let tile_bm = if tw == bitmap.width && th == bitmap.height {
+                // Single-tile fast path: avoid the crop allocation.
+                bitmap.clone()
+            } else {
+                crop_bitmap(bitmap, tx, ty, tw, th)
+            };
+            encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, &tile_bm);
+
+            // Coordinates: new_line=true, hoff/voff target (tx, ty).
+            let hoff = tx as i32 - first_left;
+            let voff = h - 1 - ty as i32 - first_bottom;
+            zp.encode_bit(&mut offset_type_ctx, true);
+            encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
+            encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
+
+            first_left = tx as i32;
+            first_bottom = h - th as i32 - ty as i32;
+
+            tx += tw;
+        }
+        ty += th;
+    }
 
     // ── End-of-data ────────────────────────────────────────────────────────
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 11);
 
     zp.finish()
+}
+
+/// Crop a tight sub-rectangle out of a bilevel bitmap.
+fn crop_bitmap(src: &Bitmap, x0: u32, y0: u32, w: u32, h: u32) -> Bitmap {
+    let mut out = Bitmap::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            if src.get(x0 + x, y0 + y) {
+                out.set_black(x, y);
+            }
+        }
+    }
+    out
 }
 
 // ── Connected-component extraction (symbol-dict encoding) ─────────────────────
@@ -909,6 +964,45 @@ mod tests {
         assert!(encode_jb2(&Bitmap::new(0, 0)).is_empty());
         assert!(encode_jb2(&Bitmap::new(8, 0)).is_empty());
         assert!(encode_jb2(&Bitmap::new(0, 8)).is_empty());
+    }
+
+    /// Round-trip across the 1 MP tile boundary (#198).
+    /// 2048×2048 = 4 MP forces a 2×2 tile grid (each tile 1024×1024 = 1 MP).
+    #[test]
+    fn tiled_2048x2048_roundtrip() {
+        let src = make_bitmap(2048, 2048, |x, y| {
+            // Pseudo-random pattern that stresses each tile differently.
+            ((x.wrapping_mul(2654435761)) ^ y.wrapping_mul(40503)) & 7 == 0
+        });
+        let encoded = encode_jb2(&src);
+        let decoded = jb2::decode(&encoded, None).expect("decode failed");
+        assert_eq!(decoded.width, 2048);
+        assert_eq!(decoded.height, 2048);
+        for y in 0..2048u32 {
+            for x in 0..2048u32 {
+                assert_eq!(decoded.get(x, y), src.get(x, y), "mismatch at ({x},{y})");
+            }
+        }
+    }
+
+    /// Tile boundary not on a power-of-two stride — checks edge tiles smaller
+    /// than 1024 in either axis (#198).
+    #[test]
+    fn tiled_irregular_size_roundtrip() {
+        let src = make_bitmap(1500, 1100, |x, y| (x * 13 + y * 7) % 11 == 0);
+        let encoded = encode_jb2(&src);
+        let decoded = jb2::decode(&encoded, None).expect("decode failed");
+        assert_eq!(decoded.width, 1500);
+        assert_eq!(decoded.height, 1100);
+        let mut mismatches = 0u32;
+        for y in 0..1100u32 {
+            for x in 0..1500u32 {
+                if decoded.get(x, y) != src.get(x, y) {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert_eq!(mismatches, 0);
     }
 
     // ── Dict-based encoder (Phase 1: record types 1 + 7) ──────────────────────
