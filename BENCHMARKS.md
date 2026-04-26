@@ -263,18 +263,24 @@ Run with `cargo run --release --example encode_quality_jb2 -- tests/corpus/*.djv
 |---------|-------------|-----|---------------|------------|
 | `cjb2` (original) | 25 032 792 | 0.0288 | 1.00× | — |
 | `encode_jb2` (tiled direct) | 42 809 783 | 0.0492 | **1.71×** | 553 / 553 ok |
-| `encode_jb2_dict` (CC + rec 1+7) | 35 301 664 | 0.0406 | **1.41×** | 483 / 553 ok |
+| `encode_jb2_dict` (CC + rec 1+7, Phase 1) | 35 301 664 | 0.0406 | **1.41×** | 483 / 553 ok |
+| `encode_jb2_dict` (Phase 2, same-line) | 34 447 360 | 0.0396 | **1.376×** | 483 / 553 ok |
 
 - `encode_jb2` (#198): direct-blit, tiled into ≤ 1024×1024 records to stay
   under the decoder's 1 MP per-symbol cap. 100% round-trip across all corpus
   pages including 4267×6853 (29 MP) scans.
-- `encode_jb2_dict` (#188 phase 1): connected-component extraction + exact-match
-  symbol dictionary. **1.41×** total ratio is mostly recovered already; the
-  remaining gap closes with refinement matching (#188 phase 2/3) and shared
-  Djbz across pages (#194). Round-trip fails on 70 dense scans whose CC
-  extraction yields a single component > 1 MP (large halftone / contiguous
-  artwork region) — the dict path needs to fall back to tiled direct-blit
-  for such CCs (tracked under #188 phase 2).
+- `encode_jb2_dict` Phase 1 (#188): CC extraction + exact-match dedup
+  using record types 1 + 7. Recovers most of the 3.4× gap that the
+  direct encoder leaves on text-heavy pages.
+- `encode_jb2_dict` Phase 2 (#188): adds same-line coordinate coding
+  (offset_type=false) and baseline-bucket sort. Closes a further 2.5%
+  on top of Phase 1 — small because most of the per-symbol bits are
+  the bitmap data itself, not the coordinates.
+- Remaining gap to cjb2 closes with refinement matching (#188 phase 3)
+  and shared Djbz across pages (#194). Round-trip fails on 70 dense
+  scans whose CC extraction yields a single component > 1 MP (large
+  halftone / contiguous artwork region) — the dict path needs to fall
+  back to tiled direct-blit for such CCs.
 
 Per-book ratios:
 
