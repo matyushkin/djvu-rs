@@ -424,9 +424,25 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
 
     let ccs = extract_ccs(bitmap);
 
-    // Reading-order sort: top-to-bottom, then left-to-right.
+    // Reading-order sort by baseline-bucket, then left-to-right.
+    //
+    // The JB2 coord stream's `same_line` mode is keyed off `y_jb2` (the bottom
+    // edge of each symbol in JB2 bottom-up coords). Glyphs sharing a text
+    // baseline have similar `y_jb2` values regardless of height (e.g. 't' vs
+    // 'o'), but they differ in top-left `cc.y`. Sorting by `cc.y` therefore
+    // interleaves glyphs from adjacent lines, defeating same-line coding.
+    //
+    // Bucketing by bottom-row in top-down coords (`cc.y + cc_h`), rounded to a
+    // line-height grid, then by `x` within a bucket, gives proper reading order
+    // for same-line detection. The bucket granularity is the same baseline
+    // tolerance used in the same/new-line decision below.
     let mut order: Vec<usize> = (0..ccs.len()).collect();
-    order.sort_by_key(|&i| (ccs[i].y, ccs[i].x));
+    let bucket = (SAME_LINE_BASELINE_TOL.max(1)) as u32;
+    order.sort_by_key(|&i| {
+        let cc = &ccs[i];
+        let bottom = cc.y + cc.bitmap.height;
+        (bottom / bucket, cc.x)
+    });
 
     let mut zp = ZpEncoder::new();
     let mut record_type_ctx = NumContext::new();
@@ -436,6 +452,8 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     let mut symbol_index_ctx = NumContext::new();
     let mut hoff_ctx = NumContext::new();
     let mut voff_ctx = NumContext::new();
+    let mut shoff_ctx = NumContext::new();
+    let mut svoff_ctx = NumContext::new();
     let mut direct_bitmap_ctx = vec![0u8; 1024];
     let mut offset_type_ctx: u8 = 0;
     let mut flag_ctx: u8 = 0;
@@ -446,9 +464,8 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     encode_num(&mut zp, &mut image_size_ctx, 0, 262142, h);
     zp.encode_bit(&mut flag_ctx, false);
 
-    // Layout state — mirrors `LayoutState::new`.
-    let mut first_left: i32 = -1;
-    let mut first_bottom: i32 = h - 1;
+    // Layout state — mirrors `LayoutState::new` in jb2.rs:1187.
+    let mut layout = EncoderLayout::new(h);
 
     // Dedup: (w, h, packed-data) → dict index assigned on first emission.
     let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
@@ -459,32 +476,21 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
         let cc_w = cc.bitmap.width as i32;
         let cc_h = cc.bitmap.height as i32;
         // JB2 uses bottom-up y: y_jb2 is the bottom y of the symbol.
-        // Top-down bottom = cc.y + cc_h - 1; JB2 y = (h - 1) - (cc.y + cc_h - 1).
         let x_jb2 = cc.x as i32;
         let y_jb2 = h - cc.y as i32 - cc_h;
 
         let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
-        match dedup.get(&key).copied() {
+        let dict_action = dedup.get(&key).copied();
+
+        // Record header (shared between types 1 and 7).
+        match dict_action {
             None => {
-                // Type 1 — new symbol, direct decode, add to dict AND blit.
                 encode_num(&mut zp, &mut record_type_ctx, 0, 11, 1);
                 encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, cc_w);
                 encode_num(&mut zp, &mut symbol_height_ctx, 0, 262142, cc_h);
                 encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, &cc.bitmap);
-
-                zp.encode_bit(&mut offset_type_ctx, true); // new_line
-                let hoff = x_jb2 - first_left;
-                let voff = y_jb2 + cc_h - 1 - first_bottom;
-                encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
-                encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
-                first_left = x_jb2;
-                first_bottom = y_jb2;
-
-                dedup.insert(key, dict_size);
-                dict_size += 1;
             }
             Some(dict_idx) => {
-                // Type 7 — matched copy, no refinement, blit only.
                 encode_num(&mut zp, &mut record_type_ctx, 0, 11, 7);
                 encode_num(
                     &mut zp,
@@ -493,20 +499,118 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
                     (dict_size - 1) as i32,
                     dict_idx as i32,
                 );
-
-                zp.encode_bit(&mut offset_type_ctx, true); // new_line
-                let hoff = x_jb2 - first_left;
-                let voff = y_jb2 + cc_h - 1 - first_bottom;
-                encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
-                encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
-                first_left = x_jb2;
-                first_bottom = y_jb2;
             }
+        }
+
+        // ── Coordinate coding (Phase 2: same-line vs new_line) ────────────
+        //
+        // Decide whether the symbol fits the running baseline / line:
+        //   * shoff = x_jb2 - last_right     (small, often 0..16 for a font)
+        //   * svoff = y_jb2 - baseline_value (small, near 0 if same line)
+        //
+        // If both are within typical text-line tolerances we encode with
+        // offset_type=false (same-line); else fall back to offset_type=true
+        // (new_line), exactly mirroring what the decoder does in
+        // jb2.rs::decode_symbol_coords.
+        let shoff = x_jb2 - layout.last_right;
+        let svoff = y_jb2 - layout.baseline_get();
+        let same_line = layout.same_line_seen
+            && svoff.abs() <= SAME_LINE_BASELINE_TOL
+            && (-SAME_LINE_OVERLAP_TOL..=SAME_LINE_GAP_MAX).contains(&shoff);
+
+        if same_line {
+            zp.encode_bit(&mut offset_type_ctx, false);
+            encode_num(&mut zp, &mut shoff_ctx, -262143, 262142, shoff);
+            encode_num(&mut zp, &mut svoff_ctx, -262143, 262142, svoff);
+            // Decoder: x = last_right + shoff, y = baseline + svoff.
+            let nx = layout.last_right + shoff;
+            let ny = layout.baseline_get() + svoff;
+            layout.baseline_add(ny);
+            layout.last_right = nx + cc_w - 1;
+        } else {
+            zp.encode_bit(&mut offset_type_ctx, true);
+            let hoff = x_jb2 - layout.first_left;
+            let voff = y_jb2 + cc_h - 1 - layout.first_bottom;
+            encode_num(&mut zp, &mut hoff_ctx, -262143, 262142, hoff);
+            encode_num(&mut zp, &mut voff_ctx, -262143, 262142, voff);
+            // Decoder: nx = first_left+hoff, ny = first_bottom+voff-h+1, then
+            // first_left = nx, first_bottom = ny, baseline.fill(ny).
+            let nx = layout.first_left + hoff;
+            let ny = layout.first_bottom + voff - cc_h + 1;
+            layout.first_left = nx;
+            layout.first_bottom = ny;
+            layout.baseline_fill(ny);
+            layout.baseline_add(ny);
+            layout.last_right = nx + cc_w - 1;
+            layout.same_line_seen = true;
+        }
+
+        if dict_action.is_none() {
+            dedup.insert(key, dict_size);
+            dict_size += 1;
         }
     }
 
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 11);
     zp.finish()
+}
+
+/// Same-line tolerances (Phase 2 of #188) used to decide between new_line
+/// and same-line coordinate coding. Values are in image pixels and chosen
+/// to cover normal text glyph variation while still treating a real line
+/// break as a new_line. Looser thresholds reduce shoff/svoff magnitudes
+/// at the cost of forcing same-line coding when the receiver would have
+/// preferred a fresh baseline; tighter thresholds do the opposite.
+const SAME_LINE_BASELINE_TOL: i32 = 16;
+const SAME_LINE_OVERLAP_TOL: i32 = 16;
+const SAME_LINE_GAP_MAX: i32 = 1000;
+
+/// Mirror of jb2::LayoutState held encoder-side.
+struct EncoderLayout {
+    first_left: i32,
+    first_bottom: i32,
+    last_right: i32,
+    baseline: [i32; 3],
+    baseline_idx: i32,
+    /// `false` until the first symbol has been emitted — same-line coding
+    /// is invalid before then because there is no "previous" baseline.
+    same_line_seen: bool,
+}
+
+impl EncoderLayout {
+    fn new(image_height: i32) -> Self {
+        Self {
+            first_left: -1,
+            first_bottom: image_height - 1,
+            last_right: 0,
+            baseline: [0, 0, 0],
+            baseline_idx: -1,
+            same_line_seen: false,
+        }
+    }
+
+    fn baseline_fill(&mut self, val: i32) {
+        self.baseline = [val, val, val];
+    }
+
+    fn baseline_add(&mut self, val: i32) {
+        self.baseline_idx += 1;
+        if self.baseline_idx == 3 {
+            self.baseline_idx = 0;
+        }
+        self.baseline[self.baseline_idx as usize] = val;
+    }
+
+    fn baseline_get(&self) -> i32 {
+        let (a, b, c) = (self.baseline[0], self.baseline[1], self.baseline[2]);
+        if (a >= b && a <= c) || (a <= b && a >= c) {
+            a
+        } else if (b >= a && b <= c) || (b <= a && b >= c) {
+            b
+        } else {
+            c
+        }
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
