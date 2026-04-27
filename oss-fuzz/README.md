@@ -38,6 +38,13 @@ Mirrors `fuzz/fuzz_targets/`:
 | `fuzz_bzz`   | BZZ decompressor                           |
 | `fuzz_iw44`  | IW44 wavelet decoder                       |
 
-A seed corpus is **not** shipped here — it would re-pull `tests/corpus/*.djvu`
-into every Docker build. Follow-up on #193: ship a small `<target>_seed_corpus.zip`
-alongside each target so OSS-Fuzz starts with realistic inputs.
+## Seed corpora
+
+`build.sh` zips `fuzz/corpus/<target>/` from the source tree into
+`$OUT/<target>_seed_corpus.zip` for every target. OSS-Fuzz unpacks these on
+the first run so coverage-guided fuzzing starts from realistic inputs
+(malformed headers, truncated chunks, codec edge cases).
+
+To extend a corpus, drop minimised reproducers into the relevant
+`fuzz/corpus/<target>/` directory and commit them. Keep individual files
+small (≤ 200 KB) and prefer synthetic / CC0-licensed inputs.
