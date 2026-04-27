@@ -59,6 +59,32 @@ jobs:
       - name: Bench document
         run: cargo bench --bench document -- --output-format bencher 2>&1 | tee -a bench_output.txt
 
+      # ── DjVuLibre baseline (overlay on the same dashboard) ───────────────
+      # Compiles libdjvulibre's render benchmark and emits one bencher line
+      # per DPI so github-action-benchmark plots a parallel timeline next to
+      # djvu-rs's render_page series. This satisfies the "DjVuLibre ratio
+      # overlay" item of #197's DoD. The asset (colorbook.djvu) is checked
+      # into references/djvujs/ so no fetch step is needed.
+      - name: Run DjVuLibre render benchmark
+        id: djvulibre
+        continue-on-error: true
+        run: |
+          mkdir -p target/djvulibre-bench
+          bash scripts/bench_djvulibre.sh target/djvulibre-bench
+          # Parse `render_only : X.XXX ms ...` → bencher ns line per DPI.
+          # bench_djvulibre.sh defaults to 150 dpi; if more DPIs are added
+          # there, extend this loop to track each one.
+          python3 - <<'PYEOF' >> bench_output.txt
+          import re, pathlib
+          txt = pathlib.Path("target/djvulibre-bench/djvulibre_bench.txt").read_text()
+          current_dpi = 150
+          for line in txt.splitlines():
+              m = re.match(r"render_only\s*:\s*([\d.]+)\s*ms", line)
+              if m:
+                  ns = int(float(m.group(1)) * 1_000_000)
+                  print(f"test djvulibre_render_dpi_{current_dpi} ... bench: {ns} ns/iter (+/- 0)")
+          PYEOF
+
       # ── Publish history + dashboard to gh-pages ─────────────────────────
       - name: Push to gh-pages dashboard
         uses: benchmark-action/github-action-benchmark@v1
