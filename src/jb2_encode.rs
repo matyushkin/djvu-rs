@@ -616,6 +616,25 @@ fn find_refinement_ref(
 /// - Components >= 1 MP are encoded as-is; the decoder will reject them via
 ///   `MAX_SYMBOL_PIXELS`. For scanned text pages this is not a practical issue.
 pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
+    encode_jb2_dict_with_shared(bitmap, &[])
+}
+
+/// Encode a bilevel [`Bitmap`] into a JB2 stream that inherits its initial
+/// symbol library from a previously-encoded shared dictionary (Djbz).
+///
+/// Same as [`encode_jb2_dict`] but emits a "required-dict-or-reset"
+/// (record type 9) preamble announcing `shared_symbols.len()` inherited
+/// entries. Per-symbol matches that hit any of the shared symbols are
+/// emitted as record-7 (matched copy) referencing the shared index, so
+/// the per-page Sjbz never re-transmits glyphs already present in the
+/// shared Djbz.
+///
+/// `shared_symbols` must be the **identical bitmap sequence** the matching
+/// Djbz was built from (see [`encode_jb2_djbz`]).
+///
+/// Round-trip: pass the resulting Sjbz bytes plus
+/// `decode_dict(djbz_bytes, None)` to [`crate::jb2::decode`].
+pub fn encode_jb2_dict_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap]) -> Vec<u8> {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
     if w == 0 || h == 0 {
@@ -652,6 +671,7 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     let mut symbol_width_diff_ctx = NumContext::new();
     let mut symbol_height_diff_ctx = NumContext::new();
     let mut symbol_index_ctx = NumContext::new();
+    let mut inherit_dict_size_ctx = NumContext::new();
     let mut hoff_ctx = NumContext::new();
     let mut voff_ctx = NumContext::new();
     let mut shoff_ctx = NumContext::new();
@@ -662,6 +682,18 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     let mut flag_ctx: u8 = 0;
 
     // Preamble.
+    if !shared_symbols.is_empty() {
+        // Required-dict-or-reset: announce the inherited library size before
+        // start-of-image so the decoder pre-populates `dict` from `shared_dict`.
+        encode_num(&mut zp, &mut record_type_ctx, 0, 11, 9);
+        encode_num(
+            &mut zp,
+            &mut inherit_dict_size_ctx,
+            0,
+            262142,
+            shared_symbols.len() as i32,
+        );
+    }
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 0);
     encode_num(&mut zp, &mut image_size_ctx, 0, 262142, w);
     encode_num(&mut zp, &mut image_size_ctx, 0, 262142, h);
@@ -670,7 +702,9 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     // Layout state — mirrors `LayoutState::new` in jb2.rs:1187.
     let mut layout = EncoderLayout::new(h);
 
-    // Exact-match dedup: (w, h, packed-data) → dict index.
+    // Exact-match dedup: (w, h, packed-data) → dict index. Pre-populated from
+    // shared_symbols so cross-page identical glyphs encode as rec-7 (copy)
+    // referencing the shared library.
     let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
     // Stored dict entries (parallel to the decoder's `dict` vector) — needed
     // so refinement matching can score Hamming distance against historical
@@ -678,6 +712,15 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     let mut dict_entries: Vec<Bitmap> = Vec::new();
     // Index of dict entries by (w, h) for O(1) lookup of refinement candidates.
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for sym in shared_symbols {
+        let idx = dict_entries.len();
+        dedup.insert((sym.width, sym.height, sym.data.clone()), idx);
+        by_size
+            .entry((sym.width, sym.height))
+            .or_default()
+            .push(idx);
+        dict_entries.push(sym.clone());
+    }
 
     for &cc_idx in &order {
         let cc = &ccs[cc_idx];
@@ -867,6 +910,281 @@ impl EncoderLayout {
             c
         }
     }
+}
+
+// ── Djbz dictionary stream + multi-page sharing (#194) ─────────────────────────
+
+/// Encode a sequence of bilevel symbols as a JB2 **Djbz** chunk payload.
+///
+/// Each symbol is emitted as record-type-2 (new symbol, direct, dict-only) in
+/// the order given. The decoder side ([`crate::jb2::decode_dict`]) reconstructs
+/// a [`crate::jb2::Jb2Dict`] whose symbol indices match this input order, so
+/// downstream Sjbz streams encoded with [`encode_jb2_dict_with_shared`] using
+/// the same `&[Bitmap]` reference will round-trip cleanly.
+///
+/// The Djbz contains no positioning information — symbols are abstract
+/// glyph bitmaps, not blits. The page Sjbz alone places them.
+pub fn encode_jb2_djbz(symbols: &[Bitmap]) -> Vec<u8> {
+    let mut zp = ZpEncoder::new();
+    let mut record_type_ctx = NumContext::new();
+    let mut image_size_ctx = NumContext::new();
+    let mut symbol_width_ctx = NumContext::new();
+    let mut symbol_height_ctx = NumContext::new();
+    let mut direct_bitmap_ctx = vec![0u8; 1024];
+    let mut flag_ctx: u8 = 0;
+
+    // Preamble: start-of-image (rec 0) — no rec-9 since a Djbz never inherits
+    // from another dict in this encoder. Dimensions are written but unused on
+    // the decode side (see `decode_dictionary` in jb2.rs:1990).
+    encode_num(&mut zp, &mut record_type_ctx, 0, 11, 0);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, 0);
+    encode_num(&mut zp, &mut image_size_ctx, 0, 262142, 0);
+    zp.encode_bit(&mut flag_ctx, false);
+
+    // Symbol body: rec-2 per entry.
+    for sym in symbols {
+        encode_num(&mut zp, &mut record_type_ctx, 0, 11, 2);
+        encode_num(&mut zp, &mut symbol_width_ctx, 0, 262142, sym.width as i32);
+        encode_num(
+            &mut zp,
+            &mut symbol_height_ctx,
+            0,
+            262142,
+            sym.height as i32,
+        );
+        encode_bitmap_direct(&mut zp, &mut direct_bitmap_ctx, sym);
+    }
+
+    // End-of-data.
+    encode_num(&mut zp, &mut record_type_ctx, 0, 11, 11);
+    zp.finish()
+}
+
+/// Cluster CCs from `pages` and return the bitmaps that should live in a
+/// shared Djbz: any (w, h, packed-data) signature that appears on `>=
+/// page_threshold` distinct pages.
+///
+/// Returns shared symbols in deterministic order (sorted by first-seen page,
+/// then first-seen position within that page). Pages without enough repetition
+/// produce an empty shared dict.
+pub(crate) fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) -> Vec<Bitmap> {
+    if page_threshold < 2 || pages.len() < page_threshold {
+        return Vec::new();
+    }
+
+    // Track per-(w,h,data) signature: pages it appeared on (set), and the
+    // first-seen (page_idx, cc_idx) for stable ordering.
+    type Key = (u32, u32, Vec<u8>);
+    struct ClusterEntry {
+        pages_seen: Vec<usize>,
+        first_seen: (usize, usize),
+        bitmap: Bitmap,
+    }
+    let mut seen: BTreeMap<Key, ClusterEntry> = BTreeMap::new();
+    for (page_idx, page) in pages.iter().enumerate() {
+        let ccs = extract_ccs(page);
+        for (cc_idx, cc) in ccs.iter().enumerate() {
+            let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
+            let entry = seen.entry(key).or_insert_with(|| ClusterEntry {
+                pages_seen: Vec::new(),
+                first_seen: (page_idx, cc_idx),
+                bitmap: cc.bitmap.clone(),
+            });
+            if !entry.pages_seen.contains(&page_idx) {
+                entry.pages_seen.push(page_idx);
+            }
+        }
+    }
+
+    let mut promoted: Vec<ClusterEntry> = seen
+        .into_values()
+        .filter(|e| e.pages_seen.len() >= page_threshold)
+        .collect();
+    promoted.sort_by_key(|e| e.first_seen);
+    promoted.into_iter().map(|e| e.bitmap).collect()
+}
+
+/// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
+///
+/// CCs that appear on at least `shared_dict_page_threshold` distinct input
+/// pages are promoted into a single shared [`Jb2Dict`] (Djbz) emitted as a
+/// `FORM:DJVI` component. Each page's `FORM:DJVU` then carries a small
+/// `INCL` chunk pointing at that DJVI plus a Sjbz that references the shared
+/// dictionary by index.
+///
+/// Returns the full DjVu container bytes (with `AT&T` magic, ready to write
+/// to a file). With `pages.len() < 2` or `shared_dict_page_threshold > pages.len()`,
+/// no symbols qualify for sharing and the encoder degrades to per-page
+/// independent encoding (still wrapped in DJVM).
+///
+/// [`Jb2Dict`]: crate::jb2::Jb2Dict
+pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usize) -> Vec<u8> {
+    use crate::iff;
+
+    let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
+    let djbz_bytes = encode_jb2_djbz(&shared);
+
+    // ── Build component buffers (each = full FORM body, ready for IFF emit) ──
+    //
+    // DJVI component (only when there is something to share): contains a single
+    // INFO chunk (none required by spec) + the Djbz.
+    //
+    // DJVU page components: INFO + INCL("dict0001.djvi") + Sjbz.
+    let mut comp_form_bodies: Vec<(Vec<u8>, /*is_page*/ bool, String)> = Vec::new();
+
+    let dict_id = "dict0001.djvi".to_string();
+    if !shared.is_empty() {
+        let mut djvi_body = Vec::new();
+        djvi_body.extend_from_slice(b"DJVI");
+        djvi_body.extend_from_slice(b"Djbz");
+        djvi_body.extend_from_slice(&(djbz_bytes.len() as u32).to_be_bytes());
+        djvi_body.extend_from_slice(&djbz_bytes);
+        if !djbz_bytes.len().is_multiple_of(2) {
+            djvi_body.push(0);
+        }
+        comp_form_bodies.push((djvi_body, false, dict_id.clone()));
+    }
+
+    let shared_ref: &[Bitmap] = &shared;
+    for (page_idx, page) in pages.iter().enumerate() {
+        let sjbz = encode_jb2_dict_with_shared(page, shared_ref);
+        let mut info = Vec::with_capacity(10);
+        info.extend_from_slice(&(page.width as u16).to_be_bytes());
+        info.extend_from_slice(&(page.height as u16).to_be_bytes());
+        info.extend_from_slice(&[24, 0, 100, 0, 1, 0]); // version major, minor, dpi(le16), gamma, rotation
+
+        let mut djvu_body = Vec::new();
+        djvu_body.extend_from_slice(b"DJVU");
+        djvu_body.extend_from_slice(b"INFO");
+        djvu_body.extend_from_slice(&(info.len() as u32).to_be_bytes());
+        djvu_body.extend_from_slice(&info);
+        if !info.len().is_multiple_of(2) {
+            djvu_body.push(0);
+        }
+        if !shared.is_empty() {
+            let incl_payload = dict_id.as_bytes();
+            djvu_body.extend_from_slice(b"INCL");
+            djvu_body.extend_from_slice(&(incl_payload.len() as u32).to_be_bytes());
+            djvu_body.extend_from_slice(incl_payload);
+            if !incl_payload.len().is_multiple_of(2) {
+                djvu_body.push(0);
+            }
+        }
+        djvu_body.extend_from_slice(b"Sjbz");
+        djvu_body.extend_from_slice(&(sjbz.len() as u32).to_be_bytes());
+        djvu_body.extend_from_slice(&sjbz);
+        if !sjbz.len().is_multiple_of(2) {
+            djvu_body.push(0);
+        }
+
+        let pid = format!("p{:04}.djvu", page_idx + 1);
+        comp_form_bodies.push((djvu_body, true, pid));
+    }
+
+    // ── Build DIRM directly (bundled, with offsets) ──
+    //
+    // Reuses the shape of `crate::djvm::build_djvm` but inlined here because
+    // we have FORM bodies (not full FORM chunks with header) to embed. The
+    // simpler path: build full FORM chunks here, then call `iff::emit_form`.
+    // Each component is a FORM chunk: { id: "FORM", body: <DJVU/DJVI ...> }.
+    let comp_form_data: Vec<&[u8]> = comp_form_bodies
+        .iter()
+        .map(|(b, _, _)| b.as_slice())
+        .collect();
+
+    // DIRM payload: build matching the bundled-format layout in
+    // `djvu_document.rs::parse` (flags=0x81 → bundled+1.0; count u16-be;
+    // per-component offsets u32-be; bzz-compressed metadata table).
+    let n = comp_form_bodies.len();
+    let mut dirm = Vec::new();
+    dirm.push(0x81); // bundled (high bit) + version 1
+    dirm.extend_from_slice(&(n as u16).to_be_bytes());
+
+    // Compute offsets after the DIRM chunk has been laid down.
+    // Layout: AT&T (4) + FORM (4) + form_size (4) + "DJVM" (4) + "DIRM" (4) +
+    //         dirm_size (4) + dirm_payload_with_offsets+bzz_meta + pad +
+    //         each FORM chunk header (8) + body + pad.
+    //
+    // Offsets in the DIRM are *file-byte* offsets to the AT&T-stripped FORM
+    // chunk header for each component. So offset[i] = position of "FORM" id
+    // bytes for that component within the file.
+    //
+    // We don't know the DIRM size until we know the offsets; resolve via
+    // two-pass: build metadata table first, then layout.
+    let mut meta = Vec::new();
+    for (body, _, _) in &comp_form_bodies {
+        let total = body.len() + 8; // FORM + size + body
+        meta.extend_from_slice(&(total as u32).to_be_bytes()[1..4]); // 24-bit size
+    }
+    for (_, is_page, _) in &comp_form_bodies {
+        let flag = if *is_page { 1u8 } else { 0u8 };
+        meta.push(flag);
+    }
+    for (_, _, id) in &comp_form_bodies {
+        meta.extend_from_slice(id.as_bytes());
+        meta.push(0);
+    }
+    for (_, _, id) in &comp_form_bodies {
+        meta.extend_from_slice(id.as_bytes());
+        meta.push(0);
+    }
+    meta.extend(core::iter::repeat_n(0u8, n)); // empty titles
+    let bzz_meta = crate::bzz_encode::bzz_encode(&meta);
+
+    // dirm payload final size = 1 (flags) + 2 (count) + 4*n (offsets) + bzz_meta.len()
+    let dirm_size = 1 + 2 + 4 * n + bzz_meta.len();
+
+    // Compute DJVM body size and component offsets.
+    let dirm_chunk_total = 8 + dirm_size + (dirm_size & 1); // header + payload + pad
+    let mut form_body_size: usize = 4; // "DJVM"
+    form_body_size += dirm_chunk_total;
+    let mut comp_offsets: Vec<u32> = Vec::with_capacity(n);
+    for body in &comp_form_data {
+        // File offset = AT&T(4) + FORM(4) + size(4) + DJVM(4) + dirm_chunk_total
+        //             + sum-of-prior-comp-totals
+        // The decoder treats DIRM offsets as byte offsets from start of file
+        // pointing at the "FORM" id bytes of the component. Offset 0 of the
+        // file = 'A' of "AT&T", so offset = 12 + 4 + dirm_chunk_total + prior.
+        let off = 4 + 4 + 4 + 4 + dirm_chunk_total + (form_body_size - 4 - dirm_chunk_total);
+        comp_offsets.push(off as u32);
+        let tot = body.len() + 8;
+        form_body_size += tot + (tot & 1); // pad component to even
+    }
+
+    // Now write final dirm payload with offsets.
+    let _ = dirm; // computed above for reference; final form built fresh below.
+    let mut dirm_full = Vec::with_capacity(dirm_size);
+    dirm_full.push(0x81);
+    dirm_full.extend_from_slice(&(n as u16).to_be_bytes());
+    for off in &comp_offsets {
+        dirm_full.extend_from_slice(&off.to_be_bytes());
+    }
+    dirm_full.extend_from_slice(&bzz_meta);
+    debug_assert_eq!(dirm_full.len(), dirm_size);
+
+    // Emit final file.
+    let mut out = Vec::with_capacity(12 + form_body_size);
+    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&(form_body_size as u32).to_be_bytes());
+    out.extend_from_slice(b"DJVM");
+    out.extend_from_slice(b"DIRM");
+    out.extend_from_slice(&(dirm_size as u32).to_be_bytes());
+    out.extend_from_slice(&dirm_full);
+    if dirm_size & 1 == 1 {
+        out.push(0);
+    }
+    for body in &comp_form_data {
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(body);
+        if body.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+
+    let _ = iff::parse_form; // silence unused-import warning
+    out
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1266,5 +1584,188 @@ mod tests {
         let c = vec![0u8; 2];
         let d = vec![0xff; 2];
         assert_eq!(packed_hamming(&c, &d), 16);
+    }
+
+    // ── #194 multi-page shared Djbz ────────────────────────────────────────────
+
+    fn render_glyph(bm: &mut Bitmap, x: u32, y: u32, glyph: &[&[u8]]) {
+        for (gy, row) in glyph.iter().enumerate() {
+            for (gx, &c) in row.iter().enumerate() {
+                if c == b'#' {
+                    bm.set(x + gx as u32, y + gy as u32, true);
+                }
+            }
+        }
+    }
+
+    fn glyph_a() -> Vec<&'static [u8]> {
+        vec![
+            b" ## " as &[u8],
+            b"#  #" as &[u8],
+            b"####" as &[u8],
+            b"#  #" as &[u8],
+            b"#  #" as &[u8],
+        ]
+    }
+    fn glyph_b() -> Vec<&'static [u8]> {
+        vec![
+            b"### " as &[u8],
+            b"#  #" as &[u8],
+            b"### " as &[u8],
+            b"#  #" as &[u8],
+            b"### " as &[u8],
+        ]
+    }
+
+    fn make_text_page(words: &[&[u8]]) -> Bitmap {
+        let mut bm = Bitmap::new(80, 30);
+        let mut x = 4;
+        for word in words {
+            for &letter in *word {
+                let g = match letter {
+                    b'A' => glyph_a(),
+                    b'B' => glyph_b(),
+                    _ => continue,
+                };
+                render_glyph(&mut bm, x, 8, &g);
+                x += 6;
+            }
+            x += 4;
+        }
+        bm
+    }
+
+    fn assert_decoded_eq(src: &Bitmap, decoded: &Bitmap) {
+        assert_eq!(src.width, decoded.width, "width mismatch");
+        assert_eq!(src.height, decoded.height, "height mismatch");
+        let mut mismatches = 0u32;
+        for y in 0..src.height {
+            for x in 0..src.width {
+                if src.get(x, y) != decoded.get(x, y) {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert_eq!(mismatches, 0, "{mismatches} pixel mismatches");
+    }
+
+    #[test]
+    fn djbz_roundtrip_two_glyphs() {
+        // Encode two distinct glyph bitmaps as a Djbz, decode it, and verify
+        // the resulting Jb2Dict has exactly those two symbols in order.
+        let mut a = Bitmap::new(4, 5);
+        render_glyph(&mut a, 0, 0, &glyph_a());
+        let mut b = Bitmap::new(4, 5);
+        render_glyph(&mut b, 0, 0, &glyph_b());
+        let djbz = encode_jb2_djbz(&[a.clone(), b.clone()]);
+        assert!(!djbz.is_empty());
+
+        // Sanity-decode by constructing a Sjbz that uses the shared dict
+        // and checking the two glyphs round-trip.
+        let dict = jb2::decode_dict(&djbz, None).expect("decode_dict");
+        // Use the shared dict in a 1-page Sjbz that places both glyphs.
+        let mut page = Bitmap::new(20, 8);
+        render_glyph(&mut page, 2, 2, &glyph_a());
+        render_glyph(&mut page, 10, 2, &glyph_b());
+        let sjbz = encode_jb2_dict_with_shared(&page, &[a, b]);
+        let decoded = jb2::decode(&sjbz, Some(&dict)).expect("decode");
+        assert_decoded_eq(&page, &decoded);
+    }
+
+    #[test]
+    fn shared_dict_smaller_than_independent_for_repeated_pages() {
+        // Build two identical text pages. Encoding them with a shared Djbz
+        // should produce strictly smaller total bytes than two independent
+        // dict encodings.
+        let p1 = make_text_page(&[b"AABB", b"BABA"]);
+        let p2 = make_text_page(&[b"AABB", b"BABA"]);
+
+        let independent_total = encode_jb2_dict(&p1).len() + encode_jb2_dict(&p2).len();
+
+        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        assert!(!bundle.is_empty());
+
+        // Round-trip via the document parser.
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        let d1 = doc
+            .page(0)
+            .expect("page 0")
+            .extract_mask()
+            .expect("extract_mask 0")
+            .expect("mask 0 present");
+        let d2 = doc
+            .page(1)
+            .expect("page 1")
+            .extract_mask()
+            .expect("extract_mask 1")
+            .expect("mask 1 present");
+        assert_decoded_eq(&p1, &d1);
+        assert_decoded_eq(&p2, &d2);
+
+        // Size win sanity check (bundle includes DIRM + IFF wrappers, so we
+        // only assert the pure JB2 payload across (Djbz + 2× Sjbz) is smaller
+        // than the pure 2× independent Sjbz).
+        let shared = cluster_shared_symbols(&[p1.clone(), p2.clone()], 2);
+        assert!(
+            !shared.is_empty(),
+            "two identical pages should produce shared symbols"
+        );
+        let djbz = encode_jb2_djbz(&shared);
+        let sjbz1 = encode_jb2_dict_with_shared(&p1, &shared);
+        let sjbz2 = encode_jb2_dict_with_shared(&p2, &shared);
+        let shared_jb2_total = djbz.len() + sjbz1.len() + sjbz2.len();
+        assert!(
+            shared_jb2_total < independent_total,
+            "expected shared jb2 < independent: shared={}  independent={}",
+            shared_jb2_total,
+            independent_total
+        );
+    }
+
+    #[test]
+    fn cluster_promotes_only_repeated_glyphs() {
+        // A appears on both pages, B appears on only one. With threshold=2,
+        // only A should be promoted.
+        let mut p1 = Bitmap::new(20, 10);
+        render_glyph(&mut p1, 2, 2, &glyph_a());
+        render_glyph(&mut p1, 10, 2, &glyph_b());
+        let mut p2 = Bitmap::new(20, 10);
+        render_glyph(&mut p2, 2, 2, &glyph_a());
+        // No B on page 2.
+
+        let shared = cluster_shared_symbols(&[p1, p2], 2);
+        assert_eq!(shared.len(), 1, "only A should cross the threshold");
+        // A glyph is 4×5.
+        assert_eq!(shared[0].width, 4);
+        assert_eq!(shared[0].height, 5);
+    }
+
+    #[test]
+    fn djvm_bundle_with_no_repeats_still_round_trips() {
+        // Two pages with no shared CCs — bundle should still parse and decode
+        // each page correctly (degraded path: empty Djbz / no shared dict).
+        let mut p1 = Bitmap::new(20, 10);
+        render_glyph(&mut p1, 2, 2, &glyph_a());
+        let mut p2 = Bitmap::new(20, 10);
+        render_glyph(&mut p2, 2, 2, &glyph_b());
+
+        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        let d1 = doc
+            .page(0)
+            .expect("page 0")
+            .extract_mask()
+            .expect("extract_mask 0")
+            .expect("mask 0 present");
+        let d2 = doc
+            .page(1)
+            .expect("page 1")
+            .extract_mask()
+            .expect("extract_mask 1")
+            .expect("mask 1 present");
+        assert_decoded_eq(&p1, &d1);
+        assert_decoded_eq(&p2, &d2);
     }
 }
