@@ -192,6 +192,28 @@ A CC-analysis + symbol dictionary encoder (#188) should close ≥80% of this gap
 
 ---
 
+### JB2 dict encoder Phase 3 — refinement matching (#188, 2026-04-27)
+
+**Setup:** Same harness on full `tests/corpus/*.djvu` (553 pages, 4 books). Implemented record-type-6 emission for near-duplicate glyphs against existing dict entries of identical (w, h), with `encode_bitmap_ref` mirroring decoder's `decode_bitmap_ref` 11-bit context (c_r1 / c_r0 / m_r2 / m_r1 / m_r0 from cbm above + mbm above/at/below).
+
+**Heuristic calibration:** uncapped 10% Hamming threshold regressed total size by +1.6% on dense scans (`pathogenic_bacteria_1896.djvu`: 34.25 MB → 34.83 MB) — false-positive matches on halftone CCs forced 1+ bpp refinement bitmaps that exceeded a fresh record-1 cost. Tuned to **4% Hamming + ≥32-pixel minimum CC size**:
+
+| Corpus | Pages | Phase 2 | Phase 3 | Δ |
+|--------|-------|---------|---------|---|
+| `cable_1973_100133.djvu` | 2 | 1.136× | 1.126× | -0.9% |
+| `conquete_paix.djvu` | 22 | 1.025× | 1.030× | +0.5% |
+| `pathogenic_bacteria_1896.djvu` | 517 | 1.378× | 1.379× | +0.07% (flat) |
+| `watchmaker.djvu` | 12 | 1.058× | **0.937×** | -11.4% |
+| **Total** | 553 | 1.376× | 1.376× | flat (-0.04%) |
+
+On the CI 3-book subset (`cable` + `conquete_paix` + `watchmaker`, used by `.github/workflows/quality.yml`) Phase 3 hits **0.972×** vs cjb2 — the dict encoder beats cjb2 on text-heavy corpora. Dense-scan parity is unchanged (gap closes via #194 shared Djbz).
+
+**Implementation:** `src/jb2_encode.rs` — `encode_bitmap_ref()` (top-down Bitmap iteration with `row_offset = mrow - crow` center alignment between cbm and mbm; rolling 11-bit context updates per column), `find_refinement_ref()` (linear scan over same-(w,h) dict indices), `packed_hamming()` (XOR + popcount). Action enum gates new/copy/refine. Per-CC by_size index keyed on `(w, h)` for O(matches) lookup. Updates only on `Action::New` (refined CCs do not become dict entries). 4 new round-trip unit tests including `refine_far_glyph_falls_back_to_new` (validates threshold, not just success path).
+
+**Reverted:** uncapped 10% Hamming threshold — see calibration table above. Bigger lesson: refinement-match heuristics need a per-CC profitability model, not a flat fraction; the fixed cost of a record-6 (coordinate header + ZP-coded refinement bitmap) only amortizes for genuinely near-identical larger glyphs.
+
+---
+
 ### IW44 `to_rgb()` profile breakdown (2026-04-16)
 
 **Setup:** 500 iters of `img.to_rgb()` on colorbook.djvu, samply @ ~1 ksample/s.
