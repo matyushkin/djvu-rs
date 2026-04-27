@@ -215,6 +215,64 @@ fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk>, E
     Ok(chunks)
 }
 
+// ---- Legacy emitter (round-trip support, #195) ------------------------------
+
+/// Serialise a `DjvuFile` (legacy parser) back into the on-disk IFF byte
+/// stream, including the leading "AT&T" magic.
+///
+/// Parser/emitter contract: `parse(emit(file)) == file` for any tree
+/// previously produced by `parse(...)`. This is used by property-based
+/// round-trip tests under `tests/proptest_codecs.rs` (#195) and is small
+/// enough to keep alongside the parser; not intended as a general-purpose
+/// DjVu writer.
+pub fn emit(file: &DjvuFile) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(b"AT&T");
+    emit_chunk(&file.root, &mut out);
+    out
+}
+
+fn emit_chunk(chunk: &Chunk, out: &mut Vec<u8>) {
+    match chunk {
+        Chunk::Form {
+            secondary_id,
+            length: _,
+            children,
+        } => {
+            // Compute payload = secondary_id (4 bytes) + concat(emit(child)).
+            // Recompute length from children rather than trusting the stored
+            // value — the parser's `length` covers the original on-disk size,
+            // but children may have grown/shrunk if the caller mutated the
+            // tree. The proptest harness only feeds back unmodified trees,
+            // so both forms agree there.
+            let mut payload: Vec<u8> = Vec::new();
+            payload.extend_from_slice(secondary_id);
+            for child in children {
+                emit_chunk(child, &mut payload);
+            }
+            let len = payload.len() as u32;
+            out.extend_from_slice(b"FORM");
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(&payload);
+            // Word-align: pad to even total chunk size.
+            let total = 8 + payload.len();
+            if total % 2 == 1 {
+                out.push(0);
+            }
+        }
+        Chunk::Leaf { id, data } => {
+            let len = data.len() as u32;
+            out.extend_from_slice(id);
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(data);
+            let total = 8 + data.len();
+            if total % 2 == 1 {
+                out.push(0);
+            }
+        }
+    }
+}
+
 // ---- New spec-based IFF parser (phase 1) ------------------------------------
 //
 // `parse_form` is a new zero-copy parser written from the sndjvu.org spec.
