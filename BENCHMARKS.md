@@ -265,6 +265,7 @@ Run with `cargo run --release --example encode_quality_jb2 -- tests/corpus/*.djv
 | `encode_jb2` (tiled direct) | 42 809 783 | 0.0492 | **1.71×** | 553 / 553 ok |
 | `encode_jb2_dict` (CC + rec 1+7, Phase 1) | 35 301 664 | 0.0406 | **1.41×** | 483 / 553 ok |
 | `encode_jb2_dict` (Phase 2, same-line) | 34 447 360 | 0.0396 | **1.376×** | 483 / 553 ok |
+| `encode_jb2_dict` (Phase 3, refinement rec 6) | 34 434 762 | 0.0396 | **1.376×** | 483 / 553 ok |
 
 - `encode_jb2` (#198): direct-blit, tiled into ≤ 1024×1024 records to stay
   under the decoder's 1 MP per-symbol cap. 100% round-trip across all corpus
@@ -276,13 +277,31 @@ Run with `cargo run --release --example encode_quality_jb2 -- tests/corpus/*.djv
   (offset_type=false) and baseline-bucket sort. Closes a further 2.5%
   on top of Phase 1 — small because most of the per-symbol bits are
   the bitmap data itself, not the coordinates.
-- Remaining gap to cjb2 closes with refinement matching (#188 phase 3)
-  and shared Djbz across pages (#194). Round-trip fails on 70 dense
-  scans whose CC extraction yields a single component > 1 MP (large
-  halftone / contiguous artwork region) — the dict path needs to fall
-  back to tiled direct-blit for such CCs.
+- `encode_jb2_dict` Phase 3 (#188): adds matched-refinement coding
+  (record type 6) for near-duplicate glyphs. Same-size dict entries
+  within a 4%-Hamming threshold (CCs ≥ 32 px) are emitted as a
+  refinement against the previous instance. Aggregate flat on dense
+  scans (the 4%/min-pixels heuristic suppresses unprofitable matches
+  on halftone CCs) but materially improves text-heavy corpora — e.g.
+  `watchmaker.djvu` 1.058× → 0.937× (now beats cjb2). On the CI
+  3-book subset (`cable` + `conquete_paix` + `watchmaker`) the dict
+  encoder is now **0.972× of cjb2**.
+- Remaining gap on dense-scan corpora closes with shared Djbz across
+  pages (#194). Round-trip fails on 70 dense scans whose CC extraction
+  yields a single component > 1 MP (large halftone / contiguous artwork
+  region) — the dict path needs to fall back to tiled direct-blit for
+  such CCs.
 
-Per-book ratios:
+Per-book ratios (Phase 3 dict encoder):
+
+| Corpus | Pages | dict bytes | orig bytes | dict ratio | direct ratio |
+|--------|-------|------------|------------|------------|--------------|
+| `cable_1973_100133.djvu` | 2 | 9 034 | 8 020 | 1.126× | 3.886× |
+| `conquete_paix.djvu` | 22 | 53 590 | 52 007 | 1.030× | 1.906× |
+| `pathogenic_bacteria_1896.djvu` | 517 | 34 256 946 | 24 849 842 | 1.379× | 1.696× |
+| `watchmaker.djvu` | 12 | 115 192 | 122 923 | **0.937×** | 4.349× |
+
+Phase 1 baseline for reference (single-pass exact-match dedup):
 
 | Corpus | Pages | dict bytes | orig bytes | dict ratio | direct ratio |
 |--------|-------|------------|------------|------------|--------------|
