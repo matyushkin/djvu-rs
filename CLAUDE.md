@@ -214,6 +214,34 @@ On the CI 3-book subset (`cable` + `conquete_paix` + `watchmaker`, used by `.git
 
 ---
 
+### Multi-page shared Djbz dictionary, Phase 1 (#194, 2026-04-27)
+
+**Setup:** Add cross-page CC dedup as a follow-on to #188. Three new public APIs in `src/jb2_encode.rs`:
+
+| API | Output |
+|-----|--------|
+| `encode_jb2_djbz(symbols)` | Djbz chunk payload (rec-2 per symbol, no inheritance) |
+| `encode_jb2_dict_with_shared(bitmap, shared)` | Sjbz chunk that emits rec-9 (required-dict-or-reset) preamble + references shared dict via rec-7 |
+| `encode_djvm_bundle_jb2(pages, threshold)` | full DJVM container with one DJVI(Djbz) + N DJVU(INCL+Sjbz) |
+
+**Phase 1 algorithm:** exact-match `(w, h, packed-data)` clustering across pages; CCs appearing on `>= threshold` distinct pages get promoted to the shared Djbz, the rest stay per-page. Same-line/refinement matching from #188 Phase 2/3 carries over inside each page's Sjbz.
+
+**Validation:** 4 new unit tests on toy 2-page text bitmaps:
+- `djbz_roundtrip_two_glyphs` — confirms `decode_dict` round-trips a 2-symbol dict
+- `shared_dict_smaller_than_independent_for_repeated_pages` — proves shared total bytes < independent total (the milestone from the issue)
+- `cluster_promotes_only_repeated_glyphs` — threshold semantics
+- `djvm_bundle_with_no_repeats_still_round_trips` — degraded path (no shared symbols → Djbz/DJVI omitted)
+
+Full DJVM container parses cleanly through `DjVuDocument::parse`; both pages' bitmaps round-trip pixel-exact through `extract_mask`.
+
+**Limitations / Phase 2 (not done):**
+- Exact-match only — no cross-page Hamming/refinement clustering. Real-world scanned text glyphs have small per-instance noise (anti-aliasing, scanner jitter); they won't dedup at the byte-exact level. Phase 2 should cluster by (w, h) + `packed_hamming` ≤ K and emit the dict entry as the canonical rep, then per-page CCs that match within threshold get rec-7 (copy) or rec-6 (refine) against the shared dict index.
+- No corpus-level size benchmark yet. Need a harness that splits a multi-page `cjb2`-encoded `.djvu` into per-page `Bitmap`s, re-encodes via `encode_djvm_bundle_jb2`, compares total bytes vs independent + vs the original. Tracked as Phase 2 measurement.
+
+**Format detail:** the DIRM offset table is **file-byte offsets to the "FORM" id** of each component (not relative to body, not stripped of AT&T). Computed via two-pass: bzz-compress the metadata block first to know its length, then place per-component offsets relative to AT&T(4)+FORM(4)+size(4)+DJVM(4)+DIRM-chunk-total. Verified by round-tripping through the existing parser.
+
+---
+
 ### IW44 `to_rgb()` profile breakdown (2026-04-16)
 
 **Setup:** 500 iters of `img.to_rgb()` on colorbook.djvu, samply @ ~1 ksample/s.
