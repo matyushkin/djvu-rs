@@ -1005,6 +1005,53 @@ mod tests {
         assert_eq!(mismatches, 0);
     }
 
+    /// 1×1 single-pixel image — smallest round-trip case (#198 DoD).
+    #[test]
+    fn tiled_1x1_roundtrip() {
+        for &px in &[false, true] {
+            let src = make_bitmap(1, 1, |_, _| px);
+            let encoded = encode_jb2(&src);
+            let decoded = jb2::decode(&encoded, None).expect("decode failed");
+            assert_eq!(decoded.width, 1);
+            assert_eq!(decoded.height, 1);
+            assert_eq!(decoded.get(0, 0), px, "1x1 pixel mismatch px={px}");
+        }
+    }
+
+    /// 100×100 sub-tile image — single tile, exercise non-trivial geometry (#198 DoD).
+    #[test]
+    fn tiled_100x100_roundtrip() {
+        let src = make_bitmap(100, 100, |x, y| (x ^ y) & 1 == 0);
+        let encoded = encode_jb2(&src);
+        let decoded = jb2::decode(&encoded, None).expect("decode failed");
+        assert_eq!(decoded.width, 100);
+        assert_eq!(decoded.height, 100);
+        for y in 0..100u32 {
+            for x in 0..100u32 {
+                assert_eq!(decoded.get(x, y), src.get(x, y), "mismatch at ({x},{y})");
+            }
+        }
+    }
+
+    /// 4096×4096 = 16 MP forces a 4×4 tile grid (#198 DoD).
+    /// Sparse pattern keeps this test light enough to run in CI.
+    #[test]
+    #[ignore = "16 MP pixel-by-pixel verify is slow; enable with --ignored"]
+    fn tiled_4096x4096_roundtrip() {
+        let src = make_bitmap(4096, 4096, |x, y| {
+            ((x.wrapping_mul(2654435761)) ^ y.wrapping_mul(40503)) & 31 == 0
+        });
+        let encoded = encode_jb2(&src);
+        let decoded = jb2::decode(&encoded, None).expect("decode failed");
+        assert_eq!(decoded.width, 4096);
+        assert_eq!(decoded.height, 4096);
+        for y in 0..4096u32 {
+            for x in 0..4096u32 {
+                assert_eq!(decoded.get(x, y), src.get(x, y), "mismatch at ({x},{y})");
+            }
+        }
+    }
+
     // ── Dict-based encoder (Phase 1: record types 1 + 7) ──────────────────────
 
     fn roundtrip_dict(bm: &Bitmap) -> Bitmap {
