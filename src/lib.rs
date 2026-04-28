@@ -139,6 +139,16 @@ pub mod fgbz_encode;
 #[cfg(feature = "std")]
 pub mod djvu_encode;
 
+/// Photometric foreground/background segmentation — splits an RGBA
+/// page into a bilevel ink mask and a sub-sampled background pixmap.
+///
+/// Provides [`segment::segment_page`], [`segment::SegmentOptions`],
+/// and [`segment::SegmentedPage`]. v1 uses a luminance threshold +
+/// block-averaged BG; adaptive binarisation and FG palette extraction
+/// are tracked as #220 follow-ups.
+#[cfg(feature = "std")]
+pub mod segment;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
