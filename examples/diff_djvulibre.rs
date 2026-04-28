@@ -148,7 +148,7 @@ fn render_ddjvu(path: &Path, page_idx: usize, w: u32, h: u32) -> Option<(u32, u3
     let out = tempfile::NamedTempFile::new().ok()?;
     let out_path = out.path().to_path_buf();
     let status = Command::new("ddjvu")
-        .arg(format!("-format=ppm"))
+        .arg("-format=ppm")
         .arg(format!("-page={}", page_idx + 1))
         .arg(format!("-size={w}x{h}"))
         .arg("-aspect=no")
