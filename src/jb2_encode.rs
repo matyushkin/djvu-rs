@@ -962,46 +962,97 @@ pub fn encode_jb2_djbz(symbols: &[Bitmap]) -> Vec<u8> {
 
 /// Cluster CCs from `pages` and return the bitmaps that should live in a
 /// shared Djbz: any (w, h, packed-data) signature that appears on `>=
-/// page_threshold` distinct pages.
+/// page_threshold` distinct pages, represented by the first-seen CC.
 ///
 /// Returns shared symbols in deterministic order (sorted by first-seen page,
 /// then first-seen position within that page). Pages without enough repetition
 /// produce an empty shared dict.
-pub(crate) fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) -> Vec<Bitmap> {
+///
+/// **Byte-exact dedup only.** Tried Hamming-distance clustering for #194
+/// Phase 2 (`cluster_shared_symbols_tunable` with `diff_fraction > 0`):
+/// no measurable byte saving on the 517-page `pathogenic_bacteria_1896`
+/// corpus (< 0.05% delta from byte-exact across 0%/1%/2% Hamming) and
+/// `diff_fraction = 3%` introduced per-page Sjbz decode mismatches under
+/// rec-6 refinement against shared reps. Byte-exact clustering already
+/// captures the multi-page win (−13.0% bundle vs independent on the same
+/// corpus). See CLAUDE.md "Multi-page shared Djbz dictionary, Phase 2"
+/// investigation for measurements.
+pub fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) -> Vec<Bitmap> {
+    cluster_shared_symbols_tunable(pages, page_threshold, 0)
+}
+
+/// Same as [`cluster_shared_symbols`] but exposes the per-CC Hamming
+/// allowance as a percentage of pixel count. `diff_fraction = 0` produces
+/// byte-exact clustering (the shipped default); higher values fold
+/// near-duplicate glyphs into a single shared rep at the cost of forcing
+/// the per-page Sjbz emitter through rec-6 (matched refinement) more often.
+///
+/// Provided for corpus benchmarking — most callers want
+/// [`cluster_shared_symbols`].
+pub fn cluster_shared_symbols_tunable(
+    pages: &[Bitmap],
+    page_threshold: usize,
+    diff_fraction: u32,
+) -> Vec<Bitmap> {
     if page_threshold < 2 || pages.len() < page_threshold {
         return Vec::new();
     }
 
-    // Track per-(w,h,data) signature: pages it appeared on (set), and the
-    // first-seen (page_idx, cc_idx) for stable ordering.
-    type Key = (u32, u32, Vec<u8>);
-    struct ClusterEntry {
+    struct Cluster {
+        rep: Bitmap,
         pages_seen: Vec<usize>,
         first_seen: (usize, usize),
-        bitmap: Bitmap,
     }
-    let mut seen: BTreeMap<Key, ClusterEntry> = BTreeMap::new();
+
+    let mut buckets: BTreeMap<(u32, u32), Vec<Cluster>> = BTreeMap::new();
+
     for (page_idx, page) in pages.iter().enumerate() {
         let ccs = extract_ccs(page);
         for (cc_idx, cc) in ccs.iter().enumerate() {
-            let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
-            let entry = seen.entry(key).or_insert_with(|| ClusterEntry {
-                pages_seen: Vec::new(),
-                first_seen: (page_idx, cc_idx),
-                bitmap: cc.bitmap.clone(),
-            });
-            if !entry.pages_seen.contains(&page_idx) {
-                entry.pages_seen.push(page_idx);
+            let bm = &cc.bitmap;
+            let pixel_count = (bm.width as u64) * (bm.height as u64);
+            // Tiny CCs always byte-exact: refinement is rejected per-page anyway.
+            let max_diff: u32 = if pixel_count < REFINEMENT_MIN_PIXELS {
+                0
+            } else {
+                ((pixel_count * diff_fraction as u64) / 100) as u32
+            };
+
+            let bucket = buckets.entry((bm.width, bm.height)).or_default();
+            let mut best: Option<(usize, u32)> = None;
+            for (i, c) in bucket.iter().enumerate() {
+                let d = packed_hamming(&bm.data, &c.rep.data);
+                if d > max_diff {
+                    continue;
+                }
+                match best {
+                    None => best = Some((i, d)),
+                    Some((_, bd)) if d < bd => best = Some((i, d)),
+                    _ => {}
+                }
+            }
+            match best {
+                Some((i, _)) => {
+                    if !bucket[i].pages_seen.contains(&page_idx) {
+                        bucket[i].pages_seen.push(page_idx);
+                    }
+                }
+                None => bucket.push(Cluster {
+                    rep: bm.clone(),
+                    pages_seen: vec![page_idx],
+                    first_seen: (page_idx, cc_idx),
+                }),
             }
         }
     }
 
-    let mut promoted: Vec<ClusterEntry> = seen
+    let mut promoted: Vec<Cluster> = buckets
         .into_values()
-        .filter(|e| e.pages_seen.len() >= page_threshold)
+        .flatten()
+        .filter(|c| c.pages_seen.len() >= page_threshold)
         .collect();
-    promoted.sort_by_key(|e| e.first_seen);
-    promoted.into_iter().map(|e| e.bitmap).collect()
+    promoted.sort_by_key(|c| c.first_seen);
+    promoted.into_iter().map(|c| c.rep).collect()
 }
 
 /// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
@@ -1019,10 +1070,18 @@ pub(crate) fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) ->
 ///
 /// [`Jb2Dict`]: crate::jb2::Jb2Dict
 pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usize) -> Vec<u8> {
+    let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
+    encode_djvm_bundle_jb2_with_shared(pages, &shared)
+}
+
+/// Same as [`encode_djvm_bundle_jb2`] but uses a caller-supplied shared
+/// dictionary instead of running [`cluster_shared_symbols`]. Lets callers
+/// drive cluster selection (e.g. corpus benchmarks measuring different
+/// Hamming thresholds) while reusing the IFF/DIRM emission logic.
+pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -> Vec<u8> {
     use crate::iff;
 
-    let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
-    let djbz_bytes = encode_jb2_djbz(&shared);
+    let djbz_bytes = encode_jb2_djbz(shared);
 
     // ── Build component buffers (each = full FORM body, ready for IFF emit) ──
     //
@@ -1033,7 +1092,8 @@ pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usiz
     let mut comp_form_bodies: Vec<(Vec<u8>, /*is_page*/ bool, String)> = Vec::new();
 
     let dict_id = "dict0001.djvi".to_string();
-    if !shared.is_empty() {
+    let has_shared = !shared.is_empty();
+    if has_shared {
         let mut djvi_body = Vec::new();
         djvi_body.extend_from_slice(b"DJVI");
         djvi_body.extend_from_slice(b"Djbz");
@@ -1045,7 +1105,7 @@ pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usiz
         comp_form_bodies.push((djvi_body, false, dict_id.clone()));
     }
 
-    let shared_ref: &[Bitmap] = &shared;
+    let shared_ref: &[Bitmap] = shared;
     for (page_idx, page) in pages.iter().enumerate() {
         let sjbz = encode_jb2_dict_with_shared(page, shared_ref);
         let mut info = Vec::with_capacity(10);
@@ -1061,7 +1121,7 @@ pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usiz
         if !info.len().is_multiple_of(2) {
             djvu_body.push(0);
         }
-        if !shared.is_empty() {
+        if has_shared {
             let incl_payload = dict_id.as_bytes();
             djvu_body.extend_from_slice(b"INCL");
             djvu_body.extend_from_slice(&(incl_payload.len() as u32).to_be_bytes());
@@ -1432,7 +1492,7 @@ mod tests {
     fn dict_letter_like_shapes() {
         // Two disconnected 3×5 rectangles — should dedup to 1 symbol.
         let src = make_bitmap(32, 32, |x, y| {
-            (x < 3 && y < 5) || (x >= 20 && x < 23 && y >= 10 && y < 15)
+            (x < 3 && y < 5) || ((20..23).contains(&x) && (10..15).contains(&y))
         });
         let decoded = roundtrip_dict(&src);
         assert_bitmaps_eq(&src, &decoded);
@@ -1490,8 +1550,8 @@ mod tests {
         // 3 non-touching black squares.
         let src = make_bitmap(30, 30, |x, y| {
             (x < 3 && y < 3)
-                || (x >= 10 && x < 13 && y >= 10 && y < 13)
-                || (x >= 25 && x < 28 && y >= 25 && y < 28)
+                || ((10..13).contains(&x) && (10..13).contains(&y))
+                || ((25..28).contains(&x) && (25..28).contains(&y))
         });
         let ccs = extract_ccs(&src);
         assert_eq!(ccs.len(), 3);
@@ -1739,6 +1799,47 @@ mod tests {
         // A glyph is 4×5.
         assert_eq!(shared[0].width, 4);
         assert_eq!(shared[0].height, 5);
+    }
+
+    fn glyph_box8() -> Vec<&'static [u8]> {
+        vec![
+            b"########" as &[u8],
+            b"#      #" as &[u8],
+            b"#      #" as &[u8],
+            b"#      #" as &[u8],
+            b"#      #" as &[u8],
+            b"#      #" as &[u8],
+            b"#      #" as &[u8],
+            b"########" as &[u8],
+        ]
+    }
+
+    #[test]
+    fn cluster_tunable_groups_near_duplicate_large_glyphs() {
+        // 8×8 = 64 pixels (>= REFINEMENT_MIN_PIXELS=32). With diff_fraction=4%,
+        // max_diff = 64*4/100 = 2 bits. A glyph and its 1-bit-perturbed twin
+        // must cluster into one rep when Hamming clustering is opted into.
+        // Default (byte-exact) ships off — see Phase 2 calibration in CLAUDE.md.
+        //
+        // Use box outlines with one outline-pixel removed (so the noise alters
+        // the same CC instead of producing a stray 1-pixel CC).
+        let mut p1 = Bitmap::new(20, 20);
+        render_glyph(&mut p1, 4, 4, &glyph_box8());
+        p1.set(5, 4, false); // notch the top edge at x=5
+        let mut p2 = Bitmap::new(20, 20);
+        render_glyph(&mut p2, 4, 4, &glyph_box8());
+        p2.set(6, 4, false); // notch at x=6 instead — different bit
+
+        let shared = cluster_shared_symbols_tunable(&[p1.clone(), p2.clone()], 2, 4);
+        assert_eq!(shared.len(), 1, "near-duplicate twins should cluster at 4%");
+
+        // Default (byte-exact) keeps them separate — neither passes
+        // page_threshold=2 since each variant only appears on one page.
+        let shared_exact = cluster_shared_symbols(&[p1, p2], 2);
+        assert!(
+            shared_exact.is_empty(),
+            "byte-exact default must not promote noisy near-dupes"
+        );
     }
 
     #[test]
