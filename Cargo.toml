@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "djvu-py"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "tests/no_std_smoke"]
 
 [package]
 name = "djvu-rs"
