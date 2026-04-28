@@ -519,15 +519,22 @@ unsafe fn ycbcr_avx2_raw(
     let n_min = _mm256_set1_epi16(-128);
     let n_max = _mm256_set1_epi16(127);
     let c128 = _mm256_set1_epi16(128);
-    let c32 = _mm256_set1_epi16(32);
+    let one = _mm256_set1_epi16(1);
 
     let full16 = w / 16;
     for i in 0..full16 {
         let off = i * 16;
-        // Load + normalize ((v + 32) >> 6 arithmetic; rounding shift) + clamp [-128, 127]
+        // Rounding right shift by 6 + clamp to [-128, 127].
+        // Equivalent to scalar `((v as i32 + 32) >> 6).clamp(-128, 127)` and to NEON
+        // `vrshrq_n_s16::<6>` followed by clamp.  We compute it at i16 width without
+        // overflow as `(v >> 6) + ((v as u16 >> 5) & 1)` — the bit-5 logical-shifted
+        // term is the round-half-away-from-zero correction and matches the wider
+        // intermediate that NEON / scalar use.
         let load_norm_clamp = |p: *const i16| -> __m256i {
             let v = _mm256_loadu_si256(p as *const __m256i);
-            let n = _mm256_srai_epi16::<6>(_mm256_add_epi16(v, c32));
+            let high = _mm256_srai_epi16::<6>(v);
+            let bit5 = _mm256_and_si256(_mm256_srli_epi16::<5>(v), one);
+            let n = _mm256_add_epi16(high, bit5);
             _mm256_max_epi16(_mm256_min_epi16(n, n_max), n_min)
         };
         let yc = load_norm_clamp(yp.add(off));
@@ -608,7 +615,16 @@ unsafe fn ycbcr_avx2_raw_half(
     let n_min = _mm256_set1_epi16(-128);
     let n_max = _mm256_set1_epi16(127);
     let c128 = _mm256_set1_epi16(128);
-    let c32 = _mm256_set1_epi16(32);
+    let one = _mm256_set1_epi16(1);
+
+    // Overflow-safe rounding right shift by 6 + clamp to [-128, 127];
+    // see `ycbcr_avx2_raw` for the equivalence proof.
+    let norm_clamp = |v: __m256i| -> __m256i {
+        let high = _mm256_srai_epi16::<6>(v);
+        let bit5 = _mm256_and_si256(_mm256_srli_epi16::<5>(v), one);
+        let n = _mm256_add_epi16(high, bit5);
+        _mm256_max_epi16(_mm256_min_epi16(n, n_max), n_min)
+    };
 
     let full16 = w / 16;
     for i in 0..full16 {
@@ -617,10 +633,7 @@ unsafe fn ycbcr_avx2_raw_half(
 
         // Load + normalize 16 Y samples
         let yv = _mm256_loadu_si256(yp.add(off) as *const __m256i);
-        let yc = _mm256_max_epi16(
-            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(yv, c32)), n_max),
-            n_min,
-        );
+        let yc = norm_clamp(yv);
 
         // Load 8 chroma i16 (one __m128i), upsample to 16 by duplicating each.
         let upsample = |p: *const i16| -> __m256i {
@@ -631,16 +644,8 @@ unsafe fn ycbcr_avx2_raw_half(
             // Per-128-bit-lane interleave with itself: duplicates each i16 lane.
             _mm256_unpacklo_epi16(spread, spread)
         };
-        let cb_dup = upsample(cbp.add(c_off));
-        let cr_dup = upsample(crp.add(c_off));
-        let cbc = _mm256_max_epi16(
-            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(cb_dup, c32)), n_max),
-            n_min,
-        );
-        let crc = _mm256_max_epi16(
-            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(cr_dup, c32)), n_max),
-            n_min,
-        );
+        let cbc = norm_clamp(upsample(cbp.add(c_off)));
+        let crc = norm_clamp(upsample(crp.add(c_off)));
 
         let y128 = _mm256_add_epi16(yc, c128);
         let t2 = _mm256_add_epi16(crc, _mm256_srai_epi16::<1>(crc));
