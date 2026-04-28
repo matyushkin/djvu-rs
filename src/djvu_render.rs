@@ -432,6 +432,20 @@ fn rgb_to_rgba_scalar(src: &[u8], dst: &mut [u8], start: usize, end: usize) {
     }
 }
 
+/// Q24 ratios `(fg_w << 24) / page_w` and `(fg_h << 24) / page_h` for converting
+/// page-space FRACBITS coords into FG44-space FRACBITS coords. Returns `(0, 0)`
+/// when `fg` is `None` or page dims are zero. Issue #199.
+#[inline]
+fn fg_q24(fg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
+    match fg {
+        Some(fg) if page_w > 0 && page_h > 0 => (
+            ((fg.width as u64) << 24) / page_w as u64,
+            ((fg.height as u64) << 24) / page_h as u64,
+        ),
+        _ => (0, 0),
+    }
+}
+
 /// Sample a pixmap at fractional coordinates using bilinear interpolation.
 ///
 /// Coordinates are in fixed-point: `fx = x * FRAC`, etc.
@@ -1160,6 +1174,14 @@ struct CompositeContext<'a> {
     /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
     blit_map: Option<&'a [i32]>,
     fg44: Option<&'a Pixmap>,
+    /// Q24 ratio `(fg.width << 24) / page_w` for converting page-space FRACBITS
+    /// coordinates to FG44-space FRACBITS coordinates:
+    /// `fg_x = (page_x as u64 * fg_x_q24 as u64) >> 24`. Issue #199 — without
+    /// this scale, the page-space `fx` was clamped to `fg.width - 1` for any
+    /// pixel beyond the FG plane's right edge (≈ 92% of the page at sub=12).
+    /// `0` when `fg44` is `None`.
+    fg_x_q24: u64,
+    fg_y_q24: u64,
     gamma_lut: &'a [u8; 256],
     /// X offset within the full render (for region renders; 0 for full page).
     offset_x: u32,
@@ -1242,7 +1264,9 @@ fn composite_loop_bilinear(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     (color.r, color.g, color.b)
                 } else if let Some(fg) = ctx.fg44 {
-                    sample_bilinear(fg, fx, fy)
+                    let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
+                    let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
+                    sample_bilinear(fg, fg_fx, fg_fy)
                 } else {
                     (0, 0, 0)
                 }
@@ -1300,7 +1324,11 @@ fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, cx, cy);
                     (color.r, color.g, color.b)
                 } else if let Some(fg) = ctx.fg44 {
-                    sample_area_avg(fg, fx, fy, fx_step, fy_step)
+                    let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
+                    let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
+                    let fg_fx_step = ((fx_step as u64 * ctx.fg_x_q24) >> 24) as u32;
+                    let fg_fy_step = ((fy_step as u64 * ctx.fg_y_q24) >> 24) as u32;
+                    sample_area_avg(fg, fg_fx, fg_fy, fg_fx_step, fg_fy_step)
                 } else {
                     (0, 0, 0)
                 }
@@ -1528,10 +1556,13 @@ pub fn render_into(
         (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
     };
 
+    let page_w = page.width() as u32;
+    let page_h = page.height() as u32;
+    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
     let ctx = CompositeContext {
         opts,
-        page_w: page.width() as u32,
-        page_h: page.height() as u32,
+        page_w,
+        page_h,
         bg: bg.as_ref(),
         bg_shift: bg_subsample.trailing_zeros(),
         mask: ctx_mask,
@@ -1539,6 +1570,8 @@ pub fn render_into(
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
+        fg_x_q24,
+        fg_y_q24,
         gamma_lut: &gamma_lut,
         offset_x: 0,
         offset_y: 0,
@@ -1629,10 +1662,13 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     let mut pm = Pixmap::white(w, h);
 
     {
+        let page_w = page.width() as u32;
+        let page_h = page.height() as u32;
+        let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
         let ctx = CompositeContext {
             opts,
-            page_w: page.width() as u32,
-            page_h: page.height() as u32,
+            page_w,
+            page_h,
             bg: bg.as_ref(),
             bg_shift: bg_subsample.trailing_zeros(),
             mask: ctx_mask,
@@ -1640,6 +1676,8 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
+            fg_x_q24,
+            fg_y_q24,
             gamma_lut: &gamma_lut,
             offset_x: 0,
             offset_y: 0,
@@ -1777,10 +1815,13 @@ pub fn render_region(
         height: full_h,
         ..*opts
     };
+    let page_w = page.width() as u32;
+    let page_h = page.height() as u32;
+    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
     let ctx = CompositeContext {
         opts: &region_opts,
-        page_w: page.width() as u32,
-        page_h: page.height() as u32,
+        page_w,
+        page_h,
         bg: bg.as_ref(),
         bg_shift: bg_subsample.trailing_zeros(),
         mask: mask.as_ref(),
@@ -1788,6 +1829,8 @@ pub fn render_region(
         fg_palette: fg_palette.as_ref(),
         blit_map: blit_map.as_deref(),
         fg44: fg44.as_ref(),
+        fg_x_q24,
+        fg_y_q24,
         gamma_lut: &gamma_lut,
         offset_x: region.x,
         offset_y: region.y,
@@ -1907,6 +1950,8 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
             fg_palette: None,
             blit_map: None,
             fg44: None,
+            fg_x_q24: 0,
+            fg_y_q24: 0,
             gamma_lut: &gamma_lut,
             offset_x: 0,
             offset_y: 0,
@@ -1982,10 +2027,13 @@ pub fn render_progressive(
 
     let mut pm = Pixmap::white(w, h);
     {
+        let page_w = page.width() as u32;
+        let page_h = page.height() as u32;
+        let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
         let ctx = CompositeContext {
             opts,
-            page_w: page.width() as u32,
-            page_h: page.height() as u32,
+            page_w,
+            page_h,
             bg: bg.as_ref(),
             bg_shift: bg_subsample.trailing_zeros(),
             mask: mask.as_ref(),
@@ -1993,6 +2041,8 @@ pub fn render_progressive(
             fg_palette: fg_palette.as_ref(),
             blit_map: blit_map.as_deref(),
             fg44: fg44.as_ref(),
+            fg_x_q24,
+            fg_y_q24,
             gamma_lut: &gamma_lut,
             offset_x: 0,
             offset_y: 0,
@@ -2048,6 +2098,33 @@ mod tests {
     }
 
     // ── TDD: failing tests written first ─────────────────────────────────────
+
+    /// Issue #199 regression: page-space FRACBITS coords must be scaled into
+    /// FG44-space using the `fg_x_q24` / `fg_y_q24` ratios. With page_w=2260
+    /// and fg_w=189 a Q24 ratio of `(189 << 24) / 2260` maps the rightmost
+    /// column to `fg_w - 1` instead of clamping every column past x=189.
+    #[test]
+    fn fg_q24_maps_endpoints_into_fg_space() {
+        let fg = Pixmap::white(189, 306);
+        let (qx, qy) = fg_q24(Some(&fg), 2260, 3669);
+        assert!(qx > 0 && qy > 0);
+        let frac = 1u64 << FRACBITS;
+        let last_x = 2259u64 * frac;
+        let fg_fx = (last_x * qx) >> 24;
+        let fg_px = fg_fx >> FRACBITS;
+        assert_eq!(fg_px, (fg.width as u64) - 1);
+        let last_y = 3668u64 * frac;
+        let fg_fy = (last_y * qy) >> 24;
+        let fg_py = fg_fy >> FRACBITS;
+        assert_eq!(fg_py, (fg.height as u64) - 1);
+        // First column maps to first FG column.
+        assert_eq!(((0u64 * qx) >> 24) >> FRACBITS, 0);
+    }
+
+    #[test]
+    fn fg_q24_returns_zero_when_fg_is_none() {
+        assert_eq!(fg_q24(None, 100, 100), (0, 0));
+    }
 
     /// RenderOptions default values.
     #[test]
