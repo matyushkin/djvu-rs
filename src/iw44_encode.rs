@@ -126,6 +126,207 @@ fn pred_avg_fwd(cur: i32, p: i32, n: i32) -> i32 {
     cur - ((p + n + 1) >> 1)
 }
 
+/// NEON row pass for s=1 (forward analysis: odd pass first, then even pass).
+///
+/// Forward predict subtracts; forward lift adds.  This is the exact sign-dual
+/// of `row_pass_neon_s1_row` in `iw44_new`.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn forward_row_neon_s1_row(data: &mut [i16], row_off: usize, width: usize) {
+    use core::arch::aarch64::*;
+
+    let kmax = width - 1;
+    let border = kmax.saturating_sub(3);
+    let ptr = data.as_mut_ptr().add(row_off);
+
+    let even_chunks = if width >= 32 { (width - 31) / 16 } else { 0 };
+
+    // ── Step 1: odd pass (predict, forward: subtract) ─────────────────────────
+
+    // k=1 boundary scalar
+    if kmax >= 1 {
+        let p = *data.get_unchecked(row_off) as i32;
+        let idx1 = row_off + 1;
+        if kmax >= 2 {
+            let n = *data.get_unchecked(row_off + 2) as i32;
+            *data.get_unchecked_mut(idx1) =
+                (*data.get_unchecked(idx1) as i32 - ((p + n + 1) >> 1)) as i16;
+        } else {
+            *data.get_unchecked_mut(idx1) = (*data.get_unchecked(idx1) as i32 - p) as i16;
+        }
+    }
+
+    // NEON inner odd chunks
+    let odd_chunks = if kmax >= 20 {
+        even_chunks.min((kmax - 20) / 16 + 1)
+    } else {
+        0
+    };
+
+    for chunk in 0..odd_chunks {
+        let pair1 = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        let pair2 = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+
+        // 8 inner odds at physical positions 3+chunk*16, 5+..., 17+chunk*16
+        let curr_odds = vextq_s16::<1>(pair1.1, pair2.1);
+
+        let p3_e = pair1.0;
+        let p1_e = vextq_s16::<1>(pair1.0, pair2.0);
+        let n1_e = vextq_s16::<2>(pair1.0, pair2.0);
+        let n3_e = vextq_s16::<3>(pair1.0, pair2.0);
+
+        macro_rules! predict_fwd {
+            ($co:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<4>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(8i32)), c));
+                vsubq_s32($co, delta) // forward: subtract
+            }};
+        }
+
+        let new_lo = predict_fwd!(
+            vmovl_s16(vget_low_s16(curr_odds)),
+            vmovl_s16(vget_low_s16(p1_e)),
+            vmovl_s16(vget_low_s16(n1_e)),
+            vmovl_s16(vget_low_s16(p3_e)),
+            vmovl_s16(vget_low_s16(n3_e))
+        );
+        let new_hi = predict_fwd!(
+            vmovl_high_s16(curr_odds),
+            vmovl_high_s16(p1_e),
+            vmovl_high_s16(n1_e),
+            vmovl_high_s16(p3_e),
+            vmovl_high_s16(n3_e)
+        );
+        let new_odds = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        // store: evens at chunk*16+2..+16 unchanged (= p1_e), odds updated
+        vst2q_s16(ptr.add(chunk * 16 + 2), int16x8x2_t(p1_e, new_odds));
+    }
+
+    // scalar odd tail: k = 3+odd_chunks*16, ..., kmax
+    if kmax >= 3 {
+        let k_scalar = 3 + odd_chunks * 16;
+        let mut prev1 = *data.get_unchecked(row_off + k_scalar - 3) as i32;
+        let mut next1 = *data.get_unchecked(row_off + k_scalar - 1) as i32;
+        let mut next3 = if k_scalar < kmax {
+            *data.get_unchecked(row_off + k_scalar + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_scalar;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let idx = row_off + k;
+            if k <= border {
+                let a = prev1 + next1;
+                let c = prev3 + next3;
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 - (((a << 3) + a - c + 8) >> 4)) as i16;
+            } else if k < kmax {
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 - ((prev1 + next1 + 1) >> 1)) as i16;
+            } else {
+                *data.get_unchecked_mut(idx) = (*data.get_unchecked(idx) as i32 - prev1) as i16;
+            }
+            k += 2;
+        }
+    }
+
+    // ── Step 2: even pass (lift, forward: add) ────────────────────────────────
+
+    let mut prev_odd = vdupq_n_s16(0i16);
+
+    for chunk in 0..even_chunks {
+        let curr_pair = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        let next_pair = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+        let curr_even = curr_pair.0;
+        let curr_odd = curr_pair.1; // already updated by Step 1
+        let next_odd = next_pair.1;
+
+        let p1 = vextq_s16::<7>(prev_odd, curr_odd);
+        let n1 = curr_odd;
+        let p3 = vextq_s16::<6>(prev_odd, curr_odd);
+        let n3 = vextq_s16::<1>(curr_odd, next_odd);
+
+        macro_rules! lift_fwd {
+            ($ce:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(16i32)), c));
+                vaddq_s32($ce, delta) // forward: add
+            }};
+        }
+
+        let new_lo = lift_fwd!(
+            vmovl_s16(vget_low_s16(curr_even)),
+            vmovl_s16(vget_low_s16(p1)),
+            vmovl_s16(vget_low_s16(n1)),
+            vmovl_s16(vget_low_s16(p3)),
+            vmovl_s16(vget_low_s16(n3))
+        );
+        let new_hi = lift_fwd!(
+            vmovl_high_s16(curr_even),
+            vmovl_high_s16(p1),
+            vmovl_high_s16(n1),
+            vmovl_high_s16(p3),
+            vmovl_high_s16(n3)
+        );
+        let new_evens = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        vst2q_s16(ptr.add(chunk * 16), int16x8x2_t(new_evens, curr_odd));
+
+        prev_odd = curr_odd;
+    }
+
+    // scalar even tail
+    {
+        let k_start = even_chunks * 16;
+        let mut prev1 = if even_chunks > 0 {
+            vgetq_lane_s16::<6>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next1 = if even_chunks > 0 {
+            vgetq_lane_s16::<7>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next3 = if k_start < kmax {
+            *data.get_unchecked(row_off + k_start + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_start;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let a = prev1 + next1;
+            let c = prev3 + next3;
+            let idx = row_off + k;
+            *data.get_unchecked_mut(idx) =
+                (*data.get_unchecked(idx) as i32 + (((a << 3) + a - c + 16) >> 5)) as i16;
+            k += 2;
+        }
+    }
+}
+
 /// Forward row pass (analysis) at scale `s`.
 ///
 /// Operates on every `s`-th row, within each row on every sample.
@@ -133,6 +334,18 @@ fn forward_row_pass(data: &mut [i16], width: usize, height: usize, stride: usize
     let sd = s.trailing_zeros() as usize;
     let kmax = (width - 1) >> sd;
     let border = kmax.saturating_sub(3);
+
+    // AArch64 NEON path at s=1
+    #[cfg(target_arch = "aarch64")]
+    if s == 1 {
+        for row in (0..height).step_by(s) {
+            #[allow(unsafe_code)]
+            unsafe {
+                forward_row_neon_s1_row(data, row * stride, width);
+            }
+        }
+        return;
+    }
 
     for row in (0..height).step_by(s) {
         let off = row * stride;
@@ -212,6 +425,127 @@ fn forward_row_pass(data: &mut [i16], width: usize, height: usize, stride: usize
     }
 }
 
+/// NEON inner predict for the column pass at s=1.
+///
+/// Processes 8 consecutive columns per iteration.  All 5 row offsets are for
+/// the currently-active odd row k.  Performs:
+///   data[k0+col] -= ((9*(p1+n1) - (p3+n3) + 8) >> 4)
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn forward_col_predict_neon(
+    data: &mut [i16],
+    km3_off: usize,
+    km1_off: usize,
+    k0_off: usize,
+    kp1_off: usize,
+    kp3_off: usize,
+    width: usize,
+) {
+    use core::arch::aarch64::*;
+    let ptr = data.as_mut_ptr();
+    let d8 = vdupq_n_s32(8i32);
+    let mut col = 0usize;
+    while col + 8 <= width {
+        let p3 = vld1q_s16(ptr.add(km3_off + col) as *const i16);
+        let p1 = vld1q_s16(ptr.add(km1_off + col) as *const i16);
+        let cur = vld1q_s16(ptr.add(k0_off + col) as *const i16);
+        let n1 = vld1q_s16(ptr.add(kp1_off + col) as *const i16);
+        let n3 = vld1q_s16(ptr.add(kp3_off + col) as *const i16);
+        let a_lo = vaddq_s32(vmovl_s16(vget_low_s16(p1)), vmovl_s16(vget_low_s16(n1)));
+        let a_hi = vaddq_s32(vmovl_high_s16(p1), vmovl_high_s16(n1));
+        let c_lo = vaddq_s32(vmovl_s16(vget_low_s16(p3)), vmovl_s16(vget_low_s16(n3)));
+        let c_hi = vaddq_s32(vmovl_high_s16(p3), vmovl_high_s16(n3));
+        let nine_a_lo = vaddq_s32(vshlq_n_s32::<3>(a_lo), a_lo);
+        let nine_a_hi = vaddq_s32(vshlq_n_s32::<3>(a_hi), a_hi);
+        let delta_lo = vshrq_n_s32::<4>(vsubq_s32(vaddq_s32(nine_a_lo, d8), c_lo));
+        let delta_hi = vshrq_n_s32::<4>(vsubq_s32(vaddq_s32(nine_a_hi, d8), c_hi));
+        let delta = vcombine_s16(vmovn_s32(delta_lo), vmovn_s32(delta_hi));
+        vst1q_s16(ptr.add(k0_off + col), vsubq_s16(cur, delta));
+        col += 8;
+    }
+    while col < width {
+        let p1 = *data.get_unchecked(km1_off + col) as i32;
+        let n1 = *data.get_unchecked(kp1_off + col) as i32;
+        let p3 = *data.get_unchecked(km3_off + col) as i32;
+        let n3 = *data.get_unchecked(kp3_off + col) as i32;
+        *data.get_unchecked_mut(k0_off + col) =
+            pred_inner_fwd(*data.get_unchecked(k0_off + col) as i32, p1, n1, p3, n3) as i16;
+        col += 1;
+    }
+}
+
+/// NEON col-pass lift for s=1: one even row, 8 consecutive columns per iteration.
+///
+/// State slices (`prev3`, `prev1`, `next1`) are i16 (values bounded by i16 after
+/// predict).  Performs:
+///   data[k0+col] += ((9*(p1+n1) - (p3+n3) + 16) >> 5)
+/// then advances state: prev3 ← prev1, prev1 ← next1, next1 ← n3.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, clippy::too_many_arguments)]
+#[target_feature(enable = "neon")]
+unsafe fn forward_col_lift_neon_row(
+    data: &mut [i16],
+    k0_off: usize,
+    n3_off: usize, // ignored when !has_n3
+    has_n3: bool,
+    prev3: &mut [i16],
+    prev1: &mut [i16],
+    next1: &mut [i16],
+    width: usize,
+) {
+    use core::arch::aarch64::*;
+    let ptr = data.as_mut_ptr();
+    let p3p = prev3.as_mut_ptr();
+    let p1p = prev1.as_mut_ptr();
+    let n1p = next1.as_mut_ptr();
+    let d16 = vdupq_n_s32(16i32);
+    let mut col = 0usize;
+    while col + 8 <= width {
+        let p3_s = vld1q_s16(p3p.add(col) as *const i16);
+        let p1_s = vld1q_s16(p1p.add(col) as *const i16);
+        let n1_s = vld1q_s16(n1p.add(col) as *const i16);
+        let n3_s = if has_n3 {
+            vld1q_s16(ptr.add(n3_off + col) as *const i16)
+        } else {
+            vdupq_n_s16(0)
+        };
+        let cur_s = vld1q_s16(ptr.add(k0_off + col) as *const i16);
+        let a_lo = vaddq_s32(vmovl_s16(vget_low_s16(p1_s)), vmovl_s16(vget_low_s16(n1_s)));
+        let a_hi = vaddq_s32(vmovl_high_s16(p1_s), vmovl_high_s16(n1_s));
+        let c_lo = vaddq_s32(vmovl_s16(vget_low_s16(p3_s)), vmovl_s16(vget_low_s16(n3_s)));
+        let c_hi = vaddq_s32(vmovl_high_s16(p3_s), vmovl_high_s16(n3_s));
+        let nine_a_lo = vaddq_s32(vshlq_n_s32::<3>(a_lo), a_lo);
+        let nine_a_hi = vaddq_s32(vshlq_n_s32::<3>(a_hi), a_hi);
+        let delta_lo = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a_lo, d16), c_lo));
+        let delta_hi = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a_hi, d16), c_hi));
+        let delta_s = vcombine_s16(vmovn_s32(delta_lo), vmovn_s32(delta_hi));
+        vst1q_s16(ptr.add(k0_off + col), vaddq_s16(cur_s, delta_s));
+        // advance state
+        vst1q_s16(p3p.add(col), p1_s);
+        vst1q_s16(p1p.add(col), n1_s);
+        vst1q_s16(n1p.add(col), n3_s);
+        col += 8;
+    }
+    // scalar tail
+    while col < width {
+        let p3 = *prev3.get_unchecked(col) as i32;
+        let p1 = *prev1.get_unchecked(col) as i32;
+        let n1 = *next1.get_unchecked(col) as i32;
+        let n3 = if has_n3 {
+            *data.get_unchecked(n3_off + col) as i32
+        } else {
+            0
+        };
+        *data.get_unchecked_mut(k0_off + col) =
+            lift(*data.get_unchecked(k0_off + col) as i32, p1, n1, p3, n3) as i16;
+        *prev3.get_unchecked_mut(col) = p1 as i16;
+        *prev1.get_unchecked_mut(col) = n1 as i16;
+        *next1.get_unchecked_mut(col) = n3 as i16;
+        col += 1;
+    }
+}
+
 /// Forward column pass (analysis) at scale `s`.
 fn forward_col_pass(data: &mut [i16], width: usize, height: usize, stride: usize, s: usize) {
     let sd = s.trailing_zeros() as usize;
@@ -245,6 +579,17 @@ fn forward_col_pass(data: &mut [i16], width: usize, height: usize, stride: usize
             let k0_off = (k << sd) * stride;
             let kp1_off = ((k + 1) << sd) * stride;
             let kp3_off = ((k + 3) << sd) * stride;
+            #[cfg(target_arch = "aarch64")]
+            if s == 1 {
+                #[allow(unsafe_code)]
+                unsafe {
+                    forward_col_predict_neon(
+                        data, km3_off, km1_off, k0_off, kp1_off, kp3_off, width,
+                    );
+                }
+                k += 2;
+                continue;
+            }
             for col in (0..width).step_by(col_step) {
                 let p1 = data[km1_off + col] as i32;
                 let n1 = data[kp1_off + col] as i32;
@@ -278,6 +623,31 @@ fn forward_col_pass(data: &mut [i16], width: usize, height: usize, stride: usize
     }
 
     // Step 2: undo lifting — even rows (k=0,2,4,...)
+    // AArch64 NEON path at s=1: i16 state, 8 columns/iter
+    #[cfg(target_arch = "aarch64")]
+    if s == 1 {
+        let mut prev3: Vec<i16> = vec![0i16; width];
+        let mut prev1: Vec<i16> = vec![0i16; width];
+        let mut next1: Vec<i16> = if kmax >= 1 {
+            data[stride..stride + width].to_vec()
+        } else {
+            vec![0i16; width]
+        };
+        let mut k = 0usize;
+        while k <= kmax {
+            let k0_off = k * stride;
+            let has_n3 = k + 3 <= kmax;
+            let n3_off = if has_n3 { (k + 3) * stride } else { 0 };
+            #[allow(unsafe_code)]
+            unsafe {
+                forward_col_lift_neon_row(
+                    data, k0_off, n3_off, has_n3, &mut prev3, &mut prev1, &mut next1, width,
+                );
+            }
+            k += 2;
+        }
+        return;
+    }
     {
         let num_cols = width.div_ceil(col_step);
         let mut prev3: Vec<i32> = vec![0i32; num_cols];
@@ -369,6 +739,101 @@ fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (i16, i16, i16) {
 //   - When encoding a previously-active coefficient: apply the same delta that
 //     the decoder will apply, choosing the bit that minimises |true - decoded|.
 
+// ---- NEON helpers for preliminary_flag_computation --------------------------
+
+/// NEON-vectorized band≠0 bucket flag update for the encoder.
+///
+/// Reads 16 i32 reconstruction values at `base`, writes 16 u8 flags (UNK or
+/// ACTIVE), and returns the bitwise-OR of all written flags.
+///
+/// Mirrors `prelim_flags_bucket_neon` in iw44_new but uses 4 × `vld1q_s32`
+/// (i32 input) instead of 2 × `vld1q_s16` (i16 input).
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_bucket_enc_neon(
+    recon: &[i32; 1024],
+    base: usize,
+    bucket: &mut [u8; 16],
+) -> u8 {
+    use core::arch::aarch64::*;
+    let ptr = recon.as_ptr().add(base);
+    let c0 = vld1q_s32(ptr);
+    let c1 = vld1q_s32(ptr.add(4));
+    let c2 = vld1q_s32(ptr.add(8));
+    let c3 = vld1q_s32(ptr.add(12));
+    // eq: 0xFFFFFFFF where coef == 0, 0x00000000 where coef != 0
+    let zero32 = vdupq_n_s32(0);
+    let eq0 = vceqq_s32(c0, zero32); // uint32x4_t
+    let eq1 = vceqq_s32(c1, zero32);
+    let eq2 = vceqq_s32(c2, zero32);
+    let eq3 = vceqq_s32(c3, zero32);
+    // Narrow u32x4 → u16x4 → u8x8 in two steps (low bytes: 0xFF or 0x00)
+    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1)); // uint16x8_t
+    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
+    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23)); // 0xFF where ==0
+    let is_nonzero = vmvnq_u8(is_zero); // 0xFF where !=0
+    // result = UNK(8) if zero, ACTIVE(2) if nonzero
+    // = UNK ^ ((UNK ^ ACTIVE) & is_nonzero) = 8 ^ (10 & is_nonzero)
+    let xv = vdupq_n_u8(10);
+    let uv = vdupq_n_u8(8);
+    let out = veorq_u8(uv, vandq_u8(xv, is_nonzero));
+    vst1q_u8(bucket.as_mut_ptr(), out);
+    // Horizontal OR of 16 lanes
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
+/// NEON-vectorized band-0 flag update for the encoder.
+///
+/// Like `prelim_flags_bucket_enc_neon` but only updates entries where the
+/// existing flag is not ZERO (1) — matches the decoder's `prelim_flags_band0_neon`.
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_band0_enc_neon(recon: &[i32; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    // Load old flags; build mask: 0xFF where flag != ZERO(1), else 0x00
+    let old_u8 = vld1q_u8(old_flags.as_ptr());
+    let one_u8 = vdupq_n_u8(1);
+    let is_zero_state = vceqq_u8(old_u8, one_u8); // 0xFF where old==ZERO
+    let should_update = vmvnq_u8(is_zero_state); // 0xFF where should update
+    // Load 16 i32 reconstruction values for band 0 (indices 0..16)
+    let ptr = recon.as_ptr();
+    let c0 = vld1q_s32(ptr);
+    let c1 = vld1q_s32(ptr.add(4));
+    let c2 = vld1q_s32(ptr.add(8));
+    let c3 = vld1q_s32(ptr.add(12));
+    let zero32 = vdupq_n_s32(0);
+    let eq0 = vceqq_s32(c0, zero32);
+    let eq1 = vceqq_s32(c1, zero32);
+    let eq2 = vceqq_s32(c2, zero32);
+    let eq3 = vceqq_s32(c3, zero32);
+    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1));
+    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
+    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23));
+    let is_nonzero = vmvnq_u8(is_zero);
+    let xv = vdupq_n_u8(10);
+    let uv = vdupq_n_u8(8);
+    let new_flags = veorq_u8(uv, vandq_u8(xv, is_nonzero)); // UNK or ACTIVE
+    // Blend: where should_update==0xFF take new_flags, else keep old_u8
+    let out = vbslq_u8(should_update, new_flags, old_u8);
+    vst1q_u8(old_flags.as_mut_ptr(), out);
+    // Horizontal OR
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
 #[cfg(feature = "std")]
 struct PlaneEncoder {
     /// True wavelet coefficients (read-only after `gather`).
@@ -418,20 +883,27 @@ impl PlaneEncoder {
     }
 
     /// Gather wavelet coefficients from a flat plane into zigzag blocks.
+    #[allow(unsafe_code)]
     fn gather(&mut self, plane: &[i16], stride: usize) {
+        // Safety invariant: `stride` = block_cols*32, `plane.len()` = stride * block_rows*32.
+        // For any r < block_rows, c < block_cols, i < 1024:
+        //   row  = ZIGZAG_ROW[i]  (∈ [0,31]) + r*32  ≤ block_rows*32 - 1
+        //   col  = ZIGZAG_COL[i]  (∈ [0,31]) + c*32  ≤ stride - 1
+        //   idx  = row * stride + col ≤ plane.len() - 1
+        // The idx-in-bounds check is therefore always true; use get_unchecked to
+        // eliminate the dead branch from the inner loop.
         let block_rows = self.blocks.len() / self.block_cols;
         for r in 0..block_rows {
             for c in 0..self.block_cols {
                 let block = &mut self.blocks[r * self.block_cols + c];
                 let row_base = r << 5;
                 let col_base = c << 5;
-                for i in 0..1024 {
-                    let row = ZIGZAG_ROW[i] as usize + row_base;
-                    let col = ZIGZAG_COL[i] as usize + col_base;
-                    // Pad with zero beyond image boundaries (not with last sample)
-                    // to avoid inflating energy in high-frequency subbands at edges.
+                for (i, dst) in block.iter_mut().enumerate() {
+                    let row = unsafe { *ZIGZAG_ROW.get_unchecked(i) } as usize + row_base;
+                    let col = unsafe { *ZIGZAG_COL.get_unchecked(i) } as usize + col_base;
                     let idx = row * stride + col;
-                    block[i] = if idx < plane.len() { plane[idx] } else { 0 };
+                    // SAFETY: see invariant above — idx < plane.len() always holds.
+                    *dst = unsafe { *plane.get_unchecked(idx) };
                 }
             }
         }
@@ -463,32 +935,57 @@ impl PlaneEncoder {
         let (from, to) = BAND_BUCKETS[self.curband];
         if self.curband != 0 {
             for (boff, j) in (from..=to).enumerate() {
-                let mut bstatetmp: u8 = 0;
-                for k in 0..16 {
-                    // Use recon (decoder reconstruction) not blocks (true value)
-                    if self.recon[block_idx][(j << 4) | k] == 0 {
-                        self.coeffstate[boff][k] = UNK;
-                    } else {
-                        self.coeffstate[boff][k] = ACTIVE;
+                let base = j << 4;
+                #[cfg(target_arch = "aarch64")]
+                // SAFETY: NEON always available on aarch64; base+16 <= 1024 (max j=63).
+                #[allow(unsafe_code)]
+                let bstatetmp = unsafe {
+                    prelim_flags_bucket_enc_neon(
+                        &self.recon[block_idx],
+                        base,
+                        &mut self.coeffstate[boff],
+                    )
+                };
+                #[cfg(not(target_arch = "aarch64"))]
+                let bstatetmp = {
+                    let mut b = 0u8;
+                    for k in 0..16 {
+                        let f = if self.recon[block_idx][base + k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
+                        self.coeffstate[boff][k] = f;
+                        b |= f;
                     }
-                    bstatetmp |= self.coeffstate[boff][k];
-                }
+                    b
+                };
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
         } else {
             // Band 0: coeffstate[0] is pre-initialized by is_null_slice
-            let mut bstatetmp: u8 = 0;
-            for k in 0..16 {
-                if self.coeffstate[0][k] != ZERO {
-                    if self.recon[block_idx][k] == 0 {
-                        self.coeffstate[0][k] = UNK;
-                    } else {
-                        self.coeffstate[0][k] = ACTIVE;
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON always available on aarch64; recon[0..16] is valid.
+            #[allow(unsafe_code)]
+            let bstatetmp = unsafe {
+                prelim_flags_band0_enc_neon(&self.recon[block_idx], &mut self.coeffstate[0])
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let bstatetmp = {
+                let mut b = 0u8;
+                for k in 0..16 {
+                    if self.coeffstate[0][k] != ZERO {
+                        self.coeffstate[0][k] = if self.recon[block_idx][k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
                     }
+                    b |= self.coeffstate[0][k];
                 }
-                bstatetmp |= self.coeffstate[0][k];
-            }
+                b
+            };
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
@@ -503,7 +1000,9 @@ impl PlaneEncoder {
                     self.bucket_encoding_pass(zp, block_idx);
                     self.newly_active_encoding_pass(zp, block_idx);
                 }
-                self.previously_active_encoding_pass(zp, block_idx);
+                if (self.bbstate & ACTIVE) != 0 {
+                    self.previously_active_encoding_pass(zp, block_idx);
+                }
             }
         }
         self.finish_slice();
@@ -813,16 +1312,66 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
         }
     }
 
-    forward_wavelet_transform(&mut y_plane, w, h, stride);
-    forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
-    forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
-
-    let mut y_enc = PlaneEncoder::new(w, h);
-    let mut cb_enc = PlaneEncoder::new(cw, ch);
-    let mut cr_enc = PlaneEncoder::new(cw, ch);
-    y_enc.gather(&y_plane, stride);
-    cb_enc.gather(&cb_plane, c_stride);
-    cr_enc.gather(&cr_plane, c_stride);
+    // Transform + gather all three planes.  Each plane is independent, so with
+    // the `parallel` feature they run concurrently on rayon threads, reducing
+    // wall-time from Y+Cb+Cr sequential to max(Y, Cb, Cr).
+    //
+    // The threshold (512×512 = 262 144 px) ensures rayon overhead (~30 µs) is
+    // only paid when the work per plane is large enough to justify it.  Below
+    // that threshold sequential is faster (verified on M1 with 192×256 images).
+    #[cfg(feature = "parallel")]
+    let (mut y_enc, mut cb_enc, mut cr_enc) = if w * h > 512 * 512 {
+        use rayon::join;
+        let (ye, (cbe, cre)) = join(
+            move || {
+                forward_wavelet_transform(&mut y_plane, w, h, stride);
+                let mut enc = PlaneEncoder::new(w, h);
+                enc.gather(&y_plane, stride);
+                enc
+            },
+            move || {
+                join(
+                    move || {
+                        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+                        let mut enc = PlaneEncoder::new(cw, ch);
+                        enc.gather(&cb_plane, c_stride);
+                        enc
+                    },
+                    move || {
+                        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+                        let mut enc = PlaneEncoder::new(cw, ch);
+                        enc.gather(&cr_plane, c_stride);
+                        enc
+                    },
+                )
+            },
+        );
+        (ye, cbe, cre)
+    } else {
+        forward_wavelet_transform(&mut y_plane, w, h, stride);
+        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+        let mut y_enc = PlaneEncoder::new(w, h);
+        let mut cb_enc = PlaneEncoder::new(cw, ch);
+        let mut cr_enc = PlaneEncoder::new(cw, ch);
+        y_enc.gather(&y_plane, stride);
+        cb_enc.gather(&cb_plane, c_stride);
+        cr_enc.gather(&cr_plane, c_stride);
+        (y_enc, cb_enc, cr_enc)
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (mut y_enc, mut cb_enc, mut cr_enc) = {
+        forward_wavelet_transform(&mut y_plane, w, h, stride);
+        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
+        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
+        let mut y_enc = PlaneEncoder::new(w, h);
+        let mut cb_enc = PlaneEncoder::new(cw, ch);
+        let mut cr_enc = PlaneEncoder::new(cw, ch);
+        y_enc.gather(&y_plane, stride);
+        cb_enc.gather(&cb_plane, c_stride);
+        cr_enc.gather(&cr_plane, c_stride);
+        (y_enc, cb_enc, cr_enc)
+    };
 
     encode_chunks(
         &mut y_enc,
