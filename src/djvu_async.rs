@@ -45,13 +45,15 @@
 
 use std::sync::Arc;
 
+use tokio::io::{AsyncRead, AsyncReadExt};
+
 use crate::{
-    djvu_document::DjVuPage,
+    djvu_document::{DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
     pixmap::{GrayPixmap, Pixmap},
 };
 
-// ── Error type ────────────────────────────────────────────────────────────────
+// ── Error types ───────────────────────────────────────────────────────────────
 
 /// Errors from async rendering.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +65,54 @@ pub enum AsyncRenderError {
     /// The blocking task was cancelled or panicked.
     #[error("spawn_blocking join error: {0}")]
     Join(String),
+}
+
+/// Errors from async document loading.
+#[derive(Debug, thiserror::Error)]
+pub enum AsyncLoadError {
+    /// I/O error from the underlying async reader.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// The buffered bytes failed to parse as a DjVu document.
+    #[error("parse error: {0}")]
+    Parse(#[from] DocError),
+}
+
+// ── Async document loader ─────────────────────────────────────────────────────
+
+/// Asynchronously load and parse a DjVu document from any [`AsyncRead`].
+///
+/// **Phase 1 of #196.** Convenience constructor that buffers the full reader
+/// into memory before handing the bytes to [`DjVuDocument::parse`]. Memory
+/// still peaks at full file size, but removes the synchronous `std::fs::read`
+/// boundary at the call site — works directly with [`tokio::fs::File`], HTTP
+/// body streams, S3 GetObject, etc.
+///
+/// Phases 2/3 will add genuine streaming: Phase 2 reads only the IFF
+/// header and DIRM up front and exposes per-page byte offsets; Phase 3
+/// makes [`DjVuDocument::page`] async and fetches each page's bytes on
+/// demand (HTTP Range requests, etc.).
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use djvu_rs::djvu_async::load_document_async;
+/// use tokio::fs::File;
+///
+/// let file = File::open("document.djvu").await?;
+/// let doc = load_document_async(file).await?;
+/// println!("loaded {} pages", doc.page_count());
+/// # Ok(()) }
+/// ```
+pub async fn load_document_async<R>(mut reader: R) -> Result<DjVuDocument, AsyncLoadError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    Ok(DjVuDocument::parse(&buf)?)
 }
 
 // ── Async render functions ────────────────────────────────────────────────────
@@ -376,6 +426,81 @@ mod tests {
         assert_eq!(
             count, expected_count,
             "frame count must equal BG44 chunk count"
+        );
+    }
+
+    // ── load_document_async tests ────────────────────────────────────────────
+
+    /// `load_document_async` over `tokio::fs::File` matches `DjVuDocument::parse`.
+    #[tokio::test]
+    async fn load_document_async_matches_sync_parse() {
+        let path = assets_path().join("chicken.djvu");
+        let file = tokio::fs::File::open(&path)
+            .await
+            .expect("open must succeed");
+        let async_doc = load_document_async(file)
+            .await
+            .expect("async load must succeed");
+
+        let sync_data = std::fs::read(&path).expect("sync read must succeed");
+        let sync_doc = DjVuDocument::parse(&sync_data).expect("sync parse must succeed");
+
+        assert_eq!(async_doc.page_count(), sync_doc.page_count());
+        for i in 0..sync_doc.page_count() {
+            let a = async_doc.page(i).expect("async page");
+            let s = sync_doc.page(i).expect("sync page");
+            assert_eq!(a.width(), s.width());
+            assert_eq!(a.height(), s.height());
+        }
+    }
+
+    /// `load_document_async` works with an in-memory `&[u8]` reader (e.g. HTTP body).
+    #[tokio::test]
+    async fn load_document_async_from_in_memory_reader() {
+        let path = assets_path().join("chicken.djvu");
+        let bytes = std::fs::read(&path).expect("read");
+
+        // `&[u8]` implements AsyncRead via tokio's blanket impl on slices.
+        let reader = std::io::Cursor::new(bytes.clone());
+        let doc = load_document_async(reader)
+            .await
+            .expect("async load from cursor must succeed");
+        assert!(doc.page_count() > 0);
+    }
+
+    /// Truncated / non-DjVu bytes surface as `AsyncLoadError::Parse`, not panic.
+    #[tokio::test]
+    async fn load_document_async_propagates_parse_error() {
+        let bogus = b"not a djvu file at all".to_vec();
+        let reader = std::io::Cursor::new(bogus);
+        let err = load_document_async(reader)
+            .await
+            .expect_err("must fail to parse garbage");
+        assert!(
+            matches!(err, AsyncLoadError::Parse(_)),
+            "expected Parse error, got {err:?}"
+        );
+    }
+
+    /// I/O failure surfaces as `AsyncLoadError::Io`, not panic.
+    #[tokio::test]
+    async fn load_document_async_propagates_io_error() {
+        struct FailingReader;
+        impl tokio::io::AsyncRead for FailingReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("simulated I/O failure")))
+            }
+        }
+        let err = load_document_async(FailingReader)
+            .await
+            .expect_err("must fail on I/O error");
+        assert!(
+            matches!(err, AsyncLoadError::Io(_)),
+            "expected Io error, got {err:?}"
         );
     }
 
