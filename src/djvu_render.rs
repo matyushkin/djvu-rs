@@ -2117,8 +2117,6 @@ mod tests {
         let fg_fy = (last_y * qy) >> 24;
         let fg_py = fg_fy >> FRACBITS;
         assert_eq!(fg_py, (fg.height as u64) - 1);
-        // First column maps to first FG column.
-        assert_eq!(((0u64 * qx) >> 24) >> FRACBITS, 0);
     }
 
     #[test]
