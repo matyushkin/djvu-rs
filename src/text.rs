@@ -108,6 +108,22 @@ pub struct TextLayer {
     pub zones: Vec<TextZone>,
 }
 
+/// A reflowable paragraph: the original lines as they appear on the page,
+/// plus a single joined `text` string with line-break and hyphenation rules
+/// applied (see [`TextLayer::reflowable_text`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Paragraph {
+    /// Each physical line as it appeared on the page (trimmed of trailing
+    /// whitespace, ordered top-to-bottom).
+    pub lines: Vec<String>,
+    /// Lines joined into a single string. Hyphenated line breaks (line ends
+    /// with `-` and next line starts with a lowercase letter) are joined with
+    /// no separator and the hyphen is dropped. Other line breaks become a
+    /// single ASCII space.
+    pub text: String,
+}
+
 impl TextLayer {
     /// Return a copy of this text layer with all zone rectangles transformed to
     /// match a rendered page of size `render_w × render_h`.
@@ -146,6 +162,64 @@ impl TextLayer {
             zones,
         }
     }
+
+    /// Group the page text into reading-order paragraphs (#228).
+    ///
+    /// Uses the DjVu zone separator characters carried in `self.text`:
+    ///
+    /// - `\x00` (NUL), `\x0b` (VT), `\x1d` (GS), `\x1f` (US) — paragraph /
+    ///   region / column / page boundary. Each starts a new [`Paragraph`].
+    /// - `\x0a` (LF) — line break within a paragraph.
+    ///
+    /// Line joining: trailing whitespace is dropped from each line. If a line
+    /// ends with `-` and the next line starts with an ASCII lowercase letter,
+    /// the hyphen is dropped and the lines are joined with no separator
+    /// (soft-hyphen at line end). Otherwise lines are joined with a single
+    /// ASCII space.
+    ///
+    /// Empty paragraphs (only whitespace) are skipped. The returned vector
+    /// preserves zone-stream order — for the typical OCR'd single-column page
+    /// this is reading order.
+    pub fn reflowable_text(&self) -> Vec<Paragraph> {
+        let mut out = Vec::new();
+        for chunk in self
+            .text
+            .split(['\u{0000}', '\u{000b}', '\u{001d}', '\u{001f}'])
+        {
+            let lines: Vec<String> = chunk
+                .split('\n')
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let text = join_paragraph_lines(&lines);
+            out.push(Paragraph { lines, text });
+        }
+        out
+    }
+}
+
+/// Join the lines of a paragraph applying soft-hyphen detection.
+fn join_paragraph_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            out.push_str(line);
+            continue;
+        }
+        let prev_hyphen =
+            out.ends_with('-') && line.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+        if prev_hyphen {
+            out.pop();
+            out.push_str(line);
+        } else {
+            out.push(' ');
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 // ---- Coordinate helpers -----------------------------------------------------
@@ -795,5 +869,73 @@ mod tests {
         assert_eq!(result.zones[0].text, "Hi");
         assert_eq!(result.zones[0].rect.width, 100);
         assert_eq!(result.zones[0].rect.height, 50);
+    }
+
+    // ── Paragraph reflow tests (#228) ───────────────────────────────────────
+
+    fn layer_with(text: &str) -> TextLayer {
+        TextLayer {
+            text: text.to_string(),
+            zones: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reflowable_text_splits_on_paragraph_separator() {
+        // Two paragraphs separated by US (\x1f), each with two lines.
+        let layer = layer_with("first line\nsecond line\u{001f}third line\nfourth line");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 2);
+        assert_eq!(paras[0].lines, vec!["first line", "second line"]);
+        assert_eq!(paras[0].text, "first line second line");
+        assert_eq!(paras[1].lines, vec!["third line", "fourth line"]);
+        assert_eq!(paras[1].text, "third line fourth line");
+    }
+
+    #[test]
+    fn reflowable_text_joins_soft_hyphen() {
+        // "compre-" + "hensive" → "comprehensive" (lowercase next, hyphen drop).
+        let layer = layer_with("a compre-\nhensive guide");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].text, "a comprehensive guide");
+    }
+
+    #[test]
+    fn reflowable_text_keeps_hyphen_before_uppercase() {
+        // "Anglo-" + "Saxon" — the hyphen is part of the word, not a soft
+        // line-break. Uppercase next ⇒ keep the hyphen, replace newline with
+        // a space.
+        let layer = layer_with("Anglo-\nSaxon roots");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].text, "Anglo- Saxon roots");
+    }
+
+    #[test]
+    fn reflowable_text_treats_all_separator_codes_as_break() {
+        // NUL, VT, GS, US should each break paragraphs.
+        let layer = layer_with("a\u{0000}b\u{000b}c\u{001d}d\u{001f}e");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 5);
+        assert_eq!(paras[0].text, "a");
+        assert_eq!(paras[4].text, "e");
+    }
+
+    #[test]
+    fn reflowable_text_skips_empty_paragraphs() {
+        let layer = layer_with("\u{001f}\u{001f}only one\u{001f}");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].text, "only one");
+    }
+
+    #[test]
+    fn reflowable_text_trims_per_line_whitespace() {
+        let layer = layer_with("  leading\n  trailing  \n   middle   ");
+        let paras = layer.reflowable_text();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].lines, vec!["leading", "trailing", "middle"]);
+        assert_eq!(paras[0].text, "leading trailing middle");
     }
 }
