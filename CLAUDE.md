@@ -7,6 +7,62 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #194 Phase 2.5 — per-CC accounting harness for shared-Djbz refinement — **Kept (instrumentation only)** (2026-04-28)
+
+**Approach.** Added `pub fn analyze_jb2_cc_stats(page, &shared)` that mirrors
+the rec-1/rec-6/rec-7 action-selection branch in
+`encode_jb2_dict_with_shared` but emits no bytes — just counts and a
+Hamming-distance histogram for rec-6 emissions, separating refs that
+land in the shared dict (cross-page) from refs that land in the
+page-local running dict. Wired through to `encode_quality_djbz` via a
+new `--cc-stats` flag.
+
+This is the measurement layer Phase 2.5 needs before deciding whether
+the per-CC profitability model in CLAUDE.md's #194 follow-up is worth
+implementing. The Phase 2 result already showed flat Hamming clustering
+doesn't beat byte-exact; the open question was whether selective
+near-duplicate promotion (with a profitability gate per CC) could.
+Without the actual rec-6 distribution we were guessing.
+
+**Observations** (`--cc-stats` on `tests/corpus/*.djvu`, 36 pages, 4 books):
+
+| File | Pages | rec-1 fresh | rec-6 shared | rec-6 local | rec-7 exact |
+|---|---:|---:|---:|---:|---:|
+| `cable_1973_100133.djvu` | 2  | 12.4% | 0.0%  | 4.7% | 82.8% |
+| `conquete_paix.djvu`     | 22 | 40.7% | 0.2%  | 2.1% | 56.9% |
+| `watchmaker.djvu`        | 12 | 6.1%  | 24.7% | 1.8% | 67.5% |
+
+rec-6 Hamming-distance distribution on `watchmaker.djvu` (6256 rec-6
+matches, dominant case): 49.7% in [1, 4], 47.7% in [5, 16], 2.5% in
+[17, 64], 0% above. Very tight — the existing 4%-of-pixels threshold in
+`find_refinement_ref` is approximately right; there is little headroom
+for "tighter" to improve the picture.
+
+**Reason kept.** Pure instrumentation, no encoder behavior change. Gives
+future Phase 2.5 work (and any Phase 4 lossy-refinement experiment from
+#224) a concrete CC-action breakdown without round-tripping bytes.
+Round-trip + clippy + nextest all clean; new test
+`analyze_jb2_cc_stats_classifies_records` covers all three buckets +
+shared/local distinction.
+
+**What this tells us about Phase 2.5 viability.** On the dominant
+shared-dict beneficiary (`watchmaker`), rec-6 already covers 24.7% of
+CCs against the shared dict, and the Hamming distribution is bimodal
+on [1, 16]. The remaining 6.1% rec-1 are mostly:
+1. Unique glyphs (no shared-dict twin) — promotion candidates need ≥ N
+   page repetitions, by definition rare for these
+2. Glyphs that fail the same-(w, h) bucket constraint
+   (cross-size matching is `find_refinement_ref`'s explicit
+   limitation, see jb2_encode.rs:611)
+
+So the most plausible Phase 2.5 win is **cross-size refinement**, not
+per-CC profitability. That's a substantially larger change (requires
+resampling for Hamming scoring) and is what the open #194 follow-up
+should track. Per-CC profitability against the existing same-size
+shortlist is unlikely to add anything material — the rec-6 hits we
+already get are tight enough that a profitability gate would barely
+exclude any of them.
+
 ### #185 — perf(jb2): bit-pack Jbm to 1 bit/pixel — **Kept** (2026-04-18)
 
 **Approach.** Changed the internal `Jbm` working bitmap from 1 byte/pixel
