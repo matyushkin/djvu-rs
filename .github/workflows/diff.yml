@@ -60,8 +60,12 @@ jobs:
       # tests/diff_tolerance.md for the empirical baseline.
       #
       # Excluded for now (tracked separately):
-      #   colorbook.djvu      — IW44 divergence under investigation (#192)
-      #   navm_fgbz.djvu p3-4 — small FGbz divergence under investigation
+      #   colorbook.djvu — residual ≈3.45% on p0, likely glyph-edge
+      #                    bilinear-interpolation drift (#199 follow-up)
+      #
+      # navm_fgbz.djvu was re-added after #248 fixed the page→plane-space
+      # coord conversion (#199); worst page p4 measures 0.12% mismatch /
+      # mean Δ 0.024, comfortably within the gate below.
       #
       # Width 99999 caps to native page width; small fixtures render at
       # their native dimensions. This is the only mode in which the diff
@@ -80,6 +84,7 @@ jobs:
             tests/fixtures/links.djvu \
             tests/fixtures/problem_page.djvu \
             tests/fixtures/big-scanned-page.djvu \
+            tests/fixtures/navm_fgbz.djvu \
               | tee diff_results.jsonl
 
       # CI gate: any page over the per-codec ceiling fails. See
