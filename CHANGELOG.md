@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/matyushkin/djvu-rs/compare/v0.13.0...v0.14.0) (2026-04-28)
+
+
+### Features
+
+* **jb2-enc:** multi-page shared Djbz dictionary in DJVM bundle, Phase 1 ([#194](https://github.com/matyushkin/djvu-rs/issues/194)) ([#216](https://github.com/matyushkin/djvu-rs/issues/216)) ([507b061](https://github.com/matyushkin/djvu-rs/commit/507b0618b27dc6619ce33736d01a9e920f2fdb32))
+* **jb2-enc:** symbol-dictionary encoder Phases 1-3 ([#188](https://github.com/matyushkin/djvu-rs/issues/188)) ([#213](https://github.com/matyushkin/djvu-rs/issues/213)) ([8a2ed15](https://github.com/matyushkin/djvu-rs/commit/8a2ed150ad86bde2d0305c0b18e1297523590ce2))
+
+
+### Bug Fixes
+
+* **annotation:** add MAX_SEXPR_DEPTH=64 guard to prevent stack overflow on deeply nested S-expressions ([#200](https://github.com/matyushkin/djvu-rs/issues/200)) ([2f03789](https://github.com/matyushkin/djvu-rs/commit/2f03789638a65f9ac2e6c7cf5763f63ec9a3a0f6))
+* **jb2-enc:** tile direct encoder to ≤1MP records ([#198](https://github.com/matyushkin/djvu-rs/issues/198)) ([#214](https://github.com/matyushkin/djvu-rs/issues/214)) ([24ac60f](https://github.com/matyushkin/djvu-rs/commit/24ac60fce1c139a8b55a3d30e71a7c36cac5d6d8))
+
+
+### Performance Improvements
+
+* **iw44-enc:** NEON forward wavelet + parallel Y/Cb/Cr + skip empty passes ([#206](https://github.com/matyushkin/djvu-rs/issues/206)) ([d1f2765](https://github.com/matyushkin/djvu-rs/commit/d1f27658d9eecfcd741a63788a56be7a891e8ed0))
+* **iw44:** NEON decoder — column pass s=2/4, scatter, YCbCr, lifting (~25% to_rgb) ([#207](https://github.com/matyushkin/djvu-rs/issues/207)) ([f570297](https://github.com/matyushkin/djvu-rs/commit/f5702973fd0833ed195554335853325ece4e5f12))
+* **jb2-enc:** eliminate bounds checks from JB2 encode hot loop ([#205](https://github.com/matyushkin/djvu-rs/issues/205)) ([5cbeaf0](https://github.com/matyushkin/djvu-rs/commit/5cbeaf0f64afbb2d39b86f568c73d04df9c9d35a))
+
 ## [0.13.0](https://github.com/matyushkin/djvu-rs/compare/v0.12.0...v0.13.0) (2026-04-18)
 
 
