@@ -1071,13 +1071,21 @@ fn cmd_encode(
     }
 
     let pixmap = decode_png_to_pixmap(input)?;
-    let seg = segment_page(&pixmap, &SegmentOptions::default());
 
-    let bytes = PageEncoder::from_bitmap(&seg.mask)
-        .with_dpi(dpi)
-        .with_quality(q)
-        .encode()
-        .map_err(|e| format!("encode: {e}"))?;
+    let bytes = match q {
+        EncodeQuality::Lossless => {
+            let seg = segment_page(&pixmap, &SegmentOptions::default());
+            PageEncoder::from_bitmap(&seg.mask)
+                .with_dpi(dpi)
+                .with_quality(EncodeQuality::Lossless)
+                .encode()
+        }
+        EncodeQuality::Quality | EncodeQuality::Archival => PageEncoder::from_pixmap(&pixmap)
+            .with_dpi(dpi)
+            .with_quality(q)
+            .encode(),
+    }
+    .map_err(|e| format!("encode: {e}"))?;
 
     std::fs::write(output, &bytes)?;
     eprintln!(
