@@ -249,3 +249,56 @@ fn test_djvu_page_text_method() {
     let text = text_opt.unwrap();
     assert!(!text.is_empty(), "extracted text should be non-empty");
 }
+
+// ── Reflowable text (#228) ───────────────────────────────────────────────────
+
+/// On a real OCR'd page, `reflowable_text()` should:
+///  - return a non-empty list of paragraphs
+///  - join the per-line strings within a paragraph into a single `text` field
+///    that contains no `\n` and no DjVu separator codes (\x00, \x0b, \x1d, \x1f)
+///  - apply the trim-each-line rule (no leading/trailing spaces around lines)
+#[test]
+fn test_reflowable_text_on_corpus_watchmaker() {
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/watchmaker.djvu");
+    let Ok(data) = std::fs::read(&path) else {
+        eprintln!("watchmaker.djvu not present, skipping");
+        return;
+    };
+    let doc = DjVuDocument::parse(&data).expect("parse");
+    let page = doc.page(1).expect("page 1");
+    let layer = page
+        .text_layer()
+        .expect("text_layer no error")
+        .expect("page 1 has text");
+
+    let paras = layer.reflowable_text();
+    assert!(
+        paras.len() >= 3,
+        "expected at least 3 paragraphs on this page, got {}",
+        paras.len()
+    );
+
+    for p in &paras {
+        assert!(!p.text.is_empty(), "paragraph text should not be empty");
+        assert!(
+            !p.text.contains('\n'),
+            "joined paragraph text must not contain raw newlines"
+        );
+        for sep in ['\u{0000}', '\u{000b}', '\u{001d}', '\u{001f}'] {
+            assert!(
+                !p.text.contains(sep),
+                "joined paragraph text must not contain DjVu separator U+{:04X}",
+                sep as u32
+            );
+        }
+        for line in &p.lines {
+            assert_eq!(line.trim(), line, "each line must be already trimmed");
+            assert!(!line.is_empty(), "no empty lines should slip through");
+        }
+    }
+
+    // The opening paragraph is the running header "98 Living in the LambLight"
+    // (single line). Confirm the first paragraph round-trips that.
+    assert_eq!(paras[0].text, "98 Living in the LambLight");
+}
