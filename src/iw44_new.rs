@@ -216,9 +216,10 @@ fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
         }
         return;
     }
-    #[cfg(target_arch = "x86_64")]
+    // Runtime AVX2 detection requires `std` (`is_x86_feature_detected!`).
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if std::is_x86_feature_detected!("avx2") {
             #[allow(unsafe_code)]
             unsafe {
                 ycbcr_avx2_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), out.as_mut_ptr(), w);
@@ -265,9 +266,9 @@ fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mu
         }
         return;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     {
-        if is_x86_feature_detected!("avx2") {
+        if std::is_x86_feature_detected!("avx2") {
             #[allow(unsafe_code)]
             unsafe {
                 ycbcr_avx2_raw_half(
@@ -505,7 +506,7 @@ unsafe fn ycbcr_neon_raw_half(
 /// SSE byte-interleave to materialise R/G/B/A → RGBA bytes.
 ///
 /// `cbp` and `crp` must point to `w` values each (same stride as `yp`).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "avx2")]
 unsafe fn ycbcr_avx2_raw(
@@ -601,7 +602,7 @@ unsafe fn ycbcr_avx2_raw(
 /// to place chromas 0-3 in the low 128-bit lane low half and chromas 4-7 in the
 /// high 128-bit lane low half, then `_mm256_unpacklo_epi16(v, v)` duplicates each
 /// chroma into two adjacent i16 lanes per 128-bit half.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "avx2")]
 unsafe fn ycbcr_avx2_raw_half(
@@ -3454,7 +3455,7 @@ mod tests {
 
     /// Reference scalar implementation of the fused-normalize YCbCr→RGBA path.
     /// Mirrors `ycbcr_neon_raw` byte-for-byte (same formula, same clamps).
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     fn ycbcr_raw_scalar(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
         let w = y.len();
         for col in 0..w {
@@ -3470,7 +3471,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     fn ycbcr_raw_half_scalar(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
         let w = y.len();
         for col in 0..w {
@@ -3489,7 +3490,7 @@ mod tests {
     /// AVX2 fused-normalize YCbCr→RGBA must agree byte-for-byte with the scalar
     /// reference across the full i16 input range and all width residues mod 16
     /// (covers main loop + scalar tail).
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     #[test]
     fn ycbcr_avx2_raw_matches_scalar() {
         if !std::is_x86_feature_detected!("avx2") {
@@ -3522,7 +3523,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     #[test]
     fn ycbcr_avx2_raw_half_matches_scalar() {
         if !std::is_x86_feature_detected!("avx2") {
