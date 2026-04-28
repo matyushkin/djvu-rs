@@ -112,21 +112,12 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
                 }
             }
 
-            let (r, g, b) = if n_unmasked > 0 {
-                (
-                    (r_unmasked / n_unmasked) as u8,
-                    (g_unmasked / n_unmasked) as u8,
-                    (b_unmasked / n_unmasked) as u8,
-                )
-            } else if n_all > 0 {
-                (
-                    (r_all / n_all) as u8,
-                    (g_all / n_all) as u8,
-                    (b_all / n_all) as u8,
-                )
-            } else {
-                (255, 255, 255)
-            };
+            let mean = |sum: u32, n: u32| sum.checked_div(n).map(|v| v as u8);
+            let triple =
+                |r: u32, g: u32, b: u32, n: u32| Some((mean(r, n)?, mean(g, n)?, mean(b, n)?));
+            let (r, g, b) = triple(r_unmasked, g_unmasked, b_unmasked, n_unmasked)
+                .or_else(|| triple(r_all, g_all, b_all, n_all))
+                .unwrap_or((255, 255, 255));
             bg.set_rgb(bx, by, r, g, b);
         }
     }
