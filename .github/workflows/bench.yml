@@ -2,12 +2,14 @@ name: Benchmarks
 
 on:
   # Track regressions on every PR that touches code or benchmarks.
+  # Workflow file itself is included so changes to bench.yml re-run on PR.
   pull_request:
     paths:
       - 'src/**'
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/bench.yml'
 
   # Update the baseline when code or benchmarks actually change on main / release tags.
   # Tags always bump Cargo.toml so the paths filter still fires for releases.
@@ -20,6 +22,7 @@ on:
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/bench.yml'
 
   # Allow manual runs (e.g. to seed the initial baseline).
   workflow_dispatch:
