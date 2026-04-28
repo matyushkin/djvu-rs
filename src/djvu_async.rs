@@ -115,6 +115,76 @@ where
     Ok(DjVuDocument::parse(&buf)?)
 }
 
+/// Async loader that reads the IFF + FORM + DIRM head separately from the
+/// page bodies (#196 Phase 2).
+///
+/// **Phase 2 of #196.** Issues two `read_exact` calls for the document head
+/// (IFF magic + FORM length + form_type, then the DIRM chunk header + payload),
+/// then a single `read_to_end` for the remainder. The total bytes received
+/// match Phase 1 — this constructor still returns an in-memory
+/// [`DjVuDocument`] — but a bandwidth-instrumented `AsyncRead` implementation
+/// can observe the head-first read pattern, and the resulting document
+/// exposes [`DjVuDocument::page_byte_range`] for any caller that wants to
+/// fan out per-page byte fetches via HTTP `Range` requests on a separate
+/// connection.
+///
+/// For documents that aren't bundled DJVM (single-page DJVU, indirect DJVM,
+/// or anything without a DIRM in the first chunk), this falls back to the
+/// Phase 1 buffered-read behavior — there's nothing useful to stream.
+///
+/// # Errors
+///
+/// - `AsyncLoadError::Io` — any underlying read fails
+/// - `AsyncLoadError::Parse` — the assembled buffer fails [`DjVuDocument::parse`]
+pub async fn load_document_async_streaming<R>(mut reader: R) -> Result<DjVuDocument, AsyncLoadError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    // 1) IFF outer header: 4-byte magic "AT&T" + "FORM" + 4-byte length + 4-byte form_type = 16 bytes.
+    let mut head = [0u8; 16];
+    reader.read_exact(&mut head).await?;
+
+    // If it isn't a DJVM bundle, the rest of the file is just page payload —
+    // no per-chunk streaming benefit, so fall back to bulk read.
+    let is_djvm = &head[..4] == b"AT&T" && &head[4..8] == b"FORM" && &head[12..16] == b"DJVM";
+
+    let mut buf = Vec::with_capacity(if is_djvm {
+        // Pre-size: 1 MB head guess; Vec grows as needed.
+        1 << 20
+    } else {
+        16 * 1024
+    });
+    buf.extend_from_slice(&head);
+
+    if is_djvm {
+        // 2) Next chunk header: 4-byte id + 4-byte BE length.
+        let mut chunk_hdr = [0u8; 8];
+        reader.read_exact(&mut chunk_hdr).await?;
+        buf.extend_from_slice(&chunk_hdr);
+
+        // If the first inner chunk is DIRM, read its payload separately so
+        // a recording reader sees the head-first pattern. Otherwise just
+        // continue with read_to_end — the document layout is non-canonical
+        // and Phase 2's offset map wouldn't apply anyway.
+        if &chunk_hdr[..4] == b"DIRM" {
+            let dirm_len =
+                u32::from_be_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]])
+                    as usize;
+            // IFF chunks pad to 2-byte boundary; the parser handles this, but
+            // we must read those padding bytes too to keep alignment.
+            let padded = dirm_len + (dirm_len & 1);
+            let mut dirm_buf = vec![0u8; padded];
+            reader.read_exact(&mut dirm_buf).await?;
+            buf.extend_from_slice(&dirm_buf);
+        }
+    }
+
+    // 3) Bulk-read the remainder.
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(DjVuDocument::parse(&buf)?)
+}
+
 // ── Async render functions ────────────────────────────────────────────────────
 
 /// Render `page` to an RGBA [`Pixmap`] asynchronously.
@@ -479,6 +549,92 @@ mod tests {
         assert!(
             matches!(err, AsyncLoadError::Parse(_)),
             "expected Parse error, got {err:?}"
+        );
+    }
+
+    /// `load_document_async_streaming` produces the same document as
+    /// the buffered Phase 1 loader on a bundled DJVM.
+    #[tokio::test]
+    async fn streaming_loader_matches_buffered() {
+        let path = assets_path().join("DjVu3Spec_bundled.djvu");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        };
+        let streamed = load_document_async_streaming(std::io::Cursor::new(bytes.clone()))
+            .await
+            .expect("streaming load must succeed");
+        let buffered = DjVuDocument::parse(&bytes).expect("buffered parse");
+
+        assert_eq!(streamed.page_count(), buffered.page_count());
+        for i in 0..buffered.page_count() {
+            assert_eq!(streamed.page_byte_range(i), buffered.page_byte_range(i));
+        }
+    }
+
+    /// `load_document_async_streaming` reads the head before the body
+    /// (#196 Phase 2 DoD).
+    ///
+    /// A custom `AsyncRead` records every requested read size. The first
+    /// three calls must be small and bounded (IFF head 16 B, chunk header
+    /// 8 B, DIRM payload — typically a few KB on a real document).
+    #[tokio::test]
+    async fn streaming_loader_reads_head_before_body() {
+        use std::sync::{Arc, Mutex};
+
+        let path = assets_path().join("DjVu3Spec_bundled.djvu");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        };
+
+        struct RecordingReader {
+            inner: std::io::Cursor<Vec<u8>>,
+            sizes: Arc<Mutex<Vec<usize>>>,
+        }
+        impl tokio::io::AsyncRead for RecordingReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let want = buf.remaining();
+                let pos = self.inner.position() as usize;
+                let src = self.inner.get_ref();
+                let n = want.min(src.len().saturating_sub(pos));
+                if n > 0 {
+                    buf.put_slice(&src[pos..pos + n]);
+                    self.inner.set_position((pos + n) as u64);
+                }
+                self.sizes.lock().unwrap().push(n);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let reader = RecordingReader {
+            inner: std::io::Cursor::new(bytes.clone()),
+            sizes: Arc::clone(&sizes),
+        };
+        let _ = load_document_async_streaming(reader)
+            .await
+            .expect("streaming load must succeed");
+
+        let sizes = sizes.lock().unwrap().clone();
+        // Strip 0-byte tail reads (EOF signals from read_to_end).
+        let nonzero: Vec<usize> = sizes.into_iter().filter(|&n| n > 0).collect();
+
+        // First read: the 16-byte IFF + FORM + form_type head.
+        assert_eq!(nonzero[0], 16, "first read must be 16-byte IFF head");
+        // Second read: the 8-byte DIRM chunk header.
+        assert_eq!(nonzero[1], 8, "second read must be 8-byte chunk header");
+        // Third read: the DIRM payload — must be smaller than the full body.
+        assert!(
+            nonzero[2] < bytes.len() / 4,
+            "third read should be the DIRM payload, well under the full body \
+             (got {} bytes for a {} byte file)",
+            nonzero[2],
+            bytes.len()
         );
     }
 

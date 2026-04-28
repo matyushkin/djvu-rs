@@ -720,6 +720,15 @@ pub struct DjVuDocument {
     /// Raw document-level chunks (NAVM, DIRM, etc.) from the DJVM container,
     /// or from the top-level DJVU form for single-page documents.
     global_chunks: Vec<RawChunk>,
+    /// Byte ranges of each page's outer FORM chunk inside the original
+    /// document buffer, in page order. Populated only for bundled DJVM
+    /// documents parsed from a contiguous slice; empty otherwise (single-page
+    /// DJVU, indirect DJVM, or when offsets were unavailable).
+    ///
+    /// Used by [`DjVuDocument::page_byte_range`] (#196 Phase 2). Lets a
+    /// future HTTP-Range fetcher (#196 Phase 3) request exactly the bytes
+    /// for a given page.
+    page_byte_ranges: Vec<core::ops::Range<u64>>,
 }
 
 impl DjVuDocument {
@@ -758,10 +767,14 @@ impl DjVuDocument {
                     })
                     .collect();
                 let page = parse_page_from_chunks(&form.chunks, 0, None)?;
+                // Single-page document spans the entire buffer.
+                #[allow(clippy::single_range_in_vec_init)]
+                let page_byte_ranges = vec![0u64..(data.len() as u64)];
                 Ok(DjVuDocument {
                     pages: vec![page],
                     bookmarks: vec![],
                     global_chunks,
+                    page_byte_ranges,
                 })
             }
             b"DJVM" => {
@@ -772,7 +785,7 @@ impl DjVuDocument {
                     .find(|c| &c.id == b"DIRM")
                     .ok_or(DocError::MissingChunk("DIRM"))?;
 
-                let (entries, is_bundled) = parse_dirm(dirm_chunk.data)?;
+                let (entries, is_bundled, comp_offsets) = parse_dirm(dirm_chunk.data)?;
 
                 // Collect NAVM bookmarks (BZZ-compressed)
                 let bookmarks = parse_navm_bookmarks(&form.chunks)?;
@@ -829,6 +842,7 @@ impl DjVuDocument {
                         .collect();
 
                     let mut pages = Vec::new();
+                    let mut page_byte_ranges = Vec::new();
                     let mut page_idx = 0usize;
                     for (comp_idx, entry) in entries.iter().enumerate() {
                         if entry.comp_type != ComponentType::Page {
@@ -857,13 +871,39 @@ impl DjVuDocument {
 
                         let page = parse_page_from_chunks(&sub_chunks, page_idx, shared_djbz)?;
                         pages.push(page);
+
+                        // Record the byte range of this page's outer FORM. The DIRM
+                        // offset points at the 4 bytes `b"FORM"`; the size sits at
+                        // offset+4 (BE u32) and covers the form_type + payload bytes,
+                        // so the full container is `8 + size` bytes long.
+                        if let Some(off) = comp_offsets.get(comp_idx) {
+                            let start = *off as usize;
+                            if let Some(size_bytes) = data.get(start + 4..start + 8) {
+                                let size = u32::from_be_bytes([
+                                    size_bytes[0],
+                                    size_bytes[1],
+                                    size_bytes[2],
+                                    size_bytes[3],
+                                ]) as u64;
+                                let begin = start as u64;
+                                let end = begin.saturating_add(8).saturating_add(size);
+                                page_byte_ranges.push(begin..end);
+                            }
+                        }
                         page_idx += 1;
+                    }
+
+                    // Only expose offsets if we got one for every page; partial
+                    // tables would surprise callers iterating by page index.
+                    if page_byte_ranges.len() != pages.len() {
+                        page_byte_ranges.clear();
                     }
 
                     Ok(DjVuDocument {
                         pages,
                         bookmarks,
                         global_chunks,
+                        page_byte_ranges,
                     })
                 } else {
                     // Indirect: pages must be resolved by name
@@ -887,6 +927,9 @@ impl DjVuDocument {
                         pages,
                         bookmarks,
                         global_chunks,
+                        // Indirect: per-page bytes live in external files, not the
+                        // index buffer — no meaningful range to expose here.
+                        page_byte_ranges: Vec::new(),
                     })
                 }
             }
@@ -897,6 +940,27 @@ impl DjVuDocument {
     /// Number of pages.
     pub fn page_count(&self) -> usize {
         self.pages.len()
+    }
+
+    /// Byte range of `page`'s outer FORM chunk inside the original document
+    /// buffer (#196 Phase 2).
+    ///
+    /// Returns `Some(start..end)` where `start` is the absolute offset of the
+    /// 4-byte `FORM` magic and `end` is one past the last byte of the chunk
+    /// payload. The range is suitable for an HTTP `Range:` request that
+    /// fetches exactly the bytes needed to decode that page (assuming any
+    /// referenced shared `DJVI` dictionaries are already in hand — those
+    /// have their own ranges too, but `page_byte_range` only covers pages).
+    ///
+    /// Returns `None` for:
+    /// - `index >= page_count()`
+    /// - Indirect DJVM documents (per-page bytes live in external files)
+    /// - Bundled DJVM documents whose DIRM offset table couldn't be matched
+    ///   to every page
+    ///
+    /// Single-page DJVU documents always return the full buffer range.
+    pub fn page_byte_range(&self, index: usize) -> Option<core::ops::Range<u64>> {
+        self.page_byte_ranges.get(index).cloned()
     }
 
     /// Access a page by 0-based index.
@@ -1249,8 +1313,11 @@ struct DirmEntry {
 
 /// Parse the DIRM chunk (directory of files in FORM:DJVM).
 ///
-/// Returns `(entries, is_bundled)`.
-fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), DocError> {
+/// Returns `(entries, is_bundled, offsets)`. `offsets` is non-empty only for
+/// bundled documents; each entry is the absolute byte offset of the
+/// corresponding component's outer `b"FORM"` header within the original
+/// document buffer.
+fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool, Vec<u32>), DocError> {
     if data.len() < 3 {
         return Err(DocError::Malformed("DIRM chunk too short"));
     }
@@ -1264,15 +1331,25 @@ fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), DocError> {
 
     let mut pos = 3usize;
 
-    // Bundled documents embed 4-byte offsets (skipped; we rely on in-order FORM children).
+    // Bundled documents embed 4-byte BE offsets to each component's FORM header.
+    let mut offsets: Vec<u32> = Vec::new();
     if is_bundled {
         let offsets_size = nfiles * 4;
-        pos = pos
+        let end = pos
             .checked_add(offsets_size)
             .ok_or(DocError::Malformed("DIRM offset arithmetic overflow"))?;
-        if pos > data.len() {
+        if end > data.len() {
             return Err(DocError::Malformed("DIRM offset table truncated"));
         }
+        offsets.reserve(nfiles);
+        for i in 0..nfiles {
+            let base = pos + i * 4;
+            let bytes = data
+                .get(base..base + 4)
+                .ok_or(DocError::Malformed("DIRM offset slice OOB"))?;
+            offsets.push(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+        pos = end;
     }
 
     // Remaining bytes are BZZ-compressed metadata.
@@ -1295,7 +1372,7 @@ fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), DocError> {
                 id: format!("p{:04}", i),
             })
             .collect();
-        return Ok((entries, is_bundled));
+        return Ok((entries, is_bundled, offsets));
     }
     let flags: Vec<u8> = meta
         .get(mpos..mpos + nfiles)
@@ -1324,7 +1401,7 @@ fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool), DocError> {
         entries.push(DirmEntry { comp_type, id });
     }
 
-    Ok((entries, is_bundled))
+    Ok((entries, is_bundled, offsets))
 }
 
 /// Read a null-terminated UTF-8 string from `data` at `*pos`, advancing `*pos`.
@@ -1882,6 +1959,61 @@ mod tests {
         assert_eq!(reparsed.width, page.width() as u16);
         assert_eq!(reparsed.height, page.height() as u16);
         assert_eq!(reparsed.dpi, page.dpi());
+    }
+
+    // ── #196 Phase 2: page_byte_range ────────────────────────────────────────
+
+    /// Single-page DJVU: byte range covers the entire input buffer.
+    #[test]
+    fn page_byte_range_single_page_covers_full_buffer() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+
+        let r = doc.page_byte_range(0).expect("page 0 must have a range");
+        assert_eq!(r.start, 0);
+        assert_eq!(r.end, data.len() as u64);
+
+        assert!(
+            doc.page_byte_range(1).is_none(),
+            "out-of-range index returns None"
+        );
+    }
+
+    /// Bundled DJVM: every page's byte range is non-empty, in-bounds,
+    /// non-overlapping with neighbours, and re-parseable as a FORM.
+    #[test]
+    fn page_byte_range_bundled_djvm_round_trips() {
+        let path = assets_path().join("DjVu3Spec_bundled.djvu");
+        let Ok(data) = std::fs::read(&path) else {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        };
+        let doc = DjVuDocument::parse(&data).expect("bundled DJVM parse must succeed");
+
+        let mut prev_end = 0u64;
+        for i in 0..doc.page_count() {
+            let r = doc
+                .page_byte_range(i)
+                .unwrap_or_else(|| panic!("page {i} must have a range"));
+            assert!(r.end <= data.len() as u64, "page {i} range OOB");
+            assert!(r.start < r.end, "page {i} range empty");
+            assert!(r.start >= prev_end, "page {i} overlaps previous");
+            prev_end = r.end;
+
+            // The range must start with `b"FORM"` magic.
+            let slice = &data[r.start as usize..r.end as usize];
+            assert_eq!(&slice[..4], b"FORM", "page {i} range must start with FORM");
+        }
+    }
+
+    /// Out-of-range page index returns None.
+    #[test]
+    fn page_byte_range_out_of_range() {
+        let data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        assert!(doc.page_byte_range(99).is_none());
     }
 
     /// MmapDocument opens a file and parses identically to in-memory parse.
