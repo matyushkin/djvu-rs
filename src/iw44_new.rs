@@ -82,21 +82,61 @@ const fn zigzag_col(i: usize) -> u8 {
     b0 * 16 + b2 * 8 + b4 * 4 + b6 * 2 + b8
 }
 
-static ZIGZAG_ROW: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
+/// Inverse zigzag: `ZIGZAG_INV[row * 32 + col]` is the index `i` such that
+/// `zigzag_row(i) == row as u8 && zigzag_col(i) == col as u8`.
+///
+/// Enables row-major scatter (sequential writes to the plane) at the cost of
+/// gathering block coefficients in zigzag order (2 KB block fits in L1).
+static ZIGZAG_INV: [u16; 1024] = {
+    let mut table = [0u16; 1024];
+    let mut i = 0usize;
     while i < 1024 {
-        table[i] = zigzag_row(i);
+        let r = zigzag_row(i) as usize;
+        let c = zigzag_col(i) as usize;
+        table[r * 32 + c] = i as u16;
         i += 1;
     }
     table
 };
 
-static ZIGZAG_COL: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        table[i] = zigzag_col(i);
+/// Compact inverse zigzag for sub=2 (16×16 sub-block, 256 entries).
+/// `ZIGZAG_INV_SUB2[row * 16 + col]` = index `i` in 0..256 such that
+/// `zigzag_row(i) >> 1 == row && zigzag_col(i) >> 1 == col`.
+static ZIGZAG_INV_SUB2: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let r = (zigzag_row(i) >> 1) as usize;
+        let c = (zigzag_col(i) >> 1) as usize;
+        table[r * 16 + c] = i as u8;
+        i += 1;
+    }
+    table
+};
+
+/// Compact inverse zigzag for sub=4 (8×8 sub-block, 64 entries).
+/// `ZIGZAG_INV_SUB4[row * 8 + col]` = index `i` in 0..64.
+static ZIGZAG_INV_SUB4: [u8; 64] = {
+    let mut table = [0u8; 64];
+    let mut i = 0usize;
+    while i < 64 {
+        let r = (zigzag_row(i) >> 2) as usize;
+        let c = (zigzag_col(i) >> 2) as usize;
+        table[r * 8 + c] = i as u8;
+        i += 1;
+    }
+    table
+};
+
+/// Compact inverse zigzag for sub=8 (4×4 sub-block, 16 entries).
+/// `ZIGZAG_INV_SUB8[row * 4 + col]` = index `i` in 0..16.
+static ZIGZAG_INV_SUB8: [u8; 16] = {
+    let mut table = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        let r = (zigzag_row(i) >> 3) as usize;
+        let c = (zigzag_col(i) >> 3) as usize;
+        table[r * 4 + c] = i as u8;
         i += 1;
     }
     table
@@ -130,73 +170,142 @@ fn normalize(val: i16) -> i32 {
 /// B     = clamp(t3 + (Cb << 1),     0, 255)
 /// ```
 pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8]) {
-    use wide::i32x8;
     debug_assert_eq!(y_row.len(), cb_row.len());
     debug_assert_eq!(y_row.len(), cr_row.len());
     debug_assert_eq!(out.len(), y_row.len() * 4);
 
+    let w = y_row.len();
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon(
+                y_row.as_ptr(),
+                cb_row.as_ptr(),
+                cr_row.as_ptr(),
+                out.as_mut_ptr(),
+                w,
+            )
+        };
+        return;
+    }
+
+    // Portable path: chunks_exact eliminates per-element bounds checks.
+    #[allow(unreachable_code)]
+    ycbcr_portable(y_row, cb_row, cr_row, out, w);
+}
+
+/// Convert raw i16 plane row data to RGBA, fusing normalize + YCbCr in one pass.
+///
+/// Uses `ycbcr_neon_raw` on AArch64 (avoids three intermediate i32 buffers and
+/// the separate normalize loops).  Falls back to two-pass on other targets.
+///
+/// `y`, `cb`, `cr` must all have the same length `w`; `out` must hold `w * 4` bytes.
+#[inline]
+fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
+    let w = y.len();
+    debug_assert_eq!(cb.len(), w);
+    debug_assert_eq!(cr.len(), w);
+    debug_assert_eq!(out.len(), w * 4);
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), out.as_mut_ptr(), w);
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut y_norm = vec![0i32; w];
+        let mut cb_norm = vec![0i32; w];
+        let mut cr_norm = vec![0i32; w];
+        for (col, v) in y_norm.iter_mut().enumerate() {
+            *v = normalize(y[col]);
+        }
+        for col in 0..w {
+            cb_norm[col] = normalize(cb[col]);
+            cr_norm[col] = normalize(cr[col]);
+        }
+        ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, out);
+    }
+}
+
+/// Convert raw i16 plane row data to RGBA with chroma at half horizontal resolution.
+///
+/// `y` has length ≥ `w`; `cb_half`/`cr_half` have length ≥ `(w+1)/2`.  Each
+/// chroma sample is nearest-neighbour upsampled to two adjacent output pixels.
+/// Uses `ycbcr_neon_raw_half` on AArch64; two-pass fallback elsewhere.
+#[inline]
+fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mut [u8], w: usize) {
+    debug_assert!(y.len() >= w);
+    debug_assert_eq!(out.len(), w * 4);
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_neon_raw_half(
+                y.as_ptr(),
+                cb_half.as_ptr(),
+                cr_half.as_ptr(),
+                out.as_mut_ptr(),
+                w,
+            );
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut y_norm = vec![0i32; w];
+        let mut cb_norm = vec![0i32; w];
+        let mut cr_norm = vec![0i32; w];
+        for (col, v) in y_norm.iter_mut().enumerate() {
+            *v = normalize(y[col]);
+        }
+        for col in 0..w {
+            cb_norm[col] = normalize(cb_half[col / 2]);
+            cr_norm[col] = normalize(cr_half[col / 2]);
+        }
+        ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, out);
+    }
+}
+
+/// Portable YCbCr→RGBA using chunks_exact so LLVM sees exact 8-element slices.
+#[inline(always)]
+fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8], w: usize) {
+    use wide::i32x8;
     let c128 = i32x8::splat(128);
     let c0 = i32x8::splat(0);
     let c255 = i32x8::splat(255);
 
-    let w = y_row.len();
-    let full_chunks = w / 8;
-
-    for chunk in 0..full_chunks {
-        let base = chunk * 8;
-        let ys = i32x8::from([
-            y_row[base],
-            y_row[base + 1],
-            y_row[base + 2],
-            y_row[base + 3],
-            y_row[base + 4],
-            y_row[base + 5],
-            y_row[base + 6],
-            y_row[base + 7],
-        ]);
+    let full8 = w / 8;
+    for (((yc, cbc), crc), outc) in y_row[..full8 * 8]
+        .chunks_exact(8)
+        .zip(cb_row[..full8 * 8].chunks_exact(8))
+        .zip(cr_row[..full8 * 8].chunks_exact(8))
+        .zip(out[..full8 * 32].chunks_exact_mut(32))
+    {
+        let ys = i32x8::from([yc[0], yc[1], yc[2], yc[3], yc[4], yc[5], yc[6], yc[7]]);
         let bs = i32x8::from([
-            cb_row[base],
-            cb_row[base + 1],
-            cb_row[base + 2],
-            cb_row[base + 3],
-            cb_row[base + 4],
-            cb_row[base + 5],
-            cb_row[base + 6],
-            cb_row[base + 7],
+            cbc[0], cbc[1], cbc[2], cbc[3], cbc[4], cbc[5], cbc[6], cbc[7],
         ]);
         let rs = i32x8::from([
-            cr_row[base],
-            cr_row[base + 1],
-            cr_row[base + 2],
-            cr_row[base + 3],
-            cr_row[base + 4],
-            cr_row[base + 5],
-            cr_row[base + 6],
-            cr_row[base + 7],
+            crc[0], crc[1], crc[2], crc[3], crc[4], crc[5], crc[6], crc[7],
         ]);
-
         let t2 = rs + (rs >> 1_i32);
         let t3 = ys + c128 - (bs >> 2_i32);
-
-        let red: i32x8 = (ys + c128 + t2).max(c0).min(c255);
-        let green: i32x8 = (t3 - (t2 >> 1_i32)).max(c0).min(c255);
-        let blue: i32x8 = (t3 + (bs << 1_i32)).max(c0).min(c255);
-
-        let reds = red.to_array();
-        let greens = green.to_array();
-        let blues = blue.to_array();
-
-        let out_base = base * 4;
+        let red = (ys + c128 + t2).max(c0).min(c255).to_array();
+        let grn = (t3 - (t2 >> 1_i32)).max(c0).min(c255).to_array();
+        let blu = (t3 + (bs << 1_i32)).max(c0).min(c255).to_array();
         for i in 0..8 {
-            out[out_base + i * 4] = reds[i] as u8;
-            out[out_base + i * 4 + 1] = greens[i] as u8;
-            out[out_base + i * 4 + 2] = blues[i] as u8;
-            out[out_base + i * 4 + 3] = 255;
+            outc[i * 4] = red[i] as u8;
+            outc[i * 4 + 1] = grn[i] as u8;
+            outc[i * 4 + 2] = blu[i] as u8;
+            outc[i * 4 + 3] = 255;
         }
     }
-
-    // Scalar tail — fewer than 8 pixels remaining.
-    for col in (full_chunks * 8)..w {
+    for col in (full8 * 8)..w {
         let y = y_row[col];
         let b = cb_row[col];
         let r = cr_row[col];
@@ -206,6 +315,235 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
         out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
         out[col * 4 + 2] = (t3 + (b << 1)).clamp(0, 255) as u8;
         out[col * 4 + 3] = 255;
+    }
+}
+
+/// AArch64 NEON fused normalize + YCbCr→RGBA from raw i16 plane data (non-chroma-half).
+///
+/// Loads 8 i16 per channel, applies `normalize()` inline using `vrshrq_n_s16`
+/// (rounding-shift by 6, i.e. `(v+32)>>6`) and clamps to `[-128,127]`, then
+/// runs the YCbCr→RGBA formula.  Eliminates the separate normalize pass and the
+/// three intermediate i32 buffers.
+///
+/// `cbp` and `crp` must point to `w` values each (same stride as `yp`).
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon_raw(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::aarch64::*;
+    // After normalize+clamp all values ∈ [-128, 127].  The YCbCr arithmetic
+    // intermediates all fit in i16 (proof: y128∈[0,255], t2∈[-192,190],
+    // t3∈[-31,287], r16∈[-192,445], g16∈[-126,383], b16∈[-287,541]).
+    // vqmovun_s16 saturates signed i16 → unsigned u8, clamping to [0,255]
+    // in one instruction — no separate min/max clamp ops needed.
+    let n_min = vdupq_n_s16(-128);
+    let n_max = vdupq_n_s16(127);
+    let c128 = vdupq_n_s16(128);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        // Load + normalize (rounded right-shift by 6) + clamp to [-128, 127] at i16
+        let yc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(yp.add(off))), n_max),
+            n_min,
+        );
+        let cbc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(cbp.add(off))), n_max),
+            n_min,
+        );
+        let crc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(crp.add(off))), n_max),
+            n_min,
+        );
+        // All arithmetic stays at i16 — no widening to i32 needed.
+        // y128 = y + 128, range [0, 255]
+        let y128 = vaddq_s16(yc, c128);
+        // t2 = cr + (cr >> 1) = 1.5·cr, range [-192, 190]
+        let t2 = vaddq_s16(crc, vshrq_n_s16::<1>(crc));
+        // t3 = y128 - (cb >> 2), range [-31, 287]
+        let t3 = vsubq_s16(y128, vshrq_n_s16::<2>(cbc));
+        // R = y128 + t2, range [-192, 445]
+        let r16 = vaddq_s16(y128, t2);
+        // G = t3 - (t2 >> 1), range [-126, 383]
+        let g16 = vsubq_s16(t3, vshrq_n_s16::<1>(t2));
+        // B = t3 + 2·cb, range [-287, 541]
+        let b16 = vaddq_s16(t3, vshlq_n_s16::<1>(cbc));
+        // Saturating narrow signed i16 → unsigned u8 (clamps to [0, 255])
+        let r8 = vqmovun_s16(r16);
+        let g8 = vqmovun_s16(g16);
+        let b8 = vqmovun_s16(b16);
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col));
+        let r = normalize(*crp.add(col));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// AArch64 NEON fused normalize + YCbCr→RGBA from raw i16 plane data (chroma-half).
+///
+/// `cbp` and `crp` point to chroma planes at half the horizontal resolution.
+/// Each chroma sample is nearest-neighbour upsampled to two luma columns.
+/// 8 output pixels are produced per iteration, consuming 8 Y samples and 4 Cb/Cr samples.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon_raw_half(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::aarch64::*;
+    // Same i16 arithmetic as ycbcr_neon_raw — all intermediates fit in i16.
+    let n_min = vdupq_n_s16(-128);
+    let n_max = vdupq_n_s16(127);
+    let c128 = vdupq_n_s16(128);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        let c_off = i * 4;
+        // Load + normalize Y (8 consecutive)
+        let yc = vmaxq_s16(
+            vminq_s16(vrshrq_n_s16::<6>(vld1q_s16(yp.add(off))), n_max),
+            n_min,
+        );
+        // Load 4 chroma values, normalize at i16 level, then upsample 4→8 by
+        // duplicating each value: [a,b,c,d] → [a,a,b,b,c,c,d,d] via vzip1q
+        let cb4 = vmaxq_s16(
+            vminq_s16(
+                vrshrq_n_s16::<6>(vcombine_s16(vld1_s16(cbp.add(c_off)), vdup_n_s16(0))),
+                n_max,
+            ),
+            n_min,
+        );
+        let cr4 = vmaxq_s16(
+            vminq_s16(
+                vrshrq_n_s16::<6>(vcombine_s16(vld1_s16(crp.add(c_off)), vdup_n_s16(0))),
+                n_max,
+            ),
+            n_min,
+        );
+        // Upsample: interleave low 4 lanes with themselves → [a,a,b,b,c,c,d,d]
+        let cbc = vzip1q_s16(cb4, cb4);
+        let crc = vzip1q_s16(cr4, cr4);
+        // All arithmetic at i16 level (same ranges as non-half path after upsample)
+        let y128 = vaddq_s16(yc, c128);
+        let t2 = vaddq_s16(crc, vshrq_n_s16::<1>(crc));
+        let t3 = vsubq_s16(y128, vshrq_n_s16::<2>(cbc));
+        let r16 = vaddq_s16(y128, t2);
+        let g16 = vsubq_s16(t3, vshrq_n_s16::<1>(t2));
+        let b16 = vaddq_s16(t3, vshlq_n_s16::<1>(cbc));
+        let r8 = vqmovun_s16(r16);
+        let g8 = vqmovun_s16(g16);
+        let b8 = vqmovun_s16(b16);
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col / 2));
+        let r = normalize(*crp.add(col / 2));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// AArch64 NEON: 6× vld1q_s32 + SIMD arithmetic + vst4_u8 per 8 pixels.
+/// Replaces 80+ bounds-check branches per 8 pixels in the LLVM-generated portable code.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn ycbcr_neon(yp: *const i32, cbp: *const i32, crp: *const i32, outp: *mut u8, w: usize) {
+    use core::arch::aarch64::*;
+    let c128 = vdupq_n_s32(128);
+    let c0 = vdupq_n_s32(0);
+    let c255 = vdupq_n_s32(255);
+    let alpha = vdup_n_u8(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        // Load 8 × i32 from each channel (2 × vld1q_s32 = one cache line per channel)
+        let y_lo = vld1q_s32(yp.add(off));
+        let y_hi = vld1q_s32(yp.add(off + 4));
+        let cb_lo = vld1q_s32(cbp.add(off));
+        let cb_hi = vld1q_s32(cbp.add(off + 4));
+        let cr_lo = vld1q_s32(crp.add(off));
+        let cr_hi = vld1q_s32(crp.add(off + 4));
+
+        // t2 = cr + (cr >> 1)
+        let t2_lo = vaddq_s32(cr_lo, vshrq_n_s32::<1>(cr_lo));
+        let t2_hi = vaddq_s32(cr_hi, vshrq_n_s32::<1>(cr_hi));
+        // t3 = y + 128 - (cb >> 2)
+        let t3_lo = vsubq_s32(vaddq_s32(y_lo, c128), vshrq_n_s32::<2>(cb_lo));
+        let t3_hi = vsubq_s32(vaddq_s32(y_hi, c128), vshrq_n_s32::<2>(cb_hi));
+
+        // red = clamp(y + 128 + t2)
+        let r_lo = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_lo, c128), t2_lo), c0), c255);
+        let r_hi = vminq_s32(vmaxq_s32(vaddq_s32(vaddq_s32(y_hi, c128), t2_hi), c0), c255);
+        // green = clamp(t3 - (t2 >> 1))
+        let g_lo = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_lo, vshrq_n_s32::<1>(t2_lo)), c0),
+            c255,
+        );
+        let g_hi = vminq_s32(
+            vmaxq_s32(vsubq_s32(t3_hi, vshrq_n_s32::<1>(t2_hi)), c0),
+            c255,
+        );
+        // blue = clamp(t3 + (cb << 1))
+        let b_lo = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_lo, vshlq_n_s32::<1>(cb_lo)), c0),
+            c255,
+        );
+        let b_hi = vminq_s32(
+            vmaxq_s32(vaddq_s32(t3_hi, vshlq_n_s32::<1>(cb_hi)), c0),
+            c255,
+        );
+
+        // Narrow i32×4 → i16×4 → u8×8 for each channel
+        let r8 = vqmovun_s16(vcombine_s16(vmovn_s32(r_lo), vmovn_s32(r_hi)));
+        let g8 = vqmovun_s16(vcombine_s16(vmovn_s32(g_lo), vmovn_s32(g_hi)));
+        let b8 = vqmovun_s16(vcombine_s16(vmovn_s32(b_lo), vmovn_s32(b_hi)));
+
+        // Store 8 RGBA pixels (32 bytes) interleaved via vst4_u8
+        vst4_u8(outp.add(off * 4), uint8x8x4_t(r8, g8, b8, alpha));
+    }
+
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = *yp.add(col);
+        let b = *cbp.add(col);
+        let r = *crp.add(col);
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
     }
 }
 
@@ -238,6 +576,106 @@ struct PlaneDecoder {
     bbstate: u8,
 }
 
+/// Map 16 i16 coefficients at `block[base..]` to UNK/ACTIVE flags, store in `bucket`,
+/// and return the OR of all flag bytes (bstatetmp).
+///
+/// Scalar fallback used on non-aarch64 targets.
+#[allow(unsafe_code)]
+#[inline(always)]
+fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is mandatory on aarch64; `base + 16 <= 1024` is guaranteed by
+    // BAND_BUCKETS (max bucket index 63, so base = 63 * 16 = 1008, 1008 + 16 = 1024).
+    return unsafe { prelim_flags_bucket_neon(block, base, bucket) };
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut bstate = 0u8;
+        for k in 0..16 {
+            let f = if block[base + k] == 0 { UNK } else { ACTIVE };
+            bucket[k] = f;
+            bstate |= f;
+        }
+        bstate
+    }
+}
+
+/// NEON-vectorized version of `prelim_flags_bucket` for aarch64.
+///
+/// Loads 16 i16 values, compares to zero with NEON, narrows to u8 flags
+/// (UNK=8 for zero, ACTIVE=2 for non-zero), stores, and OR-reduces to bstatetmp.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    let ptr = block.as_ptr().add(base);
+    // Load as u16 — zero-comparison is the same for signed and unsigned 16-bit.
+    let c0 = vreinterpretq_u16_s16(vld1q_s16(ptr));
+    let c1 = vreinterpretq_u16_s16(vld1q_s16(ptr.add(8)));
+    // nz: 0xFFFF where coef != 0, 0x0000 where coef == 0
+    let zero = vdupq_n_u16(0);
+    let nz0 = vmvnq_u16(vceqq_u16(c0, zero));
+    let nz1 = vmvnq_u16(vceqq_u16(c1, zero));
+    // result = UNK ^ ((UNK ^ ACTIVE) & nz)  ⟹  UNK(8) if zero, ACTIVE(2) if nonzero
+    // UNK ^ ACTIVE = 8 ^ 2 = 10
+    let xv = vdupq_n_u16(10);
+    let uv = vdupq_n_u16(8);
+    let r0 = veorq_u16(uv, vandq_u16(xv, nz0));
+    let r1 = veorq_u16(uv, vandq_u16(xv, nz1));
+    // Narrow u16 → u8 (values 2 and 8 both fit; high byte of each lane is 0)
+    let out = vcombine_u8(vmovn_u16(r0), vmovn_u16(r1));
+    vst1q_u8(bucket.as_mut_ptr(), out);
+    // Horizontal OR: fold 16 u8 lanes to 1
+    let lo = vget_low_u8(out);
+    let hi = vget_high_u8(out);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
+/// NEON-vectorized band-0 path of `preliminary_flag_computation`.
+///
+/// Band 0 differs from bands 1-9: only update entries where `old_flags[k] != ZERO (1)`.
+/// Uses `vbslq_u8` to blend new flags (UNK/ACTIVE from coef) with old flags (keep ZERO).
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    use core::arch::aarch64::*;
+    // Load old coeffstate[0] (u8 flags: ZERO=1, UNK=8, ACTIVE=2).
+    let old_u8 = vld1q_u8(old_flags.as_ptr());
+    // should_update mask: 0xFF where old_flags[k] != ZERO(1), 0x00 where == ZERO
+    let one_u8 = vdupq_n_u8(1);
+    let is_zero_state = vceqq_u8(old_u8, one_u8); // 0xFF where ZERO, 0x00 elsewhere
+    let should_update = vmvnq_u8(is_zero_state); // 0xFF where not-ZERO
+    // Compute new flags from first 16 coefs (same as prelim_flags_bucket_neon with base=0).
+    let ptr = block.as_ptr();
+    let c0 = vreinterpretq_u16_s16(vld1q_s16(ptr));
+    let c1 = vreinterpretq_u16_s16(vld1q_s16(ptr.add(8)));
+    let zero16 = vdupq_n_u16(0);
+    let nz0 = vmvnq_u16(vceqq_u16(c0, zero16));
+    let nz1 = vmvnq_u16(vceqq_u16(c1, zero16));
+    let xv = vdupq_n_u16(10); // UNK ^ ACTIVE = 10
+    let uv = vdupq_n_u16(8); // UNK = 8
+    let r0 = veorq_u16(uv, vandq_u16(xv, nz0));
+    let r1 = veorq_u16(uv, vandq_u16(xv, nz1));
+    let new_flags = vcombine_u8(vmovn_u16(r0), vmovn_u16(r1));
+    // Blend: where should_update, take new_flags; where ZERO state, keep old.
+    let result = vbslq_u8(should_update, new_flags, old_u8);
+    vst1q_u8(old_flags.as_mut_ptr(), result);
+    // Horizontal OR of final flags for bstatetmp.
+    let lo = vget_low_u8(result);
+    let hi = vget_high_u8(result);
+    let v4 = vorr_u8(lo, hi);
+    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
+    vget_lane_u8::<0>(v0)
+}
+
 impl PlaneDecoder {
     fn new(width: usize, height: usize) -> Self {
         let block_cols = width.div_ceil(32);
@@ -266,11 +704,14 @@ impl PlaneDecoder {
         if !self.is_null_slice() {
             for block_idx in 0..self.blocks.len() {
                 self.preliminary_flag_computation(block_idx);
-                if self.block_band_decoding_pass(zp) {
-                    self.bucket_decoding_pass(zp, block_idx);
+                if self.block_band_decoding_pass(zp) && self.bucket_decoding_pass(zp, block_idx) {
                     self.newly_active_coefficient_decoding_pass(zp, block_idx);
                 }
-                self.previously_active_coefficient_decoding_pass(zp, block_idx);
+                // Skip the inner loop entirely when no ACTIVE coefficients exist
+                // (avoids function call + zp register flush for fresh/sparse blocks).
+                if (self.bbstate & ACTIVE) != 0 {
+                    self.previously_active_coefficient_decoding_pass(zp, block_idx);
+                }
             }
         }
         self.finish_slice();
@@ -300,30 +741,36 @@ impl PlaneDecoder {
 
         if self.curband != 0 {
             for (boff, j) in (from..=to).enumerate() {
-                let mut bstatetmp: u8 = 0;
-                for k in 0..16 {
-                    if self.blocks[block_idx][(j << 4) | k] == 0 {
-                        self.coeffstate[boff][k] = UNK;
-                    } else {
-                        self.coeffstate[boff][k] = ACTIVE;
-                    }
-                    bstatetmp |= self.coeffstate[boff][k];
-                }
+                let bstatetmp = prelim_flags_bucket(
+                    &self.blocks[block_idx],
+                    j << 4,
+                    &mut self.coeffstate[boff],
+                );
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
         } else {
-            let mut bstatetmp: u8 = 0;
-            for k in 0..16 {
-                if self.coeffstate[0][k] != ZERO {
-                    if self.blocks[block_idx][k] == 0 {
-                        self.coeffstate[0][k] = UNK;
-                    } else {
-                        self.coeffstate[0][k] = ACTIVE;
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON always available on aarch64; block[0..16] valid by construction.
+            #[allow(unsafe_code)]
+            let bstatetmp = unsafe {
+                prelim_flags_band0_neon(&self.blocks[block_idx], &mut self.coeffstate[0])
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let bstatetmp = {
+                let mut b = 0u8;
+                for k in 0..16 {
+                    if self.coeffstate[0][k] != ZERO {
+                        self.coeffstate[0][k] = if self.blocks[block_idx][k] == 0 {
+                            UNK
+                        } else {
+                            ACTIVE
+                        };
                     }
+                    b |= self.coeffstate[0][k];
                 }
-                bstatetmp |= self.coeffstate[0][k];
-            }
+                b
+            };
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
@@ -341,8 +788,10 @@ impl PlaneDecoder {
         (self.bbstate & NEW) != 0
     }
 
-    fn bucket_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) {
+    /// Returns `true` if any bucket was newly marked active (NEW bit set).
+    fn bucket_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) -> bool {
         let (from, to) = BAND_BUCKETS[self.curband];
+        let mut any_new = false;
         for (boff, i) in (from..=to).enumerate() {
             if (self.bucketstate[boff] & UNK) == 0 {
                 continue;
@@ -364,8 +813,10 @@ impl PlaneDecoder {
             }
             if zp.decode_bit(&mut self.ctx_decode_coef[n + self.curband * 8]) {
                 self.bucketstate[boff] |= NEW;
+                any_new = true;
             }
         }
+        any_new
     }
 
     fn newly_active_coefficient_decoding_pass(&mut self, zp: &mut ZpDecoder<'_>, block_idx: usize) {
@@ -408,11 +859,114 @@ impl PlaneDecoder {
         }
     }
 
+    /// Hot inner loop for refining already-active coefficients.
+    ///
+    /// Uses local copies of all ZP state fields so LLVM can keep them in
+    /// registers for the duration of the double-loop, avoiding struct-pointer
+    /// round-trips on every `decode_bit` / `decode_passthrough_iw44` call.
+    #[inline(never)]
     fn previously_active_coefficient_decoding_pass(
         &mut self,
         zp: &mut ZpDecoder<'_>,
         block_idx: usize,
     ) {
+        use crate::zp_impl::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+        // Extract ZP state to true stack-locals — LLVM keeps these in registers.
+        let mut a = zp.a;
+        let mut c = zp.c;
+        let mut fence = zp.fence;
+        let mut bit_buf = zp.bit_buf;
+        let mut bit_count = zp.bit_count;
+        let data = zp.data;
+        let mut pos = zp.pos;
+
+        macro_rules! read_byte {
+            () => {{
+                let b = if pos < data.len() { data[pos] } else { 0xff };
+                pos = pos.wrapping_add(1);
+                b as u32
+            }};
+        }
+        macro_rules! refill {
+            () => {
+                while bit_count <= 24 {
+                    bit_buf = (bit_buf << 8) | read_byte!();
+                    bit_count += 8;
+                }
+            };
+        }
+        macro_rules! renorm {
+            () => {{
+                let shift = (a as u16).leading_ones();
+                bit_count -= shift as i32;
+                a = (a << shift) & 0xffff;
+                let mask = (1u32 << (shift & 31)).wrapping_sub(1);
+                c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
+                if bit_count < 16 {
+                    refill!();
+                }
+                fence = c.min(0x7fff);
+            }};
+        }
+        // Decode one bit using an adaptive context byte.
+        macro_rules! decode_bit_ctx {
+            ($ctx:expr) => {{
+                let state = ($ctx) as usize;
+                let mps_bit = state & 1;
+                let z = a + PROB[state] as u32;
+                if z <= fence {
+                    a = z;
+                    mps_bit != 0
+                } else {
+                    let boundary = 0x6000u32 + ((a + z) >> 2);
+                    let z_clamped = z.min(boundary);
+                    if z_clamped > c {
+                        let complement = 0x10000u32 - z_clamped;
+                        a = (a + complement) & 0xffff;
+                        c = (c + complement) & 0xffff;
+                        $ctx = LPS_NEXT[state];
+                        renorm!();
+                        (1 - mps_bit) != 0
+                    } else {
+                        if a >= THRESHOLD[state] as u32 {
+                            $ctx = MPS_NEXT[state];
+                        }
+                        bit_count -= 1;
+                        a = (z_clamped << 1) & 0xffff;
+                        c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                        if bit_count < 16 {
+                            refill!();
+                        }
+                        fence = c.min(0x7fff);
+                        mps_bit != 0
+                    }
+                }
+            }};
+        }
+        // Decode one bit in IW44 passthrough mode (threshold = 0x8000 + 3a/8).
+        macro_rules! decode_passthrough_iw44 {
+            () => {{
+                let z = (0x8000u32 + (3u32 * a) / 8) as u16;
+                if z as u32 > c {
+                    let complement = 0x10000u32 - z as u32;
+                    a = (a + complement) & 0xffff;
+                    c = (c + complement) & 0xffff;
+                    renorm!();
+                    true
+                } else {
+                    bit_count -= 1;
+                    a = (z as u32 * 2) & 0xffff;
+                    c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                    if bit_count < 16 {
+                        refill!();
+                    }
+                    fence = c.min(0x7fff);
+                    false
+                }
+            }};
+        }
+
         let (from, to) = BAND_BUCKETS[self.curband];
         let mut step = self.quant_hi[self.curband];
         for (boff, i) in (from..=to).enumerate() {
@@ -425,11 +979,11 @@ impl PlaneDecoder {
                     let mut abs_coef = coef.unsigned_abs() as i32;
                     let s = step as i32;
                     let des = if abs_coef <= 3 * s {
-                        let d = zp.decode_bit(&mut self.ctx_increase_coef[0]);
+                        let d = decode_bit_ctx!(self.ctx_increase_coef[0]);
                         abs_coef += s >> 2;
                         d
                     } else {
-                        zp.decode_passthrough_iw44()
+                        decode_passthrough_iw44!()
                     };
                     if des {
                         abs_coef += s >> 1;
@@ -444,6 +998,14 @@ impl PlaneDecoder {
                 }
             }
         }
+
+        // Write back ZP state so subsequent calls see the updated arithmetic.
+        zp.a = a;
+        zp.c = c;
+        zp.fence = fence;
+        zp.bit_buf = bit_buf;
+        zp.bit_count = bit_count;
+        zp.pos = pos;
     }
 
     /// Advance quantization step and band counter after one slice.
@@ -471,7 +1033,8 @@ impl PlaneDecoder {
         // positions — those with zigzag index i < 256 (see zigzag_row/col: both
         // are even iff bits 8 and 9 of i are 0).  We can therefore:
         //   1. Allocate a 4× smaller plane  (ceil(w/2) × ceil(h/2))
-        //   2. Scatter only i ∈ [0, coeff_limit) at (row/sub, col/sub)
+        //   2. Scatter only the sub_block² low-frequency coefficients per block
+        //      (zigzag indices 0..sub_block² map to even multiples of sub)
         //   3. Run the full wavelet (sub=1) on the compact plane, which now
         //      includes the SIMD s=1 pass.
         //
@@ -479,13 +1042,9 @@ impl PlaneDecoder {
         // and sampling every other position: each compact[k][c] equals the value
         // that full[k·sub][c·sub] would hold after the sub=2 wavelet.
         //
-        // The same logic holds for sub=4 (coeff_limit=64, quarter-plane) and
-        // sub=8 (coeff_limit=16, eighth-plane).
+        // The same logic holds for sub=4 (8×8 sub-block) and sub=8 (4×4 sub-block).
         if (2..=8).contains(&subsample) && subsample.is_power_of_two() {
             let sub = subsample;
-            // Number of coefficients whose (row, col) are both multiples of `sub`.
-            // For sub=2: 256; sub=4: 64; sub=8: 16.
-            let coeff_limit = 1024 / (sub * sub);
 
             // Block structure: the compact plane inherits the same block grid but
             // each 32×32 block contributes a (32/sub)×(32/sub) sub-block.
@@ -499,22 +1058,46 @@ impl PlaneDecoder {
             let compact_w = self.width.div_ceil(sub);
             let compact_h = self.height.div_ceil(sub);
 
+            // Safety: zigzag_row(i)/sub × zigzag_col(i)/sub for i in 0..sub_block²
+            // is a bijection over [0..sub_block) × [0..sub_block) (bits 8/9 of i are
+            // 0 → both zigzag values are even; dividing by sub tiles all sub_block²
+            // positions per block → every element is written before the wavelet reads).
+            #[allow(unsafe_code)]
             let mut plane = FlatPlane {
-                data: vec![0i16; compact_stride * compact_rows],
+                data: unsafe { uninit_i16_vec(compact_stride * compact_rows) },
                 stride: compact_stride,
             };
 
+            // Row-major scatter via compact inverse zigzag tables: write
+            // sub_block consecutive i16 per row before advancing, maximising
+            // write-combine efficiency (one cache line per row for sub=2).
+            // Safety invariants for get_unchecked below:
+            //   inv: inv_base+col = row*sub_block+col, row,col ∈ 0..sub_block → < sub_block²
+            //        = compact_inv.len(); block[i]: compact_inv values < sub_block² ≤ 256
+            //        < 1024 = block.len(); plane[dst_base+col]: sequential within
+            //        (base_row+row)*compact_stride+base_col+[0,sub_block) — all in bounds.
+            let compact_inv: &[u8] = match sub {
+                2 => &ZIGZAG_INV_SUB2,
+                4 => &ZIGZAG_INV_SUB4,
+                _ => &ZIGZAG_INV_SUB8, // sub=8
+            };
+            #[allow(unsafe_code)]
             for r in 0..block_rows {
                 for c in 0..self.block_cols {
                     let block = &self.blocks[r * self.block_cols + c];
-                    let row_base = r << 5;
-                    let col_base = c << 5;
-                    for i in 0..coeff_limit {
-                        // zigzag positions are even multiples of `sub`; divide
-                        // by `sub` to get compact-plane coordinates.
-                        let row = (ZIGZAG_ROW[i] as usize + row_base) / sub;
-                        let col = (ZIGZAG_COL[i] as usize + col_base) / sub;
-                        plane.data[row * compact_stride + col] = block[i];
+                    let base_row = r * sub_block;
+                    let base_col = c * sub_block;
+                    for row in 0..sub_block {
+                        let dst_base = (base_row + row) * compact_stride + base_col;
+                        let inv_base = row * sub_block;
+                        for col in 0..sub_block {
+                            // Safety: see invariants above.
+                            let i = unsafe { *compact_inv.get_unchecked(inv_base + col) } as usize;
+                            unsafe {
+                                *plane.data.get_unchecked_mut(dst_base + col) =
+                                    *block.get_unchecked(i);
+                            }
+                        }
                     }
                 }
             }
@@ -532,21 +1115,31 @@ impl PlaneDecoder {
         let full_width = self.width.div_ceil(32) * 32;
         let full_height = self.height.div_ceil(32) * 32;
         let block_rows = self.height.div_ceil(32);
+        // Safety: ZIGZAG_ROW/COL for i in 0..1024 is a bijection over [0..32)×[0..32)
+        // (odd-indexed bits → row, even-indexed bits → col, non-overlapping). The
+        // scatter below writes every element before the wavelet reads any of them.
+        #[allow(unsafe_code)]
         let mut plane = FlatPlane {
-            data: vec![0i16; full_width * full_height],
+            data: unsafe { uninit_i16_vec(full_width * full_height) },
             stride: full_width,
         };
 
-        // Scatter block coefficients into the flat plane via zigzag
+        // Row-major scatter via ZIGZAG_INV: write 32 consecutive i16 per row
+        // (= 1 cache line) before advancing, maximising write-combine efficiency.
+        // block[ZIGZAG_INV[row*32+col]] is a gathered read from a 2 KB array
+        // that fits in L1, so the scatter cost is minimal.
         for r in 0..block_rows {
             for c in 0..self.block_cols {
                 let block = &self.blocks[r * self.block_cols + c];
                 let row_base = r << 5;
                 let col_base = c << 5;
-                for i in 0..1024 {
-                    let row = ZIGZAG_ROW[i] as usize + row_base;
-                    let col = ZIGZAG_COL[i] as usize + col_base;
-                    plane.data[row * full_width + col] = block[i];
+                for row in 0..32usize {
+                    let dst_base = (row_base + row) * full_width + col_base;
+                    let inv_base = row * 32;
+                    for col in 0..32usize {
+                        let i = ZIGZAG_INV[inv_base + col] as usize;
+                        plane.data[dst_base + col] = block[i];
+                    }
                 }
             }
         }
@@ -557,6 +1150,24 @@ impl PlaneDecoder {
 }
 
 // ---- Flat plane helper -------------------------------------------------------
+
+/// Allocate `n` uninitialized `i16` elements.
+///
+/// Uses `Vec<MaybeUninit<i16>>` (the clippy-blessed pattern) and reinterprets
+/// as `Vec<i16>`.
+///
+/// # Safety
+/// Caller must write every element before reading it.
+#[allow(unsafe_code)]
+unsafe fn uninit_i16_vec(n: usize) -> Vec<i16> {
+    use core::mem::MaybeUninit;
+    let mut v: Vec<MaybeUninit<i16>> = Vec::with_capacity(n);
+    // Safety: MaybeUninit<i16> requires no initialization; len will equal capacity.
+    unsafe { v.set_len(n) };
+    let mut md = core::mem::ManuallyDrop::new(v);
+    // Safety: MaybeUninit<i16> and i16 have identical layout; capacity unchanged.
+    unsafe { Vec::from_raw_parts(md.as_mut_ptr().cast::<i16>(), md.len(), md.capacity()) }
+}
 
 struct FlatPlane {
     data: Vec<i16>,
@@ -576,125 +1187,510 @@ struct FlatPlane {
 
 use wide::i32x8;
 
-/// Load 8 contiguous `i16` values from `slice[off..]` into an `i32x8`.
+/// Load 8 `i16` values at stride `s` starting at `slice[phys_off]`.
+///
+/// Reads `slice[phys_off + j*s]` for j = 0..7. For s=1 this is identical to
+/// [`load8`]. For s=2 and s=4 the AArch64 path uses `ld2`/`ld4` to deinterleave
+/// in a single instruction; other targets use scalar loads that LLVM may
+/// auto-vectorize.
 #[inline(always)]
-fn load8(slice: &[i16], off: usize) -> i32x8 {
+fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
+    // s=1 fast path: single contiguous load + sign-extend.  Checked FIRST so that
+    // the s=1 branch is a single cmp+b (not taken on s≠1) rather than a 5-branch
+    // dispatch chain inside load8s_neon.
+    if s == 1 {
+        #[allow(unsafe_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let arr: [i16; 8] = core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
+            i32x8::from([
+                arr[0] as i32,
+                arr[1] as i32,
+                arr[2] as i32,
+                arr[3] as i32,
+                arr[4] as i32,
+                arr[5] as i32,
+                arr[6] as i32,
+                arr[7] as i32,
+            ])
+        };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if s == 2 || s == 4 {
+        #[allow(unsafe_code)]
+        return unsafe { load8s_neon(slice, phys_off, s) };
+    }
     i32x8::from([
-        slice[off] as i32,
-        slice[off + 1] as i32,
-        slice[off + 2] as i32,
-        slice[off + 3] as i32,
-        slice[off + 4] as i32,
-        slice[off + 5] as i32,
-        slice[off + 6] as i32,
-        slice[off + 7] as i32,
+        slice[phys_off] as i32,
+        slice[phys_off + s] as i32,
+        slice[phys_off + 2 * s] as i32,
+        slice[phys_off + 3 * s] as i32,
+        slice[phys_off + 4 * s] as i32,
+        slice[phys_off + 5 * s] as i32,
+        slice[phys_off + 6 * s] as i32,
+        slice[phys_off + 7 * s] as i32,
     ])
 }
 
-/// Store 8 values from an `i32x8` into contiguous `i16` slots at `slice[off..]`.
+/// Store 8 `i32x8` values (truncated to `i16`) at stride `s` starting at `slice[phys_off]`.
+///
+/// Writes `slice[phys_off + j*s] = v[j] as i16` for j = 0..7. Interleaved positions
+/// (those not at multiples of `s`) are left unchanged.
 #[inline(always)]
-fn store8(slice: &mut [i16], off: usize, v: i32x8) {
+fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
+    // s=1 fast path: narrow and store contiguously.  Same reasoning as load8s.
+    if s == 1 {
+        #[allow(unsafe_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let a = v.to_array();
+            let narrow: [i16; 8] = [
+                a[0] as i16,
+                a[1] as i16,
+                a[2] as i16,
+                a[3] as i16,
+                a[4] as i16,
+                a[5] as i16,
+                a[6] as i16,
+                a[7] as i16,
+            ];
+            core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
+        };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if s == 2 || s == 4 {
+        #[allow(unsafe_code)]
+        return unsafe { store8s_neon(slice, phys_off, s, v) };
+    }
     let a = v.to_array();
-    slice[off] = a[0] as i16;
-    slice[off + 1] = a[1] as i16;
-    slice[off + 2] = a[2] as i16;
-    slice[off + 3] = a[3] as i16;
-    slice[off + 4] = a[4] as i16;
-    slice[off + 5] = a[5] as i16;
-    slice[off + 6] = a[6] as i16;
-    slice[off + 7] = a[7] as i16;
+    for j in 0..8 {
+        slice[phys_off + j * s] = a[j] as i16;
+    }
+}
+
+// ---- AArch64 NEON stride load/store -----------------------------------------
+//
+// ld2 deinterleaves 16 consecutive i16s into two vectors (even, odd).
+// ld4 deinterleaves 32 consecutive i16s into four vectors.
+// After widening the target lane to i32, `lifting_even` / `predict_inner`
+// run on i32x8 exactly as for s=1.
+// On store, we re-interleave the updated even lane with the unchanged odd lanes.
+
+#[cfg(target_arch = "aarch64")]
+// s=1 is now handled directly in load8s/store8s (single ldr/str q without dispatch).
+// This function only needs to handle s=2 and s=4.
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn load8s_neon(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
+    use core::arch::aarch64::*;
+    let ptr = slice.as_ptr().add(phys_off);
+    let target: int16x8_t = if s == 2 {
+        vld2q_s16(ptr).0
+    } else {
+        // s == 4
+        vld4q_s16(ptr).0
+    };
+    // Widen i16x8 → two i32x4, then reinterpret as [i32;8] → i32x8
+    let lo = vmovl_s16(vget_low_s16(target));
+    let hi = vmovl_high_s16(target);
+    let arr = core::mem::transmute::<[int32x4_t; 2], [i32; 8]>([lo, hi]);
+    i32x8::from(arr)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn store8s_neon(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
+    use core::arch::aarch64::*;
+    let ptr = slice.as_mut_ptr().add(phys_off);
+    // Narrow v (i32x8) back to i16x8 via vmovn (truncate low 16 bits)
+    let v_arr = core::mem::transmute::<[i32; 8], [int32x4_t; 2]>(v.to_array());
+    let new_vals = vcombine_s16(vmovn_s32(v_arr[0]), vmovn_s32(v_arr[1]));
+    // For s=2,4: scatter-store 8 i16s to stride-s positions.
+    // Using 8 individual str h avoids the extra vld2/vld4 that would be needed
+    // to preserve interleaved odd lanes before a vst2/vst4.
+    // Each str h targets the same ~16-byte cache region (already hot from load8s).
+    let a: [i16; 8] = core::mem::transmute(new_vals);
+    for (j, &val) in a.iter().enumerate() {
+        *ptr.add(j * s) = val;
+    }
 }
 
 /// Load 8 contiguous `i32` values from `slice[off..]` into an `i32x8`.
+///
+/// # Safety
+/// Caller must ensure `off + 7 < slice.len()`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn load8_i32(slice: &[i32], off: usize) -> i32x8 {
-    i32x8::from([
-        slice[off],
-        slice[off + 1],
-        slice[off + 2],
-        slice[off + 3],
-        slice[off + 4],
-        slice[off + 5],
-        slice[off + 6],
-        slice[off + 7],
-    ])
+    // SAFETY: caller guarantees off+7 is in bounds.
+    unsafe {
+        i32x8::from([
+            *slice.get_unchecked(off),
+            *slice.get_unchecked(off + 1),
+            *slice.get_unchecked(off + 2),
+            *slice.get_unchecked(off + 3),
+            *slice.get_unchecked(off + 4),
+            *slice.get_unchecked(off + 5),
+            *slice.get_unchecked(off + 6),
+            *slice.get_unchecked(off + 7),
+        ])
+    }
 }
 
 /// Store 8 values from an `i32x8` into contiguous `i32` slots at `slice[off..]`.
+///
+/// # Safety
+/// Caller must ensure `off + 7 < slice.len()`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn store8_i32(slice: &mut [i32], off: usize, v: i32x8) {
     let a = v.to_array();
-    slice[off] = a[0];
-    slice[off + 1] = a[1];
-    slice[off + 2] = a[2];
-    slice[off + 3] = a[3];
-    slice[off + 4] = a[4];
-    slice[off + 5] = a[5];
-    slice[off + 6] = a[6];
-    slice[off + 7] = a[7];
+    // SAFETY: caller guarantees off+7 is in bounds.
+    unsafe {
+        *slice.get_unchecked_mut(off) = a[0];
+        *slice.get_unchecked_mut(off + 1) = a[1];
+        *slice.get_unchecked_mut(off + 2) = a[2];
+        *slice.get_unchecked_mut(off + 3) = a[3];
+        *slice.get_unchecked_mut(off + 4) = a[4];
+        *slice.get_unchecked_mut(off + 5) = a[5];
+        *slice.get_unchecked_mut(off + 6) = a[6];
+        *slice.get_unchecked_mut(off + 7) = a[7];
+    }
 }
 
 /// Gather one `i16` value from each of 8 consecutive rows at column index `k`.
 ///
 /// `offs[i]` is the start offset `row_i * stride` for row `i`.
+///
+/// # Safety
+/// Caller must ensure `offs[i] + k < data.len()` for all `i in 0..8`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn load_rows8(data: &[i16], offs: &[usize; 8], k: usize) -> i32x8 {
-    i32x8::from([
-        data[offs[0] + k] as i32,
-        data[offs[1] + k] as i32,
-        data[offs[2] + k] as i32,
-        data[offs[3] + k] as i32,
-        data[offs[4] + k] as i32,
-        data[offs[5] + k] as i32,
-        data[offs[6] + k] as i32,
-        data[offs[7] + k] as i32,
-    ])
+    // SAFETY: caller guarantees offs[i]+k is in bounds for all i.
+    unsafe {
+        i32x8::from([
+            *data.get_unchecked(offs[0] + k) as i32,
+            *data.get_unchecked(offs[1] + k) as i32,
+            *data.get_unchecked(offs[2] + k) as i32,
+            *data.get_unchecked(offs[3] + k) as i32,
+            *data.get_unchecked(offs[4] + k) as i32,
+            *data.get_unchecked(offs[5] + k) as i32,
+            *data.get_unchecked(offs[6] + k) as i32,
+            *data.get_unchecked(offs[7] + k) as i32,
+        ])
+    }
 }
 
 /// Scatter one value from `v` to each of 8 consecutive rows at column index `k`.
+///
+/// # Safety
+/// Caller must ensure `offs[i] + k < data.len()` for all `i in 0..8`.
 #[inline(always)]
+#[allow(unsafe_code)]
 fn store_rows8(data: &mut [i16], offs: &[usize; 8], k: usize, v: i32x8) {
     let a = v.to_array();
-    data[offs[0] + k] = a[0] as i16;
-    data[offs[1] + k] = a[1] as i16;
-    data[offs[2] + k] = a[2] as i16;
-    data[offs[3] + k] = a[3] as i16;
-    data[offs[4] + k] = a[4] as i16;
-    data[offs[5] + k] = a[5] as i16;
-    data[offs[6] + k] = a[6] as i16;
-    data[offs[7] + k] = a[7] as i16;
+    // SAFETY: caller guarantees offs[i]+k is in bounds for all i.
+    unsafe {
+        *data.get_unchecked_mut(offs[0] + k) = a[0] as i16;
+        *data.get_unchecked_mut(offs[1] + k) = a[1] as i16;
+        *data.get_unchecked_mut(offs[2] + k) = a[2] as i16;
+        *data.get_unchecked_mut(offs[3] + k) = a[3] as i16;
+        *data.get_unchecked_mut(offs[4] + k) = a[4] as i16;
+        *data.get_unchecked_mut(offs[5] + k) = a[5] as i16;
+        *data.get_unchecked_mut(offs[6] + k) = a[6] as i16;
+        *data.get_unchecked_mut(offs[7] + k) = a[7] as i16;
+    }
 }
+
+// Compile-time rounding constants — avoids the `memcpy` call that
+// `i32x8::splat(N)` generates on AArch64 (LLVM doesn't hoist splat to movi.4s).
+// SAFETY: [i32; 8] and i32x8 have identical representations (8 × 4-byte i32,
+// 32-byte size); the transmute is value-preserving.
+#[allow(unsafe_code)]
+const C16: i32x8 = unsafe { core::mem::transmute([16i32; 8]) };
+#[allow(unsafe_code)]
+const C8: i32x8 = unsafe { core::mem::transmute([8i32; 8]) };
+#[allow(unsafe_code)]
+const C1: i32x8 = unsafe { core::mem::transmute([1i32; 8]) };
 
 /// Lifting filter: `data[idx] -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)`
 #[inline(always)]
 fn lifting_even(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
     let a = p1 + n1;
     let c = p3 + n3;
-    let c16 = i32x8::splat(16);
-    cur - (((a << 3) + a - c + c16) >> 5)
+    cur - (((a << 3) + a - c + C16) >> 5)
 }
 
 /// Prediction filter (inner): `data[idx] += ((9*(p1+n1) - (p3+n3) + 8) >> 4)`
 #[inline(always)]
 fn predict_inner(cur: i32x8, p1: i32x8, n1: i32x8, p3: i32x8, n3: i32x8) -> i32x8 {
     let a = p1 + n1;
-    let c8 = i32x8::splat(8);
-    cur + (((a << 3) + a - (p3 + n3) + c8) >> 4)
+    cur + (((a << 3) + a - (p3 + n3) + C8) >> 4)
 }
 
 /// Prediction filter (boundary): `data[idx] += ((p + n + 1) >> 1)`
 #[inline(always)]
 fn predict_avg(cur: i32x8, p: i32x8, n: i32x8) -> i32x8 {
-    let c1 = i32x8::splat(1);
-    cur + ((p + n + c1) >> 1)
+    cur + ((p + n + C1) >> 1)
+}
+
+/// AArch64 NEON horizontal row pass for s=1.
+///
+/// Processes each row independently using `vld2q_s16` to deinterleave even/odd
+/// positions and `vextq_s16` for the 5-tap sliding-window neighbors, eliminating
+/// the scatter loads (`8×ldrh`) used by the vertical 8-rows-at-a-time path.
+///
+/// # Even pass (lifting)
+/// For each chunk of 8 even positions (`chunk*16 .. chunk*16+15`):
+/// ```text
+///   vld2q_s16(chunk*16)     → curr_even[0..8], curr_odd[0..8]
+///   vld2q_s16((chunk+1)*16) → next_even (for n3)
+///   p1 = vextq_s16(prev_odd, curr_odd, 7)
+///   n1 = curr_odd
+///   p3 = vextq_s16(prev_odd, curr_odd, 6)
+///   n3 = vextq_s16(curr_odd, next_odd, 1)
+/// ```
+///
+/// # Odd pass (prediction)
+/// For each chunk of 8 inner odd positions at `3+chunk*16, 5+..., 17+chunk*16`:
+/// ```text
+///   pair1 = vld2q_s16(chunk*16)     → p3=.0, odds_lo=.1
+///   pair2 = vld2q_s16((chunk+1)*16) → next_even=.0, odds_hi=.1
+///   curr_odds = vextq_s16(odds_lo, odds_hi, 1)
+///   p1 = vextq_s16(p3, next_even, 1)
+///   n1 = vextq_s16(p3, next_even, 2)
+///   n3 = vextq_s16(p3, next_even, 3)
+/// ```
+///
+/// # Safety
+/// `data[row_off .. row_off+width]` must be valid. `width >= 1`.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "neon")]
+unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, width: usize) {
+    use core::arch::aarch64::*;
+
+    let kmax = width - 1;
+    let border = kmax.saturating_sub(3);
+    let ptr = data.as_mut_ptr().add(row_off);
+
+    // Number of NEON even chunks: need next chunk fully in bounds for n3.
+    // Condition: (chunk+1)*16+15 < width  →  chunk < (width-31)/16.
+    let even_chunks = if width >= 32 { (width - 31) / 16 } else { 0 };
+
+    // ── Even pass (lifting) ────────────────────────────────────────────────────
+
+    let mut prev_odd = vdupq_n_s16(0i16);
+
+    for chunk in 0..even_chunks {
+        let curr_pair = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        let next_pair = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+        let curr_even = curr_pair.0;
+        let curr_odd = curr_pair.1;
+        let next_odd = next_pair.1;
+
+        let p1 = vextq_s16::<7>(prev_odd, curr_odd);
+        let n1 = curr_odd;
+        let p3 = vextq_s16::<6>(prev_odd, curr_odd);
+        let n3 = vextq_s16::<1>(curr_odd, next_odd);
+
+        // cur -= ((9*(p1+n1) - (p3+n3) + 16) >> 5)
+        macro_rules! lift {
+            ($ce:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<5>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(16i32)), c));
+                vsubq_s32($ce, delta)
+            }};
+        }
+
+        let new_lo = lift!(
+            vmovl_s16(vget_low_s16(curr_even)),
+            vmovl_s16(vget_low_s16(p1)),
+            vmovl_s16(vget_low_s16(n1)),
+            vmovl_s16(vget_low_s16(p3)),
+            vmovl_s16(vget_low_s16(n3))
+        );
+        let new_hi = lift!(
+            vmovl_high_s16(curr_even),
+            vmovl_high_s16(p1),
+            vmovl_high_s16(n1),
+            vmovl_high_s16(p3),
+            vmovl_high_s16(n3)
+        );
+        let new_evens = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        vst2q_s16(ptr.add(chunk * 16), int16x8x2_t(new_evens, curr_odd));
+
+        prev_odd = curr_odd;
+    }
+
+    // Scalar even tail: k = even_chunks*16, +2, ... <= kmax.
+    // State just before the first advance: prev1=prev_odd[6], next1=prev_odd[7], next3=data[k+1].
+    {
+        let k_start = even_chunks * 16;
+        let mut prev1 = if even_chunks > 0 {
+            vgetq_lane_s16::<6>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next1 = if even_chunks > 0 {
+            vgetq_lane_s16::<7>(prev_odd) as i32
+        } else {
+            0
+        };
+        let mut next3 = if k_start < kmax {
+            *data.get_unchecked(row_off + k_start + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_start;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let a = prev1 + next1;
+            let c = prev3 + next3;
+            let idx = row_off + k;
+            *data.get_unchecked_mut(idx) =
+                (*data.get_unchecked(idx) as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+            k += 2;
+        }
+    }
+
+    // ── Odd pass (prediction) ──────────────────────────────────────────────────
+
+    if kmax < 1 {
+        return;
+    }
+
+    // k=1: always predict_avg (or +=prev if k==kmax)
+    {
+        let p1 = *data.get_unchecked(row_off) as i32;
+        let idx1 = row_off + 1;
+        if 1 < kmax {
+            let n1 = *data.get_unchecked(row_off + 2) as i32;
+            *data.get_unchecked_mut(idx1) =
+                (*data.get_unchecked(idx1) as i32 + ((p1 + n1 + 1) >> 1)) as i16;
+        } else {
+            *data.get_unchecked_mut(idx1) = (*data.get_unchecked(idx1) as i32 + p1) as i16;
+        }
+    }
+
+    // NEON inner odd chunks: predict_inner for k=3,5,...,17+chunk*16.
+    // Safety: need (chunk+1)*16+15 < width AND 17+chunk*16 <= border (= kmax-3).
+    // Combined: chunk < (width-31)/16 (same as even_chunks).
+    // Inner check: 17+chunk*16 <= kmax-3  →  chunk <= (kmax-20)/16.
+    let odd_chunks = if kmax >= 20 {
+        even_chunks.min((kmax - 20) / 16 + 1)
+    } else {
+        0
+    };
+
+    for chunk in 0..odd_chunks {
+        // pair1: evens[chunk*8..+7] in .0, odds[chunk*8..+7] in .1
+        let pair1 = vld2q_s16(ptr.add(chunk * 16) as *const i16);
+        // pair2: evens[(chunk+1)*8..+7] in .0, odds[(chunk+1)*8..+7] in .1
+        let pair2 = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
+
+        // 8 inner odds at physical positions 3+chunk*16, 5+..., 17+chunk*16
+        let curr_odds = vextq_s16::<1>(pair1.1, pair2.1);
+
+        // Even neighbors for predict_inner:
+        // p3[i] = even at k_odd-3 = chunk*16+2i → pair1.0[i]
+        // p1[i] = even at k_odd-1 = chunk*16+2i+2 → vextq(pair1.0, pair2.0, 1)[i]
+        // n1[i] = even at k_odd+1 = chunk*16+2i+4 → vextq(pair1.0, pair2.0, 2)[i]
+        // n3[i] = even at k_odd+3 = chunk*16+2i+6 → vextq(pair1.0, pair2.0, 3)[i]
+        let p3_e = pair1.0;
+        let p1_e = vextq_s16::<1>(pair1.0, pair2.0); // also = unchanged evens for store
+        let n1_e = vextq_s16::<2>(pair1.0, pair2.0);
+        let n3_e = vextq_s16::<3>(pair1.0, pair2.0);
+
+        // cur += ((9*(p1+n1) - (p3+n3) + 8) >> 4)
+        macro_rules! predict {
+            ($co:expr, $p1:expr, $n1:expr, $p3:expr, $n3:expr) => {{
+                let a = vaddq_s32($p1, $n1);
+                let c = vaddq_s32($p3, $n3);
+                let nine_a = vaddq_s32(vshlq_n_s32::<3>(a), a);
+                let delta = vshrq_n_s32::<4>(vsubq_s32(vaddq_s32(nine_a, vdupq_n_s32(8i32)), c));
+                vaddq_s32($co, delta)
+            }};
+        }
+
+        let new_lo = predict!(
+            vmovl_s16(vget_low_s16(curr_odds)),
+            vmovl_s16(vget_low_s16(p1_e)),
+            vmovl_s16(vget_low_s16(n1_e)),
+            vmovl_s16(vget_low_s16(p3_e)),
+            vmovl_s16(vget_low_s16(n3_e))
+        );
+        let new_hi = predict!(
+            vmovl_high_s16(curr_odds),
+            vmovl_high_s16(p1_e),
+            vmovl_high_s16(n1_e),
+            vmovl_high_s16(p3_e),
+            vmovl_high_s16(n3_e)
+        );
+        let new_odds = vcombine_s16(vmovn_s32(new_lo), vmovn_s32(new_hi));
+
+        // Store: evens at chunk*16+2,+4,...,+16 unchanged (= p1_e), odds updated.
+        vst2q_s16(ptr.add(chunk * 16 + 2), int16x8x2_t(p1_e, new_odds));
+    }
+
+    // Scalar odd tail: k = 3+odd_chunks*16, ..., kmax (inner then boundary).
+    // State before the advance at k_scalar: prev1=data[k-3], next1=data[k-1], next3=data[k+1].
+    if kmax >= 3 {
+        let k_scalar = 3 + odd_chunks * 16;
+        let mut prev1 = *data.get_unchecked(row_off + k_scalar - 3) as i32;
+        let mut next1 = *data.get_unchecked(row_off + k_scalar - 1) as i32;
+        let mut next3 = if k_scalar < kmax {
+            *data.get_unchecked(row_off + k_scalar + 1) as i32
+        } else {
+            0
+        };
+        let mut k = k_scalar;
+        while k <= kmax {
+            let prev3 = prev1;
+            prev1 = next1;
+            next1 = next3;
+            next3 = if k + 3 <= kmax {
+                *data.get_unchecked(row_off + k + 3) as i32
+            } else {
+                0
+            };
+            let idx = row_off + k;
+            if k <= border {
+                let a = prev1 + next1;
+                let c = prev3 + next3;
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 + (((a << 3) + a - c + 8) >> 4)) as i16;
+            } else if k < kmax {
+                *data.get_unchecked_mut(idx) =
+                    (*data.get_unchecked(idx) as i32 + ((prev1 + next1 + 1) >> 1)) as i16;
+            } else {
+                *data.get_unchecked_mut(idx) = (*data.get_unchecked(idx) as i32 + prev1) as i16;
+            }
+            k += 2;
+        }
+    }
 }
 
 /// Apply the row-direction wavelet pass for one resolution level.
 ///
-/// When `use_simd` is `true` and `s == 1` (`sd == 0`), the first
-/// `height / 8 * 8` rows are processed 8 at a time using `i32x8` SIMD.
-/// The remaining rows (and all rows when `s > 1` or `use_simd` is false) use
-/// the scalar path.
+/// When `use_simd` is `true` and `s == 1` (`sd == 0`), on AArch64 the
+/// horizontal NEON path (`row_pass_neon_s1_row`) is used for each row,
+/// processing 8 even/odd positions at a time with `vld2q_s16` instead of
+/// scatter loads. For `s > 1` and non-AArch64, the vertical 8-rows-at-a-time
+/// `i32x8` path is used. The remaining rows (and all rows when `use_simd` is
+/// false) use the scalar path.
 ///
 /// `s` — step between active samples (power of two); `sd = log2(s)`.
 pub(crate) fn row_pass_inner(
@@ -706,24 +1702,39 @@ pub(crate) fn row_pass_inner(
     sd: usize,
     use_simd: bool,
 ) {
+    // AArch64 horizontal NEON path: at s=1, process each row using vld2q_s16
+    // (sequential deinterleave) instead of scatter loads across 8 rows.
+    #[cfg(target_arch = "aarch64")]
+    if use_simd && s == 1 {
+        for row in (0..height).step_by(s) {
+            #[allow(unsafe_code)]
+            unsafe {
+                row_pass_neon_s1_row(data, row * stride, width);
+            }
+        }
+        return;
+    }
+
     let kmax = (width - 1) >> sd;
     let border = kmax.saturating_sub(3);
 
-    // ── SIMD path: 8 rows at a time (only when s == 1, i.e. sd == 0) ─────────
-    let simd_rows = if use_simd && s == 1 {
-        height / 8 * 8
-    } else {
-        0
-    };
+    // ── SIMD path: 8 active rows at a time ───────────────────────────────────
+    //
+    // At s=1 the 8 rows are consecutive (o[i] = (row_base + i) * stride).
+    // At s=2 they are spaced by 2  (o[i] = (row_base + i*2) * stride), etc.
+    // Column accesses use `k << sd` so the logical k loop is unchanged.
+    let simd_active = if use_simd { height / s / 8 * 8 } else { 0 };
+    let simd_rows = simd_active * s;
 
-    for row_base in (0..simd_rows).step_by(8) {
-        let o: [usize; 8] = core::array::from_fn(|i| (row_base + i) * stride);
+    for group in 0..simd_active / 8 {
+        let row_base = group * 8 * s;
+        let o: [usize; 8] = core::array::from_fn(|i| (row_base + i * s) * stride);
 
         // — Lifting (even k) ——————————————————————————————————————————————————
         let mut prev1v = i32x8::splat(0);
         let mut next1v = i32x8::splat(0);
         let mut next3v = if kmax >= 1 {
-            load_rows8(data, &o, 1)
+            load_rows8(data, &o, 1 << sd)
         } else {
             i32x8::splat(0)
         };
@@ -734,15 +1745,15 @@ pub(crate) fn row_pass_inner(
             prev1v = next1v;
             next1v = next3v;
             next3v = if k + 3 <= kmax {
-                load_rows8(data, &o, k + 3)
+                load_rows8(data, &o, (k + 3) << sd)
             } else {
                 i32x8::splat(0)
             };
-            let cur = load_rows8(data, &o, k);
+            let cur = load_rows8(data, &o, k << sd);
             store_rows8(
                 data,
                 &o,
-                k,
+                k << sd,
                 lifting_even(cur, prev1v, next1v, prev3v, next3v),
             );
             k += 2;
@@ -751,20 +1762,20 @@ pub(crate) fn row_pass_inner(
         // — Prediction (odd k) ————————————————————————————————————————————————
         if kmax >= 1 {
             let mut k = 1usize;
-            prev1v = load_rows8(data, &o, k - 1); // data[0] per row
+            prev1v = load_rows8(data, &o, (k - 1) << sd);
             if k < kmax {
-                next1v = load_rows8(data, &o, k + 1);
-                let cur = load_rows8(data, &o, k);
-                store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+                next1v = load_rows8(data, &o, (k + 1) << sd);
+                let cur = load_rows8(data, &o, k << sd);
+                store_rows8(data, &o, k << sd, predict_avg(cur, prev1v, next1v));
             } else {
                 // k == kmax: boundary — only one odd sample, += prev
-                let cur = load_rows8(data, &o, k);
-                store_rows8(data, &o, k, cur + prev1v);
+                let cur = load_rows8(data, &o, k << sd);
+                store_rows8(data, &o, k << sd, cur + prev1v);
                 next1v = i32x8::splat(0);
             }
 
             next3v = if border >= 3 {
-                load_rows8(data, &o, k + 3)
+                load_rows8(data, &o, (k + 3) << sd)
             } else {
                 i32x8::splat(0)
             };
@@ -774,12 +1785,12 @@ pub(crate) fn row_pass_inner(
                 prev3v = prev1v;
                 prev1v = next1v;
                 next1v = next3v;
-                next3v = load_rows8(data, &o, k + 3);
-                let cur = load_rows8(data, &o, k);
+                next3v = load_rows8(data, &o, (k + 3) << sd);
+                let cur = load_rows8(data, &o, k << sd);
                 store_rows8(
                     data,
                     &o,
-                    k,
+                    k << sd,
                     predict_inner(cur, prev1v, next1v, prev3v, next3v),
                 );
                 k += 2;
@@ -789,11 +1800,11 @@ pub(crate) fn row_pass_inner(
                 prev1v = next1v;
                 next1v = next3v;
                 next3v = i32x8::splat(0);
-                let cur = load_rows8(data, &o, k);
+                let cur = load_rows8(data, &o, k << sd);
                 if k < kmax {
-                    store_rows8(data, &o, k, predict_avg(cur, prev1v, next1v));
+                    store_rows8(data, &o, k << sd, predict_avg(cur, prev1v, next1v));
                 } else {
-                    store_rows8(data, &o, k, cur + prev1v);
+                    store_rows8(data, &o, k << sd, cur + prev1v);
                 }
                 k += 2;
             }
@@ -907,8 +1918,10 @@ fn inverse_wavelet_transform_from(
     while s >= subsample {
         let sd = s_degree as usize;
 
-        // When s == 1, column indices are contiguous → use SIMD.
-        let use_simd = s == 1;
+        // Column pass SIMD: enabled for s=1,2,4 using stride-aware load8s/store8s.
+        // For s=2 the load uses vld2q_s16 (deinterleave even/odd), for s=4 vld4q_s16.
+        // The scalar else-branches below are now only reached for s>4 (s=8, s=16).
+        let use_simd = s <= 4;
 
         // ── Column pass (transposed) ──────────────────────────────────────────
         {
@@ -928,10 +1941,10 @@ fn inverse_wavelet_transform_from(
                 let off = (1 << sd) * stride;
                 if use_simd {
                     for ci in (0..simd_cols).step_by(8) {
-                        store8_i32(&mut st2, ci, load8(data, off + ci));
+                        store8_i32(&mut st2, ci, load8s(data, off + ci * s, s));
                     }
                     for ci in simd_cols..num_cols {
-                        st2[ci] = data[off + ci] as i32;
+                        st2[ci] = data[off + ci * s] as i32;
                     }
                 } else {
                     for (ci, col) in (0..width).step_by(s).enumerate() {
@@ -944,41 +1957,43 @@ fn inverse_wavelet_transform_from(
                 }
             }
 
+            // Split even pass into: main (k+3 <= kmax → n3 always in-bounds) and
+            // tail (k+3 > kmax → n3 = 0), mirroring the odd pass structure.
+            // This hoists the `has_n3` branch out of the ci inner loop so that
+            // the hot path (≥97% of k-iterations) has no runtime conditional.
             let mut k = 0usize;
-            while k <= kmax {
+            // Main: n3 always available
+            while k + 3 <= kmax {
                 let k_off = (k << sd) * stride;
-                let has_n3 = k + 3 <= kmax;
-                let n3_off = if has_n3 { ((k + 3) << sd) * stride } else { 0 };
-
+                let n3_off = ((k + 3) << sd) * stride;
                 if use_simd {
-                    let zero8 = i32x8::splat(0);
                     let mut ci = 0usize;
                     while ci < simd_cols {
                         let vp3 = load8_i32(&st0, ci);
                         let vp1 = load8_i32(&st1, ci);
                         let vn1 = load8_i32(&st2, ci);
-                        let vn3 = if has_n3 {
-                            load8(data, n3_off + ci)
-                        } else {
-                            zero8
-                        };
-                        let cur = load8(data, k_off + ci);
-                        store8(data, k_off + ci, lifting_even(cur, vp1, vn1, vp3, vn3));
+                        let vn3 = load8s(data, n3_off + ci * s, s);
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(
+                            data,
+                            k_off + ci * s,
+                            s,
+                            lifting_even(cur, vp1, vn1, vp3, vn3),
+                        );
                         store8_i32(&mut st0, ci, vp1);
                         store8_i32(&mut st1, ci, vn1);
                         store8_i32(&mut st2, ci, vn3);
                         ci += 8;
                     }
-                    // scalar tail
                     while ci < num_cols {
                         let p3 = st0[ci];
                         let p1 = st1[ci];
                         let n1 = st2[ci];
-                        let n3 = if has_n3 { data[n3_off + ci] as i32 } else { 0 };
+                        let n3 = data[n3_off + ci * s] as i32;
                         let a = p1 + n1;
-                        let c = p3 + n3;
-                        let idx = k_off + ci;
-                        data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
+                        let idx = k_off + ci * s;
+                        data[idx] =
+                            (data[idx] as i32 - (((a << 3) + a - (p3 + n3) + 16) >> 5)) as i16;
                         st0[ci] = p1;
                         st1[ci] = n1;
                         st2[ci] = n3;
@@ -989,16 +2004,63 @@ fn inverse_wavelet_transform_from(
                         let p3 = st0[ci];
                         let p1 = st1[ci];
                         let n1 = st2[ci];
-                        let n3 = if has_n3 { data[n3_off + col] as i32 } else { 0 };
-
+                        let n3 = data[n3_off + col] as i32;
                         let a = p1 + n1;
                         let c = p3 + n3;
                         let idx = k_off + col;
                         data[idx] = (data[idx] as i32 - (((a << 3) + a - c + 16) >> 5)) as i16;
-
                         st0[ci] = p1;
                         st1[ci] = n1;
                         st2[ci] = n3;
+                    }
+                }
+                k += 2;
+            }
+            // Tail: k+3 > kmax → n3 = 0
+            while k <= kmax {
+                let k_off = (k << sd) * stride;
+                if use_simd {
+                    let zero8 = i32x8::splat(0);
+                    let mut ci = 0usize;
+                    while ci < simd_cols {
+                        let vp3 = load8_i32(&st0, ci);
+                        let vp1 = load8_i32(&st1, ci);
+                        let vn1 = load8_i32(&st2, ci);
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(
+                            data,
+                            k_off + ci * s,
+                            s,
+                            lifting_even(cur, vp1, vn1, vp3, zero8),
+                        );
+                        store8_i32(&mut st0, ci, vp1);
+                        store8_i32(&mut st1, ci, vn1);
+                        store8_i32(&mut st2, ci, zero8);
+                        ci += 8;
+                    }
+                    while ci < num_cols {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let a = p1 + n1;
+                        let idx = k_off + ci * s;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - p3 + 16) >> 5)) as i16;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = 0;
+                        ci += 1;
+                    }
+                } else {
+                    for (ci, col) in (0..width).step_by(s).enumerate() {
+                        let p3 = st0[ci];
+                        let p1 = st1[ci];
+                        let n1 = st2[ci];
+                        let a = p1 + n1;
+                        let idx = k_off + col;
+                        data[idx] = (data[idx] as i32 - (((a << 3) + a - p3 + 16) >> 5)) as i16;
+                        st0[ci] = p1;
+                        st1[ci] = n1;
+                        st2[ci] = 0;
                     }
                 }
                 k += 2;
@@ -1015,18 +2077,18 @@ fn inverse_wavelet_transform_from(
                     if use_simd {
                         let mut ci = 0usize;
                         while ci < simd_cols {
-                            let vp = load8(data, km1_off + ci);
-                            let vn = load8(data, kp1_off + ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                            let vp = load8s(data, km1_off + ci * s, s);
+                            let vn = load8s(data, kp1_off + ci * s, s);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(data, k_off + ci * s, s, predict_avg(cur, vp, vn));
                             store8_i32(&mut st0, ci, vp);
                             store8_i32(&mut st1, ci, vn);
                             ci += 8;
                         }
                         while ci < num_cols {
-                            let p = data[km1_off + ci] as i32;
-                            let n = data[kp1_off + ci] as i32;
-                            let idx = k_off + ci;
+                            let p = data[km1_off + ci * s] as i32;
+                            let n = data[kp1_off + ci * s] as i32;
+                            let idx = k_off + ci * s;
                             data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
                             st0[ci] = p;
                             st1[ci] = n;
@@ -1045,9 +2107,9 @@ fn inverse_wavelet_transform_from(
                 } else if use_simd {
                     let mut ci = 0usize;
                     while ci < simd_cols {
-                        let vp = load8(data, km1_off + ci);
-                        let cur = load8(data, k_off + ci);
-                        store8(data, k_off + ci, cur + vp);
+                        let vp = load8s(data, km1_off + ci * s, s);
+                        let cur = load8s(data, k_off + ci * s, s);
+                        store8s(data, k_off + ci * s, s, cur + vp);
                         store8_i32(&mut st0, ci, vp);
                         ci += 8;
                     }
@@ -1055,8 +2117,8 @@ fn inverse_wavelet_transform_from(
                         *v = 0;
                     }
                     while ci < num_cols {
-                        let p = data[km1_off + ci] as i32;
-                        let idx = k_off + ci;
+                        let p = data[km1_off + ci * s] as i32;
+                        let idx = k_off + ci * s;
                         data[idx] = (data[idx] as i32 + p) as i16;
                         st0[ci] = p;
                         st1[ci] = 0;
@@ -1077,11 +2139,11 @@ fn inverse_wavelet_transform_from(
                     if use_simd {
                         let mut ci = 0usize;
                         while ci < simd_cols {
-                            store8_i32(&mut st2, ci, load8(data, off + ci));
+                            store8_i32(&mut st2, ci, load8s(data, off + ci * s, s));
                             ci += 8;
                         }
                         while ci < num_cols {
-                            st2[ci] = data[off + ci] as i32;
+                            st2[ci] = data[off + ci * s] as i32;
                             ci += 1;
                         }
                     } else {
@@ -1103,9 +2165,14 @@ fn inverse_wavelet_transform_from(
                             let vp3 = load8_i32(&st0, ci);
                             let vp1 = load8_i32(&st1, ci);
                             let vn1 = load8_i32(&st2, ci);
-                            let vn3 = load8(data, n3_off + ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, predict_inner(cur, vp1, vn1, vp3, vn3));
+                            let vn3 = load8s(data, n3_off + ci * s, s);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(
+                                data,
+                                k_off + ci * s,
+                                s,
+                                predict_inner(cur, vp1, vn1, vp3, vn3),
+                            );
                             store8_i32(&mut st0, ci, vp1);
                             store8_i32(&mut st1, ci, vn1);
                             store8_i32(&mut st2, ci, vn3);
@@ -1115,9 +2182,9 @@ fn inverse_wavelet_transform_from(
                             let p3 = st0[ci];
                             let p1 = st1[ci];
                             let n1 = st2[ci];
-                            let n3 = data[n3_off + ci] as i32;
+                            let n3 = data[n3_off + ci * s] as i32;
                             let a = p1 + n1;
-                            let idx = k_off + ci;
+                            let idx = k_off + ci * s;
                             data[idx] =
                                 (data[idx] as i32 + (((a << 3) + a - (p3 + n3) + 8) >> 4)) as i16;
                             st0[ci] = p1;
@@ -1155,8 +2222,8 @@ fn inverse_wavelet_transform_from(
                             while ci < simd_cols {
                                 let vp = load8_i32(&st1, ci);
                                 let vn = load8_i32(&st2, ci);
-                                let cur = load8(data, k_off + ci);
-                                store8(data, k_off + ci, predict_avg(cur, vp, vn));
+                                let cur = load8s(data, k_off + ci * s, s);
+                                store8s(data, k_off + ci * s, s, predict_avg(cur, vp, vn));
                                 store8_i32(&mut st1, ci, vn);
                                 store8_i32(&mut st2, ci, i32x8::splat(0));
                                 ci += 8;
@@ -1164,7 +2231,7 @@ fn inverse_wavelet_transform_from(
                             while ci < num_cols {
                                 let p = st1[ci];
                                 let n = st2[ci];
-                                let idx = k_off + ci;
+                                let idx = k_off + ci * s;
                                 data[idx] = (data[idx] as i32 + ((p + n + 1) >> 1)) as i16;
                                 st1[ci] = n;
                                 st2[ci] = 0;
@@ -1184,15 +2251,15 @@ fn inverse_wavelet_transform_from(
                         let mut ci = 0usize;
                         while ci < simd_cols {
                             let vp = load8_i32(&st1, ci);
-                            let cur = load8(data, k_off + ci);
-                            store8(data, k_off + ci, cur + vp);
+                            let cur = load8s(data, k_off + ci * s, s);
+                            store8s(data, k_off + ci * s, s, cur + vp);
                             store8_i32(&mut st1, ci, load8_i32(&st2, ci));
                             store8_i32(&mut st2, ci, i32x8::splat(0));
                             ci += 8;
                         }
                         while ci < num_cols {
                             let p = st1[ci];
-                            let idx = k_off + ci;
+                            let idx = k_off + ci * s;
                             data[idx] = (data[idx] as i32 + p) as i16;
                             st1[ci] = st2[ci];
                             st2[ci] = 0;
@@ -1213,7 +2280,8 @@ fn inverse_wavelet_transform_from(
         }
 
         // ── Row pass ─────────────────────────────────────────────────────────
-        row_pass_inner(data, width, height, stride, s, sd, use_simd);
+        // Row pass SIMD works for any s — always enable it.
+        row_pass_inner(data, width, height, stride, s, sd, true);
 
         s >>= 1;
         s_degree = s_degree.saturating_sub(1);
@@ -1479,70 +2547,55 @@ impl Iw44Image {
                         .for_each(|(out_row, row_data)| {
                             let row = ph - 1 - out_row; // DjVu rows are bottom-to-top
                             let y_off = row * y_plane.stride;
-                            let mut y_norm = vec![0i32; pw];
-                            let mut cb_norm = vec![0i32; pw];
-                            let mut cr_norm = vec![0i32; pw];
-                            for (col, v) in y_norm.iter_mut().enumerate() {
-                                *v = normalize(y_plane.data[y_off + col]);
-                            }
                             if chroma_half {
                                 let c_row = row / 2;
                                 let cb_off = c_row * cb_plane.stride;
                                 let cr_off = c_row * cr_plane.stride;
-                                for col in 0..pw {
-                                    let c_col = col / 2;
-                                    cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
-                                    cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
-                                }
+                                ycbcr_row_from_i16_half(
+                                    &y_plane.data[y_off..y_off + pw],
+                                    &cb_plane.data[cb_off..],
+                                    &cr_plane.data[cr_off..],
+                                    row_data,
+                                    pw,
+                                );
                             } else {
                                 let c_off = row * cb_plane.stride;
-                                for col in 0..pw {
-                                    cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                                    cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                                }
+                                ycbcr_row_from_i16(
+                                    &y_plane.data[y_off..y_off + pw],
+                                    &cb_plane.data[c_off..c_off + pw],
+                                    &cr_plane.data[c_off..c_off + pw],
+                                    row_data,
+                                );
                             }
-                            ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, row_data);
                         });
                 }
                 #[cfg(not(feature = "parallel"))]
                 {
-                    let mut y_norm = vec![0i32; pw];
-                    let mut cb_norm = vec![0i32; pw];
-                    let mut cr_norm = vec![0i32; pw];
-
                     for row in 0..ph {
                         let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                         let y_off = row * y_plane.stride;
-
-                        for (col, v) in y_norm.iter_mut().enumerate() {
-                            *v = normalize(y_plane.data[y_off + col]);
-                        }
+                        let row_start = out_row * pw * 4;
 
                         if self.chroma_half {
-                            // Chroma plane is half-resolution: index with row/2, col/2.
                             let c_row = row / 2;
                             let cb_off = c_row * cb_plane.stride;
                             let cr_off = c_row * cr_plane.stride;
-                            for col in 0..pw {
-                                let c_col = col / 2;
-                                cb_norm[col] = normalize(cb_plane.data[cb_off + c_col]);
-                                cr_norm[col] = normalize(cr_plane.data[cr_off + c_col]);
-                            }
+                            ycbcr_row_from_i16_half(
+                                &y_plane.data[y_off..y_off + pw],
+                                &cb_plane.data[cb_off..],
+                                &cr_plane.data[cr_off..],
+                                &mut pm.data[row_start..row_start + pw * 4],
+                                pw,
+                            );
                         } else {
                             let c_off = row * cb_plane.stride;
-                            for col in 0..pw {
-                                cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                                cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                            }
+                            ycbcr_row_from_i16(
+                                &y_plane.data[y_off..y_off + pw],
+                                &cb_plane.data[c_off..c_off + pw],
+                                &cr_plane.data[c_off..c_off + pw],
+                                &mut pm.data[row_start..row_start + pw * 4],
+                            );
                         }
-
-                        let row_start = out_row * pw * 4;
-                        ycbcr_row_to_rgba(
-                            &y_norm,
-                            &cb_norm,
-                            &cr_norm,
-                            &mut pm.data[row_start..row_start + pw * 4],
-                        );
                     }
                 }
                 return Ok(pm);
@@ -1558,28 +2611,15 @@ impl Iw44Image {
             //
             // Uses SIMD via `ycbcr_row_to_rgba` (same as the sub=1 fast path).
             if (2..=8).contains(&sub) && sub.is_power_of_two() {
-                let mut y_norm = vec![0i32; pw];
-                let mut cb_norm = vec![0i32; pw];
-                let mut cr_norm = vec![0i32; pw];
-
                 for row in 0..ph {
                     let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                     let y_off = row * y_plane.stride;
                     let c_off = row * cb_plane.stride;
-
-                    for (col, v) in y_norm.iter_mut().enumerate() {
-                        *v = normalize(y_plane.data[y_off + col]);
-                    }
-                    for col in 0..pw {
-                        cb_norm[col] = normalize(cb_plane.data[c_off + col]);
-                        cr_norm[col] = normalize(cr_plane.data[c_off + col]);
-                    }
-
                     let row_start = out_row * pw * 4;
-                    ycbcr_row_to_rgba(
-                        &y_norm,
-                        &cb_norm,
-                        &cr_norm,
+                    ycbcr_row_from_i16(
+                        &y_plane.data[y_off..y_off + pw],
+                        &cb_plane.data[c_off..c_off + pw],
+                        &cr_plane.data[c_off..c_off + pw],
                         &mut pm.data[row_start..row_start + pw * 4],
                     );
                 }
@@ -2155,6 +3195,34 @@ mod tests {
         assert_eq!(
             scalar_data, simd_data,
             "SIMD row pass must produce identical output to scalar"
+        );
+    }
+
+    /// Same as `simd_row_pass_matches_scalar` but for s=2 (sd=1).
+    ///
+    /// Active rows are every other row; active columns are every other column.
+    /// The generalised SIMD path (8 active rows at a time with stride s) must
+    /// produce the same result as the pure scalar path.
+    #[test]
+    fn simd_row_pass_s2_matches_scalar() {
+        let width = 64usize;
+        let height = 32usize;
+        let stride = width;
+        let n = stride * height;
+        let s = 2usize;
+        let sd = 1usize;
+
+        let initial: Vec<i16> = (0..n).map(|i| ((i * 7 + 13) % 511) as i16 - 255).collect();
+
+        let mut scalar_data = initial.clone();
+        super::row_pass_inner(&mut scalar_data, width, height, stride, s, sd, false);
+
+        let mut simd_data = initial.clone();
+        super::row_pass_inner(&mut simd_data, width, height, stride, s, sd, true);
+
+        assert_eq!(
+            scalar_data, simd_data,
+            "SIMD row pass (s=2) must produce identical output to scalar"
         );
     }
 }
