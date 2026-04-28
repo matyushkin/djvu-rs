@@ -1426,21 +1426,34 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
     // the s=1 branch is a single cmp+b (not taken on s≠1) rather than a 5-branch
     // dispatch chain inside load8s_neon.
     if s == 1 {
-        #[allow(unsafe_code)]
-        return unsafe {
-            // SAFETY: caller ensures phys_off+7 < slice.len().
-            let arr: [i16; 8] = core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
-            i32x8::from([
-                arr[0] as i32,
-                arr[1] as i32,
-                arr[2] as i32,
-                arr[3] as i32,
-                arr[4] as i32,
-                arr[5] as i32,
-                arr[6] as i32,
-                arr[7] as i32,
-            ])
-        };
+        // x86_64 + AVX2 enabled at compile time: `vpmovsxwd ymm, [mem]` is one
+        // instruction (movdqu + vpmovsxwd, fused on most µarchs). Compile-time
+        // gating keeps the hot loop branch-free; runtime detection in this loop
+        // would dominate the kernel.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe { load8s_s1_avx2(slice, phys_off) };
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe {
+                // SAFETY: caller ensures phys_off+7 < slice.len().
+                let arr: [i16; 8] =
+                    core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
+                i32x8::from([
+                    arr[0] as i32,
+                    arr[1] as i32,
+                    arr[2] as i32,
+                    arr[3] as i32,
+                    arr[4] as i32,
+                    arr[5] as i32,
+                    arr[6] as i32,
+                    arr[7] as i32,
+                ])
+            };
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if s == 2 || s == 4 {
@@ -1467,22 +1480,30 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
 fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
     // s=1 fast path: narrow and store contiguously.  Same reasoning as load8s.
     if s == 1 {
-        #[allow(unsafe_code)]
-        return unsafe {
-            // SAFETY: caller ensures phys_off+7 < slice.len().
-            let a = v.to_array();
-            let narrow: [i16; 8] = [
-                a[0] as i16,
-                a[1] as i16,
-                a[2] as i16,
-                a[3] as i16,
-                a[4] as i16,
-                a[5] as i16,
-                a[6] as i16,
-                a[7] as i16,
-            ];
-            core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
-        };
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe { store8s_s1_avx2(slice, phys_off, v) };
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe {
+                // SAFETY: caller ensures phys_off+7 < slice.len().
+                let a = v.to_array();
+                let narrow: [i16; 8] = [
+                    a[0] as i16,
+                    a[1] as i16,
+                    a[2] as i16,
+                    a[3] as i16,
+                    a[4] as i16,
+                    a[5] as i16,
+                    a[6] as i16,
+                    a[7] as i16,
+                ];
+                core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
+            };
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if s == 2 || s == 4 {
@@ -1522,6 +1543,56 @@ unsafe fn load8s_neon(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
     let hi = vmovl_high_s16(target);
     let arr = core::mem::transmute::<[int32x4_t; 2], [i32; 8]>([lo, hi]);
     i32x8::from(arr)
+}
+
+// ---- x86_64 AVX2 stride-1 load/store ---------------------------------------
+//
+// `vpmovsxwd ymm, [mem]` sign-extends 8×i16 → 8×i32 in one fused load+convert.
+// Truncating narrow i32x8 → i16x8 has no native AVX2 instruction (the only
+// pack ops saturate); we emulate it with a per-lane byte shuffle that gathers
+// the low halfword of each i32 lane, then a 64-bit lane permute to combine
+// the two 128-bit halves.
+//
+// `i32x8` ↔ `__m256i` are layout-compatible on x86_64 with AVX2 enabled
+// (`wide` uses `__m256i` internally), and the existing `C16: i32x8 = transmute([16i32; 8])`
+// pattern at line ~1639 already relies on this. Both are 32 bytes.
+
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn load8s_s1_avx2(slice: &[i16], phys_off: usize) -> i32x8 {
+    use core::arch::x86_64::*;
+    let ptr = slice.as_ptr().add(phys_off) as *const __m128i;
+    let v16 = _mm_loadu_si128(ptr);
+    let v32 = _mm256_cvtepi16_epi32(v16);
+    let arr: [i32; 8] = core::mem::transmute(v32);
+    i32x8::from(arr)
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn store8s_s1_avx2(slice: &mut [i16], phys_off: usize, v: i32x8) {
+    use core::arch::x86_64::*;
+    let arr: [i32; 8] = v.to_array();
+    let v32: __m256i = core::mem::transmute(arr);
+    // Per-lane byte shuffle: pack low halfwords of each i32 into the low 64 bits
+    // of each 128-bit lane. _mm256_shuffle_epi8 is per-128-bit-lane, so the same
+    // 16-byte mask applies to both halves.
+    let shuf = _mm256_setr_epi8(
+        0, 1, 4, 5, 8, 9, 12, 13, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 4, 5, 8, 9, 12, 13, -1, -1,
+        -1, -1, -1, -1, -1, -1,
+    );
+    let shuffled = _mm256_shuffle_epi8(v32, shuf);
+    // 64-bit lanes after shuffle: [lo_packed | zeros | hi_packed | zeros].
+    // Permute to bring [lo_packed | hi_packed] into the low 128 bits.
+    // Imm 0b00_00_10_00 = lane 0 → 0 (lo_packed), lane 1 → 2 (hi_packed).
+    let permuted = _mm256_permute4x64_epi64::<0b00_00_10_00>(shuffled);
+    let result = _mm256_castsi256_si128(permuted);
+    let ptr = slice.as_mut_ptr().add(phys_off) as *mut __m128i;
+    _mm_storeu_si128(ptr, result);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -3520,6 +3591,66 @@ mod tests {
             ycbcr_raw_scalar(&y, &cb, &cr, &mut want);
 
             assert_eq!(got, want, "AVX2 raw mismatch at width {}", width);
+        }
+    }
+
+    /// AVX2 stride-1 load/store must round-trip the full i16 range
+    /// bit-exactly through an i32x8.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[test]
+    fn load8s_s1_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        let raw_vals: [i16; 8] = [-32768, -8192, -64, -1, 0, 63, 8191, 32767];
+        let n = 64;
+        let buf: Vec<i16> = (0..n).map(|i| raw_vals[i % raw_vals.len()]).collect();
+        for phys_off in 0..(n - 8) {
+            #[allow(unsafe_code)]
+            let got = unsafe { super::load8s_s1_avx2(&buf, phys_off) };
+            let want = super::load8s(&buf, phys_off, 1);
+            assert_eq!(
+                got.to_array(),
+                want.to_array(),
+                "AVX2 load8s_s1 mismatch at phys_off {}",
+                phys_off
+            );
+        }
+    }
+
+    /// AVX2 stride-1 store must truncate i32→i16 (drop upper 16 bits, no
+    /// saturation) matching the scalar `as i16` cast for every input.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[test]
+    fn store8s_s1_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        // Inputs that exercise truncation: values that don't fit in i16,
+        // negative values, and boundaries.
+        let raw_vals: [i32; 8] = [i32::MIN, -100_000, -32768, -1, 0, 32767, 100_000, i32::MAX];
+        for offset in 0..8usize {
+            let mut input = [0i32; 8];
+            for j in 0..8 {
+                input[j] = raw_vals[(j + offset) % 8];
+            }
+            let v = wide::i32x8::from(input);
+
+            // AVX2 store with surrounding sentinel bytes to detect over-write.
+            let mut buf_avx2 = vec![0xABCDu16 as i16; 32];
+            #[allow(unsafe_code)]
+            unsafe {
+                super::store8s_s1_avx2(&mut buf_avx2, 8, v);
+            }
+            // Scalar reference using stride-1 store (which on this host is
+            // also the AVX2 path; route through stride-2 to force scalar).
+            let mut buf_scalar = vec![0xABCDu16 as i16; 32];
+            for j in 0..8 {
+                buf_scalar[8 + j] = input[j] as i16;
+            }
+            assert_eq!(buf_avx2, buf_scalar, "AVX2 store8s_s1 mismatch");
         }
     }
 
