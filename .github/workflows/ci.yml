@@ -147,6 +147,15 @@ jobs:
       - name: cargo build --no-default-features --target wasm32-unknown-unknown
         run: cargo build --no-default-features --target wasm32-unknown-unknown
 
+      # simd128 build verification (#190 Phase 1). The IW44 hot kernels gate on
+      # `cfg(all(target_arch = "wasm32", target_feature = "simd128"))`; without
+      # this step the simd128 path is reachable only via local opt-in and would
+      # silently bit-rot.
+      - name: cargo check --target wasm32-unknown-unknown +simd128
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+        run: cargo check --target wasm32-unknown-unknown --features wasm
+
       # Consumer-side no_std smoke (#227). The wasm32 build above proves the
       # lib *itself* is no_std-clean; this sub-crate proves the four codec
       # entry points (iff::parse_form, bzz_new::bzz_decode, jb2::decode_dict,
