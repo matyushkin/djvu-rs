@@ -227,6 +227,15 @@ fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
             return;
         }
     }
+    // WASM simd128 is compile-time only; no runtime detection.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_simd128_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), out.as_mut_ptr(), w);
+        }
+        return;
+    }
     #[allow(unreachable_code)]
     {
         let mut y_norm = vec![0i32; w];
@@ -281,6 +290,20 @@ fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mu
             }
             return;
         }
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            ycbcr_simd128_raw_half(
+                y.as_ptr(),
+                cb_half.as_ptr(),
+                cr_half.as_ptr(),
+                out.as_mut_ptr(),
+                w,
+            );
+        }
+        return;
     }
     #[allow(unreachable_code)]
     {
@@ -687,6 +710,178 @@ unsafe fn ycbcr_avx2_raw_half(
     }
     // Scalar tail
     for col in (full16 * 16)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col / 2));
+        let r = normalize(*crp.add(col / 2));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// WASM simd128 fused normalize + YCbCr→RGBA from raw i16 plane data (non-chroma-half).
+///
+/// 8 pixels per iteration, mirroring the AArch64 NEON kernel byte-for-byte.
+/// `v128` is 128 bits → 8×i16, same width as NEON's `int16x8_t`. Saturating
+/// signed-i16 → unsigned-u8 narrow is one instruction (`u8x16_narrow_i16x8`),
+/// equivalent to NEON `vqmovun_s16`.
+///
+/// RGBA byte-interleave is materialised via two `i8x16_shuffle` calls
+/// (constant-mask shuffle, 16 lanes each, picking from {r/g pack, b/alpha pack}).
+/// WASM has no `vst4`-equivalent; the shuffle pair is the simd128 idiom.
+///
+/// `cbp` and `crp` must point to `w` values each (same stride as `yp`).
+#[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "simd128")]
+unsafe fn ycbcr_simd128_raw(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::wasm32::*;
+    let n_min = i16x8_splat(-128);
+    let n_max = i16x8_splat(127);
+    let c128 = i16x8_splat(128);
+    let one = i16x8_splat(1);
+    // Saturating-narrow input ≥ 255 → 255, so any sentinel ≥ 255 produces the
+    // alpha byte without a separate splat-store path.
+    let alpha_src = i16x8_splat(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        // Rounding right shift by 6 + clamp to [-128, 127].
+        // Same overflow-safe form as the AVX2 path: `(v >> 6) + ((v as u16 >> 5) & 1)`.
+        // Avoids the i16-overflow that would happen with `(v + 32) >> 6` for v near
+        // `i16::MAX` and matches the wider intermediate that NEON `vrshrq_n_s16` uses.
+        let load_norm_clamp = |p: *const i16| -> v128 {
+            let v = v128_load(p as *const v128);
+            let high = i16x8_shr(v, 6);
+            let bit5 = v128_and(u16x8_shr(v, 5), one);
+            let n = i16x8_add(high, bit5);
+            i16x8_max(i16x8_min(n, n_max), n_min)
+        };
+        let yc = load_norm_clamp(yp.add(off));
+        let cbc = load_norm_clamp(cbp.add(off));
+        let crc = load_norm_clamp(crp.add(off));
+
+        // Same i16 arithmetic as NEON / AVX2 — all intermediates fit in i16.
+        let y128 = i16x8_add(yc, c128);
+        let t2 = i16x8_add(crc, i16x8_shr(crc, 1));
+        let t3 = i16x8_sub(y128, i16x8_shr(cbc, 2));
+        let r16 = i16x8_add(y128, t2);
+        let g16 = i16x8_sub(t3, i16x8_shr(t2, 1));
+        let b16 = i16x8_add(t3, i16x8_shl(cbc, 1));
+
+        // Saturating signed→unsigned narrow: i16x8 → u8x16 (clamps to [0, 255]).
+        // Pack two i16x8 vectors into one u8x16 in a single op — exactly NEON's
+        // `vqmovun_s16` semantics, just in the wider 16-lane form.
+        let v_rg = u8x16_narrow_i16x8(r16, g16);
+        let v_ba = u8x16_narrow_i16x8(b16, alpha_src);
+
+        // Interleave to RGBA: pixel n = (r_n, g_n, b_n, a_n).
+        // v_rg lanes: 0..7 = r, 8..15 = g. v_ba lanes: 0..7 = b, 8..15 = 255.
+        // Constant byte-shuffle picks {r_n=v_rg[n], g_n=v_rg[n+8], b_n=v_ba[n+0], a_n=v_ba[n+8]}.
+        let out0 =
+            i8x16_shuffle::<0, 8, 16, 24, 1, 9, 17, 25, 2, 10, 18, 26, 3, 11, 19, 27>(v_rg, v_ba);
+        let out1 =
+            i8x16_shuffle::<4, 12, 20, 28, 5, 13, 21, 29, 6, 14, 22, 30, 7, 15, 23, 31>(v_rg, v_ba);
+
+        v128_store(outp.add(off * 4) as *mut v128, out0);
+        v128_store(outp.add(off * 4 + 16) as *mut v128, out1);
+    }
+    // Scalar tail
+    for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col));
+        let r = normalize(*crp.add(col));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// WASM simd128 fused normalize + YCbCr→RGBA, chroma-half variant.
+///
+/// 8 luma + 4 chroma per iteration. Chroma is loaded as 8 bytes via
+/// `v128_load64_zero` (low half = 4 i16, high half = 0), normalized at
+/// i16 width across all 8 lanes (high lanes normalize to 0, unused), and
+/// nearest-neighbour upsampled to 8 lanes via a constant byte shuffle that
+/// duplicates each of the low 4 i16 lanes (`[a,b,c,d,_,_,_,_]` → `[a,a,b,b,c,c,d,d]`).
+#[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "simd128")]
+unsafe fn ycbcr_simd128_raw_half(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::wasm32::*;
+    let n_min = i16x8_splat(-128);
+    let n_max = i16x8_splat(127);
+    let c128 = i16x8_splat(128);
+    let one = i16x8_splat(1);
+    let alpha_src = i16x8_splat(255);
+
+    let full8 = w / 8;
+    for i in 0..full8 {
+        let off = i * 8;
+        let c_off = i * 4;
+        // Y: full 8-lane load + normalize (same as non-half path).
+        let load_norm_clamp = |p: *const i16| -> v128 {
+            let v = v128_load(p as *const v128);
+            let high = i16x8_shr(v, 6);
+            let bit5 = v128_and(u16x8_shr(v, 5), one);
+            let n = i16x8_add(high, bit5);
+            i16x8_max(i16x8_min(n, n_max), n_min)
+        };
+        let yc = load_norm_clamp(yp.add(off));
+
+        // Chroma: load 4 i16 = 8 bytes into low half of v128, zero upper half.
+        // Normalize on the full vector (upper 4 lanes normalize to 0, harmless).
+        let load_norm_chroma_4 = |p: *const i16| -> v128 {
+            let v = v128_load64_zero(p as *const u64);
+            let high = i16x8_shr(v, 6);
+            let bit5 = v128_and(u16x8_shr(v, 5), one);
+            let n = i16x8_add(high, bit5);
+            i16x8_max(i16x8_min(n, n_max), n_min)
+        };
+        let cb4 = load_norm_chroma_4(cbp.add(c_off));
+        let cr4 = load_norm_chroma_4(crp.add(c_off));
+
+        // Upsample each i16 lane into a pair (`zip-low` of self+self).
+        // Byte-level shuffle: bytes 0,1 → 0,1,2,3 ; 2,3 → 4,5,6,7 ; etc.
+        let cbc = i8x16_shuffle::<0, 1, 0, 1, 2, 3, 2, 3, 4, 5, 4, 5, 6, 7, 6, 7>(cb4, cb4);
+        let crc = i8x16_shuffle::<0, 1, 0, 1, 2, 3, 2, 3, 4, 5, 4, 5, 6, 7, 6, 7>(cr4, cr4);
+
+        let y128 = i16x8_add(yc, c128);
+        let t2 = i16x8_add(crc, i16x8_shr(crc, 1));
+        let t3 = i16x8_sub(y128, i16x8_shr(cbc, 2));
+        let r16 = i16x8_add(y128, t2);
+        let g16 = i16x8_sub(t3, i16x8_shr(t2, 1));
+        let b16 = i16x8_add(t3, i16x8_shl(cbc, 1));
+
+        let v_rg = u8x16_narrow_i16x8(r16, g16);
+        let v_ba = u8x16_narrow_i16x8(b16, alpha_src);
+        let out0 =
+            i8x16_shuffle::<0, 8, 16, 24, 1, 9, 17, 25, 2, 10, 18, 26, 3, 11, 19, 27>(v_rg, v_ba);
+        let out1 =
+            i8x16_shuffle::<4, 12, 20, 28, 5, 13, 21, 29, 6, 14, 22, 30, 7, 15, 23, 31>(v_rg, v_ba);
+        v128_store(outp.add(off * 4) as *mut v128, out0);
+        v128_store(outp.add(off * 4 + 16) as *mut v128, out1);
+    }
+    for col in (full8 * 8)..w {
         let y = normalize(*yp.add(col));
         let b = normalize(*cbp.add(col / 2));
         let r = normalize(*crp.add(col / 2));
