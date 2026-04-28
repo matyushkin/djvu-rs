@@ -5,3 +5,22 @@ Cargo.lock
 scripts/djvulibre_bench
 scripts/djvulibre_bench_ci
 examples/wasm/pkg/
+
+# macOS Finder metadata
+.DS_Store
+
+# Local profiling output (samply, perf, custom JSON dumps)
+/profile.json.gz
+/profile_*.json
+/profile_*.json.gz
+
+# Stray dev artefacts (accidental render output, ad-hoc binaries)
+/0
+/rust_out
+
+# Local debug/profiling examples kept out-of-tree
+/examples/_debug_*.rs
+
+# Claude Code local state (user-specific, never shared)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
