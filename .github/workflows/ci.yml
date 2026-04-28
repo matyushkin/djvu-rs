@@ -147,6 +147,14 @@ jobs:
       - name: cargo build --no-default-features --target wasm32-unknown-unknown
         run: cargo build --no-default-features --target wasm32-unknown-unknown
 
+      # Consumer-side no_std smoke (#227). The wasm32 build above proves the
+      # lib *itself* is no_std-clean; this sub-crate proves the four codec
+      # entry points (iff::parse_form, bzz_new::bzz_decode, jb2::decode_dict,
+      # iw44_new::Iw44Image::decode_chunk) are *callable* from a `#![no_std]`
+      # consumer. A leaked std type in any of those signatures fails here.
+      - name: cargo build (no_std smoke crate, wasm32)
+        run: cargo build --manifest-path tests/no_std_smoke/Cargo.toml --target wasm32-unknown-unknown
+
   # ── Tesseract OCR integration ────────────────────────────────────────────────
   ocr-tesseract:
     name: OCR (tesseract)

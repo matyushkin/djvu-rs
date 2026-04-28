@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "djvu-rs-no-std-smoke"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "No-op crate that proves djvu-rs codec entry points are reachable from a `#![no_std]` consumer."
+
+# Excluded from the root workspace (see root Cargo.toml `workspace.exclude`)
+# so it can pin its own `default-features = false` build of djvu-rs without
+# fighting the workspace feature unification.
+
+[dependencies]
+djvu-rs = { path = "../..", default-features = false }
+
+[lib]
+crate-type = ["rlib"]

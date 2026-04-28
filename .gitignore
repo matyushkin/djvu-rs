@@ -1,5 +1,6 @@
 /target
 /fuzz/target
+/tests/no_std_smoke/target
 Cargo.lock
 *.orig
 scripts/djvulibre_bench
