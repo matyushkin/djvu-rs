@@ -3639,14 +3639,14 @@ mod tests {
             let v = wide::i32x8::from(input);
 
             // AVX2 store with surrounding sentinel bytes to detect over-write.
-            let mut buf_avx2 = vec![0xABCDi16; 32];
+            let mut buf_avx2 = vec![0xABCDu16 as i16; 32];
             #[allow(unsafe_code)]
             unsafe {
                 super::store8s_s1_avx2(&mut buf_avx2, 8, v);
             }
             // Scalar reference using stride-1 store (which on this host is
             // also the AVX2 path; route through stride-2 to force scalar).
-            let mut buf_scalar = vec![0xABCDi16; 32];
+            let mut buf_scalar = vec![0xABCDu16 as i16; 32];
             for j in 0..8 {
                 buf_scalar[8 + j] = input[j] as i16;
             }
