@@ -162,55 +162,60 @@ fn encode_num(zp: &mut ZpEncoder, ctx: &mut NumContext, low: i32, high: i32, val
     }
 }
 
-// ── Bitmap pixel helper ────────────────────────────────────────────────────────
-
-/// Return the pixel value (1 = black, 0 = white) at bitmap coordinates (col, y).
-/// Out-of-bounds → 0.
-#[inline(always)]
-fn pix_bm(bm: &Bitmap, col: i32, y: i32) -> u32 {
-    if col < 0 || y < 0 || col >= bm.width as i32 || y >= bm.height as i32 {
-        return 0;
-    }
-    bm.get(col as u32, y as u32) as u32
-}
-
 // ── Direct bitmap encoding (10-bit context) ───────────────────────────────────
 
 /// Encode a bitmap using the direct 10-pixel-context method.
 ///
 /// Mirrors `decode_bitmap_direct` in `jb2` exactly.  Iterates rows
-/// top-to-bottom (jbm_row = height-1 down to 0), which corresponds to
-/// Bitmap y = 0 (top) up to height-1 (bottom).
+/// top-to-bottom, which corresponds to Bitmap y = 0 (top) up to height-1 (bottom).
+///
+/// The bitmap is first expanded to a flat byte-per-pixel array with 2 zero rows
+/// above the image and 4 zero columns to the right of each row.  This eliminates
+/// all per-pixel bounds checking and bit-manipulation in the inner loop.
+#[allow(unsafe_code)]
 fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
     debug_assert_eq!(ctx.len(), 1024);
-    let w = bm.width as i32;
-    let h = bm.height as i32;
+    let w = bm.width as usize;
+    let h = bm.height as usize;
+    // Row stride with 4 zero-padding columns so col+2 and col+3 are always in-bounds.
+    let pw = w + 4;
 
-    for jbm_row in (0..h).rev() {
-        // Map JB2 internal row (0=bottom) to Bitmap y (0=top).
-        let bm_y = h - 1 - jbm_row; // current row in Bitmap space
-        let bm_y_p1 = bm_y - 1; // jbm_row+1 in Bitmap space (one row above = smaller y)
-        let bm_y_p2 = bm_y - 2; // jbm_row+2 in Bitmap space
+    // Expand bitmap to byte-per-pixel (0 or 1).
+    // Layout: rows 0..2 are zero (padding for bm_y_p2/bm_y_p1 when bm_y < 2),
+    //         rows 2..h+2 hold image rows 0..h.
+    // Mapping: padded_index(bm_y_p2) = bm_y, padded_index(bm_y_p1) = bm_y+1,
+    //          padded_index(cur) = bm_y+2.
+    let mut pixels = vec![0u8; (h + 2) * pw];
+    for y in 0..h {
+        for x in 0..w {
+            pixels[(y + 2) * pw + x] = bm.get(x as u32, y as u32) as u8;
+        }
+    }
 
-        // Initialise rolling windows at col=0 (col-1 and col-2 are OOB → 0).
+    for bm_y in 0..h {
+        let row_p2 = &pixels[bm_y * pw..(bm_y + 1) * pw];
+        let row_p1 = &pixels[(bm_y + 1) * pw..(bm_y + 2) * pw];
+        let row_cur = &pixels[(bm_y + 2) * pw..(bm_y + 3) * pw];
+
+        // Initialise rolling windows at col=0 (col-1 and col-2 are OOB → 0 via padding).
         //
-        // r2 = 3 bits: (jbm_row+2, col-1), (col), (col+1)
-        //            = 0, pix(0, bm_y_p2), pix(1, bm_y_p2)
-        let mut r2 = pix_bm(bm, 0, bm_y_p2) << 1 | pix_bm(bm, 1, bm_y_p2);
-        // r1 = 5 bits: (jbm_row+1, col-2..col+2) = 0,0, pix(0), pix(1), pix(2)
-        let mut r1 =
-            pix_bm(bm, 0, bm_y_p1) << 2 | pix_bm(bm, 1, bm_y_p1) << 1 | pix_bm(bm, 2, bm_y_p1);
-        // r0 = 2 bits from already-encoded pixels in current row: col-2, col-1 → 0,0
+        // r2 = 3 bits: (bm_y_p2, col-1=0), (col=0), (col+1=1)
+        let mut r2 = (row_p2[0] as u32) << 1 | row_p2[1] as u32;
+        // r1 = 5 bits: (bm_y_p1, col-2=0), (col-1=0), (col=0), (col+1=1), (col+2=2)
+        let mut r1 = (row_p1[0] as u32) << 2 | (row_p1[1] as u32) << 1 | row_p1[2] as u32;
         let mut r0: u32 = 0;
 
         for col in 0..w {
             let idx = ((r2 << 7) | (r1 << 2) | r0) as usize;
-            let bit = pix_bm(bm, col, bm_y) != 0;
-            zp.encode_bit(&mut ctx[idx], bit);
+            let bit = row_cur[col] != 0;
+            // Safety: r2 ≤ 7, r1 ≤ 31, r0 ≤ 3 by the & masks above,
+            // so idx ≤ (7<<7)|(31<<2)|3 = 1023 < ctx.len() = 1024.
+            let ctx_byte = unsafe { ctx.get_unchecked_mut(idx) };
+            zp.encode_bit(ctx_byte, bit);
 
-            // Advance rolling windows (same as decoder).
-            r2 = ((r2 << 1) & 0b111) | pix_bm(bm, col + 2, bm_y_p2);
-            r1 = ((r1 << 1) & 0b11111) | pix_bm(bm, col + 3, bm_y_p1);
+            // Advance rolling windows — no bounds checks: col+2 < w+2 < pw, col+3 < w+3 < pw.
+            r2 = ((r2 << 1) & 0b111) | row_p2[col + 2] as u32;
+            r1 = ((r1 << 1) & 0b11111) | row_p1[col + 3] as u32;
             r0 = ((r0 << 1) & 0b11) | bit as u32;
         }
     }
