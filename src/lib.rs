@@ -122,6 +122,14 @@ pub mod iw44_encode;
 #[cfg(feature = "std")]
 pub mod jb2_encode;
 
+/// FGbz foreground-palette encoder — produces FGbz chunk payloads.
+///
+/// Provides [`fgbz_encode::encode_fgbz`] (palette + optional per-blit
+/// index table) and [`fgbz_encode::decode_fgbz`] (inverse), plus the
+/// [`fgbz_encode::FgbzColor`] palette-entry type.
+#[cfg(feature = "std")]
+pub mod fgbz_encode;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
