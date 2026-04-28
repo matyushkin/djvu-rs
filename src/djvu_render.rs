@@ -432,18 +432,28 @@ fn rgb_to_rgba_scalar(src: &[u8], dst: &mut [u8], start: usize, end: usize) {
     }
 }
 
-/// Q24 ratios `(fg_w << 24) / page_w` and `(fg_h << 24) / page_h` for converting
-/// page-space FRACBITS coords into FG44-space FRACBITS coords. Returns `(0, 0)`
-/// when `fg` is `None` or page dims are zero. Issue #199.
+/// Q24 ratios `(plane_w << 24) / page_w` and `(plane_h << 24) / page_h` for
+/// converting page-space FRACBITS coords into plane-space FRACBITS coords.
+/// Returns `(0, 0)` when `plane` is `None` or page dims are zero. Issue #199.
 #[inline]
-fn fg_q24(fg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
-    match fg {
-        Some(fg) if page_w > 0 && page_h > 0 => (
-            ((fg.width as u64) << 24) / page_w as u64,
-            ((fg.height as u64) << 24) / page_h as u64,
+fn plane_q24(plane: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
+    match plane {
+        Some(p) if page_w > 0 && page_h > 0 => (
+            ((p.width as u64) << 24) / page_w as u64,
+            ((p.height as u64) << 24) / page_h as u64,
         ),
         _ => (0, 0),
     }
+}
+
+#[inline]
+fn fg_q24(fg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
+    plane_q24(fg, page_w, page_h)
+}
+
+#[inline]
+fn bg_q24(bg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
+    plane_q24(bg, page_w, page_h)
 }
 
 /// Sample a pixmap at fractional coordinates using bilinear interpolation.
@@ -1162,10 +1172,14 @@ struct CompositeContext<'a> {
     page_w: u32,
     page_h: u32,
     bg: Option<&'a Pixmap>,
-    /// `bg_subsample.trailing_zeros()` where bg_subsample is 1, 2, 4, or 8.
-    /// Using a shift instead of division avoids a UDIV for each `fx / bg_subsample`
-    /// in the inner pixel loop.
-    bg_shift: u32,
+    /// Q24 ratio `(bg.width << 24) / page_w` for converting page-space FRACBITS
+    /// coordinates to BG-plane FRACBITS coordinates:
+    /// `bg_x = (page_x as u64 * bg_x_q24 as u64) >> 24`. Issue #199 — without
+    /// this scale, page-space `fx` was clamped to `bg.width - 1` whenever the
+    /// BG plane wasn't a power-of-2 of the page (e.g. 1/3-of-page, common for
+    /// scanned colour pages). `0` when `bg` is `None`.
+    bg_x_q24: u64,
+    bg_y_q24: u64,
     mask: Option<&'a crate::bitmap::Bitmap>,
     /// `mask_sub.trailing_zeros()` where mask_sub is 1 (full-res) or 4 (1/4-res).
     /// Using a shift instead of division avoids a UDIV instruction in the hot path.
@@ -1271,7 +1285,9 @@ fn composite_loop_bilinear(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                sample_bilinear(bg, fx >> ctx.bg_shift, fy >> ctx.bg_shift)
+                let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
+                let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+                sample_bilinear(bg, bg_fx, bg_fy)
             } else {
                 (255, 255, 255)
             };
@@ -1288,10 +1304,9 @@ fn composite_loop_bilinear(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
 /// Uses box filter for background sampling and checks a box of mask pixels.
 fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: u32, fy_step: u32) {
     let (w, h) = (ctx.out_w, ctx.out_h);
-    // Precompute bg step in bg-space (avoid per-pixel division in the inner loop).
-    let bg_sh = ctx.bg_shift;
-    let bg_fx_step = fx_step >> bg_sh;
-    let bg_fy_step = fy_step >> bg_sh;
+    // Precompute bg step in bg-space (avoid per-pixel multiply in the inner loop).
+    let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
+    let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
 
     let row_stride = w as usize * 4;
     for (oy, row) in buf
@@ -1301,8 +1316,8 @@ fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
     {
         let oy = oy as u32;
         let fy = (oy + ctx.offset_y) * fy_step;
-        // bg-space fy (shift replaces division by bg_subsample)
-        let bg_fy = fy >> bg_sh;
+        // bg-space fy: page → bg via Q24 ratio.
+        let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
 
         for (ox, pixel) in row.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
@@ -1333,8 +1348,8 @@ fn composite_loop_area_avg(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                // bg-space fx (shift replaces division by bg_subsample)
-                let bg_fx = fx >> bg_sh;
+                // bg-space fx: page → bg via Q24 ratio.
+                let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
                 sample_area_avg(bg, bg_fx, bg_fy, bg_fx_step, bg_fy_step)
             } else {
                 (255, 255, 255)
@@ -1559,12 +1574,14 @@ pub fn render_into(
     let page_w = page.width() as u32;
     let page_h = page.height() as u32;
     let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
+    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
     let ctx = CompositeContext {
         opts,
         page_w,
         page_h,
         bg: bg.as_ref(),
-        bg_shift: bg_subsample.trailing_zeros(),
+        bg_x_q24,
+        bg_y_q24,
         mask: ctx_mask,
         mask_shift,
         fg_palette: fg_palette.as_ref(),
@@ -1665,12 +1682,14 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         let page_w = page.width() as u32;
         let page_h = page.height() as u32;
         let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
         let ctx = CompositeContext {
             opts,
             page_w,
             page_h,
             bg: bg.as_ref(),
-            bg_shift: bg_subsample.trailing_zeros(),
+            bg_x_q24,
+            bg_y_q24,
             mask: ctx_mask,
             mask_shift,
             fg_palette: fg_palette.as_ref(),
@@ -1818,12 +1837,14 @@ pub fn render_region(
     let page_w = page.width() as u32;
     let page_h = page.height() as u32;
     let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
+    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
     let ctx = CompositeContext {
         opts: &region_opts,
         page_w,
         page_h,
         bg: bg.as_ref(),
-        bg_shift: bg_subsample.trailing_zeros(),
+        bg_x_q24,
+        bg_y_q24,
         mask: mask.as_ref(),
         mask_shift: 0,
         fg_palette: fg_palette.as_ref(),
@@ -1939,12 +1960,16 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
     let mut pm = Pixmap::white(w, h);
 
     {
+        let page_w = page.width() as u32;
+        let page_h = page.height() as u32;
+        let (bg_x_q24, bg_y_q24) = bg_q24(Some(&bg), page_w, page_h);
         let ctx = CompositeContext {
             opts,
-            page_w: page.width() as u32,
-            page_h: page.height() as u32,
+            page_w,
+            page_h,
             bg: Some(&bg),
-            bg_shift: bg_subsample.trailing_zeros(),
+            bg_x_q24,
+            bg_y_q24,
             mask: None,
             mask_shift: 0,
             fg_palette: None,
@@ -2030,12 +2055,14 @@ pub fn render_progressive(
         let page_w = page.width() as u32;
         let page_h = page.height() as u32;
         let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
         let ctx = CompositeContext {
             opts,
             page_w,
             page_h,
             bg: bg.as_ref(),
-            bg_shift: bg_subsample.trailing_zeros(),
+            bg_x_q24,
+            bg_y_q24,
             mask: mask.as_ref(),
             mask_shift: 0,
             fg_palette: fg_palette.as_ref(),
@@ -2122,6 +2149,29 @@ mod tests {
     #[test]
     fn fg_q24_returns_zero_when_fg_is_none() {
         assert_eq!(fg_q24(None, 100, 100), (0, 0));
+    }
+
+    /// Issue #199 second-half regression: BG plane is often stored at a
+    /// non-power-of-2 fraction of the page (1/3 is common for 400dpi colour
+    /// scans). Without `bg_x_q24` / `bg_y_q24` page→bg-space scaling the BG
+    /// sampler clamped most of the page to the rightmost BG column.
+    #[test]
+    fn bg_q24_maps_non_pow2_subsample() {
+        // Page 2260×3669 with BG plane 754×1223 (DjVu's 1/3-of-page layout).
+        let bg = Pixmap::white(754, 1223);
+        let (qx, qy) = bg_q24(Some(&bg), 2260, 3669);
+        let frac = 1u64 << FRACBITS;
+        let last_x = 2259u64 * frac;
+        let bg_px = ((last_x * qx) >> 24) >> FRACBITS;
+        assert_eq!(bg_px, (bg.width as u64) - 1);
+        let last_y = 3668u64 * frac;
+        let bg_py = ((last_y * qy) >> 24) >> FRACBITS;
+        assert_eq!(bg_py, (bg.height as u64) - 1);
+    }
+
+    #[test]
+    fn bg_q24_returns_zero_when_bg_is_none() {
+        assert_eq!(bg_q24(None, 100, 100), (0, 0));
     }
 
     /// RenderOptions default values.
