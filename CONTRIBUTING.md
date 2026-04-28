@@ -120,6 +120,32 @@ See `RELEASING.md` for how commits drive the automated release process.
 - Link to any relevant issue in the description.
 - If the change touches the public API, update `README.md` examples if needed.
 
+## Triaging an OSS-Fuzz finding
+
+OSS-Fuzz reports arrive as private issues containing a testcase plus a
+reproducer command. Workflow:
+
+1. **Reproduce locally**. Drop the testcase into `fuzz/corpus/<target>/`
+   and run:
+   ```sh
+   cargo +nightly fuzz run <target> fuzz/corpus/<target>/<testcase> -- -runs=1
+   ```
+   If it doesn't reproduce, check that you're on the same commit OSS-Fuzz
+   was building (the report includes a SHA).
+2. **Minimise** with `cargo fuzz tmin` if the input is large.
+3. **Add a unit test** under `tests/regression_<codec>.rs` (or the
+   appropriate file) that loads the minimised testcase and asserts the
+   expected error variant. This locks the fix.
+4. **Fix the underlying bug**. Most findings so far have been
+   missing-bounds-check or unchecked-arithmetic in malformed-input paths.
+   Stick to the "Hard rules" above — return a typed error, do not panic.
+5. **Commit the minimised testcase** alongside the fix in
+   `fuzz/corpus/<target>/`. It becomes part of the seed corpus on the
+   next OSS-Fuzz build via `oss-fuzz/build.sh`.
+6. **Mark the OSS-Fuzz issue as fixed** by including
+   `Fixes oss-fuzz/<id>` in the commit body so the bot closes it after
+   the next successful build.
+
 ## Reporting bugs
 
 Open a GitHub issue. Include:
