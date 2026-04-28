@@ -64,6 +64,16 @@ pub struct EpubOptions {
     /// ISO 8601 timestamp for `dcterms:modified` (e.g. `"2026-04-14T00:00:00Z"`).
     /// When `None`, the current UTC time is used (computed from `std::time::SystemTime`).
     pub modified: Option<String>,
+    /// Append a reflowable-text section after the page image on each page
+    /// XHTML, populated from [`TextLayer::reflowable_text`]. Defaults to
+    /// `false` (existing fixed-layout behaviour, page image + invisible
+    /// overlay text).
+    ///
+    /// When `true`, each page body gets an extra `<section class="djvu-reflowable">`
+    /// containing one `<p>` per extracted paragraph. Reading apps that prefer
+    /// flowable text (most e-readers) can render it; image-first viewers
+    /// still get the bitmap above.
+    pub reflowable_text: bool,
 }
 
 impl Default for EpubOptions {
@@ -74,6 +84,7 @@ impl Default for EpubOptions {
             dpi: 150,
             language: "en".to_owned(),
             modified: None,
+            reflowable_text: false,
         }
     }
 }
@@ -178,8 +189,34 @@ fn write_page(
     // Hyperlink overlays from ANTz/ANTa annotations
     let hyperlinks = page.hyperlinks().unwrap_or_default();
 
+    // Optional reflowable paragraphs (#228) — extracted from the same text
+    // layer that feeds the overlay, but joined with reading-order rules.
+    let reflowable: Vec<String> = if opts.reflowable_text {
+        page.text_layer()
+            .ok()
+            .flatten()
+            .map(|tl| {
+                tl.reflowable_text()
+                    .into_iter()
+                    .map(|p| p.text)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     // Build XHTML page
-    let xhtml = build_page_xhtml(&img_name, w, h, pw, ph, &text_overlay, &hyperlinks);
+    let xhtml = build_page_xhtml(
+        &img_name,
+        w,
+        h,
+        pw,
+        ph,
+        &text_overlay,
+        &hyperlinks,
+        &reflowable,
+    );
     let xhtml_path = format!("OEBPS/pages/page_{page_num:04}.xhtml");
 
     zip.start_file(
@@ -253,6 +290,7 @@ fn build_text_overlay(page: &DjVuPage, pw: u32, ph: u32) -> Vec<(f32, f32, f32, 
 
 // ── XHTML page ────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn build_page_xhtml(
     img_name: &str,
     w: u32,
@@ -261,6 +299,7 @@ fn build_page_xhtml(
     ph: u32,
     text_overlay: &[(f32, f32, f32, f32, String)],
     hyperlinks: &[MapArea],
+    reflowable: &[String],
 ) -> String {
     let mut html = String::new();
     html.push_str(
@@ -315,7 +354,20 @@ body { margin: 0; padding: 0; }
         }
     }
 
-    html.push_str("</div>\n</body>\n</html>\n");
+    html.push_str("</div>\n");
+
+    if !reflowable.is_empty() {
+        html.push_str(r#"<section class="djvu-reflowable">"#);
+        html.push('\n');
+        for para in reflowable {
+            html.push_str("  <p>");
+            html.push_str(&xml_escape(para));
+            html.push_str("</p>\n");
+        }
+        html.push_str("</section>\n");
+    }
+
+    html.push_str("</body>\n</html>\n");
     html
 }
 
@@ -347,7 +399,7 @@ fn map_area_to_css(ma: &MapArea, pw: u32, ph: u32) -> Option<(f32, f32, f32, f32
         }
         Shape::Line(x1, y1, x2, y2) => {
             let min_x = (*x1).min(*x2);
-            let min_y = (*y1).min(*y2);
+            let _min_y = (*y1).min(*y2);
             let max_y = (*y1).max(*y2);
             let w = ((*x1 as i64 - *x2 as i64).unsigned_abs() as u32).max(1);
             let h = ((*y1 as i64 - *y2 as i64).unsigned_abs() as u32).max(1);
@@ -644,6 +696,27 @@ mod tests {
     #[test]
     fn epub_options_default_modified_is_none() {
         assert!(EpubOptions::default().modified.is_none());
+    }
+
+    #[test]
+    fn epub_options_default_reflowable_text_is_off() {
+        assert!(!EpubOptions::default().reflowable_text);
+    }
+
+    #[test]
+    fn build_page_xhtml_omits_reflowable_when_empty() {
+        let html = build_page_xhtml("p_0001.png", 800, 1000, 800, 1000, &[], &[], &[]);
+        assert!(!html.contains("djvu-reflowable"));
+    }
+
+    #[test]
+    fn build_page_xhtml_emits_reflowable_paragraphs() {
+        let paras = vec!["First paragraph.".to_string(), "Second & last.".to_string()];
+        let html = build_page_xhtml("p_0001.png", 800, 1000, 800, 1000, &[], &[], &paras);
+        assert!(html.contains(r#"<section class="djvu-reflowable">"#));
+        assert!(html.contains("<p>First paragraph.</p>"));
+        // XML-escapes ampersand
+        assert!(html.contains("<p>Second &amp; last.</p>"));
     }
 
     #[test]
