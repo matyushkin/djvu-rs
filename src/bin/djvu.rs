@@ -109,14 +109,18 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Encode an image (PNG) into a single-page DjVu file.
+    /// Encode an image (PNG) into a single-page DjVu file, or a
+    /// directory of PNGs into a multi-page DJVM bundle.
     ///
-    /// Bilevel pipeline only in v1: input is luminance-thresholded into
-    /// a JB2 mask via `segment_page`, then wrapped as `INFO + Sjbz`.
+    /// Bilevel pipeline only in v1: each input is luminance-thresholded
+    /// into a JB2 mask via `segment_page`, then wrapped as `INFO + Sjbz`.
+    /// Multi-page mode (input is a directory) builds a `FORM:DJVM`
+    /// bundle with a shared Djbz dictionary across pages.
     /// `--quality quality|archival` is reserved for the layered codec
     /// (#220 follow-ups).
     Encode {
-        /// Input image path (PNG).
+        /// Input PNG path, or a directory of PNGs (sorted by file name)
+        /// for multi-page encoding.
         input: PathBuf,
         /// Output DjVu file path.
         #[arg(short, long)]
@@ -127,6 +131,11 @@ enum Cmd {
         /// Encoding profile.
         #[arg(short, long, default_value = "lossless", value_enum)]
         quality: EncodeQualityArg,
+        /// (Multi-page only.) Promote a connected component to the
+        /// shared Djbz dictionary if it appears on at least this many
+        /// distinct pages. Default: 2.
+        #[arg(long, default_value = "2")]
+        shared_dict_pages: usize,
     },
     /// Extract the text layer from a DjVu document.
     Text {
@@ -269,7 +278,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output,
             dpi,
             quality,
-        } => cmd_encode(&input, &output, dpi, quality),
+            shared_dict_pages,
+        } => cmd_encode(&input, &output, dpi, quality, shared_dict_pages),
     }
 }
 
@@ -1007,8 +1017,10 @@ fn cmd_encode(
     output: &Path,
     dpi: u16,
     quality: EncodeQualityArg,
+    shared_dict_pages: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
+    use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
     use djvu_rs::segment::{SegmentOptions, segment_page};
 
     let q = match quality {
@@ -1016,6 +1028,47 @@ fn cmd_encode(
         EncodeQualityArg::Quality => EncodeQuality::Quality,
         EncodeQualityArg::Archival => EncodeQuality::Archival,
     };
+
+    if input.is_dir() {
+        if !matches!(quality, EncodeQualityArg::Lossless) {
+            return Err(
+                "multi-page encode currently supports --quality lossless only \
+                        (#220 follow-ups for layered Quality / Archival)"
+                    .into(),
+            );
+        }
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(input)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+            })
+            .collect();
+        entries.sort();
+        if entries.is_empty() {
+            return Err(format!("{}: no PNG files found in directory", input.display()).into());
+        }
+
+        let mut masks = Vec::with_capacity(entries.len());
+        for path in &entries {
+            let pixmap = decode_png_to_pixmap(path)?;
+            let seg = segment_page(&pixmap, &SegmentOptions::default());
+            masks.push(seg.mask);
+        }
+        let bytes = encode_djvm_bundle_jb2(&masks, shared_dict_pages);
+        std::fs::write(output, &bytes)?;
+        eprintln!(
+            "{} pages → {} ({} bytes, shared-dict threshold = {})",
+            entries.len(),
+            output.display(),
+            bytes.len(),
+            shared_dict_pages,
+        );
+        return Ok(());
+    }
 
     let pixmap = decode_png_to_pixmap(input)?;
     let seg = segment_page(&pixmap, &SegmentOptions::default());

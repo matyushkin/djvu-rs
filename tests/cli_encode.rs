@@ -95,6 +95,52 @@ fn encode_quality_profile_unsupported_until_segmentation() {
 }
 
 #[test]
+fn encode_directory_produces_multipage_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_dir = dir.path().join("scans");
+    std::fs::create_dir(&input_dir).unwrap();
+    write_test_png(&input_dir.join("01.png"), 32, 32);
+    write_test_png(&input_dir.join("02.png"), 32, 32);
+    write_test_png(&input_dir.join("03.png"), 32, 32);
+    let output = dir.path().join("book.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::Document::from_bytes(bytes).unwrap();
+    assert_eq!(doc.page_count(), 3);
+}
+
+#[test]
+fn encode_empty_directory_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_dir = dir.path().join("empty");
+    std::fs::create_dir(&input_dir).unwrap();
+    let output = dir.path().join("out.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no PNG"));
+}
+
+#[test]
 fn encode_missing_input_fails() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("nope.png");
