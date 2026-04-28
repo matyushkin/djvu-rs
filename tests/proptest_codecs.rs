@@ -11,6 +11,7 @@ use djvu_rs::annotation::{
     Annotation, Border, Color, Highlight, MapArea, Rect, Shape, encode_annotations,
     encode_annotations_bzz, parse_annotations, parse_annotations_bzz,
 };
+use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
 use djvu_rs::{bzz_encode, bzz_new, jb2, jb2_encode};
 use proptest::prelude::*;
@@ -79,6 +80,25 @@ proptest! {
         let encoded = bzz_encode::bzz_encode(&data);
         let decoded = bzz_new::decode(&encoded).expect("BZZ decode failed");
         prop_assert_eq!(data, decoded);
+    }
+
+    /// FGbz: bit-exact round-trip for palette + index table (#217).
+    /// Index strategy includes negative i16 values (-1 is sometimes used as
+    /// a "no-color" sentinel) and bursts of repeats (BZZ-friendly).
+    #[test]
+    fn fgbz_roundtrip(
+        palette in prop::collection::vec(
+            (any::<u8>(), any::<u8>(), any::<u8>())
+                .prop_map(|(r, g, b)| FgbzColor { r, g, b }),
+            0..256usize,
+        ),
+        indices in prop::option::of(prop::collection::vec(any::<i16>(), 0..1024usize)),
+    ) {
+        let bytes = encode_fgbz(&palette, indices.as_deref());
+        let (decoded_palette, decoded_indices) =
+            decode_fgbz(&bytes).expect("FGbz decode failed");
+        prop_assert_eq!(decoded_palette, palette);
+        prop_assert_eq!(decoded_indices, indices.unwrap_or_default());
     }
 }
 

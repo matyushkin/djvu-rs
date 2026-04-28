@@ -798,18 +798,18 @@ fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
 
 /// An RGB color from the FGbz palette.
 #[derive(Debug, Clone, Copy, Default)]
-struct PaletteColor {
-    r: u8,
-    g: u8,
-    b: u8,
+pub(crate) struct PaletteColor {
+    pub(crate) r: u8,
+    pub(crate) g: u8,
+    pub(crate) b: u8,
 }
 
 /// Parsed FGbz data: palette colors and optional per-blit color indices.
-struct FgbzPalette {
-    colors: Vec<PaletteColor>,
+pub(crate) struct FgbzPalette {
+    pub(crate) colors: Vec<PaletteColor>,
     /// Per-blit color index: `indices[blit_idx]` → index into `colors`.
     /// Empty when the FGbz chunk has no index table (version bit 7 unset).
-    indices: Vec<i16>,
+    pub(crate) indices: Vec<i16>,
 }
 
 /// Parse the FGbz chunk into palette colors and per-blit index table.
@@ -819,7 +819,7 @@ struct FgbzPalette {
 /// - byte 1-2: big-endian u16 palette size (number of colors)
 /// - next `palette_size * 3` bytes: BGR triples (raw if version=0, BZZ if version has bit 0 set)
 /// - if bit 7 set: 3-byte big-endian count + BZZ-compressed i16be index table
-fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
+pub(crate) fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
     if data.len() < 3 {
         return Ok(FgbzPalette {
             colors: vec![],
