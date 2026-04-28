@@ -73,7 +73,7 @@ fn encode_default_dpi_is_300() {
 }
 
 #[test]
-fn encode_quality_profile_unsupported_until_segmentation() {
+fn encode_quality_profile_emits_layered_djvu() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.png");
     let output = dir.path().join("out.djvu");
@@ -90,8 +90,36 @@ fn encode_quality_profile_unsupported_until_segmentation() {
             "quality",
         ])
         .assert()
+        .success();
+
+    // Layered output must contain at least one BG44 chunk in addition to Sjbz.
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    let page = doc.page(0).unwrap();
+    assert!(page.raw_chunk(b"Sjbz").is_some());
+    assert!(!page.all_chunks(b"BG44").is_empty());
+}
+
+#[test]
+fn encode_archival_profile_still_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.png");
+    let output = dir.path().join("out.djvu");
+    write_test_png(&input, 16, 16);
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "archival",
+        ])
+        .assert()
         .failure()
-        .stderr(predicates::str::contains("Quality profile"));
+        .stderr(predicates::str::contains("Archival"));
 }
 
 #[test]
