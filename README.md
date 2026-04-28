@@ -231,7 +231,15 @@ djvu text file.djvu --page 2
 
 # Extract text from all pages
 djvu text file.djvu --all
+
+# Encode a PNG image into a single-page DjVu (bilevel JB2, lossless)
+djvu encode scan.png --output scan.djvu --dpi 300
 ```
+
+The `encode` subcommand luminance-thresholds the input into a JB2 mask
+and wraps it as a `FORM:DJVU` (`INFO + Sjbz`). `--quality quality` and
+`--quality archival` are reserved for the layered FG/BG codec
+(currently unsupported — see [#220](https://github.com/matyushkin/djvu-rs/issues/220)).
 
 ## hOCR and ALTO XML export
 

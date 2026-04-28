@@ -109,6 +109,25 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Encode an image (PNG) into a single-page DjVu file.
+    ///
+    /// Bilevel pipeline only in v1: input is luminance-thresholded into
+    /// a JB2 mask via `segment_page`, then wrapped as `INFO + Sjbz`.
+    /// `--quality quality|archival` is reserved for the layered codec
+    /// (#220 follow-ups).
+    Encode {
+        /// Input image path (PNG).
+        input: PathBuf,
+        /// Output DjVu file path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Page DPI stored in the INFO chunk. Default: 300.
+        #[arg(short, long, default_value = "300")]
+        dpi: u16,
+        /// Encoding profile.
+        #[arg(short, long, default_value = "lossless", value_enum)]
+        quality: EncodeQualityArg,
+    },
     /// Extract the text layer from a DjVu document.
     Text {
         /// Path to the DjVu file.
@@ -175,6 +194,16 @@ enum RotateArg {
 }
 
 #[derive(Clone, ValueEnum)]
+enum EncodeQualityArg {
+    /// Pixel-exact bilevel JB2 (`INFO + Sjbz`).
+    Lossless,
+    /// Layered FG/BG with lossy IW44 BG. Currently unsupported — see #220.
+    Quality,
+    /// Archival profile with FGbz palette. Currently unsupported — see #194 Phase 2.5.
+    Archival,
+}
+
+#[derive(Clone, ValueEnum)]
 enum Layer {
     /// Full composite render (default).
     Composite,
@@ -235,6 +264,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             format,
             output,
         } => cmd_text(&file, page, all, format, output.as_deref()),
+        Cmd::Encode {
+            input,
+            output,
+            dpi,
+            quality,
+        } => cmd_encode(&input, &output, dpi, quality),
     }
 }
 
@@ -963,4 +998,97 @@ fn cmd_bzz_decode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::
         decoded.len(),
     );
     Ok(())
+}
+
+// ── encode ───────────────────────────────────────────────────────────────────
+
+fn cmd_encode(
+    input: &Path,
+    output: &Path,
+    dpi: u16,
+    quality: EncodeQualityArg,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
+    use djvu_rs::segment::{SegmentOptions, segment_page};
+
+    let q = match quality {
+        EncodeQualityArg::Lossless => EncodeQuality::Lossless,
+        EncodeQualityArg::Quality => EncodeQuality::Quality,
+        EncodeQualityArg::Archival => EncodeQuality::Archival,
+    };
+
+    let pixmap = decode_png_to_pixmap(input)?;
+    let seg = segment_page(&pixmap, &SegmentOptions::default());
+
+    let bytes = PageEncoder::from_bitmap(&seg.mask)
+        .with_dpi(dpi)
+        .with_quality(q)
+        .encode()
+        .map_err(|e| format!("encode: {e}"))?;
+
+    std::fs::write(output, &bytes)?;
+    eprintln!(
+        "{} → {} ({}×{} px, {} bytes)",
+        input.display(),
+        output.display(),
+        pixmap.width,
+        pixmap.height,
+        bytes.len(),
+    );
+    Ok(())
+}
+
+fn decode_png_to_pixmap(path: &Path) -> Result<djvu_rs::Pixmap, Box<dyn std::error::Error>> {
+    use djvu_rs::Pixmap;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let mut reader = decoder.read_info()?;
+    let info = reader.info();
+    let width = info.width;
+    let height = info.height;
+    let color = info.color_type;
+    let depth = info.bit_depth;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut buf)?;
+    buf.truncate(frame.buffer_size());
+
+    if depth != png::BitDepth::Eight {
+        return Err(format!(
+            "{}: unsupported PNG bit depth {:?} (only 8-bit channels for v1)",
+            path.display(),
+            depth
+        )
+        .into());
+    }
+
+    let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    match color {
+        png::ColorType::Rgba => data.extend_from_slice(&buf),
+        png::ColorType::Rgb => {
+            for chunk in buf.chunks_exact(3) {
+                data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for chunk in buf.chunks_exact(2) {
+                let g = chunk[0];
+                data.extend_from_slice(&[g, g, g, chunk[1]]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for &g in &buf {
+                data.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        png::ColorType::Indexed => {
+            return Err(format!("{}: indexed PNG not supported", path.display()).into());
+        }
+    }
+
+    Ok(Pixmap {
+        width,
+        height,
+        data,
+    })
 }
