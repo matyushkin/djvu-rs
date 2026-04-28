@@ -130,6 +130,15 @@ pub mod jb2_encode;
 #[cfg(feature = "std")]
 pub mod fgbz_encode;
 
+/// High-level page encoder — composes the codec primitives into a
+/// complete `FORM:DJVU` page.
+///
+/// Provides [`djvu_encode::PageEncoder`] (builder-style entry point),
+/// [`djvu_encode::EncodeQuality`] (Lossless / Quality / Archival
+/// profiles), and [`djvu_encode::EncodeError`].
+#[cfg(feature = "std")]
+pub mod djvu_encode;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
