@@ -88,3 +88,74 @@ gain.
 **Next step.** Re-attempt on ARM64 (M1) with raw NEON `vld2q_s16`, measure
 against the baseline `iw44_decode_first_chunk` (715 µs) on the reference
 hardware listed in `BENCHMARKS_RESULTS.md`.
+
+### #194 Phase 2 — multi-page shared Djbz with Hamming clustering — **Reverted default, kept tunable knob** (2026-04-28)
+
+**Approach.** Phase 1 (#194, shipped) builds the shared Djbz dictionary by
+byte-exact `(w, h, data)` dedup of CCs across pages: any CC signature
+appearing on `≥ threshold` distinct pages becomes a shared symbol, the rest
+stay per-page Sjbz. Phase 2 attempted to widen the cluster predicate to
+"same `(w, h)` AND `packed_hamming(rep, cc) ≤ pixels * fraction`", folding
+near-duplicate scanned-glyph variants into one shared rep so the per-page
+Sjbz can emit `rec-7` (matched copy) or `rec-6` (matched refinement)
+instead of `rec-1` (new direct).
+
+Implementation: `cluster_shared_symbols_tunable(pages, page_threshold,
+diff_fraction)` — bucketed by `(w, h)`, linear scan per bucket choosing the
+nearest existing rep within `max_diff = pixels * diff_fraction / 100` (with
+a `REFINEMENT_MIN_PIXELS = 32` floor that keeps tiny CCs byte-exact).
+`encode_djvm_bundle_jb2_with_shared(pages, &shared)` lets a benchmark
+harness drive cluster selection without re-running the IFF/DIRM pipeline.
+
+**Harness.** `examples/encode_quality_djbz.rs` — for each multi-page DjVu
+input, computes total bytes for {original Sjbz, independent
+`encode_jb2_dict` per page, bundled `encode_djvm_bundle_jb2_with_shared`}
+across configurable Hamming thresholds; verifies pixel-exact bundle
+round-trip.
+
+**Bench** (`encode_quality_djbz` on `pathogenic_bacteria_1896.djvu`,
+517 pages of cjb2 scans, Apple M1 Max):
+
+| `--diff-fraction` | shared syms | Djbz bytes | Σ Sjbz | bundle / independent | round-trip |
+|-------------------|-------------|------------|--------|----------------------|------------|
+| 0 (byte-exact, shipped) | 1 568 | 41 KB | 7.40 MB | **0.870×** (−13.0%) | ✓ |
+| 1% | 1 547 | 40 KB | 7.40 MB | 0.870× (−13.0%) | ✓ |
+| 2% | 1 503 | 39 KB | 7.41 MB | 0.871× (−12.9%) | ✓ |
+| 3% | 1 449 | 38 KB | — | — | **✗ mismatch** |
+| 4% | 1 387 | 36 KB | 7.50 MB | 0.877× (−12.3%) | ✓ |
+
+Small corpus (`tests/corpus/*.djvu`, 36 pages from 4 books):
+
+| `--diff-fraction` | bundle / independent |
+|-------------------|----------------------|
+| 0 (byte-exact)    | 1.021× (+2.1%) |
+| 4%                | 1.150× (+15.0%) |
+
+**Reason reverted as default.** The Phase 1 byte-exact win (−13.0% bundle
+vs independent on the 517-page corpus) is the entire shared-Djbz benefit.
+Hamming clustering at 1–2% is within 0.05% of byte-exact; at 4% it is
+strictly worse. Hypothesis: the per-page `symbol_index_ctx` encoding pays
+≈ `log2(K)` bits per reference, so growing `K` (more shared reps) inflates
+every `rec-7` reference; meanwhile `rec-6` refinement bitmaps cost more
+ZP-coded bits than a fresh `rec-1` direct emission whenever the shared rep
+isn't a near-perfect match. Net: cross-page Hamming clustering must match
+*better than* the per-page intra-CC refinement matcher already does within
+each page (#188 Phase 3) — and on this corpus it doesn't.
+
+**Reason kept tunable.** `cluster_shared_symbols_tunable` and
+`encode_djvm_bundle_jb2_with_shared` are exposed `pub` so the benchmark
+harness — and any future Phase 2.5 calibration work (per-CC profitability
+model instead of a flat fraction) — can sweep thresholds without forking
+the encoder. The default `cluster_shared_symbols` continues to delegate to
+`diff_fraction = 0`.
+
+**Open follow-ups.**
+1. The `diff_fraction = 3%` round-trip mismatch on the big corpus is a real
+   bug in the rec-6 refinement path against shared reps — should be filed
+   as a sub-issue. (Doesn't block ship: 0% remains lossless and is the
+   shipped default.)
+2. Per-CC profitability model: instead of a flat Hamming fraction, decide
+   per CC whether `cost(rec-6 against shared rep)` < `cost(rec-1 fresh) +
+   amortized log2(K) increase`. Unclear if the win exists — would need to
+   re-measure with a corpus where intra-page refinement is already
+   exhausted.
