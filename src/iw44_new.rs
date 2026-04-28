@@ -216,6 +216,16 @@ fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
         }
         return;
     }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            #[allow(unsafe_code)]
+            unsafe {
+                ycbcr_avx2_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), out.as_mut_ptr(), w);
+            }
+            return;
+        }
+    }
     #[allow(unreachable_code)]
     {
         let mut y_norm = vec![0i32; w];
@@ -254,6 +264,22 @@ fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mu
             );
         }
         return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            #[allow(unsafe_code)]
+            unsafe {
+                ycbcr_avx2_raw_half(
+                    y.as_ptr(),
+                    cb_half.as_ptr(),
+                    cr_half.as_ptr(),
+                    out.as_mut_ptr(),
+                    w,
+                );
+            }
+            return;
+        }
     }
     #[allow(unreachable_code)]
     {
@@ -460,6 +486,201 @@ unsafe fn ycbcr_neon_raw_half(
     }
     // Scalar tail
     for col in (full8 * 8)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col / 2));
+        let r = normalize(*crp.add(col / 2));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// x86_64 AVX2 fused normalize + YCbCr→RGBA from raw i16 plane data (non-chroma-half).
+///
+/// 16 pixels per iteration (vs NEON's 8): __m256i holds 16 i16. Pack-down to u8
+/// is done via SSE `_mm_packus_epi16` on the two 128-bit halves followed by an
+/// SSE byte-interleave to materialise R/G/B/A → RGBA bytes.
+///
+/// `cbp` and `crp` must point to `w` values each (same stride as `yp`).
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn ycbcr_avx2_raw(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::x86_64::*;
+    let n_min = _mm256_set1_epi16(-128);
+    let n_max = _mm256_set1_epi16(127);
+    let c128 = _mm256_set1_epi16(128);
+    let c32 = _mm256_set1_epi16(32);
+
+    let full16 = w / 16;
+    for i in 0..full16 {
+        let off = i * 16;
+        // Load + normalize ((v + 32) >> 6 arithmetic; rounding shift) + clamp [-128, 127]
+        let load_norm_clamp = |p: *const i16| -> __m256i {
+            let v = _mm256_loadu_si256(p as *const __m256i);
+            let n = _mm256_srai_epi16::<6>(_mm256_add_epi16(v, c32));
+            _mm256_max_epi16(_mm256_min_epi16(n, n_max), n_min)
+        };
+        let yc = load_norm_clamp(yp.add(off));
+        let cbc = load_norm_clamp(cbp.add(off));
+        let crc = load_norm_clamp(crp.add(off));
+
+        // Same i16 arithmetic as NEON path; ranges fit in i16 → no widening.
+        let y128 = _mm256_add_epi16(yc, c128);
+        let t2 = _mm256_add_epi16(crc, _mm256_srai_epi16::<1>(crc));
+        let t3 = _mm256_sub_epi16(y128, _mm256_srai_epi16::<2>(cbc));
+        let r16 = _mm256_add_epi16(y128, t2);
+        let g16 = _mm256_sub_epi16(t3, _mm256_srai_epi16::<1>(t2));
+        let b16 = _mm256_add_epi16(t3, _mm256_slli_epi16::<1>(cbc));
+
+        // Saturating narrow signed i16 → unsigned u8 in halves (clamps to [0, 255])
+        let r_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(r16),
+            _mm256_extracti128_si256::<1>(r16),
+        );
+        let g_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(g16),
+            _mm256_extracti128_si256::<1>(g16),
+        );
+        let b_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(b16),
+            _mm256_extracti128_si256::<1>(b16),
+        );
+        let a_pack = _mm_set1_epi8(-1i8);
+
+        // Interleave R/G and B/A into pairs, then unpack i16 to materialise RGBA.
+        let rg_lo = _mm_unpacklo_epi8(r_pack, g_pack);
+        let rg_hi = _mm_unpackhi_epi8(r_pack, g_pack);
+        let ba_lo = _mm_unpacklo_epi8(b_pack, a_pack);
+        let ba_hi = _mm_unpackhi_epi8(b_pack, a_pack);
+
+        let rgba0 = _mm_unpacklo_epi16(rg_lo, ba_lo);
+        let rgba1 = _mm_unpackhi_epi16(rg_lo, ba_lo);
+        let rgba2 = _mm_unpacklo_epi16(rg_hi, ba_hi);
+        let rgba3 = _mm_unpackhi_epi16(rg_hi, ba_hi);
+
+        let dst = outp.add(off * 4) as *mut __m128i;
+        _mm_storeu_si128(dst, rgba0);
+        _mm_storeu_si128(dst.add(1), rgba1);
+        _mm_storeu_si128(dst.add(2), rgba2);
+        _mm_storeu_si128(dst.add(3), rgba3);
+    }
+    // Scalar tail
+    for col in (full16 * 16)..w {
+        let y = normalize(*yp.add(col));
+        let b = normalize(*cbp.add(col));
+        let r = normalize(*crp.add(col));
+        let t2 = r + (r >> 1);
+        let t3 = y + 128 - (b >> 2);
+        *outp.add(col * 4) = (y + 128 + t2).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 1) = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 2) = (t3 + (b << 1)).clamp(0, 255) as u8;
+        *outp.add(col * 4 + 3) = 255;
+    }
+}
+
+/// x86_64 AVX2 fused normalize + YCbCr→RGBA from raw i16 plane data (chroma-half).
+///
+/// 16 Y / 8 chroma per iteration. Chroma upsample uses `_mm256_permute4x64_epi64`
+/// to place chromas 0-3 in the low 128-bit lane low half and chromas 4-7 in the
+/// high 128-bit lane low half, then `_mm256_unpacklo_epi16(v, v)` duplicates each
+/// chroma into two adjacent i16 lanes per 128-bit half.
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn ycbcr_avx2_raw_half(
+    yp: *const i16,
+    cbp: *const i16,
+    crp: *const i16,
+    outp: *mut u8,
+    w: usize,
+) {
+    use core::arch::x86_64::*;
+    let n_min = _mm256_set1_epi16(-128);
+    let n_max = _mm256_set1_epi16(127);
+    let c128 = _mm256_set1_epi16(128);
+    let c32 = _mm256_set1_epi16(32);
+
+    let full16 = w / 16;
+    for i in 0..full16 {
+        let off = i * 16;
+        let c_off = i * 8;
+
+        // Load + normalize 16 Y samples
+        let yv = _mm256_loadu_si256(yp.add(off) as *const __m256i);
+        let yc = _mm256_max_epi16(
+            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(yv, c32)), n_max),
+            n_min,
+        );
+
+        // Load 8 chroma i16 (one __m128i), upsample to 16 by duplicating each.
+        let upsample = |p: *const i16| -> __m256i {
+            let v8 = _mm_loadu_si128(p as *const __m128i);
+            // Place i16s 0-3 into i64-lane 0 (already there), i16s 4-7 into i64-lane 2.
+            // permute4x64 mask 0b00_01_00_00: out0←src0, out1←src0, out2←src1, out3←src0.
+            let spread = _mm256_permute4x64_epi64::<0b00_01_00_00>(_mm256_castsi128_si256(v8));
+            // Per-128-bit-lane interleave with itself: duplicates each i16 lane.
+            _mm256_unpacklo_epi16(spread, spread)
+        };
+        let cb_dup = upsample(cbp.add(c_off));
+        let cr_dup = upsample(crp.add(c_off));
+        let cbc = _mm256_max_epi16(
+            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(cb_dup, c32)), n_max),
+            n_min,
+        );
+        let crc = _mm256_max_epi16(
+            _mm256_min_epi16(_mm256_srai_epi16::<6>(_mm256_add_epi16(cr_dup, c32)), n_max),
+            n_min,
+        );
+
+        let y128 = _mm256_add_epi16(yc, c128);
+        let t2 = _mm256_add_epi16(crc, _mm256_srai_epi16::<1>(crc));
+        let t3 = _mm256_sub_epi16(y128, _mm256_srai_epi16::<2>(cbc));
+        let r16 = _mm256_add_epi16(y128, t2);
+        let g16 = _mm256_sub_epi16(t3, _mm256_srai_epi16::<1>(t2));
+        let b16 = _mm256_add_epi16(t3, _mm256_slli_epi16::<1>(cbc));
+
+        let r_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(r16),
+            _mm256_extracti128_si256::<1>(r16),
+        );
+        let g_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(g16),
+            _mm256_extracti128_si256::<1>(g16),
+        );
+        let b_pack = _mm_packus_epi16(
+            _mm256_castsi256_si128(b16),
+            _mm256_extracti128_si256::<1>(b16),
+        );
+        let a_pack = _mm_set1_epi8(-1i8);
+
+        let rg_lo = _mm_unpacklo_epi8(r_pack, g_pack);
+        let rg_hi = _mm_unpackhi_epi8(r_pack, g_pack);
+        let ba_lo = _mm_unpacklo_epi8(b_pack, a_pack);
+        let ba_hi = _mm_unpackhi_epi8(b_pack, a_pack);
+
+        let rgba0 = _mm_unpacklo_epi16(rg_lo, ba_lo);
+        let rgba1 = _mm_unpackhi_epi16(rg_lo, ba_lo);
+        let rgba2 = _mm_unpacklo_epi16(rg_hi, ba_hi);
+        let rgba3 = _mm_unpackhi_epi16(rg_hi, ba_hi);
+
+        let dst = outp.add(off * 4) as *mut __m128i;
+        _mm_storeu_si128(dst, rgba0);
+        _mm_storeu_si128(dst.add(1), rgba1);
+        _mm_storeu_si128(dst.add(2), rgba2);
+        _mm_storeu_si128(dst.add(3), rgba3);
+    }
+    // Scalar tail
+    for col in (full16 * 16)..w {
         let y = normalize(*yp.add(col));
         let b = normalize(*cbp.add(col / 2));
         let r = normalize(*crp.add(col / 2));
@@ -3224,5 +3445,114 @@ mod tests {
             scalar_data, simd_data,
             "SIMD row pass (s=2) must produce identical output to scalar"
         );
+    }
+
+    /// Reference scalar implementation of the fused-normalize YCbCr→RGBA path.
+    /// Mirrors `ycbcr_neon_raw` byte-for-byte (same formula, same clamps).
+    #[cfg(target_arch = "x86_64")]
+    fn ycbcr_raw_scalar(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
+        let w = y.len();
+        for col in 0..w {
+            let yn = super::normalize(y[col]);
+            let bn = super::normalize(cb[col]);
+            let rn = super::normalize(cr[col]);
+            let t2 = rn + (rn >> 1);
+            let t3 = yn + 128 - (bn >> 2);
+            out[col * 4] = (yn + 128 + t2).clamp(0, 255) as u8;
+            out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+            out[col * 4 + 2] = (t3 + (bn << 1)).clamp(0, 255) as u8;
+            out[col * 4 + 3] = 255;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn ycbcr_raw_half_scalar(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
+        let w = y.len();
+        for col in 0..w {
+            let yn = super::normalize(y[col]);
+            let bn = super::normalize(cb[col / 2]);
+            let rn = super::normalize(cr[col / 2]);
+            let t2 = rn + (rn >> 1);
+            let t3 = yn + 128 - (bn >> 2);
+            out[col * 4] = (yn + 128 + t2).clamp(0, 255) as u8;
+            out[col * 4 + 1] = (t3 - (t2 >> 1)).clamp(0, 255) as u8;
+            out[col * 4 + 2] = (t3 + (bn << 1)).clamp(0, 255) as u8;
+            out[col * 4 + 3] = 255;
+        }
+    }
+
+    /// AVX2 fused-normalize YCbCr→RGBA must agree byte-for-byte with the scalar
+    /// reference across the full i16 input range and all width residues mod 16
+    /// (covers main loop + scalar tail).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn ycbcr_avx2_raw_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        // Range chosen to exercise normalize + clamp + every arithmetic branch.
+        let raw_vals: [i16; 8] = [-32768, -8192, -64, -1, 0, 63, 8191, 32767];
+        for &width in &[1usize, 7, 16, 17, 31, 32, 33, 47, 48, 64, 100] {
+            let n = width;
+            let make_seq = |seed: usize| -> Vec<i16> {
+                (0..n)
+                    .map(|i| raw_vals[(i + seed) % raw_vals.len()])
+                    .collect()
+            };
+            let y = make_seq(0);
+            let cb = make_seq(3);
+            let cr = make_seq(5);
+
+            let mut got = vec![0u8; n * 4];
+            #[allow(unsafe_code)]
+            unsafe {
+                super::ycbcr_avx2_raw(y.as_ptr(), cb.as_ptr(), cr.as_ptr(), got.as_mut_ptr(), n);
+            }
+
+            let mut want = vec![0u8; n * 4];
+            ycbcr_raw_scalar(&y, &cb, &cr, &mut want);
+
+            assert_eq!(got, want, "AVX2 raw mismatch at width {}", width);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn ycbcr_avx2_raw_half_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        let raw_vals: [i16; 8] = [-32768, -8192, -64, -1, 0, 63, 8191, 32767];
+        for &width in &[2usize, 8, 16, 18, 30, 32, 34, 48, 64, 96] {
+            let n = width;
+            let half = n.div_ceil(2);
+            let make_seq = |seed: usize, len: usize| -> Vec<i16> {
+                (0..len)
+                    .map(|i| raw_vals[(i + seed) % raw_vals.len()])
+                    .collect()
+            };
+            let y = make_seq(0, n);
+            let cb_half = make_seq(3, half);
+            let cr_half = make_seq(5, half);
+
+            let mut got = vec![0u8; n * 4];
+            #[allow(unsafe_code)]
+            unsafe {
+                super::ycbcr_avx2_raw_half(
+                    y.as_ptr(),
+                    cb_half.as_ptr(),
+                    cr_half.as_ptr(),
+                    got.as_mut_ptr(),
+                    n,
+                );
+            }
+
+            let mut want = vec![0u8; n * 4];
+            ycbcr_raw_half_scalar(&y, &cb_half, &cr_half, &mut want);
+
+            assert_eq!(got, want, "AVX2 raw_half mismatch at width {}", width);
+        }
     }
 }
