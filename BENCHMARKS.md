@@ -251,6 +251,65 @@ Contributions with measurements for other libraries are welcome — see **Contri
 
 ---
 
+## Encoder quality (vs DjVuLibre)
+
+Quality benchmarks compare djvu-rs's encoder output size to the original DjVu
+file (typically produced by `cjb2`/`c44` from DjVuLibre) on `tests/corpus/*`.
+Run with `cargo run --release --example encode_quality_jb2 -- tests/corpus/*.djvu`.
+
+### JB2 — Sjbz payload size (553 pages across 4 books)
+
+| Encoder | Total bytes | bpp | Ratio vs cjb2 | Round-trip |
+|---------|-------------|-----|---------------|------------|
+| `cjb2` (original) | 25 032 792 | 0.0288 | 1.00× | — |
+| `encode_jb2` (tiled direct) | 42 809 783 | 0.0492 | **1.71×** | 553 / 553 ok |
+| `encode_jb2_dict` (CC + rec 1+7) | 35 301 664 | 0.0406 | **1.41×** | 483 / 553 ok |
+
+- `encode_jb2` (#198): direct-blit, tiled into ≤ 1024×1024 records to stay
+  under the decoder's 1 MP per-symbol cap. 100% round-trip across all corpus
+  pages including 4267×6853 (29 MP) scans.
+- `encode_jb2_dict` (#188 phase 1): connected-component extraction + exact-match
+  symbol dictionary. **1.41×** total ratio is mostly recovered already; the
+  remaining gap closes with refinement matching (#188 phase 2/3) and shared
+  Djbz across pages (#194). Round-trip fails on 70 dense scans whose CC
+  extraction yields a single component > 1 MP (large halftone / contiguous
+  artwork region) — the dict path needs to fall back to tiled direct-blit
+  for such CCs (tracked under #188 phase 2).
+
+Per-book ratios:
+
+| Corpus | Pages | dict bytes | orig bytes | dict ratio | direct ratio |
+|--------|-------|------------|------------|------------|--------------|
+| `cable_1973_100133.djvu` | 2 | 10 082 | 8 020 | 1.257× | 3.886× |
+| `conquete_paix.djvu` | 22 | 54 919 | 52 007 | 1.056× | 1.906× |
+| `pathogenic_bacteria_1896.djvu` | 517 | 35 092 640 | 24 849 842 | 1.412× | 1.696× |
+| `watchmaker.djvu` | 12 | 144 023 | 122 923 | 1.172× | 4.349× |
+
+### IW44 — BG44 payload size + PSNR (23 colour pages, 4 books)
+
+Re-encoded via `cargo run --release --example encode_quality_iw44 --
+tests/corpus/*.djvu`. Reference for PSNR is djvu-rs's own decode of the
+original BG44 (the encoder is the unit under test).
+
+| Metric | Value |
+|--------|-------|
+| Total pages | 23 |
+| Total orig BG44 size | 1 607 509 B |
+| Total djvu-rs BG44 size | 1 834 621 B (1.14× orig) |
+| Avg PSNR (luma) | 19.52 dB |
+| Min PSNR (luma) | 9.75 dB |
+| `watchmaker.djvu` pages (small bg) | 45–47 dB ✓ |
+| `conquete_paix.djvu` pages | 9–17 dB ✗ |
+
+`watchmaker.djvu` results are near-perfect (45+ dB on a near-empty bg).
+`conquete_paix.djvu` results are catastrophic — sub-20 dB indicates the
+encoder loses substantial structure on those pages. Worth opening a follow-up
+to investigate; the harness exists now to track it.
+
+Apple M1 Max, 2026-04-26.
+
+---
+
 ## Notes
 
 - `bzz_decode` is slow (82 ms) because the NAVM chunk in navm_fgbz.djvu is large (~6 KB compressed). BZZ is inherently sequential (BWT inverse requires a full-block sort).
