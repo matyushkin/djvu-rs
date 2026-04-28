@@ -13,6 +13,7 @@ use djvu_rs::annotation::{
 };
 use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
+use djvu_rs::smmr::{decode_smmr, encode_smmr};
 use djvu_rs::{bzz_encode, bzz_new, jb2, jb2_encode};
 use proptest::prelude::*;
 
@@ -80,6 +81,14 @@ proptest! {
         let encoded = bzz_encode::bzz_encode(&data);
         let decoded = bzz_new::decode(&encoded).expect("BZZ decode failed");
         prop_assert_eq!(data, decoded);
+    }
+
+    /// Smmr (G4/MMR): bit-exact round-trip for arbitrary bilevel bitmaps (#221).
+    #[test]
+    fn smmr_roundtrip(bm in arb_bitmap(64, 64)) {
+        let bytes = encode_smmr(&bm);
+        let decoded = decode_smmr(&bytes).expect("Smmr decode failed");
+        bitmaps_eq(&bm, &decoded)?;
     }
 
     /// FGbz: bit-exact round-trip for palette + index table (#217).

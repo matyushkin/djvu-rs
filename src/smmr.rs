@@ -1,4 +1,4 @@
-//! Smmr chunk decoder — ITU-T G4 (MMR) bilevel image decompression.
+//! Smmr chunk codec — ITU-T G4 (MMR) bilevel image compression.
 //!
 //! ## Chunk layout
 //!
@@ -7,6 +7,12 @@
 //! u16be   nrows   — image height in pixels
 //! <data>          — raw G4/MMR bitstream (MSB first, no EOL between rows)
 //! ```
+//!
+//! ## API
+//!
+//! * [`decode_smmr`] — chunk payload → [`Bitmap`]
+//! * [`encode_smmr`] — [`Bitmap`] → chunk payload (horizontal-mode only;
+//!   correct but not size-optimal — see fn docs for trade-offs vs JB2)
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -517,102 +523,130 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
     Ok(bm)
 }
 
+// ---- Encoder ---------------------------------------------------------------
+
+fn push_bits(bits: &mut Vec<bool>, code: u32, n: u8) {
+    for i in (0..n).rev() {
+        bits.push((code >> i) & 1 != 0);
+    }
+}
+
+fn emit_white(bits: &mut Vec<bool>, mut run: usize) {
+    while run >= 64 {
+        let m = (run / 64 * 64).min(1728);
+        let &(c, n, _) = WHITE_MAKEUP
+            .iter()
+            .find(|&&(_, _, r)| r as usize == m)
+            .unwrap();
+        push_bits(bits, c as u32, n);
+        run -= m;
+    }
+    let &(c, n, _) = WHITE_TERM
+        .iter()
+        .find(|&&(_, _, r)| r as usize == run)
+        .unwrap();
+    push_bits(bits, c as u32, n);
+}
+
+fn emit_black(bits: &mut Vec<bool>, mut run: usize) {
+    while run >= 64 {
+        let m = (run / 64 * 64).min(1728);
+        let &(c, n, _) = BLACK_MAKEUP
+            .iter()
+            .find(|&&(_, _, r)| r as usize == m)
+            .unwrap();
+        push_bits(bits, c, n);
+        run -= m;
+    }
+    let &(c, n, _) = BLACK_TERM
+        .iter()
+        .find(|&&(_, _, r)| r as usize == run)
+        .unwrap();
+    push_bits(bits, c, n);
+}
+
+/// Encode a [`Bitmap`] as an Smmr (G4/MMR) chunk payload, decodable by
+/// [`decode_smmr`].
+///
+/// Output layout matches the chunk header described at the top of this
+/// module: `u16be ncols`, `u16be nrows`, then the raw G4 bitstream
+/// (MSB-first within each byte, no EOL between rows).
+///
+/// # Trade-offs vs [`crate::jb2_encode::encode_jb2`]
+///
+/// * **Simplicity** — no symbol dictionary, no context model, no ZP
+///   arithmetic coder. Just per-row run-length Huffman coding.
+/// * **Size** — for fax-style bilevel scans (~ 200 dpi) Smmr can match
+///   or beat JB2 on documents with no recurring glyph structure (line
+///   art, schematics, tables). For dense text JB2 is consistently
+///   smaller because it amortises shared symbols across the page.
+/// * **Decoder cost** — Smmr decode is straight Huffman + line-by-line
+///   reference; no arithmetic decoding state. Useful when the consumer
+///   is a constrained device.
+///
+/// # Encoder strategy
+///
+/// Horizontal-mode only (no vertical / pass-mode optimisation), so the
+/// output is correct but typically 5–15 % larger than what `cjb2 -mmr`
+/// would produce. This is sufficient for round-trip correctness and
+/// for the layered page encoder's mask alternative; size-tuned modes
+/// can be added incrementally without breaking the wire format.
+pub fn encode_smmr(bm: &Bitmap) -> Vec<u8> {
+    let ncols = bm.width as usize;
+    let nrows = bm.height as usize;
+    let mut bits: Vec<bool> = Vec::new();
+
+    for row in 0..nrows {
+        let mut col = 0usize;
+        let color = false; // starts white
+        while col < ncols {
+            // Count run of current color
+            let run_start = col;
+            while col < ncols && bm.get(col as u32, row as u32) == color {
+                col += 1;
+            }
+            let r1 = col - run_start;
+            // Count run of opposite color
+            let run2_start = col;
+            while col < ncols && bm.get(col as u32, row as u32) != color {
+                col += 1;
+            }
+            let r2 = col - run2_start;
+            // Emit H mode
+            push_bits(&mut bits, 0b001, 3);
+            if !color {
+                emit_white(&mut bits, r1);
+                emit_black(&mut bits, r2);
+            } else {
+                emit_black(&mut bits, r1);
+                emit_white(&mut bits, r2);
+            }
+            // color unchanged (consumed 2 runs)
+        }
+    }
+    // EOFB: two consecutive 12-bit EOLs (000000000001).
+    push_bits(&mut bits, 0b000000000001, 12);
+    push_bits(&mut bits, 0b000000000001, 12);
+
+    let nbytes = bits.len().div_ceil(8);
+    let mut data = vec![0u8; 4 + nbytes];
+    data[0] = (ncols >> 8) as u8;
+    data[1] = ncols as u8;
+    data[2] = (nrows >> 8) as u8;
+    data[3] = nrows as u8;
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            data[4 + i / 8] |= 0x80 >> (i % 8);
+        }
+    }
+    data
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn push_bits(bits: &mut Vec<bool>, code: u32, n: u8) {
-        for i in (0..n).rev() {
-            bits.push((code >> i) & 1 != 0);
-        }
-    }
-
-    fn emit_white(bits: &mut Vec<bool>, mut run: usize) {
-        while run >= 64 {
-            let m = (run / 64 * 64).min(1728);
-            let &(c, n, _) = WHITE_MAKEUP
-                .iter()
-                .find(|&&(_, _, r)| r as usize == m)
-                .unwrap();
-            push_bits(bits, c as u32, n);
-            run -= m;
-        }
-        let &(c, n, _) = WHITE_TERM
-            .iter()
-            .find(|&&(_, _, r)| r as usize == run)
-            .unwrap();
-        push_bits(bits, c as u32, n);
-    }
-
-    fn emit_black(bits: &mut Vec<bool>, mut run: usize) {
-        while run >= 64 {
-            let m = (run / 64 * 64).min(1728);
-            let &(c, n, _) = BLACK_MAKEUP
-                .iter()
-                .find(|&&(_, _, r)| r as usize == m)
-                .unwrap();
-            push_bits(bits, c, n);
-            run -= m;
-        }
-        let &(c, n, _) = BLACK_TERM
-            .iter()
-            .find(|&&(_, _, r)| r as usize == run)
-            .unwrap();
-        push_bits(bits, c, n);
-    }
-
-    /// Minimal G4 encoder (horizontal mode only) for roundtrip testing.
-    fn encode_smmr(bm: &Bitmap) -> Vec<u8> {
-        let ncols = bm.width as usize;
-        let nrows = bm.height as usize;
-        let mut bits: Vec<bool> = Vec::new();
-
-        for row in 0..nrows {
-            let mut col = 0usize;
-            let color = false; // starts white
-            while col < ncols {
-                // Count run of current color
-                let run_start = col;
-                while col < ncols && bm.get(col as u32, row as u32) == color {
-                    col += 1;
-                }
-                let r1 = col - run_start;
-                // Count run of opposite color
-                let run2_start = col;
-                while col < ncols && bm.get(col as u32, row as u32) != color {
-                    col += 1;
-                }
-                let r2 = col - run2_start;
-                // Emit H mode
-                push_bits(&mut bits, 0b001, 3);
-                if !color {
-                    emit_white(&mut bits, r1);
-                    emit_black(&mut bits, r2);
-                } else {
-                    emit_black(&mut bits, r1);
-                    emit_white(&mut bits, r2);
-                }
-                // color unchanged (consumed 2 runs)
-            }
-        }
-        push_bits(&mut bits, 0b000000000001, 12);
-        push_bits(&mut bits, 0b000000000001, 12);
-
-        let nbytes = bits.len().div_ceil(8);
-        let mut data = vec![0u8; 4 + nbytes];
-        data[0] = (ncols >> 8) as u8;
-        data[1] = ncols as u8;
-        data[2] = (nrows >> 8) as u8;
-        data[3] = nrows as u8;
-        for (i, &b) in bits.iter().enumerate() {
-            if b {
-                data[4 + i / 8] |= 0x80 >> (i % 8);
-            }
-        }
-        data
-    }
 
     fn make_bm(w: u32, h: u32, f: impl Fn(u32, u32) -> bool) -> Bitmap {
         let mut bm = Bitmap::new(w, h);

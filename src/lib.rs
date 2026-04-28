@@ -245,7 +245,11 @@ pub mod text_encode;
 #[cfg(feature = "std")]
 pub mod navm_encode;
 
-/// Smmr chunk decoder — ITU-T G4 (MMR) bilevel image decompression.
+/// Smmr chunk codec — ITU-T G4 (MMR) bilevel image compression.
+///
+/// Provides [`smmr::decode_smmr`] (chunk → [`Bitmap`]) and
+/// [`smmr::encode_smmr`] ([`Bitmap`] → chunk). Useful as an alternative
+/// to JB2 for fax-style scans without recurring glyph structure.
 pub mod smmr;
 
 #[cfg(feature = "wasm")]
