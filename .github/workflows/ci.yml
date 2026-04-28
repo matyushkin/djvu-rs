@@ -139,6 +139,14 @@ jobs:
       - name: cargo check --target wasm32-unknown-unknown
         run: cargo check --target wasm32-unknown-unknown --features wasm
 
+      # Pure no_std build for wasm32 (no std feature, no wasm-bindgen).
+      # This is the strictest test of the README "no_std compatible — IFF/BZZ/JB2/IW44/ZP
+      # codec modules work with alloc only" claim — wasm32-unknown-unknown has no std
+      # runtime, so any leaked `std::*` reference fails to link. Catches bit-rot like
+      # the recent `core::arch` vs `std::arch` regression.
+      - name: cargo build --no-default-features --target wasm32-unknown-unknown
+        run: cargo build --no-default-features --target wasm32-unknown-unknown
+
   # ── Tesseract OCR integration ────────────────────────────────────────────────
   ocr-tesseract:
     name: OCR (tesseract)
