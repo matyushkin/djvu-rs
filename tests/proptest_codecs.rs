@@ -7,12 +7,14 @@
 //! Default `proptest` budget is 256 cases per test, suitable for CI.
 
 use djvu_rs::Bitmap;
+use djvu_rs::Pixmap;
 use djvu_rs::annotation::{
     Annotation, Border, Color, Highlight, MapArea, Rect, Shape, encode_annotations,
     encode_annotations_bzz, parse_annotations, parse_annotations_bzz,
 };
 use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
+use djvu_rs::segment::{SegmentOptions, segment_page};
 use djvu_rs::smmr::{decode_smmr, encode_smmr};
 use djvu_rs::{bzz_encode, bzz_new, jb2, jb2_encode};
 use proptest::prelude::*;
@@ -359,6 +361,105 @@ proptest! {
         prop_assert_eq!(areas.len(), areas2.len());
         for (a, b) in areas.iter().zip(areas2.iter()) {
             map_areas_eq(a, b)?;
+        }
+    }
+}
+
+/// Strategy for an RGBA `Pixmap` with arbitrary content.
+fn arb_pixmap(max_w: u32, max_h: u32) -> impl Strategy<Value = Pixmap> {
+    (1u32..=max_w, 1u32..=max_h).prop_flat_map(|(w, h)| {
+        let n = (w * h) as usize;
+        prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>()), n).prop_map(move |triples| {
+            let mut pm = Pixmap::white(w, h);
+            for (i, (r, g, b)) in triples.into_iter().enumerate() {
+                let x = (i as u32) % w;
+                let y = (i as u32) / w;
+                pm.set_rgb(x, y, r, g, b);
+            }
+            pm
+        })
+    })
+}
+
+fn bt601_lum(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) * 306 + (g as u32) * 601 + (b as u32) * 117) >> 10
+}
+
+proptest! {
+    // Segmentation v1 (#220): cap dimensions so the O(w·h) scan stays cheap
+    // on CI; 64 cases at ≤ 32×32 over a few sub-sample factors is enough to
+    // shake out off-by-one bugs in the block accumulator without dominating
+    // the run.
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Mask shape + threshold predicate: every mask pixel has BT.601 lum
+    /// strictly less than threshold; every non-mask pixel has lum ≥ threshold.
+    #[test]
+    fn segment_mask_matches_threshold(
+        pm in arb_pixmap(32, 32),
+        threshold in any::<u8>(),
+        sub in 1u32..=16,
+    ) {
+        let opts = SegmentOptions { threshold, bg_subsample: sub };
+        let seg = segment_page(&pm, &opts);
+        prop_assert_eq!(seg.mask.width, pm.width);
+        prop_assert_eq!(seg.mask.height, pm.height);
+        for y in 0..pm.height {
+            for x in 0..pm.width {
+                let (r, g, b) = pm.get_rgb(x, y);
+                let lum = bt601_lum(r, g, b);
+                let masked = seg.mask.get(x, y);
+                if masked {
+                    prop_assert!(
+                        lum < threshold as u32,
+                        "masked pixel ({x},{y}) lum {lum} >= threshold {threshold}"
+                    );
+                } else {
+                    prop_assert!(
+                        lum >= threshold as u32,
+                        "unmasked pixel ({x},{y}) lum {lum} < threshold {threshold}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// BG dimensions are ceil(w/sub) × ceil(h/sub), with sub=0 clamped to 1.
+    #[test]
+    fn segment_bg_dims_round_up(
+        pm in arb_pixmap(32, 32),
+        sub in 0u32..=16,
+    ) {
+        let opts = SegmentOptions { threshold: 128, bg_subsample: sub };
+        let seg = segment_page(&pm, &opts);
+        let effective = sub.max(1);
+        prop_assert_eq!(seg.bg.width, pm.width.div_ceil(effective));
+        prop_assert_eq!(seg.bg.height, pm.height.div_ceil(effective));
+    }
+
+    /// Determinism: two calls with the same input must agree byte-for-byte.
+    #[test]
+    fn segment_is_deterministic(
+        pm in arb_pixmap(32, 32),
+        threshold in any::<u8>(),
+        sub in 1u32..=16,
+    ) {
+        let opts = SegmentOptions { threshold, bg_subsample: sub };
+        let a = segment_page(&pm, &opts);
+        let b = segment_page(&pm, &opts);
+        prop_assert_eq!(a.mask.data, b.mask.data);
+        prop_assert_eq!(a.bg.data, b.bg.data);
+    }
+
+    /// Threshold = 0 produces an empty mask (no pixel has lum < 0).
+    #[test]
+    fn segment_threshold_zero_yields_empty_mask(pm in arb_pixmap(32, 32)) {
+        let opts = SegmentOptions { threshold: 0, bg_subsample: 4 };
+        let seg = segment_page(&pm, &opts);
+        for y in 0..pm.height {
+            for x in 0..pm.width {
+                prop_assert!(!seg.mask.get(x, y));
+            }
         }
     }
 }
