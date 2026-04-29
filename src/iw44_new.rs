@@ -1630,25 +1630,30 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
             #[allow(unsafe_code)]
             return unsafe { load8s_s1_avx2(slice, phys_off) };
         }
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        // WASM simd128 compile-time path: `i32x4.extend_low/high_i16x8_s` sign-extends
+        // 8×i16 → 8×i32 in two 128-bit ops, avoiding 8 scalar cast+store pairs.
+        // On WASM, `wide::i32x8` is `{a: i32x4, b: i32x4}` where each `i32x4` is
+        // `repr(transparent)` over `v128`, so [lo, hi]: [v128; 2] transmutes cleanly.
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             #[allow(unsafe_code)]
-            return unsafe {
-                // SAFETY: caller ensures phys_off+7 < slice.len().
-                let arr: [i16; 8] =
-                    core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
-                i32x8::from([
-                    arr[0] as i32,
-                    arr[1] as i32,
-                    arr[2] as i32,
-                    arr[3] as i32,
-                    arr[4] as i32,
-                    arr[5] as i32,
-                    arr[6] as i32,
-                    arr[7] as i32,
-                ])
-            };
+            return unsafe { load8s_s1_simd128(slice, phys_off) };
         }
+        #[allow(unsafe_code, unreachable_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let arr: [i16; 8] = core::ptr::read(slice.as_ptr().add(phys_off) as *const [i16; 8]);
+            i32x8::from([
+                arr[0] as i32,
+                arr[1] as i32,
+                arr[2] as i32,
+                arr[3] as i32,
+                arr[4] as i32,
+                arr[5] as i32,
+                arr[6] as i32,
+                arr[7] as i32,
+            ])
+        };
     }
     #[cfg(target_arch = "aarch64")]
     if s == 2 || s == 4 {
@@ -1680,25 +1685,32 @@ fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
             #[allow(unsafe_code)]
             return unsafe { store8s_s1_avx2(slice, phys_off, v) };
         }
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        // WASM simd128: byte-shuffle to pack the low halfword of each i32 lane into
+        // a contiguous i16x8.  Indices 0,1,4,5,8,9,12,13 pick bytes 0-1 of each 4-byte
+        // i32 from the low half (lo), and indices 16,17,20,21,24,25,28,29 do the same
+        // for the high half (hi).  This matches the truncating `as i16` semantics
+        // (not saturating narrow) and mirrors the AVX2 byte-shuffle approach.
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             #[allow(unsafe_code)]
-            return unsafe {
-                // SAFETY: caller ensures phys_off+7 < slice.len().
-                let a = v.to_array();
-                let narrow: [i16; 8] = [
-                    a[0] as i16,
-                    a[1] as i16,
-                    a[2] as i16,
-                    a[3] as i16,
-                    a[4] as i16,
-                    a[5] as i16,
-                    a[6] as i16,
-                    a[7] as i16,
-                ];
-                core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
-            };
+            return unsafe { store8s_s1_simd128(slice, phys_off, v) };
         }
+        #[allow(unsafe_code, unreachable_code)]
+        return unsafe {
+            // SAFETY: caller ensures phys_off+7 < slice.len().
+            let a = v.to_array();
+            let narrow: [i16; 8] = [
+                a[0] as i16,
+                a[1] as i16,
+                a[2] as i16,
+                a[3] as i16,
+                a[4] as i16,
+                a[5] as i16,
+                a[6] as i16,
+                a[7] as i16,
+            ];
+            core::ptr::write(slice.as_mut_ptr().add(phys_off) as *mut [i16; 8], narrow);
+        };
     }
     #[cfg(target_arch = "aarch64")]
     if s == 2 || s == 4 {
@@ -1807,6 +1819,55 @@ unsafe fn store8s_neon(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
     for (j, &val) in a.iter().enumerate() {
         *ptr.add(j * s) = val;
     }
+}
+
+// ---- WASM simd128 stride-1 load/store ----------------------------------------
+//
+// On WASM simd128, `wide::i32x8` compiles to `{a: i32x4, b: i32x4}` where each
+// `i32x4` is `repr(transparent)` over `v128`.  The struct is `repr(C, align(32))`
+// so it is memory-compatible with `[v128; 2]` (two consecutive 128-bit values).
+//
+// Load: `i32x4.extend_low_i16x8_s` / `i32x4.extend_high_i16x8_s` each produce one
+// `v128` of 4×i32 from the low/high 4 lanes of an i16x8, sign-extending in a single
+// WASM instruction (equivalent to `_mm256_cvtepi16_epi32` on AVX2 but in two 128-bit
+// ops).
+//
+// Store: `i8x16_shuffle` with constant mask picks bytes 0,1,4,5,8,9,12,13 from the
+// low half and 0,1,4,5,8,9,12,13 from the high half (as indices 16..31 into the
+// second operand), packing the low 2 bytes of each 4-byte i32 lane into a contiguous
+// 16-byte i16x8.  This is the truncating `as i16` cast (not saturating), matching
+// the scalar fallback and the AVX2 byte-shuffle approach.
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "simd128")]
+#[inline]
+unsafe fn load8s_s1_simd128(slice: &[i16], phys_off: usize) -> i32x8 {
+    use core::arch::wasm32::*;
+    // Load 8 consecutive i16 (16 bytes) as a v128.
+    let v16 = v128_load(slice.as_ptr().add(phys_off) as *const v128);
+    // Sign-extend lower 4 i16 → i32x4 and upper 4 i16 → i32x4.
+    let lo = i32x4_extend_low_i16x8(v16);
+    let hi = i32x4_extend_high_i16x8(v16);
+    // Transmute [v128; 2] → i32x8.  On WASM simd128, i32x8 is {a: i32x4(v128), b: i32x4(v128)}
+    // (repr(C, align(32))), layout-compatible with two consecutive v128 values.
+    core::mem::transmute::<[v128; 2], i32x8>([lo, hi])
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn, dead_code)]
+#[target_feature(enable = "simd128")]
+#[inline]
+unsafe fn store8s_s1_simd128(slice: &mut [i16], phys_off: usize, v: i32x8) {
+    use core::arch::wasm32::*;
+    // Transmute i32x8 → [v128; 2] (lo = lower 4 lanes, hi = upper 4 lanes).
+    let [lo, hi]: [v128; 2] = core::mem::transmute(v);
+    // Pack low halfwords of each i32 lane via constant byte-shuffle.
+    // Indices 0,1,4,5,8,9,12,13 select bytes 0-1 of lanes 0-3 from `lo` (first operand).
+    // Indices 16,17,20,21,24,25,28,29 select bytes 0-1 of lanes 0-3 from `hi` (second operand).
+    // Result is 8 consecutive i16 values, truncating i32→i16 (low 16 bits only).
+    let out = i8x16_shuffle::<0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29>(lo, hi);
+    v128_store(slice.as_mut_ptr().add(phys_off) as *mut v128, out);
 }
 
 /// Load 8 contiguous `i32` values from `slice[off..]` into an `i32x8`.
@@ -3885,6 +3946,58 @@ mod tests {
             ycbcr_raw_half_scalar(&y, &cb_half, &cr_half, &mut want);
 
             assert_eq!(got, want, "AVX2 raw_half mismatch at width {}", width);
+        }
+    }
+
+    /// WASM simd128 stride-1 load must sign-extend i16→i32 correctly.
+    ///
+    /// Mirrors `load8s_s1_avx2_matches_scalar` but for the simd128 path.
+    /// Runs only when compiled for wasm32 with +simd128; host tests use the
+    /// AVX2 or scalar path instead.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[test]
+    fn load8s_s1_simd128_matches_scalar() {
+        let raw_vals: [i16; 8] = [-32768, -8192, -64, -1, 0, 63, 8191, 32767];
+        let n = 64;
+        let buf: alloc::vec::Vec<i16> = (0..n).map(|i| raw_vals[i % raw_vals.len()]).collect();
+        for phys_off in 0..(n - 8) {
+            #[allow(unsafe_code)]
+            let got = unsafe { super::load8s_s1_simd128(&buf, phys_off) };
+            let want = super::load8s(&buf, phys_off, 1);
+            assert_eq!(
+                got.to_array(),
+                want.to_array(),
+                "simd128 load8s_s1 mismatch at phys_off {}",
+                phys_off
+            );
+        }
+    }
+
+    /// WASM simd128 stride-1 store must truncate i32→i16 (drop upper 16 bits, no
+    /// saturation) matching the scalar `as i16` cast for every input.
+    ///
+    /// Mirrors `store8s_s1_avx2_matches_scalar`.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[test]
+    fn store8s_s1_simd128_matches_scalar() {
+        let raw_vals: [i32; 8] = [i32::MIN, -100_000, -32768, -1, 0, 32767, 100_000, i32::MAX];
+        for offset in 0..8usize {
+            let mut input = [0i32; 8];
+            for j in 0..8 {
+                input[j] = raw_vals[(j + offset) % 8];
+            }
+            let v = wide::i32x8::from(input);
+
+            let mut buf_simd128 = alloc::vec![0xABCDu16 as i16; 32];
+            #[allow(unsafe_code)]
+            unsafe {
+                super::store8s_s1_simd128(&mut buf_simd128, 8, v);
+            }
+            let mut buf_scalar = alloc::vec![0xABCDu16 as i16; 32];
+            for j in 0..8 {
+                buf_scalar[8 + j] = input[j] as i16;
+            }
+            assert_eq!(buf_simd128, buf_scalar, "simd128 store8s_s1 mismatch");
         }
     }
 }
