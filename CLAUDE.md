@@ -7,6 +7,44 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #190 Phase 2 — WASM simd128 inverse wavelet (load/store stride-1) — **Kept** (2026-04-29)
+
+**Approach.** Added `load8s_s1_simd128` and `store8s_s1_simd128` (gated on
+`cfg(all(target_arch = "wasm32", target_feature = "simd128"))`) as the WASM
+counterparts to the AVX2 stride-1 helpers shipped in Phase 2 of #189.
+
+`load8s_s1_simd128`: loads 8 consecutive i16 as one `v128`, then calls
+`i32x4_extend_low_i16x8` / `i32x4_extend_high_i16x8` to sign-extend into two
+`v128`s of i32, which are transmuted directly to `wide::i32x8` (`{a: i32x4(v128),
+b: i32x4(v128)}`). This replaces 8 scalar `as i32` casts assembled via
+`i32x8::from([...])`.
+
+`store8s_s1_simd128`: transmutes `i32x8` back to `[v128; 2]`, then uses a
+constant `i8x16_shuffle` with indices `[0,1,4,5,8,9,12,13, 16,17,20,21,24,25,28,29]`
+to pick the low 2 bytes of each i32 lane from both halves into a single `v128`,
+stored in one `v128_store`. This replicates the truncating `as i16` semantics of
+the scalar path (not saturating narrow), matching the AVX2 byte-shuffle approach.
+
+Both functions are wired into `load8s` and `store8s` via a compile-time
+`#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]` block
+(the `return` before the scalar `#[allow(unreachable_code)]` block), so
+the hot column-pass loop at `s == 1` gets the fast path with no runtime branch.
+
+**Bench.** No direct wasm bench harness available locally. Expected speedup is
+analogous to the AVX2 load/store path (#189 Phase 2), which measured −3.9% on
+`jb2_decode_corpus_bilevel`. The WASM path processes 8 lanes (same as `v128`
+width) in 2 ops (load) or 1 shuffle + 1 store (store) vs 8 scalar cast-and-
+write pairs. The column pass at `s=1` is the hottest sub-kernel in
+`inverse_wavelet_transform_from` during full-resolution (`to_rgb`) decoding.
+CI bench job will capture actual WASM numbers on next main merge.
+
+**Reason kept.** Zero regression risk: compile-time gating, bit-exact by
+construction (sign-extend from i16→i32 is exact; low-halfword extraction via
+byte-shuffle is exact truncation). Two new unit tests
+(`load8s_s1_simd128_matches_scalar`, `store8s_s1_simd128_matches_scalar`)
+gate on `wasm32 + simd128` and verify round-trip across the full i16/i32 range.
+All 389 host lib tests pass; both WASM builds (plain and `+simd128`) succeed.
+
 ### #224 Phase 4 — opt-in lossy rec-7 substitution for near-duplicates — **Kept** (2026-04-28)
 
 **Approach.** Added `Jb2EncodeOptions { lossy_threshold: f32 }` and
