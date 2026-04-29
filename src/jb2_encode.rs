@@ -562,6 +562,46 @@ const REFINEMENT_DIFF_FRACTION: u32 = 4;
 /// context state) outweighs any saving even at low Hamming distance.
 const REFINEMENT_MIN_PIXELS: u64 = 32;
 
+/// Find the closest same-size dict entry within a Hamming-distance budget,
+/// for use as a **lossy copy** target (record-7) — the encoder pretends the
+/// near-duplicate is byte-exact, the decoder produces the dict entry's pixels
+/// instead of the original CC. Visual loss is bounded by the threshold.
+///
+/// Used by [`Jb2EncodeOptions::lossy_threshold`] (#224 Phase 4); independent
+/// of [`find_refinement_ref`] which gates record-6 (lossless refinement).
+fn find_lossy_copy_ref(
+    cand: &Bitmap,
+    dict_entries: &[Bitmap],
+    same_size_indices: &[usize],
+    threshold: f32,
+) -> Option<usize> {
+    if same_size_indices.is_empty() || threshold <= 0.0 {
+        return None;
+    }
+    let pixel_count = (cand.width as u64) * (cand.height as u64);
+    if pixel_count < REFINEMENT_MIN_PIXELS {
+        return None;
+    }
+    // Hamming budget in pixel count, rounded to the nearest integer.
+    let max_diff = ((pixel_count as f64) * (threshold as f64)).round() as u32;
+    let mut best: Option<(usize, u32)> = None;
+    for &i in same_size_indices {
+        let ref_bm = &dict_entries[i];
+        debug_assert_eq!(ref_bm.width, cand.width);
+        debug_assert_eq!(ref_bm.height, cand.height);
+        let d = packed_hamming(&cand.data, &ref_bm.data);
+        if d > max_diff {
+            continue;
+        }
+        match best {
+            None => best = Some((i, d)),
+            Some((_, bd)) if d < bd => best = Some((i, d)),
+            _ => {}
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Find the best refinement-reference dict index for `cand` among
 /// dict entries of identical (w, h). Returns `None` if no candidate is
 /// close enough to be worth a record-6 emission.
@@ -595,6 +635,33 @@ fn find_refinement_ref(
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// Tunable knobs for the JB2 dictionary encoder.
+///
+/// Default values reproduce the lossless behavior of [`encode_jb2_dict`]
+/// and [`encode_jb2_dict_with_shared`].
+#[derive(Debug, Clone, Copy)]
+pub struct Jb2EncodeOptions {
+    /// Hamming-distance threshold (as fraction of pixel count) for **lossy
+    /// rec-7 substitution** (#224 Phase 4). When `> 0`, CCs that are not
+    /// byte-exact but match a same-size dict entry within
+    /// `pixel_count × lossy_threshold` flipped pixels are emitted as
+    /// rec-7 (matched copy) — the decoder produces the dict entry's pixels
+    /// instead of the original. Visual error per CC is bounded by the
+    /// threshold; bytes shrink because rec-7 carries no refinement bitmap.
+    ///
+    /// `0.0` (default) = lossless: rec-7 fires only on byte-exact matches.
+    /// `cjb2 -lossy` ships at roughly the equivalent of 0.04–0.05 here.
+    pub lossy_threshold: f32,
+}
+
+impl Default for Jb2EncodeOptions {
+    fn default() -> Self {
+        Self {
+            lossy_threshold: 0.0,
+        }
+    }
 }
 
 /// Encode a bilevel [`Bitmap`] into a JB2 stream using a **symbol dictionary**.
@@ -635,6 +702,25 @@ pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
 /// Round-trip: pass the resulting Sjbz bytes plus
 /// `decode_dict(djbz_bytes, None)` to [`crate::jb2::decode`].
 pub fn encode_jb2_dict_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap]) -> Vec<u8> {
+    encode_jb2_dict_with_options(bitmap, shared_symbols, &Jb2EncodeOptions::default())
+}
+
+/// Encode like [`encode_jb2_dict_with_shared`] but with caller-specified
+/// [`Jb2EncodeOptions`]. The default options reproduce the lossless
+/// behavior of [`encode_jb2_dict_with_shared`]; raising
+/// `opts.lossy_threshold` enables rec-7 substitution for near-duplicate
+/// CCs (see [`Jb2EncodeOptions::lossy_threshold`]).
+///
+/// Lossy output: when `lossy_threshold > 0`, the decoded page is no
+/// longer pixel-exact relative to the input; reconstruction error per CC
+/// is bounded by the threshold (Hamming as a fraction of pixel count).
+/// Lossless output (default) round-trips byte-for-byte through
+/// [`crate::jb2::decode`].
+pub fn encode_jb2_dict_with_options(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+) -> Vec<u8> {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
     if w == 0 || h == 0 {
@@ -749,9 +835,20 @@ pub fn encode_jb2_dict_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap]) -
                 .get(&(cc.bitmap.width, cc.bitmap.height))
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            match find_refinement_ref(&cc.bitmap, &dict_entries, candidates) {
-                Some(ref_idx) => Action::Refine(ref_idx),
-                None => Action::New,
+            // Phase 4 (#224): lossy rec-7 substitution. Tried before
+            // refinement so a same-size near-twin produces a smaller
+            // rec-7 (no refinement bitmap) instead of a larger rec-6.
+            let lossy_copy = if opts.lossy_threshold > 0.0 {
+                find_lossy_copy_ref(&cc.bitmap, &dict_entries, candidates, opts.lossy_threshold)
+            } else {
+                None
+            };
+            match lossy_copy {
+                Some(idx) => Action::Copy(idx),
+                None => match find_refinement_ref(&cc.bitmap, &dict_entries, candidates) {
+                    Some(ref_idx) => Action::Refine(ref_idx),
+                    None => Action::New,
+                },
             }
         };
 
@@ -1980,6 +2077,93 @@ mod tests {
             .expect("mask 1 present");
         assert_decoded_eq(&p1, &d1);
         assert_decoded_eq(&p2, &d2);
+    }
+
+    #[test]
+    fn lossy_threshold_substitutes_near_duplicate_with_rec7() {
+        // Three 6×6 CCs on one page:
+        //   - "base" solid block (1st CC → rec-1, becomes dict entry 0)
+        //   - "near_dup" solid block with one pixel off (Hamming = 1)
+        //   - "another_near_dup" solid block with a different pixel off
+        //     (Hamming = 1 from base, Hamming = 2 from near_dup)
+        //
+        // Lossless (threshold = 0) → 2 rec-6 refinements.
+        // Lossy (threshold = 0.05 ≈ 2 pixels of 36) → 2 rec-7 copies of base.
+        // Lossy bytes < lossless bytes (rec-7 is smaller — no refinement bitmap).
+        let base = make_bitmap(6, 6, |_, _| true);
+        let near_dup = make_bitmap(6, 6, |x, y| !(x == 3 && y == 3));
+        let another = make_bitmap(6, 6, |x, y| !(x == 1 && y == 4));
+
+        let stamp = |page: &mut Bitmap, ox: u32, oy: u32, src: &Bitmap| {
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    if src.get(x, y) {
+                        page.set(ox + x, oy + y, true);
+                    }
+                }
+            }
+        };
+        let mut page = make_bitmap(40, 12, |_, _| false);
+        stamp(&mut page, 2, 2, &base);
+        stamp(&mut page, 14, 2, &near_dup);
+        stamp(&mut page, 26, 2, &another);
+
+        let lossless = encode_jb2_dict_with_options(
+            &page,
+            &[],
+            &Jb2EncodeOptions {
+                lossy_threshold: 0.0,
+            },
+        );
+        let lossy = encode_jb2_dict_with_options(
+            &page,
+            &[],
+            &Jb2EncodeOptions {
+                lossy_threshold: 0.05,
+            },
+        );
+
+        assert!(
+            lossy.len() < lossless.len(),
+            "lossy should be smaller than lossless: lossy={} lossless={}",
+            lossy.len(),
+            lossless.len()
+        );
+
+        // Lossy output decodes; the decoded near-duplicate CCs should now
+        // be byte-identical to `base` (not to their original perturbed
+        // pixels — that's the deliberate visual loss).
+        let decoded = jb2::decode(&lossy, None).expect("lossy decode");
+        assert_eq!(decoded.width, page.width);
+        assert_eq!(decoded.height, page.height);
+
+        // The first CC region (base) is unchanged. The second/third
+        // regions used to have one missing pixel each; in lossy mode the
+        // decoder fills them in (the substitute rec-7 references the
+        // solid base).
+        //
+        // Sanity: original page is missing pixel at (14+3, 2+3) = (17, 5)
+        // and at (26+1, 2+4) = (27, 6). The lossy decode should have those
+        // pixels set (because rec-7 copied the solid `base`).
+        assert!(
+            decoded.get(17, 5),
+            "lossy decode should fill base at (17,5)"
+        );
+        assert!(
+            decoded.get(27, 6),
+            "lossy decode should fill base at (27,6)"
+        );
+
+        // Lossless decode preserves the holes faithfully.
+        let decoded_lossless = jb2::decode(&lossless, None).expect("lossless decode");
+        assert!(
+            !decoded_lossless.get(17, 5),
+            "lossless should preserve hole at (17,5)"
+        );
+        assert!(
+            !decoded_lossless.get(27, 6),
+            "lossless should preserve hole at (27,6)"
+        );
     }
 
     #[test]
