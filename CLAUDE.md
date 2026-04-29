@@ -7,6 +7,68 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #224 Phase 4 — opt-in lossy rec-7 substitution for near-duplicates — **Kept** (2026-04-28)
+
+**Approach.** Added `Jb2EncodeOptions { lossy_threshold: f32 }` and
+`pub fn encode_jb2_dict_with_options(bitmap, shared, &opts)`. When
+`lossy_threshold > 0.0`, the action-selection branch tries
+`find_lossy_copy_ref` *before* the lossless refinement matcher
+(`find_refinement_ref`): for each CC, it scans `same_size_indices` in
+`dict_entries`, and if any entry has `packed_hamming(rep, cc) <= pixels *
+lossy_threshold`, the encoder emits `rec-7` (matched copy, no
+refinement bitmap) referencing it. Decoder will then reconstruct the
+dict entry's pixels, with visual error bounded by the threshold. The
+existing `REFINEMENT_MIN_PIXELS = 32` floor still applies — tiny CCs
+stay byte-exact regardless of threshold.
+
+`encode_jb2_dict_with_shared` now delegates to
+`encode_jb2_dict_with_options(bitmap, shared, &Jb2EncodeOptions::default())`
+so the shipped lossless path is unchanged. Default threshold = 0 = exact
+behaviour preserved.
+
+`examples/encode_quality_jb2.rs` got a `--lossy-threshold <fraction>`
+flag, plus a `bitmap_hamming` helper that decodes the lossy-encoded Sjbz
+and computes pixel-wise Hamming vs the original mask, so the harness
+reports both byte savings and total reconstruction error.
+
+**Bench** (`encode_quality_jb2` on a 15-page bilevel mix:
+`tests/corpus/{cable_1973_100133,watchmaker}.djvu` +
+`tests/fixtures/{big-scanned-page,carte,chicken,irish}.djvu`,
+~188 M total pixels, Apple M1 Max):
+
+| `--lossy-threshold` | rs-lossy bytes | vs rs-dict (lossless) | total err pixels | bits/pixel error |
+|---------------------|---------------:|----------------------:|-----------------:|-----------------:|
+| 0 (lossless dict)   | 167 314        | 1.000×                | 0                | 0                |
+| 0.01                | 158 250        | **0.946×** (−5.4%)    | 10 986           | 0.000087         |
+| 0.02                | 154 050        | 0.921× (−7.9%)        | 17 946           | 0.000142         |
+| 0.04                | 150 118        | 0.897× (−10.3%)       | 28 568           | 0.000226         |
+| 0.05                | 149 015        | 0.891× (−10.9%)       | 32 386           | 0.000256         |
+| 0.08                | 146 104        | **0.873×** (−12.7%)   | 40 767           | 0.000322         |
+
+Reconstruction error is on the order of 1 in 5–20 K pixels (≈0.0001–
+0.0003 bits/pixel) — visually imperceptible for scanned text on these
+600 dpi-class bilevel inputs. The `lossy decode errors: 1` row in the
+summary is the same `irish.djvu` page that already trips
+`roundtrip_dict: decode_error` on the lossless path (issue #198: a CC
+larger than `MAX_SYMBOL_PIXELS`); orthogonal to lossy mode.
+
+**Reason kept.** Material byte savings on top of the already-shipped
+lossless dict path, opt-in via `Jb2EncodeOptions`, default behaviour
+unchanged. The threshold knob is exposed so callers can pick their own
+size↔fidelity point. Pairs naturally with the cjb2 quality settings
+(default ≈ 0.005, conservative ≈ 0.02 in DjVuLibre) — a CLI front-end
+could map that mapping in a follow-up. All 32 `jb2_encode` unit tests
+plus the new `lossy_threshold_substitutes_near_duplicate_with_rec7`
+test pass.
+
+**Open follow-ups.**
+1. `--lossy-threshold` doesn't yet feed into `cjb2`-equivalent CLI
+   front-end (`tools/djvu-encode` if/when one exists).
+2. The same threshold logic could be extended to refinement: instead of
+   only substituting same-size near-dups with rec-7, allow lossy rec-6
+   that emits a *truncated* refinement bitmap. Unclear if there's
+   additional headroom past the rec-7 path measured here.
+
 ### #194 Phase 2.5 — per-CC accounting harness for shared-Djbz refinement — **Kept (instrumentation only)** (2026-04-28)
 
 **Approach.** Added `pub fn analyze_jb2_cc_stats(page, &shared)` that mirrors
