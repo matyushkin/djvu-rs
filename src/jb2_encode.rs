@@ -1055,6 +1055,118 @@ pub fn cluster_shared_symbols_tunable(
     promoted.into_iter().map(|c| c.rep).collect()
 }
 
+/// Per-CC accounting of which JB2 record type a single page would emit
+/// against a given shared dictionary, without performing the actual encode.
+///
+/// Phase 2.5 measurement aid (#194): mirrors the action-selection branch in
+/// [`encode_jb2_dict_with_shared`] (rec-7 exact / rec-6 refinement / rec-1
+/// new) and reports counts, pixel totals, and Hamming-distance distribution
+/// for the rec-6 emissions, distinguishing references that resolve into the
+/// shared Djbz vs ones that resolve into the page-local running dict.
+///
+/// Use this to answer questions like "how many CCs would actually benefit
+/// from a tighter refinement threshold" or "how large is the rec-7 win
+/// from the shared dict on this corpus" without round-tripping bytes.
+#[derive(Debug, Default, Clone)]
+pub struct CcStats {
+    pub total_ccs: usize,
+    /// rec-7: byte-exact match found in the running dict.
+    pub rec_7_exact: usize,
+    /// rec-6 against a slot inside the shared (cross-page) Djbz.
+    pub rec_6_refine_shared: usize,
+    /// rec-6 against a slot emitted earlier on the same page.
+    pub rec_6_refine_local: usize,
+    /// rec-1: no usable match, fresh emission.
+    pub rec_1_new: usize,
+    /// Hamming distances of rec-6 matches (one entry per rec-6 CC).
+    pub rec_6_hamming: Vec<u32>,
+    /// Pixel-count totals split by record type.
+    pub pixels_rec_1: u64,
+    pub pixels_rec_6: u64,
+    pub pixels_rec_7: u64,
+}
+
+/// Walk `page`'s connected components in encoder order and accumulate
+/// per-CC accounting against `shared_symbols` using the same action-
+/// selection rules as [`encode_jb2_dict_with_shared`]. Pure observation —
+/// no bytes are emitted.
+pub fn analyze_jb2_cc_stats(page: &Bitmap, shared_symbols: &[Bitmap]) -> CcStats {
+    let mut stats = CcStats::default();
+    if page.width == 0 || page.height == 0 {
+        return stats;
+    }
+
+    let ccs = extract_ccs(page);
+    let mut order: Vec<usize> = (0..ccs.len()).collect();
+    let bucket = (SAME_LINE_BASELINE_TOL.max(1)) as u32;
+    order.sort_by_key(|&i| {
+        let cc = &ccs[i];
+        let bottom = cc.y + cc.bitmap.height;
+        (bottom / bucket, cc.x)
+    });
+
+    let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
+    let mut dict_entries: Vec<Bitmap> = Vec::new();
+    let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    let shared_len = shared_symbols.len();
+    for sym in shared_symbols {
+        let idx = dict_entries.len();
+        dedup.insert((sym.width, sym.height, sym.data.clone()), idx);
+        by_size
+            .entry((sym.width, sym.height))
+            .or_default()
+            .push(idx);
+        dict_entries.push(sym.clone());
+    }
+
+    for &cc_idx in &order {
+        let cc = &ccs[cc_idx];
+        let pixels = (cc.bitmap.width as u64) * (cc.bitmap.height as u64);
+        stats.total_ccs += 1;
+
+        let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
+        if let Some(idx) = dedup.get(&key).copied() {
+            stats.rec_7_exact += 1;
+            stats.pixels_rec_7 += pixels;
+            // rec-7 emits no new dict entry, no need to update tables.
+            let _ = idx;
+            continue;
+        }
+
+        let candidates = by_size
+            .get(&(cc.bitmap.width, cc.bitmap.height))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        match find_refinement_ref(&cc.bitmap, &dict_entries, candidates) {
+            Some(ref_idx) => {
+                let ref_bm = &dict_entries[ref_idx];
+                let d = packed_hamming(&cc.bitmap.data, &ref_bm.data);
+                stats.rec_6_hamming.push(d);
+                if ref_idx < shared_len {
+                    stats.rec_6_refine_shared += 1;
+                } else {
+                    stats.rec_6_refine_local += 1;
+                }
+                stats.pixels_rec_6 += pixels;
+                // rec-6 emits no new dict entry — the refinement is blit-only.
+            }
+            None => {
+                stats.rec_1_new += 1;
+                stats.pixels_rec_1 += pixels;
+                let idx = dict_entries.len();
+                dedup.insert(key, idx);
+                by_size
+                    .entry((cc.bitmap.width, cc.bitmap.height))
+                    .or_default()
+                    .push(idx);
+                dict_entries.push(cc.bitmap.clone());
+            }
+        }
+    }
+
+    stats
+}
+
 /// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
 ///
 /// CCs that appear on at least `shared_dict_page_threshold` distinct input
@@ -1868,5 +1980,59 @@ mod tests {
             .expect("mask 1 present");
         assert_decoded_eq(&p1, &d1);
         assert_decoded_eq(&p2, &d2);
+    }
+
+    #[test]
+    fn analyze_jb2_cc_stats_classifies_records() {
+        // Three CCs on one page, each well-separated:
+        //   1. solid 6×6 block             → byte-exact match against shared (rec-7)
+        //   2. solid 6×6 minus one pixel   → Hamming-1 match against shared  (rec-6)
+        //   3. solid 5×5 block             → unrelated, no same-size match   (rec-1)
+        //
+        // REFINEMENT_MIN_PIXELS = 32 forces the 5×5 path through rec-1 even
+        // if the dict had a same-size entry. The 6×6 entries (36 pixels each)
+        // are eligible for rec-6 against the shared dict.
+        let shared_glyph = make_bitmap(6, 6, |_, _| true);
+        let near_dup = make_bitmap(6, 6, |x, y| !(x == 3 && y == 3));
+        let unrelated = make_bitmap(5, 5, |_, _| true);
+
+        let stamp = |page: &mut Bitmap, ox: u32, oy: u32, src: &Bitmap| {
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    if src.get(x, y) {
+                        page.set(ox + x, oy + y, true);
+                    }
+                }
+            }
+        };
+        let mut page = make_bitmap(40, 12, |_, _| false);
+        stamp(&mut page, 2, 2, &shared_glyph);
+        stamp(&mut page, 14, 2, &near_dup);
+        stamp(&mut page, 26, 2, &unrelated);
+
+        let stats = analyze_jb2_cc_stats(&page, &[shared_glyph]);
+        assert_eq!(stats.rec_7_exact, 1, "expected one byte-exact rec-7 hit");
+        assert_eq!(
+            stats.rec_6_refine_shared, 1,
+            "expected one refinement against the shared dict slot"
+        );
+        assert_eq!(stats.rec_6_refine_local, 0);
+        assert!(
+            stats.rec_1_new >= 1,
+            "expected at least one rec-1 (got {})",
+            stats.rec_1_new
+        );
+        assert_eq!(stats.rec_6_hamming.len(), 1);
+        assert_eq!(stats.rec_6_hamming[0], 1);
+        assert!(stats.pixels_rec_7 > 0);
+        assert!(stats.pixels_rec_6 > 0);
+        assert!(stats.pixels_rec_1 > 0);
+        assert_eq!(
+            stats.total_ccs,
+            stats.rec_1_new
+                + stats.rec_6_refine_local
+                + stats.rec_6_refine_shared
+                + stats.rec_7_exact
+        );
     }
 }
