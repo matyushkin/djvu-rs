@@ -29,8 +29,9 @@ use std::process::ExitCode;
 use djvu_rs::{
     Bitmap, DjVuDocument,
     jb2_encode::{
-        cluster_shared_symbols_tunable, encode_djvm_bundle_jb2_with_shared, encode_jb2_dict,
-        encode_jb2_dict_with_shared, encode_jb2_djbz,
+        CcStats, analyze_jb2_cc_stats, cluster_shared_symbols_tunable,
+        encode_djvm_bundle_jb2_with_shared, encode_jb2_dict, encode_jb2_dict_with_shared,
+        encode_jb2_djbz,
     },
 };
 
@@ -76,7 +77,57 @@ fn collect_pages(path: &Path) -> Option<(Vec<Bitmap>, usize, (u32, u32))> {
     Some((pages, orig_total, avg))
 }
 
-fn process_file(path: &Path, threshold: usize, diff_fraction: u32) -> Option<FileResult> {
+/// Aggregate per-page CC stats across all pages of a bundle.
+fn aggregate_cc_stats(pages: &[Bitmap], shared: &[Bitmap]) -> CcStats {
+    let mut agg = CcStats::default();
+    for p in pages {
+        let s = analyze_jb2_cc_stats(p, shared);
+        agg.total_ccs += s.total_ccs;
+        agg.rec_7_exact += s.rec_7_exact;
+        agg.rec_6_refine_shared += s.rec_6_refine_shared;
+        agg.rec_6_refine_local += s.rec_6_refine_local;
+        agg.rec_1_new += s.rec_1_new;
+        agg.pixels_rec_1 += s.pixels_rec_1;
+        agg.pixels_rec_6 += s.pixels_rec_6;
+        agg.pixels_rec_7 += s.pixels_rec_7;
+        agg.rec_6_hamming.extend(s.rec_6_hamming);
+    }
+    agg
+}
+
+/// Print a fixed-bin Hamming-distance histogram for rec-6 emissions.
+/// Bins are in % of pixel-count (Hamming / pixel_count × 100), with the
+/// caveat that we don't have per-CC pixel context in the aggregate, so
+/// we report by absolute Hamming distance bucketed into power-of-two bins.
+fn print_hamming_histogram(hamming: &[u32]) {
+    if hamming.is_empty() {
+        eprintln!("  rec-6 Hamming histogram: (no rec-6 emissions)");
+        return;
+    }
+    let bins: [(u32, u32, &str); 7] = [
+        (0, 0, "=0"),
+        (1, 4, "1-4"),
+        (5, 16, "5-16"),
+        (17, 64, "17-64"),
+        (65, 256, "65-256"),
+        (257, 1024, "257-1024"),
+        (1025, u32::MAX, ">1024"),
+    ];
+    let total = hamming.len();
+    eprintln!("  rec-6 Hamming histogram ({} matches):", total);
+    for (lo, hi, label) in bins {
+        let n = hamming.iter().filter(|&&h| h >= lo && h <= hi).count();
+        let pct = n as f64 / total as f64 * 100.0;
+        eprintln!("    {:>10}: {:>6} ({:>5.1}%)", label, n, pct);
+    }
+}
+
+fn process_file(
+    path: &Path,
+    threshold: usize,
+    diff_fraction: u32,
+    cc_stats: bool,
+) -> Option<FileResult> {
     let (pages, orig_total, avg) = match collect_pages(path) {
         Some(t) => t,
         None => {
@@ -117,6 +168,28 @@ fn process_file(path: &Path, threshold: usize, diff_fraction: u32) -> Option<Fil
         bundle_total.saturating_sub(djbz_bytes + sjbz_total),
     );
 
+    if cc_stats {
+        let agg = aggregate_cc_stats(&pages, &shared);
+        eprintln!(
+            "  CC accounting: total={} rec-1={} ({:.1}%) rec-6_shared={} ({:.1}%) \
+             rec-6_local={} ({:.1}%) rec-7_exact={} ({:.1}%)",
+            agg.total_ccs,
+            agg.rec_1_new,
+            agg.rec_1_new as f64 / agg.total_ccs.max(1) as f64 * 100.0,
+            agg.rec_6_refine_shared,
+            agg.rec_6_refine_shared as f64 / agg.total_ccs.max(1) as f64 * 100.0,
+            agg.rec_6_refine_local,
+            agg.rec_6_refine_local as f64 / agg.total_ccs.max(1) as f64 * 100.0,
+            agg.rec_7_exact,
+            agg.rec_7_exact as f64 / agg.total_ccs.max(1) as f64 * 100.0,
+        );
+        eprintln!(
+            "  pixel volume: rec-1={} px  rec-6={} px  rec-7={} px",
+            agg.pixels_rec_1, agg.pixels_rec_6, agg.pixels_rec_7,
+        );
+        print_hamming_histogram(&agg.rec_6_hamming);
+    }
+
     // Verify round-trip — every page must decode pixel-exact.
     let roundtrip_ok = match DjVuDocument::parse(&bundle) {
         Ok(doc) if doc.page_count() == pages.len() => {
@@ -149,6 +222,7 @@ fn main() -> ExitCode {
     // Default 0 = byte-exact, the shipped clustering. Higher values opt
     // into Hamming clustering for experimentation.
     let mut diff_fraction: u32 = 0;
+    let mut cc_stats = false;
     let mut files: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -162,6 +236,8 @@ fn main() -> ExitCode {
                 .next()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(diff_fraction);
+        } else if a == "--cc-stats" {
+            cc_stats = true;
         } else {
             files.push(a);
         }
@@ -169,20 +245,21 @@ fn main() -> ExitCode {
 
     if files.is_empty() {
         eprintln!(
-            "usage: encode_quality_djbz [--threshold N] [--diff-fraction P] <file.djvu> [...]\n\
+            "usage: encode_quality_djbz [--threshold N] [--diff-fraction P] [--cc-stats] <file.djvu> [...]\n\
              \n\
              Encodes every multi-page input via encode_djvm_bundle_jb2 and\n\
              reports total bytes vs. independent per-page dict + original Sjbz.\n\
              \n\
              --threshold N      promote glyph clusters that span >= N pages (default 2)\n\
-             --diff-fraction P  Hamming distance allowance, percent of pixels (0..=10, default 0 = byte-exact)"
+             --diff-fraction P  Hamming distance allowance, percent of pixels (0..=10, default 0 = byte-exact)\n\
+             --cc-stats         print per-CC record-type accounting + Hamming histogram (#194 Phase 2.5)"
         );
         return ExitCode::from(2);
     }
 
     let mut all = Vec::new();
     for f in &files {
-        if let Some(r) = process_file(Path::new(f), threshold, diff_fraction) {
+        if let Some(r) = process_file(Path::new(f), threshold, diff_fraction, cc_stats) {
             all.push(r);
         }
     }
