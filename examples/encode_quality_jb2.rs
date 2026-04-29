@@ -25,8 +25,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use djvu_rs::{
-    DjVuDocument, jb2,
-    jb2_encode::{encode_jb2, encode_jb2_dict},
+    Bitmap, DjVuDocument, jb2,
+    jb2_encode::{Jb2EncodeOptions, encode_jb2, encode_jb2_dict, encode_jb2_dict_with_options},
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -56,11 +56,29 @@ struct PageResult {
     orig_sjbz_bytes: usize,
     rs_sjbz_bytes: usize,
     rs_dict_sjbz_bytes: usize,
+    rs_lossy_sjbz_bytes: usize,
+    /// Reconstruction-error pixel count for lossy mode (Hamming between
+    /// the original page bitmap and the lossy decode). 0 = lossless or
+    /// no near-duplicates fired the substitution.
+    lossy_hamming: u64,
     roundtrip: RoundtripStatus,
     roundtrip_dict: RoundtripStatus,
 }
 
-fn process_file(path: &Path) -> Vec<PageResult> {
+/// Pixel-wise Hamming distance between two same-size bitmaps. Used to
+/// quantify lossy reconstruction error vs the original.
+fn bitmap_hamming(a: &Bitmap, b: &Bitmap) -> u64 {
+    if a.width != b.width || a.height != b.height || a.data.len() != b.data.len() {
+        return u64::MAX;
+    }
+    let mut total: u64 = 0;
+    for (x, y) in a.data.iter().zip(b.data.iter()) {
+        total += (x ^ y).count_ones() as u64;
+    }
+    total
+}
+
+fn process_file(path: &Path, lossy_threshold: f32) -> Vec<PageResult> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -93,6 +111,19 @@ fn process_file(path: &Path) -> Vec<PageResult> {
 
         let rs_encoded = encode_jb2(&bitmap);
         let rs_dict_encoded = encode_jb2_dict(&bitmap);
+        let rs_lossy_encoded = if lossy_threshold > 0.0 {
+            encode_jb2_dict_with_options(&bitmap, &[], &Jb2EncodeOptions { lossy_threshold })
+        } else {
+            rs_dict_encoded.clone()
+        };
+        let lossy_hamming = if lossy_threshold > 0.0 {
+            match jb2::decode(&rs_lossy_encoded, None) {
+                Ok(d) => bitmap_hamming(&bitmap, &d),
+                Err(_) => u64::MAX,
+            }
+        } else {
+            0
+        };
 
         let roundtrip = match jb2::decode(&rs_encoded, None) {
             Ok(b) => {
@@ -123,6 +154,8 @@ fn process_file(path: &Path) -> Vec<PageResult> {
             orig_sjbz_bytes: orig_sjbz.len(),
             rs_sjbz_bytes: rs_encoded.len(),
             rs_dict_sjbz_bytes: rs_dict_encoded.len(),
+            rs_lossy_sjbz_bytes: rs_lossy_encoded.len(),
+            lossy_hamming,
             roundtrip,
             roundtrip_dict,
         });
@@ -138,29 +171,72 @@ fn bpp(bytes: usize, width: u32, height: u32) -> f64 {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let mut lossy_threshold: f32 = 0.0;
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw_args.len() {
+        let a = &raw_args[i];
+        if a == "--lossy-threshold" {
+            i += 1;
+            if i >= raw_args.len() {
+                eprintln!("--lossy-threshold requires a value (e.g. 0.04)");
+                return ExitCode::from(2);
+            }
+            lossy_threshold = match raw_args[i].parse::<f32>() {
+                Ok(v) if (0.0..=1.0).contains(&v) => v,
+                _ => {
+                    eprintln!(
+                        "--lossy-threshold must be a fraction in [0.0, 1.0] (got {:?})",
+                        raw_args[i]
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+        } else if let Some(rest) = a.strip_prefix("--lossy-threshold=") {
+            lossy_threshold = match rest.parse::<f32>() {
+                Ok(v) if (0.0..=1.0).contains(&v) => v,
+                _ => {
+                    eprintln!(
+                        "--lossy-threshold must be a fraction in [0.0, 1.0] (got {:?})",
+                        rest
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+        } else {
+            files.push(a.clone());
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
         eprintln!(
-            "usage: encode_quality_jb2 <file.djvu> [<file2.djvu> ...]\n\
+            "usage: encode_quality_jb2 [--lossy-threshold <fraction>] <file.djvu> [<file2.djvu> ...]\n\
              \n\
              Re-encodes every Sjbz chunk via djvu-rs and compares size to the\n\
-             original. Also verifies lossless round-trip."
+             original. Also verifies lossless round-trip.\n\
+             \n\
+             --lossy-threshold <f>  enable lossy rec-7 substitution at the given\n\
+                                    Hamming fraction (e.g. 0.04 = 4%% of pixels).\n\
+                                    Default 0 = lossless."
         );
         return ExitCode::from(2);
     }
 
     let mut all: Vec<PageResult> = Vec::new();
-    for arg in &args {
+    for arg in &files {
         let path = Path::new(arg);
-        all.extend(process_file(path));
+        all.extend(process_file(path, lossy_threshold));
     }
 
     for r in &all {
         println!(
             "{{\"file\":\"{}\",\"page\":{},\"width\":{},\"height\":{},\
              \"orig_sjbz_bytes\":{},\"rs_sjbz_bytes\":{},\"rs_dict_sjbz_bytes\":{},\
-             \"bpp_orig\":{:.4},\"bpp_rs\":{:.4},\"bpp_rs_dict\":{:.4},\
-             \"size_ratio\":{:.3},\"size_ratio_dict\":{:.3},\
+             \"rs_lossy_sjbz_bytes\":{},\"lossy_hamming\":{},\
+             \"bpp_orig\":{:.4},\"bpp_rs\":{:.4},\"bpp_rs_dict\":{:.4},\"bpp_rs_lossy\":{:.4},\
+             \"size_ratio\":{:.3},\"size_ratio_dict\":{:.3},\"size_ratio_lossy\":{:.3},\
              \"roundtrip\":\"{}\",\"roundtrip_dict\":\"{}\"}}",
             r.file,
             r.page,
@@ -169,11 +245,15 @@ fn main() -> ExitCode {
             r.orig_sjbz_bytes,
             r.rs_sjbz_bytes,
             r.rs_dict_sjbz_bytes,
+            r.rs_lossy_sjbz_bytes,
+            r.lossy_hamming,
             bpp(r.orig_sjbz_bytes, r.width, r.height),
             bpp(r.rs_sjbz_bytes, r.width, r.height),
             bpp(r.rs_dict_sjbz_bytes, r.width, r.height),
+            bpp(r.rs_lossy_sjbz_bytes, r.width, r.height),
             r.rs_sjbz_bytes as f64 / r.orig_sjbz_bytes.max(1) as f64,
             r.rs_dict_sjbz_bytes as f64 / r.orig_sjbz_bytes.max(1) as f64,
+            r.rs_lossy_sjbz_bytes as f64 / r.orig_sjbz_bytes.max(1) as f64,
             r.roundtrip.as_str(),
             r.roundtrip_dict.as_str(),
         );
@@ -255,6 +335,45 @@ fn main() -> ExitCode {
         total_orig,
         (total_orig as f64 * 8.0) / total_pixels.max(1) as f64
     );
+
+    if lossy_threshold > 0.0 {
+        let total_rs_lossy: usize = all.iter().map(|r| r.rs_lossy_sjbz_bytes).sum();
+        let total_lossy_hamming: u64 = all
+            .iter()
+            .map(|r| {
+                if r.lossy_hamming == u64::MAX {
+                    0
+                } else {
+                    r.lossy_hamming
+                }
+            })
+            .sum();
+        let lossy_decode_err = all.iter().filter(|r| r.lossy_hamming == u64::MAX).count();
+        eprintln!();
+        eprintln!(
+            "-- lossy dict (rec-7 near-dup substitution, threshold = {:.4}) --",
+            lossy_threshold
+        );
+        eprintln!(
+            "total rs-lossy size: {:>10} bytes  ({:.4} bpp)",
+            total_rs_lossy,
+            (total_rs_lossy as f64 * 8.0) / total_pixels.max(1) as f64
+        );
+        eprintln!(
+            "ratio rs-lossy / orig:    {:.3}×",
+            total_rs_lossy as f64 / total_orig.max(1) as f64
+        );
+        eprintln!(
+            "ratio rs-lossy / rs-dict: {:.3}×",
+            total_rs_lossy as f64 / total_rs_dict.max(1) as f64
+        );
+        eprintln!(
+            "total reconstruction err: {} pixels  ({:.6} bits/pixel error)",
+            total_lossy_hamming,
+            total_lossy_hamming as f64 / total_pixels.max(1) as f64
+        );
+        eprintln!("lossy decode errors:      {}", lossy_decode_err);
+    }
 
     if roundtrip_mismatch > 0 || roundtrip_dict_mismatch > 0 {
         ExitCode::from(1)
