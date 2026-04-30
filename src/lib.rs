@@ -72,11 +72,12 @@ pub mod error;
 /// INFO chunk parser (phase 1).
 pub(crate) mod info;
 
-/// ZP arithmetic coder — clean-room implementation (phase 2a).
+/// ZP arithmetic coder — clean-room implementation.
 ///
-/// Provides `ZpDecoder` used by BZZ, JB2, and IW44 decoders.
-#[path = "zp/mod.rs"]
-pub(crate) mod zp_impl;
+/// Lives in the standalone [`djvu_zp`] sub-crate (workspace member) since
+/// PR1 of #229.  Re-exported here as `zp_impl` for backwards compatibility
+/// with the historical internal path used by BZZ, JB2, and IW44.
+pub(crate) use djvu_zp as zp_impl;
 
 /// BZZ decompressor — clean-room implementation.
 ///
