@@ -217,6 +217,14 @@ pub enum BzzError {
     OutputTooLarge,
 }
 
+/// Map ZP-coder init errors into [`BzzError`] so callers using `?` keep working
+/// after the ZP coder moved into the standalone `djvu-zp` crate (#229 PR1).
+impl From<djvu_zp::ZpError> for BzzError {
+    fn from(_: djvu_zp::ZpError) -> Self {
+        BzzError::TooShort
+    }
+}
+
 // ---- Legacy error type (kept for backward compatibility) --------------------
 
 /// Original error type used by the legacy implementation.

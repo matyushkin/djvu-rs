@@ -1,17 +1,56 @@
 //! ZP adaptive binary arithmetic coder — pure-Rust clean-room implementation.
 //!
-//! This module implements the ZP (Z-Prime) adaptive binary arithmetic decoder
-//! from the DjVu v3 specification (<https://www.sndjvu.org/spec.html>).
+//! This crate implements the ZP (Z-Prime) adaptive binary arithmetic coder
+//! from the DjVu v3 specification (<https://www.sndjvu.org/spec.html>),
+//! used by the JB2, IW44, and BZZ codecs that make up a DjVu file.
 //!
-//! Key public types:
-//! - [`ZpDecoder`] — the ZP decoder state machine
+//! ## Usage
+//!
+//! Decoder (no_std-capable, no allocations):
+//!
+//! ```
+//! use djvu_zp::ZpDecoder;
+//! let compressed: &[u8] = &[0x00, 0x00];
+//! let mut dec = ZpDecoder::new(compressed)?;
+//! let mut ctx = 0u8;
+//! let _bit = dec.decode_bit(&mut ctx);
+//! # Ok::<(), djvu_zp::ZpError>(())
+//! ```
+//!
+//! Encoder (requires `std` feature, default-on):
+//!
+//! ```
+//! # #[cfg(feature = "std")]
+//! # {
+//! use djvu_zp::encoder::ZpEncoder;
+//! let mut enc = ZpEncoder::new();
+//! let mut ctx = 0u8;
+//! enc.encode_bit(&mut ctx, true);
+//! let _bytes: Vec<u8> = enc.finish();
+//! # }
+//! ```
+//!
+//! ## Features
+//!
+//! - `std` (default) — enables [`encoder::ZpEncoder`].  The decoder works
+//!   with or without `std` and never allocates.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "std")]
-pub(crate) mod encoder;
-pub(crate) mod tables;
+pub mod encoder;
+pub mod tables;
 
-use crate::error::BzzError;
 use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+/// Errors that can occur while initializing or decoding a ZP stream.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ZpError {
+    /// Input is too short — the ZP coder needs at least 2 bytes to load the
+    /// initial code register.
+    #[error("ZP input is too short (need at least 2 bytes)")]
+    TooShort,
+}
 
 /// ZP (Z-Prime) adaptive binary arithmetic decoder.
 ///
@@ -22,21 +61,21 @@ use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 /// Context bytes encode both the probability state index and the current MPS
 /// (most probable symbol) value. The low bit of the context byte indicates
 /// the current MPS; the remaining bits encode the probability state.
-pub(crate) struct ZpDecoder<'a> {
+pub struct ZpDecoder<'a> {
     /// Current interval width register (16-bit value held in low 16 bits).
-    pub(crate) a: u32,
+    pub a: u32,
     /// Current code (value within the interval) register (16-bit value held in low 16 bits).
-    pub(crate) c: u32,
+    pub c: u32,
     /// Cached upper bound for the fast decode path (= min(c, 0x7fff)).
-    pub(crate) fence: u32,
+    pub fence: u32,
     /// Bit buffer for feeding bits into the code register.
-    pub(crate) bit_buf: u32,
+    pub bit_buf: u32,
     /// Number of valid bits remaining in `bit_buf`.
-    pub(crate) bit_count: i32,
+    pub bit_count: i32,
     /// Compressed input bytes.
-    pub(crate) data: &'a [u8],
+    pub data: &'a [u8],
     /// Current read position within `data`.
-    pub(crate) pos: usize,
+    pub pos: usize,
 }
 
 impl<'a> ZpDecoder<'a> {
@@ -46,10 +85,10 @@ impl<'a> ZpDecoder<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`BzzError::TooShort`] if `data` has fewer than 2 bytes.
-    pub(crate) fn new(data: &'a [u8]) -> Result<Self, BzzError> {
+    /// Returns [`ZpError::TooShort`] if `data` has fewer than 2 bytes.
+    pub fn new(data: &'a [u8]) -> Result<Self, ZpError> {
         if data.len() < 2 {
-            return Err(BzzError::TooShort);
+            return Err(ZpError::TooShort);
         }
 
         let mut dec = ZpDecoder {
@@ -105,7 +144,7 @@ impl<'a> ZpDecoder<'a> {
     ///
     /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
-    pub(crate) fn decode_bit(&mut self, ctx: &mut u8) -> bool {
+    pub fn decode_bit(&mut self, ctx: &mut u8) -> bool {
         let state = *ctx as usize;
         let mps_bit = state & 1; // low bit encodes the current MPS
         let z = self.a + PROB[state] as u32;
@@ -150,7 +189,7 @@ impl<'a> ZpDecoder<'a> {
     /// After exhaustion the coder returns `0xFF` bytes indefinitely, producing
     /// deterministic but meaningless bits. Callers may use this to skip
     /// remaining work that would otherwise loop on constant input.
-    pub(crate) fn is_exhausted(&self) -> bool {
+    pub fn is_exhausted(&self) -> bool {
         self.pos >= self.data.len()
     }
 
@@ -161,7 +200,7 @@ impl<'a> ZpDecoder<'a> {
     ///
     /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
-    pub(crate) fn decode_passthrough(&mut self) -> bool {
+    pub fn decode_passthrough(&mut self) -> bool {
         let z = (0x8000u32 + (self.a >> 1)) as u16;
         self.passthrough_with_threshold(z)
     }
@@ -172,7 +211,7 @@ impl<'a> ZpDecoder<'a> {
     ///
     /// Returns `true` if the decoded bit is 1.
     #[inline(always)]
-    pub(crate) fn decode_passthrough_iw44(&mut self) -> bool {
+    pub fn decode_passthrough_iw44(&mut self) -> bool {
         let z = (0x8000u32 + (3u32 * self.a) / 8) as u16;
         self.passthrough_with_threshold(z)
     }
@@ -221,16 +260,15 @@ impl<'a> ZpDecoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::BzzError;
 
     #[test]
     fn zp_decoder_rejects_empty_input() {
-        assert!(matches!(ZpDecoder::new(&[]), Err(BzzError::TooShort)));
+        assert!(matches!(ZpDecoder::new(&[]), Err(ZpError::TooShort)));
     }
 
     #[test]
     fn zp_decoder_rejects_one_byte_input() {
-        assert!(matches!(ZpDecoder::new(&[0x00]), Err(BzzError::TooShort)));
+        assert!(matches!(ZpDecoder::new(&[0x00]), Err(ZpError::TooShort)));
     }
 
     #[test]
