@@ -7,6 +7,86 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #229 PR1 — extract `djvu-zp` into a standalone workspace crate — **Kept** (2026-04-30)
+
+**Approach.** Moved `src/zp/{mod,encoder,tables}.rs` into a new
+`crates/djvu-zp/` workspace member with its own `Cargo.toml`. The new
+crate:
+
+- Defines `pub enum ZpError { TooShort }` instead of leaking `BzzError`
+  back into ZP. Decoupling ZP from `crate::error` is what makes the
+  extraction publishable.
+- Promotes every `pub(crate)` to `pub` (the audit the issue body warns
+  about): `ZpDecoder`, `ZpDecoder::{a, c, fence, bit_buf, bit_count, data,
+  pos}` fields, `decode_bit`, `decode_passthrough`, `decode_passthrough_iw44`,
+  `is_exhausted`, `ZpEncoder` + its methods, and the four format-constant
+  tables (`PROB`, `THRESHOLD`, `MPS_NEXT`, `LPS_NEXT`).
+- Has a `default = ["std"]` feature that gates the encoder (which needs
+  `Vec<u8>`). Decoder works in `no_std` builds and never allocates.
+- Adds a `Default` impl on `ZpEncoder` (clippy `new_without_default` for
+  the now-public `new` method).
+
+`src/lib.rs` keeps the historical internal name via
+`pub(crate) use djvu_zp as zp_impl;` so every existing import
+(`crate::zp_impl::ZpDecoder`, `crate::zp_impl::tables::PROB`, etc) keeps
+working unchanged. `From<djvu_zp::ZpError> for BzzError` makes the `?`
+operator in `bzz_new::bzz_decode` continue to work without per-callsite
+edits.
+
+`src/zp/` is removed; the `#[path = "zp/mod.rs"] pub(crate) mod zp_impl;`
+attribute in `src/lib.rs` was replaced with the `use` re-export. Workspace
+`members = [".", "djvu-py", "crates/djvu-zp"]`.
+
+**Tests.** Per-crate test counts:
+
+- `djvu-rs` (umbrella): 393 lib tests pass (down from 405 — the 4 ZP
+  decoder tests + 7 ZP encoder roundtrip tests moved into the new crate).
+- `djvu-zp`: 11 unit tests pass (`zp_decoder_*`, `zp_tables_spot_check`,
+  7 roundtrip tests in the encoder module). Two doctest examples
+  (`ZpDecoder::new` from a 2-byte slice, `ZpEncoder` round-trip).
+- `djvu-py`: builds. No tests defined.
+- Workspace `cargo build --no-default-features --lib` (host
+  no-std-compatible build) green; no_std smoke test
+  (`tests/no_std_smoke`) builds green against the new dependency graph.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `cargo fmt --check` clean.
+
+**Scope of `pub` audit.** Every newly-`pub` item was an internal
+`pub(crate)` before — there is no new behavioural surface, just a wider
+visibility. Specifically:
+
+| Was            | Now           | Justification                                               |
+| -------------- | ------------- | ----------------------------------------------------------- |
+| `ZpDecoder`    | `pub`         | Required for cross-crate use                                |
+| Decoder fields | `pub`         | Hot-path field access from JB2/IW44/BZZ in djvu-rs internals |
+| `ZpEncoder`    | `pub`         | Required for cross-crate use                                |
+| `PROB` etc.    | `pub` (in `pub mod tables`) | Used by JB2/IW44/BZZ saturation-bound tests in djvu-rs |
+
+The decoder field exposure is the only mildly load-bearing widening: it
+lets djvu-rs internals manipulate the registers directly during
+saturated-decode fast paths. Wrapping each in a getter would force every
+hot-path access through a function call. Acceptable for an internal-
+collaboration sub-crate and matches the precedent set by `wide` /
+`bytemuck` / similar low-level numerics crates.
+
+**Reason kept.** Lossless extraction of ~780 LOC into a publishable
+sub-crate, no behavioural change for djvu-rs consumers, all tests pass,
+no_std build still works. This is the canonical "is this approach
+viable" first step of #229; PR2 (`djvu-bzz`), PR3 (`djvu-iff`), PR4-5
+(`djvu-jb2`, `djvu-iw44`), and PR6 (umbrella re-export shim) follow the
+same pattern.
+
+**Open follow-ups.**
+1. The `From<ZpError> for BzzError` mapping collapses to `BzzError::TooShort`
+   — fine for now since `ZpError::TooShort` is the only variant. If
+   future ZP-coder errors are added, the mapping needs a more specific
+   `BzzError` variant (likely `BzzError::ZpError`-already-exists).
+2. Publish to crates.io once the API is reviewed. The `version = "0.1.0"`
+   reflects new-crate convention, not djvu-rs's `0.14.0` line.
+3. Consider whether the encoder fields (`a`, `subend`, `buffer`, `nrun`,
+   `delay`, `byte`, `scount`, `output`) need to be `pub`. Currently they
+   stay private — only methods are exposed.
+
 ### #189 Phase 3 — x86_64 AVX2 ports of `prelim_flags_bucket` + `prelim_flags_band0` — **Kept** (2026-04-30)
 
 **Approach.** Two new AVX2 functions mirroring the existing aarch64 NEON

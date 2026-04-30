@@ -1,0 +1,22 @@
+[package]
+name = "djvu-zp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "ZP adaptive binary arithmetic coder for the DjVu format — pure-Rust clean-room implementation, no_std-capable decoder."
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-zp"
+readme = "README.md"
+keywords = ["djvu", "arithmetic-coder", "compression", "no-std"]
+categories = ["compression", "no-std"]
+publish = true
+
+[features]
+default = ["std"]
+# `std` enables the encoder (which needs `Vec<u8>`).  Disable for no_std
+# decode-only consumers — the decoder itself does not allocate.
+std = []
+
+[dependencies]
+thiserror = { version = "2", default-features = false }

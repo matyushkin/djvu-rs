@@ -4,7 +4,7 @@
 //! ZP arithmetic coder. The tables are defined in the DjVu v3 specification at
 //! <https://www.sndjvu.org/spec.html>.
 //!
-//! Key public types (all `pub(crate)` constants):
+//! Public exports:
 //! - [`PROB`] — probability estimates (256 entries, u16)
 //! - [`THRESHOLD`] — adaptation thresholds (256 entries, u16)
 //! - [`MPS_NEXT`] — state transitions on MPS (most probable symbol) (256 entries, u8)
@@ -18,7 +18,7 @@
 /// 251 valid entries + 5 padding entries (indices 251–255, never accessed).
 /// Each entry gives the probability that the next decoded bit is the MPS (most
 /// probable symbol). Values are unsigned 16-bit fractions in the range [0, 0x8000].
-pub(crate) const PROB: [u16; 256] = [
+pub const PROB: [u16; 256] = [
     0x8000, 0x8000, 0x8000, 0x6bbd, 0x6bbd, 0x5d45, 0x5d45, 0x51b9, 0x51b9, 0x4813, 0x4813, 0x3fd5,
     0x3fd5, 0x38b1, 0x38b1, 0x3275, 0x3275, 0x2cfd, 0x2cfd, 0x2825, 0x2825, 0x23ab, 0x23ab, 0x1f87,
     0x1f87, 0x1bbb, 0x1bbb, 0x1845, 0x1845, 0x1523, 0x1523, 0x1253, 0x1253, 0x0fcf, 0x0fcf, 0x0d95,
@@ -50,7 +50,7 @@ pub(crate) const PROB: [u16; 256] = [
 ///
 /// When `a >= m[state]`, the MPS transition updates the context state using
 /// [`MPS_NEXT`]. Entries beyond state 82 are 0 (no threshold-based update).
-pub(crate) const THRESHOLD: [u16; 256] = [
+pub const THRESHOLD: [u16; 256] = [
     0x0000, 0x0000, 0x0000, 0x10a5, 0x10a5, 0x1f28, 0x1f28, 0x2bd3, 0x2bd3, 0x36e3, 0x36e3, 0x408c,
     0x408c, 0x48fd, 0x48fd, 0x505d, 0x505d, 0x56d0, 0x56d0, 0x5c71, 0x5c71, 0x615b, 0x615b, 0x65a5,
     0x65a5, 0x6962, 0x6962, 0x6ca2, 0x6ca2, 0x6f74, 0x6f74, 0x71e6, 0x71e6, 0x7404, 0x7404, 0x75d6,
@@ -80,7 +80,7 @@ pub(crate) const THRESHOLD: [u16; 256] = [
 ///
 /// When the decoded bit matches the MPS and `a >= m[state]`, the context is
 /// updated to `MPS_NEXT[state]`.
-pub(crate) const MPS_NEXT: [u8; 256] = [
+pub const MPS_NEXT: [u8; 256] = [
     84, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
     51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
@@ -101,7 +101,7 @@ pub(crate) const MPS_NEXT: [u8; 256] = [
 ///
 /// When the decoded bit does not match the MPS, the context is updated to
 /// `LPS_NEXT[state]`.
-pub(crate) const LPS_NEXT: [u8; 256] = [
+pub const LPS_NEXT: [u8; 256] = [
     145, 4, 3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
     24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,

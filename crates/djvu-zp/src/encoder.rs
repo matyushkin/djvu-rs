@@ -11,7 +11,7 @@ use super::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 /// `unsigned int` types. They hold u16-range values but intermediate
 /// arithmetic can exceed 0xFFFF, which is critical for correct carry
 /// propagation in `zemit`.
-pub(crate) struct ZpEncoder {
+pub struct ZpEncoder {
     /// Current interval width — stored as u32 but logically u16 after shifts.
     a: u32,
     /// Sub-interval lower bound for bit emission — u32 for carry propagation.
@@ -30,8 +30,14 @@ pub(crate) struct ZpEncoder {
     output: Vec<u8>,
 }
 
+impl Default for ZpEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZpEncoder {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             a: 0,
             subend: 0,
@@ -50,7 +56,7 @@ impl ZpEncoder {
     /// - LPS always calls encode_lps
     /// - MPS with z >= 0x8000 calls encode_mps
     /// - MPS with z < 0x8000 takes fast path (a = z, no shift)
-    pub(crate) fn encode_bit(&mut self, ctx: &mut u8, bit: bool) {
+    pub fn encode_bit(&mut self, ctx: &mut u8, bit: bool) {
         let state = *ctx as usize;
         let mps_bit = (state & 1) != 0;
         let z = self.a + PROB[state] as u32;
@@ -69,7 +75,7 @@ impl ZpEncoder {
     ///
     /// Counterpart to [`ZpDecoder::decode_passthrough_iw44`]; must produce a
     /// stream that it correctly decodes.
-    pub(crate) fn encode_passthrough_iw44(&mut self, bit: bool) {
+    pub fn encode_passthrough_iw44(&mut self, bit: bool) {
         let z = 0x8000 + (3 * self.a / 8);
         // Invariant: self.a < 0x8000 (all encode paths maintain this).
         // Therefore z = 0x8000 + 3a/8 ∈ [0x8000, 0xB000) — always ≥ 0x8000.
@@ -91,7 +97,7 @@ impl ZpEncoder {
         }
     }
 
-    pub(crate) fn encode_passthrough(&mut self, bit: bool) {
+    pub fn encode_passthrough(&mut self, bit: bool) {
         let z = 0x8000 + (self.a >> 1);
         // Invariant: self.a < 0x8000, so z = 0x8000 + a/2 ∈ [0x8000, 0xC000) — always ≥ 0x8000.
         if !bit {
@@ -114,7 +120,7 @@ impl ZpEncoder {
     }
 
     /// Flush the encoder and return the compressed byte stream.
-    pub(crate) fn finish(mut self) -> Vec<u8> {
+    pub fn finish(mut self) -> Vec<u8> {
         // eflush: round subend up to disambiguate
         if self.subend > 0x8000 {
             self.subend = 0x10000;
@@ -223,7 +229,7 @@ impl ZpEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zp_impl::ZpDecoder;
+    use crate::ZpDecoder;
 
     #[test]
     fn zp_roundtrip_passthrough_false() {
