@@ -1001,7 +1001,7 @@ struct PlaneDecoder {
 /// Map 16 i16 coefficients at `block[base..]` to UNK/ACTIVE flags, store in `bucket`,
 /// and return the OR of all flag bytes (bstatetmp).
 ///
-/// Scalar fallback used on non-aarch64 targets.
+/// Dispatches to NEON on aarch64, AVX2 on x86_64 when available, else scalar.
 #[allow(unsafe_code)]
 #[inline(always)]
 fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
@@ -1010,7 +1010,15 @@ fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) 
     // BAND_BUCKETS (max bucket index 63, so base = 63 * 16 = 1008, 1008 + 16 = 1024).
     return unsafe { prelim_flags_bucket_neon(block, base, bucket) };
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was just feature-detected; `base + 16 <= 1024` per BAND_BUCKETS.
+            return unsafe { prelim_flags_bucket_avx2(block, base, bucket) };
+        }
+    }
+
+    #[cfg_attr(target_arch = "aarch64", allow(unreachable_code))]
     {
         let mut bstate = 0u8;
         for k in 0..16 {
@@ -1058,6 +1066,46 @@ unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mu
     vget_lane_u8::<0>(v0)
 }
 
+/// AVX2-vectorized version of `prelim_flags_bucket` for x86_64.
+///
+/// Loads 16 i16 in one `__m256i`, compares to zero with `_mm256_cmpeq_epi16`,
+/// builds UNK/ACTIVE flags via `uv ^ (xv & nz)` where UNK=8 and XV=10
+/// (= UNK ^ ACTIVE), narrows to 16 u8 with `_mm_packus_epi16` (saturating but
+/// values 2/8 fit), stores via `_mm_storeu_si128`, and horizontally OR-reduces
+/// the 16 bytes to one byte via shift+OR.
+///
+/// Mirror of `prelim_flags_bucket_neon` — same operations, AVX2 lanes.
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn prelim_flags_bucket_avx2(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+    use core::arch::x86_64::*;
+    // Load 16 contiguous i16 (32 bytes) at block[base..base+16].
+    let coefs = _mm256_loadu_si256(block.as_ptr().add(base) as *const __m256i);
+    // eq: 0xFFFF where coef == 0, 0x0000 where != 0.
+    let zero = _mm256_setzero_si256();
+    let eq = _mm256_cmpeq_epi16(coefs, zero);
+    // nz = !eq.  cmpeq(x, x) == all-ones.
+    let all_ones = _mm256_cmpeq_epi16(zero, zero);
+    let nz = _mm256_xor_si256(eq, all_ones);
+    // result = UNK ^ ((UNK ^ ACTIVE) & nz)  ⟹  UNK(8) if zero, ACTIVE(2) if nonzero.
+    let xv = _mm256_set1_epi16(10);
+    let uv = _mm256_set1_epi16(8);
+    let r16 = _mm256_xor_si256(uv, _mm256_and_si256(xv, nz));
+    // Narrow u16 → u8: pack the two 128-bit halves.  `_mm_packus_epi16` saturates
+    // to [0, 255] but our values are 2 or 8 — equivalent to truncation here.
+    let r_lo = _mm256_castsi256_si128(r16);
+    let r_hi = _mm256_extracti128_si256::<1>(r16);
+    let packed = _mm_packus_epi16(r_lo, r_hi);
+    _mm_storeu_si128(bucket.as_mut_ptr() as *mut __m128i, packed);
+    // Horizontal OR of 16 u8 lanes → 1 byte via successive shift+OR.
+    let or64 = _mm_or_si128(packed, _mm_unpackhi_epi64(packed, packed));
+    let or32 = _mm_or_si128(or64, _mm_srli_si128::<4>(or64));
+    let or16_red = _mm_or_si128(or32, _mm_srli_si128::<2>(or32));
+    let or8 = _mm_or_si128(or16_red, _mm_srli_si128::<1>(or16_red));
+    _mm_extract_epi8::<0>(or8) as u8
+}
+
 /// NEON-vectorized band-0 path of `preliminary_flag_computation`.
 ///
 /// Band 0 differs from bands 1-9: only update entries where `old_flags[k] != ZERO (1)`.
@@ -1093,9 +1141,86 @@ unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16])
     let hi = vget_high_u8(result);
     let v4 = vorr_u8(lo, hi);
     let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
-    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
+    let v1 = vorr_u8(v2, vext_u8::<1>(v1, v1));
     let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
     vget_lane_u8::<0>(v0)
+}
+
+/// AVX2-vectorized band-0 path of `preliminary_flag_computation` for x86_64.
+///
+/// Mirror of `prelim_flags_band0_neon`: only updates entries where
+/// `old_flags[k] != ZERO(1)`; uses an SSE2 blend (`(new & m) | (old & ~m)`)
+/// for the conditional-write step that NEON does with `vbslq_u8`.
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn prelim_flags_band0_avx2(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    use core::arch::x86_64::*;
+    // Load old coeffstate[0] (16 u8 flags: ZERO=1, UNK=8, ACTIVE=2).
+    let old_u8 = _mm_loadu_si128(old_flags.as_ptr() as *const __m128i);
+    // should_update mask: 0xFF where old_flags[k] != ZERO(1), 0x00 where == ZERO.
+    let one_u8 = _mm_set1_epi8(1);
+    let is_zero_state = _mm_cmpeq_epi8(old_u8, one_u8);
+    let all_ones_128 = _mm_cmpeq_epi8(old_u8, old_u8);
+    let should_update = _mm_xor_si128(is_zero_state, all_ones_128);
+
+    // Compute new flags from first 16 coefs (same recipe as prelim_flags_bucket_avx2 with base=0).
+    let coefs = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
+    let zero = _mm256_setzero_si256();
+    let eq = _mm256_cmpeq_epi16(coefs, zero);
+    let all_ones_256 = _mm256_cmpeq_epi16(zero, zero);
+    let nz = _mm256_xor_si256(eq, all_ones_256);
+    let xv = _mm256_set1_epi16(10);
+    let uv = _mm256_set1_epi16(8);
+    let r16 = _mm256_xor_si256(uv, _mm256_and_si256(xv, nz));
+    let r_lo = _mm256_castsi256_si128(r16);
+    let r_hi = _mm256_extracti128_si256::<1>(r16);
+    let new_flags = _mm_packus_epi16(r_lo, r_hi);
+
+    // Blend: (new & should_update) | (old & ~should_update).
+    let blended = _mm_or_si128(
+        _mm_and_si128(should_update, new_flags),
+        _mm_andnot_si128(should_update, old_u8),
+    );
+    _mm_storeu_si128(old_flags.as_mut_ptr() as *mut __m128i, blended);
+
+    // Horizontal OR of 16 u8 lanes → 1 byte (same reduction as the bucket path).
+    let or64 = _mm_or_si128(blended, _mm_unpackhi_epi64(blended, blended));
+    let or32 = _mm_or_si128(or64, _mm_srli_si128::<4>(or64));
+    let or16_red = _mm_or_si128(or32, _mm_srli_si128::<2>(or32));
+    let or8 = _mm_or_si128(or16_red, _mm_srli_si128::<1>(or16_red));
+    _mm_extract_epi8::<0>(or8) as u8
+}
+
+/// Dispatcher for the band-0 path of `preliminary_flag_computation`.
+///
+/// Picks NEON on aarch64, AVX2 on x86_64 when available, scalar otherwise.
+#[allow(unsafe_code)]
+#[inline(always)]
+fn band0_dispatch(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON always available on aarch64; block[0..16] valid by construction.
+    return unsafe { prelim_flags_band0_neon(block, old_flags) };
+
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was just feature-detected; block[0..16] valid by construction.
+            return unsafe { prelim_flags_band0_avx2(block, old_flags) };
+        }
+    }
+
+    #[cfg_attr(target_arch = "aarch64", allow(unreachable_code))]
+    {
+        let mut b = 0u8;
+        for k in 0..16 {
+            if old_flags[k] != ZERO {
+                old_flags[k] = if block[k] == 0 { UNK } else { ACTIVE };
+            }
+            b |= old_flags[k];
+        }
+        b
+    }
 }
 
 impl PlaneDecoder {
@@ -1172,27 +1297,7 @@ impl PlaneDecoder {
                 self.bbstate |= bstatetmp;
             }
         } else {
-            #[cfg(target_arch = "aarch64")]
-            // SAFETY: NEON always available on aarch64; block[0..16] valid by construction.
-            #[allow(unsafe_code)]
-            let bstatetmp = unsafe {
-                prelim_flags_band0_neon(&self.blocks[block_idx], &mut self.coeffstate[0])
-            };
-            #[cfg(not(target_arch = "aarch64"))]
-            let bstatetmp = {
-                let mut b = 0u8;
-                for k in 0..16 {
-                    if self.coeffstate[0][k] != ZERO {
-                        self.coeffstate[0][k] = if self.blocks[block_idx][k] == 0 {
-                            UNK
-                        } else {
-                            ACTIVE
-                        };
-                    }
-                    b |= self.coeffstate[0][k];
-                }
-                b
-            };
+            let bstatetmp = band0_dispatch(&self.blocks[block_idx], &mut self.coeffstate[0]);
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
@@ -3907,6 +4012,137 @@ mod tests {
                 buf_scalar[8 + j] = input[j] as i16;
             }
             assert_eq!(buf_avx2, buf_scalar, "AVX2 store8s_s1 mismatch");
+        }
+    }
+
+    /// AVX2 `prelim_flags_bucket_avx2` must produce identical bucket bytes
+    /// and bstatetmp to the scalar fallback for any 16-coef input.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[test]
+    fn prelim_flags_bucket_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        // Inputs that exercise the all-zero, all-nonzero, mixed, and edge-value cases.
+        let test_vectors: &[[i16; 16]] = &[
+            [0; 16],
+            [
+                1, 0, -1, 0, 100, 0, -200, 0, 0, 1234, 0, -1234, 0, 32767, -32768, 0,
+            ],
+            [1; 16],
+            [-1; 16],
+            [
+                32767, -32768, 1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 32767, -32768, 1, -1,
+            ],
+        ];
+        for &coefs in test_vectors {
+            let mut block = [0i16; 1024];
+            // Place the 16 coefs at base = 0 *and* at a non-zero base to test the offset.
+            for &base in &[0usize, 16, 32, 1008] {
+                block[base..base + 16].copy_from_slice(&coefs);
+
+                let mut bucket_avx2 = [0u8; 16];
+                #[allow(unsafe_code)]
+                let bstate_avx2 =
+                    unsafe { super::prelim_flags_bucket_avx2(&block, base, &mut bucket_avx2) };
+
+                let mut bucket_scalar = [0u8; 16];
+                let mut bstate_scalar = 0u8;
+                for k in 0..16 {
+                    let f = if block[base + k] == 0 {
+                        super::UNK
+                    } else {
+                        super::ACTIVE
+                    };
+                    bucket_scalar[k] = f;
+                    bstate_scalar |= f;
+                }
+
+                assert_eq!(
+                    bucket_avx2, bucket_scalar,
+                    "bucket mismatch at base={base} coefs={coefs:?}"
+                );
+                assert_eq!(
+                    bstate_avx2, bstate_scalar,
+                    "bstatetmp mismatch at base={base}"
+                );
+            }
+        }
+    }
+
+    /// AVX2 `prelim_flags_band0_avx2` must mirror the scalar band-0 update:
+    /// only entries with `old_flags[k] != ZERO` are rewritten; other entries
+    /// stay (so a ZERO-state lane is preserved across the call).
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[test]
+    fn prelim_flags_band0_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("skipping: AVX2 not available on this host");
+            return;
+        }
+        // Old-flag patterns covering the three states and mixed.
+        let old_patterns: &[[u8; 16]] = &[
+            [super::ZERO; 16],
+            [super::UNK; 16],
+            [super::ACTIVE; 16],
+            [
+                super::ZERO,
+                super::UNK,
+                super::ACTIVE,
+                super::ZERO,
+                super::UNK,
+                super::ACTIVE,
+                super::ZERO,
+                super::UNK,
+                super::ACTIVE,
+                super::ZERO,
+                super::UNK,
+                super::ACTIVE,
+                super::ZERO,
+                super::UNK,
+                super::ACTIVE,
+                super::ZERO,
+            ],
+        ];
+        let coef_patterns: &[[i16; 16]] = &[
+            [0; 16],
+            [1; 16],
+            [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            [
+                -32768, 0, 32767, 0, 100, 0, -100, 0, 0, 1, 0, -1, 0, 5, 0, -5,
+            ],
+        ];
+
+        for &old in old_patterns {
+            for &coefs in coef_patterns {
+                let mut block = [0i16; 1024];
+                block[..16].copy_from_slice(&coefs);
+
+                let mut flags_avx2 = old;
+                #[allow(unsafe_code)]
+                let bstate_avx2 =
+                    unsafe { super::prelim_flags_band0_avx2(&block, &mut flags_avx2) };
+
+                let mut flags_scalar = old;
+                let mut bstate_scalar = 0u8;
+                for k in 0..16 {
+                    if flags_scalar[k] != super::ZERO {
+                        flags_scalar[k] = if block[k] == 0 {
+                            super::UNK
+                        } else {
+                            super::ACTIVE
+                        };
+                    }
+                    bstate_scalar |= flags_scalar[k];
+                }
+
+                assert_eq!(
+                    flags_avx2, flags_scalar,
+                    "flags mismatch old={old:?} coefs={coefs:?}"
+                );
+                assert_eq!(bstate_avx2, bstate_scalar, "bstatetmp mismatch");
+            }
         }
     }
 
