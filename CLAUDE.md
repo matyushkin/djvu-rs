@@ -7,6 +7,64 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #225 Phase 1 — internal row-streaming render refactor — **Kept** (2026-04-29)
+
+**Approach.** Extracted the composite hot path into a per-row streaming
+primitive without changing the public API. Three new module-private functions:
+
+- `composite_rows_bilevel_one` / `composite_rows_bilinear_one` /
+  `composite_rows_area_avg_one` — per-row helpers containing the pixel-level
+  computation for each of the three compositing modes (bilevel fast path,
+  bilinear upscale/1:1, area-average downscale). These are `#[inline]` and
+  mirror the existing `composite_loop_*` bodies row by row.
+
+- `composite_rows<F: FnMut(usize, &[u8])>` — allocates a single row scratch
+  buffer (`out_w * 4` bytes, reused across rows), calls the appropriate per-row
+  helper, then invokes the sink `F(row_index, &row_slice)`. The
+  `composite_into` direct flat-buffer path is untouched and continues to drive
+  `render_into`, `render_region`, `render_coarse`, and `render_progressive`.
+
+- `pub(crate) render_rows<F>` — decode/setup entry point (mirrors
+  `render_pixmap`'s decode logic) that calls `composite_rows`. This is the
+  Phase 2 hook: future `render_streaming` will delegate here instead of
+  allocating a full Pixmap.
+
+`render_pixmap` is now a thin adapter: it pre-allocates `Pixmap::white(w, h)`,
+calls `render_rows` with a sink that copies each row into `pm.data`, then
+applies the existing aa/Lanczos/rotation post-processing steps.
+
+Two new unit tests — `render_rows_byte_identical_to_render_into_color` and
+`render_rows_byte_identical_to_render_into_bilevel` — verify that
+`composite_rows` and `composite_into` produce byte-exact identical output for
+color (chicken.djvu) and bilevel (boy_jb2.djvu) pages.
+
+**Bench** (`cargo bench --bench render -- 'render_page/dpi/72'`,
+100 samples, Apple M1 Max):
+
+| Benchmark             | Before   | After    | Δ       |
+|-----------------------|----------|----------|---------|
+| `render_page/dpi/72`  | 243.5 µs | 211.8 µs | **−13%** |
+| `render_colorbook_cold` | — | 17.8 ms | flat (no prior baseline in this worktree) |
+
+The 72-dpi benchmark **improved** by ~13% despite the per-row scratch
+allocation and `copy_from_slice` on each row. The likely cause: the scratch row
+buffer (`w * 4 ≈ 400–2400 bytes`) fits entirely in L1 cache; subsequent writes
+from the composite inner loop and the copy into `pm.data` both hit warm L1
+rather than cold L2/L3 as in the previous approach that wrote directly into the
+full pre-allocated pixmap. The decode step dominates at 72 dpi (BG44 + JB2
+cache hits account for ~200 µs), so even the best-case compositing improvement
+is bounded.
+
+**Reason kept.** Material improvement on the warm-cache render benchmark (−13%)
+with zero public API change, bit-exact output verified by tests, all 550 tests
+pass, clippy and fmt clean. The `render_rows` hook is in place for Phase 2.
+
+**Open follow-ups.**
+1. Phase 2 (future PR): expose `pub fn render_streaming` with a user-visible
+   row callback, enabling true zero-full-pixmap rendering for WASM / embedded.
+2. `render_region`, `render_coarse`, `render_progressive` could similarly be
+   refactored to use `composite_rows` for API symmetry, but are not hot paths.
+
 ### #190 Phase 2 — WASM simd128 inverse wavelet (load/store stride-1) — **Kept** (2026-04-29)
 
 **Approach.** Added `load8s_s1_simd128` and `store8s_s1_simd128` (gated on
