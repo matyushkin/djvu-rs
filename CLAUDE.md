@@ -7,6 +7,76 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #222 PR1 — `DjVuDocumentMut::from_bytes` + chunk-replacement primitive — **Kept** (2026-04-30)
+
+**Approach.** New `src/djvu_mut.rs` module gated on `feature = "std"` with
+the foundation layer for in-place document mutation. Public surface:
+
+- `pub struct DjVuDocumentMut` — owns a parsed `DjvuFile` tree plus the
+  original byte buffer.
+- `pub fn from_bytes(data: &[u8]) -> Result<Self, MutError>` — parses (via
+  `iff::parse`, the legacy tree-based parser) and retains the input bytes.
+- `pub fn into_bytes(self) -> Vec<u8>` — fast path: when no mutation has
+  happened, returns the original bytes verbatim. After any mutation, falls
+  through to `iff::emit`.
+- `pub fn replace_leaf(&mut self, path: &[usize], new_data: Vec<u8>)` —
+  walks the tree by child indices and rewrites the leaf payload.
+- `pub fn chunk_at_path(&self, path: &[usize]) -> Result<&Chunk, _>` —
+  read-only walker, used by tests and (future) inspectors.
+- Utility: `root_child_count`, `root_form_type`, `is_dirty`.
+- `pub enum MutError`: `Parse(LegacyError)`, `PathOutOfRange`,
+  `PathTraversesLeaf`, `NotALeaf`, `EmptyPath`.
+
+The byte-identical-no-edit guarantee is achieved by holding the original
+`Vec<u8>` and short-circuiting `into_bytes` when `!is_dirty`. After any
+mutation `iff::emit` is invoked, which **does not** guarantee byte-identity
+even for unmutated chunks (it recomputes FORM lengths from children) — but
+this case is explicitly out of scope for PR1 and tracked as a follow-up
+for PR3 (proper byte-range patching).
+
+**Tests.** Ten new unit tests in `djvu_mut::tests`:
+
+- Round-trip byte-identical (no edit) on four corpus fixtures:
+  - `chicken.djvu` — color FORM:DJVU
+  - `boy_jb2.djvu` — bilevel FORM:DJVU
+  - `DjVu3Spec_bundled.djvu` — multi-page FORM:DJVM
+  - `navm_fgbz.djvu` — FORM:DJVU with NAVM + FGbz
+- `replace_leaf_changes_emitted_bytes` — replaces INFO with a marker, parses
+  the output, verifies the marker came back.
+- Negative paths: `EmptyPath`, `PathOutOfRange`, `PathTraversesLeaf`,
+  `NotALeaf` (last picks the last child of a DJVM bundle, which is a
+  page FORM).
+- `root_form_type_djvu_single_page` — sanity on the tree-introspection API.
+
+All 402 lib tests pass (393 → 402; `+10` djvu_mut, `-1` ignored count
+shifted). `cargo clippy --workspace --all-targets -- -D warnings` clean,
+`cargo fmt --check` clean.
+
+**Reason kept.** PR1 of #222 establishes the byte-identical contract and
+the chunk-walking primitive that PR2-4 build on (per the issue body's
+sequencing comment). The implementation is intentionally minimal — wrap
+the existing IFF parser, hold raw bytes for fast path, expose one
+mutation primitive — to ship a focused first slice without committing to
+the high-level setter design (`set_metadata`, `set_bookmarks`,
+`page_mut(i).set_text_layer`). Those settings each compose
+`replace_leaf` with one of the existing chunk encoders
+(`encode_navm`, `encode_annotations*`, `encode_metadata`,
+`encode_text_layer`).
+
+**Open follow-ups (PR2-4 of #222 sequence).**
+1. **PR2**: high-level setters (`set_metadata`, `set_bookmarks`,
+   `page_mut(i).set_text_layer`, `…set_annotations`) on top of
+   `replace_leaf`.
+2. **PR3**: byte-range patching for true byte-identical round-trip even
+   *with* edits (only changed chunks are rewritten; unchanged regions are
+   memcpy'd). Currently any mutation triggers a full `iff::emit` which
+   may differ from the original byte layout in incidental ways (FORM
+   length recomputation, padding).
+3. **PR4**: indirect DJVM support — the issue's "per-file rewrite vs
+   re-bundle" decision still needs a concrete answer.
+4. `librarian` consumer migration off `djvused` shell-out (#158
+   follow-up) — depends on PR2 setters.
+
 ### #229 PR1 — extract `djvu-zp` into a standalone workspace crate — **Kept** (2026-04-30)
 
 **Approach.** Moved `src/zp/{mod,encoder,tables}.rs` into a new

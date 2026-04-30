@@ -157,6 +157,13 @@ pub mod segment;
 /// [`DjVuBookmark`] (NAVM table-of-contents entry).
 pub mod djvu_document;
 
+/// In-place document mutation — byte-preserving rewrite primitive (PR1 of #222).
+///
+/// Provides [`djvu_mut::DjVuDocumentMut`] for editing a DjVu document while
+/// preserving the bytes of every chunk that wasn't touched.
+#[cfg(feature = "std")]
+pub mod djvu_mut;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
