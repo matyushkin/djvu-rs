@@ -7,6 +7,69 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #189 Phase 3 — x86_64 AVX2 ports of `prelim_flags_bucket` + `prelim_flags_band0` — **Kept** (2026-04-30)
+
+**Approach.** Two new AVX2 functions mirroring the existing aarch64 NEON
+helpers in `src/iw44_new.rs`:
+
+- `prelim_flags_bucket_avx2`: loads 16 i16 (one `__m256i` — twice the lane
+  width of NEON's two `int16x8_t` loads), compares to zero with
+  `_mm256_cmpeq_epi16`, builds UNK/ACTIVE flags via `uv ^ (xv & nz)` (UNK=8,
+  XV=10), narrows u16→u8 via `_mm_packus_epi16` of the two 128-bit halves
+  (saturating but values 2/8 fit), stores 16 bytes via `_mm_storeu_si128`,
+  horizontally OR-reduces via `_mm_unpackhi_epi64` + `_mm_srli_si128` chain.
+
+- `prelim_flags_band0_avx2`: same flag computation, then conditional blend
+  `(new & should_update) | (old & ~should_update)` using SSE2
+  `_mm_andnot_si128` to replicate NEON's `vbslq_u8`. Keeps the ZERO-state
+  lane unchanged; updates other lanes from the coef comparison.
+
+A new `band0_dispatch` helper picks NEON / AVX2 / scalar at runtime via
+`is_x86_feature_detected!("avx2")` (gated on `feature = "std"` per the
+established pattern in #251/#252). The scalar fallback is unchanged — so
+non-AVX2 x86_64 hosts and `no_std` builds keep their existing behaviour.
+
+The dispatcher in `prelim_flags_bucket` was extended the same way: AVX2
+branch added, NEON path unchanged, scalar fallback unchanged.
+
+**Tests.** Two new unit tests gated on `cfg(all(target_arch = "x86_64",
+feature = "std"))` + AVX2 runtime detection:
+
+- `prelim_flags_bucket_avx2_matches_scalar` — sweeps 5 coef vectors
+  (all-zero, mixed, all-one, all-negative-one, edge values) at four bases
+  including the highest valid bucket offset (1008). Verifies bucket bytes
+  and bstatetmp byte-exact vs scalar.
+- `prelim_flags_band0_avx2_matches_scalar` — sweeps 4 old-flag patterns ×
+  4 coef patterns. Verifies the conditional-update semantics: ZERO lanes
+  are preserved, other lanes get UNK/ACTIVE from the coef comparison.
+
+Both pass on the local x86_64 host. All 405 lib tests pass; clippy
+`-D warnings` and `cargo fmt --check` clean.
+
+**Bench.** No native bench harness for this kernel in isolation; expected
+speedup over scalar at this hot path (called once per (block × band) =
+~1024 blocks/page × 10 bands = ~10K calls/page) is on the order of
+4–8× from replacing the scalar 16-iteration loop with three AVX2 ops + a
+narrow + horizontal OR. End-to-end `iw44_decode_*` benches will pick up
+the change at the next `bench.yml` AVX2 runner pass.
+
+**Reason kept.** Two more AVX2 kernels close the parity gap with NEON
+that issue #189 calls out (lines 11–14 of the issue body listed
+`preliminary_flag_computation` band-0 and band≠0 as next priorities after
+`load8s`/`store8s`, which shipped in #252). Bit-exact verified vs scalar,
+zero behavioural change for non-AVX2 hosts, no allocation overhead, no
+runtime cost on the dispatcher (one feature-detected branch). Pattern
+established for the remaining kernels (`row_pass_neon_s1_row`,
+`lifting_even`, `predict_inner`, `predict_avg`).
+
+**Open follow-ups.**
+1. `row_pass_neon_s1_row` AVX2 port — significantly larger because AVX2
+   has no native `vld2q_s16` deinterleave; CLAUDE.md `### #184` is the
+   cautionary tale of attempting strided loads in AVX2 without gather.
+2. Encoder-side ports (`forward_row_neon_s1_row`, `forward_col_predict_neon`).
+3. Bench numbers from the next `bench.yml` AVX2 runner pass should be
+   recorded here once available.
+
 ### #225 Phase 2 — public `render_streaming` API — **Kept** (2026-04-30)
 
 **Approach.** Built on Phase 1's internal `render_rows` primitive. Added one
