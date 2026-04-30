@@ -19,8 +19,14 @@ examples/wasm/pkg/
 /0
 /rust_out
 
-# Local debug/profiling examples kept out-of-tree
-/examples/_debug_*.rs
+# Local debug/profiling examples kept out-of-tree (any leading-underscore prefix)
+/examples/_*.rs
+
+# Personal profiling/comparison harnesses (scratch, hardcoded paths)
+/examples/bench_render_lib.rs
+/examples/compare_render.rs
+/examples/profile_jb2.rs
+/examples/zp_call_counter.rs
 
 # Claude Code local state (user-specific, never shared)
 .claude/settings.local.json
