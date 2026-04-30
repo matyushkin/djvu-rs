@@ -1498,6 +1498,367 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     Ok(())
 }
 
+/// Drive the composite hot path row-by-row, calling `sink(row_index, &row_rgba)`
+/// once per output row.
+///
+/// Each call to `sink` receives a 4-byte-per-pixel RGBA slice of width
+/// `ctx.out_w`.  A single scratch row is allocated up-front (not per-row), so
+/// peak additional heap use is `out_w * 4` bytes regardless of page height.
+///
+/// This is the internal streaming primitive used by [`render_rows`]; callers
+/// that already hold a flat output buffer should prefer [`composite_into`],
+/// which writes directly without an intermediate copy.
+fn composite_rows<F>(ctx: &CompositeContext<'_>, mut sink: F) -> Result<(), RenderError>
+where
+    F: FnMut(usize, &[u8]),
+{
+    let full_w = ctx.opts.width;
+    let full_h = ctx.opts.height;
+
+    // Fixed-point step: how many source pixels per full-render output pixel.
+    let fx_step = ((ctx.page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
+    let fy_step = ((ctx.page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
+
+    let row_stride = ctx.out_w as usize * 4;
+
+    // Bilevel fast path: JB2-only page (no IW44 bg, no FG44, no palette).
+    if ctx.bg.is_none() && ctx.fg44.is_none() && ctx.fg_palette.is_none() {
+        let mut row_buf = vec![0u8; row_stride];
+        for oy in 0..ctx.out_h {
+            composite_rows_bilevel_one(ctx, oy, fx_step, fy_step, &mut row_buf);
+            sink(oy as usize, &row_buf);
+        }
+        return Ok(());
+    }
+
+    let mut row_buf = vec![0u8; row_stride];
+    let downscale = fx_step > FRAC || fy_step > FRAC;
+
+    // Precompute bg-space step for area-average path (avoids per-pixel multiply).
+    let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
+    let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
+
+    for oy in 0..ctx.out_h {
+        if downscale {
+            composite_rows_area_avg_one(
+                ctx,
+                oy,
+                fx_step,
+                fy_step,
+                bg_fx_step,
+                bg_fy_step,
+                &mut row_buf,
+            );
+        } else {
+            composite_rows_bilinear_one(ctx, oy, fx_step, fy_step, &mut row_buf);
+        }
+        fill_alpha_255(&mut row_buf);
+        sink(oy as usize, &row_buf);
+    }
+
+    Ok(())
+}
+
+/// Write one bilevel row into `row_buf`.
+#[inline]
+fn composite_rows_bilevel_one(
+    ctx: &CompositeContext<'_>,
+    oy: u32,
+    fx_step: u32,
+    fy_step: u32,
+    row_buf: &mut [u8],
+) {
+    let mask = match ctx.mask {
+        Some(m) => m,
+        None => {
+            for chunk in row_buf.chunks_exact_mut(4) {
+                chunk[0] = 255;
+                chunk[1] = 255;
+                chunk[2] = 255;
+                chunk[3] = 255;
+            }
+            return;
+        }
+    };
+
+    // 1:1 scale fast path.
+    if fx_step == FRAC && fy_step == FRAC {
+        let stride = mask.row_stride();
+        let py = (oy + ctx.offset_y).min(ctx.page_h.saturating_sub(1)) as usize;
+        let mask_row = &mask.data[py * stride..(py + 1) * stride];
+        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+            let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
+            let is_black = (mask_row[px / 8] >> (7 - (px % 8))) & 1 != 0;
+            if is_black {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+                pixel[3] = 255;
+            } else {
+                pixel[0] = 255;
+                pixel[1] = 255;
+                pixel[2] = 255;
+                pixel[3] = 255;
+            }
+        }
+        return;
+    }
+
+    let downscale = fx_step > FRAC || fy_step > FRAC;
+    let fy = (oy + ctx.offset_y) * fy_step;
+    let py = (fy >> FRACBITS).min(ctx.page_h.saturating_sub(1));
+
+    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+        let fx = (ox as u32 + ctx.offset_x) * fx_step;
+        let px = (fx >> FRACBITS).min(ctx.page_w.saturating_sub(1));
+
+        let is_fg = if downscale {
+            if ctx.mask_shift > 0 {
+                let dpx = fx >> (FRACBITS + ctx.mask_shift);
+                let dpy = fy >> (FRACBITS + ctx.mask_shift);
+                dpx < mask.width && dpy < mask.height && mask.get(dpx, dpy)
+            } else {
+                mask_box_any(mask, fx, fy, fx_step, fy_step)
+            }
+        } else {
+            px < mask.width && py < mask.height && mask.get(px, py)
+        };
+
+        if is_fg {
+            pixel[0] = 0;
+            pixel[1] = 0;
+            pixel[2] = 0;
+            pixel[3] = 255;
+        } else {
+            pixel[0] = 255;
+            pixel[1] = 255;
+            pixel[2] = 255;
+            pixel[3] = 255;
+        }
+    }
+}
+
+/// Write one bilinear row into `row_buf` (upscale / 1:1).
+#[inline]
+fn composite_rows_bilinear_one(
+    ctx: &CompositeContext<'_>,
+    oy: u32,
+    fx_step: u32,
+    fy_step: u32,
+    row_buf: &mut [u8],
+) {
+    let (page_w, page_h) = (ctx.page_w, ctx.page_h);
+    let fy = (oy + ctx.offset_y) * fy_step;
+    let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
+
+    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+        let fx = (ox as u32 + ctx.offset_x) * fx_step;
+        let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
+
+        let is_fg = ctx
+            .mask
+            .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
+
+        let (r, g, b) = if is_fg {
+            if let Some(pal) = ctx.fg_palette {
+                let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
+                (color.r, color.g, color.b)
+            } else if let Some(fg) = ctx.fg44 {
+                let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
+                let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
+                sample_bilinear(fg, fg_fx, fg_fy)
+            } else {
+                (0, 0, 0)
+            }
+        } else if let Some(bg) = ctx.bg {
+            let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
+            let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+            sample_bilinear(bg, bg_fx, bg_fy)
+        } else {
+            (255, 255, 255)
+        };
+
+        pixel[0] = ctx.gamma_lut[r as usize];
+        pixel[1] = ctx.gamma_lut[g as usize];
+        pixel[2] = ctx.gamma_lut[b as usize];
+        // alpha written by fill_alpha_255 in composite_rows
+    }
+}
+
+/// Write one area-average row into `row_buf` (downscale).
+#[inline]
+fn composite_rows_area_avg_one(
+    ctx: &CompositeContext<'_>,
+    oy: u32,
+    fx_step: u32,
+    fy_step: u32,
+    bg_fx_step: u32,
+    bg_fy_step: u32,
+    row_buf: &mut [u8],
+) {
+    let fy = (oy + ctx.offset_y) * fy_step;
+    let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+
+    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+        let fx = (ox as u32 + ctx.offset_x) * fx_step;
+
+        let is_fg = ctx.mask.is_some_and(|m| {
+            if ctx.mask_shift > 0 {
+                let px = fx >> (FRACBITS + ctx.mask_shift);
+                let py = fy >> (FRACBITS + ctx.mask_shift);
+                px < m.width && py < m.height && m.get(px, py)
+            } else {
+                mask_box_any(m, fx, fy, fx_step, fy_step)
+            }
+        });
+
+        let (r, g, b) = if is_fg {
+            if let Some(pal) = ctx.fg_palette {
+                let (cx, cy) = mask_box_center_fg(ctx.mask.unwrap(), fx, fy, fx_step, fy_step);
+                let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, cx, cy);
+                (color.r, color.g, color.b)
+            } else if let Some(fg) = ctx.fg44 {
+                let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
+                let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
+                let fg_fx_step = ((fx_step as u64 * ctx.fg_x_q24) >> 24) as u32;
+                let fg_fy_step = ((fy_step as u64 * ctx.fg_y_q24) >> 24) as u32;
+                sample_area_avg(fg, fg_fx, fg_fy, fg_fx_step, fg_fy_step)
+            } else {
+                (0, 0, 0)
+            }
+        } else if let Some(bg) = ctx.bg {
+            let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
+            sample_area_avg(bg, bg_fx, bg_fy, bg_fx_step, bg_fy_step)
+        } else {
+            (255, 255, 255)
+        };
+
+        pixel[0] = ctx.gamma_lut[r as usize];
+        pixel[1] = ctx.gamma_lut[g as usize];
+        pixel[2] = ctx.gamma_lut[b as usize];
+        // alpha written by fill_alpha_255 in composite_rows
+    }
+}
+
+/// Render a `DjVuPage` row by row, calling `sink(row_index, &rgba_row)` for
+/// each output row in top-to-bottom order.
+///
+/// `rgba_row` contains `opts.width * 4` bytes (RGBA, alpha = 255).
+///
+/// This is the internal streaming primitive for Phase 1.  Public callers should
+/// use [`render_pixmap`] (allocates a complete `Pixmap`) or, in a future Phase
+/// 2 PR, a public `render_streaming` API.
+///
+/// # Errors
+///
+/// - [`RenderError::InvalidDimensions`] if `width == 0 || height == 0`
+/// - Propagates IW44 / JB2 decode errors.
+pub(crate) fn render_rows<F>(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    sink: F,
+) -> Result<(), RenderError>
+where
+    F: FnMut(usize, &[u8]),
+{
+    let w = opts.width;
+    let h = opts.height;
+
+    if w == 0 || h == 0 {
+        return Err(RenderError::InvalidDimensions {
+            width: w,
+            height: h,
+        });
+    }
+
+    let gamma_lut = build_gamma_lut(page.gamma());
+
+    let bg_subsample = best_iw44_subsample(opts.scale);
+
+    let bg;
+    let fg_palette;
+    let mask;
+    let blit_map;
+    let fg44;
+
+    if opts.permissive {
+        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
+        fg_palette = decode_fg_palette_full(page).ok().flatten();
+        let indexed = if fg_palette.is_some() {
+            decode_mask_indexed(page).ok().flatten()
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = decode_mask(page).ok().flatten();
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page).ok().flatten();
+    } else {
+        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+        fg_palette = decode_fg_palette_full(page)?;
+        let indexed_result = if fg_palette.is_some() {
+            decode_mask_indexed(page)?
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed_result {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = if fg_palette.is_none() {
+                decode_mask(page)?
+            } else {
+                None
+            };
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page)?;
+    }
+
+    let mask = if opts.bold > 0 {
+        mask.map(|m| m.dilate_n(opts.bold as u32))
+    } else {
+        mask
+    };
+
+    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
+    let (ctx_mask, mask_shift) = if use_sub4_mask {
+        (page.decoded_mask_sub4(), 2u32)
+    } else {
+        (mask.as_ref().map(|m| m as &_), 0u32)
+    };
+
+    let page_w = page.width() as u32;
+    let page_h = page.height() as u32;
+    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
+    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
+    let ctx = CompositeContext {
+        opts,
+        page_w,
+        page_h,
+        bg: bg.as_ref(),
+        bg_x_q24,
+        bg_y_q24,
+        mask: ctx_mask,
+        mask_shift,
+        fg_palette: fg_palette.as_ref(),
+        blit_map: blit_map.as_deref(),
+        fg44: fg44.as_ref(),
+        fg_x_q24,
+        fg_y_q24,
+        gamma_lut: &gamma_lut,
+        offset_x: 0,
+        offset_y: 0,
+        out_w: w,
+        out_h: h,
+    };
+    composite_rows(&ctx, sink)
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Render a `DjVuPage` into a pre-allocated RGBA buffer.
@@ -1601,6 +1962,11 @@ pub fn render_into(
 }
 
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
+///
+/// Internally delegates to [`render_rows`], which composites each output row
+/// into a per-row scratch buffer and copies it into the pre-allocated `Pixmap`.
+/// This thin adapter keeps the public API unchanged while the per-row path
+/// prepares Phase 2 streaming support (issue #225).
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     let w = opts.width;
     let h = opts.height;
@@ -1612,99 +1978,14 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         });
     }
 
-    let gamma_lut = build_gamma_lut(page.gamma());
-
-    // Decode all layers, respecting permissive mode.
-    let bg;
-    let fg_palette;
-    let mask;
-    let blit_map;
-    let fg44;
-
-    let bg_subsample = best_iw44_subsample(opts.scale);
-
-    if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
-        fg_palette = decode_fg_palette_full(page).ok().flatten();
-        let indexed = if fg_palette.is_some() {
-            decode_mask_indexed(page).ok().flatten()
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = decode_mask(page).ok().flatten();
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page).ok().flatten();
-    } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
-        fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
-            } else {
-                None
-            };
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page)?;
-    }
-
-    let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
-    } else {
-        mask
-    };
-
-    // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
-    // 4-9 lookups per pixel in the full-res mask).
-    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
-    let (ctx_mask, mask_shift) = if use_sub4_mask {
-        (page.decoded_mask_sub4(), 2u32) // sub=4 → shift by 2
-    } else {
-        (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
-    };
-
+    let row_stride = w as usize * 4;
     let mut pm = Pixmap::white(w, h);
 
-    {
-        let page_w = page.width() as u32;
-        let page_h = page.height() as u32;
-        let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
-        let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
-        let ctx = CompositeContext {
-            opts,
-            page_w,
-            page_h,
-            bg: bg.as_ref(),
-            bg_x_q24,
-            bg_y_q24,
-            mask: ctx_mask,
-            mask_shift,
-            fg_palette: fg_palette.as_ref(),
-            blit_map: blit_map.as_deref(),
-            fg44: fg44.as_ref(),
-            fg_x_q24,
-            fg_y_q24,
-            gamma_lut: &gamma_lut,
-            offset_x: 0,
-            offset_y: 0,
-            out_w: w,
-            out_h: h,
-        };
-        composite_into(&ctx, &mut pm.data)?;
-    }
+    // Composite row by row via render_rows; copy each row into the Pixmap.
+    render_rows(page, opts, |y, row| {
+        let start = y * row_stride;
+        pm.data[start..start + row_stride].copy_from_slice(row);
+    })?;
 
     if opts.aa {
         pm = aa_downscale(&pm);
@@ -3334,6 +3615,78 @@ mod tests {
         assert_eq!(
             part.height, 40,
             "expected height=40 (was region.width) after CW90 rotation"
+        );
+    }
+
+    // ── Issue #225: render_rows byte-identical to render_into (direct-write path) ──
+
+    /// `render_rows` must produce byte-for-byte identical output to `render_into`
+    /// (which uses `composite_into` — the direct flat-buffer write path) for a
+    /// color page at a fixed small resolution.
+    ///
+    /// This verifies that the per-row scratch-and-copy path in `composite_rows`
+    /// produces the same pixels as the direct loop path in `composite_into`.
+    #[test]
+    fn render_rows_byte_identical_to_render_into_color() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+
+        let w = 60u32;
+        let h = 80u32;
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+
+        // render_into uses composite_into (direct flat-buffer write).
+        let mut direct_buf = vec![0u8; w as usize * h as usize * 4];
+        render_into(page, &opts, &mut direct_buf).expect("render_into should succeed");
+
+        // Collect rows via render_rows (scratch + copy path).
+        let row_stride = w as usize * 4;
+        let mut rows_buf = vec![0u8; w as usize * h as usize * 4];
+        render_rows(page, &opts, |y, row| {
+            let start = y * row_stride;
+            rows_buf[start..start + row_stride].copy_from_slice(row);
+        })
+        .expect("render_rows should succeed");
+
+        assert_eq!(
+            direct_buf, rows_buf,
+            "render_rows output must be byte-identical to render_into (composite_into path)"
+        );
+    }
+
+    /// `render_rows` must produce byte-for-byte identical output to `render_into`
+    /// for a bilevel (JB2-only) page at a fixed small resolution.
+    #[test]
+    fn render_rows_byte_identical_to_render_into_bilevel() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+
+        let w = 50u32;
+        let h = 70u32;
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+
+        let mut direct_buf = vec![0u8; w as usize * h as usize * 4];
+        render_into(page, &opts, &mut direct_buf).expect("render_into should succeed");
+
+        let row_stride = w as usize * 4;
+        let mut rows_buf = vec![0u8; w as usize * h as usize * 4];
+        render_rows(page, &opts, |y, row| {
+            let start = y * row_stride;
+            rows_buf[start..start + row_stride].copy_from_slice(row);
+        })
+        .expect("render_rows should succeed");
+
+        assert_eq!(
+            direct_buf, rows_buf,
+            "render_rows bilevel output must be byte-identical to render_into"
         );
     }
 }
