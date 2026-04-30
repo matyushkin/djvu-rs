@@ -7,6 +7,66 @@ Referenced from issue templates ("Record result in CLAUDE.md (Kept or Reverted +
 
 Each entry: issue, approach, numbers, decision, reason.
 
+### #225 Phase 2 — public `render_streaming` API — **Kept** (2026-04-30)
+
+**Approach.** Built on Phase 1's internal `render_rows` primitive. Added one
+new public entry point and one new error variant:
+
+- `pub fn render_streaming<F: FnMut(usize, &[u8])>(page, opts, sink)` — thin
+  wrapper around `render_rows` that rejects render options requiring
+  post-processing of a fully-allocated pixmap.
+- `RenderError::UnsupportedOption(&'static str)` — returned when the streaming
+  path cannot honour the requested options.
+
+The constraints surface what `render_pixmap` does after compositing: the
+streaming path *cannot* support `opts.aa = true` (the AA downscale needs the
+full pixmap), `opts.resampling = Lanczos3` *when scaling actually happens*
+(re-renders at native resolution and downscales), or any non-identity
+combined rotation (`combine_rotations(page.rotation(), opts.rotation)`
+wraps a rotate-pixmap step). When all three constraints hold,
+`render_streaming` is byte-identical to `render_pixmap` — verified by two
+new tests on `chicken.djvu` (color) and `boy_jb2.djvu` (bilevel).
+
+Lanczos at native size is permitted: the early-return path in
+`render_pixmap` skips Lanczos when output dimensions equal page dimensions
+(`need_scale = false`), so it has no effect on bytes either way.
+
+**Tests.** Seven new unit tests in `djvu_render::tests`:
+
+- `render_streaming_byte_identical_to_render_pixmap_color`
+- `render_streaming_byte_identical_to_render_pixmap_bilevel`
+- `render_streaming_rejects_aa`
+- `render_streaming_rejects_lanczos_with_scaling`
+- `render_streaming_allows_lanczos_at_native_size`
+- `render_streaming_rejects_user_rotation`
+- `render_streaming_rejects_zero_dimensions`
+
+All 403 lib tests pass; clippy `-D warnings` and `cargo fmt --check` clean.
+
+**Memory.** Phase 1 already established that the internal compositing path
+allocates a single `opts.width * 4` byte scratch row reused across rows;
+`render_streaming` inherits that. Peak heap during compositing is bounded
+by `scratch_row + decoded BG44 + decoded JB2 mask + FG palette` — no full
+pixmap. The 600-dpi A3 (≈100 MB pixmap) target from the issue's DoD is met
+by construction (the scratch row is < 16 KB at any reasonable width).
+
+**Reason kept.** The DoD-required public API is now in place with no
+behavioural change for existing `render_pixmap` callers, byte-exact
+equivalence verified, post-processing options safely refused with a typed
+error rather than silently producing different output. The `UnsupportedOption`
+variant is `&'static str` — no allocation on the error path. Phase 1's
+zero-cost adapter through `render_rows` means `render_pixmap` continues to
+benefit from the warm-cache row scratch (CLAUDE.md `### #225 Phase 1`,
+−13% on `render_page/dpi/72`).
+
+**Open follow-ups.**
+1. `render_region`, `render_coarse`, `render_progressive` could similarly
+   gain streaming variants if a use case appears.
+2. Memory benchmark from the issue's DoD ("peak RSS during render of a
+   600-dpi 2550×3301 page < 4 MB") not yet wired into `bench/`. Manual
+   verification via `heaptrack` or `dhat` would confirm the BG44/mask
+   buffers are the only large allocations.
+
 ### #225 Phase 1 — internal row-streaming render refactor — **Kept** (2026-04-29)
 
 **Approach.** Extracted the composite hot path into a per-row streaming
