@@ -233,30 +233,40 @@ pub fn emit(file: &DjvuFile) -> Vec<u8> {
 }
 
 fn emit_chunk(chunk: &Chunk, out: &mut Vec<u8>) {
+    emit_chunk_inner(chunk, out, false);
+}
+
+fn emit_chunk_inner(chunk: &Chunk, out: &mut Vec<u8>, suppress_inner_pad: bool) {
     match chunk {
         Chunk::Form {
             secondary_id,
-            length: _,
+            length: stored_length,
             children,
         } => {
-            // Compute payload = secondary_id (4 bytes) + concat(emit(child)).
-            // Recompute length from children rather than trusting the stored
-            // value — the parser's `length` covers the original on-disk size,
-            // but children may have grown/shrunk if the caller mutated the
-            // tree. The proptest harness only feeds back unmodified trees,
-            // so both forms agree there.
+            // Two valid IFF layouts exist for a FORM whose last child has odd
+            // payload length:
+            //   (A) FORM declared length is odd, no pad after last child;
+            //       the outer/parent loop writes the alignment byte.
+            //   (B) FORM declared length is even, includes a pad byte after
+            //       the last child inside the FORM body.
+            // Real DjVu files mix both styles. Preserve the parser's stored
+            // length parity so unmutated subtrees round-trip byte-identical.
+            let suppress_last_pad = (*stored_length & 1) == 1;
             let mut payload: Vec<u8> = Vec::new();
             payload.extend_from_slice(secondary_id);
-            for child in children {
-                emit_chunk(child, &mut payload);
+            let n = children.len();
+            for (i, child) in children.iter().enumerate() {
+                let last = i + 1 == n;
+                emit_chunk_inner(child, &mut payload, last && suppress_last_pad);
             }
             let len = payload.len() as u32;
             out.extend_from_slice(b"FORM");
             out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(&payload);
-            // Word-align: pad to even total chunk size.
+            // Outer pad to align the next sibling in our parent. Skip when
+            // our parent told us they'll provide alignment for us.
             let total = 8 + payload.len();
-            if total % 2 == 1 {
+            if !suppress_inner_pad && total % 2 == 1 {
                 out.push(0);
             }
         }
@@ -266,7 +276,7 @@ fn emit_chunk(chunk: &Chunk, out: &mut Vec<u8>) {
             out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(data);
             let total = 8 + data.len();
-            if total % 2 == 1 {
+            if !suppress_inner_pad && total % 2 == 1 {
                 out.push(0);
             }
         }
