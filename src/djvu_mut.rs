@@ -42,8 +42,13 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::error::LegacyError;
+use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
+use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile};
+use crate::info::PageInfo;
+use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
+use crate::text::TextLayer;
+use crate::text_encode::encode_text_layer;
 
 /// Errors produced by [`DjVuDocumentMut`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +77,31 @@ pub enum MutError {
     /// The path is empty — must contain at least one index.
     #[error("path must not be empty")]
     EmptyPath,
+
+    /// `page_mut` was called with an index past the document's page count.
+    #[error("page index {index} out of range (document has {count} pages)")]
+    PageOutOfRange {
+        /// Requested page index.
+        index: usize,
+        /// Number of pages in the document.
+        count: usize,
+    },
+
+    /// The page has no INFO chunk, which is required to encode chunks whose
+    /// payload depends on page height (currently `set_text_layer`).
+    #[error("page has no INFO chunk; cannot encode height-dependent chunk")]
+    MissingPageInfo,
+
+    /// The page's INFO chunk failed to parse.
+    #[error("INFO chunk parse error: {0}")]
+    InfoParse(#[from] IffError),
+
+    /// The operation requires DIRM offset recomputation, which is not
+    /// implemented yet — page mutation in a multi-page `FORM:DJVM` bundle
+    /// shifts the per-component offsets stored in DIRM. Tracked as a follow-up
+    /// PR in the [#222](https://github.com/matyushkin/issues/222) sequence.
+    #[error("mutation of multi-page DJVM bundles requires DIRM recomputation (not in PR2)")]
+    DjvmMutationUnsupported,
 }
 
 /// A DjVu document opened for in-place mutation.
@@ -221,9 +251,149 @@ impl DjVuDocumentMut {
             self.original_bytes
         }
     }
+
+    // ---- High-level setters (PR2 of #222) ----------------------------------
+
+    /// Number of editable pages in the document.
+    ///
+    /// `1` for `FORM:DJVU`, the count of `FORM:DJVU` children for `FORM:DJVM`
+    /// (shared-dictionary `FORM:DJVI` components are not counted as pages).
+    pub fn page_count(&self) -> usize {
+        match self.root_form_type() {
+            Some(b"DJVM") => self
+                .file
+                .root
+                .children()
+                .iter()
+                .filter(
+                    |c| matches!(c, Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU"),
+                )
+                .count(),
+            _ => 1,
+        }
+    }
+
+    /// Borrow the i-th page's `FORM:DJVU` for high-level mutation.
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::PageOutOfRange`] if `index >= self.page_count()`.
+    /// - [`MutError::DjvmMutationUnsupported`] if the document is a
+    ///   multi-page `FORM:DJVM` bundle — DIRM offset recomputation is
+    ///   deferred to a follow-up PR. Single-page `FORM:DJVU` works.
+    pub fn page_mut(&mut self, index: usize) -> Result<PageMut<'_>, MutError> {
+        let count = self.page_count();
+        if index >= count {
+            return Err(MutError::PageOutOfRange { index, count });
+        }
+        // clippy::redundant_guards wants `secondary_id: b"DJVU"` here, but
+        // the byte-array pattern would expect `[u8; 4]` while the field is
+        // `[u8; 4]` reached through a reference, which doesn't work as a
+        // by-value pattern; the guard form is the cleanest match.
+        #[allow(clippy::redundant_guards)]
+        match &self.file.root {
+            Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU" => {
+                debug_assert_eq!(index, 0);
+                Ok(PageMut {
+                    form: &mut self.file.root,
+                    dirty: &mut self.dirty,
+                })
+            }
+            _ => Err(MutError::DjvmMutationUnsupported),
+        }
+    }
+}
+
+/// A mutable handle to one page's `FORM:DJVU` chunk inside a
+/// [`DjVuDocumentMut`]. Returned by [`DjVuDocumentMut::page_mut`].
+///
+/// Each setter replaces the corresponding chunk in place, or appends a new
+/// chunk if the page does not have one yet. The compressed `*z` chunk variant
+/// is preferred on insert (TXTz / ANTz / METz) for size; if an existing
+/// uncompressed `*a` chunk is present, the setter replaces *that* chunk and
+/// upgrades its identifier to the `*z` form.
+pub struct PageMut<'doc> {
+    form: &'doc mut Chunk,
+    dirty: &'doc mut bool,
+}
+
+impl PageMut<'_> {
+    /// Replace (or insert) the page's text layer with the BZZ-compressed
+    /// `TXTz` form of `layer`. Page height is read from the page's `INFO`
+    /// chunk; missing INFO yields [`MutError::MissingPageInfo`].
+    pub fn set_text_layer(&mut self, layer: &TextLayer) -> Result<(), MutError> {
+        let info_data = self
+            .find_leaf_data(b"INFO")
+            .ok_or(MutError::MissingPageInfo)?;
+        let info = PageInfo::parse(info_data)?;
+        let plain = encode_text_layer(layer, info.height as u32);
+        let compressed = crate::bzz_encode::bzz_encode(&plain);
+        self.replace_or_insert_text(compressed);
+        *self.dirty = true;
+        Ok(())
+    }
+
+    /// Replace (or insert) the page's annotation chunk with the
+    /// BZZ-compressed `ANTz` form of `(annotation, areas)`.
+    pub fn set_annotations(&mut self, annotation: &Annotation, areas: &[MapArea]) {
+        let bytes = encode_annotations_bzz(annotation, areas);
+        self.replace_or_insert(b"ANTa", b"ANTz", bytes);
+        *self.dirty = true;
+    }
+
+    /// Replace (or insert) the page's metadata chunk with the
+    /// BZZ-compressed `METz` form of `meta`. An empty `meta` value removes
+    /// any existing METa/METz chunk.
+    pub fn set_metadata(&mut self, meta: &DjVuMetadata) {
+        let bytes = encode_metadata_bzz(meta);
+        self.replace_or_insert(b"METa", b"METz", bytes);
+        *self.dirty = true;
+    }
+
+    fn find_leaf_data(&self, id: &[u8; 4]) -> Option<&[u8]> {
+        for child in self.form.children() {
+            if let Chunk::Leaf { id: cid, data } = child
+                && cid == id
+            {
+                return Some(data);
+            }
+        }
+        None
+    }
+
+    /// Replace either the `*a` or `*z` variant of a chunk pair, picking `*z`
+    /// (compressed) for any newly inserted chunk. If `data` is empty, removes
+    /// the existing chunk (whichever variant is present) and does not insert.
+    fn replace_or_insert(&mut self, id_a: &[u8; 4], id_z: &[u8; 4], data: Vec<u8>) {
+        let children = match self.form {
+            Chunk::Form { children, .. } => children,
+            Chunk::Leaf { .. } => unreachable!("PageMut wraps a FORM"),
+        };
+        let pos = children
+            .iter()
+            .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == id_a || id == id_z));
+        match (pos, data.is_empty()) {
+            (Some(i), true) => {
+                children.remove(i);
+            }
+            (Some(i), false) => {
+                children[i] = Chunk::Leaf { id: *id_z, data };
+            }
+            (None, true) => { /* nothing to remove and nothing to insert */ }
+            (None, false) => {
+                children.push(Chunk::Leaf { id: *id_z, data });
+            }
+        }
+    }
+
+    /// TXTa / TXTz variant of `replace_or_insert` (kept separate for clarity).
+    fn replace_or_insert_text(&mut self, data: Vec<u8>) {
+        self.replace_or_insert(b"TXTa", b"TXTz", data);
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -339,5 +509,202 @@ mod tests {
         let original = read_corpus("chicken.djvu");
         let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
         assert_eq!(doc.root_form_type(), Some(b"DJVU"));
+    }
+
+    // ---- PR2 setters ------------------------------------------------------
+
+    #[test]
+    fn page_count_single_page_djvu_is_one() {
+        let original = read_corpus("chicken.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        assert_eq!(doc.page_count(), 1);
+    }
+
+    #[test]
+    fn page_count_djvm_bundle_counts_djvu_components_only() {
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        // The bundle has multiple FORM:DJVU pages; assert it's > 1 and matches
+        // the count of DJVU children at the root.
+        let direct: usize = doc
+            .file
+            .root
+            .children()
+            .iter()
+            .filter(|c| {
+                matches!(c, crate::iff::Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU")
+            })
+            .count();
+        assert!(direct >= 2, "expected multi-page bundle, got {direct}");
+        assert_eq!(doc.page_count(), direct);
+    }
+
+    #[test]
+    fn page_mut_out_of_range_errors() {
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let err = doc.page_mut(1).err().unwrap();
+        assert!(matches!(
+            err,
+            MutError::PageOutOfRange { index: 1, count: 1 }
+        ));
+    }
+
+    #[test]
+    fn page_mut_djvm_returns_unsupported() {
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let err = doc.page_mut(0).err().unwrap();
+        assert!(matches!(err, MutError::DjvmMutationUnsupported));
+    }
+
+    #[test]
+    fn set_text_layer_roundtrip_chicken() {
+        use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        let layer = TextLayer {
+            text: "hello world".to_string(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 50,
+                },
+                text: "hello world".to_string(),
+                children: vec![],
+            }],
+        };
+        doc.page_mut(0).unwrap().set_text_layer(&layer).unwrap();
+        assert!(doc.is_dirty());
+        let edited = doc.into_bytes();
+
+        // Re-parse and confirm a TXTz chunk now exists.
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let has_txtz = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"TXTz"));
+        assert!(
+            has_txtz,
+            "TXTz chunk should be present after set_text_layer"
+        );
+    }
+
+    #[test]
+    fn set_annotations_roundtrip_chicken() {
+        use crate::annotation::{Annotation, Color};
+
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        let mut ann = Annotation::default();
+        ann.background = Some(Color {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+        });
+        ann.mode = Some("color".to_string());
+        doc.page_mut(0).unwrap().set_annotations(&ann, &[]);
+        let edited = doc.into_bytes();
+
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let antz = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"));
+        assert!(antz.is_some(), "ANTz should be inserted");
+        let data = antz.unwrap().data();
+        let (parsed_ann, _areas) =
+            crate::annotation::parse_annotations_bzz(data).expect("ANTz must round-trip");
+        assert_eq!(parsed_ann.mode.as_deref(), Some("color"));
+        assert_eq!(
+            parsed_ann.background,
+            Some(Color {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF
+            })
+        );
+    }
+
+    #[test]
+    fn set_metadata_roundtrip_chicken() {
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        let mut meta = DjVuMetadata::default();
+        meta.title = Some("Test Title".into());
+        meta.author = Some("Tester".into());
+        doc.page_mut(0).unwrap().set_metadata(&meta);
+        let edited = doc.into_bytes();
+
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let metz = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
+            .expect("METz should be inserted");
+        let parsed = crate::metadata::parse_metadata_bzz(metz.data()).unwrap();
+        assert_eq!(parsed, meta);
+    }
+
+    #[test]
+    fn set_metadata_empty_removes_existing_chunk() {
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        // Insert one, then clear.
+        let mut meta = DjVuMetadata::default();
+        meta.title = Some("X".into());
+        doc.page_mut(0).unwrap().set_metadata(&meta);
+        doc.page_mut(0)
+            .unwrap()
+            .set_metadata(&DjVuMetadata::default());
+
+        let edited = doc.into_bytes();
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let any_meta = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"));
+        assert!(!any_meta, "set_metadata(empty) should remove any METa/METz");
+    }
+
+    #[test]
+    fn set_metadata_replaces_existing_chunk_in_place() {
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        let mut m1 = DjVuMetadata::default();
+        m1.title = Some("First".into());
+        doc.page_mut(0).unwrap().set_metadata(&m1);
+
+        let mut m2 = DjVuMetadata::default();
+        m2.title = Some("Second".into());
+        doc.page_mut(0).unwrap().set_metadata(&m2);
+
+        let edited = doc.into_bytes();
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let metz_count = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .filter(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"))
+            .count();
+        assert_eq!(metz_count, 1, "should not duplicate METz on repeat set");
     }
 }
