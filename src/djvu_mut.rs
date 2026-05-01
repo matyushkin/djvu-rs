@@ -1242,4 +1242,74 @@ mod tests {
             "TXTz chunk should be present on page 2 after set_text_layer"
         );
     }
+
+    /// PR4 of #222: editing one page in a bundled DJVM must leave every
+    /// other page's bytes unchanged. The mutated page itself may grow
+    /// (e.g. a new METz chunk), but unmutated FORM:DJVU/DJVI components
+    /// must round-trip byte-identical.
+    #[test]
+    fn unmutated_pages_byte_identical_after_metadata_edit() {
+        use crate::metadata::DjVuMetadata;
+
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+
+        let orig_ranges = top_form_ranges(&original);
+
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let meta = DjVuMetadata {
+            title: Some("PR4 byte-identical probe".into()),
+            ..Default::default()
+        };
+        doc.page_mut(0).unwrap().set_metadata(&meta);
+        let edited = doc.into_bytes();
+
+        let edited_ranges = top_form_ranges(&edited);
+        assert_eq!(orig_ranges.len(), edited_ranges.len());
+
+        // The first FORM:DJVU child corresponds to page 0 (the one we edited);
+        // it is allowed to differ. All others must be byte-identical.
+        let mut djvu_idx = 0usize;
+        for (i, (or, er)) in orig_ranges.iter().zip(edited_ranges.iter()).enumerate() {
+            // Only enforce identity on FORM:DJVU/DJVI components — bare leaves
+            // (DIRM, NAVM) legitimately change when offsets shift.
+            let is_form_djvu = &original[or.start..or.start + 4] == b"FORM"
+                && (&original[or.start + 8..or.start + 12] == b"DJVU"
+                    || &original[or.start + 8..or.start + 12] == b"DJVI");
+            if !is_form_djvu {
+                continue;
+            }
+            let is_edited_page = djvu_idx == 0;
+            djvu_idx += 1;
+            if is_edited_page {
+                continue;
+            }
+            assert_eq!(
+                &original[or.clone()],
+                &edited[er.clone()],
+                "FORM at top-level child #{i} must be byte-identical after edit"
+            );
+        }
+    }
+
+    /// Walk top-level children of the outer FORM and return their absolute
+    /// byte ranges (header+payload+pad).
+    fn top_form_ranges(data: &[u8]) -> Vec<core::ops::Range<usize>> {
+        assert_eq!(&data[..4], b"AT&T");
+        let form_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let body_end = 12 + form_len;
+        let mut pos = 16usize; // skip AT&T(4) + FORM(4) + len(4) + secondary_id(4)
+        let mut out = Vec::new();
+        while pos + 8 <= body_end {
+            let len =
+                u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
+            let mut next = pos + 8 + len;
+            if next & 1 == 1 && next < body_end {
+                next += 1;
+            }
+            out.push(pos..next);
+            pos = next;
+        }
+        out
+    }
 }
