@@ -43,10 +43,12 @@
 use alloc::vec::Vec;
 
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
+use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile};
 use crate::info::PageInfo;
 use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
+use crate::navm_encode::encode_navm;
 use crate::text::TextLayer;
 use crate::text_encode::encode_text_layer;
 
@@ -97,11 +99,35 @@ pub enum MutError {
     InfoParse(#[from] IffError),
 
     /// The operation requires DIRM offset recomputation, which is not
-    /// implemented yet — page mutation in a multi-page `FORM:DJVM` bundle
-    /// shifts the per-component offsets stored in DIRM. Tracked as a follow-up
-    /// PR in the [#222](https://github.com/matyushkin/issues/222) sequence.
-    #[error("mutation of multi-page DJVM bundles requires DIRM recomputation (not in PR2)")]
-    DjvmMutationUnsupported,
+    /// implemented for indirect (non-bundled) `FORM:DJVM` documents — those
+    /// reference page bytes in external files via a resolver, so editing them
+    /// in place would also need the external files rewritten. Tracked as a
+    /// follow-up PR (PR5) in the
+    /// [#222](https://github.com/matyushkin/djvu-rs/issues/222) sequence.
+    #[error("mutation of indirect DJVM documents is not supported")]
+    IndirectDjvmUnsupported,
+
+    /// The DIRM chunk was malformed in a way that prevents offset
+    /// recomputation. Should not occur after a successful
+    /// [`DjVuDocumentMut::from_bytes`] on a well-formed DJVM document.
+    #[error("DIRM chunk is malformed: {0}")]
+    DirmMalformed(&'static str),
+
+    /// The number of `FORM:DJVU`/`FORM:DJVI` components in the bundle does
+    /// not match the count recorded in DIRM. Indicates a structurally
+    /// inconsistent document.
+    #[error("DIRM component count {dirm} does not match bundle child count {children}")]
+    DirmComponentCountMismatch {
+        /// Component count read from DIRM (`nfiles`).
+        dirm: usize,
+        /// Actual count of `FORM:DJVU`/`FORM:DJVI` children in the root.
+        children: usize,
+    },
+
+    /// `set_bookmarks` was called on a `FORM:DJVU` (single-page) document.
+    /// NAVM bookmarks live in `FORM:DJVM` bundles only.
+    #[error("set_bookmarks requires a FORM:DJVM bundle (this document is FORM:DJVU)")]
+    BookmarksRequireDjvm,
 }
 
 /// A DjVu document opened for in-place mutation.
@@ -243,13 +269,30 @@ impl DjVuDocumentMut {
     ///
     /// When [`Self::is_dirty`] is `false`, this returns the bytes passed to
     /// [`Self::from_bytes`] verbatim. After any mutation it falls through to
-    /// [`iff::emit`] which reconstructs the IFF stream from the parsed tree.
+    /// [`iff::emit`] which reconstructs the IFF stream from the parsed tree;
+    /// for `FORM:DJVM` bundles the `DIRM` offsets are recomputed first so
+    /// they point at the correct component positions in the new output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `DIRM` offset recomputation fails — this only happens on a
+    /// structurally inconsistent document (DIRM `nfiles` not matching the
+    /// bundle's child count, etc.) which a successful [`Self::from_bytes`]
+    /// would already have rejected. Use [`Self::try_into_bytes`] to recover
+    /// the error without panicking.
     pub fn into_bytes(self) -> Vec<u8> {
-        if self.dirty {
-            iff::emit(&self.file)
-        } else {
-            self.original_bytes
+        self.try_into_bytes()
+            .expect("DIRM recomputation failed — inconsistent document")
+    }
+
+    /// Like [`Self::into_bytes`] but returns the [`MutError`] from `DIRM`
+    /// offset recomputation rather than panicking.
+    pub fn try_into_bytes(mut self) -> Result<Vec<u8>, MutError> {
+        if !self.dirty {
+            return Ok(self.original_bytes);
         }
+        recompute_dirm_offsets(&mut self.file.root)?;
+        Ok(iff::emit(&self.file))
     }
 
     // ---- High-level setters (PR2 of #222) ----------------------------------
@@ -275,33 +318,244 @@ impl DjVuDocumentMut {
 
     /// Borrow the i-th page's `FORM:DJVU` for high-level mutation.
     ///
+    /// For single-page `FORM:DJVU` only `index == 0` is valid. For bundled
+    /// `FORM:DJVM` the index walks `FORM:DJVU` direct children in order
+    /// (shared-dictionary `FORM:DJVI` components are skipped).
+    ///
+    /// On serialisation, [`Self::into_bytes`] rewrites DIRM offsets to
+    /// reflect any size changes from page mutations.
+    ///
     /// # Errors
     ///
     /// - [`MutError::PageOutOfRange`] if `index >= self.page_count()`.
-    /// - [`MutError::DjvmMutationUnsupported`] if the document is a
-    ///   multi-page `FORM:DJVM` bundle — DIRM offset recomputation is
-    ///   deferred to a follow-up PR. Single-page `FORM:DJVU` works.
+    /// - [`MutError::IndirectDjvmUnsupported`] if the document is an
+    ///   indirect (non-bundled) `FORM:DJVM` — page bytes live in external
+    ///   files, so editing in place is not supported by this primitive.
     pub fn page_mut(&mut self, index: usize) -> Result<PageMut<'_>, MutError> {
         let count = self.page_count();
         if index >= count {
             return Err(MutError::PageOutOfRange { index, count });
         }
-        // clippy::redundant_guards wants `secondary_id: b"DJVU"` here, but
-        // the byte-array pattern would expect `[u8; 4]` while the field is
-        // `[u8; 4]` reached through a reference, which doesn't work as a
-        // by-value pattern; the guard form is the cleanest match.
-        #[allow(clippy::redundant_guards)]
-        match &self.file.root {
-            Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU" => {
-                debug_assert_eq!(index, 0);
-                Ok(PageMut {
-                    form: &mut self.file.root,
-                    dirty: &mut self.dirty,
-                })
+        let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
+        if &root_form_type == b"DJVU" {
+            debug_assert_eq!(index, 0);
+            return Ok(PageMut {
+                form: &mut self.file.root,
+                dirty: &mut self.dirty,
+            });
+        }
+        debug_assert_eq!(&root_form_type, b"DJVM");
+        if !is_bundled_djvm(&self.file.root) {
+            return Err(MutError::IndirectDjvmUnsupported);
+        }
+        // Walk the root's children, returning the index-th FORM:DJVU.
+        let children = match &mut self.file.root {
+            Chunk::Form { children, .. } => children,
+            Chunk::Leaf { .. } => unreachable!("validated FORM root"),
+        };
+        let mut seen = 0usize;
+        for child in children.iter_mut() {
+            if let Chunk::Form { secondary_id, .. } = child
+                && secondary_id == b"DJVU"
+            {
+                if seen == index {
+                    return Ok(PageMut {
+                        form: child,
+                        dirty: &mut self.dirty,
+                    });
+                }
+                seen += 1;
             }
-            _ => Err(MutError::DjvmMutationUnsupported),
+        }
+        unreachable!("page_count agreed with bundle but iteration disagreed")
+    }
+
+    /// Replace, insert, or remove the document's `NAVM` bookmark chunk.
+    ///
+    /// Empty `bookmarks` removes any existing NAVM. The chunk lives at the
+    /// `FORM:DJVM` bundle root, between `DIRM` and the per-page components,
+    /// and the encoder uses [`encode_navm`].
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::BookmarksRequireDjvm`] if the document is a single-page
+    ///   `FORM:DJVU` (no NAVM in non-bundled documents per the DjVu spec).
+    pub fn set_bookmarks(&mut self, bookmarks: &[DjVuBookmark]) -> Result<(), MutError> {
+        let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
+        if &root_form_type != b"DJVM" {
+            return Err(MutError::BookmarksRequireDjvm);
+        }
+        let children = match &mut self.file.root {
+            Chunk::Form { children, .. } => children,
+            Chunk::Leaf { .. } => unreachable!("validated FORM root"),
+        };
+        let pos = children
+            .iter()
+            .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"NAVM"));
+        match (pos, bookmarks.is_empty()) {
+            (Some(i), true) => {
+                children.remove(i);
+            }
+            (Some(i), false) => {
+                children[i] = Chunk::Leaf {
+                    id: *b"NAVM",
+                    data: encode_navm(bookmarks),
+                };
+            }
+            (None, true) => { /* nothing to remove and nothing to insert */ }
+            (None, false) => {
+                // Insert NAVM right after DIRM if present, else right after
+                // the secondary id (i.e. as the first child). DIRM is the
+                // first chunk in a well-formed bundle.
+                let dirm_pos = children
+                    .iter()
+                    .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"DIRM"));
+                let insert_at = dirm_pos.map(|i| i + 1).unwrap_or(0);
+                children.insert(
+                    insert_at,
+                    Chunk::Leaf {
+                        id: *b"NAVM",
+                        data: encode_navm(bookmarks),
+                    },
+                );
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+}
+
+/// Whether `chunk` is a bundled (rather than indirect) `FORM:DJVM`.
+///
+/// Returns `false` for any non-DJVM chunk.
+fn is_bundled_djvm(chunk: &Chunk) -> bool {
+    let Chunk::Form {
+        secondary_id,
+        children,
+        ..
+    } = chunk
+    else {
+        return false;
+    };
+    if secondary_id != b"DJVM" {
+        return false;
+    }
+    children.iter().any(|c| {
+        matches!(c, Chunk::Leaf { id, data } if id == b"DIRM" && !data.is_empty() && (data[0] & 0x80) != 0)
+    })
+}
+
+/// Compute the byte length the chunk will occupy when emitted by [`iff::emit`]:
+/// 8-byte chunk header + payload + word-alignment padding.
+///
+/// For `FORM` chunks the payload is recomputed recursively (4 bytes for
+/// secondary_id + sum of children's emitted sizes), to mirror what
+/// [`iff::emit`] writes after a tree mutation.
+fn emitted_chunk_size(chunk: &Chunk) -> usize {
+    match chunk {
+        Chunk::Form {
+            secondary_id: _,
+            children,
+            ..
+        } => {
+            let payload: usize = 4 + children.iter().map(emitted_chunk_size).sum::<usize>();
+            let total = 8 + payload;
+            total + (total & 1)
+        }
+        Chunk::Leaf { data, .. } => {
+            let total = 8 + data.len();
+            total + (total & 1)
         }
     }
+}
+
+/// Recompute the absolute byte offsets stored in the `DIRM` chunk so they
+/// point at each `FORM:DJVU`/`FORM:DJVI` component in the about-to-be-emitted
+/// document.
+///
+/// Offsets in DIRM are absolute file-byte positions (from the leading
+/// `b"AT&T"` magic) of each component's outer `b"FORM"` chunk header. After a
+/// page-chunk mutation those positions shift, and viewers that use DIRM for
+/// page navigation see the wrong bytes if the table is not refreshed.
+///
+/// No-op for non-DJVM roots and for indirect DIRM (no offset table).
+fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
+    let Chunk::Form {
+        secondary_id,
+        children,
+        ..
+    } = root
+    else {
+        return Ok(());
+    };
+    if secondary_id != b"DJVM" {
+        return Ok(());
+    }
+
+    // Absolute byte position of the next chunk inside the FORM:DJVM body:
+    // AT&T(4) + FORM(4) + length(4) + secondary_id "DJVM"(4) = 16.
+    let mut pos: usize = 16;
+    let mut new_offsets: Vec<u32> = Vec::new();
+    let mut dirm_idx: Option<usize> = None;
+
+    // The `id == b"DIRM"` guard form is needed: `id` is `[u8; 4]` reached
+    // through a `&` reference, so a by-value pattern would require `*b"DIRM"`
+    // which clippy's redundant-guards autofix doesn't propose.
+    #[allow(clippy::redundant_guards)]
+    for (i, child) in children.iter().enumerate() {
+        match child {
+            Chunk::Leaf { id, .. } if id == b"DIRM" => {
+                dirm_idx = Some(i);
+            }
+            Chunk::Form {
+                secondary_id: sid, ..
+            } if sid == b"DJVU" || sid == b"DJVI" || sid == b"THUM" => {
+                new_offsets.push(u32::try_from(pos).map_err(|_| {
+                    MutError::DirmMalformed("component offset exceeds u32 (file > 4 GiB)")
+                })?);
+            }
+            _ => {}
+        }
+        pos += emitted_chunk_size(child);
+    }
+
+    let Some(dirm_idx) = dirm_idx else {
+        // Bundled DJVM with no DIRM is malformed by spec, but tolerate it
+        // (parse_dirm would have failed during from_bytes if it mattered).
+        return Ok(());
+    };
+
+    let dirm = &mut children[dirm_idx];
+    let Chunk::Leaf { data, .. } = dirm else {
+        return Err(MutError::DirmMalformed("DIRM is not a leaf chunk"));
+    };
+
+    if data.len() < 3 {
+        return Err(MutError::DirmMalformed("DIRM payload < 3 bytes"));
+    }
+    let bundled = (data[0] & 0x80) != 0;
+    if !bundled {
+        // Indirect DIRM has no offset table to update.
+        return Ok(());
+    }
+    let nfiles = u16::from_be_bytes([data[1], data[2]]) as usize;
+    if nfiles != new_offsets.len() {
+        return Err(MutError::DirmComponentCountMismatch {
+            dirm: nfiles,
+            children: new_offsets.len(),
+        });
+    }
+    let needed = 3usize
+        .checked_add(4 * nfiles)
+        .ok_or(MutError::DirmMalformed("DIRM offset table size overflow"))?;
+    if data.len() < needed {
+        return Err(MutError::DirmMalformed("DIRM offset table truncated"));
+    }
+    for (i, &off) in new_offsets.iter().enumerate() {
+        let base = 3 + i * 4;
+        data[base..base + 4].copy_from_slice(&off.to_be_bytes());
+    }
+    Ok(())
 }
 
 /// A mutable handle to one page's `FORM:DJVU` chunk inside a
@@ -551,11 +805,15 @@ mod tests {
     }
 
     #[test]
-    fn page_mut_djvm_returns_unsupported() {
+    fn page_mut_djvm_bundle_succeeds_after_pr3() {
+        // PR3 enables page_mut on bundled FORM:DJVM. Verify it returns a
+        // valid handle for index 0 and rejects out-of-range indices.
         let original = read_corpus("DjVu3Spec_bundled.djvu");
         let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
-        let err = doc.page_mut(0).err().unwrap();
-        assert!(matches!(err, MutError::DjvmMutationUnsupported));
+        assert!(doc.page_mut(0).is_ok());
+        let count = doc.page_count();
+        let err = doc.page_mut(count).err().unwrap();
+        assert!(matches!(err, MutError::PageOutOfRange { .. }));
     }
 
     #[test]
@@ -706,5 +964,282 @@ mod tests {
             .filter(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"))
             .count();
         assert_eq!(metz_count, 1, "should not duplicate METz on repeat set");
+    }
+
+    // ---- PR3: bundled DJVM mutation + set_bookmarks -----------------------
+
+    /// Helper: parse the FORM:DJVM body, return the DIRM chunk's offset table
+    /// and the actual file offsets where each component FORM header sits.
+    fn dirm_offsets_and_actual(data: &[u8]) -> (Vec<u32>, Vec<u32>) {
+        // Parse top-level FORM
+        let form = crate::iff::parse_form(data).expect("parse_form");
+        assert_eq!(&form.form_type, b"DJVM");
+
+        let dirm = form
+            .chunks
+            .iter()
+            .find(|c| &c.id == b"DIRM")
+            .expect("DIRM present");
+        let payload = dirm.data;
+        let nfiles = u16::from_be_bytes([payload[1], payload[2]]) as usize;
+        let mut declared = Vec::with_capacity(nfiles);
+        for i in 0..nfiles {
+            let base = 3 + i * 4;
+            declared.push(u32::from_be_bytes([
+                payload[base],
+                payload[base + 1],
+                payload[base + 2],
+                payload[base + 3],
+            ]));
+        }
+
+        // Walk the file to find each FORM child's absolute byte offset.
+        // Layout: AT&T(4) FORM(4) length(4) DJVM(4) chunks…
+        let mut actual = Vec::with_capacity(nfiles);
+        let mut pos = 16usize;
+        let body_end = 8 + u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        while pos < body_end {
+            let id = &data[pos..pos + 4];
+            let len =
+                u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
+            if id == b"FORM" {
+                actual.push(pos as u32);
+            }
+            let mut next = pos + 8 + len;
+            if next & 1 == 1 {
+                next += 1;
+            }
+            pos = next;
+        }
+        (declared, actual)
+    }
+
+    #[test]
+    fn dirm_offsets_match_actual_after_no_edit() {
+        // Sanity: even without edits, the recompute path agrees with the
+        // original document layout on a real bundle.
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let (declared, actual) = dirm_offsets_and_actual(&original);
+        assert_eq!(declared, actual);
+    }
+
+    #[test]
+    fn dirm_offsets_recomputed_after_page_metadata_edit() {
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        // Edit page 0's metadata so the page FORM grows.
+        let mut meta = DjVuMetadata::default();
+        meta.title = Some("PR3 DJVM bundled mutation".into());
+        meta.author = Some("djvu-rs PR3 tests".into());
+        doc.page_mut(0).unwrap().set_metadata(&meta);
+        assert!(doc.is_dirty());
+
+        let edited = doc.into_bytes();
+        // Sizes must have changed (metadata chunk was inserted).
+        assert_ne!(edited.len(), original.len());
+
+        // DIRM offsets in the new bytes must match where the FORM headers
+        // actually live.
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(
+            declared, actual,
+            "DIRM offsets must point at the new FORM positions after edit"
+        );
+
+        // The full document must still parse via DjVuDocument and expose the
+        // expected page count.
+        let reparsed =
+            crate::djvu_document::DjVuDocument::parse(&edited).expect("edited bundle must parse");
+        let original_doc =
+            crate::djvu_document::DjVuDocument::parse(&original).expect("original bundle parses");
+        assert_eq!(reparsed.page_count(), original_doc.page_count());
+    }
+
+    #[test]
+    fn dirm_offsets_recomputed_after_middle_page_edit() {
+        // Editing a non-first page must shift only the trailing offsets.
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let count = doc.page_count();
+        assert!(count >= 3);
+
+        let mid = count / 2;
+        let mut meta = DjVuMetadata::default();
+        meta.title = Some("PR3 mid-page edit".into());
+        doc.page_mut(mid).unwrap().set_metadata(&meta);
+
+        let edited = doc.into_bytes();
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+
+        // Pages before `mid` should have unchanged offsets vs. the original.
+        let (orig_declared, _) = dirm_offsets_and_actual(&original);
+        for i in 0..mid {
+            assert_eq!(
+                declared[i], orig_declared[i],
+                "offset for page {i} (before edit) must be unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn set_bookmarks_replaces_navm_in_bundle() {
+        use crate::djvu_document::DjVuBookmark;
+
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+
+        let bookmarks = vec![
+            DjVuBookmark {
+                title: "Front matter".into(),
+                url: "#1".into(),
+                children: vec![DjVuBookmark {
+                    title: "Acknowledgments".into(),
+                    url: "#3".into(),
+                    children: vec![],
+                }],
+            },
+            DjVuBookmark {
+                title: "Body".into(),
+                url: "#10".into(),
+                children: vec![],
+            },
+        ];
+        doc.set_bookmarks(&bookmarks).unwrap();
+        assert!(doc.is_dirty());
+        let edited = doc.into_bytes();
+
+        // DIRM offsets must still be correct after the NAVM size change.
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+
+        // Round-trip the bookmarks via the high-level DjVuDocument parser.
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&edited)
+            .expect("bundle with new bookmarks parses");
+        let parsed_bms = reparsed.bookmarks();
+        assert_eq!(parsed_bms.len(), 2);
+        assert_eq!(parsed_bms[0].title, "Front matter");
+        assert_eq!(parsed_bms[0].children.len(), 1);
+        assert_eq!(parsed_bms[0].children[0].title, "Acknowledgments");
+        assert_eq!(parsed_bms[1].title, "Body");
+    }
+
+    #[test]
+    fn set_bookmarks_empty_removes_navm() {
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        // The fixture might or might not have NAVM; either way, calling with
+        // an empty slice should result in no NAVM in the output.
+        doc.set_bookmarks(&[]).unwrap();
+        let edited = doc.into_bytes();
+
+        let form = crate::iff::parse_form(&edited).unwrap();
+        let has_navm = form.chunks.iter().any(|c| &c.id == b"NAVM");
+        assert!(!has_navm, "set_bookmarks(&[]) must remove NAVM");
+
+        // DIRM offsets still match.
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+    }
+
+    #[test]
+    fn set_bookmarks_inserts_navm_when_absent() {
+        use crate::djvu_document::DjVuBookmark;
+
+        // Build a bundle that has no NAVM by first stripping it, then
+        // re-add bookmarks via set_bookmarks.
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_bookmarks(&[]).unwrap();
+        let stripped = doc.into_bytes();
+
+        let mut doc = DjVuDocumentMut::from_bytes(&stripped).unwrap();
+        let bms = vec![DjVuBookmark {
+            title: "Re-added".into(),
+            url: "#1".into(),
+            children: vec![],
+        }];
+        doc.set_bookmarks(&bms).unwrap();
+        let edited = doc.into_bytes();
+
+        let form = crate::iff::parse_form(&edited).unwrap();
+        let navm_pos = form
+            .chunks
+            .iter()
+            .position(|c| &c.id == b"NAVM")
+            .expect("NAVM should be inserted");
+        let dirm_pos = form.chunks.iter().position(|c| &c.id == b"DIRM").unwrap();
+        assert_eq!(
+            navm_pos,
+            dirm_pos + 1,
+            "NAVM should be placed immediately after DIRM"
+        );
+
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+    }
+
+    #[test]
+    fn set_bookmarks_on_single_page_djvu_errors() {
+        let original = read_corpus("chicken.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let err = doc.set_bookmarks(&[]).err().unwrap();
+        assert!(matches!(err, MutError::BookmarksRequireDjvm));
+    }
+
+    #[test]
+    fn page_mut_djvm_text_layer_roundtrip() {
+        use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let layer = TextLayer {
+            text: "djvm page-3 text".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 50,
+                },
+                text: "djvm page-3 text".into(),
+                children: vec![],
+            }],
+        };
+        doc.page_mut(2).unwrap().set_text_layer(&layer).unwrap();
+        let edited = doc.into_bytes();
+
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+
+        // Re-open and confirm the targeted page now has a TXTz chunk.
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        // The third FORM:DJVU child should have a TXTz leaf.
+        let mut djvu_seen = 0usize;
+        let mut found_txtz = false;
+        for child in reparsed.file.root.children() {
+            if let Chunk::Form {
+                secondary_id,
+                children,
+                ..
+            } = child
+                && secondary_id == b"DJVU"
+            {
+                if djvu_seen == 2 {
+                    found_txtz = children
+                        .iter()
+                        .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"TXTz"));
+                    break;
+                }
+                djvu_seen += 1;
+            }
+        }
+        assert!(
+            found_txtz,
+            "TXTz chunk should be present on page 2 after set_text_layer"
+        );
     }
 }
