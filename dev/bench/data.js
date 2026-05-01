@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777631451347,
+  "lastUpdate": 1777632240433,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -464,6 +464,240 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 6753000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "eec08153575052d81f71eb5382176816f1592aff",
+          "message": "feat(api): high-level setters for DjVuDocumentMut (PR2 of #222) (#267)\n\n* feat(api): high-level setters for DjVuDocumentMut (PR2 of #222)\n\nPR2 of #222 builds on PR1's chunk-replacement primitive and exposes\nhigh-level setters that compose `replace_leaf` with the existing chunk\nencoders.\n\n## New surface\n\n- `DjVuDocumentMut::page_count() -> usize`\n- `DjVuDocumentMut::page_mut(i) -> Result<PageMut<'_>, MutError>`\n- `PageMut::set_text_layer(&TextLayer)` — emits TXTz (replaces TXTa/TXTz)\n- `PageMut::set_annotations(&Annotation, &[MapArea])` — emits ANTz\n- `PageMut::set_metadata(&DjVuMetadata)` — emits METz; empty input\n  removes the existing chunk\n- `metadata::encode_metadata` / `encode_metadata_bzz` — new public\n  encoders, round-trip tested against `parse_metadata`/`parse_metadata_bzz`\n- New `MutError` variants: `PageOutOfRange`, `MissingPageInfo`,\n  `InfoParse(IffError)`, `DjvmMutationUnsupported`\n\n## Scope\n\n`page_mut` errors with `DjvmMutationUnsupported` on multi-page\n`FORM:DJVM` bundles: changing a page's chunk size shifts the per-component\noffsets in DIRM, which needs its own recomputation pass. Deferred to\nPR3 of the #222 sequence (along with `set_bookmarks` for NAVM at the\nbundle root). Single-page `FORM:DJVU` works fully.\n\n## Test plan\n\n- [x] `cargo test --release --lib` — 410 passed (402 → 410: +9\n      djvu_mut, +5 metadata)\n- [x] Round-trip tests parse re-emitted bytes and decode each chunk\n      back to the input value\n- [x] Empty/replace/remove paths covered explicitly\n- [x] `page_mut` error paths (out-of-range, DJVM bundle)\n- [x] `cargo clippy --workspace --lib --tests --bins -- -D warnings` clean\n- [x] `cargo fmt --check` clean\n\nCLAUDE.md / PERF_EXPERIMENTS.md updated with `### #222 PR2 — Kept (2026-05-01)`.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* fix(metadata): gate encode_metadata_bzz on feature=std\n\nbzz_encode (the encoder) is std-only; the new encode_metadata_bzz\nhelper transitively required std but was unconditionally pub. CI's\nno_std and wasm32 builds failed with E0433 \"cannot find bzz_encode\nin crate\". Gate the function and its test on feature = \"std\", matching\nthe existing precedent in src/annotation.rs:532.\n\n---------\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-01T19:34:10+09:00",
+          "tree_id": "9adf51d0ccd44795eae0cce34da078e62914c4eb",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/eec08153575052d81f71eb5382176816f1592aff"
+        },
+        "date": 1777632239539,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 118,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 147263,
+            "range": "± 257",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 839055,
+            "range": "± 6360",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 580149,
+            "range": "± 2802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1534837,
+            "range": "± 30695",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 3155,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9246133,
+            "range": "± 140464",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 589081,
+            "range": "± 5261",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2210216,
+            "range": "± 14601",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2769256,
+            "range": "± 3550",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 30062610,
+            "range": "± 450745",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 212729,
+            "range": "± 1676",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 343415,
+            "range": "± 615",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1308694,
+            "range": "± 35181",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 5016641,
+            "range": "± 33494",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 19573804,
+            "range": "± 160915",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1576770,
+            "range": "± 7834",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 12498509,
+            "range": "± 99523",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 12429913,
+            "range": "± 87764",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5127865,
+            "range": "± 6914",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 29961307,
+            "range": "± 1279356",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 122325199,
+            "range": "± 844174",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 121061081,
+            "range": "± 347923",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 208976,
+            "range": "± 808",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 9232954,
+            "range": "± 51471",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1300174260,
+            "range": "± 5469584",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 6813147,
+            "range": "± 154438",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 2413,
+            "range": "± 30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 26171199,
+            "range": "± 463801",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 26789616,
+            "range": "± 314300",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3140372,
+            "range": "± 3743",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 22884194,
+            "range": "± 135343",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 218656,
+            "range": "± 2069",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7331000,
             "range": "± 0",
             "unit": "ns/iter"
           }
