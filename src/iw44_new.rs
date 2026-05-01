@@ -1141,7 +1141,7 @@ unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16])
     let hi = vget_high_u8(result);
     let v4 = vorr_u8(lo, hi);
     let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
-    let v1 = vorr_u8(v2, vext_u8::<1>(v1, v1));
+    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
     let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
     vget_lane_u8::<0>(v0)
 }
