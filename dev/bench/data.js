@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777633539869,
+  "lastUpdate": 1777636419709,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -932,6 +932,240 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 8166000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "df1e95e51c08ebe4e85cb1899352aae0cf5a5692",
+          "message": "fix(iff): preserve FORM length parity for byte-identical mutation (PR4 of #222) (#269)\n\nTwo valid IFF layouts exist when a FORM's last child has odd payload\nlength: declare FORM length odd and let the parent loop write the pad\nbyte, or declare even and include the pad inside the FORM body. Real\nDjVu files mix both styles inconsistently — the bundled DjVu3 spec\nfixture has 78 pages of one style and 5 pages of the other.\n\nPreviously `iff::emit` always inlined the pad (even-style), which\nshifted the FORM length-LSB by 1 on those 5 pages after any mutation.\nThat broke the PR4 byte-identical guarantee for unmutated pages.\n\nSwitch the legacy emitter to honor the parser's stored length parity:\nsuppress the trailing internal pad on the last child iff the original\nFORM length was odd. The outer pad still fires unconditionally so the\nparent's child loop sees correct alignment.\n\nAlso adds `unmutated_pages_byte_identical_after_metadata_edit` which\ncatches future regressions on the bundled fixture.\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-01T20:43:12+09:00",
+          "tree_id": "dba66838a75e4e33a8f3af255a74b2175499a1ae",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/df1e95e51c08ebe4e85cb1899352aae0cf5a5692"
+        },
+        "date": 1777636418696,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 117,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 157749,
+            "range": "± 1321",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 764696,
+            "range": "± 2252",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 570762,
+            "range": "± 19941",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1309986,
+            "range": "± 45975",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2696,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9360158,
+            "range": "± 194982",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 596199,
+            "range": "± 8821",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2261917,
+            "range": "± 50805",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2745090,
+            "range": "± 5039",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 28472649,
+            "range": "± 486771",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 243058,
+            "range": "± 893",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 350135,
+            "range": "± 14554",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1515615,
+            "range": "± 7611",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 5783109,
+            "range": "± 23052",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 22464963,
+            "range": "± 116395",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1687964,
+            "range": "± 25033",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 13205527,
+            "range": "± 87216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 13271178,
+            "range": "± 38112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5319785,
+            "range": "± 17204",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 28471496,
+            "range": "± 177432",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 137331476,
+            "range": "± 330534",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 136803529,
+            "range": "± 1621450",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 220176,
+            "range": "± 2335",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 8448921,
+            "range": "± 38460",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1443500882,
+            "range": "± 5696809",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 4198028,
+            "range": "± 61479",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 3307,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 22092520,
+            "range": "± 148649",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 22439484,
+            "range": "± 361690",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3199539,
+            "range": "± 23569",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 23520902,
+            "range": "± 582076",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 197632,
+            "range": "± 1252",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8286000,
             "range": "± 0",
             "unit": "ns/iter"
           }
