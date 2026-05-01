@@ -160,6 +160,7 @@ pub fn encode_metadata(meta: &DjVuMetadata) -> Vec<u8> {
 
 /// Encode [`DjVuMetadata`] to METz (BZZ-compressed) bytes. Returns an empty
 /// `Vec` if `meta` has no populated fields (callers should skip the chunk).
+#[cfg(feature = "std")]
 pub fn encode_metadata_bzz(meta: &DjVuMetadata) -> Vec<u8> {
     let plain = encode_metadata(meta);
     if plain.is_empty() {
@@ -457,6 +458,7 @@ mod tests {
     #[test]
     fn encode_empty_metadata_is_empty() {
         assert!(encode_metadata(&DjVuMetadata::default()).is_empty());
+        #[cfg(feature = "std")]
         assert!(encode_metadata_bzz(&DjVuMetadata::default()).is_empty());
     }
 
@@ -493,6 +495,7 @@ mod tests {
         assert_eq!(parsed.title, m.title);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn encode_bzz_roundtrip() {
         let mut m = DjVuMetadata::default();
