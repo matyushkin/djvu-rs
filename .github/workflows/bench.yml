@@ -178,7 +178,7 @@ jobs:
   # This job reruns the AVX2-relevant benches twice (default RUSTFLAGS vs
   # `-C target-cpu=x86-64-v3`) on the same runner and posts the delta.
   # Tracks the validation gate added after #251/#252/#253 shipped without
-  # baseline numbers — see CLAUDE.md follow-up for context.
+  # baseline numbers — see PERF_EXPERIMENTS.md follow-up for context.
   bench-x86-64-v3:
     name: Benchmark (x86-64-v3 AVX2 validation)
     runs-on: ubuntu-latest
@@ -299,7 +299,7 @@ jobs:
               print("**Verdict.** No measurable difference (all benches within ±3%). "
                     "The AVX2 hot paths are not earning their keep — "
                     "consider reverting #251/#252 with a "
-                    "_Reverted: no measurable speedup_ entry in CLAUDE.md.")
+                    "_Reverted: no measurable speedup_ entry in PERF_EXPERIMENTS.md.")
           else:
               print("**Verdict.** Mixed: some speedup, some regression. Investigate per-bench.")
           PYEOF
