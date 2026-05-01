@@ -96,6 +96,78 @@ pub fn parse_metadata_bzz(data: &[u8]) -> Result<DjVuMetadata, MetadataError> {
     parse_metadata(&decoded)
 }
 
+// ---- Encoder ----------------------------------------------------------------
+
+/// Encode [`DjVuMetadata`] to METa (uncompressed S-expression) bytes.
+///
+/// Output is a single `(metadata …)` form with each populated dedicated field
+/// followed by [`DjVuMetadata::extra`] entries in document order. Returns an
+/// empty `Vec` when no fields are set — callers should skip emitting a chunk.
+///
+/// Round-trip: `parse_metadata(encode_metadata(m))` recovers `m` for any
+/// metadata produced by [`parse_metadata`], modulo the `subject`/`description`
+/// and `year`/`date` aliasing that the parser collapses to canonical keys.
+pub fn encode_metadata(meta: &DjVuMetadata) -> Vec<u8> {
+    if meta.title.is_none()
+        && meta.author.is_none()
+        && meta.subject.is_none()
+        && meta.publisher.is_none()
+        && meta.year.is_none()
+        && meta.keywords.is_none()
+        && meta.extra.is_empty()
+    {
+        return Vec::new();
+    }
+
+    let mut out = String::from("(metadata\n");
+    let mut emit = |key: &str, val: &str| {
+        out.push_str("  (");
+        out.push_str(key);
+        out.push_str(" \"");
+        for ch in val.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                _ => out.push(ch),
+            }
+        }
+        out.push_str("\")\n");
+    };
+    if let Some(v) = meta.title.as_deref() {
+        emit("title", v);
+    }
+    if let Some(v) = meta.author.as_deref() {
+        emit("author", v);
+    }
+    if let Some(v) = meta.subject.as_deref() {
+        emit("subject", v);
+    }
+    if let Some(v) = meta.publisher.as_deref() {
+        emit("publisher", v);
+    }
+    if let Some(v) = meta.year.as_deref() {
+        emit("year", v);
+    }
+    if let Some(v) = meta.keywords.as_deref() {
+        emit("keywords", v);
+    }
+    for (k, v) in &meta.extra {
+        emit(k, v);
+    }
+    out.push(')');
+    out.into_bytes()
+}
+
+/// Encode [`DjVuMetadata`] to METz (BZZ-compressed) bytes. Returns an empty
+/// `Vec` if `meta` has no populated fields (callers should skip the chunk).
+pub fn encode_metadata_bzz(meta: &DjVuMetadata) -> Vec<u8> {
+    let plain = encode_metadata(meta);
+    if plain.is_empty() {
+        return Vec::new();
+    }
+    crate::bzz_encode::bzz_encode(&plain)
+}
+
 // ---- Internal parsing -------------------------------------------------------
 
 fn parse_metadata_text(text: &str) -> DjVuMetadata {
@@ -281,6 +353,7 @@ fn parse_one(tokens: &[Token<'_>], pos: &mut usize) -> Option<SExpr> {
 // ---- Tests ------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -379,5 +452,55 @@ mod tests {
             parse_metadata(invalid),
             Err(MetadataError::InvalidUtf8)
         ));
+    }
+
+    #[test]
+    fn encode_empty_metadata_is_empty() {
+        assert!(encode_metadata(&DjVuMetadata::default()).is_empty());
+        assert!(encode_metadata_bzz(&DjVuMetadata::default()).is_empty());
+    }
+
+    #[test]
+    fn encode_then_parse_roundtrip_known_fields() {
+        let mut m = DjVuMetadata::default();
+        m.title = Some("Twenty Thousand Leagues".into());
+        m.author = Some("Jules Verne".into());
+        m.year = Some("1870".into());
+        m.keywords = Some("adventure, sea".into());
+        let bytes = encode_metadata(&m);
+        let parsed = parse_metadata(&bytes).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn encode_preserves_extra_fields_in_order() {
+        let mut m = DjVuMetadata::default();
+        m.extra = vec![
+            ("isbn".into(), "0-553-21311-3".into()),
+            ("language".into(), "en".into()),
+        ];
+        let bytes = encode_metadata(&m);
+        let parsed = parse_metadata(&bytes).unwrap();
+        assert_eq!(parsed.extra, m.extra);
+    }
+
+    #[test]
+    fn encode_escapes_quotes_and_backslashes() {
+        let mut m = DjVuMetadata::default();
+        m.title = Some(r#"He said "hi" \o/"#.into());
+        let bytes = encode_metadata(&m);
+        let parsed = parse_metadata(&bytes).unwrap();
+        assert_eq!(parsed.title, m.title);
+    }
+
+    #[test]
+    fn encode_bzz_roundtrip() {
+        let mut m = DjVuMetadata::default();
+        m.title = Some("Compressed".into());
+        m.author = Some("Author X".into());
+        let bytes = encode_metadata_bzz(&m);
+        assert!(!bytes.is_empty());
+        let parsed = parse_metadata_bzz(&bytes).unwrap();
+        assert_eq!(parsed, m);
     }
 }

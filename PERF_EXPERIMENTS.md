@@ -5,6 +5,66 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #222 PR2 — high-level setters (`page_mut(i).set_text_layer`/`set_annotations`/`set_metadata`) — **Kept** (2026-05-01)
+
+**Approach.** Builds on PR1's chunk-replacement primitive. New surface:
+
+- `DjVuDocumentMut::page_count() -> usize` — `1` for `FORM:DJVU`, count of
+  `FORM:DJVU` direct children for `FORM:DJVM`.
+- `DjVuDocumentMut::page_mut(i) -> Result<PageMut<'_>, MutError>` — borrow
+  one page's `FORM:DJVU` for editing.
+- `PageMut::set_text_layer(&TextLayer)` — encode via `encode_text_layer`
+  (page height read from `INFO`) + `bzz_encode`, replace the existing
+  `TXTa`/`TXTz` or insert a new `TXTz`.
+- `PageMut::set_annotations(&Annotation, &[MapArea])` — same shape over
+  `encode_annotations_bzz` and `ANTa`/`ANTz`.
+- `PageMut::set_metadata(&DjVuMetadata)` — over a new
+  `metadata::encode_metadata` / `encode_metadata_bzz` pair, against
+  `METa`/`METz`. Empty `DjVuMetadata` removes the chunk.
+- New `MutError` variants: `PageOutOfRange`, `MissingPageInfo`,
+  `InfoParse(IffError)`, `DjvmMutationUnsupported`.
+
+`page_mut` errors with `DjvmMutationUnsupported` on `FORM:DJVM` bundles —
+the page-level setters change a component FORM's byte size which would
+shift DIRM offsets. DIRM recomputation is its own concern, deferred.
+
+**Tests.** Nine new unit tests in `djvu_mut::tests` plus five in
+`metadata::tests`:
+
+- `set_text_layer_roundtrip_chicken`, `set_annotations_roundtrip_chicken`,
+  `set_metadata_roundtrip_chicken` — each parse the re-emitted bytes and
+  decode the chunk back to the input value.
+- `set_metadata_empty_removes_existing_chunk` and
+  `set_metadata_replaces_existing_chunk_in_place` — exercise the
+  remove-on-empty and replace-don't-duplicate behaviours.
+- `page_count_*`, `page_mut_out_of_range_errors`,
+  `page_mut_djvm_returns_unsupported` — error paths.
+- Metadata encoder tests cover empty input, dedicated-field round-trip,
+  `extra` ordering, escape handling for `"`/`\\`, and BZZ round-trip.
+
+All 410 lib tests pass (402 → 410; `+9` djvu_mut, `+5` metadata, with the
+PR1 metadata count shift). `cargo clippy --workspace --lib --tests --bins
+-- -D warnings` clean, `cargo fmt --check` clean. (Examples have two
+pre-existing clippy warnings unrelated to this PR.)
+
+**Reason kept.** Direct continuation of PR1's contract — PR1 only exposed
+`replace_leaf(path, bytes)`; PR2 wires the existing chunk encoders to
+that primitive so callers don't need to know IFF chunk IDs or BZZ
+compression to update text/annotations/metadata. With this PR the
+`librarian` consumer (#158) can finally drop its `djvused` shell-out for
+single-page DjVu files.
+
+**Open follow-ups (PR3-4 of #222 sequence).**
+1. **PR3**: bundled DJVM mutation (DIRM offset recomputation) plus
+   `DjVuDocumentMut::set_bookmarks(&[DjVuBookmark])` for NAVM at the
+   bundle root.
+2. **PR4**: byte-range patching for true byte-identical round-trip even
+   *with* edits (only changed chunks are rewritten; unchanged regions are
+   memcpy'd). Currently any mutation triggers a full `iff::emit` which
+   may differ from the original byte layout in incidental ways.
+3. **PR5**: indirect DJVM support — the issue's "per-file rewrite vs
+   re-bundle" decision still needs a concrete answer.
+
 ### #222 PR1 — `DjVuDocumentMut::from_bytes` + chunk-replacement primitive — **Kept** (2026-04-30)
 
 **Approach.** New `src/djvu_mut.rs` module gated on `feature = "std"` with
