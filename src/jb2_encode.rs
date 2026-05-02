@@ -1148,6 +1148,53 @@ pub fn cluster_shared_symbols_tunable(
         .flatten()
         .filter(|c| c.pages_seen.len() >= page_threshold)
         .collect();
+
+    // Cap cumulative pixels at the decoder's per-stream symbol budget
+    // (`MAX_TOTAL_SYMBOL_PIXELS` in src/jb2.rs). Without this guard, a long
+    // bilevel corpus (e.g. 517-page `pathogenic_bacteria_1896.djvu` produces
+    // ~78 MP of shared symbols at threshold 2) yields a `Djbz` that
+    // `decode_dictionary` then rejects with `Jb2Error::ImageTooLarge`,
+    // rendering the whole bundle undecodable. See #270.
+    //
+    // When trimming, prefer to keep the highest-value reps: those seen on
+    // more pages save more bytes per byte of shared-dict footprint. Ties on
+    // page count → smaller pixel cost wins (cheaper, less likely to push us
+    // back over budget on the next item).
+    let mut total_pixels: u64 = 0;
+    let cap = crate::jb2::MAX_TOTAL_SYMBOL_PIXELS as u64;
+    let any_over_budget = promoted.iter().fold(0u64, |acc, c| {
+        acc + (c.rep.width as u64) * (c.rep.height as u64)
+    }) > cap;
+    if any_over_budget {
+        let mut by_value: Vec<usize> = (0..promoted.len()).collect();
+        by_value.sort_by(|&a, &b| {
+            promoted[b]
+                .pages_seen
+                .len()
+                .cmp(&promoted[a].pages_seen.len())
+                .then_with(|| {
+                    let pa = (promoted[a].rep.width as u64) * (promoted[a].rep.height as u64);
+                    let pb = (promoted[b].rep.width as u64) * (promoted[b].rep.height as u64);
+                    pa.cmp(&pb)
+                })
+        });
+        let mut keep = vec![false; promoted.len()];
+        for &i in &by_value {
+            let pix = (promoted[i].rep.width as u64) * (promoted[i].rep.height as u64);
+            if total_pixels + pix > cap {
+                continue;
+            }
+            keep[i] = true;
+            total_pixels += pix;
+        }
+        let mut idx = 0;
+        promoted.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+    }
+
     promoted.sort_by_key(|c| c.first_seen);
     promoted.into_iter().map(|c| c.rep).collect()
 }
@@ -2218,5 +2265,71 @@ mod tests {
                 + stats.rec_6_refine_shared
                 + stats.rec_7_exact
         );
+    }
+
+    /// Regression for #270: a clustered shared dict whose total symbol pixels
+    /// would exceed `MAX_TOTAL_SYMBOL_PIXELS` must be trimmed at clustering
+    /// time so the produced `Djbz` round-trips through `decode_dict`.
+    #[test]
+    fn cluster_shared_symbols_caps_total_pixel_budget() {
+        let cap = crate::jb2::MAX_TOTAL_SYMBOL_PIXELS;
+
+        // Build many distinct same-size CCs, then stamp each twice (across two
+        // pages) so they all promote at threshold 2. Sum > cap.
+        let glyph_w: u32 = 96;
+        let glyph_h: u32 = 96;
+        let pixels_per_glyph = (glyph_w as usize) * (glyph_h as usize);
+        let n_glyphs = (cap / pixels_per_glyph) + 64; // overshoot the cap
+
+        let glyphs: Vec<Bitmap> = (0..n_glyphs)
+            .map(|i| {
+                make_bitmap(glyph_w, glyph_h, |x, y| {
+                    // Per-glyph pseudo-random pattern; ensures buckets are
+                    // populated by distinct (w, h, data) reps.
+                    let v = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503))
+                        .wrapping_add(i as u32);
+                    (v & 0xff) < 128
+                })
+            })
+            .collect();
+
+        let page_w: u32 = 1024;
+        let make_page = |start: usize, count: usize| -> Bitmap {
+            // Pack glyphs in rows; canvas grows just enough to fit.
+            let cols = (page_w / (glyph_w + 2)).max(1) as usize;
+            let rows = count.div_ceil(cols);
+            let canvas_h = (rows as u32) * (glyph_h + 2) + 2;
+            let mut canvas = Bitmap::new(page_w, canvas_h);
+            for (i, g) in glyphs[start..start + count].iter().enumerate() {
+                let col = (i % cols) as u32;
+                let row = (i / cols) as u32;
+                let ox = col * (glyph_w + 2) + 1;
+                let oy = row * (glyph_h + 2) + 1;
+                for y in 0..glyph_h {
+                    for x in 0..glyph_w {
+                        if g.get(x, y) {
+                            canvas.set(ox + x, oy + y, true);
+                        }
+                    }
+                }
+            }
+            canvas
+        };
+        let p1 = make_page(0, n_glyphs);
+        let p2 = make_page(0, n_glyphs);
+
+        let shared = cluster_shared_symbols_tunable(&[p1, p2], 2, 0);
+        let total: usize = shared
+            .iter()
+            .map(|s| (s.width as usize) * (s.height as usize))
+            .sum();
+        assert!(
+            total <= cap,
+            "cluster output {total} px must respect MAX_TOTAL_SYMBOL_PIXELS={cap}"
+        );
+
+        let djbz = encode_jb2_djbz(&shared);
+        crate::jb2::decode_dict(&djbz, None)
+            .expect("encoded shared Djbz must round-trip through decode_dict");
     }
 }
