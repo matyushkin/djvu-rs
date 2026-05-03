@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777814602537,
+  "lastUpdate": 1777816255276,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -1400,6 +1400,240 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 8189000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "41898282+github-actions[bot]@users.noreply.github.com",
+            "name": "github-actions[bot]",
+            "username": "github-actions[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fa331459e5995805389d3b98a47b8ffdf96d63d0",
+          "message": "chore(main): release 0.15.0 (#234)\n\n* chore(main): release 0.15.0\n\n* docs(changelog): add missing iw44 perf entries (#252, #257)\n\nRelease-please skipped two perf(iw44) commits in the auto-generated\n0.15.0 changelog:\n- WASM simd128 inverse wavelet load/store (Phase 2 of #190, #257)\n- x86_64 AVX2 stride-1 load/store (Phase 2 of #189, #252)\n\nBoth landed on main since v0.14.0 with conventional-commit subjects.\n\n---------\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>\nCo-authored-by: leo <leva.matyushkin@gmail.com>",
+          "timestamp": "2026-05-03T22:40:43+09:00",
+          "tree_id": "5f445552c5bc7bab25069fa6602c96e72141753a",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/fa331459e5995805389d3b98a47b8ffdf96d63d0"
+        },
+        "date": 1777816253944,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 116,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 158319,
+            "range": "± 1102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 763926,
+            "range": "± 4148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 567583,
+            "range": "± 2369",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1320839,
+            "range": "± 13969",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2659,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9304208,
+            "range": "± 24968",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 590274,
+            "range": "± 1655",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2228720,
+            "range": "± 56791",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2762234,
+            "range": "± 7802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 27715401,
+            "range": "± 115006",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 227739,
+            "range": "± 305",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 339593,
+            "range": "± 2422",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1599129,
+            "range": "± 36315",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 6159949,
+            "range": "± 153614",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 23868507,
+            "range": "± 54199",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1698792,
+            "range": "± 27496",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 13462486,
+            "range": "± 36027",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 13475216,
+            "range": "± 52316",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5283449,
+            "range": "± 30415",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 28674484,
+            "range": "± 169866",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 134118191,
+            "range": "± 2104611",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 133231301,
+            "range": "± 1352732",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 208482,
+            "range": "± 2832",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 8478994,
+            "range": "± 111329",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1428384099,
+            "range": "± 3724793",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 4115855,
+            "range": "± 40359",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 3322,
+            "range": "± 24",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 26794433,
+            "range": "± 339303",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 26800392,
+            "range": "± 316332",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3156803,
+            "range": "± 20447",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 22899473,
+            "range": "± 99148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 199344,
+            "range": "± 845",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8170000,
             "range": "± 0",
             "unit": "ns/iter"
           }
