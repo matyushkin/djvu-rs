@@ -59,7 +59,9 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
       - name: Run tests
-        run: cargo nextest run --profile ci --workspace
+        # Mirrors the CI Test (stable) job on main — the `cli` feature gates
+        # the `djvu` binary that several integration tests need.
+        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
 
       # ── djvu-zp (published first; djvu-rs depends on it) ────────────────
       - name: Check if djvu-zp already published
