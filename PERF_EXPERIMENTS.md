@@ -704,3 +704,37 @@ the encoder. The default `cluster_shared_symbols` continues to delegate to
    amortized log2(K) increase`. Unclear if the win exists — would need to
    re-measure with a corpus where intra-page refinement is already
    exhausted.
+
+### #258 — shared-Djbz Hamming clustering — **Rejected** (2026-05-04)
+
+**Approach.** Re-tested the `diff_fraction = 3` path on the 517-page
+`pathogenic_bacteria_1896.djvu` corpus. The corpus exposed three separate
+robustness problems: the 1 MP per-symbol decode cap was too low for large
+connected components, the 64 MP cumulative symbol-work cap was too low for
+dense independently encoded pages, and Hamming shared clustering/rec-6
+refinement did not provide a reliable size win. The kept path raises decode
+caps to 16 MP per symbol and 256 MP cumulative symbol work, disables
+lossless rec-6 emission, and keeps shared-Djbz clustering byte-exact with a
+4 MP retained shared-dict budget.
+
+**Numbers.** Re-running the 517-page `pathogenic_bacteria_1896.djvu`
+experiment at `--diff-fraction 3` before this change localized the failure
+to page-level JB2 decode errors such as `Jb2(ImageTooLarge)` beginning at
+page 81. The clustered shared dictionary had 63,062 symbols; the per-page
+Sjbz stream then emitted enough shared-ref rec-6 refinements to exceed the
+decoder's per-stream symbol-pixel budget before pixel comparison.
+
+After the change:
+
+| Command | shared syms | bundle / independent | round-trip |
+|---------|-------------|----------------------|------------|
+| `--threshold 999 --diff-fraction 3` | 0 | 1.001× | ✓ |
+| `--diff-fraction 3` | 5,164 | 0.976× | ✓ |
+
+**Decision.** Rejected. Hamming shared clustering has no material measured
+size win over byte-exact clustering, and the `diff_fraction = 3` corpus path
+still produces invalid page streams. `cluster_shared_symbols_tunable` keeps
+its public benchmarking signature but now ignores the Hamming allowance and
+uses byte-exact clustering for every threshold. In addition, inherited
+shared-Djbz symbols are used only for exact record-7 hits, and lossless
+near matches fall back to record-1 rather than rec-6 refinement.

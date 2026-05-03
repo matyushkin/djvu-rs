@@ -245,6 +245,7 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
 ///
 /// `row_offset = mrow - crow` is the centre-alignment shift expressed in
 /// Bitmap (top-down) row indices.
+#[allow(dead_code)]
 fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bitmap) {
     debug_assert_eq!(ctx.len(), 2048);
     let cw = cbm.width as i32;
@@ -544,16 +545,6 @@ fn packed_hamming(a: &[u8], b: &[u8]) -> u32 {
     total
 }
 
-/// Phase 3 refinement-match threshold (percent of pixels).
-///
-/// A candidate dict entry of the same (w, h) qualifies as a refinement
-/// reference when its Hamming distance to the new CC is at most this
-/// fraction of total pixels. Calibrated against `tests/corpus/*.djvu`:
-/// values above ~4% start producing record-6 emissions whose refinement
-/// bitmap costs more bits than a fresh record-1 on noisy / halftone CCs,
-/// regressing total size on dense scanned pages.
-const REFINEMENT_DIFF_FRACTION: u32 = 4;
-
 /// Minimum pixel area for a CC to be considered for refinement matching.
 ///
 /// Sub-32-pixel CCs (typical: dust, single anti-aliasing fragments) encode
@@ -584,41 +575,6 @@ fn find_lossy_copy_ref(
     }
     // Hamming budget in pixel count, rounded to the nearest integer.
     let max_diff = ((pixel_count as f64) * (threshold as f64)).round() as u32;
-    let mut best: Option<(usize, u32)> = None;
-    for &i in same_size_indices {
-        let ref_bm = &dict_entries[i];
-        debug_assert_eq!(ref_bm.width, cand.width);
-        debug_assert_eq!(ref_bm.height, cand.height);
-        let d = packed_hamming(&cand.data, &ref_bm.data);
-        if d > max_diff {
-            continue;
-        }
-        match best {
-            None => best = Some((i, d)),
-            Some((_, bd)) if d < bd => best = Some((i, d)),
-            _ => {}
-        }
-    }
-    best.map(|(i, _)| i)
-}
-
-/// Find the best refinement-reference dict index for `cand` among
-/// dict entries of identical (w, h). Returns `None` if no candidate is
-/// close enough to be worth a record-6 emission.
-fn find_refinement_ref(
-    cand: &Bitmap,
-    dict_entries: &[Bitmap],
-    same_size_indices: &[usize],
-) -> Option<usize> {
-    if same_size_indices.is_empty() {
-        return None;
-    }
-    let pixel_count = (cand.width as u64) * (cand.height as u64);
-    if pixel_count < REFINEMENT_MIN_PIXELS {
-        return None;
-    }
-    let max_diff = ((pixel_count * REFINEMENT_DIFF_FRACTION as u64) / 100) as u32;
-
     let mut best: Option<(usize, u32)> = None;
     for &i in same_size_indices {
         let ref_bm = &dict_entries[i];
@@ -754,8 +710,6 @@ pub fn encode_jb2_dict_with_options(
     let mut image_size_ctx = NumContext::new();
     let mut symbol_width_ctx = NumContext::new();
     let mut symbol_height_ctx = NumContext::new();
-    let mut symbol_width_diff_ctx = NumContext::new();
-    let mut symbol_height_diff_ctx = NumContext::new();
     let mut symbol_index_ctx = NumContext::new();
     let mut inherit_dict_size_ctx = NumContext::new();
     let mut hoff_ctx = NumContext::new();
@@ -763,7 +717,6 @@ pub fn encode_jb2_dict_with_options(
     let mut shoff_ctx = NumContext::new();
     let mut svoff_ctx = NumContext::new();
     let mut direct_bitmap_ctx = vec![0u8; 1024];
-    let mut refinement_bitmap_ctx = vec![0u8; 2048];
     let mut offset_type_ctx: u8 = 0;
     let mut flag_ctx: u8 = 0;
 
@@ -826,7 +779,6 @@ pub fn encode_jb2_dict_with_options(
         enum Action {
             New,
             Copy(usize),
-            Refine(usize),
         }
         let action = if let Some(idx) = exact_match {
             Action::Copy(idx)
@@ -845,10 +797,7 @@ pub fn encode_jb2_dict_with_options(
             };
             match lossy_copy {
                 Some(idx) => Action::Copy(idx),
-                None => match find_refinement_ref(&cc.bitmap, &dict_entries, candidates) {
-                    Some(ref_idx) => Action::Refine(ref_idx),
-                    None => Action::New,
-                },
+                None => Action::New,
             }
         };
 
@@ -868,25 +817,6 @@ pub fn encode_jb2_dict_with_options(
                     0,
                     (dict_size - 1) as i32,
                     *dict_idx as i32,
-                );
-            }
-            Action::Refine(ref_idx) => {
-                encode_num(&mut zp, &mut record_type_ctx, 0, 11, 6);
-                encode_num(
-                    &mut zp,
-                    &mut symbol_index_ctx,
-                    0,
-                    (dict_size - 1) as i32,
-                    *ref_idx as i32,
-                );
-                // Same-size refinement: width/height diffs are zero.
-                encode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142, 0);
-                encode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142, 0);
-                encode_bitmap_ref(
-                    &mut zp,
-                    &mut refinement_bitmap_ctx,
-                    &cc.bitmap,
-                    &dict_entries[*ref_idx],
                 );
             }
         }
@@ -1011,6 +941,8 @@ impl EncoderLayout {
 
 // ── Djbz dictionary stream + multi-page sharing (#194) ─────────────────────────
 
+const SHARED_DICT_PIXEL_BUDGET: usize = 4 * 1024 * 1024;
+
 /// Encode a sequence of bilevel symbols as a JB2 **Djbz** chunk payload.
 ///
 /// Each symbol is emitted as record-type-2 (new symbol, direct, dict-only) in
@@ -1078,18 +1010,18 @@ pub fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) -> Vec<Bi
     cluster_shared_symbols_tunable(pages, page_threshold, 0)
 }
 
-/// Same as [`cluster_shared_symbols`] but exposes the per-CC Hamming
-/// allowance as a percentage of pixel count. `diff_fraction = 0` produces
-/// byte-exact clustering (the shipped default); higher values fold
-/// near-duplicate glyphs into a single shared rep at the cost of forcing
-/// the per-page Sjbz emitter through rec-6 (matched refinement) more often.
+/// Same as [`cluster_shared_symbols`], preserving the old benchmarking
+/// signature that accepted a per-CC Hamming allowance. The allowance is now
+/// ignored: #258 showed that Hamming shared clustering can produce invalid
+/// page streams on long corpora, and prior measurements found no material
+/// size win over byte-exact clustering.
 ///
 /// Provided for corpus benchmarking — most callers want
 /// [`cluster_shared_symbols`].
 pub fn cluster_shared_symbols_tunable(
     pages: &[Bitmap],
     page_threshold: usize,
-    diff_fraction: u32,
+    _diff_fraction: u32,
 ) -> Vec<Bitmap> {
     if page_threshold < 2 || pages.len() < page_threshold {
         return Vec::new();
@@ -1107,13 +1039,11 @@ pub fn cluster_shared_symbols_tunable(
         let ccs = extract_ccs(page);
         for (cc_idx, cc) in ccs.iter().enumerate() {
             let bm = &cc.bitmap;
-            let pixel_count = (bm.width as u64) * (bm.height as u64);
-            // Tiny CCs always byte-exact: refinement is rejected per-page anyway.
-            let max_diff: u32 = if pixel_count < REFINEMENT_MIN_PIXELS {
-                0
-            } else {
-                ((pixel_count * diff_fraction as u64) / 100) as u32
-            };
+            // Hamming shared clustering was rejected for #258: it produced
+            // invalid page streams on the 517-page corpus while providing no
+            // measured size win. Keep the public benchmarking knob, but make
+            // clustering byte-exact for all callers.
+            let max_diff: u32 = 0;
 
             let bucket = buckets.entry((bm.width, bm.height)).or_default();
             let mut best: Option<(usize, u32)> = None;
@@ -1161,7 +1091,7 @@ pub fn cluster_shared_symbols_tunable(
     // page count → smaller pixel cost wins (cheaper, less likely to push us
     // back over budget on the next item).
     let mut total_pixels: u64 = 0;
-    let cap = crate::jb2::MAX_TOTAL_SYMBOL_PIXELS as u64;
+    let cap = SHARED_DICT_PIXEL_BUDGET as u64;
     let any_over_budget = promoted.iter().fold(0u64, |acc, c| {
         acc + (c.rep.width as u64) * (c.rep.height as u64)
     }) > cap;
@@ -1252,7 +1182,6 @@ pub fn analyze_jb2_cc_stats(page: &Bitmap, shared_symbols: &[Bitmap]) -> CcStats
     let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
     let mut dict_entries: Vec<Bitmap> = Vec::new();
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
-    let shared_len = shared_symbols.len();
     for sym in shared_symbols {
         let idx = dict_entries.len();
         dedup.insert((sym.width, sym.height, sym.data.clone()), idx);
@@ -1277,35 +1206,15 @@ pub fn analyze_jb2_cc_stats(page: &Bitmap, shared_symbols: &[Bitmap]) -> CcStats
             continue;
         }
 
-        let candidates = by_size
-            .get(&(cc.bitmap.width, cc.bitmap.height))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        match find_refinement_ref(&cc.bitmap, &dict_entries, candidates) {
-            Some(ref_idx) => {
-                let ref_bm = &dict_entries[ref_idx];
-                let d = packed_hamming(&cc.bitmap.data, &ref_bm.data);
-                stats.rec_6_hamming.push(d);
-                if ref_idx < shared_len {
-                    stats.rec_6_refine_shared += 1;
-                } else {
-                    stats.rec_6_refine_local += 1;
-                }
-                stats.pixels_rec_6 += pixels;
-                // rec-6 emits no new dict entry — the refinement is blit-only.
-            }
-            None => {
-                stats.rec_1_new += 1;
-                stats.pixels_rec_1 += pixels;
-                let idx = dict_entries.len();
-                dedup.insert(key, idx);
-                by_size
-                    .entry((cc.bitmap.width, cc.bitmap.height))
-                    .or_default()
-                    .push(idx);
-                dict_entries.push(cc.bitmap.clone());
-            }
-        }
+        stats.rec_1_new += 1;
+        stats.pixels_rec_1 += pixels;
+        let idx = dict_entries.len();
+        dedup.insert(key, idx);
+        by_size
+            .entry((cc.bitmap.width, cc.bitmap.height))
+            .or_default()
+            .push(idx);
+        dict_entries.push(cc.bitmap.clone());
     }
 
     stats
@@ -2071,11 +1980,10 @@ mod tests {
     }
 
     #[test]
-    fn cluster_tunable_groups_near_duplicate_large_glyphs() {
-        // 8×8 = 64 pixels (>= REFINEMENT_MIN_PIXELS=32). With diff_fraction=4%,
-        // max_diff = 64*4/100 = 2 bits. A glyph and its 1-bit-perturbed twin
-        // must cluster into one rep when Hamming clustering is opted into.
-        // Default (byte-exact) ships off — see Phase 2 calibration in CLAUDE.md.
+    fn cluster_tunable_keeps_near_duplicate_large_glyphs_separate() {
+        // Hamming clustering was rejected for #258. The tunable API remains
+        // available for benchmark compatibility, but all thresholds now use
+        // byte-exact clustering.
         //
         // Use box outlines with one outline-pixel removed (so the noise alters
         // the same CC instead of producing a stray 1-pixel CC).
@@ -2087,7 +1995,10 @@ mod tests {
         p2.set(6, 4, false); // notch at x=6 instead — different bit
 
         let shared = cluster_shared_symbols_tunable(&[p1.clone(), p2.clone()], 2, 4);
-        assert_eq!(shared.len(), 1, "near-duplicate twins should cluster at 4%");
+        assert!(
+            shared.is_empty(),
+            "tunable clustering must not promote noisy near-dupes"
+        );
 
         // Default (byte-exact) keeps them separate — neither passes
         // page_threshold=2 since each variant only appears on one page.
@@ -2217,12 +2128,12 @@ mod tests {
     fn analyze_jb2_cc_stats_classifies_records() {
         // Three CCs on one page, each well-separated:
         //   1. solid 6×6 block             → byte-exact match against shared (rec-7)
-        //   2. solid 6×6 minus one pixel   → Hamming-1 match against shared  (rec-6)
+        //   2. solid 6×6 minus one pixel   → rec-1; shared rec-6 is disabled
         //   3. solid 5×5 block             → unrelated, no same-size match   (rec-1)
         //
         // REFINEMENT_MIN_PIXELS = 32 forces the 5×5 path through rec-1 even
         // if the dict had a same-size entry. The 6×6 entries (36 pixels each)
-        // are eligible for rec-6 against the shared dict.
+        // would otherwise be eligible for rec-6 against the shared dict.
         let shared_glyph = make_bitmap(6, 6, |_, _| true);
         let near_dup = make_bitmap(6, 6, |x, y| !(x == 3 && y == 3));
         let unrelated = make_bitmap(5, 5, |_, _| true);
@@ -2244,19 +2155,18 @@ mod tests {
         let stats = analyze_jb2_cc_stats(&page, &[shared_glyph]);
         assert_eq!(stats.rec_7_exact, 1, "expected one byte-exact rec-7 hit");
         assert_eq!(
-            stats.rec_6_refine_shared, 1,
-            "expected one refinement against the shared dict slot"
+            stats.rec_6_refine_shared, 0,
+            "shared-dict near matches must not use rec-6"
         );
         assert_eq!(stats.rec_6_refine_local, 0);
         assert!(
-            stats.rec_1_new >= 1,
-            "expected at least one rec-1 (got {})",
+            stats.rec_1_new >= 2,
+            "expected near shared hit and unrelated CC to use rec-1 (got {})",
             stats.rec_1_new
         );
-        assert_eq!(stats.rec_6_hamming.len(), 1);
-        assert_eq!(stats.rec_6_hamming[0], 1);
+        assert!(stats.rec_6_hamming.is_empty());
         assert!(stats.pixels_rec_7 > 0);
-        assert!(stats.pixels_rec_6 > 0);
+        assert_eq!(stats.pixels_rec_6, 0);
         assert!(stats.pixels_rec_1 > 0);
         assert_eq!(
             stats.total_ccs,
@@ -2272,7 +2182,7 @@ mod tests {
     /// time so the produced `Djbz` round-trips through `decode_dict`.
     #[test]
     fn cluster_shared_symbols_caps_total_pixel_budget() {
-        let cap = crate::jb2::MAX_TOTAL_SYMBOL_PIXELS;
+        let cap = SHARED_DICT_PIXEL_BUDGET;
 
         // Build many distinct same-size CCs, then stamp each twice (across two
         // pages) so they all promote at threshold 2. Sum > cap.
