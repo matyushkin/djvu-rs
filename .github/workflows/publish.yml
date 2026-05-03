@@ -53,29 +53,60 @@ jobs:
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          ZP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/djvu-zp/Cargo.toml | head -1)
+          echo "ZP_VERSION=$ZP_VERSION" >> "$GITHUB_ENV"
 
-      - name: Check if already published
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+      - name: Run tests
+        run: cargo nextest run --profile ci --workspace
+
+      # ── djvu-zp (published first; djvu-rs depends on it) ────────────────
+      - name: Check if djvu-zp already published
+        run: |
+          if cargo search "djvu-zp" --limit 1 2>/dev/null | grep -q "^djvu-zp = \"$ZP_VERSION\""; then
+            echo "ZP_ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+            echo "djvu-zp $ZP_VERSION already on crates.io — skipping."
+          else
+            echo "ZP_ALREADY_PUBLISHED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish djvu-zp to crates.io
+        if: env.ZP_ALREADY_PUBLISHED == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p djvu-zp
+
+      - name: Wait for djvu-zp to appear in the index
+        if: env.ZP_ALREADY_PUBLISHED == 'false'
+        run: |
+          for i in $(seq 1 30); do
+            if cargo search "djvu-zp" --limit 1 2>/dev/null | grep -q "^djvu-zp = \"$ZP_VERSION\""; then
+              echo "djvu-zp $ZP_VERSION is live."
+              exit 0
+            fi
+            echo "[$i/30] waiting for djvu-zp $ZP_VERSION on crates.io…"
+            sleep 10
+          done
+          echo "::error::djvu-zp $ZP_VERSION did not appear on crates.io within 5 minutes"
+          exit 1
+
+      # ── djvu-rs (workspace root) ────────────────────────────────────────
+      - name: Check if djvu-rs already published
         run: |
           if cargo search "djvu-rs" --limit 1 2>/dev/null | grep -q "^djvu-rs = \"$VERSION\""; then
             echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
-            echo "Version $VERSION already on crates.io — skipping publish."
+            echo "djvu-rs $VERSION already on crates.io — skipping."
           else
             echo "ALREADY_PUBLISHED=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Dry-run package
+      - name: Dry-run package djvu-rs
         if: env.ALREADY_PUBLISHED == 'false'
-        run: cargo package --allow-dirty
+        run: cargo package -p djvu-rs --allow-dirty
 
-      - name: Install cargo-nextest
-        if: env.ALREADY_PUBLISHED == 'false'
-        uses: taiki-e/install-action@cargo-nextest
-      - name: Run tests
-        if: env.ALREADY_PUBLISHED == 'false'
-        run: cargo nextest run --profile ci --workspace
-
-      - name: Publish to crates.io
+      - name: Publish djvu-rs to crates.io
         if: env.ALREADY_PUBLISHED == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish -p djvu-rs
