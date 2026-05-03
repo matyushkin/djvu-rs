@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/matyushkin/djvu-rs/compare/v0.14.0...v0.15.0) (2026-05-03)
+
+
+### Features
+
+* **api:** bundled DJVM mutation + set_bookmarks (PR3 of [#222](https://github.com/matyushkin/djvu-rs/issues/222)) ([#268](https://github.com/matyushkin/djvu-rs/issues/268)) ([6672a93](https://github.com/matyushkin/djvu-rs/commit/6672a936202f66b32e0e77dafdf467503547de6e))
+* **api:** DjVuDocumentMut::from_bytes — chunk-replacement primitive (PR1 of [#222](https://github.com/matyushkin/djvu-rs/issues/222)) ([#263](https://github.com/matyushkin/djvu-rs/issues/263)) ([b6279ae](https://github.com/matyushkin/djvu-rs/commit/b6279aed03de0eae42b1df7ee22da0bb56efaf08))
+* **api:** high-level setters for DjVuDocumentMut (PR2 of [#222](https://github.com/matyushkin/djvu-rs/issues/222)) ([#267](https://github.com/matyushkin/djvu-rs/issues/267)) ([eec0815](https://github.com/matyushkin/djvu-rs/commit/eec08153575052d81f71eb5382176816f1592aff))
+* **async:** load_document_async — buffered AsyncRead constructor ([#196](https://github.com/matyushkin/djvu-rs/issues/196) Phase 1) ([#231](https://github.com/matyushkin/djvu-rs/issues/231)) ([2d85e65](https://github.com/matyushkin/djvu-rs/commit/2d85e65e1963efb88bb86fe4b1b7e706228e910d))
+* **async:** page_byte_range API + streaming async loader ([#196](https://github.com/matyushkin/djvu-rs/issues/196) Phase 2) ([#237](https://github.com/matyushkin/djvu-rs/issues/237)) ([a365abb](https://github.com/matyushkin/djvu-rs/commit/a365abb64b06a1c86de87e230623e05f465909e1))
+* **cli:** multi-page djvu encode from a directory of PNGs ([#223](https://github.com/matyushkin/djvu-rs/issues/223) follow-up) ([#245](https://github.com/matyushkin/djvu-rs/issues/245)) ([b8858bb](https://github.com/matyushkin/djvu-rs/commit/b8858bb36366be29441c17a06f0ea75daa4a210a))
+* **djvu-enc:** high-level PageEncoder for bilevel Lossless ([#218](https://github.com/matyushkin/djvu-rs/issues/218)) ([#243](https://github.com/matyushkin/djvu-rs/issues/243)) ([afefcef](https://github.com/matyushkin/djvu-rs/commit/afefcef00cb2026772b4b22eb896c5533f87b844))
+* **djvu-enc:** minimal layered Quality (segment → Sjbz + BG44) ([#246](https://github.com/matyushkin/djvu-rs/issues/246)) ([2febd04](https://github.com/matyushkin/djvu-rs/commit/2febd0486b839d800390e0abc1729965f02ad66c))
+* **epub:** opt-in reflowable text section per page ([#228](https://github.com/matyushkin/djvu-rs/issues/228)) ([#240](https://github.com/matyushkin/djvu-rs/issues/240)) ([8207fb9](https://github.com/matyushkin/djvu-rs/commit/8207fb9e3046f594e5fb13150fa2d1220c5b35cf))
+* **fgbz-enc:** FGbz foreground palette encoder ([#217](https://github.com/matyushkin/djvu-rs/issues/217)) ([#241](https://github.com/matyushkin/djvu-rs/issues/241)) ([e43bc9f](https://github.com/matyushkin/djvu-rs/commit/e43bc9f81ed3bc5e3cfaf5fa249c651749583a36))
+* **jb2-enc:** expose tunable shared-Djbz clustering + corpus harness ([#194](https://github.com/matyushkin/djvu-rs/issues/194) Phase 2) ([#219](https://github.com/matyushkin/djvu-rs/issues/219)) ([9aafe42](https://github.com/matyushkin/djvu-rs/commit/9aafe42f04b6d474fefa0bbc73f06b4c666c9d1f))
+* **render:** public render_streaming API (Phase 2 of [#225](https://github.com/matyushkin/djvu-rs/issues/225)) ([#260](https://github.com/matyushkin/djvu-rs/issues/260)) ([b92fac7](https://github.com/matyushkin/djvu-rs/commit/b92fac7c962c57115673eb31b6f84a5e7b36c085))
+* **segment + cli:** FG/BG segmentation v1 + djvu encode subcommand ([#220](https://github.com/matyushkin/djvu-rs/issues/220), [#223](https://github.com/matyushkin/djvu-rs/issues/223)) ([#244](https://github.com/matyushkin/djvu-rs/issues/244)) ([4945b06](https://github.com/matyushkin/djvu-rs/commit/4945b0670938f4623e5368c14aa5ba41a0b107a5))
+* **smmr-enc:** public Smmr (G4/MMR) encoder API ([#221](https://github.com/matyushkin/djvu-rs/issues/221)) ([#242](https://github.com/matyushkin/djvu-rs/issues/242)) ([009c706](https://github.com/matyushkin/djvu-rs/commit/009c70681eb9c34992ed8a438343638a694cd98b))
+* **text:** add reflowable_text() for paragraph reading-order extraction ([#228](https://github.com/matyushkin/djvu-rs/issues/228)) ([#239](https://github.com/matyushkin/djvu-rs/issues/239)) ([221a49a](https://github.com/matyushkin/djvu-rs/commit/221a49a1c066bdef59d5dcabc26961e8d6283752))
+
+
+### Bug Fixes
+
+* **iff:** preserve FORM length parity for byte-identical mutation (PR4 of [#222](https://github.com/matyushkin/djvu-rs/issues/222)) ([#269](https://github.com/matyushkin/djvu-rs/issues/269)) ([df1e95e](https://github.com/matyushkin/djvu-rs/commit/df1e95e51c08ebe4e85cb1899352aae0cf5a5692))
+* **iw44:** correct vext lane in prelim_flags_band0_neon horizontal-OR ([#266](https://github.com/matyushkin/djvu-rs/issues/266)) ([b390681](https://github.com/matyushkin/djvu-rs/commit/b3906813dbe4d4c9946c93b9b9e6884c1da62efc))
+* **jb2-enc:** cap cluster_shared_symbols pixel budget at decoder limit ([#270](https://github.com/matyushkin/djvu-rs/issues/270)) ([#271](https://github.com/matyushkin/djvu-rs/issues/271)) ([78e5c79](https://github.com/matyushkin/djvu-rs/commit/78e5c793d3d7a86512e42820d8e3cf0c9870c48e))
+* **render:** scale page-space coords into FG44 + BG plane space ([#199](https://github.com/matyushkin/djvu-rs/issues/199)) ([#248](https://github.com/matyushkin/djvu-rs/issues/248)) ([e2c07df](https://github.com/matyushkin/djvu-rs/commit/e2c07df45d5cfbc1edbef07553549e4fbf0fd2fc))
+
+
+### Performance Improvements
+
+* **iw44:** WASM simd128 ycbcr_raw kernels (Phase 1 of [#190](https://github.com/matyushkin/djvu-rs/issues/190)) ([#253](https://github.com/matyushkin/djvu-rs/issues/253)) ([d59fcee](https://github.com/matyushkin/djvu-rs/commit/d59fcee1c770011a726ee41d77cf8964629dbc94))
+* **iw44:** x86_64 AVX2 ports of prelim_flags kernels (Phase 3 of [#189](https://github.com/matyushkin/djvu-rs/issues/189)) ([#261](https://github.com/matyushkin/djvu-rs/issues/261)) ([0ed7a36](https://github.com/matyushkin/djvu-rs/commit/0ed7a36e3c117d83c9bf9dde6df5bd347a2652cf))
+* **iw44:** x86_64 AVX2 ycbcr_raw kernels (Phase 1 of [#189](https://github.com/matyushkin/djvu-rs/issues/189)) ([#251](https://github.com/matyushkin/djvu-rs/issues/251)) ([7f3d867](https://github.com/matyushkin/djvu-rs/commit/7f3d8679e68f7c1daa8d7973e82d475ab3974c47))
+* **jb2-enc:** opt-in lossy rec-7 near-duplicate substitution (Phase 4 of [#224](https://github.com/matyushkin/djvu-rs/issues/224)) ([#256](https://github.com/matyushkin/djvu-rs/issues/256)) ([98fb8c7](https://github.com/matyushkin/djvu-rs/commit/98fb8c76c22a3eb4a7306585f030605a0941673b))
+* **jb2-enc:** per-CC accounting harness for shared-Djbz ([#194](https://github.com/matyushkin/djvu-rs/issues/194) Phase 2.5) ([#255](https://github.com/matyushkin/djvu-rs/issues/255)) ([f09bfdf](https://github.com/matyushkin/djvu-rs/commit/f09bfdf71ff0ce9959baa67aedb0c2fe73535f99))
+* **render:** internal row-streaming refactor (Phase 1 of [#225](https://github.com/matyushkin/djvu-rs/issues/225)) ([#259](https://github.com/matyushkin/djvu-rs/issues/259)) ([3d22a59](https://github.com/matyushkin/djvu-rs/commit/3d22a59ae90ccff0cfcc0b4eb3fb21c7bb693dc6))
+
 ## [0.14.0](https://github.com/matyushkin/djvu-rs/compare/v0.13.0...v0.14.0) (2026-04-28)
 
 
