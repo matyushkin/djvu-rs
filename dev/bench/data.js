@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777636419709,
+  "lastUpdate": 1777814602537,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -1166,6 +1166,240 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 8286000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "78e5c793d3d7a86512e42820d8e3cf0c9870c48e",
+          "message": "fix(jb2-enc): cap cluster_shared_symbols pixel budget at decoder limit (#270) (#271)\n\n* fix(jb2-enc): cap cluster_shared_symbols pixel budget at decoder limit (#270)\n\n`encode_djvm_bundle_jb2(corpus_pages, 2)` on the 517-page\n`pathogenic_bacteria_1896.djvu` corpus produced an undecodable bundle:\nthe shared `Djbz` totalled ~78 MP of symbols, exceeding the decoder's\n`MAX_TOTAL_SYMBOL_PIXELS = 64 MP` per-stream budget. `decode_dictionary`\nreturned `Jb2Error::ImageTooLarge`, `decoded_shared_dict()` swallowed it\nto `None`, and downstream pages then surfaced `MissingSharedDict`.\n\nTrim the cluster output at promotion time so cumulative symbol pixels\nstay under the decoder's budget, prioritising reps seen on more pages\n(higher byte-savings yield) and breaking ties toward smaller pixel cost.\nOn the affected corpus this drops 63 149 → 59 141 symbols (~6 %) and\ngrows the bundle by ~0.7 % (29.79 → 30.02 MB) — a worthwhile cost for\nencoder output that always round-trips.\n\nAlso expose `MAX_TOTAL_SYMBOL_PIXELS` as `pub(crate)` so the encoder\nreferences the decoder's authoritative cap rather than duplicating the\nvalue.\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n* style(jb2-enc): cargo fmt fix on #270 regression test\n\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.7 <noreply@anthropic.com>",
+          "timestamp": "2026-05-03T22:13:04+09:00",
+          "tree_id": "2992bd8579e9ec6e3cfc056d2cd19c1133d81f55",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/78e5c793d3d7a86512e42820d8e3cf0c9870c48e"
+        },
+        "date": 1777814601836,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 117,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 157705,
+            "range": "± 722",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 771739,
+            "range": "± 5941",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 572293,
+            "range": "± 1887",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1387637,
+            "range": "± 48402",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2644,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9627370,
+            "range": "± 31772",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 592242,
+            "range": "± 1830",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2278748,
+            "range": "± 10189",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2768786,
+            "range": "± 4245",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 28846035,
+            "range": "± 196898",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 228609,
+            "range": "± 429",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 341988,
+            "range": "± 1228",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1603573,
+            "range": "± 8575",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 6153706,
+            "range": "± 18598",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 24169426,
+            "range": "± 212543",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1698178,
+            "range": "± 18878",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 13958844,
+            "range": "± 266026",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 13955227,
+            "range": "± 61112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5283764,
+            "range": "± 40547",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 29611790,
+            "range": "± 112817",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 133956265,
+            "range": "± 3009171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 132889501,
+            "range": "± 1475462",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 208007,
+            "range": "± 393",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 8478094,
+            "range": "± 10486",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1432167790,
+            "range": "± 3342354",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 4408065,
+            "range": "± 58844",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 3324,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 26420108,
+            "range": "± 133503",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 26419378,
+            "range": "± 165190",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3168590,
+            "range": "± 12082",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 23148904,
+            "range": "± 101392",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 199433,
+            "range": "± 860",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8189000,
             "range": "± 0",
             "unit": "ns/iter"
           }
