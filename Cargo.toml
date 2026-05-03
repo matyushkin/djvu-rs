@@ -4,7 +4,7 @@ exclude = ["fuzz", "tests/no_std_smoke"]
 
 [package]
 name = "djvu-rs"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -35,7 +35,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 thiserror = "2"
 wide = "0.7"
-djvu-zp = { version = "0.1.0", path = "crates/djvu-zp", default-features = false }
+djvu-zp = { version = "0.15.0", path = "crates/djvu-zp", default-features = false }
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
