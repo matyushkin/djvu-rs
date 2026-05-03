@@ -364,7 +364,7 @@ const MAX_SYMBOL_PIXELS: usize = 1024 * 1024; // 1 MP per symbol — prevents Do
 // representable image (incl. tiled direct-blit, see jb2_encode::encode_jb2)
 // fits the budget. Was 16 MP, raised in #198 to support naive tiled encoding
 // of full-page bitonal images that have one decoded symbol per tile.
-const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_TOTAL_SYMBOL_PIXELS: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
