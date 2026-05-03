@@ -2286,8 +2286,8 @@ mod tests {
                 make_bitmap(glyph_w, glyph_h, |x, y| {
                     // Per-glyph pseudo-random pattern; ensures buckets are
                     // populated by distinct (w, h, data) reps.
-                    let v = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503))
-                        .wrapping_add(i as u32);
+                    let v =
+                        (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)).wrapping_add(i as u32);
                     (v & 0xff) < 128
                 })
             })
