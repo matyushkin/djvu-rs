@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance Improvements
 
+* **iw44:** WASM simd128 inverse wavelet load/store (Phase 2 of [#190](https://github.com/matyushkin/djvu-rs/issues/190)) ([#257](https://github.com/matyushkin/djvu-rs/issues/257)) ([353813e](https://github.com/matyushkin/djvu-rs/commit/353813eac5460f1e1f4976fc639881ca8a98a306))
 * **iw44:** WASM simd128 ycbcr_raw kernels (Phase 1 of [#190](https://github.com/matyushkin/djvu-rs/issues/190)) ([#253](https://github.com/matyushkin/djvu-rs/issues/253)) ([d59fcee](https://github.com/matyushkin/djvu-rs/commit/d59fcee1c770011a726ee41d77cf8964629dbc94))
 * **iw44:** x86_64 AVX2 ports of prelim_flags kernels (Phase 3 of [#189](https://github.com/matyushkin/djvu-rs/issues/189)) ([#261](https://github.com/matyushkin/djvu-rs/issues/261)) ([0ed7a36](https://github.com/matyushkin/djvu-rs/commit/0ed7a36e3c117d83c9bf9dde6df5bd347a2652cf))
+* **iw44:** x86_64 AVX2 stride-1 load/store (Phase 2 of [#189](https://github.com/matyushkin/djvu-rs/issues/189)) ([#252](https://github.com/matyushkin/djvu-rs/issues/252)) ([3edf027](https://github.com/matyushkin/djvu-rs/commit/3edf02784f68710f9eb1eeb7762a986a322b0ab3))
 * **iw44:** x86_64 AVX2 ycbcr_raw kernels (Phase 1 of [#189](https://github.com/matyushkin/djvu-rs/issues/189)) ([#251](https://github.com/matyushkin/djvu-rs/issues/251)) ([7f3d867](https://github.com/matyushkin/djvu-rs/commit/7f3d8679e68f7c1daa8d7973e82d475ab3974c47))
 * **jb2-enc:** opt-in lossy rec-7 near-duplicate substitution (Phase 4 of [#224](https://github.com/matyushkin/djvu-rs/issues/224)) ([#256](https://github.com/matyushkin/djvu-rs/issues/256)) ([98fb8c7](https://github.com/matyushkin/djvu-rs/commit/98fb8c76c22a3eb4a7306585f030605a0941673b))
 * **jb2-enc:** per-CC accounting harness for shared-Djbz ([#194](https://github.com/matyushkin/djvu-rs/issues/194) Phase 2.5) ([#255](https://github.com/matyushkin/djvu-rs/issues/255)) ([f09bfdf](https://github.com/matyushkin/djvu-rs/commit/f09bfdf71ff0ce9959baa67aedb0c2fe73535f99))
