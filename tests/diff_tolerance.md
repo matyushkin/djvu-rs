@@ -70,17 +70,22 @@ shift — fails the gate.
 
 ## Known divergences (excluded from CI gate, tracked separately)
 
-Tracked under **#199**:
+Tracked under **#250**:
 
-* `colorbook.djvu` page 0+ — IW44 native-resolution divergence
-  (`mismatch_pct ≈ 56%`, `max Δ = 226`, `mean Δ = 7.8` at width 2260).
-  Not a resampling artifact (no scale change). Likely a real codec
-  divergence to investigate.
+* `colorbook.djvu` page 0 — residual IW44 native-resolution divergence
+  after the #199 compositor coordinate fix. Reproducer:
+  `cargo run --release --features cli --example diff_djvulibre -- --width 99999 --tolerance 4 --max-pages 1 tests/fixtures/colorbook.djvu`.
+  Current result at 2260x3669: `mismatch_pct = 3.4482%`,
+  `max Δ = 97`, `mean Δ = 0.659`.
+  A nearest-neighbor FG44 cell-mapping experiment regressed this to 10.93%,
+  so the remaining drift is not explained by simple FG44 cell assignment.
+  Keep this page excluded from the strict native-resolution CI corpus unless
+  a future IW44 interpolation/color-ordering fix brings it below 0.5%.
 * `navm_fgbz.djvu` pages 3 + 4 — FGbz divergence
   (`mismatch_pct = 0.96%–2.2%`, `mean Δ ≈ 1–2` at width 2550).
   Small enough that single-LSB rounding can't explain it.
 
-These are excluded from the CI corpus until #199 lands.
+These are excluded from the CI corpus until their tracking issues land.
 
 ## Filing divergences
 
