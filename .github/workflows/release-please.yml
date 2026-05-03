@@ -44,7 +44,7 @@ jobs:
       # ── djvu-zp (must publish first; djvu-rs depends on it) ─────────────
       - name: Check if djvu-zp already published
         run: |
-          if curl -fsSL "https://crates.io/api/v1/crates/djvu-zp/$ZP_VERSION" >/dev/null; then
+          if cargo info "djvu-zp@$ZP_VERSION" --registry crates-io >/dev/null 2>&1; then
             echo "ZP_ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
             echo "djvu-zp $ZP_VERSION already on crates.io — skipping."
           else
@@ -61,7 +61,7 @@ jobs:
         if: env.ZP_ALREADY_PUBLISHED == 'false'
         run: |
           for i in $(seq 1 30); do
-            if curl -fsSL "https://crates.io/api/v1/crates/djvu-zp/$ZP_VERSION" >/dev/null; then
+            if cargo info "djvu-zp@$ZP_VERSION" --registry crates-io >/dev/null 2>&1; then
               echo "djvu-zp $ZP_VERSION is live."
               exit 0
             fi
@@ -74,7 +74,7 @@ jobs:
       # ── djvu-rs (workspace root) ────────────────────────────────────────
       - name: Check if djvu-rs already published
         run: |
-          if curl -fsSL "https://crates.io/api/v1/crates/djvu-rs/$VERSION" >/dev/null; then
+          if cargo info "djvu-rs@$VERSION" --registry crates-io >/dev/null 2>&1; then
             echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
             echo "djvu-rs $VERSION already on crates.io — skipping."
           else
