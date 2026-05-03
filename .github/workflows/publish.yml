@@ -17,21 +17,21 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  publish:
-    name: Publish
+  validate:
+    name: Validate release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: crates-io
     steps:
       - name: Resolve ref
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "PUBLISH_REF=${{ inputs.tag }}" >> "$GITHUB_ENV"
+            PUBLISH_REF="${{ inputs.tag }}"
           elif [ "${{ github.event_name }}" = "release" ]; then
-            echo "PUBLISH_REF=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+            PUBLISH_REF="${{ github.event.release.tag_name }}"
           else
-            echo "PUBLISH_REF=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+            PUBLISH_REF="${GITHUB_REF_NAME}"
           fi
+          echo "PUBLISH_REF=$PUBLISH_REF" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v6
         with:
@@ -58,12 +58,59 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
+
       - name: Run tests
         # Mirrors the CI Test (stable) job on main — the `cli` feature gates
         # the `djvu` binary that several integration tests need.
         run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
 
-      # ── djvu-zp (published first; djvu-rs depends on it) ────────────────
+      - name: Check package for djvu-zp
+        run: cargo package -p djvu-zp --allow-dirty
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: validate
+    environment: crates-io
+    steps:
+      - name: Resolve ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PUBLISH_REF="${{ inputs.tag }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            PUBLISH_REF="${{ github.event.release.tag_name }}"
+          else
+            PUBLISH_REF="${GITHUB_REF_NAME}"
+          fi
+          echo "PUBLISH_REF=$PUBLISH_REF" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.PUBLISH_REF }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      - name: Verify version matches tag
+        run: |
+          VERSION_FROM_MANIFEST=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          ZP_VERSION_FROM_MANIFEST=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/djvu-zp/Cargo.toml | head -1)
+          TAG="${PUBLISH_REF#djvu-rs-v}"
+          TAG="${TAG#v}"
+          if [ "$VERSION_FROM_MANIFEST" != "$TAG" ]; then
+            echo "::error::Cargo.toml version ($VERSION_FROM_MANIFEST) does not match tag (v$TAG)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION_FROM_MANIFEST" >> "$GITHUB_ENV"
+          echo "ZP_VERSION=$ZP_VERSION_FROM_MANIFEST" >> "$GITHUB_ENV"
+
+      # djvu-zp is published first; djvu-rs depends on it.
       - name: Check if djvu-zp already published
         run: |
           if cargo info "djvu-zp@$ZP_VERSION" --registry crates-io >/dev/null 2>&1; then
@@ -77,7 +124,7 @@ jobs:
         if: env.ZP_ALREADY_PUBLISHED == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p djvu-zp
+        run: cargo publish -p djvu-zp --no-verify
 
       - name: Wait for djvu-zp to appear in the index
         if: env.ZP_ALREADY_PUBLISHED == 'false'
@@ -93,7 +140,7 @@ jobs:
           echo "::error::djvu-zp $ZP_VERSION did not appear on crates.io within 5 minutes"
           exit 1
 
-      # ── djvu-rs (workspace root) ────────────────────────────────────────
+      # djvu-rs is the workspace root crate.
       - name: Check if djvu-rs already published
         run: |
           if cargo info "djvu-rs@$VERSION" --registry crates-io >/dev/null 2>&1; then
@@ -111,4 +158,4 @@ jobs:
         if: env.ALREADY_PUBLISHED == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p djvu-rs
+        run: cargo publish -p djvu-rs --no-verify
