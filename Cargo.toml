@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "djvu-py", "crates/djvu-zp", "crates/djvu-bzz"]
+members = [".", "djvu-py", "crates/djvu-zp", "crates/djvu-bzz", "crates/djvu-iff"]
 exclude = ["fuzz", "tests/no_std_smoke"]
 
 [package]
@@ -37,6 +37,7 @@ thiserror = "2"
 wide = "0.7"
 djvu-zp = { version = "0.15.0", path = "crates/djvu-zp", default-features = false }
 djvu-bzz = { version = "0.15.0", path = "crates/djvu-bzz", default-features = false }
+djvu-iff = { version = "0.15.0", path = "crates/djvu-iff", default-features = false }
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
@@ -65,7 +66,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std", "djvu-bzz/std"]
+std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std", "djvu-bzz/std", "djvu-iff/std"]
 cli = ["std", "dep:clap"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
