@@ -4,7 +4,7 @@
 //!
 //! ```sh
 //! cargo run --example async_lazy_first_page --features async -- \
-//!   tests/corpus/pathogenic_bacteria_1896.djvu --bandwidth-mib 12.5 --dpi 150
+//!   tests/corpus/pathogenic_bacteria_1896.djvu --bandwidth-mib 12.5 --dpi 150 --pad-to-mib 100
 //! ```
 
 use std::{
@@ -90,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut bandwidth_mib = None;
     let mut dpi = 150u32;
+    let mut pad_to_mib = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -106,11 +107,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("--dpi requires a value")?
                     .parse::<u32>()?;
             }
+            "--pad-to-mib" => {
+                pad_to_mib = Some(
+                    args.next()
+                        .ok_or("--pad-to-mib requires a value")?
+                        .parse::<usize>()?,
+                );
+            }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
 
-    let data = fs::read(&path)?;
+    let mut data = fs::read(&path)?;
+    if let Some(mib) = pad_to_mib {
+        pad_djvu_to_len(&mut data, mib * 1024 * 1024)?;
+    }
     let file_bytes = data.len() as u64;
     let bytes_read = Arc::new(AtomicU64::new(0));
     let reader = ThrottledCursor::new(data, bandwidth_mib, bytes_read.clone());
@@ -143,5 +154,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("first_pixel_ms={:.3}", first_pixel.as_secs_f64() * 1000.0);
     println!("rendered={}x{}", pixmap.width, pixmap.height);
 
+    Ok(())
+}
+
+fn pad_djvu_to_len(
+    data: &mut Vec<u8>,
+    target_len: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if data.len() >= target_len {
+        return Ok(());
+    }
+    if data.len() < 12 || &data[..4] != b"AT&T" || &data[4..8] != b"FORM" {
+        return Err("--pad-to-mib requires an AT&T FORM DjVu document".into());
+    }
+
+    let needed = target_len
+        .checked_sub(data.len())
+        .ok_or("target length overflow")?;
+    if needed < 8 {
+        return Ok(());
+    }
+
+    let payload_len = needed - 8;
+    if payload_len > u32::MAX as usize {
+        return Err("padding chunk exceeds u32 chunk length".into());
+    }
+    data.extend_from_slice(b"JUNK");
+    data.extend_from_slice(&(payload_len as u32).to_be_bytes());
+    data.resize(target_len, 0);
+
+    let form_len = data.len().checked_sub(8).ok_or("FORM length underflow")?;
+    if form_len > u32::MAX as usize {
+        return Err("padded FORM exceeds u32 length".into());
+    }
+    data[8..12].copy_from_slice(&(form_len as u32).to_be_bytes());
     Ok(())
 }
