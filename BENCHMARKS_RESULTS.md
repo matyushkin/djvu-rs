@@ -99,30 +99,35 @@ The benchmark dashboard workflow also publishes a DjVuLibre overlay.
 
 Current local run (2026-05-04):
 
-- Test file: `references/djvujs/library/assets/colorbook.djvu`
-- Input: 2260x3669 px, 400 dpi, color IW44
-- Output: 847x1375 px, 150 dpi
-- libdjvulibre checksum: `738157454`
-- libdjvulibre open+decode: **35.25 ms**
+- `boy.djvu`: small color IW44 downscale
+- `colorbook.djvu`: large color IW44 downscale
+- `watchmaker.djvu`: native-resolution color corpus page
+- `cable_1973_100133.djvu`: native-resolution bilevel JB2 corpus page
 
 > libdjvulibre C API is render-only with the page already decoded in memory.
 > `ddjvu` CLI includes process startup and PPM output to `/dev/null`.
 
 | Benchmark | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |
 |-----------|--------:|-------------------:|----------:|------:|
-| `colorbook.djvu` @ 150 dpi, color IW44 | **7.29 ms** | **6.08 ms** | **2.543 s** | djvu-rs **1.2x slower** than C API |
+| `boy.djvu` @ 72 dpi, small color IW44 | **217 µs** | **122 µs** | **30.20 ms** | djvu-rs **1.8x slower** |
+| `colorbook.djvu` @ 150 dpi, color IW44 | **7.29 ms** | **6.00 ms** | **67.10 ms** | djvu-rs **1.2x slower** |
+| `watchmaker.djvu` @ 300 dpi, native color corpus | **73.28 ms** | **36.47 ms** | **81.00 ms** | djvu-rs **2.0x slower** |
+| `cable_1973_100133.djvu` @ 300 dpi, native bilevel JB2 corpus | **72.33 ms** | **35.26 ms** | **74.10 ms** | djvu-rs **2.1x slower** |
 
 For the closest cold-path djvu-rs Criterion comparison,
 `render_colorbook_cold` is **17.9 ms**. That benchmark includes document
 parsing and first render work, but it is not identical to libdjvulibre's
-open+decode measurement.
+open+decode measurement. The libdjvulibre C API harness intentionally avoids
+upscale cases because `ddjvu_page_render` can return a zero buffer when the
+requested output rectangle is larger than the native page.
 
 ### Summary
 
 | Scenario | Winner | Margin |
 |----------|--------|--------|
-| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2x faster on `colorbook.djvu` |
-| `ddjvu` CLI subprocess baseline | **djvu-rs Criterion render** | `ddjvu` measured at 2.543 s for the same file/output |
+| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2-1.8x faster in this matrix |
+| Native-resolution corpus render | **DjVuLibre** | 2.0-2.1x faster |
+| `ddjvu` CLI subprocess baseline | comparable to slower than djvu-rs render-only | 30.20-81.00 ms across measured cases |
 | djvu-rs cold colorbook render | — | 17.9 ms; not directly equivalent to libdjvulibre open+decode |
 | Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.27 ms |
 

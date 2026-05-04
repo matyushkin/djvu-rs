@@ -17,17 +17,31 @@
 
 set -uo pipefail
 
-OUT="${1:-.}"
-# colorbook.djvu: 2260×3669 px, 400 dpi, color IW44 — representative document scan.
-# Rendered at 150 dpi → 848×1377 px output, comparable to watchmaker.djvu native.
-# boy.djvu (192×256) is too small to show djvu-rs's advantage over libdjvulibre.
-FILE="references/djvujs/library/assets/colorbook.djvu"
 BENCH_BIN="scripts/djvulibre_bench_ci"
-DPIS=(150)
+OUT="${1:-.}"
+
+# path|page|repeats|target_dpi
+#
+# These cases mirror existing Criterion benchmarks where possible:
+# - boy.djvu@72dpi -> render_page/dpi/72
+# - colorbook.djvu@150dpi -> render_colorbook
+# - watchmaker.djvu@300dpi -> render_corpus_color
+# - cable_1973_100133.djvu@300dpi -> render_corpus_bilevel
+#
+# Avoid upscale cases in the libdjvulibre C API harness: ddjvu_page_render can
+# return a zero buffer for output rectangles larger than the native page.
+CASES=(
+  "references/djvujs/library/assets/boy.djvu|1|50|72"
+  "references/djvujs/library/assets/colorbook.djvu|1|20|150"
+  "tests/corpus/watchmaker.djvu|1|10|300"
+  "tests/corpus/cable_1973_100133.djvu|1|10|300"
+)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 die() { echo "bench_djvulibre: $*" >&2; exit 0; }
+
+mkdir -p "$OUT" || die "cannot create output dir: $OUT"
 
 # ── 1. Install DjVuLibre if not present ──────────────────────────────────────
 
@@ -59,33 +73,37 @@ echo "   OK — $BENCH_BIN"
 
 # ── 3. Guard: test file must exist ────────────────────────────────────────────
 
-[ -f "$FILE" ] || die "test file not found: $FILE"
+for case in "${CASES[@]}"; do
+  IFS='|' read -r file _page _repeats _dpi <<< "$case"
+  [ -f "$file" ] || die "test file not found: $file"
+done
 
 # ── 4. Library-level benchmark (djvulibre_bench) ─────────────────────────────
 
-echo "→ Library benchmark (render_only, 20 runs per DPI): ${DPIS[*]} dpi"
+echo "→ Library benchmark (render_only matrix)"
 {
-  for dpi in "${DPIS[@]}"; do
-    "$BENCH_BIN" "$FILE" 1 20 "$dpi"
+  for case in "${CASES[@]}"; do
+    IFS='|' read -r file page repeats dpi <<< "$case"
+    "$BENCH_BIN" "$file" "$page" "$repeats" "$dpi"
   done
 } | tee "$OUT/djvulibre_bench.txt"
 
 # ── 5. ddjvu CLI timing ───────────────────────────────────────────────────────
 
 if command -v ddjvu &>/dev/null; then
-  echo "→ ddjvu CLI timing (5 runs per DPI, warm-up included): ${DPIS[*]} dpi"
-  python3 - "$FILE" "${DPIS[@]}" <<'PYEOF' | tee "$OUT/ddjvu_timing.txt"
+  echo "→ ddjvu CLI timing (5 runs per case, warm-up included)"
+  python3 - "${CASES[@]}" <<'PYEOF' | tee "$OUT/ddjvu_timing.txt"
 import subprocess, statistics, sys, time
-file, *dpis = sys.argv[1], *[int(x) for x in sys.argv[2:]]
-basename = file.split("/")[-1]
-for dpi in dpis:
+for case in sys.argv[1:]:
+    file, page, _repeats, dpi = case.split("|")
+    basename = file.split("/")[-1]
     # warm-up
-    subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
+    subprocess.run(["ddjvu", f"-page={page}", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
                    capture_output=True)
     times = []
     for _ in range(5):
         t0 = time.perf_counter()
-        subprocess.run(["ddjvu", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
+        subprocess.run(["ddjvu", f"-page={page}", f"-scale={dpi}", "-format=ppm", file, "/dev/null"],
                        capture_output=True)
         times.append((time.perf_counter() - t0) * 1000)
     print(f"{basename}@{dpi}dpi: {statistics.mean(times):.1f} ms")
