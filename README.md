@@ -403,34 +403,28 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Measured on Apple M1 Max (Rust 1.92, release profile). DjVuLibre 3.5.29.
+Latest full Criterion run: macOS `arm64`, Rust 1.92, release profile
+(2026-05-04).
 
-### CLI comparison (process startup included, 150 dpi output)
+| Benchmark | Time |
+|-----------|-----:|
+| `render_page/dpi/72` | **216 µs** |
+| `render_page/dpi/144` | **895 µs** |
+| `render_page/dpi/300` | **3.42 ms** |
+| `render_colorbook` (150 dpi, warm) | **7.29 ms** |
+| `render_colorbook_cold` | **17.9 ms** |
+| `render_corpus_color` (native 600 dpi) | **71.2 ms** |
+| `render_corpus_bilevel` (native 600 dpi) | **70.4 ms** |
+| `jb2_decode` | **134 µs** |
+| `iw44_decode_first_chunk` | **599 µs** |
+| `iw44_decode_corpus_color` | **671 µs** |
+| `parse_multipage_520p` | **2.27 ms** |
+| `render_large_doc_first_page` | **12.8 ms** |
 
-| File | djvu-rs | ddjvu | Ratio |
-|------|---------|-------|-------|
-| watchmaker.djvu (color IW44, 2550×3301) | **35.8 ms** | 355.3 ms | **~10× faster** |
-| cable_1973.djvu (bilevel JB2, 2550×3301) | **29.5 ms** | 75.0 ms | **~2.5× faster** |
-
-djvu-rs outputs PNG; ddjvu outputs PPM. djvu-rs startup ≈ 5 ms vs ddjvu ≈ 25–35 ms.
-
-### Library-level (render-only, no process overhead)
-
-| Scenario | djvu-rs | DjVuLibre | Notes |
-|----------|---------|-----------|-------|
-| colorbook.djvu, **native** (2260×3669) | **22.5 ms** | — | first render, full IW44 decode |
-| colorbook.djvu, **150 dpi** (848×1376) | **6.75 ms** | 6.13 ms | within ~10% after progressive optimizations |
-| Dense 600 dpi bilevel (page 260/520) | **10.8 ms** | **13.8 ms** | ZP u32 widening eliminated bottleneck |
-| Document open + parse (520 pages) | **2.2 ms** | ~24–60 ms | **10–30× faster** |
-
-**Key insight:** Two complementary optimizations define djvu-rs's bilevel performance:
-(1) the ZP arithmetic decoder uses 32-bit registers for `a`/`c`/`fence`, eliminating
-u16 truncations in the inner loop and enabling better register allocation — reducing
-dense JB2 page renders from 35.6 ms → 10.8 ms (3.3×); (2) the 150 dpi render path
-uses partial BG44 chunk decode, a cached 1/4-resolution mask pyramid, and bit-shifts
-instead of divisions in the compositor inner loop.
-
-See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full Criterion numbers and methodology.
+See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
+run and methodology. Historical multi-platform and DjVuLibre comparisons are
+kept in [BENCHMARKS.md](BENCHMARKS.md); compare those carefully because some
+benchmark definitions and output sizes have changed over time.
 
 Recent targeted experiments are recorded in
 [PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md), including:
