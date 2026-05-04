@@ -158,7 +158,7 @@ struct LazyComponentIndex {
 
 impl<R> LazyDocument<R>
 where
-    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+    R: AsyncRead + AsyncSeek + Unpin + 'static,
 {
     /// Build a native lazy document index from an async seekable reader.
     pub async fn from_async_reader_lazy(mut reader: R) -> Result<Self, AsyncLazyError> {
@@ -288,11 +288,23 @@ where
     LazyDocument::from_async_reader_lazy(reader).await
 }
 
+/// Build a lazy document from a single-threaded WASM-local async reader.
+///
+/// This constructor intentionally drops the native `Send` bound for browser
+/// readers such as `wasm-bindgen-futures`/`gloo` streams.
+#[cfg(target_arch = "wasm32")]
+pub async fn from_async_reader_lazy_local<R>(reader: R) -> Result<LazyDocument<R>, AsyncLazyError>
+where
+    R: AsyncRead + AsyncSeek + Unpin + 'static,
+{
+    LazyDocument::from_async_reader_lazy(reader).await
+}
+
 async fn index_bundled_djvm<R>(
     reader: &mut R,
 ) -> Result<(Vec<LazyPageIndex>, BTreeMap<String, LazyComponentIndex>), AsyncLazyError>
 where
-    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+    R: AsyncRead + AsyncSeek + Unpin + 'static,
 {
     let mut chunk_hdr = [0u8; 8];
     reader.read_exact(&mut chunk_hdr).await?;
@@ -414,7 +426,7 @@ fn read_lazy_dirm_string(data: &[u8], pos: &mut usize) -> Option<String> {
 /// **Phase 1 of #196.** Convenience constructor that buffers the full reader
 /// into memory before handing the bytes to [`DjVuDocument::parse`]. Memory
 /// still peaks at full file size, but removes the synchronous `std::fs::read`
-/// boundary at the call site — works directly with [`tokio::fs::File`], HTTP
+/// boundary at the call site — works directly with async file readers, HTTP
 /// body streams, S3 GetObject, etc.
 ///
 /// Phases 2/3 will add genuine streaming: Phase 2 reads only the IFF
@@ -427,10 +439,9 @@ fn read_lazy_dirm_string(data: &[u8], pos: &mut usize) -> Option<String> {
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use djvu_rs::djvu_async::load_document_async;
-/// use tokio::fs::File;
 ///
-/// let file = File::open("document.djvu").await?;
-/// let doc = load_document_async(file).await?;
+/// let data = std::fs::read("document.djvu")?;
+/// let doc = load_document_async(std::io::Cursor::new(data)).await?;
 /// println!("loaded {} pages", doc.page_count());
 /// # Ok(()) }
 /// ```
@@ -829,18 +840,14 @@ mod tests {
 
     // ── load_document_async tests ────────────────────────────────────────────
 
-    /// `load_document_async` over `tokio::fs::File` matches `DjVuDocument::parse`.
+    /// `load_document_async` over an async reader matches `DjVuDocument::parse`.
     #[tokio::test]
     async fn load_document_async_matches_sync_parse() {
         let path = assets_path().join("chicken.djvu");
-        let file = tokio::fs::File::open(&path)
-            .await
-            .expect("open must succeed");
-        let async_doc = load_document_async(file)
+        let sync_data = std::fs::read(&path).expect("sync read must succeed");
+        let async_doc = load_document_async(std::io::Cursor::new(sync_data.clone()))
             .await
             .expect("async load must succeed");
-
-        let sync_data = std::fs::read(&path).expect("sync read must succeed");
         let sync_doc = DjVuDocument::parse(&sync_data).expect("sync parse must succeed");
 
         assert_eq!(async_doc.page_count(), sync_doc.page_count());
