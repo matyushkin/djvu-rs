@@ -1,6 +1,6 @@
 [package]
 name = "djvu-bzz"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -13,7 +13,7 @@ publish = true
 
 [dependencies]
 thiserror = "2"
-djvu-zp = { version = "0.16.0", path = "../djvu-zp", default-features = false }
+djvu-zp = { version = "0.16.1", path = "../djvu-zp", default-features = false }
 rayon = { version = "1", optional = true }
 
 [features]

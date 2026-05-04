@@ -1,6 +1,6 @@
 [package]
 name = "djvu-iw44"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -15,11 +15,11 @@ publish = true
 thiserror = "2"
 wide = "0.7"
 rayon = { version = "1", optional = true }
-djvu-zp = { version = "0.16.0", path = "../djvu-zp", default-features = false }
-djvu-pixmap = { version = "0.16.0", path = "../djvu-pixmap", default-features = false }
+djvu-zp = { version = "0.16.1", path = "../djvu-zp", default-features = false }
+djvu-pixmap = { version = "0.16.1", path = "../djvu-pixmap", default-features = false }
 
 [dev-dependencies]
-djvu-iff = { version = "0.16.0", path = "../djvu-iff" }
+djvu-iff = { version = "0.16.1", path = "../djvu-iff" }
 
 [features]
 default = ["std"]
