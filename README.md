@@ -427,12 +427,17 @@ The benchmark workflow still runs a DjVuLibre comparison via
 [`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) and formats it with
 [`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py).
 
-Current local comparison on `colorbook.djvu` at 150 dpi:
+Current local matrix:
 
 | Scenario | djvu-rs | DjVuLibre | Ratio |
 |----------|--------:|----------:|------:|
-| Render-only, page already decoded | **7.29 ms** | **6.08 ms** | DjVuLibre **1.2x faster** |
-| `ddjvu` CLI baseline for the same output | Criterion render benchmark | **2.543 s** | CLI includes startup and PPM output |
+| Small color IW44, 72 dpi | **217 µs** | **122 µs** | DjVuLibre **1.8x faster** |
+| Large color IW44, 150 dpi | **7.29 ms** | **6.00 ms** | DjVuLibre **1.2x faster** |
+| Native color corpus, 300 dpi | **73.28 ms** | **36.47 ms** | DjVuLibre **2.0x faster** |
+| Native bilevel JB2 corpus, 300 dpi | **72.33 ms** | **35.26 ms** | DjVuLibre **2.1x faster** |
+
+The same workflow also records `ddjvu` CLI timings for these files
+(30.20-81.00 ms locally), including process startup and PPM output.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
 run, methodology, and the full DjVuLibre comparison. Historical multi-platform

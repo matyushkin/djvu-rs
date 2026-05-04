@@ -252,9 +252,13 @@ No other pure-Rust DjVu decoder exists as of v0.4.
 
 ### Numerical comparison
 
-Measured numbers are available only for **djvu-rs vs DjVuLibre** (see section above).
-python-djvulibre delegates all decode work to the underlying DjVuLibre C++ library,
-so its performance equals DjVuLibre's.
+Measured numbers are available only for **djvu-rs vs DjVuLibre** (see section
+above and `BENCHMARKS_RESULTS.md`). The active benchmark workflow covers a
+small color IW44 downscale, a large color IW44 downscale, native-resolution
+color corpus render, native-resolution bilevel JB2 corpus render, and `ddjvu`
+CLI subprocess timings for the same files. python-djvulibre delegates all
+decode work to the underlying DjVuLibre C++ library, so its core performance
+equals DjVuLibre's.
 
 djvu.js operates in a browser context (WASM/JS) and is not designed for server-side
 batch processing. A direct comparison is not meaningful.

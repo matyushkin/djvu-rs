@@ -116,15 +116,30 @@ def ratio_cell(djvurs_ms: float | None, lib_ms: float | None) -> str:
 # ---------------------------------------------------------------------------
 # Each row: (label, criterion_rel_path, lib_bench_key, ddjvu_key)
 #
-# colorbook.djvu: 2260×3669 px, 400 dpi, color IW44.
-# Rendered at 150 dpi → 848×1377 px — representative of a typical viewer request,
-# comparable to watchmaker.djvu (849×1100) from BENCHMARKS_RESULTS.md.
 ROWS = [
+    (
+        "boy.djvu @ 72 dpi (small color IW44)",
+        "render_page/dpi/72",
+        "boy.djvu@72dpi",
+        "boy.djvu@72dpi",
+    ),
     (
         "colorbook.djvu @ 150 dpi (848×1377 px, color IW44)",
         "render_colorbook",
         "colorbook.djvu@150dpi",
         "colorbook.djvu@150dpi",
+    ),
+    (
+        "watchmaker.djvu @ 300 dpi (color corpus, native)",
+        "render_corpus_color",
+        "watchmaker.djvu@300dpi",
+        "watchmaker.djvu@300dpi",
+    ),
+    (
+        "cable_1973_100133.djvu @ 300 dpi (bilevel JB2 corpus, native)",
+        "render_corpus_bilevel",
+        "cable_1973_100133.djvu@300dpi",
+        "cable_1973_100133.djvu@300dpi",
     ),
 ]
 
@@ -163,8 +178,8 @@ def main() -> int:
     print("\n### vs DjVuLibre 3.5.29\n")
     print("> **libdjvulibre (C API)**: render-only, page already decoded in memory.")
     print("> **ddjvu CLI**: includes process startup (~7 ms) and PPM output to `/dev/null`.")
-    print("> Test file: `references/djvujs/library/assets/colorbook.djvu`"
-          " (2260×3669 px, 400 dpi, color IW44).\n")
+    print("> Matrix: small color IW44 downscale, large color IW44 downscale,"
+          " native-resolution color corpus, and native-resolution bilevel JB2 corpus.\n")
 
     print("| Benchmark | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |")
     print("|-----------|---------|-------------------|-----------|-------|")
