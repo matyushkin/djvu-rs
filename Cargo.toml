@@ -105,6 +105,10 @@ name = "djvu"
 path = "src/bin/djvu.rs"
 required-features = ["cli"]
 
+[[example]]
+name = "async_lazy_first_page"
+required-features = ["async"]
+
 [[bench]]
 name = "codecs"
 harness = false

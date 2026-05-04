@@ -77,6 +77,7 @@ pub(crate) mod info;
 /// Lives in the standalone [`djvu_zp`] sub-crate (workspace member) since
 /// PR1 of #229.  Re-exported here as `zp_impl` for backwards compatibility
 /// with the historical internal path used by BZZ, JB2, and IW44.
+#[allow(unused_imports)]
 pub(crate) use djvu_zp as zp_impl;
 
 /// BZZ decompressor — clean-room implementation.
