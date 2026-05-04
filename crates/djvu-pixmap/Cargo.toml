@@ -1,0 +1,16 @@
+[package]
+name = "djvu-pixmap"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "RGBA and grayscale pixmap types used by DjVu rendering"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-pixmap"
+keywords = ["djvu", "pixmap", "rgba", "ppm"]
+categories = ["multimedia::images", "data-structures"]
+publish = true
+
+[features]
+default = ["std"]
+std = []
