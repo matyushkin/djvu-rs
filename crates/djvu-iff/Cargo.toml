@@ -1,0 +1,19 @@
+[package]
+name = "djvu-iff"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Pure-Rust DjVu IFF container parser and emitter"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-iff"
+keywords = ["djvu", "iff", "parser"]
+categories = ["parser-implementations", "multimedia::images"]
+publish = true
+
+[dependencies]
+thiserror = "2"
+
+[features]
+default = ["std"]
+std = []

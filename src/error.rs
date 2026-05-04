@@ -57,41 +57,7 @@ pub enum DjVuError {
     Io(#[from] std::io::Error),
 }
 
-/// Errors that can occur while parsing the IFF container.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum IffError {
-    /// Input data is too short to contain a valid IFF file.
-    #[error("input is too short to be a valid IFF file")]
-    TooShort,
-
-    /// The `AT&T` magic bytes were not found at the start of the file.
-    #[error("bad magic bytes: expected AT&T, got {got:?}")]
-    BadMagic { got: [u8; 4] },
-
-    /// The FORM type identifier is not a recognised DjVu type.
-    ///
-    /// Note: this is *not* an error — callers may encounter unknown form types
-    /// in bundled documents and should handle them gracefully.
-    #[error("unknown FORM type: {id:?}")]
-    UnknownFormType { id: [u8; 4] },
-
-    /// A chunk header claims more bytes than are available in the buffer.
-    #[error(
-        "chunk {:?} claims {} bytes but only {} are available",
-        id,
-        claimed,
-        available
-    )]
-    ChunkTooLong {
-        id: [u8; 4],
-        claimed: u32,
-        available: usize,
-    },
-
-    /// The input ended unexpectedly in the middle of a chunk.
-    #[error("unexpected end of input (truncated IFF data)")]
-    Truncated,
-}
+pub use djvu_iff::IffError;
 
 /// JB2 bitonal image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -189,41 +155,7 @@ pub use djvu_bzz::BzzError;
 
 // ---- Legacy error type (kept for backward compatibility) --------------------
 
-/// Original error type used by the legacy implementation.
-///
-/// Kept at `crate::error::LegacyError` (and re-exported as `crate::Error`)
-/// so that djvu-rs and other dependents continue to compile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LegacyError {
-    /// Input data is shorter than expected.
-    UnexpectedEof,
-    /// A required magic number or tag was not found.
-    InvalidMagic,
-    /// A chunk or field has an invalid length.
-    InvalidLength,
-    /// A required chunk is missing.
-    MissingChunk(&'static str),
-    /// An unsupported feature or version was encountered.
-    Unsupported(&'static str),
-    /// Generic format violation.
-    FormatError(String),
-}
-
-impl core::fmt::Display for LegacyError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            LegacyError::UnexpectedEof => write!(f, "unexpected end of input"),
-            LegacyError::InvalidMagic => write!(f, "invalid magic number"),
-            LegacyError::InvalidLength => write!(f, "invalid length"),
-            LegacyError::MissingChunk(id) => write!(f, "missing required chunk: {}", id),
-            LegacyError::Unsupported(msg) => write!(f, "unsupported: {}", msg),
-            LegacyError::FormatError(msg) => write!(f, "format error: {}", msg),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for LegacyError {}
+pub use djvu_iff::LegacyError;
 
 /// Alias for [`LegacyError`] at the path `crate::error::Error`.
 ///
