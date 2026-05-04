@@ -766,3 +766,32 @@ DIRM/page offsets while making the file size match the issue target. Indexing
 plus first-page fetch reads only the DIRM and first page/component ranges
 instead of buffering the full 100 MiB document, and first pixel is well below
 the 2 s target under the simulated broadband reader.
+
+### #189 — x86-64-v3 AVX2 validation — **Kept partial / needs follow-up** (2026-05-04)
+
+**Approach.** Pulled the GitHub Actions artifact from run `25299920836`
+(`Benchmark (x86-64-v3 AVX2 validation)`, head `77fc6ff`) and compared
+default `RUSTFLAGS` against `RUSTFLAGS=-C target-cpu=x86-64-v3` on the same
+Ubuntu runner. This validates the already-landed AVX2 paths on real x86_64
+hardware even though the local development host is `arm64`.
+
+**Numbers.**
+
+| Bench | default ns | +x86-64-v3 ns | Delta |
+|-------|-----------:|--------------:|------:|
+| `iw44_decode_corpus_color` | 1,385,461 | 1,123,865 | -18.88% |
+| `iw44_decode_first_chunk` | 765,703 | 728,565 | -4.85% |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 9,231,033 | 9,129,333 | -1.10% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,164,523 | 2,199,280 | +1.61% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 565,640 | 583,519 | +3.16% |
+| `render_colorbook` | 13,072,440 | 12,826,562 | -1.88% |
+| `render_colorbook_cold` | 28,127,606 | 27,105,326 | -3.63% |
+| `render_colorbook_stages/mask_decode` | 5,325,125 | 5,107,550 | -4.09% |
+| `render_corpus_color` | 133,813,976 | 133,185,634 | -0.47% |
+
+**Decision.** Kept partial. Existing AVX2 decode paths earn their keep on
+full IW44 decode (`-18.88%` corpus decode, `-4.85%` first chunk), but the
+sub4 partial path regresses by `+3.16%`. This does not close #189: the
+umbrella still lacks AVX2 equivalents for the horizontal row pass and encoder
+kernels, and those should be implemented only in an x86_64 AVX2 session with
+this validation job green after each slice.
