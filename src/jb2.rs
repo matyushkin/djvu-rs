@@ -361,6 +361,7 @@ impl Jbm {
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 16 * 1024 * 1024; // 16 MP per symbol — allows large connected components while bounding DoS input
 const MAX_EXHAUSTED_SYMBOL_PIXELS: usize = 4096; // synthetic post-EOF ZP fill — prevents fuzz-time DoS
+const MAX_EXHAUSTED_TOTAL_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // cumulative post-EOF decode work
 // 256 MP cumulative decoded-symbol work. Dense JB2 pages can contain many
 // direct or refinement records whose individual symbols are valid and whose
 // blit work is bounded separately below; 64 MP was too low for the
@@ -393,7 +394,9 @@ fn check_symbol_decode_budget(
 ) -> Result<(), Jb2Error> {
     let pixels = (w.max(0) as usize).saturating_mul(h.max(0) as usize);
     check_pixel_budget(w, h, total)?;
-    if zp.is_exhausted() && pixels > MAX_EXHAUSTED_SYMBOL_PIXELS {
+    if zp.is_exhausted()
+        && (pixels > MAX_EXHAUSTED_SYMBOL_PIXELS || *total > MAX_EXHAUSTED_TOTAL_SYMBOL_PIXELS)
+    {
         return Err(Jb2Error::Truncated);
     }
     Ok(())
@@ -2417,6 +2420,21 @@ mod regression_fuzz2 {
     #[test]
     fn exhausted_refinement_symbol_from_small_input_does_not_hang() {
         let data = &[0x2a, 0xce, 0x7d, 0x24, 0x01, 0x00];
+        let start = std::time::Instant::now();
+        assert!(matches!(decode(data, None), Err(Jb2Error::Truncated)));
+        let limit_secs = if cfg!(debug_assertions) { 2 } else { 1 };
+        assert!(
+            start.elapsed().as_secs() < limit_secs,
+            "took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Regression test for the follow-up `fuzz_jb2` timeout where the
+    /// post-EOF stream repeatedly emits small-but-expensive refinement symbols.
+    #[test]
+    fn exhausted_repeated_refinement_symbols_do_not_hang() {
+        let data = &[0x2a, 0xce, 0xf1, 0xce, 0xf1, 0x88, 0x52, 0x82, 0xf7, 0xf7];
         let start = std::time::Instant::now();
         assert!(matches!(decode(data, None), Err(Jb2Error::Truncated)));
         let limit_secs = if cfg!(debug_assertions) { 2 } else { 1 };
