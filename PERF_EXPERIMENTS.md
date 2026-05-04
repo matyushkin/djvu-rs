@@ -738,3 +738,31 @@ its public benchmarking signature but now ignores the Hamming allowance and
 uses byte-exact clustering for every threshold. In addition, inherited
 shared-Djbz symbols are used only for exact record-7 hits, and lossless
 near matches fall back to record-1 rather than rec-6 refinement.
+
+### #233 — async lazy first-page probe — **Kept** (2026-05-04)
+
+**Approach.** Added `examples/async_lazy_first_page.rs`, a small native
+probe for the Phase 3 lazy async loader. It wraps a DjVu file in an
+`AsyncRead + AsyncSeek` reader that can simulate broadband throughput,
+constructs `LazyDocument` with `from_async_reader_lazy`, fetches page 0,
+and renders the first pixmap.
+
+**Command.**
+
+```sh
+cargo run -q --example async_lazy_first_page --features async -- \
+  tests/corpus/pathogenic_bacteria_1896.djvu --bandwidth-mib 12.5 --dpi 150
+```
+
+**Numbers.**
+
+| Corpus | Size | Pages | Simulated bandwidth | Bytes read | First pixel |
+|--------|------|-------|---------------------|------------|-------------|
+| `pathogenic_bacteria_1896.djvu` | 26,562,908 bytes | 520 | 12.5 MiB/s | 28,578 | 497.400 ms |
+
+**Decision.** Kept. The result is not the full 100 MB issue target, because
+the repository corpus does not contain a 100 MB bundled book, but it verifies
+the intended behavior on the largest checked-in multi-page corpus: indexing
+plus first-page fetch reads only the DIRM and first page/component ranges
+instead of buffering the full 26.6 MB document, and first pixel is well below
+the 2 s target under the simulated broadband reader.
