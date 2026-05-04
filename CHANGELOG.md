@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/matyushkin/djvu-rs/compare/v0.15.0...v0.16.0) (2026-05-04)
+
+
+### Features
+
+* **async:** add native lazy page loader ([735a226](https://github.com/matyushkin/djvu-rs/commit/735a22615ad91c89b2a38c865407a46319c46815))
+* **async:** add wasm lazy reader entrypoint ([77fc6ff](https://github.com/matyushkin/djvu-rs/commit/77fc6ffecd57cb5760f9a7e75333987b3530c872))
+* **async:** resolve lazy shared dictionaries ([30d8ac9](https://github.com/matyushkin/djvu-rs/commit/30d8ac9f2a4be61c5e82b4bea5f1d8083d4bcd07))
+
 ## [Unreleased]
 
 ### Changed
