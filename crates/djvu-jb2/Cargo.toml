@@ -1,0 +1,24 @@
+[package]
+name = "djvu-jb2"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Pure-Rust DjVu JB2 bilevel image decoder"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-jb2"
+keywords = ["djvu", "jb2", "bitmap", "decoder"]
+categories = ["multimedia::images", "compression"]
+publish = true
+
+[dependencies]
+thiserror = "2"
+djvu-zp = { version = "0.15.0", path = "../djvu-zp", default-features = false }
+djvu-bitmap = { version = "0.15.0", path = "../djvu-bitmap", default-features = false }
+
+[dev-dependencies]
+djvu-iff = { version = "0.15.0", path = "../djvu-iff" }
+
+[features]
+default = ["std"]
+std = ["djvu-zp/std", "djvu-bitmap/std"]
