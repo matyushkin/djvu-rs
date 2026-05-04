@@ -43,7 +43,7 @@
 //! }
 //! ```
 
-use std::{ops::Range, sync::Arc};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
@@ -120,6 +120,7 @@ enum LazyComponentType {
 #[derive(Debug, Clone)]
 struct LazyDirmEntry {
     comp_type: LazyComponentType,
+    id: String,
     offset: u32,
 }
 
@@ -133,18 +134,25 @@ struct LazyDirmEntry {
 ///
 /// Current scope:
 /// - single-page `FORM:DJVU`
-/// - bundled `FORM:DJVM` pages that do not contain `INCL`
+/// - bundled `FORM:DJVM` pages, including shared `DJVI` dictionaries referenced
+///   via `INCL`
 ///
-/// Shared DJVI/INCL resolution and WASM `!Send` readers are intentionally left
-/// to the next issue slices.
+/// WASM `!Send` readers are intentionally left to the next issue slice.
 pub struct LazyDocument<R> {
     reader: Arc<Mutex<R>>,
     pages: Vec<LazyPageIndex>,
+    shared: BTreeMap<String, LazyComponentIndex>,
     cache: Vec<OnceCell<Arc<DjVuPage>>>,
+    shared_cache: BTreeMap<String, OnceCell<Arc<Vec<u8>>>>,
 }
 
 #[derive(Debug, Clone)]
 struct LazyPageIndex {
+    range: Range<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyComponentIndex {
     range: Range<u64>,
 }
 
@@ -164,8 +172,8 @@ where
         }
 
         let form_type = &head[12..16];
-        let pages = if form_type == b"DJVU" {
-            vec![LazyPageIndex { range: 0..file_len }]
+        let (pages, shared) = if form_type == b"DJVU" {
+            (vec![LazyPageIndex { range: 0..file_len }], BTreeMap::new())
         } else if form_type == b"DJVM" {
             index_bundled_djvm(&mut reader).await?
         } else {
@@ -181,10 +189,16 @@ where
         }
 
         let cache = (0..pages.len()).map(|_| OnceCell::new()).collect();
+        let shared_cache = shared
+            .keys()
+            .map(|id| (id.clone(), OnceCell::new()))
+            .collect();
         Ok(Self {
             reader: Arc::new(Mutex::new(reader)),
             pages,
+            shared,
             cache,
+            shared_cache,
         })
     }
 
@@ -208,21 +222,44 @@ where
             .get_or_try_init(|| async move {
                 let bytes = self.read_page_bytes(page.range).await?;
                 let form = parse_form(&bytes)?;
-                if form.chunks.iter().any(|c| &c.id == b"INCL") {
-                    return Err(AsyncLazyError::Unsupported(
-                        "lazy shared DJVI/INCL pages are not implemented yet",
-                    ));
-                }
-                let doc = DjVuDocument::parse(&bytes)?;
-                if doc.page_count() != 1 {
-                    return Err(AsyncLazyError::Unsupported(
-                        "lazy page chunk did not parse to exactly one page",
-                    ));
-                }
-                Ok(Arc::new(doc.page(0)?.clone()))
+                let shared_djbz = if let Some(incl) = form.chunks.iter().find(|c| &c.id == b"INCL")
+                {
+                    Some(self.shared_djbz(incl.data).await?)
+                } else {
+                    None
+                };
+                let page = DjVuDocument::parse_single_page_with_shared(&bytes, index, shared_djbz)?;
+                Ok(Arc::new(page))
             })
             .await
             .cloned()
+    }
+
+    async fn shared_djbz(&self, incl: &[u8]) -> Result<Arc<Vec<u8>>, AsyncLazyError> {
+        let name = core::str::from_utf8(incl.trim_ascii_end())
+            .map_err(|_| AsyncLazyError::Unsupported("INCL name is not valid UTF-8"))?;
+        let cell = self
+            .shared_cache
+            .get(name)
+            .ok_or(AsyncLazyError::Unsupported("INCL target is not in DIRM"))?;
+        cell.get_or_try_init(|| async move {
+            let component = self
+                .shared
+                .get(name)
+                .ok_or(AsyncLazyError::Unsupported("INCL target is not in DIRM"))?
+                .clone();
+            let bytes = self.read_page_bytes(component.range).await?;
+            let form = parse_form(&bytes)?;
+            if form.form_type != *b"DJVI" {
+                return Err(AsyncLazyError::Unsupported("INCL target is not FORM:DJVI"));
+            }
+            let djbz = form.chunks.iter().find(|c| &c.id == b"Djbz").ok_or(
+                AsyncLazyError::Unsupported("DJVI component is missing Djbz"),
+            )?;
+            Ok(Arc::new(djbz.data.to_vec()))
+        })
+        .await
+        .cloned()
     }
 
     async fn read_page_bytes(&self, range: Range<u64>) -> Result<Vec<u8>, AsyncLazyError> {
@@ -251,7 +288,9 @@ where
     LazyDocument::from_async_reader_lazy(reader).await
 }
 
-async fn index_bundled_djvm<R>(reader: &mut R) -> Result<Vec<LazyPageIndex>, AsyncLazyError>
+async fn index_bundled_djvm<R>(
+    reader: &mut R,
+) -> Result<(Vec<LazyPageIndex>, BTreeMap<String, LazyComponentIndex>), AsyncLazyError>
 where
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
@@ -270,20 +309,23 @@ where
 
     let entries = parse_lazy_dirm(&dirm[..dirm_len])?;
     let mut pages = Vec::new();
+    let mut shared = BTreeMap::new();
     for entry in entries {
-        if entry.comp_type != LazyComponentType::Page {
-            continue;
-        }
         let start = entry.offset as u64;
         reader.seek(std::io::SeekFrom::Start(start + 4)).await?;
         let mut size_bytes = [0u8; 4];
         reader.read_exact(&mut size_bytes).await?;
         let size = u32::from_be_bytes(size_bytes) as u64;
-        pages.push(LazyPageIndex {
-            range: start..start.saturating_add(8).saturating_add(size),
-        });
+        let range = start..start.saturating_add(8).saturating_add(size);
+        match entry.comp_type {
+            LazyComponentType::Page => pages.push(LazyPageIndex { range }),
+            LazyComponentType::Shared => {
+                shared.insert(entry.id, LazyComponentIndex { range });
+            }
+            LazyComponentType::Thumbnail => {}
+        }
     }
-    Ok(pages)
+    Ok((pages, shared))
 }
 
 fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
@@ -318,8 +360,10 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
 
     let meta = djvu_bzz::bzz_decode(&data[offsets_end..]).unwrap_or_default();
     let mut comp_types = Vec::with_capacity(nfiles);
+    let mut ids = Vec::with_capacity(nfiles);
     let flags_start = nfiles * 3;
     if flags_start + nfiles <= meta.len() {
+        let mut pos = flags_start + nfiles;
         for flag in &meta[flags_start..flags_start + nfiles] {
             let comp_type = match flag & 0x3f {
                 1 => LazyComponentType::Page,
@@ -327,16 +371,40 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
                 _ => LazyComponentType::Shared,
             };
             comp_types.push(comp_type);
+            ids.push(read_lazy_dirm_string(&meta, &mut pos).unwrap_or_default());
+
+            if (flag & 0x80) != 0 {
+                let _ = read_lazy_dirm_string(&meta, &mut pos);
+            }
+            if (flag & 0x40) != 0 {
+                let _ = read_lazy_dirm_string(&meta, &mut pos);
+            }
         }
     } else {
         comp_types.resize(nfiles, LazyComponentType::Page);
+        ids.extend((0..nfiles).map(|i| format!("p{i:04}")));
     }
 
     Ok(offsets
         .into_iter()
         .zip(comp_types)
-        .map(|(offset, comp_type)| LazyDirmEntry { comp_type, offset })
+        .zip(ids)
+        .map(|((offset, comp_type), id)| LazyDirmEntry {
+            comp_type,
+            id,
+            offset,
+        })
         .collect())
+}
+
+fn read_lazy_dirm_string(data: &[u8], pos: &mut usize) -> Option<String> {
+    let start = *pos;
+    let rest = data.get(start..)?;
+    let nul = rest.iter().position(|&b| b == 0)?;
+    *pos = start + nul + 1;
+    core::str::from_utf8(&rest[..nul])
+        .ok()
+        .map(ToOwned::to_owned)
 }
 
 // ── Async document loader ─────────────────────────────────────────────────────
@@ -867,6 +935,46 @@ mod tests {
         let sync_page = sync_doc.page(page_index).expect("sync page");
         assert_eq!(lazy_page.width(), sync_page.width());
         assert_eq!(lazy_page.height(), sync_page.height());
+    }
+
+    #[tokio::test]
+    async fn lazy_document_bundled_page_with_incl_uses_shared_dict() {
+        let mut p1 = crate::bitmap::Bitmap::new(32, 12);
+        let mut p2 = crate::bitmap::Bitmap::new(32, 12);
+        for y in 2..10 {
+            for x in 3..9 {
+                p1.set(x, y, true);
+                p2.set(x, y, true);
+            }
+        }
+        for y in 3..9 {
+            for x in 16..22 {
+                p1.set(x, y, true);
+                p2.set(x, y, true);
+            }
+        }
+
+        let bytes = crate::jb2_encode::encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        let sync_doc = DjVuDocument::parse(&bytes).expect("sync parse");
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
+            .await
+            .expect("lazy index");
+
+        assert_eq!(lazy.page_count(), 2);
+        let lazy_page = lazy.page_async(0).await.expect("lazy page");
+        assert!(lazy_page.raw_chunk(b"INCL").is_some());
+        let lazy_mask = lazy_page
+            .extract_mask()
+            .expect("lazy mask")
+            .expect("lazy mask present");
+        let sync_mask = sync_doc
+            .page(0)
+            .expect("sync page")
+            .extract_mask()
+            .expect("sync mask")
+            .expect("sync mask present");
+        assert_eq!(lazy_mask, sync_mask);
+        assert_eq!(lazy_mask, p1);
     }
 
     #[tokio::test]
