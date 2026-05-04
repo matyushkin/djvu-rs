@@ -1,0 +1,16 @@
+[package]
+name = "djvu-bitmap"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Packed 1-bit bitmap type used by DjVu codecs"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-bitmap"
+keywords = ["djvu", "bitmap", "pbm"]
+categories = ["multimedia::images", "data-structures"]
+publish = true
+
+[features]
+default = ["std"]
+std = []
