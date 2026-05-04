@@ -1,0 +1,22 @@
+[package]
+name = "djvu-bzz"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Pure-Rust DjVu BZZ compressor and decompressor"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-bzz"
+keywords = ["djvu", "bzz", "bwt", "compression"]
+categories = ["compression", "parser-implementations"]
+publish = true
+
+[dependencies]
+thiserror = "2"
+djvu-zp = { version = "0.15.0", path = "../djvu-zp", default-features = false }
+rayon = { version = "1", optional = true }
+
+[features]
+default = ["std"]
+std = ["djvu-zp/std"]
+parallel = ["dep:rayon", "std"]

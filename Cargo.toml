@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "djvu-py", "crates/djvu-zp"]
+members = [".", "djvu-py", "crates/djvu-zp", "crates/djvu-bzz"]
 exclude = ["fuzz", "tests/no_std_smoke"]
 
 [package]
@@ -36,6 +36,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 thiserror = "2"
 wide = "0.7"
 djvu-zp = { version = "0.15.0", path = "crates/djvu-zp", default-features = false }
+djvu-bzz = { version = "0.15.0", path = "crates/djvu-bzz", default-features = false }
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
@@ -64,12 +65,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std"]
+std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std", "djvu-bzz/std"]
 cli = ["std", "dep:clap"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]
-parallel = ["dep:rayon", "std"]
+parallel = ["dep:rayon", "std", "djvu-bzz/parallel"]
 mmap = ["dep:memmap2", "std"]
 serde = ["dep:serde"]
 image = ["dep:image", "std"]
