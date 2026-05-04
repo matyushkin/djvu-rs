@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "djvu-py", "crates/djvu-zp", "crates/djvu-bzz", "crates/djvu-iff", "crates/djvu-bitmap", "crates/djvu-jb2", "crates/djvu-pixmap"]
+members = [".", "djvu-py", "crates/djvu-zp", "crates/djvu-bzz", "crates/djvu-iff", "crates/djvu-bitmap", "crates/djvu-jb2", "crates/djvu-pixmap", "crates/djvu-iw44"]
 exclude = ["fuzz", "tests/no_std_smoke"]
 
 [package]
@@ -41,6 +41,7 @@ djvu-iff = { version = "0.15.0", path = "crates/djvu-iff", default-features = fa
 djvu-bitmap = { version = "0.15.0", path = "crates/djvu-bitmap", default-features = false }
 djvu-jb2 = { version = "0.15.0", path = "crates/djvu-jb2", default-features = false }
 djvu-pixmap = { version = "0.15.0", path = "crates/djvu-pixmap", default-features = false }
+djvu-iw44 = { version = "0.15.0", path = "crates/djvu-iw44", default-features = false }
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
@@ -69,12 +70,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std", "djvu-bzz/std", "djvu-iff/std", "djvu-bitmap/std", "djvu-jb2/std", "djvu-pixmap/std"]
+std = ["dep:png", "dep:zip", "dep:miniz_oxide", "dep:zune-jpeg", "dep:jpeg-encoder", "djvu-zp/std", "djvu-bzz/std", "djvu-iff/std", "djvu-bitmap/std", "djvu-jb2/std", "djvu-pixmap/std", "djvu-iw44/std"]
 cli = ["std", "dep:clap"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]
-parallel = ["dep:rayon", "std", "djvu-bzz/parallel"]
+parallel = ["dep:rayon", "std", "djvu-bzz/parallel", "djvu-iw44/parallel"]
 mmap = ["dep:memmap2", "std"]
 serde = ["dep:serde"]
 image = ["dep:image", "std"]

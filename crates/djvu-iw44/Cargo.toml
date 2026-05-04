@@ -1,0 +1,27 @@
+[package]
+name = "djvu-iw44"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Pure-Rust DjVu IW44 wavelet image decoder"
+repository = "https://github.com/matyushkin/djvu-rs"
+documentation = "https://docs.rs/djvu-iw44"
+keywords = ["djvu", "iw44", "wavelet", "decoder"]
+categories = ["multimedia::images", "compression"]
+publish = true
+
+[dependencies]
+thiserror = "2"
+wide = "0.7"
+rayon = { version = "1", optional = true }
+djvu-zp = { version = "0.15.0", path = "../djvu-zp", default-features = false }
+djvu-pixmap = { version = "0.15.0", path = "../djvu-pixmap", default-features = false }
+
+[dev-dependencies]
+djvu-iff = { version = "0.15.0", path = "../djvu-iff" }
+
+[features]
+default = ["std"]
+std = ["djvu-zp/std", "djvu-pixmap/std"]
+parallel = ["dep:rayon", "std"]
