@@ -937,6 +937,19 @@ impl DjVuDocument {
         }
     }
 
+    #[cfg(all(feature = "std", feature = "async"))]
+    pub(crate) fn parse_single_page_with_shared(
+        data: &[u8],
+        index: usize,
+        shared_djbz: Option<Arc<Vec<u8>>>,
+    ) -> Result<DjVuPage, DocError> {
+        let form = parse_form(data)?;
+        if form.form_type != *b"DJVU" {
+            return Err(DocError::NotDjVu(form.form_type));
+        }
+        parse_page_from_chunks(&form.chunks, index, shared_djbz)
+    }
+
     /// Number of pages.
     pub fn page_count(&self) -> usize {
         self.pages.len()
