@@ -18,6 +18,25 @@ This file is the broad baseline table. Smaller issue-driven experiments and
 kept/reverted decisions are recorded in [`PERF_EXPERIMENTS.md`](PERF_EXPERIMENTS.md),
 including recent async lazy loading and x86-64-v3 AVX2 validation results.
 
+The latest full local Criterion run is summarized in
+[`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md) (2026-05-04, macOS arm64,
+Rust 1.92.0). Selected results from that run:
+
+| Benchmark | Time |
+|-----------|-----:|
+| `render_page/dpi/72` | 216 µs |
+| `render_page/dpi/144` | 895 µs |
+| `render_page/dpi/300` | 3.42 ms |
+| `render_colorbook` | 7.29 ms |
+| `render_colorbook_cold` | 17.9 ms |
+| `render_corpus_color` | 71.2 ms |
+| `render_corpus_bilevel` | 70.4 ms |
+| `jb2_decode` | 134 µs |
+| `iw44_decode_first_chunk` | 599 µs |
+| `iw44_decode_corpus_color` | 671 µs |
+| `parse_multipage_520p` | 2.27 ms |
+| `render_large_doc_first_page` | 12.8 ms |
+
 ## Contributing results
 
 To add results for a new platform, run:
@@ -32,7 +51,10 @@ Then open a PR updating this file with the new column. Please include CPU model,
 
 ## Multi-platform comparison
 
-Key benchmarks across platforms (Criterion mean, release profile, v0.4.1 tag).
+Historical key benchmarks across platforms (Criterion mean, release profile,
+v0.4.1 tag). Do not compare these directly with the latest local results above
+without checking benchmark definitions; several render benches now measure
+different corpus paths or output sizes.
 
 | Benchmark | Apple M1 Max | macOS CI (M-series) | x86_64 Linux (CI) |
 |-----------|-------------|---------------------|-------------------|
