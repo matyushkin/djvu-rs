@@ -14,6 +14,10 @@ Results require `tests/corpus/` files for document and corpus benchmarks. See `C
 CI benchmarks run automatically on every release tag via [`.github/workflows/bench.yml`](.github/workflows/bench.yml).
 Full Criterion HTML reports are uploaded as workflow artifacts (90-day retention).
 
+This file is the broad baseline table. Smaller issue-driven experiments and
+kept/reverted decisions are recorded in [`PERF_EXPERIMENTS.md`](PERF_EXPERIMENTS.md),
+including recent async lazy loading and x86-64-v3 AVX2 validation results.
+
 ## Contributing results
 
 To add results for a new platform, run:

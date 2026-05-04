@@ -31,7 +31,9 @@ Pure-Rust DjVu codec — decode and encode DjVu documents. MIT licensed, no GPL 
 - **EPUB 3 export** — page images + invisible text overlay + bookmarks as navigation (feature flag `epub`)
 - **WebAssembly (WASM)** — `wasm-bindgen` bindings for use in browsers and Node.js (feature flag `wasm`)
 - **image-rs integration** — `image::ImageDecoder` impl for use with the `image` crate (feature flag `image`)
-- **Async render** — `tokio::task::spawn_blocking` wrapper (feature flag `async`)
+- **Async render and lazy loading** — async render wrappers plus true per-page lazy loading over `AsyncRead + AsyncSeek` (feature flag `async`)
+- **Workspace codec crates** — standalone `djvu-iff`, `djvu-bzz`, `djvu-bitmap`, `djvu-jb2`, `djvu-pixmap`, `djvu-iw44`, and `djvu-zp` crates for focused consumers
+- **Fuzzing integration** — libFuzzer targets and in-tree OSS-Fuzz project files
 - `no_std` compatible — IFF/BZZ/JB2/IW44/ZP codec modules work with `alloc` only
 
 ## Quick start
@@ -47,7 +49,12 @@ println!("{} pages", doc.page_count());
 let page = doc.page(0)?;
 println!("{}×{} @ {} dpi", page.width(), page.height(), page.dpi());
 
-let opts = RenderOptions { dpi: 150.0, ..Default::default() };
+let target_dpi = 150u32;
+let opts = RenderOptions {
+    width: ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    height: ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    ..Default::default()
+};
 let pixmap = render_pixmap(page, &opts)?;
 // pixmap.data — RGBA bytes (width × height × 4), row-major
 ```
@@ -103,9 +110,40 @@ let data = std::fs::read("file.djvu")?;
 let doc = DjVuDocument::parse(&data)?;
 let page = doc.page(0)?;
 
-let opts = RenderOptions { dpi: 150.0, ..Default::default() };
+let target_dpi = 150u32;
+let opts = RenderOptions {
+    width: ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    height: ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    ..Default::default()
+};
 let pixmap = render_pixmap_async(page, opts).await?;
 ```
+
+## Lazy async loading
+
+Requires the `async` feature flag. Unlike `load_document_async`, the lazy
+loader keeps a seekable async reader and fetches page/component byte ranges
+only when `page_async(i)` is called. Parsed pages are cached as `Arc<DjVuPage>`.
+
+```rust
+use djvu_rs::djvu_async::from_async_reader_lazy;
+
+let file = tokio::fs::File::open("book.djvu").await?;
+let doc = from_async_reader_lazy(file).await?;
+println!("{} pages", doc.page_count());
+
+let page = doc.page_async(0).await?;
+println!("first page: {}×{}", page.width(), page.height());
+```
+
+Supported shapes: single-page `FORM:DJVU` and bundled `FORM:DJVM`, including
+shared `DJVI` dictionaries referenced via `INCL`. For browser-local `!Send`
+readers on `wasm32`, use `from_async_reader_lazy_local`.
+
+See [`examples/async_lazy_first_page.rs`](examples/async_lazy_first_page.rs)
+for a native first-page latency probe and
+[`examples/wasm/range_lazy.md`](examples/wasm/range_lazy.md) for the HTTP
+`Range: bytes=start-end` integration shape.
 
 ## Low-level IFF access
 
@@ -136,7 +174,7 @@ let sjbz_payload = encode_jb2(&bm);
 ### IW44 wavelet encoder
 
 ```rust
-use djvu_rs::{djvu_render::Pixmap, iw44_encode::{encode_iw44_color, Iw44EncodeOptions}};
+use djvu_rs::{Pixmap, iw44_encode::{encode_iw44_color, Iw44EncodeOptions}};
 
 let pixmap: Pixmap = /* ... your RGBA/YCbCr image ... */;
 let chunks: Vec<Vec<u8>> = encode_iw44_color(&pixmap, &Iw44EncodeOptions::default());
@@ -146,7 +184,7 @@ let chunks: Vec<Vec<u8>> = encode_iw44_color(&pixmap, &Iw44EncodeOptions::defaul
 Grayscale:
 
 ```rust
-use djvu_rs::{djvu_render::GrayPixmap, iw44_encode::{encode_iw44_gray, Iw44EncodeOptions}};
+use djvu_rs::{GrayPixmap, iw44_encode::{encode_iw44_gray, Iw44EncodeOptions}};
 
 let gray: GrayPixmap = /* ... */;
 let chunks: Vec<Vec<u8>> = encode_iw44_gray(&gray, &Iw44EncodeOptions::default());
@@ -208,11 +246,11 @@ println!("{} pages", doc.page_count());
 
 ## CLI
 
-The `djvu` binary is included when the `std` feature is enabled (the default).
+The `djvu` binary is enabled by the `cli` feature.
 
 ```sh
 # Install
-cargo install djvu-rs
+cargo install djvu-rs --features cli
 
 # Document info
 djvu info file.djvu
@@ -234,12 +272,19 @@ djvu text file.djvu --all
 
 # Encode a PNG image into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
+
+# Encode a PNG image into a layered lossy DjVu (JB2 mask + IW44 background)
+djvu encode scan.png --quality quality --output scan.djvu --dpi 300
+
+# Encode a directory of PNGs into a bundled DJVM with shared Djbz
+djvu encode pages/ --output book.djvu --shared-dict-pages 2
 ```
 
-The `encode` subcommand luminance-thresholds the input into a JB2 mask
-and wraps it as a `FORM:DJVU` (`INFO + Sjbz`). `--quality quality` and
-`--quality archival` are reserved for the layered FG/BG codec
-(currently unsupported — see [#220](https://github.com/matyushkin/djvu-rs/issues/220)).
+For single PNG input, `--quality lossless` luminance-thresholds the image into a
+JB2 mask and writes `INFO + Sjbz`; `--quality quality` uses the layered encoder
+(`INFO + Sjbz + BG44...`) for color input. `--quality archival` is still
+reserved for a future FGbz/profitability model. Directory input currently uses
+the lossless multi-page JB2 path only.
 
 ## hOCR and ALTO XML export
 
@@ -270,9 +315,8 @@ use djvu_rs::DjVuDocument;
 
 let data = std::fs::read("book.djvu")?;
 let doc = DjVuDocument::parse(&data)?;
-let info = doc.page(0)?.info()?;
 
-let json = serde_json::to_string_pretty(&info)?;
+let json = serde_json::to_string_pretty(doc.bookmarks())?;
 println!("{json}");
 ```
 
@@ -288,7 +332,7 @@ let data = std::fs::read("file.djvu")?;
 let doc = DjVuDocument::parse(&data)?;
 let page = doc.page(0)?;
 
-let decoder = DjVuDecoder::new(&page, 150.0)?;
+let decoder = DjVuDecoder::new(page)?.with_size(1200, 1600);
 let img = DynamicImage::from_decoder(decoder)?;
 img.save("page.png")?;
 ```
@@ -342,9 +386,10 @@ See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export, CLI |
+| `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export |
+| `cli` | disabled | Build the `djvu` command-line binary |
 | `tiff` | disabled | TIFF export via the `tiff` crate |
-| `async` | disabled | Async render API via `tokio::task::spawn_blocking` |
+| `async` | disabled | Async render API and lazy `AsyncRead + AsyncSeek` document loading |
 | `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
 | `jpeg` | disabled | Standalone JPEG decode without full `std` (JPEG is included in `std` by default) |
 | `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
@@ -386,6 +431,19 @@ uses partial BG44 chunk decode, a cached 1/4-resolution mask pyramid, and bit-sh
 instead of divisions in the compositor inner loop.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for full Criterion numbers and methodology.
+
+Recent targeted experiments are recorded in
+[PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md), including:
+
+- **#233 lazy async loading:** a 100 MiB padded 520-page DJVM reached first
+  pixel in **491.469 ms** while reading only **28,578 bytes** at simulated
+  12.5 MiB/s throughput.
+- **#189 x86-64-v3 AVX2 validation:** existing AVX2 decode paths showed
+  `iw44_decode_corpus_color` **-18.88%** and `iw44_decode_first_chunk`
+  **-4.85%** on GitHub-hosted x86_64, with one sub4 partial-decode regression
+  recorded for follow-up.
+- **#258 shared-Djbz clustering:** Hamming shared clustering was rejected as
+  default; byte-exact shared-Djbz remains the measured safe path.
 
 ## Minimum supported Rust version (MSRV)
 
