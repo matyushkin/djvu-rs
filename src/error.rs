@@ -11,7 +11,7 @@
 //! - `AnnotationError` — errors from the annotation parser (phase 4, see `annotation` module)
 
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::Cow, string::String};
+use alloc::borrow::Cow;
 
 // ---- New phase-1 typed errors -----------------------------------------------
 

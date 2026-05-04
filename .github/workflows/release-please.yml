@@ -34,55 +34,45 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Read crate versions
-        run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          ZP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/djvu-zp/Cargo.toml | head -1)
-          echo "ZP_VERSION=$ZP_VERSION" >> "$GITHUB_ENV"
-
-      # ── djvu-zp (must publish first; djvu-rs depends on it) ─────────────
-      - name: Check if djvu-zp already published
-        run: |
-          if cargo info "djvu-zp@$ZP_VERSION" --registry crates-io >/dev/null 2>&1; then
-            echo "ZP_ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
-            echo "djvu-zp $ZP_VERSION already on crates.io — skipping."
-          else
-            echo "ZP_ALREADY_PUBLISHED=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Publish djvu-zp
-        if: env.ZP_ALREADY_PUBLISHED == 'false'
+      - name: Publish crates to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p djvu-zp --no-verify
-
-      - name: Wait for djvu-zp to appear in the index
-        if: env.ZP_ALREADY_PUBLISHED == 'false'
         run: |
-          for i in $(seq 1 30); do
-            if cargo info "djvu-zp@$ZP_VERSION" --registry crates-io >/dev/null 2>&1; then
-              echo "djvu-zp $ZP_VERSION is live."
-              exit 0
+          set -euo pipefail
+
+          crates=(
+            "djvu-zp:crates/djvu-zp/Cargo.toml"
+            "djvu-iff:crates/djvu-iff/Cargo.toml"
+            "djvu-bitmap:crates/djvu-bitmap/Cargo.toml"
+            "djvu-pixmap:crates/djvu-pixmap/Cargo.toml"
+            "djvu-bzz:crates/djvu-bzz/Cargo.toml"
+            "djvu-jb2:crates/djvu-jb2/Cargo.toml"
+            "djvu-iw44:crates/djvu-iw44/Cargo.toml"
+            "djvu-rs:Cargo.toml"
+          )
+
+          for entry in "${crates[@]}"; do
+            name="${entry%%:*}"
+            manifest="${entry#*:}"
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1)
+
+            if cargo info "$name@$version" --registry crates-io >/dev/null 2>&1; then
+              echo "$name $version already on crates.io — skipping."
+              continue
             fi
-            echo "[$i/30] waiting for djvu-zp $ZP_VERSION on crates.io…"
-            sleep 10
+
+            cargo publish -p "$name" --no-verify
+
+            for i in $(seq 1 30); do
+              if cargo info "$name@$version" --registry crates-io >/dev/null 2>&1; then
+                echo "$name $version is live."
+                break
+              fi
+              if [ "$i" = 30 ]; then
+                echo "::error::$name $version did not appear on crates.io within 5 minutes"
+                exit 1
+              fi
+              echo "[$i/30] waiting for $name $version on crates.io..."
+              sleep 10
+            done
           done
-          echo "::error::djvu-zp $ZP_VERSION did not appear on crates.io within 5 minutes"
-          exit 1
-
-      # ── djvu-rs (workspace root) ────────────────────────────────────────
-      - name: Check if djvu-rs already published
-        run: |
-          if cargo info "djvu-rs@$VERSION" --registry crates-io >/dev/null 2>&1; then
-            echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
-            echo "djvu-rs $VERSION already on crates.io — skipping."
-          else
-            echo "ALREADY_PUBLISHED=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Publish djvu-rs
-        if: env.ALREADY_PUBLISHED == 'false'
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p djvu-rs --no-verify
