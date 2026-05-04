@@ -142,6 +142,7 @@ jobs:
             fi
 
             cargo publish -p "$name" --no-verify
+            sleep 20
 
             for i in $(seq 1 30); do
               if cargo info "$name@$version" --registry crates-io >/dev/null 2>&1; then
