@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+* **crates:** split codec primitives into publishable workspace crates: `djvu-zp`,
+  `djvu-bzz`, `djvu-iff`, `djvu-bitmap`, `djvu-jb2`, `djvu-pixmap`, and
+  `djvu-iw44` ([#229](https://github.com/matyushkin/djvu-rs/issues/229)).
+  The umbrella `djvu-rs` crate keeps the historical module paths as re-export
+  shims, while consumers that only need `djvu_iff::parse_form` can depend on
+  `djvu-iff` directly; a path-dependency cold `cargo check` for an iff-only
+  consumer measured 3.67 s.
+
 ## [0.15.0](https://github.com/matyushkin/djvu-rs/compare/v0.14.0...v0.15.0) (2026-05-03)
 
 
