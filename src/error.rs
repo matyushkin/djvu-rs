@@ -61,49 +61,7 @@ pub use djvu_iff::IffError;
 
 pub use djvu_jb2::Jb2Error;
 
-/// IW44 wavelet image decoding errors.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum Iw44Error {
-    /// Input ended before the IW44 stream was complete.
-    #[error("IW44 stream is truncated")]
-    Truncated,
-
-    /// The IW44 stream contains invalid data.
-    #[error("IW44 stream contains invalid data")]
-    Invalid,
-
-    /// A BG44/FG44/TH44 chunk is too short (fewer than 2 bytes).
-    #[error("IW44 chunk is too short")]
-    ChunkTooShort,
-
-    /// The first chunk header is too short (needs at least 9 bytes).
-    #[error("IW44 first chunk header too short (need ≥ 9 bytes)")]
-    HeaderTooShort,
-
-    /// Image width or height is zero.
-    #[error("IW44 image has zero dimension")]
-    ZeroDimension,
-
-    /// Image dimensions exceed the safety limit.
-    #[error("IW44 image dimensions too large")]
-    ImageTooLarge,
-
-    /// A subsequent chunk was encountered before the first chunk.
-    #[error("IW44 subsequent chunk received before first chunk")]
-    MissingFirstChunk,
-
-    /// The subsample parameter must be >= 1.
-    #[error("IW44 subsample must be >= 1")]
-    InvalidSubsample,
-
-    /// No codec has been initialized (no chunks decoded yet).
-    #[error("IW44 codec not yet initialized")]
-    MissingCodec,
-
-    /// The ZP arithmetic coder stream is too short.
-    #[error("IW44 ZP coder stream too short")]
-    ZpTooShort,
-}
+pub use djvu_iw44::Iw44Error;
 
 pub use djvu_bzz::BzzError;
 
