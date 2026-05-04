@@ -43,13 +43,18 @@
 //! }
 //! ```
 
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
+    sync::{Mutex, OnceCell},
+};
 
 use crate::{
     djvu_document::{DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
+    error::IffError,
+    iff::parse_form,
     pixmap::{GrayPixmap, Pixmap},
 };
 
@@ -77,6 +82,261 @@ pub enum AsyncLoadError {
     /// The buffered bytes failed to parse as a DjVu document.
     #[error("parse error: {0}")]
     Parse(#[from] DocError),
+}
+
+/// Errors from true lazy async document loading (#233 Phase 3 PR1).
+#[derive(Debug, thiserror::Error)]
+pub enum AsyncLazyError {
+    /// I/O error from the underlying async reader.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// The fetched bytes failed to parse as a DjVu document.
+    #[error("parse error: {0}")]
+    Parse(#[from] DocError),
+
+    /// IFF container parse error while inspecting lazy page bytes.
+    #[error("IFF error: {0}")]
+    Iff(#[from] IffError),
+
+    /// Page index is out of range.
+    #[error("page index {index} is out of range (document has {count} pages)")]
+    PageOutOfRange { index: usize, count: usize },
+
+    /// This lazy-loading slice intentionally rejects a document shape.
+    #[error("unsupported lazy document shape: {0}")]
+    Unsupported(&'static str),
+}
+
+// ── True lazy async document loader (#233 Phase 3 PR1) ───────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LazyComponentType {
+    Shared,
+    Page,
+    Thumbnail,
+}
+
+#[derive(Debug, Clone)]
+struct LazyDirmEntry {
+    comp_type: LazyComponentType,
+    offset: u32,
+}
+
+/// Native async lazy DjVu document.
+///
+/// This is the first Phase 3 slice for #233: it indexes a seekable async
+/// reader up front, then fetches and parses each page only when
+/// [`LazyDocument::page_async`] is called. Parsed pages are cached as
+/// `Arc<DjVuPage>` so callers can render them concurrently without borrowing
+/// the document across awaits.
+///
+/// Current scope:
+/// - single-page `FORM:DJVU`
+/// - bundled `FORM:DJVM` pages that do not contain `INCL`
+///
+/// Shared DJVI/INCL resolution and WASM `!Send` readers are intentionally left
+/// to the next issue slices.
+pub struct LazyDocument<R> {
+    reader: Arc<Mutex<R>>,
+    pages: Vec<LazyPageIndex>,
+    cache: Vec<OnceCell<Arc<DjVuPage>>>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyPageIndex {
+    range: Range<u64>,
+}
+
+impl<R> LazyDocument<R>
+where
+    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+{
+    /// Build a native lazy document index from an async seekable reader.
+    pub async fn from_async_reader_lazy(mut reader: R) -> Result<Self, AsyncLazyError> {
+        let file_len = reader.seek(std::io::SeekFrom::End(0)).await?;
+        reader.seek(std::io::SeekFrom::Start(0)).await?;
+
+        let mut head = [0u8; 16];
+        reader.read_exact(&mut head).await?;
+        if &head[..4] != b"AT&T" || &head[4..8] != b"FORM" {
+            return Err(AsyncLazyError::Unsupported("not an AT&T FORM document"));
+        }
+
+        let form_type = &head[12..16];
+        let pages = if form_type == b"DJVU" {
+            vec![LazyPageIndex { range: 0..file_len }]
+        } else if form_type == b"DJVM" {
+            index_bundled_djvm(&mut reader).await?
+        } else {
+            return Err(AsyncLazyError::Unsupported(
+                "lazy loader supports only FORM:DJVU and bundled FORM:DJVM",
+            ));
+        };
+
+        if pages.is_empty() {
+            return Err(AsyncLazyError::Unsupported(
+                "document has no lazy-loadable pages",
+            ));
+        }
+
+        let cache = (0..pages.len()).map(|_| OnceCell::new()).collect();
+        Ok(Self {
+            reader: Arc::new(Mutex::new(reader)),
+            pages,
+            cache,
+        })
+    }
+
+    /// Number of lazy-loadable pages.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Fetch, parse, cache, and return page `index`.
+    pub async fn page_async(&self, index: usize) -> Result<Arc<DjVuPage>, AsyncLazyError> {
+        let page = self
+            .pages
+            .get(index)
+            .ok_or(AsyncLazyError::PageOutOfRange {
+                index,
+                count: self.pages.len(),
+            })?
+            .clone();
+
+        self.cache[index]
+            .get_or_try_init(|| async move {
+                let bytes = self.read_page_bytes(page.range).await?;
+                let form = parse_form(&bytes)?;
+                if form.chunks.iter().any(|c| &c.id == b"INCL") {
+                    return Err(AsyncLazyError::Unsupported(
+                        "lazy shared DJVI/INCL pages are not implemented yet",
+                    ));
+                }
+                let doc = DjVuDocument::parse(&bytes)?;
+                if doc.page_count() != 1 {
+                    return Err(AsyncLazyError::Unsupported(
+                        "lazy page chunk did not parse to exactly one page",
+                    ));
+                }
+                Ok(Arc::new(doc.page(0)?.clone()))
+            })
+            .await
+            .cloned()
+    }
+
+    async fn read_page_bytes(&self, range: Range<u64>) -> Result<Vec<u8>, AsyncLazyError> {
+        let len = usize::try_from(range.end.saturating_sub(range.start))
+            .map_err(|_| AsyncLazyError::Unsupported("page range exceeds addressable memory"))?;
+        let mut bytes = Vec::with_capacity(len.saturating_add(4));
+        if range.start != 0 {
+            bytes.extend_from_slice(b"AT&T");
+        }
+        let mut reader = self.reader.lock().await;
+        reader.seek(std::io::SeekFrom::Start(range.start)).await?;
+        let mut chunk = vec![0u8; len];
+        reader.read_exact(&mut chunk).await?;
+        bytes.extend_from_slice(&chunk);
+        Ok(bytes)
+    }
+}
+
+/// Build a native lazy document index from an async seekable reader.
+///
+/// Convenience wrapper around [`LazyDocument::from_async_reader_lazy`].
+pub async fn from_async_reader_lazy<R>(reader: R) -> Result<LazyDocument<R>, AsyncLazyError>
+where
+    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+{
+    LazyDocument::from_async_reader_lazy(reader).await
+}
+
+async fn index_bundled_djvm<R>(reader: &mut R) -> Result<Vec<LazyPageIndex>, AsyncLazyError>
+where
+    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+{
+    let mut chunk_hdr = [0u8; 8];
+    reader.read_exact(&mut chunk_hdr).await?;
+    if &chunk_hdr[..4] != b"DIRM" {
+        return Err(AsyncLazyError::Unsupported(
+            "lazy DJVM loader requires DIRM as the first inner chunk",
+        ));
+    }
+    let dirm_len =
+        u32::from_be_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]]) as usize;
+    let padded = dirm_len + (dirm_len & 1);
+    let mut dirm = vec![0u8; padded];
+    reader.read_exact(&mut dirm).await?;
+
+    let entries = parse_lazy_dirm(&dirm[..dirm_len])?;
+    let mut pages = Vec::new();
+    for entry in entries {
+        if entry.comp_type != LazyComponentType::Page {
+            continue;
+        }
+        let start = entry.offset as u64;
+        reader.seek(std::io::SeekFrom::Start(start + 4)).await?;
+        let mut size_bytes = [0u8; 4];
+        reader.read_exact(&mut size_bytes).await?;
+        let size = u32::from_be_bytes(size_bytes) as u64;
+        pages.push(LazyPageIndex {
+            range: start..start.saturating_add(8).saturating_add(size),
+        });
+    }
+    Ok(pages)
+}
+
+fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
+    if data.len() < 3 {
+        return Err(AsyncLazyError::Unsupported("DIRM chunk too short"));
+    }
+    let dflags = data[0];
+    if (dflags >> 7) == 0 {
+        return Err(AsyncLazyError::Unsupported(
+            "indirect DJVM lazy loading is not implemented yet",
+        ));
+    }
+    let nfiles = u16::from_be_bytes([data[1], data[2]]) as usize;
+    let offsets_start = 3usize;
+    let offsets_end = offsets_start
+        .checked_add(nfiles.saturating_mul(4))
+        .ok_or(AsyncLazyError::Unsupported("DIRM offset table overflow"))?;
+    if offsets_end > data.len() {
+        return Err(AsyncLazyError::Unsupported("DIRM offset table truncated"));
+    }
+
+    let mut offsets = Vec::with_capacity(nfiles);
+    for i in 0..nfiles {
+        let base = offsets_start + i * 4;
+        offsets.push(u32::from_be_bytes([
+            data[base],
+            data[base + 1],
+            data[base + 2],
+            data[base + 3],
+        ]));
+    }
+
+    let meta = djvu_bzz::bzz_decode(&data[offsets_end..]).unwrap_or_default();
+    let mut comp_types = Vec::with_capacity(nfiles);
+    let flags_start = nfiles * 3;
+    if flags_start + nfiles <= meta.len() {
+        for flag in &meta[flags_start..flags_start + nfiles] {
+            let comp_type = match flag & 0x3f {
+                1 => LazyComponentType::Page,
+                2 => LazyComponentType::Thumbnail,
+                _ => LazyComponentType::Shared,
+            };
+            comp_types.push(comp_type);
+        }
+    } else {
+        comp_types.resize(nfiles, LazyComponentType::Page);
+    }
+
+    Ok(offsets
+        .into_iter()
+        .zip(comp_types)
+        .map(|(offset, comp_type)| LazyDirmEntry { comp_type, offset })
+        .collect())
 }
 
 // ── Async document loader ─────────────────────────────────────────────────────
@@ -549,6 +809,81 @@ mod tests {
         assert!(
             matches!(err, AsyncLoadError::Parse(_)),
             "expected Parse error, got {err:?}"
+        );
+    }
+
+    /// `LazyDocument` fetches and parses a single-page document only when
+    /// `page_async` is called, then returns the cached `Arc` on repeat access.
+    #[tokio::test]
+    async fn lazy_document_single_page_caches_arc_page() {
+        let path = assets_path().join("chicken.djvu");
+        let bytes = std::fs::read(&path).expect("read");
+        let sync_doc = DjVuDocument::parse(&bytes).expect("sync parse");
+
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
+            .await
+            .expect("lazy index");
+        assert_eq!(lazy.page_count(), 1);
+
+        let page_a = lazy.page_async(0).await.expect("lazy page");
+        let page_b = lazy.page_async(0).await.expect("lazy cached page");
+        assert!(
+            Arc::ptr_eq(&page_a, &page_b),
+            "repeat access must reuse cache"
+        );
+
+        let sync_page = sync_doc.page(0).expect("sync page");
+        assert_eq!(page_a.width(), sync_page.width());
+        assert_eq!(page_a.height(), sync_page.height());
+    }
+
+    /// `LazyDocument` indexes bundled DJVM ranges up front and can fetch a
+    /// no-INCL page without reading/parsing the full document body.
+    #[tokio::test]
+    async fn lazy_document_bundled_page_without_incl_matches_sync() {
+        let path = assets_path().join("colorbook.djvu");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        };
+        let sync_doc = DjVuDocument::parse(&bytes).expect("sync parse");
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
+            .await
+            .expect("lazy index");
+
+        assert_eq!(lazy.page_count(), sync_doc.page_count());
+        let page_index = (0..sync_doc.page_count())
+            .find(|&i| {
+                sync_doc
+                    .page(i)
+                    .expect("sync page")
+                    .chunk_ids()
+                    .iter()
+                    .all(|id| id != b"INCL")
+            })
+            .expect("fixture must contain at least one page without INCL");
+
+        let lazy_page = lazy.page_async(page_index).await.expect("lazy page");
+        let sync_page = sync_doc.page(page_index).expect("sync page");
+        assert_eq!(lazy_page.width(), sync_page.width());
+        assert_eq!(lazy_page.height(), sync_page.height());
+    }
+
+    #[tokio::test]
+    async fn lazy_document_page_out_of_range() {
+        let path = assets_path().join("chicken.djvu");
+        let bytes = std::fs::read(&path).expect("read");
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
+            .await
+            .expect("lazy index");
+
+        let err = lazy
+            .page_async(1)
+            .await
+            .expect_err("page 1 is out of range");
+        assert!(
+            matches!(err, AsyncLazyError::PageOutOfRange { index: 1, count: 1 }),
+            "unexpected error: {err:?}"
         );
     }
 
