@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777870946600,
+  "lastUpdate": 1777871536422,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -3524,6 +3524,258 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 47623000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "leo",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "leo",
+            "username": "matyushkin"
+          },
+          "distinct": true,
+          "id": "d54982a8abdad2ed90c5fdf4f5a03cefb9d1057c",
+          "message": "ci: fix release publishing for workspace crates",
+          "timestamp": "2026-05-04T13:58:07+09:00",
+          "tree_id": "2cfb523d205fe6905cc4575180f30d9dae79bb96",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/d54982a8abdad2ed90c5fdf4f5a03cefb9d1057c"
+        },
+        "date": 1777871535110,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 117,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 146666,
+            "range": "± 288",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 827127,
+            "range": "± 4935",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 573989,
+            "range": "± 3101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1514765,
+            "range": "± 43487",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 3121,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 8890550,
+            "range": "± 90282",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 579411,
+            "range": "± 7355",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2145502,
+            "range": "± 3936",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2758348,
+            "range": "± 13897",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 29531322,
+            "range": "± 537053",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 214492,
+            "range": "± 1287",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 339693,
+            "range": "± 6412",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1305323,
+            "range": "± 12892",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 5023190,
+            "range": "± 8185",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 19411032,
+            "range": "± 31981",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1583358,
+            "range": "± 26387",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 12370058,
+            "range": "± 48061",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 12372809,
+            "range": "± 73416",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5132434,
+            "range": "± 16667",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 29023711,
+            "range": "± 326624",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 122333663,
+            "range": "± 494862",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 121041968,
+            "range": "± 322438",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 205765,
+            "range": "± 311",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 9235582,
+            "range": "± 11332",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1283541809,
+            "range": "± 5061140",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 6168896,
+            "range": "± 119163",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 2320,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 23904849,
+            "range": "± 323497",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 24209667,
+            "range": "± 448200",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3136822,
+            "range": "± 5340",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 22864371,
+            "range": "± 49899",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 217884,
+            "range": "± 3705",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 141000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7185000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 45089000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 43323000,
             "range": "± 0",
             "unit": "ns/iter"
           }
