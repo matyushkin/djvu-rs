@@ -59,53 +59,7 @@ pub enum DjVuError {
 
 pub use djvu_iff::IffError;
 
-/// JB2 bitonal image decoding errors.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum Jb2Error {
-    /// Input ended before the JB2 stream was complete.
-    #[error("JB2 stream is truncated")]
-    Truncated,
-
-    /// A flag bit in the image/dict header was set when it must be zero.
-    #[error("JB2: bad flag bit in header")]
-    BadHeaderFlag,
-
-    /// The inherited dictionary length exceeds the shared dictionary size.
-    #[error("JB2: inherited dict length exceeds shared dict size")]
-    InheritedDictTooLarge,
-
-    /// The stream references a shared dictionary but none was provided.
-    #[error("JB2: stream requires shared dict but none provided")]
-    MissingSharedDict,
-
-    /// Image dimensions exceed the safety limit (~64M pixels).
-    #[error("JB2: image dimensions too large")]
-    ImageTooLarge,
-
-    /// A record references a dictionary symbol but the dictionary is empty.
-    #[error("JB2: dict reference with empty dict")]
-    EmptyDictReference,
-
-    /// A decoded symbol index is out of range for the current dictionary.
-    #[error("JB2: decoded symbol index out of dictionary range")]
-    InvalidSymbolIndex,
-
-    /// An unrecognized record type was encountered in the image stream.
-    #[error("JB2: unknown record type")]
-    UnknownRecordType,
-
-    /// An unexpected record type was encountered in a dictionary stream.
-    #[error("JB2: unexpected record type in dict stream")]
-    UnexpectedDictRecordType,
-
-    /// The ZP arithmetic coder could not be initialized (insufficient input).
-    #[error("JB2: insufficient data to initialize ZP coder")]
-    ZpInitFailed,
-
-    /// Stream contains more records than the safety limit allows.
-    #[error("JB2: record count exceeds safety limit")]
-    TooManyRecords,
-}
+pub use djvu_jb2::Jb2Error;
 
 /// IW44 wavelet image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
