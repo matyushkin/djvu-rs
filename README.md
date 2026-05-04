@@ -421,10 +421,23 @@ Latest full Criterion run: macOS `arm64`, Rust 1.92, release profile
 | `parse_multipage_520p` | **2.27 ms** |
 | `render_large_doc_first_page` | **12.8 ms** |
 
+### Comparison with DjVuLibre
+
+The benchmark workflow still runs a DjVuLibre comparison via
+[`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) and formats it with
+[`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py).
+
+Current local comparison on `colorbook.djvu` at 150 dpi:
+
+| Scenario | djvu-rs | DjVuLibre | Ratio |
+|----------|--------:|----------:|------:|
+| Render-only, page already decoded | **7.29 ms** | **6.08 ms** | DjVuLibre **1.2x faster** |
+| `ddjvu` CLI baseline for the same output | Criterion render benchmark | **2.543 s** | CLI includes startup and PPM output |
+
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
-run and methodology. Historical multi-platform and DjVuLibre comparisons are
-kept in [BENCHMARKS.md](BENCHMARKS.md); compare those carefully because some
-benchmark definitions and output sizes have changed over time.
+run, methodology, and the full DjVuLibre comparison. Historical multi-platform
+results are kept in [BENCHMARKS.md](BENCHMARKS.md); compare those carefully
+because some benchmark definitions and output sizes have changed over time.
 
 Recent targeted experiments are recorded in
 [PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md), including:
