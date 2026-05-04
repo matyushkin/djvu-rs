@@ -92,54 +92,39 @@ Text layer: `tests/corpus/watchmaker.djvu` (TXTz present)
 
 ## Comparison with DjVuLibre 3.5.29
 
-### CLI comparison (`djvu render` vs `ddjvu`)
+The benchmark workflow keeps this comparison active:
+`.github/workflows/bench.yml` runs `scripts/bench_djvulibre.sh` on the same
+machine as Criterion and formats the result with `scripts/djvulibre_compare.py`.
+The benchmark dashboard workflow also publishes a DjVuLibre overlay.
 
-Method: 10 runs, mean, subprocess timing in Python.
-djvu-rs outputs PNG; ddjvu outputs PPM (uncompressed). Both include process startup.
-Output resolution: 150 dpi for all files.
+Current local run (2026-05-04):
 
-| File | djvu-rs CLI | ddjvu CLI | Ratio |
-|------|-------------|-----------|-------|
-| watchmaker.djvu (color IW44, 2550×3301) | **35.8 ms** | 355.3 ms | **~10× faster** |
-| cable_1973_100133.djvu (bilevel JB2, 2550×3301) | **29.5 ms** | 75.0 ms | **~2.5× faster** |
+- Test file: `references/djvujs/library/assets/colorbook.djvu`
+- Input: 2260x3669 px, 400 dpi, color IW44
+- Output: 847x1375 px, 150 dpi
+- libdjvulibre checksum: `738157454`
+- libdjvulibre open+decode: **35.25 ms**
 
-djvu-rs process startup is ~5 ms; ddjvu startup is ~25–35 ms. For very large files the
-CLI margin narrows toward the library-level ratio.
+> libdjvulibre C API is render-only with the page already decoded in memory.
+> `ddjvu` CLI includes process startup and PPM output to `/dev/null`.
 
-### Library-level comparison (render-only, no process overhead)
+| Benchmark | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |
+|-----------|--------:|-------------------:|----------:|------:|
+| `colorbook.djvu` @ 150 dpi, color IW44 | **7.29 ms** | **6.08 ms** | **2.543 s** | djvu-rs **1.2x slower** than C API |
 
-Method: 20 warm-up + 20 measured iterations via `clock_gettime` (DjVuLibre) and
-`std::time::Instant` (djvu-rs). Page already parsed and in memory; only render step timed.
-
-Test file: `colorbook.djvu` — 2260×3669 px at 400 dpi, rendered to 848×1376 px at 150 dpi.
-
-| | djvu-rs | DjVuLibre C API | Ratio |
-|-|---------|-----------------|-------|
-| colorbook, 150 dpi (848×1376 output) — warm | **6.75 ms** | 6.13 ms | djvu-rs within **~10%** of DjVuLibre |
-| colorbook, 150 dpi (848×1376 output) — cold | **22.5 ms** | — | first render (ZP + wavelet + composite) |
-
-**Progressive IW44 optimizations implemented (issue #144):**
-- Partial BG44 decode: only the first chunk (coarsest wavelet bands) for sub=4 renders
-- 1/4-resolution max-pool mask pyramid: single bit lookup per pixel vs 4–9 lookups in the full-res mask
-- Bit-shift coordinate transforms: replaced `fx / bg_subsample` (UDIV) with `fx >> bg_shift` in the hot composite loop
-- Cumulative speedup: 37.4 ms → 6.5 ms for 150 dpi warm render (5.75× faster)
-
-The remaining ~6% gap vs DjVuLibre is due to DjVuLibre using C with platform-specific
-SIMD in the YCbCr→RGB conversion and the wavelet inverse transform.
-
-**djvu-rs advantage: document open latency.**  
-`parse_multipage_520p`: djvu-rs ≈ 1.9 ms vs DjVuLibre ≈ 24–60 ms → **10–30× faster open**.
+For the closest cold-path djvu-rs Criterion comparison,
+`render_colorbook_cold` is **17.9 ms**. That benchmark includes document
+parsing and first render work, but it is not identical to libdjvulibre's
+open+decode measurement.
 
 ### Summary
 
 | Scenario | Winner | Margin |
 |----------|--------|--------|
-| CLI (process startup included) | **djvu-rs** | ~2.5–10× |
-| Native-resolution render | comparable | — |
-| Downscaled render (< native DPI), warm | **djvu-rs** | within 6% of DjVuLibre |
-| Downscaled render (< native DPI), cold | **DjVuLibre** | ~4.4× (cold ZP decode) |
-| Dense 600 dpi bilevel (large JB2) | comparable | ZP decoder widened to u32 in #180 closed the gap |
-| Document open / parse | **djvu-rs** | ~10–30× |
+| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2x faster on `colorbook.djvu` |
+| `ddjvu` CLI subprocess baseline | **djvu-rs Criterion render** | `ddjvu` measured at 2.543 s for the same file/output |
+| djvu-rs cold colorbook render | — | 17.9 ms; not directly equivalent to libdjvulibre open+decode |
+| Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.27 ms |
 
 ---
 
