@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778560065511,
+  "lastUpdate": 1778565472327,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -4280,6 +4280,258 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 47537000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a1805a990e71aa35a26f53c9ee87f1c932a9475d",
+          "message": "perf: add JB2 cross-size refinement probe (#285)",
+          "timestamp": "2026-05-12T14:47:41+09:00",
+          "tree_id": "06fa8f3a0f7d296fa2533214a9c5ffa6690978d0",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/a1805a990e71aa35a26f53c9ee87f1c932a9475d"
+        },
+        "date": 1778565471247,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 118,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 157875,
+            "range": "± 3099",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 783029,
+            "range": "± 8308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 566234,
+            "range": "± 2865",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1292398,
+            "range": "± 15152",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2658,
+            "range": "± 53",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 8891192,
+            "range": "± 433125",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 561599,
+            "range": "± 27626",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2123465,
+            "range": "± 41769",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2740948,
+            "range": "± 9714",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 27533369,
+            "range": "± 701308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 243304,
+            "range": "± 5140",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 345544,
+            "range": "± 1992",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1594333,
+            "range": "± 9575",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 6121764,
+            "range": "± 31570",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 23826236,
+            "range": "± 406952",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1691768,
+            "range": "± 6931",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 13153660,
+            "range": "± 58019",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 13162972,
+            "range": "± 81523",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5323533,
+            "range": "± 52171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 28726390,
+            "range": "± 397118",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 133450283,
+            "range": "± 638979",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 132511319,
+            "range": "± 1295549",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 213757,
+            "range": "± 1618",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 8518323,
+            "range": "± 17076",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1436578342,
+            "range": "± 4495579",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 4153495,
+            "range": "± 62366",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 3322,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 21805851,
+            "range": "± 526063",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 21884345,
+            "range": "± 194732",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3163937,
+            "range": "± 8699",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 23321066,
+            "range": "± 69225",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 194666,
+            "range": "± 3793",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8176000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 49497000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 47725000,
             "range": "± 0",
             "unit": "ns/iter"
           }
