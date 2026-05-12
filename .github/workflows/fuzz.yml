@@ -32,6 +32,9 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
       # Per-target key: each fuzz binary compiles different code, avoid cache contention
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -48,7 +51,7 @@ jobs:
 
       - name: Install cargo-fuzz
         if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-fuzz --locked
+        run: cargo +stable install cargo-fuzz --locked
 
       # Restore corpus from previous runs so coverage improves over time
       - name: Restore fuzz corpus
@@ -59,7 +62,7 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
 
       - name: Run ${{ matrix.target }} for 60 s
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
 
       # Save updated corpus (unique key ensures this run's findings are always stored)
       - name: Save fuzz corpus
