@@ -193,16 +193,57 @@ fn process_file(
     // Verify round-trip — every page must decode pixel-exact.
     let roundtrip_ok = match DjVuDocument::parse(&bundle) {
         Ok(doc) if doc.page_count() == pages.len() => {
-            (0..pages.len()).all(|i| match doc.page(i).and_then(|p| p.extract_mask()) {
-                Ok(Some(d)) => {
-                    d.width == pages[i].width
-                        && d.height == pages[i].height
-                        && d.data == pages[i].data
+            let mut all_ok = true;
+            for (i, page) in pages.iter().enumerate() {
+                let decoded = match doc.page(i).and_then(|p| p.extract_mask()) {
+                    Ok(Some(d)) => d,
+                    Ok(None) => {
+                        eprintln!("  MISMATCH page {i}: extract_mask returned None (no Sjbz?)");
+                        all_ok = false;
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("  MISMATCH page {i}: extract_mask error: {e:?}");
+                        all_ok = false;
+                        continue;
+                    }
+                };
+                let dim_ok = decoded.width == page.width && decoded.height == page.height;
+                let diff_px = if dim_ok {
+                    let mut diff = 0u32;
+                    for y in 0..page.height {
+                        for x in 0..page.width {
+                            if page.get(x, y) != decoded.get(x, y) {
+                                diff += 1;
+                            }
+                        }
+                    }
+                    diff
+                } else {
+                    0
+                };
+                if !dim_ok || diff_px != 0 {
+                    eprintln!(
+                        "  MISMATCH page {i}: {}×{} → {}×{} diff_px={}",
+                        page.width, page.height, decoded.width, decoded.height, diff_px
+                    );
+                    all_ok = false;
                 }
-                _ => false,
-            })
+            }
+            all_ok
         }
-        _ => false,
+        Ok(doc) => {
+            eprintln!(
+                "  page_count mismatch: bundle={} expected={}",
+                doc.page_count(),
+                pages.len()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("  DjVuDocument::parse failed: {e:?}");
+            false
+        }
     };
 
     Some(FileResult {
