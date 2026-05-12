@@ -273,8 +273,11 @@ djvu text file.djvu --all
 # Encode a PNG image into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
 
-# Encode a PNG image into a layered lossy DjVu (JB2 mask + IW44 background)
+# Encode a PNG image into a layered lossy DjVu (JB2 mask + IW44 background + FGbz foreground color)
 djvu encode scan.png --quality quality --output scan.djvu --dpi 300
+
+# Use the conservative archival color profile for a single PNG
+djvu encode scan.png --quality archival --output scan.djvu --dpi 300
 
 # Encode a directory of PNGs into a bundled DJVM with shared Djbz
 djvu encode pages/ --output book.djvu --shared-dict-pages 2
@@ -282,9 +285,10 @@ djvu encode pages/ --output book.djvu --shared-dict-pages 2
 
 For single PNG input, `--quality lossless` luminance-thresholds the image into a
 JB2 mask and writes `INFO + Sjbz`; `--quality quality` uses the layered encoder
-(`INFO + Sjbz + BG44...`) for color input. `--quality archival` is still
-reserved for a future FGbz/profitability model. Directory input currently uses
-the lossless multi-page JB2 path only.
+(`INFO + Sjbz + BG44...` plus `FGbz` when colored foreground is detected) for
+color input. `--quality archival` uses the same layered shape with a denser
+background sample grid. Directory input currently uses the lossless multi-page
+JB2 path only.
 
 ## hOCR and ALTO XML export
 

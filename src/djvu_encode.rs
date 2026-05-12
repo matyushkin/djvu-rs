@@ -42,17 +42,18 @@
 //! # Status
 //!
 //! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz`. Pixel-exact.
-//! - `Quality` from a [`Pixmap`]: ships `INFO + Sjbz + BG44…` —
-//!   layered mask + sub-sampled IW44 background. Lossy by codec
-//!   definition; output is decodable end-to-end. FG layer and FGbz
-//!   palette are #220 follow-ups.
-//! - `Archival`: still [`EncodeError::Unsupported`] — wants the per-CC
-//!   profitability model from #194 Phase 2.5.
+//! - `Quality` from a [`Pixmap`]: ships `INFO + Sjbz + BG44… + FGbz`
+//!   when foreground ink is detected. Lossy by codec definition; output
+//!   is decodable end-to-end.
+//! - `Archival` from a [`Pixmap`]: same layered chunk shape as `Quality`,
+//!   with a denser background sample grid. This is a conservative archival
+//!   profile, not a DjVuLibre-equivalent color text optimiser.
 //! - `Lossless` from a [`Pixmap`] / `Quality` from a [`Bitmap`] are
 //!   rejected: the combinations are mathematically meaningless
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
 
 use crate::bitmap::Bitmap;
+use crate::fgbz_encode::{FgbzColor, encode_fgbz};
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use crate::jb2_encode;
@@ -85,12 +86,11 @@ pub enum EncodeQuality {
     Lossless,
     /// Layered foreground/background encoding. Requires color input
     /// ([`PageEncoder::from_pixmap`]); writes `INFO + Sjbz + BG44…`
-    /// (mask + sub-sampled IW44 background). FG layer and FGbz palette
-    /// are #220 follow-ups.
+    /// plus `FGbz` when foreground ink is detected.
     Quality,
-    /// Archival profile with FGbz palette + aggressive lossy JB2
-    /// refinement matching. *Not yet supported* — needs the per-CC
-    /// profitability model (#194 Phase 2.5).
+    /// Conservative archival color profile. Requires color input; writes
+    /// the same layered chunks as `Quality`, but keeps a denser background
+    /// sample grid. Bilevel input should use `Lossless`.
     Archival,
 }
 
@@ -181,11 +181,24 @@ impl<'a> PageEncoder<'a> {
                     data: jb2_encode::encode_jb2(bm),
                 },
             ])),
-            (Source::Pixmap(pm), EncodeQuality::Quality) => {
-                let seg = segment_page(pm, &SegmentOptions::default());
+            (Source::Pixmap(pm), EncodeQuality::Quality | EncodeQuality::Archival) => {
+                let segment_options = match self.quality {
+                    EncodeQuality::Quality => SegmentOptions::default(),
+                    EncodeQuality::Archival => SegmentOptions {
+                        bg_subsample: 6,
+                        ..SegmentOptions::default()
+                    },
+                    EncodeQuality::Lossless => unreachable!(),
+                };
+                let seg = segment_page(pm, &segment_options);
                 let sjbz = jb2_encode::encode_jb2(&seg.mask);
                 let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
-                let mut chunks = Vec::with_capacity(2 + bg44_chunks.len());
+                let fgbz = foreground_palette(pm, &seg.mask)
+                    .filter(|palette| foreground_palette_is_useful(palette))
+                    .map(|palette| encode_fgbz(&palette, None));
+
+                let mut chunks =
+                    Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()));
                 chunks.push(Chunk::Leaf {
                     id: *b"INFO",
                     data: info,
@@ -200,6 +213,9 @@ impl<'a> PageEncoder<'a> {
                         data: body,
                     });
                 }
+                if let Some(data) = fgbz {
+                    chunks.push(Chunk::Leaf { id: *b"FGbz", data });
+                }
                 Ok(encode_form_djvu(chunks))
             }
             (Source::Pixmap(_), EncodeQuality::Lossless) => Err(EncodeError::Unsupported(
@@ -208,8 +224,8 @@ impl<'a> PageEncoder<'a> {
             (Source::Bitmap(_), EncodeQuality::Quality) => Err(EncodeError::Unsupported(
                 "Quality requires colour input — use from_pixmap or switch to Lossless",
             )),
-            (_, EncodeQuality::Archival) => Err(EncodeError::Unsupported(
-                "Archival profile requires the per-CC profitability model (#194 Phase 2.5)",
+            (Source::Bitmap(_), EncodeQuality::Archival) => Err(EncodeError::Unsupported(
+                "Archival requires colour input — use from_pixmap or switch to Lossless",
             )),
         }
     }
@@ -243,6 +259,33 @@ fn encode_info(width: u16, height: u16, dpi: u16) -> Vec<u8> {
     b[8] = 22; // gamma byte: 22 → 2.2
     b[9] = 0x00; // flags: no rotation
     b
+}
+
+fn foreground_palette(pm: &Pixmap, mask: &Bitmap) -> Option<Vec<FgbzColor>> {
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for y in 0..mask.height {
+        for x in 0..mask.width {
+            if mask.get(x, y) {
+                let (pr, pg, pb) = pm.get_rgb(x, y);
+                r += u64::from(pr);
+                g += u64::from(pg);
+                b += u64::from(pb);
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    Some(vec![FgbzColor {
+        r: (r / n) as u8,
+        g: (g / n) as u8,
+        b: (b / n) as u8,
+    }])
+}
+
+fn foreground_palette_is_useful(palette: &[FgbzColor]) -> bool {
+    palette.iter().any(|c| c.r != 0 || c.g != 0 || c.b != 0)
 }
 
 #[cfg(test)]
@@ -325,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn archival_profile_still_unsupported() {
+    fn archival_bitmap_rejected() {
         let bm = Bitmap::new(16, 16);
         let err = PageEncoder::from_bitmap(&bm)
             .with_quality(EncodeQuality::Archival)
@@ -379,6 +422,53 @@ mod tests {
             bg44_count > 0,
             "expected at least one BG44 chunk, got {bg44_count}"
         );
+    }
+
+    #[test]
+    fn quality_color_emits_fgbz_for_colored_foreground() {
+        let mut pm = Pixmap::white(64, 64);
+        for y in 16..32 {
+            for x in 16..32 {
+                pm.set_rgb(x, y, 180, 20, 20);
+            }
+        }
+
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .expect("encode");
+
+        let form = parse_form(&bytes).expect("parse_form");
+        let fgbz = form
+            .chunks
+            .iter()
+            .find(|chunk| &chunk.id == b"FGbz")
+            .expect("FGbz chunk present");
+        let (palette, indices) = crate::fgbz_encode::decode_fgbz(fgbz.data).expect("decode FGbz");
+        assert_eq!(palette.len(), 1);
+        assert!(indices.is_empty());
+        assert!(palette[0].r > 0, "foreground red should be preserved");
+    }
+
+    #[test]
+    fn archival_color_emits_layered_djvu_with_fgbz() {
+        let mut pm = Pixmap::white(48, 48);
+        for y in 12..24 {
+            for x in 12..24 {
+                pm.set_rgb(x, y, 0, 90, 180);
+            }
+        }
+
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Archival)
+            .encode()
+            .expect("encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        assert!(page.raw_chunk(b"Sjbz").is_some());
+        assert!(!page.all_chunks(b"BG44").is_empty());
+        assert!(page.raw_chunk(b"FGbz").is_some());
     }
 
     #[test]

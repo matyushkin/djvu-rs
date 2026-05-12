@@ -21,6 +21,26 @@ fn write_test_png(path: &Path, w: u32, h: u32) {
     writer.write_image_data(&data).unwrap();
 }
 
+fn write_colored_ink_png(path: &Path, w: u32, h: u32) {
+    let file = std::fs::File::create(path).unwrap();
+    let writer = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let mut data = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            if x >= w / 4 && x < w / 2 && y >= h / 4 && y < h / 2 {
+                data.extend_from_slice(&[160, 20, 20]);
+            } else {
+                data.extend_from_slice(&[255, 255, 255]);
+            }
+        }
+    }
+    writer.write_image_data(&data).unwrap();
+}
+
 #[test]
 fn encode_creates_djvu_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -101,11 +121,37 @@ fn encode_quality_profile_emits_layered_djvu() {
 }
 
 #[test]
-fn encode_archival_profile_still_unsupported() {
+fn encode_quality_profile_emits_fgbz_for_colored_ink() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.png");
     let output = dir.path().join("out.djvu");
-    write_test_png(&input, 16, 16);
+    write_colored_ink_png(&input, 32, 32);
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "quality",
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    let page = doc.page(0).unwrap();
+    assert!(page.raw_chunk(b"FGbz").is_some());
+}
+
+#[test]
+fn encode_archival_profile_emits_layered_djvu() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.png");
+    let output = dir.path().join("out.djvu");
+    write_colored_ink_png(&input, 32, 32);
 
     Command::cargo_bin("djvu")
         .unwrap()
@@ -118,8 +164,14 @@ fn encode_archival_profile_still_unsupported() {
             "archival",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("Archival"));
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    let page = doc.page(0).unwrap();
+    assert!(page.raw_chunk(b"Sjbz").is_some());
+    assert!(!page.all_chunks(b"BG44").is_empty());
+    assert!(page.raw_chunk(b"FGbz").is_some());
 }
 
 #[test]

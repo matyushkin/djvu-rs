@@ -206,9 +206,9 @@ enum RotateArg {
 enum EncodeQualityArg {
     /// Pixel-exact bilevel JB2 (`INFO + Sjbz`).
     Lossless,
-    /// Layered FG/BG with lossy IW44 BG. Currently unsupported — see #220.
+    /// Layered FG/BG with lossy IW44 BG.
     Quality,
-    /// Archival profile with FGbz palette. Currently unsupported — see #194 Phase 2.5.
+    /// Conservative layered profile with denser BG sampling and FGbz palette.
     Archival,
 }
 
@@ -1033,7 +1033,7 @@ fn cmd_encode(
         if !matches!(quality, EncodeQualityArg::Lossless) {
             return Err(
                 "multi-page encode currently supports --quality lossless only \
-                        (#220 follow-ups for layered Quality / Archival)"
+                        (layered Quality / Archival bundles are tracked separately)"
                     .into(),
             );
         }
