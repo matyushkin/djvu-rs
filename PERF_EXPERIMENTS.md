@@ -780,6 +780,36 @@ matches can lose bytes or create invalid streams. A shipped cross-size
 encoder path needs a byte-cost model and explicit lossy/lossless semantics;
 until then `encode_djvm_bundle_jb2` remains exact rec-7 + fresh rec-1 only.
 
+### #278 PR1 — single-page Quality/Archival FGbz profiles — **Kept** (2026-05-12)
+
+**Approach.** Completed the conservative single-page color profile path:
+`Quality` still uses the existing deterministic segmentation and
+`INFO + Sjbz + BG44...` shape, but now adds an `FGbz` foreground palette
+when the detected foreground color is not black. `Archival` no longer
+returns `Unsupported` for color input; it emits the same layered shape with
+a denser background sample grid (`bg_subsample = 6` instead of 12).
+
+This deliberately does not change the multi-page directory encoder, which
+still uses the lossless shared-Djbz path only, and does not revive Hamming
+shared-Djbz clustering.
+
+**Tests.**
+
+- `cargo test -q djvu_encode::tests`
+- `cargo test -q --features cli --test cli_encode -- --nocapture`
+
+The CLI regression fixture is generated in `tests/cli_encode.rs` as a
+white RGB PNG with a dark red foreground block. `--quality quality` and
+`--quality archival` both produce parseable single-page DjVu files with
+`Sjbz`, at least one `BG44`, and `FGbz`.
+
+**Decision.** Kept as PR1 scope. This removes the user-visible
+`Archival` unsupported path for single PNGs and gives colored foreground
+documents a foreground color layer. Remaining quality work should be split
+into focused follow-ups: adaptive binarization/inpainting, per-blit FGbz
+indices or FG44 for multi-color foregrounds, and layered multi-page DJVM
+encoding.
+
 ### #233 — async lazy first-page probe — **Kept** (2026-05-04)
 
 **Approach.** Added `examples/async_lazy_first_page.rs`, a small native
