@@ -26,6 +26,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use djvu_rs::jb2_encode::analyze_jb2_cross_size_refinement;
 use djvu_rs::{
     Bitmap, DjVuDocument,
     jb2_encode::{
@@ -127,6 +128,7 @@ fn process_file(
     threshold: usize,
     diff_fraction: u32,
     cc_stats: bool,
+    cross_size_stats: bool,
 ) -> Option<FileResult> {
     let (pages, orig_total, avg) = match collect_pages(path) {
         Some(t) => t,
@@ -188,6 +190,35 @@ fn process_file(
             agg.pixels_rec_1, agg.pixels_rec_6, agg.pixels_rec_7,
         );
         print_hamming_histogram(&agg.rec_6_hamming);
+    }
+    if cross_size_stats {
+        let mut total = djvu_rs::jb2_encode::CrossSizeRefinementStats::default();
+        for p in &pages {
+            let s = analyze_jb2_cross_size_refinement(p, &shared, 2, 0.05);
+            total.total_ccs += s.total_ccs;
+            total.fresh_ccs += s.fresh_ccs;
+            total.eligible_fresh_ccs += s.eligible_fresh_ccs;
+            total.candidate_ccs += s.candidate_ccs;
+            total.near_matches += s.near_matches;
+            total.near_match_pixels += s.near_match_pixels;
+            total.best_hamming.extend(s.best_hamming);
+        }
+        let median = if total.best_hamming.is_empty() {
+            0
+        } else {
+            total.best_hamming.sort_unstable();
+            total.best_hamming[total.best_hamming.len() / 2]
+        };
+        eprintln!(
+            "  cross-size probe: fresh={} eligible={} candidates={} near_5pct={} ({:.2}%) near_pixels={} median_best_hamming={}",
+            total.fresh_ccs,
+            total.eligible_fresh_ccs,
+            total.candidate_ccs,
+            total.near_matches,
+            total.near_matches as f64 / total.eligible_fresh_ccs.max(1) as f64 * 100.0,
+            total.near_match_pixels,
+            median,
+        );
     }
 
     // Verify round-trip — every page must decode pixel-exact.
@@ -264,6 +295,7 @@ fn main() -> ExitCode {
     // into Hamming clustering for experimentation.
     let mut diff_fraction: u32 = 0;
     let mut cc_stats = false;
+    let mut cross_size_stats = false;
     let mut files: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -279,6 +311,8 @@ fn main() -> ExitCode {
                 .unwrap_or(diff_fraction);
         } else if a == "--cc-stats" {
             cc_stats = true;
+        } else if a == "--cross-size-stats" {
+            cross_size_stats = true;
         } else {
             files.push(a);
         }
@@ -286,21 +320,28 @@ fn main() -> ExitCode {
 
     if files.is_empty() {
         eprintln!(
-            "usage: encode_quality_djbz [--threshold N] [--diff-fraction P] [--cc-stats] <file.djvu> [...]\n\
+            "usage: encode_quality_djbz [--threshold N] [--diff-fraction P] [--cc-stats] [--cross-size-stats] <file.djvu> [...]\n\
              \n\
              Encodes every multi-page input via encode_djvm_bundle_jb2 and\n\
              reports total bytes vs. independent per-page dict + original Sjbz.\n\
              \n\
              --threshold N      promote glyph clusters that span >= N pages (default 2)\n\
              --diff-fraction P  Hamming distance allowance, percent of pixels (0..=10, default 0 = byte-exact)\n\
-             --cc-stats         print per-CC record-type accounting + Hamming histogram (#194 Phase 2.5)"
+             --cc-stats         print per-CC record-type accounting + Hamming histogram (#194 Phase 2.5)\n\
+             --cross-size-stats print experiment-only cross-size refinement headroom (#283)"
         );
         return ExitCode::from(2);
     }
 
     let mut all = Vec::new();
     for f in &files {
-        if let Some(r) = process_file(Path::new(f), threshold, diff_fraction, cc_stats) {
+        if let Some(r) = process_file(
+            Path::new(f),
+            threshold,
+            diff_fraction,
+            cc_stats,
+            cross_size_stats,
+        ) {
             all.push(r);
         }
     }

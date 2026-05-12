@@ -739,6 +739,47 @@ uses byte-exact clustering for every threshold. In addition, inherited
 shared-Djbz symbols are used only for exact record-7 hits, and lossless
 near matches fall back to record-1 rather than rec-6 refinement.
 
+### #283 — cross-size JB2 refinement probe — **Kept instrumentation, default unchanged** (2026-05-12)
+
+**Approach.** Added `analyze_jb2_cross_size_refinement(page, shared,
+max_dim_delta, max_hamming_fraction)`, an experiment-only accounting helper
+that mirrors `encode_jb2_dict_with_shared` dictionary growth but does not
+emit bytes. For fresh record-1 candidates, it scans dictionary symbols whose
+width/height differ by at most 2 px, normalizes the reference into the
+candidate box with nearest-neighbor sampling, and reports how many candidates
+land within a 5% normalized Hamming budget. The existing
+`examples/encode_quality_djbz.rs` harness now exposes this via
+`--cross-size-stats`.
+
+**Command.**
+
+```text
+cargo run --release --example encode_quality_djbz -- \
+  --cc-stats --cross-size-stats \
+  tests/corpus/watchmaker.djvu \
+  tests/corpus/pathogenic_bacteria_1896.djvu
+```
+
+**Numbers.**
+
+| File | Pages | bundle / independent | round-trip | fresh CCs | cross-size candidates | near @ 5% |
+|------|-------|----------------------|------------|-----------|-----------------------|-----------|
+| `watchmaker.djvu` | 12 | 0.945× | ✓ | 2,652 | 2,331 | 547 (20.65%) |
+| `pathogenic_bacteria_1896.djvu` | 517 | 0.976× | ✓ | 759,291 | 686,402 | 61,485 (8.73%) |
+
+Aggregate bundled bytes for the two-file run were 33,553,108 vs 34,384,941
+for independent per-page JB2 dict encoding (0.976×, −2.4%). Pixel round-trip
+stayed exact because the probe is observational only.
+
+**Decision.** Keep the probe, but do not change the default encoder. The
+candidate counts prove there is real cross-size shape similarity, especially
+on `watchmaker`, but they are only an upper bound: record-6 would still carry
+refinement bitmap bytes plus symbol-index/context overhead, and the previous
+same-size/shared-rec-6 experiments showed that plausible-looking Hamming
+matches can lose bytes or create invalid streams. A shipped cross-size
+encoder path needs a byte-cost model and explicit lossy/lossless semantics;
+until then `encode_djvm_bundle_jb2` remains exact rec-7 + fresh rec-1 only.
+
 ### #233 — async lazy first-page probe — **Kept** (2026-05-04)
 
 **Approach.** Added `examples/async_lazy_first_page.rs`, a small native

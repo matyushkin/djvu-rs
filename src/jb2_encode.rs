@@ -442,6 +442,30 @@ struct Cc {
     bitmap: Bitmap,
 }
 
+/// Summary of an experiment-only cross-size refinement search.
+///
+/// This does not affect encoding. It estimates how many components currently
+/// emitted as fresh record-1 symbols have a nearly matching dictionary symbol
+/// with a slightly different bounding box.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CrossSizeRefinementStats {
+    /// Total connected components seen in reading order.
+    pub total_ccs: usize,
+    /// Components that do not have an exact same-size dictionary hit.
+    pub fresh_ccs: usize,
+    /// Fresh components large enough to consider for refinement.
+    pub eligible_fresh_ccs: usize,
+    /// Eligible fresh components with at least one near-size candidate.
+    pub candidate_ccs: usize,
+    /// Candidate components whose best normalized Hamming score is within
+    /// the caller-provided pixel fraction.
+    pub near_matches: usize,
+    /// Sum of source component pixels for near matches.
+    pub near_match_pixels: u64,
+    /// Best normalized Hamming score observed for every near-size candidate.
+    pub best_hamming: Vec<u32>,
+}
+
 /// Extract all 8-connected components of black pixels from `bitmap`.
 ///
 /// Uses iterative DFS on an unpacked byte grid; each component's cropped
@@ -552,6 +576,122 @@ fn packed_hamming(a: &[u8], b: &[u8]) -> u32 {
 /// record-6 (matched-refinement coordinate header + 11-bit refinement
 /// context state) outweighs any saving even at low Hamming distance.
 const REFINEMENT_MIN_PIXELS: u64 = 32;
+
+fn scaled_hamming(cand: &Bitmap, reference: &Bitmap) -> u32 {
+    let mut diff = 0u32;
+    for y in 0..cand.height {
+        let ry = (u64::from(y) * u64::from(reference.height) / u64::from(cand.height)) as u32;
+        for x in 0..cand.width {
+            let rx = (u64::from(x) * u64::from(reference.width) / u64::from(cand.width)) as u32;
+            if cand.get(x, y) != reference.get(rx, ry) {
+                diff += 1;
+            }
+        }
+    }
+    diff
+}
+
+/// Estimate cross-size refinement headroom without changing encoder output.
+///
+/// The JB2 format can encode record-6 refinements where the reference symbol
+/// has a different `(w, h)`, but the shipped encoder intentionally only uses
+/// exact record-7 copies. This helper mirrors the dictionary growth of
+/// [`encode_jb2_dict_with_shared`] and, for fresh symbols, scores nearby
+/// dictionary entries after nearest-neighbor normalization into the candidate
+/// component's dimensions.
+///
+/// `max_dim_delta` limits candidates to entries with width/height differing
+/// by at most that many pixels. `max_hamming_fraction` is the accepted
+/// normalized Hamming budget relative to the candidate's pixel count.
+pub fn analyze_jb2_cross_size_refinement(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    max_dim_delta: u32,
+    max_hamming_fraction: f32,
+) -> CrossSizeRefinementStats {
+    let mut stats = CrossSizeRefinementStats::default();
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return stats;
+    }
+
+    let ccs = extract_ccs(bitmap);
+    let mut order: Vec<usize> = (0..ccs.len()).collect();
+    let bucket = (SAME_LINE_BASELINE_TOL.max(1)) as u32;
+    order.sort_by_key(|&i| {
+        let cc = &ccs[i];
+        let bottom = cc.y + cc.bitmap.height;
+        (bottom / bucket, cc.x)
+    });
+
+    let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
+    let mut dict_entries: Vec<Bitmap> = Vec::new();
+    for sym in shared_symbols {
+        let idx = dict_entries.len();
+        dedup.insert((sym.width, sym.height, sym.data.clone()), idx);
+        dict_entries.push(sym.clone());
+    }
+    let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for (idx, sym) in dict_entries.iter().enumerate() {
+        by_size
+            .entry((sym.width, sym.height))
+            .or_default()
+            .push(idx);
+    }
+
+    for &cc_idx in &order {
+        let cc = &ccs[cc_idx];
+        stats.total_ccs += 1;
+
+        let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
+        if dedup.contains_key(&key) {
+            continue;
+        }
+
+        stats.fresh_ccs += 1;
+        let pixels = u64::from(cc.bitmap.width) * u64::from(cc.bitmap.height);
+        if pixels >= REFINEMENT_MIN_PIXELS {
+            stats.eligible_fresh_ccs += 1;
+            let mut best: Option<u32> = None;
+            let min_w = cc.bitmap.width.saturating_sub(max_dim_delta);
+            let max_w = cc.bitmap.width.saturating_add(max_dim_delta);
+            let min_h = cc.bitmap.height.saturating_sub(max_dim_delta);
+            let max_h = cc.bitmap.height.saturating_add(max_dim_delta);
+            for w in min_w..=max_w {
+                for h in min_h..=max_h {
+                    if w == cc.bitmap.width && h == cc.bitmap.height {
+                        continue;
+                    }
+                    let Some(indices) = by_size.get(&(w, h)) else {
+                        continue;
+                    };
+                    for &idx in indices {
+                        let d = scaled_hamming(&cc.bitmap, &dict_entries[idx]);
+                        best = Some(best.map_or(d, |b| b.min(d)));
+                    }
+                }
+            }
+            if let Some(best) = best {
+                stats.candidate_ccs += 1;
+                stats.best_hamming.push(best);
+                let max_diff = ((pixels as f64) * (max_hamming_fraction as f64)).round() as u32;
+                if best <= max_diff {
+                    stats.near_matches += 1;
+                    stats.near_match_pixels += pixels;
+                }
+            }
+        }
+
+        let next_idx = dict_entries.len();
+        dedup.insert(key, next_idx);
+        by_size
+            .entry((cc.bitmap.width, cc.bitmap.height))
+            .or_default()
+            .push(next_idx);
+        dict_entries.push(cc.bitmap.clone());
+    }
+
+    stats
+}
 
 /// Find the closest same-size dict entry within a Hamming-distance budget,
 /// for use as a **lossy copy** target (record-7) — the encoder pretends the
@@ -2174,6 +2314,35 @@ mod tests {
                 + stats.rec_6_refine_local
                 + stats.rec_6_refine_shared
                 + stats.rec_7_exact
+        );
+    }
+
+    #[test]
+    fn analyze_cross_size_refinement_counts_near_size_candidates() {
+        let shared_glyph = make_bitmap(6, 6, |_, _| true);
+        let taller_near = make_bitmap(6, 7, |_, _| true);
+        let unrelated = make_bitmap(12, 12, |x, y| x == y);
+
+        let stamp = |page: &mut Bitmap, ox: u32, oy: u32, src: &Bitmap| {
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    if src.get(x, y) {
+                        page.set(ox + x, oy + y, true);
+                    }
+                }
+            }
+        };
+        let mut page = make_bitmap(40, 16, |_, _| false);
+        stamp(&mut page, 2, 2, &shared_glyph);
+        stamp(&mut page, 14, 2, &taller_near);
+        stamp(&mut page, 26, 2, &unrelated);
+
+        let stats = analyze_jb2_cross_size_refinement(&page, &[shared_glyph], 1, 0.05);
+        assert_eq!(stats.near_matches, 1);
+        assert_eq!(stats.near_match_pixels, 42);
+        assert!(
+            stats.candidate_ccs >= stats.near_matches,
+            "near matches must be a subset of cross-size candidates"
         );
     }
 
