@@ -191,11 +191,11 @@ impl<'a> PageEncoder<'a> {
                     EncodeQuality::Lossless => unreachable!(),
                 };
                 let seg = segment_page(pm, &segment_options);
-                let sjbz = jb2_encode::encode_jb2(&seg.mask);
+                // Use the dictionary encoder for color profiles so FGbz can
+                // address foreground colors per blitted component.
+                let sjbz = jb2_encode::encode_jb2_dict(&seg.mask);
                 let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
-                let fgbz = foreground_palette(pm, &seg.mask)
-                    .filter(|palette| foreground_palette_is_useful(palette))
-                    .map(|palette| encode_fgbz(&palette, None));
+                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz);
 
                 let mut chunks =
                     Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()));
@@ -261,31 +261,84 @@ fn encode_info(width: u16, height: u16, dpi: u16) -> Vec<u8> {
     b
 }
 
-fn foreground_palette(pm: &Pixmap, mask: &Bitmap) -> Option<Vec<FgbzColor>> {
-    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+#[derive(Debug, Clone, Copy, Default)]
+struct ColorAccum {
+    r: u64,
+    g: u64,
+    b: u64,
+    n: u64,
+}
+
+impl ColorAccum {
+    fn add(&mut self, r: u8, g: u8, b: u8) {
+        self.r += u64::from(r);
+        self.g += u64::from(g);
+        self.b += u64::from(b);
+        self.n += 1;
+    }
+
+    fn color(self) -> Option<FgbzColor> {
+        if self.n == 0 {
+            return None;
+        }
+        Some(FgbzColor {
+            r: (self.r / self.n) as u8,
+            g: (self.g / self.n) as u8,
+            b: (self.b / self.n) as u8,
+        })
+    }
+}
+
+fn foreground_fgbz(pm: &Pixmap, mask: &Bitmap, sjbz: &[u8]) -> Option<Vec<u8>> {
+    let (decoded_mask, blit_map) = crate::jb2::decode_indexed(sjbz, None).ok()?;
+    if decoded_mask.width != mask.width || decoded_mask.height != mask.height {
+        return None;
+    }
+
+    let max_blit = blit_map.iter().copied().filter(|&i| i >= 0).max()? as usize;
+    let mut by_blit = vec![ColorAccum::default(); max_blit + 1];
+    let w = mask.width as usize;
     for y in 0..mask.height {
         for x in 0..mask.width {
             if mask.get(x, y) {
+                let idx = y as usize * w + x as usize;
+                let blit_idx = blit_map.get(idx).copied().unwrap_or(-1);
+                if blit_idx < 0 {
+                    continue;
+                }
                 let (pr, pg, pb) = pm.get_rgb(x, y);
-                r += u64::from(pr);
-                g += u64::from(pg);
-                b += u64::from(pb);
-                n += 1;
+                by_blit[blit_idx as usize].add(pr, pg, pb);
             }
         }
     }
-    if n == 0 {
+
+    let mut palette: Vec<FgbzColor> = Vec::new();
+    let mut indices: Vec<i16> = Vec::with_capacity(by_blit.len());
+    for accum in by_blit {
+        let color = accum.color().unwrap_or_default();
+        let color_idx = match palette.iter().position(|&c| c == color) {
+            Some(i) => i,
+            None => {
+                if palette.len() >= i16::MAX as usize {
+                    return None;
+                }
+                palette.push(color);
+                palette.len() - 1
+            }
+        };
+        indices.push(color_idx as i16);
+    }
+
+    if palette.is_empty() || palette.iter().all(|c| c.r == 0 && c.g == 0 && c.b == 0) {
         return None;
     }
-    Some(vec![FgbzColor {
-        r: (r / n) as u8,
-        g: (g / n) as u8,
-        b: (b / n) as u8,
-    }])
-}
 
-fn foreground_palette_is_useful(palette: &[FgbzColor]) -> bool {
-    palette.iter().any(|c| c.r != 0 || c.g != 0 || c.b != 0)
+    let index_payload = if palette.len() > 1 {
+        Some(indices.as_slice())
+    } else {
+        None
+    };
+    Some(encode_fgbz(&palette, index_payload))
 }
 
 #[cfg(test)]
@@ -448,6 +501,58 @@ mod tests {
         assert_eq!(palette.len(), 1);
         assert!(indices.is_empty());
         assert!(palette[0].r > 0, "foreground red should be preserved");
+    }
+
+    #[test]
+    fn quality_color_emits_per_blit_fgbz_indices() {
+        let mut pm = Pixmap::white(80, 40);
+        for y in 8..24 {
+            for x in 8..24 {
+                pm.set_rgb(x, y, 180, 20, 20);
+            }
+            for x in 48..64 {
+                pm.set_rgb(x, y, 20, 40, 180);
+            }
+        }
+
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .expect("encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        let fgbz = page.raw_chunk(b"FGbz").expect("FGbz present");
+        let (palette, indices) = crate::fgbz_encode::decode_fgbz(fgbz).expect("decode FGbz");
+
+        assert!(
+            palette.len() >= 2,
+            "expected at least two foreground colors, got {palette:?}"
+        );
+        assert!(
+            indices.len() >= 2,
+            "expected per-blit indices for two foreground components"
+        );
+        assert_ne!(
+            indices[0], indices[1],
+            "separate colored components should point at distinct palette entries"
+        );
+
+        let rendered = crate::Document::from_bytes(bytes)
+            .expect("document")
+            .page(0)
+            .expect("page")
+            .render()
+            .expect("render");
+        let left = rendered.get_rgb(12, 12);
+        let right = rendered.get_rgb(52, 12);
+        assert!(
+            left.0 > left.2,
+            "left foreground should render red-dominant, got {left:?}"
+        );
+        assert!(
+            right.2 > right.0,
+            "right foreground should render blue-dominant, got {right:?}"
+        );
     }
 
     #[test]
