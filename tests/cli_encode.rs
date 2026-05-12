@@ -41,6 +41,28 @@ fn write_colored_ink_png(path: &Path, w: u32, h: u32) {
     writer.write_image_data(&data).unwrap();
 }
 
+fn write_two_color_ink_png(path: &Path, w: u32, h: u32) {
+    let file = std::fs::File::create(path).unwrap();
+    let writer = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let mut data = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            if x >= w / 4 && x < w / 2 && y >= h / 4 && y < h / 2 {
+                data.extend_from_slice(&[160, 20, 20]);
+            } else if x >= (w * 5) / 8 && x < (w * 7) / 8 && y >= h / 4 && y < h / 2 {
+                data.extend_from_slice(&[20, 40, 180]);
+            } else {
+                data.extend_from_slice(&[255, 255, 255]);
+            }
+        }
+    }
+    writer.write_image_data(&data).unwrap();
+}
+
 #[test]
 fn encode_creates_djvu_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -125,7 +147,7 @@ fn encode_quality_profile_emits_fgbz_for_colored_ink() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.png");
     let output = dir.path().join("out.djvu");
-    write_colored_ink_png(&input, 32, 32);
+    write_two_color_ink_png(&input, 32, 32);
 
     Command::cargo_bin("djvu")
         .unwrap()
@@ -143,7 +165,10 @@ fn encode_quality_profile_emits_fgbz_for_colored_ink() {
     let bytes = std::fs::read(&output).unwrap();
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
     let page = doc.page(0).unwrap();
-    assert!(page.raw_chunk(b"FGbz").is_some());
+    let fgbz = page.raw_chunk(b"FGbz").expect("FGbz");
+    let (palette, indices) = djvu_rs::fgbz_encode::decode_fgbz(fgbz).unwrap();
+    assert!(palette.len() >= 2);
+    assert!(indices.len() >= 2);
 }
 
 #[test]

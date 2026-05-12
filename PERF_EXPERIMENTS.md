@@ -810,6 +810,31 @@ into focused follow-ups: adaptive binarization/inpainting, per-blit FGbz
 indices or FG44 for multi-color foregrounds, and layered multi-page DJVM
 encoding.
 
+### #289 — per-blit FGbz indices for colored foreground — **Kept** (2026-05-12)
+
+**Approach.** Switched single-page color profiles from direct whole-page
+`encode_jb2` masks to dict-based `encode_jb2_dict` masks, then derives the
+FGbz palette from the independently decoded `decode_indexed` blit map. Each
+foreground blit gets an average source RGB color; duplicate colors share one
+palette entry; multi-color foregrounds emit an FGbz index table. Single-color
+foregrounds still use compact palette-only FGbz.
+
+**Tests.**
+
+- `cargo test -q djvu_encode::tests`
+- `cargo test -q --features cli --test cli_encode -- --nocapture`
+- `cargo clippy --lib --tests -- -D warnings`
+
+The new regression fixture has two separated colored foreground components.
+The unit test verifies both the FGbz palette/index table and a decoded render:
+the left component remains red-dominant and the right component remains
+blue-dominant.
+
+**Decision.** Kept. This closes the main PR1 limitation from #278: colored
+foreground no longer collapses to one averaged ink color when the page has
+multiple separated foreground components. Continuous foreground regions and
+FG44 remain out of scope; those need separate visual-quality measurements.
+
 ### #233 — async lazy first-page probe — **Kept** (2026-05-04)
 
 **Approach.** Added `examples/async_lazy_first_page.rs`, a small native
