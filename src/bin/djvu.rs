@@ -415,6 +415,7 @@ fn to_user_rotation(r: &RotateArg) -> djvu_rs::djvu_render::UserRotation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_render(
     path: &Path,
     page: usize,

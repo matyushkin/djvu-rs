@@ -64,28 +64,33 @@ page in the *bit-perfect-baseline* corpus exceeds:
 * `MEAN_DELTA_CEILING = 0.2`
 
 The CI corpus is the subset of `tests/fixtures/*.djvu` that is
-bit-for-bit identical to ddjvu at native resolution today (see the
-empirical table above). Any future regression — even a tiny mean Δ
-shift — fails the gate.
+bit-perfect or comfortably within the strict native-resolution ceilings today
+(see the empirical table above). Any future regression above those ceilings
+fails the gate.
 
 ## Known divergences (excluded from CI gate, tracked separately)
 
-Tracked under **#250**:
+None for the currently tracked native-resolution corpus.
 
-* `colorbook.djvu` page 0 — residual IW44 native-resolution divergence
-  after the #199 compositor coordinate fix. Reproducer:
+Resolved under **#279**:
+
+* `colorbook.djvu` page 0 — after centre-aligned BG sampling, integer FG/BG
+  colour-cell pitch, and nearest-cell FG44 lookup, the native diff is within the
+  strict gate. Reproducer:
   `cargo run --release --features cli --example diff_djvulibre -- --width 99999 --tolerance 4 --max-pages 1 tests/fixtures/colorbook.djvu`.
-  Current result at 2260x3669: `mismatch_pct = 3.4482%`,
-  `max Δ = 97`, `mean Δ = 0.659`.
-  A nearest-neighbor FG44 cell-mapping experiment regressed this to 10.93%,
-  so the remaining drift is not explained by simple FG44 cell assignment.
-  Keep this page excluded from the strict native-resolution CI corpus unless
-  a future IW44 interpolation/color-ordering fix brings it below 0.5%.
-* `navm_fgbz.djvu` pages 3 + 4 — FGbz divergence
-  (`mismatch_pct = 0.96%–2.2%`, `mean Δ ≈ 1–2` at width 2550).
-  Small enough that single-LSB rounding can't explain it.
+  Current result at 2260x3669: `mismatch_pct = 0.2673%`, `max Δ = 56`,
+  `mean Δ = 0.071` (down from `3.4482%`, `max Δ = 97`, `mean Δ = 0.659`).
+  Stage checks showed the JB2 mask matches ddjvu exactly and raw BG44 at
+  754×1223 matches ddjvu exactly; the fixed drift was native-page
+  compositing/upscaling, especially FG44 pixels. Rejected hypotheses:
+  endpoint-only plane mapping improved only to 2.07%; old nearest-neighbour
+  FG44 mapping without centre/integer-cell alignment regressed to 10.93%;
+  ad-hoc per-layer subpixel offsets improved to ~1.60% but were not kept because
+  they are not a clean-room format rule.
 
-These are excluded from the CI corpus until their tracking issues land.
+* `navm_fgbz.djvu` pages 3 + 4 — after the #279 sampling change they measure
+  `0.0010%` / `0.0271%` mismatch at width 2550 with mean Δ `0.001` / `0.003`,
+  within the strict native gate.
 
 ## Filing divergences
 

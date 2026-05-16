@@ -440,9 +440,10 @@ fn rgb_to_rgba_scalar(src: &[u8], dst: &mut [u8], start: usize, end: usize) {
     }
 }
 
-/// Q24 ratios `(plane_w << 24) / page_w` and `(plane_h << 24) / page_h` for
-/// converting page-space FRACBITS coords into plane-space FRACBITS coords.
-/// Returns `(0, 0)` when `plane` is `None` or page dims are zero. Issue #199.
+/// Generic Q24 ratios `(plane_w << 24) / page_w` and `(plane_h << 24) / page_h`
+/// for converting page-space FRACBITS coords into plane-space FRACBITS coords.
+/// Returns `(0, 0)` when `plane` is `None` or page dims are zero.  The public
+/// FG/BG helpers below apply layer-specific cell-grid adjustments first.
 #[inline]
 fn plane_q24(plane: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
     match plane {
@@ -454,14 +455,50 @@ fn plane_q24(plane: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
     }
 }
 
+/// Map page-space fixed-point coordinates to BG44/FG44 plane-space by aligning
+/// pixel centres instead of top-left corners.  This matches the usual image
+/// resampling convention and reduces native-resolution drift against ddjvu for
+/// non-integer page→plane ratios such as colorbook's 2260→754 BG scale.
+#[inline]
+fn map_plane_center_frac(page_frac: u32, q24: u64) -> u32 {
+    let centered = (((page_frac as u64 + (FRAC / 2) as u64) * q24) >> 24) as u32;
+    centered.saturating_sub(FRAC / 2)
+}
+
 #[inline]
 fn fg_q24(fg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
-    plane_q24(fg, page_w, page_h)
+    match fg {
+        Some(p) if page_w > 0 && page_h > 0 && p.width > 0 && p.height > 0 => {
+            // FG44 is a sparse foreground colour map.  Horizontally, the last
+            // encoded column is often padding for a fixed-width colour cell
+            // grid (e.g. 2260px page / 189px FG => 12px cells), so use the
+            // inferred integer cell pitch instead of stretching across the
+            // padded column.  Vertically, use the encoded plane ratio so the
+            // bottom FG row remains reachable when the page height is not an
+            // exact multiple of the cell pitch.
+            let sx = page_w.div_ceil(p.width).max(1);
+            (
+                (1u64 << 24) / sx as u64,
+                ((p.height as u64) << 24) / page_h as u64,
+            )
+        }
+        _ => plane_q24(fg, page_w, page_h),
+    }
 }
 
 #[inline]
 fn bg_q24(bg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
-    plane_q24(bg, page_w, page_h)
+    match bg {
+        Some(p) if page_w > 0 && page_h > 0 && p.width > 0 && p.height > 0 => {
+            // BG44 planes are cell grids too (usually page/3 for scans).  Use
+            // the inferred integer subsample pitch so the padded right/bottom
+            // edge cells do not stretch across the page during native render.
+            let sx = page_w.div_ceil(p.width).max(1);
+            let sy = page_h.div_ceil(p.height).max(1);
+            ((1u64 << 24) / sx as u64, (1u64 << 24) / sy as u64)
+        }
+        _ => plane_q24(bg, page_w, page_h),
+    }
 }
 
 /// Sample a pixmap at fractional coordinates using bilinear interpolation.
@@ -486,7 +523,8 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
     let lerp = |a: u8, b: u8, c: u8, d: u8| -> u8 {
         let top = a as u32 * (FRAC - tx) + b as u32 * tx;
         let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
-        let v = (top * (FRAC - ty) + bot * ty) >> (2 * FRACBITS);
+        let numerator = top * (FRAC - ty) + bot * ty;
+        let v = (numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS);
         v.min(255) as u8
     };
 
@@ -495,6 +533,13 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
         lerp(g00, g10, g01, g11),
         lerp(b00, b10, b01, b11),
     )
+}
+
+#[inline]
+fn sample_nearest(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
+    let x = ((fx + FRAC / 2) >> FRACBITS).min(pm.width.saturating_sub(1));
+    let y = ((fy + FRAC / 2) >> FRACBITS).min(pm.height.saturating_sub(1));
+    pm.get_rgb(x, y)
 }
 
 /// Area-average (box filter) sample: average all source pixels covered by the
@@ -1180,12 +1225,10 @@ struct CompositeContext<'a> {
     page_w: u32,
     page_h: u32,
     bg: Option<&'a Pixmap>,
-    /// Q24 ratio `(bg.width << 24) / page_w` for converting page-space FRACBITS
-    /// coordinates to BG-plane FRACBITS coordinates:
-    /// `bg_x = (page_x as u64 * bg_x_q24 as u64) >> 24`. Issue #199 — without
-    /// this scale, page-space `fx` was clamped to `bg.width - 1` whenever the
-    /// BG plane wasn't a power-of-2 of the page (e.g. 1/3-of-page, common for
-    /// scanned colour pages). `0` when `bg` is `None`.
+    /// Q24 ratio for converting page-space FRACBITS coordinates to BG-plane
+    /// FRACBITS coordinates.  Uses the inferred integer BG44 cell pitch so
+    /// padded edge cells do not stretch across the native render.  `0` when
+    /// `bg` is `None`.
     bg_x_q24: u64,
     bg_y_q24: u64,
     mask: Option<&'a crate::bitmap::Bitmap>,
@@ -1196,12 +1239,10 @@ struct CompositeContext<'a> {
     /// Per-pixel blit index map (same dimensions as mask). `-1` = no blit.
     blit_map: Option<&'a [i32]>,
     fg44: Option<&'a Pixmap>,
-    /// Q24 ratio `(fg.width << 24) / page_w` for converting page-space FRACBITS
-    /// coordinates to FG44-space FRACBITS coordinates:
-    /// `fg_x = (page_x as u64 * fg_x_q24 as u64) >> 24`. Issue #199 — without
-    /// this scale, the page-space `fx` was clamped to `fg.width - 1` for any
-    /// pixel beyond the FG plane's right edge (≈ 92% of the page at sub=12).
-    /// `0` when `fg44` is `None`.
+    /// Q24 ratio for converting page-space FRACBITS coordinates to FG44-space
+    /// FRACBITS coordinates.  The horizontal ratio uses the inferred integer
+    /// foreground colour-cell pitch; the vertical ratio uses the encoded plane
+    /// height so the bottom row remains reachable.  `0` when `fg44` is `None`.
     fg_x_q24: u64,
     fg_y_q24: u64,
     gamma_lut: &'a [u8; 256],
@@ -1286,15 +1327,15 @@ fn composite_loop_bilinear(ctx: &CompositeContext<'_>, buf: &mut [u8], fx_step: 
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     (color.r, color.g, color.b)
                 } else if let Some(fg) = ctx.fg44 {
-                    let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
-                    let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
-                    sample_bilinear(fg, fg_fx, fg_fy)
+                    let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
+                    let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+                    sample_nearest(fg, fg_fx, fg_fy)
                 } else {
                     (0, 0, 0)
                 }
             } else if let Some(bg) = ctx.bg {
-                let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
-                let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+                let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
+                let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
                 sample_bilinear(bg, bg_fx, bg_fy)
             } else {
                 (255, 255, 255)
@@ -1672,15 +1713,15 @@ fn composite_rows_bilinear_one(
                 let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                 (color.r, color.g, color.b)
             } else if let Some(fg) = ctx.fg44 {
-                let fg_fx = ((fx as u64 * ctx.fg_x_q24) >> 24) as u32;
-                let fg_fy = ((fy as u64 * ctx.fg_y_q24) >> 24) as u32;
-                sample_bilinear(fg, fg_fx, fg_fy)
+                let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
+                let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+                sample_nearest(fg, fg_fx, fg_fy)
             } else {
                 (0, 0, 0)
             }
         } else if let Some(bg) = ctx.bg {
-            let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
-            let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+            let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
+            let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
             sample_bilinear(bg, bg_fx, bg_fy)
         } else {
             (255, 255, 255)
@@ -2522,21 +2563,67 @@ mod tests {
     /// sampler clamped most of the page to the rightmost BG column.
     #[test]
     fn bg_q24_maps_non_pow2_subsample() {
-        // Page 2260×3669 with BG plane 754×1223 (DjVu's 1/3-of-page layout).
+        // Page 2260×3669 with BG plane 754×1223 (DjVu's padded 1/3-page layout).
         let bg = Pixmap::white(754, 1223);
         let (qx, qy) = bg_q24(Some(&bg), 2260, 3669);
-        let frac = 1u64 << FRACBITS;
-        let last_x = 2259u64 * frac;
-        let bg_px = ((last_x * qx) >> 24) >> FRACBITS;
-        assert_eq!(bg_px, (bg.width as u64) - 1);
-        let last_y = 3668u64 * frac;
-        let bg_py = ((last_y * qy) >> 24) >> FRACBITS;
-        assert_eq!(bg_py, (bg.height as u64) - 1);
+        assert_eq!(qx, (1u64 << 24) / 3);
+        assert_eq!(qy, (1u64 << 24) / 3);
+
+        let last_x = 2259u32 * FRAC;
+        let bg_px = (map_plane_center_frac(last_x, qx) as u64) >> FRACBITS;
+        assert!(bg_px < bg.width as u64);
+        let last_y = 3668u32 * FRAC;
+        let bg_py = (map_plane_center_frac(last_y, qy) as u64) >> FRACBITS;
+        assert!(bg_py < bg.height as u64);
     }
 
     #[test]
     fn bg_q24_returns_zero_when_bg_is_none() {
         assert_eq!(bg_q24(None, 100, 100), (0, 0));
+    }
+
+    #[test]
+    fn fg_q24_uses_integer_horizontal_cell_pitch() {
+        let fg = Pixmap::white(189, 306);
+        let (qx, qy) = fg_q24(Some(&fg), 2260, 3669);
+        assert_eq!(qx, (1u64 << 24) / 12);
+        assert_eq!(qy, ((306u64) << 24) / 3669);
+    }
+
+    #[test]
+    fn bg_q24_uses_integer_cell_pitch_for_padded_edges() {
+        let bg = Pixmap::white(754, 1223);
+        let (qx, qy) = bg_q24(Some(&bg), 2260, 3669);
+        assert_eq!(qx, (1u64 << 24) / 3);
+        assert_eq!(qy, (1u64 << 24) / 3);
+    }
+
+    #[test]
+    fn map_plane_center_frac_aligns_pixel_centers() {
+        // Destination page is twice the source plane size.  Page pixel x=1 has
+        // centre 1.5; mapped to source centre space that is 1.5 * 0.5 - 0.5 = 0.25.
+        let q24 = (1u64 << 24) / 2;
+        assert_eq!(map_plane_center_frac(0, q24), 0);
+        assert_eq!(map_plane_center_frac(FRAC, q24), FRAC / 4);
+    }
+
+    #[test]
+    fn sample_bilinear_rounds_to_nearest() {
+        let mut pm = Pixmap::new(2, 2, 0, 0, 0, 255);
+        pm.set_rgb(1, 1, 255, 255, 255);
+
+        // At the exact centre, bilinear interpolation is 63.75, which should
+        // round to 64 instead of truncating to 63.
+        assert_eq!(sample_bilinear(&pm, FRAC / 2, FRAC / 2), (64, 64, 64));
+    }
+
+    #[test]
+    fn sample_nearest_rounds_to_nearest_pixel() {
+        let mut pm = Pixmap::new(2, 1, 10, 20, 30, 255);
+        pm.set_rgb(1, 0, 200, 210, 220);
+
+        assert_eq!(sample_nearest(&pm, FRAC / 2 - 1, 0), (10, 20, 30));
+        assert_eq!(sample_nearest(&pm, FRAC / 2, 0), (200, 210, 220));
     }
 
     /// RenderOptions default values.

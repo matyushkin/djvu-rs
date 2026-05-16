@@ -59,13 +59,9 @@ jobs:
       # bit-perfect or near-bit-perfect against ddjvu — see
       # tests/diff_tolerance.md for the empirical baseline.
       #
-      # Excluded for now (tracked separately):
-      #   colorbook.djvu — residual ≈3.45% on p0, likely glyph-edge
-      #                    bilinear-interpolation drift (#199 follow-up)
-      #
-      # navm_fgbz.djvu was re-added after #248 fixed the page→plane-space
-      # coord conversion (#199); worst page p4 measures 0.12% mismatch /
-      # mean Δ 0.024, comfortably within the gate below.
+      # No known native-resolution exclusions remain for the tracked #279 pages:
+      # colorbook.djvu p0 now measures 0.267% mismatch / mean Δ 0.071, and
+      # navm_fgbz.djvu p4 measures 0.027% mismatch / mean Δ 0.003.
       #
       # Width 99999 caps to native page width; small fixtures render at
       # their native dimensions. This is the only mode in which the diff
@@ -75,27 +71,30 @@ jobs:
           TOL: ${{ github.event.inputs.tolerance || '4' }}
           WIDTH: ${{ github.event.inputs.width || '99999' }}
         run: |
-          ./target/release/examples/diff_djvulibre \
-            --width "$WIDTH" --tolerance "$TOL" \
-            tests/fixtures/boy.djvu \
-            tests/fixtures/boy_jb2.djvu \
-            tests/fixtures/chicken.djvu \
-            tests/fixtures/ccitt_2.djvu \
-            tests/fixtures/links.djvu \
-            tests/fixtures/problem_page.djvu \
-            tests/fixtures/big-scanned-page.djvu \
-            tests/fixtures/navm_fgbz.djvu \
-              | tee diff_results.jsonl
+          {
+            ./target/release/examples/diff_djvulibre \
+              --width "$WIDTH" --tolerance "$TOL" \
+              tests/fixtures/boy.djvu \
+              tests/fixtures/boy_jb2.djvu \
+              tests/fixtures/chicken.djvu \
+              tests/fixtures/ccitt_2.djvu \
+              tests/fixtures/links.djvu \
+              tests/fixtures/problem_page.djvu \
+              tests/fixtures/big-scanned-page.djvu \
+              tests/fixtures/navm_fgbz.djvu
+            ./target/release/examples/diff_djvulibre \
+              --width "$WIDTH" --tolerance "$TOL" --max-pages 1 \
+              tests/fixtures/colorbook.djvu
+          } | tee diff_results.jsonl
 
       # CI gate: any page over the per-codec ceiling fails. See
       # tests/diff_tolerance.md. Tight thresholds because every file in
-      # the CI corpus is bit-perfect today; any non-zero mismatch is a
-      # regression worth investigating.
+      # the CI corpus is bit-perfect or comfortably within the native gate today.
       - name: Check thresholds
         run: |
           python3 - <<'PYEOF'
           import json, sys
-          PAGE_CEILING_PCT = 0.5      # bit-perfect today; tight gate
+          PAGE_CEILING_PCT = 0.5      # strict native-resolution gate
           MEAN_DELTA_CEILING = 0.2
           fails = []
           for line in open("diff_results.jsonl"):
