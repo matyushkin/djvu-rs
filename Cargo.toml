@@ -109,6 +109,10 @@ required-features = ["cli"]
 name = "async_lazy_first_page"
 required-features = ["async"]
 
+[[example]]
+name = "probe_tiff_streaming_memory"
+required-features = ["tiff"]
+
 [[bench]]
 name = "codecs"
 harness = false
