@@ -114,8 +114,8 @@ enum Cmd {
     ///
     /// Single PNG input supports lossless bilevel JB2 plus layered
     /// quality/archival color profiles (`INFO + Sjbz + BG44 + FGbz`).
-    /// Multi-page directory input currently builds a lossless `FORM:DJVM`
-    /// bundle with a shared Djbz dictionary across pages.
+    /// Multi-page directory input supports the same profiles: lossless keeps a
+    /// shared Djbz dictionary, while layered profiles keep per-page masks.
     Encode {
         /// Input PNG path, or a directory of PNGs (sorted by file name)
         /// for multi-page encoding.
@@ -1059,42 +1059,53 @@ fn cmd_encode(
     };
 
     if input.is_dir() {
-        if !matches!(quality, EncodeQualityArg::Lossless) {
-            return Err(
-                "multi-page encode currently supports --quality lossless only \
-                        (layered Quality / Archival bundles are tracked separately)"
-                    .into(),
+        let entries = directory_png_entries(input)?;
+
+        if matches!(quality, EncodeQualityArg::Lossless) {
+            let mut masks = Vec::with_capacity(entries.len());
+            for path in &entries {
+                let pixmap = decode_png_to_pixmap(path)?;
+                let seg = segment_page(&pixmap, &SegmentOptions::default());
+                masks.push(seg.mask);
+            }
+            let bytes = encode_djvm_bundle_jb2(&masks, shared_dict_pages);
+            std::fs::write(output, &bytes)?;
+            eprintln!(
+                "{} pages → {} ({} bytes, shared-dict threshold = {})",
+                entries.len(),
+                output.display(),
+                bytes.len(),
+                shared_dict_pages,
             );
-        }
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(input)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
-            })
-            .collect();
-        entries.sort();
-        if entries.is_empty() {
-            return Err(format!("{}: no PNG files found in directory", input.display()).into());
+            return Ok(());
         }
 
-        let mut masks = Vec::with_capacity(entries.len());
+        if shared_dict_pages != 2 {
+            eprintln!(
+                "note: --shared-dict-pages is ignored for layered directory encode; \
+                 each page keeps its own Sjbz mask"
+            );
+        }
+
+        let mut pages = Vec::with_capacity(entries.len());
         for path in &entries {
             let pixmap = decode_png_to_pixmap(path)?;
-            let seg = segment_page(&pixmap, &SegmentOptions::default());
-            masks.push(seg.mask);
+            let page = PageEncoder::from_pixmap(&pixmap)
+                .with_dpi(dpi)
+                .with_quality(q)
+                .encode()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            pages.push(page);
         }
-        let bytes = encode_djvm_bundle_jb2(&masks, shared_dict_pages);
+        let page_refs: Vec<&[u8]> = pages.iter().map(Vec::as_slice).collect();
+        let bytes = djvu_rs::djvm::merge(&page_refs)?;
         std::fs::write(output, &bytes)?;
         eprintln!(
-            "{} pages → {} ({} bytes, shared-dict threshold = {})",
+            "{} pages → {} ({} bytes, layered {:?})",
             entries.len(),
             output.display(),
             bytes.len(),
-            shared_dict_pages,
+            q,
         );
         return Ok(());
     }
@@ -1126,6 +1137,24 @@ fn cmd_encode(
         bytes.len(),
     );
     Ok(())
+}
+
+fn directory_png_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+        })
+        .collect();
+    entries.sort();
+    if entries.is_empty() {
+        return Err(format!("{}: no PNG files found in directory", dir.display()).into());
+    }
+    Ok(entries)
 }
 
 fn decode_png_to_pixmap(path: &Path) -> Result<djvu_rs::Pixmap, Box<dyn std::error::Error>> {

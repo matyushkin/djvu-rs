@@ -5,6 +5,27 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #290 — layered multi-page DJVM directory encode — **Kept** (2026-05-16)
+
+**Approach.** Extended `djvu encode <dir> --quality quality|archival` to encode
+pages independently with `PageEncoder::from_pixmap`, then bundle the resulting
+single-page `FORM:DJVU` pages with `djvm::merge`. The existing lossless directory
+path is left unchanged and still uses `encode_djvm_bundle_jb2` with
+`--shared-dict-pages`. Layered directory encode deliberately does **not** create a
+shared Djbz dictionary: each page keeps its own `Sjbz` mask plus `BG44` and
+optional `FGbz`, avoiding rejected Hamming shared-Djbz clustering while preserving
+layered chunks in a parseable bundled DJVM.
+
+**Numbers / fixture.** Added CLI fixtures for two-page RGB directories. Both
+`--quality quality` and `--quality archival` produce parseable `page_count=2`
+DJVM bundles; each page has `Sjbz`, `BG44`, and `FGbz`. The quality fixture also
+renders every page through `djvu_render::render_pixmap` at native 32×32 pixels.
+The pre-existing lossless directory fixture still produces `page_count=3` with
+`Sjbz` pages and no `BG44` / `FGbz` chunks.
+
+**Decision.** Kept. This satisfies layered multi-page encode without changing the
+lossless shared-Djbz behavior or reviving Hamming clustering in the default path.
+
 ### #288 — adaptive segmentation + BG-block inpainting — **Kept** (2026-05-16)
 
 **Approach.** Extended `SegmentOptions` without changing its default behaviour:
