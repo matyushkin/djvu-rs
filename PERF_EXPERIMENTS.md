@@ -5,6 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #280 — TIFF export uses `render_streaming` rows — **Kept** (2026-05-16)
+
+**Approach.** Added `tiff_export::djvu_to_tiff_writer(doc, opts, writer)` and
+changed the existing `djvu_to_tiff` byte-buffer wrapper to delegate to it.
+Color TIFF pages now use `djvu_render::render_streaming` when options are
+streamable (no AA, bilinear/no-op resampling, identity combined rotation) and
+feed RGB rows directly into TIFF strips. Pages requiring render post-processing
+keep the existing full-`Pixmap` fallback. Bilevel TIFF export was already a
+mask-extraction path and remains unchanged.
+
+**Numbers.** Repro probe added as
+`examples/probe_tiff_streaming_memory.rs` (`required-features = ["tiff"]`).
+Command run locally after a release build:
+
+```text
+/usr/bin/time -l target/release/examples/probe_tiff_streaming_memory \
+  tests/fixtures/problem_page.djvu /tmp/problem_page_streamed.tiff 1.0
+```
+
+Output for the 600-dpi `problem_page.djvu` fixture:
+
+- page: `3288x5050` px at scale `1.000` (`16,604,400` pixels)
+- output TIFF bytes written to `File`: `49,813,798`
+- full RGBA pixmap allocation avoided: `66,417,600` bytes
+- full RGB staging allocation avoided: `49,813,200` bytes
+- `/usr/bin/time -l` maximum resident set size: `7,962,624` bytes
+- peak memory footprint: `7,111,552` bytes
+
+**Tests.** Added TIFF tests comparing decoded streamed color-TIFF pixels against
+the existing `render_pixmap(...).to_rgb()` result for both a color page
+(`chicken.djvu`) and a bilevel page (`boy_jb2.djvu`). Also fixed an existing
+TIFF test to unwrap `extract_bilevel_pixels` under the `tiff` feature.
+
+**Decision.** Kept. This makes a real public export path use the row-streaming
+renderer end-to-end without constructing a full output `Pixmap` or full RGB
+staging image, while preserving byte/pixel equivalence through tests and keeping
+the full-pixmap fallback for unsupported render options.
+
 ### #222 PR2 — high-level setters (`page_mut(i).set_text_layer`/`set_annotations`/`set_metadata`) — **Kept** (2026-05-01)
 
 **Approach.** Builds on PR1's chunk-replacement primitive. New surface:
