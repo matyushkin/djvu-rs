@@ -221,8 +221,86 @@ fn encode_directory_produces_multipage_bundle() {
         .success();
 
     let bytes = std::fs::read(&output).unwrap();
-    let doc = djvu_rs::Document::from_bytes(bytes).unwrap();
+    let doc = djvu_rs::Document::from_bytes(bytes.clone()).unwrap();
     assert_eq!(doc.page_count(), 3);
+    let parsed = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    let page = parsed.page(0).unwrap();
+    assert!(page.raw_chunk(b"Sjbz").is_some());
+    assert!(page.all_chunks(b"BG44").is_empty());
+    assert!(page.raw_chunk(b"FGbz").is_none());
+}
+
+#[test]
+fn encode_quality_directory_produces_layered_multipage_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_dir = dir.path().join("scans");
+    std::fs::create_dir(&input_dir).unwrap();
+    write_two_color_ink_png(&input_dir.join("01.png"), 32, 32);
+    write_colored_ink_png(&input_dir.join("02.png"), 32, 32);
+    let output = dir.path().join("book.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "quality",
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    assert_eq!(doc.page_count(), 2);
+    for idx in 0..doc.page_count() {
+        let page = doc.page(idx).unwrap();
+        assert!(page.raw_chunk(b"Sjbz").is_some(), "page {idx} Sjbz");
+        assert!(!page.all_chunks(b"BG44").is_empty(), "page {idx} BG44");
+        assert!(page.raw_chunk(b"FGbz").is_some(), "page {idx} FGbz");
+        let opts = djvu_rs::djvu_render::RenderOptions {
+            width: u32::from(page.width()),
+            height: u32::from(page.height()),
+            ..Default::default()
+        };
+        let rendered = djvu_rs::djvu_render::render_pixmap(page, &opts).unwrap();
+        assert_eq!((rendered.width, rendered.height), (32, 32));
+    }
+}
+
+#[test]
+fn encode_archival_directory_produces_layered_multipage_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_dir = dir.path().join("scans");
+    std::fs::create_dir(&input_dir).unwrap();
+    write_colored_ink_png(&input_dir.join("01.png"), 32, 32);
+    write_two_color_ink_png(&input_dir.join("02.png"), 32, 32);
+    let output = dir.path().join("book.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "archival",
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    assert_eq!(doc.page_count(), 2);
+    for idx in 0..doc.page_count() {
+        let page = doc.page(idx).unwrap();
+        assert!(page.raw_chunk(b"Sjbz").is_some(), "page {idx} Sjbz");
+        assert!(!page.all_chunks(b"BG44").is_empty(), "page {idx} BG44");
+        assert!(page.raw_chunk(b"FGbz").is_some(), "page {idx} FGbz");
+    }
 }
 
 #[test]

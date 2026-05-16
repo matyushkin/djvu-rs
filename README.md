@@ -287,8 +287,11 @@ For single PNG input, `--quality lossless` luminance-thresholds the image into a
 JB2 mask and writes `INFO + Sjbz`; `--quality quality` uses the layered encoder
 (`INFO + Sjbz + BG44...` plus `FGbz` when colored foreground is detected) for
 color input. `--quality archival` uses the same layered shape with a denser
-background sample grid. Directory input currently uses the lossless multi-page
-JB2 path only.
+background sample grid. Directory input supports all three profiles: `lossless`
+keeps the shared-Djbz multi-page JB2 path, while `quality` / `archival` bundle
+independently encoded layered pages so each page keeps its own `Sjbz`, `BG44`,
+and optional `FGbz` chunks. The `--shared-dict-pages` knob only affects the
+lossless directory path.
 
 Library callers can override color segmentation with `PageEncoder::with_segment_options`.
 The default remains fixed BT.601 thresholding; `SegmentOptions` also exposes
