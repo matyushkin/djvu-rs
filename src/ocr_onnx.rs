@@ -1,7 +1,9 @@
-//! ONNX OCR backend via tract (requires `ocr-onnx` feature).
+//! Experimental ONNX OCR helper via tract (requires `ocr-onnx` feature).
 //!
-//! Runs any ONNX-format OCR model (e.g. TrOCR, PaddleOCR, docTR) using
-//! the `tract` inference engine — pure Rust, no Python or C++ runtime needed.
+//! This is a library-level scaffold for simple CTC-style recognizers: callers
+//! must provide a compatible model, vocabulary, preprocessing expectations, and
+//! output decoding contract. It is intentionally not advertised as a supported
+//! CLI backend until a concrete model family and fixture are documented.
 
 use std::path::Path;
 
@@ -18,11 +20,13 @@ type OnnxModel = tract_onnx::prelude::SimplePlan<
     >,
 >;
 
-/// ONNX-based OCR backend using tract.
+/// Experimental ONNX-based OCR backend using tract.
 ///
-/// Expects a pre-trained ONNX model that accepts image input and produces
-/// text recognition output. The model format depends on the specific
-/// architecture (TrOCR, PaddleOCR, etc.).
+/// Expects a pre-trained CTC-style ONNX model that accepts a single grayscale
+/// image tensor `[1, 1, H, W]` normalized to `[0, 1]` and emits character
+/// probabilities compatible with [`Self::ctc_decode`]. Other architectures
+/// require their own preprocessing and decoder and are not supported by this
+/// helper.
 pub struct OnnxBackend {
     model: OnnxModel,
     /// Character vocabulary for decoding model output.

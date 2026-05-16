@@ -1,10 +1,15 @@
 //! Pluggable OCR backend trait and error types.
 //!
-//! Provides [`OcrBackend`] — an abstraction over OCR engines (Tesseract, ONNX, Candle).
-//! Each backend is gated behind its own feature flag:
-//! - `ocr-tesseract` — system Tesseract via `tesseract-rs`
-//! - `ocr-onnx` — ONNX models via `tract`
-//! - `ocr-neural` — HuggingFace models via `candle`
+//! Provides [`OcrBackend`] — an abstraction over OCR engines.
+//!
+//! Supported user-facing OCR is currently limited to:
+//! - `ocr-tesseract` — system Tesseract via `tesseract-rs`.
+//!
+//! Experimental scaffolding is kept separate and is not exposed as a supported
+//! CLI backend:
+//! - `ocr-onnx` — generic tract/CTC helper with no stable model contract yet.
+//! - `ocr-neural` — placeholder Candle backend; `load()` returns a clear
+//!   unsupported-backend error until a concrete model implementation lands.
 //!
 //! [`OcrBackend`]: crate::ocr::OcrBackend
 

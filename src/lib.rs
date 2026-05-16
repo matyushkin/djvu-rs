@@ -257,11 +257,11 @@ pub mod ocr;
 #[cfg(feature = "ocr-tesseract")]
 pub mod ocr_tesseract;
 
-/// ONNX OCR backend via tract (requires `ocr-onnx` feature).
+/// Experimental ONNX OCR helper via tract (requires `ocr-onnx` feature).
 #[cfg(feature = "ocr-onnx")]
 pub mod ocr_onnx;
 
-/// Neural OCR backend via Candle (requires `ocr-neural` feature).
+/// Experimental neural OCR placeholder (requires `ocr-neural` feature).
 #[cfg(feature = "ocr-neural")]
 pub mod ocr_neural;
 
