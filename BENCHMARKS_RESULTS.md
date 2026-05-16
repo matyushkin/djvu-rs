@@ -71,6 +71,29 @@ only), (2) cached 1/4-res max-pool mask pyramid (single bit lookup per pixel), (
 bit-shift instead of UDIV for bg/mask coordinate transforms.  Cold render includes full
 ZP arithmetic decode for the first BG44 chunk (~20 ms) + wavelet + composite.
 
+### Native render stage breakdown (#281 quick run)
+
+Command shape: `cargo bench --bench render -- render_native_stages --warm-up-time 1 --measurement-time 3 --sample-size 10`.
+These benches are diagnostic: `render_pixmap` is the public allocation-returning
+API, `render_into_reuse_buffer` composites into a caller-owned buffer, and
+`render_streaming_discard` measures row generation without retaining output.
+
+| Benchmark | Page | Time (median) | Notes |
+|-----------|------|--------------:|-------|
+| `render_native_stages/render_pixmap` | watchmaker color | **86.8 ms** | public `Pixmap` path, warm decode caches |
+| `render_native_stages/render_into_reuse_buffer` | watchmaker color | **91.5 ms** | caller-owned RGBA buffer |
+| `render_native_stages/render_streaming_discard` | watchmaker color | **81.1 ms** | row streaming, no retained output |
+| `render_native_stages/mask_decode` | watchmaker color | **3.37 ms** | JB2 mask decode only |
+| `render_native_stages/bg_to_rgb_warm` | watchmaker color | **3.83 ms** | cached IW44 inverse + RGB |
+| `render_native_stages/render_pixmap` | cable mixed bilevel | **83.5 ms** | public `Pixmap` path, warm decode caches |
+| `render_native_stages/render_into_reuse_buffer` | cable mixed bilevel | **79.0 ms** | caller-owned RGBA buffer |
+| `render_native_stages/render_streaming_discard` | cable mixed bilevel | **68.2 ms** | row streaming, no retained output |
+| `render_native_stages/mask_decode` | cable mixed bilevel | **429 µs** | JB2 mask decode only |
+| `render_native_stages/bg_to_rgb_warm` | cable mixed bilevel | **2.89 ms** | cached IW44 inverse + RGB |
+
+The diagnostic split shows the native-resolution gap is dominated by compositor
+sampling and output materialization, not by warm JB2/IW44 decode alone.
+
 ---
 
 ## Document benchmarks (`cargo bench --bench document`)

@@ -2027,14 +2027,21 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         });
     }
 
-    let row_stride = w as usize * 4;
     let mut pm = Pixmap::white(w, h);
 
-    // Composite row by row via render_rows; copy each row into the Pixmap.
-    render_rows(page, opts, |y, row| {
-        let start = y * row_stride;
-        pm.data[start..start + row_stride].copy_from_slice(row);
-    })?;
+    if opts.permissive {
+        let row_stride = w as usize * 4;
+        // Permissive rendering has its own decode-error recovery path in
+        // render_rows; keep that behaviour and copy each recovered row.
+        render_rows(page, opts, |y, row| {
+            let start = y * row_stride;
+            pm.data[start..start + row_stride].copy_from_slice(row);
+        })?;
+    } else {
+        // Strict renders can composite directly into the output Pixmap,
+        // avoiding the scratch row + row copy used by the streaming adapter.
+        render_into(page, opts, &mut pm.data)?;
+    }
 
     if opts.aa {
         pm = aa_downscale(&pm);
