@@ -145,9 +145,9 @@ pub mod djvu_encode;
 /// page into a bilevel ink mask and a sub-sampled background pixmap.
 ///
 /// Provides [`segment::segment_page`], [`segment::SegmentOptions`],
-/// and [`segment::SegmentedPage`]. v1 uses a luminance threshold +
-/// block-averaged BG; adaptive binarisation and FG palette extraction
-/// are tracked as #220 follow-ups.
+/// [`segment::Binarization`], and [`segment::SegmentedPage`]. The default is
+/// fixed-threshold + block-averaged BG; optional Sauvola binarisation and
+/// fully-masked BG-block inpainting are available through `SegmentOptions`.
 #[cfg(feature = "std")]
 pub mod segment;
 
