@@ -182,11 +182,11 @@ enum TextFormat {
 ))]
 #[derive(Clone, ValueEnum)]
 enum OcrBackendChoice {
-    #[cfg(feature = "ocr-tesseract")]
+    /// Supported backend: system Tesseract via tesseract-rs.
     Tesseract,
-    #[cfg(feature = "ocr-onnx")]
+    /// Experimental library-only ONNX scaffold; no stable CLI contract yet.
     Onnx,
-    #[cfg(feature = "ocr-neural")]
+    /// Experimental neural placeholder; no supported model implementation yet.
     Candle,
 }
 
@@ -802,25 +802,12 @@ fn cmd_ocr(
     model_path: Option<&Path>,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use djvu_rs::ocr::{OcrBackend, OcrOptions};
+    use djvu_rs::ocr::OcrOptions;
+
+    let ocr_backend = build_ocr_backend(backend, model_path)?;
 
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-
-    let ocr_backend: Box<dyn OcrBackend> = match backend {
-        #[cfg(feature = "ocr-tesseract")]
-        OcrBackendChoice::Tesseract => Box::new(djvu_rs::ocr_tesseract::TesseractBackend::new()),
-        #[cfg(feature = "ocr-onnx")]
-        OcrBackendChoice::Onnx => {
-            let mp = model_path.ok_or("--model is required for onnx backend")?;
-            Box::new(djvu_rs::ocr_onnx::OnnxBackend::load(mp, None)?)
-        }
-        #[cfg(feature = "ocr-neural")]
-        OcrBackendChoice::Candle => {
-            let mp = model_path.ok_or("--model is required for candle backend")?;
-            Box::new(djvu_rs::ocr_neural::CandleBackend::load(mp)?)
-        }
-    };
 
     let options = OcrOptions {
         languages: lang.to_string(),
@@ -872,6 +859,49 @@ fn cmd_ocr(
     );
 
     Ok(())
+}
+
+#[cfg(any(
+    feature = "ocr-tesseract",
+    feature = "ocr-onnx",
+    feature = "ocr-neural"
+))]
+fn build_ocr_backend(
+    backend: OcrBackendChoice,
+    model_path: Option<&Path>,
+) -> Result<Box<dyn djvu_rs::ocr::OcrBackend>, Box<dyn std::error::Error>> {
+    match backend {
+        OcrBackendChoice::Tesseract => {
+            let _ = model_path;
+            #[cfg(feature = "ocr-tesseract")]
+            {
+                Ok(Box::new(djvu_rs::ocr_tesseract::TesseractBackend::new()))
+            }
+            #[cfg(not(feature = "ocr-tesseract"))]
+            {
+                Err(
+                    "Tesseract OCR backend is not enabled; rebuild with --features ocr-tesseract"
+                        .into(),
+                )
+            }
+        }
+        OcrBackendChoice::Onnx => {
+            let _ = model_path;
+            Err(
+                "ONNX OCR backend is experimental library-only and has no stable CLI model \
+                 contract yet; use --backend tesseract with --features ocr-tesseract"
+                    .into(),
+            )
+        }
+        OcrBackendChoice::Candle => {
+            let _ = model_path;
+            Err(
+                "Candle OCR backend is experimental and has no supported model-specific \
+                 implementation yet; use --backend tesseract with --features ocr-tesseract"
+                    .into(),
+            )
+        }
+    }
 }
 
 // ── text ──────────────────────────────────────────────────────────────────────

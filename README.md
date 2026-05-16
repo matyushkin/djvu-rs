@@ -307,6 +307,27 @@ let alto = to_alto(&doc, &AltoOptions::default())?;
 std::fs::write("output.xml", alto)?;
 ```
 
+## OCR recognition backends
+
+The supported OCR recognition path is the `ocr-tesseract` feature, which uses a
+system Tesseract installation and tessdata files:
+
+```sh
+cargo build --features cli,ocr-tesseract
+# Requires Tesseract + the requested language data, e.g. eng.traineddata.
+# Text-layer injection is still pending; the CLI reports recognized text chunks
+# and writes a copy of the input file for now.
+djvu ocr scanned.djvu --backend tesseract --lang eng --output copy.djvu
+```
+
+`ocr-onnx` is an experimental library-level CTC helper; the CLI does not treat it
+as a stable backend because no specific model family, preprocessing contract, or
+fixture is guaranteed yet. `ocr-neural` is a placeholder only: `CandleBackend` now
+returns a clear unsupported-backend error instead of constructing a backend that
+always fails at recognition time. The compatibility feature name
+`ocr-neural-candle` is a no-op and no longer pulls Candle/tokenizers into
+`--all-features` builds.
+
 ## Serde support
 
 Requires the `serde` feature flag: `djvu-rs = { version = "…", features = ["serde"] }`.
