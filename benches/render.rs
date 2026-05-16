@@ -195,6 +195,116 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
     });
 }
 
+/// Stage-level breakdown for the native-resolution corpus pages used in the
+/// DjVuLibre comparison matrix.
+///
+/// The `render_pixmap` case includes output pixmap allocation and any adapter
+/// copies; `render_into_reuse_buffer` isolates strict compositing into an
+/// already-allocated RGBA buffer; `render_streaming_discard` measures the
+/// row-streaming path without retaining the full output image. The decode stages
+/// explain how much of the native color/bilevel gap is codec work vs output
+/// materialization.
+fn bench_render_native_stage_breakdown(c: &mut Criterion) {
+    let cases = [
+        ("watchmaker_color", "watchmaker.djvu"),
+        ("cable_bilevel", "cable_1973_100133.djvu"),
+    ];
+
+    let mut group = c.benchmark_group("render_native_stages");
+
+    for (label, filename) in cases {
+        let path = corpus_path().join(filename);
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping render_native_stages/{label}: {filename} not found");
+                continue;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping render_native_stages/{label}: parse failed");
+                continue;
+            }
+        };
+        let page = match doc.page(0) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let opts = djvu_rs::djvu_render::RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            scale: 1.0,
+            bold: 0,
+            aa: false,
+            rotation: djvu_rs::djvu_render::UserRotation::None,
+            permissive: false,
+            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        };
+        let buf_len = opts.width as usize * opts.height as usize * 4;
+
+        // Warm page-level decode caches so the render stages focus on hot render
+        // work, matching the DjVuLibre render-only comparison harness.
+        let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
+
+        group.bench_function(BenchmarkId::new("render_pixmap", label), |b| {
+            b.iter(|| {
+                black_box(
+                    djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts))
+                        .expect("render_pixmap"),
+                );
+            });
+        });
+
+        let mut buf = vec![0u8; buf_len];
+        group.bench_function(BenchmarkId::new("render_into_reuse_buffer", label), |b| {
+            b.iter(|| {
+                djvu_rs::djvu_render::render_into(
+                    black_box(page),
+                    black_box(&opts),
+                    black_box(buf.as_mut_slice()),
+                )
+                .expect("render_into");
+                black_box(&buf);
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("render_streaming_discard", label), |b| {
+            b.iter(|| {
+                let mut bytes = 0usize;
+                djvu_rs::djvu_render::render_streaming(
+                    black_box(page),
+                    black_box(&opts),
+                    |_, row| bytes = bytes.wrapping_add(row.len()),
+                )
+                .expect("render_streaming");
+                black_box(bytes);
+            });
+        });
+
+        if page.find_chunk(b"Sjbz").is_some() {
+            group.bench_function(BenchmarkId::new("mask_decode", label), |b| {
+                b.iter(|| {
+                    black_box(page.extract_mask().expect("mask decode"));
+                });
+            });
+        }
+
+        if page.find_chunk(b"BG44").is_some() {
+            group.bench_function(BenchmarkId::new("bg_to_rgb_warm", label), |b| {
+                b.iter(|| {
+                    if let Some(img) = page.decoded_bg44() {
+                        black_box(img.to_rgb_subsample(1).expect("BG44 to RGB"));
+                    }
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 /// Benchmark 0.5× scaling with Bilinear vs Lanczos3 resampling on a color page.
 ///
 /// Lanczos3 re-renders at native resolution first, so the difference reveals
@@ -464,6 +574,7 @@ criterion_group!(
     bench_render_colorbook_cold,
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
+    bench_render_native_stage_breakdown,
     bench_render_scaled,
     bench_pdf_export,
 );

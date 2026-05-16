@@ -5,6 +5,41 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #281 — strict `render_pixmap` composites directly into its output — **Kept** (2026-05-16)
+
+**Approach.** Added native-resolution stage benches for the DjVuLibre comparison
+corpus (`render_native_stages/*`) covering public `render_pixmap`,
+`render_into` with a reused RGBA buffer, `render_streaming` with discarded rows,
+JB2 mask decode, and cached IW44 inverse/RGB. Then changed strict
+`render_pixmap` to call `render_into` directly instead of routing through the
+row-streaming adapter and copying each scratch row into the output `Pixmap`.
+`opts.permissive` keeps the old `render_rows` path because it has different
+chunk-error recovery semantics.
+
+**Numbers.** Quick local Criterion runs (`--warm-up-time 1 --measurement-time 2/3
+--sample-size 10`) after #279 had made native render more expensive:
+
+- `render_corpus_color`: `88.44 ms` → `72.27 ms` median (**18% faster**).
+- `render_corpus_bilevel`: `90.09 ms` → `72.00 ms` median (**20% faster**).
+- `render_colorbook` at 150 dpi: `7.29 ms` historical / `7.12 ms` after this
+  change (no regression; slight improvement in the quick run).
+- `iw44_to_rgb_colorbook/sub4_partial_decode`: `344 µs`, Criterion reported no
+  statistically significant change, so the known sub4 partial decode path did
+  not regress.
+
+The new stage split (recorded in `BENCHMARKS_RESULTS.md`) shows warm JB2/IW44
+codec stages are only a few milliseconds on the native corpus; the remaining
+DjVuLibre gap is dominated by compositor sampling and output materialization.
+
+**Tests.** Targeted render tests passed, including byte-identical
+`render_rows`/`render_into` and `render_streaming`/`render_pixmap` checks plus the
+permissive truncated-BG44 regression. Full validation below covered the rest of
+the workspace.
+
+**Decision.** Kept. The change is narrow, removes an avoidable row copy from the
+public strict render path, beats Criterion noise on both native corpus targets,
+and leaves the permissive recovery path and IW44 sub4 decode untouched.
+
 ### #280 — TIFF export uses `render_streaming` rows — **Kept** (2026-05-16)
 
 **Approach.** Added `tiff_export::djvu_to_tiff_writer(doc, opts, writer)` and
