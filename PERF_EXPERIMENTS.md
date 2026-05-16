@@ -5,6 +5,40 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #288 — adaptive segmentation + BG-block inpainting — **Kept** (2026-05-16)
+
+**Approach.** Extended `SegmentOptions` without changing its default behaviour:
+`Binarization::Fixed` remains the default global BT.601 threshold, while
+`Binarization::Sauvola { window, k }` adds local adaptive binarisation for mixed
+lighting scans. Added optional `bg_inpaint` for fully masked background blocks:
+when a BG subsample cell has no unmasked source pixels, it is filled from the
+nearest neighbouring unmasked pixels instead of falling back to the ink-coloured
+block mean. `PageEncoder::with_segment_options` lets library callers opt into
+these knobs for `Quality` / `Archival` single-page encodes; CLI defaults remain
+unchanged.
+
+**Numbers / fixture.** Added a checked-in synthetic mixed text/photo test in
+`djvu_encode::tests::adaptive_segment_options_improve_decoded_mixed_lighting_fixture`:
+left half dark paper (`Y=80`), right half bright paper (`Y=220`), with dark ink
+(`Y=40`) and light gray ink (`Y=140`). With `bg_subsample=6`, fixed-threshold
+Quality encode decodes at `mean_abs_rgb_diff=10.767` versus source; Sauvola +
+inpainting decodes at `4.188` (61% lower), and the test requires at least a 30%
+reduction. The lower-level `segment::tests::sauvola_handles_dark_background_and_light_ink`
+asserts that fixed 128 masks most dark paper and misses the light ink, while
+Sauvola keeps the mask less than half the fixed-mask size and retains both ink
+pixels. Added `segment::tests::inpaint_fully_masked_bg_block_from_neighbors`: a
+fully masked black 4×4 BG block next to tan paper now inpaints to
+`(210,200,160)` when `bg_inpaint` is enabled; default fixed-threshold/no-inpaint
+still falls back to black for all-black pages.
+
+**Tests.** Added/updated segment unit tests, proptest `SegmentOptions`
+constructors, and a `PageEncoder::with_segment_options` parseability test proving
+Quality encode still emits `Sjbz` + `BG44` with adaptive options.
+
+**Decision.** Kept. The new behaviour is opt-in, deterministic, covered by a
+synthetic mixed-light fixture, and does not enable Hamming shared-Djbz clustering
+or alter the default fixed-threshold path.
+
 ### #281 — strict `render_pixmap` composites directly into its output — **Kept** (2026-05-16)
 
 **Approach.** Added native-resolution stage benches for the DjVuLibre comparison

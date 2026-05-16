@@ -119,6 +119,7 @@ pub struct PageEncoder<'a> {
     source: Source<'a>,
     dpi: u16,
     quality: EncodeQuality,
+    segment_options: Option<SegmentOptions>,
 }
 
 impl<'a> PageEncoder<'a> {
@@ -128,6 +129,7 @@ impl<'a> PageEncoder<'a> {
             source: Source::Bitmap(bitmap),
             dpi: 300,
             quality: EncodeQuality::Lossless,
+            segment_options: None,
         }
     }
 
@@ -139,6 +141,7 @@ impl<'a> PageEncoder<'a> {
             source: Source::Pixmap(pixmap),
             dpi: 300,
             quality: EncodeQuality::Quality,
+            segment_options: None,
         }
     }
 
@@ -155,6 +158,13 @@ impl<'a> PageEncoder<'a> {
     /// per-variant trade-offs and current support status.
     pub fn with_quality(mut self, quality: EncodeQuality) -> Self {
         self.quality = quality;
+        self
+    }
+
+    /// Override the segmentation knobs used by `Quality` / `Archival` color
+    /// encodes. Defaults remain profile-specific and fixed-threshold.
+    pub fn with_segment_options(mut self, opts: SegmentOptions) -> Self {
+        self.segment_options = Some(opts);
         self
     }
 
@@ -182,14 +192,14 @@ impl<'a> PageEncoder<'a> {
                 },
             ])),
             (Source::Pixmap(pm), EncodeQuality::Quality | EncodeQuality::Archival) => {
-                let segment_options = match self.quality {
+                let segment_options = self.segment_options.unwrap_or_else(|| match self.quality {
                     EncodeQuality::Quality => SegmentOptions::default(),
                     EncodeQuality::Archival => SegmentOptions {
                         bg_subsample: 6,
                         ..SegmentOptions::default()
                     },
                     EncodeQuality::Lossless => unreachable!(),
-                };
+                });
                 let seg = segment_page(pm, &segment_options);
                 // Use the dictionary encoder for color profiles so FGbz can
                 // address foreground colors per blitted component.
@@ -411,6 +421,7 @@ mod tests {
         let enc = PageEncoder::from_pixmap(&pm);
         assert_eq!(enc.dpi, 300);
         assert_eq!(enc.quality, EncodeQuality::Quality);
+        assert!(enc.segment_options.is_none());
     }
 
     #[test]
@@ -553,6 +564,126 @@ mod tests {
             right.2 > right.0,
             "right foreground should render blue-dominant, got {right:?}"
         );
+    }
+
+    #[test]
+    fn quality_color_accepts_adaptive_segment_options() {
+        let pm = mixed_lighting_fixture();
+
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_segment_options(adaptive_segment_options())
+            .encode()
+            .expect("encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        assert!(page.raw_chunk(b"Sjbz").is_some());
+        assert!(!page.all_chunks(b"BG44").is_empty());
+    }
+
+    #[test]
+    fn adaptive_segment_options_improve_decoded_mixed_lighting_fixture() {
+        let pm = mixed_lighting_fixture();
+        let fixed = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_segment_options(SegmentOptions {
+                bg_subsample: 6,
+                ..SegmentOptions::default()
+            })
+            .encode()
+            .expect("fixed encode");
+        let adaptive = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_segment_options(SegmentOptions {
+                bg_subsample: 6,
+                ..adaptive_segment_options()
+            })
+            .encode()
+            .expect("adaptive encode");
+
+        let fixed_render = render_encoded(&fixed);
+        let adaptive_render = render_encoded(&adaptive);
+        let fixed_err = mean_abs_rgb_diff(&pm, &fixed_render);
+        let adaptive_err = mean_abs_rgb_diff(&pm, &adaptive_render);
+
+        assert!(
+            adaptive_err < fixed_err * 0.70,
+            "adaptive decoded render should be closer to source ({adaptive_err:.2} vs {fixed_err:.2})"
+        );
+    }
+
+    fn adaptive_segment_options() -> SegmentOptions {
+        SegmentOptions {
+            binarization: crate::segment::Binarization::Sauvola { window: 9, k: 0.34 },
+            bg_inpaint: true,
+            ..SegmentOptions::default()
+        }
+    }
+
+    fn mixed_lighting_fixture() -> Pixmap {
+        let mut pm = Pixmap::white(48, 24);
+        for y in 0..24 {
+            for x in 0..48 {
+                let v = if x < 24 { 80 } else { 220 };
+                pm.set_rgb(x, y, v, v, v);
+            }
+        }
+
+        // Dark ink on dark paper.
+        for y in 6..18 {
+            pm.set_rgb(9, y, 40, 40, 40);
+            pm.set_rgb(14, y, 40, 40, 40);
+        }
+        for x in 9..=14 {
+            pm.set_rgb(x, 6, 40, 40, 40);
+            pm.set_rgb(x, 12, 40, 40, 40);
+        }
+
+        // Light-gray ink on bright paper. Fixed threshold treats this as BG,
+        // so the thin strokes wash into the BG44 sample cells.
+        for y in 6..18 {
+            pm.set_rgb(33, y, 140, 140, 140);
+            pm.set_rgb(40, y, 140, 140, 140);
+        }
+        for x in 33..=40 {
+            pm.set_rgb(x, 6, 140, 140, 140);
+            pm.set_rgb(x, 12, 140, 140, 140);
+            pm.set_rgb(x, 17, 140, 140, 140);
+        }
+        pm
+    }
+
+    fn render_encoded(bytes: &[u8]) -> Pixmap {
+        let doc = crate::djvu_document::DjVuDocument::parse(bytes).expect("parse encoded doc");
+        let page = doc.page(0).expect("page");
+        let (width, height) = page.dimensions();
+        let opts = crate::djvu_render::RenderOptions {
+            width: u32::from(width),
+            height: u32::from(height),
+            ..crate::djvu_render::RenderOptions::default()
+        };
+        crate::djvu_render::render_pixmap(page, &opts).expect("render encoded page")
+    }
+
+    fn mean_abs_rgb_diff(expected: &Pixmap, actual: &Pixmap) -> f64 {
+        assert_eq!(
+            (expected.width, expected.height),
+            (actual.width, actual.height)
+        );
+        let mut sum = 0u64;
+        let mut n = 0u64;
+        for (a, b) in expected
+            .data
+            .chunks_exact(4)
+            .zip(actual.data.chunks_exact(4))
+        {
+            for c in 0..3 {
+                sum += a[c].abs_diff(b[c]) as u64;
+                n += 1;
+            }
+        }
+        sum as f64 / n as f64
     }
 
     #[test]

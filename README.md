@@ -290,6 +290,12 @@ color input. `--quality archival` uses the same layered shape with a denser
 background sample grid. Directory input currently uses the lossless multi-page
 JB2 path only.
 
+Library callers can override color segmentation with `PageEncoder::with_segment_options`.
+The default remains fixed BT.601 thresholding; `SegmentOptions` also exposes
+Sauvola adaptive binarisation and fully-masked background-block inpainting for
+mixed text/photo scans where a single global threshold masks dark paper or misses
+light ink.
+
 ## hOCR and ALTO XML export
 
 ```rust

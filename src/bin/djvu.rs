@@ -112,12 +112,10 @@ enum Cmd {
     /// Encode an image (PNG) into a single-page DjVu file, or a
     /// directory of PNGs into a multi-page DJVM bundle.
     ///
-    /// Bilevel pipeline only in v1: each input is luminance-thresholded
-    /// into a JB2 mask via `segment_page`, then wrapped as `INFO + Sjbz`.
-    /// Multi-page mode (input is a directory) builds a `FORM:DJVM`
+    /// Single PNG input supports lossless bilevel JB2 plus layered
+    /// quality/archival color profiles (`INFO + Sjbz + BG44 + FGbz`).
+    /// Multi-page directory input currently builds a lossless `FORM:DJVM`
     /// bundle with a shared Djbz dictionary across pages.
-    /// `--quality quality|archival` is reserved for the layered codec
-    /// (#220 follow-ups).
     Encode {
         /// Input PNG path, or a directory of PNGs (sorted by file name)
         /// for multi-page encoding.
