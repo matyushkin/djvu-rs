@@ -1019,3 +1019,46 @@ sub4 partial path regresses by `+3.16%`. This does not close #189: the
 umbrella still lacks AVX2 equivalents for the horizontal row pass and encoder
 kernels, and those should be implemented only in an x86_64 AVX2 session with
 this validation job green after each slice.
+
+### #292 — cross-architecture benchmark matrix — **Kept** (2026-05-17)
+
+**Approach.** Added a canonical cross-architecture platform metadata template
+and seed matrix to `BENCHMARKS_RESULTS.md`. This issue did not run new
+benchmarks; it normalized existing trustworthy artifacts and made missing
+target families explicit for downstream architecture issues.
+
+**Platform.**
+- OS: macOS 26.3.1 (Darwin 25.3) for the local Apple ARM64 seed row; Ubuntu
+  GitHub-hosted runner for the x86_64 artifact rows.
+- CPU: Apple M1 Max, 10 cores, for the broad local baseline; GitHub-hosted
+  x86_64 runner for #189 artifact run `25299920836`.
+- arch: `aarch64` and `x86_64`
+- target features: Apple ARM64 baseline/NEON available; x86_64 baseline;
+  x86_64-v3/AVX2 via `RUSTFLAGS=-C target-cpu=x86-64-v3`.
+- Rust: 1.92.0 stable for the local Apple ARM64 row; stable toolchain from
+  `.github/workflows/bench.yml` for the GitHub artifact rows.
+- RUSTFLAGS: unset for local Apple ARM64 and Linux x86_64 baseline rows;
+  `-C target-cpu=x86-64-v3` for the AVX2 row.
+
+**Command(s).**
+
+```sh
+# Existing local summary source already recorded in BENCHMARKS_RESULTS.md:
+cargo bench --workspace --features cli,tiff
+
+# Existing x86_64-v3 artifact source already recorded in this file under #189:
+gh run view 25299920836 --repo matyushkin/djvu-rs
+```
+
+**Numbers.** The seed matrix records Apple ARM64 local values for
+`iw44_decode_*`, `iw44_to_rgb_colorbook/*`, `render_colorbook*`, and
+`render_corpus_color`, plus the #189 Linux x86_64 baseline vs
+`x86_64-v3`/AVX2 values. wasm32 scalar, wasm32 simd128, and Linux aarch64 are
+explicitly marked missing.
+
+**Decision.** Kept. The repository now has one copy/pasteable platform metadata
+block and one public cross-architecture result schema for #306, #307, and #308.
+
+**Reason.** Normalizing the table first avoids each downstream architecture
+issue inventing a different platform format, while preserving measurement
+discipline by distinguishing current numbers from missing/untrusted cells.
