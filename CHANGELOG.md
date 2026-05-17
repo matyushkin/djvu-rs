@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/matyushkin/djvu-rs/compare/v0.17.0...v0.18.0) (2026-05-17)
+
+
+### Features
+
+* add archival FGbz scan profile ([#287](https://github.com/matyushkin/djvu-rs/issues/287)) ([6e0b850](https://github.com/matyushkin/djvu-rs/commit/6e0b8508689893e01124372ec6fac1dcfed423cd))
+* emit per-blit FGbz color indices ([#291](https://github.com/matyushkin/djvu-rs/issues/291)) ([f9120c8](https://github.com/matyushkin/djvu-rs/commit/f9120c8cb132675b5dc0a45e1f378de8a718f076))
+* **encode:** add adaptive segmentation options ([7b71793](https://github.com/matyushkin/djvu-rs/commit/7b71793bfa7c4378d22587da9fade166790979d4))
+* **encode:** support layered directory bundles ([404054c](https://github.com/matyushkin/djvu-rs/commit/404054c4a848db1452f49d050492858da7b4be69))
+* **ocr:** narrow experimental backends ([913e100](https://github.com/matyushkin/djvu-rs/commit/913e1001ac75078a49ee41e06e3b73cc5217d9f6))
+
+
+### Bug Fixes
+
+* **render:** reduce native colorbook diff ([63fe3dc](https://github.com/matyushkin/djvu-rs/commit/63fe3dc01064917d364647942d244d6773591c86))
+
+
+### Performance Improvements
+
+* add JB2 cross-size refinement probe ([#285](https://github.com/matyushkin/djvu-rs/issues/285)) ([a1805a9](https://github.com/matyushkin/djvu-rs/commit/a1805a990e71aa35a26f53c9ee87f1c932a9475d))
+* **export:** stream TIFF color rendering ([4e3f955](https://github.com/matyushkin/djvu-rs/commit/4e3f9552010a13dd3aa4304a02367c10dda960cf))
+* **render:** composite pixmap output directly ([39fbe27](https://github.com/matyushkin/djvu-rs/commit/39fbe27cd46792b7b69d4bfa808406c37bed3619))
+
 ## [0.17.0](https://github.com/matyushkin/djvu-rs/compare/v0.16.1...v0.17.0) (2026-05-04)
 
 
