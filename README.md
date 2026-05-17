@@ -425,6 +425,11 @@ ctx.putImageData(img, 0, 0);
 
 See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo.
 
+The generated npm package follows the Rust crate version; there is no separate
+WASM release train. The local `pkg/` directory is ignored wasm-pack output, so
+regenerate it from the checked-in `Cargo.toml` before publishing instead of
+editing generated `pkg/package.json` by hand.
+
 ### WASM scalar vs simd128 benchmark
 
 The local Node.js harness builds two `wasm-pack --target nodejs` bundles and

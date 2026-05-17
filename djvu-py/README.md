@@ -8,10 +8,16 @@ Python bindings for [djvu-rs](https://github.com/matyushkin/djvu-rs), a pure-Rus
 pip install djvu-rs
 ```
 
+## Version policy
+
+The Python package follows the Rust crate version. For example, Python package
+`djvu-rs==0.18.0` is built from the `djvu-rs` Rust workspace at version
+`0.18.0`. There is no separate Python release train.
+
 ## Usage
 
 ```python
-import djvu_rs_python as djvu
+import djvu_rs as djvu
 
 doc = djvu.Document.open('scan.djvu')
 print(f'{doc.page_count()} pages')
