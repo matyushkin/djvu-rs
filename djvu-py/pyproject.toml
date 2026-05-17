@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "djvu-rs"
-version = "0.1.0"
+version = "0.18.0"
 description = "Python bindings for djvu-rs — pure-Rust DjVu decoder"
 readme = "README.md"
 license = {text = "MIT"}
