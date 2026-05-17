@@ -7,6 +7,11 @@
 mod tesseract_tests {
     use std::path::PathBuf;
 
+    #[cfg(feature = "cli")]
+    use assert_cmd::Command;
+    #[cfg(feature = "cli")]
+    use predicates::prelude::*;
+
     use djvu_rs::{
         DjVuDocument,
         djvu_render::{RenderOptions, render_pixmap},
@@ -16,6 +21,11 @@ mod tesseract_tests {
 
     fn assets_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("references/djvujs/library/assets")
+    }
+
+    #[cfg(feature = "cli")]
+    fn corpus_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
     }
 
     #[test]
@@ -62,5 +72,82 @@ mod tesseract_tests {
         let _ = layer.text;
         // zones field is present and does not panic
         let _ = layer.zones;
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn cli_ocr_embeds_text_layer_into_single_page_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("boy_ocr.djvu");
+
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "ocr",
+                assets_path().join("boy.djvu").to_str().unwrap(),
+                "--output",
+                out.to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Embedded text layers for 1 page"));
+
+        let data = std::fs::read(&out).expect("OCR output must exist");
+        let doc = DjVuDocument::parse(&data).expect("OCR output must parse");
+        assert!(
+            doc.page(0)
+                .expect("page 0")
+                .text_layer()
+                .expect("text layer parse")
+                .is_some(),
+            "OCR output should contain a TXTz/TXTa text layer"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn cli_ocr_embeds_text_layer_into_bundled_output_and_text_cli_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cable_ocr.djvu");
+
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "ocr",
+                corpus_path()
+                    .join("cable_1973_100133.djvu")
+                    .to_str()
+                    .unwrap(),
+                "--output",
+                out.to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Embedded text layers for 2 page"));
+
+        let data = std::fs::read(&out).expect("OCR output must exist");
+        let doc = DjVuDocument::parse(&data).expect("OCR output must parse");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            assert!(
+                doc.page(i)
+                    .expect("page")
+                    .text_layer()
+                    .expect("text layer parse")
+                    .is_some(),
+                "page {i} should contain a TXTz/TXTa text layer"
+            );
+        }
+
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args(["text", out.to_str().unwrap(), "--all"])
+            .assert()
+            .success()
+            .stdout(
+                predicate::str::contains("--- Page 1 ---")
+                    .and(predicate::str::contains("--- Page 2 ---"))
+                    .and(predicate::str::contains("No text layer").not()),
+            );
     }
 }
