@@ -5,6 +5,70 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Post-roadmap full benchmark refresh — **Kept** (2026-05-17)
+
+**Approach.** Reran the public full workspace Criterion command after the
+roadmap PR series was merged through #310, then reran the DjVuLibre comparison
+harness against the same local Criterion artifact. No code was changed; this
+refresh updates public benchmark documentation from the new measurements.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple M1 Max, 10 cores
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- Cargo: `cargo 1.92.0 (344c4567c 2025-10-21)`
+- RUSTFLAGS: unset
+
+**Command(s).**
+
+```sh
+cargo bench --workspace --features cli,tiff
+bash scripts/bench_djvulibre.sh /private/tmp/djvu-rs-post-roadmap-djvulibre
+python3 scripts/djvulibre_compare.py \
+  --criterion target/criterion \
+  --djvulibre-bench /private/tmp/djvu-rs-post-roadmap-djvulibre/djvulibre_bench.txt \
+  --ddjvu-timing /private/tmp/djvu-rs-post-roadmap-djvulibre/ddjvu_timing.txt
+```
+
+**Numbers.**
+
+| Benchmark | Criterion mean |
+|-----------|---------------:|
+| `render_page/dpi/72` | 246 us |
+| `render_page/dpi/144` | 934 us |
+| `render_page/dpi/300` | 6.96 ms |
+| `render_page/dpi/600` | 42.1 ms |
+| `render_colorbook` | 8.78 ms |
+| `render_colorbook_cold` | 48.9 ms |
+| `render_corpus_color` | 151 ms |
+| `render_corpus_bilevel` | 75.4 ms |
+| `render_native_stages/render_streaming_discard/watchmaker_color` | 195 ms |
+| `jb2_decode` | 132 us |
+| `iw44_decode_first_chunk` | 592 us |
+| `iw44_decode_corpus_color` | 655 us |
+| `parse_multipage_520p` | 2.29 ms |
+| `render_large_doc_first_page` | 10.6 ms |
+| `pdf_export_sequential` | 821 ms |
+
+DjVuLibre comparison on the same local fixture matrix:
+
+| Scenario | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |
+|----------|--------:|-------------------:|----------:|------:|
+| `boy.djvu` @ 72 dpi | 246 us | 159 us | 30.6 ms | djvu-rs 1.5x slower |
+| `colorbook.djvu` @ 150 dpi | 8.78 ms | 5.96 ms | 67.3 ms | djvu-rs 1.5x slower |
+| `watchmaker.djvu` @ 300 dpi | 151 ms | 36.44 ms | 79.8 ms | djvu-rs 4.2x slower |
+| `cable_1973_100133.djvu` @ 300 dpi | 75.45 ms | 35.25 ms | 73.8 ms | djvu-rs 2.1x slower |
+
+**Decision.** Kept.
+
+**Reason.** This run is the current broad Apple ARM64 public snapshot after all
+roadmap work through #310. `README.md`, `BENCHMARKS_RESULTS.md`, and the
+current-summary block in `BENCHMARKS.md` were updated. Several native/cold
+render rows had wide Criterion intervals, so the docs record the measurements
+without making a narrow regression claim.
+
 ### #306 — wasm32 scalar vs simd128 benchmark harness — **Kept** (2026-05-17)
 
 **Approach.** Added a reproducible Node.js harness for the existing
