@@ -244,6 +244,10 @@ let doc = DjVuDocument::parse_from_dir(&index, "/path/to/pages")?;
 println!("{} pages", doc.page_count());
 ```
 
+Mutation of indirect DJVM documents is not supported by `DjVuDocumentMut` yet.
+The current strategy decision is to add a resolver-backed rebundling path first;
+see [`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
+
 ## CLI
 
 The `djvu` binary is enabled by the `cli` feature.
