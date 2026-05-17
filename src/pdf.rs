@@ -255,8 +255,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
             height: rh,
             ..RenderOptions::default()
         };
-        let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
-        let rgb = pixmap.to_rgb();
+        let rgb = render_rgb_for_pdf(page, &render_opts, rw, rh)?;
 
         let img_dict = format!(
             " /Type /XObject /Subtype /Image /Width {rw} /Height {rh}\
@@ -290,6 +289,33 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         text_ops,
         link_annot_bodies,
     })
+}
+
+fn render_rgb_for_pdf(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, PdfError> {
+    if can_stream_pdf_render(page, opts) {
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        djvu_render::render_streaming(page, opts, |_, rgba_row| {
+            for rgba in rgba_row.chunks_exact(4) {
+                rgb.extend_from_slice(&rgba[..3]);
+            }
+        })?;
+        Ok(rgb)
+    } else {
+        Ok(djvu_render::render_pixmap(page, opts)?.to_rgb())
+    }
+}
+
+fn can_stream_pdf_render(page: &DjVuPage, opts: &RenderOptions) -> bool {
+    !opts.aa
+        && (opts.resampling == djvu_render::Resampling::Bilinear
+            || (page.width() as u32 == opts.width && page.height() as u32 == opts.height))
+        && page.rotation() == crate::info::Rotation::None
+        && opts.rotation == djvu_render::UserRotation::None
 }
 
 /// Decode and deflate the JB2 foreground mask into a PDF ImageMask XObject body.
@@ -1256,5 +1282,44 @@ mod tests {
             default_pdf.len() < flat_pdf.len(),
             "default PDF must use DCT and be smaller than FlateDecode"
         );
+    }
+
+    #[test]
+    fn pdf_rgb_streaming_matches_pixmap_rgb() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let (rw, rh) = render_dims(
+            page.width() as u32,
+            page.height() as u32,
+            page.dpi().max(1) as f32,
+            PdfOptions::default().output_dpi,
+        );
+        let opts = RenderOptions {
+            width: rw,
+            height: rh,
+            ..RenderOptions::default()
+        };
+
+        let streamed = render_rgb_for_pdf(page, &opts, rw, rh).unwrap();
+        let pixmap = djvu_render::render_pixmap(page, &opts).unwrap();
+
+        assert_eq!(streamed, pixmap.to_rgb());
+    }
+
+    #[test]
+    fn pdf_rgb_fallback_handles_non_streamable_options() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            aa: true,
+            ..RenderOptions::default()
+        };
+
+        let rgb = render_rgb_for_pdf(page, &opts, opts.width, opts.height).unwrap();
+        let pixmap = djvu_render::render_pixmap(page, &opts).unwrap();
+
+        assert_eq!(rgb, pixmap.to_rgb());
     }
 }

@@ -1331,3 +1331,62 @@ baseline for #299 is therefore: beat ~894 ms sequential wall time and reduce
 or cap the ~76.7 MiB sequential peak RSS / ~228.9 MiB parallel peak RSS by
 streaming page render/RGB/JPEG data into PDF objects instead of retaining all
 encoded page bodies at once.
+
+### #299 — PDF color row streaming — **Kept** (2026-05-17)
+
+**Approach.** Replaced the PDF color-image path's full `Pixmap` + full RGB
+staging pair with `render_streaming` into one RGB staging buffer when render
+options are streamable. The fallback `render_pixmap(...).to_rgb()` path remains
+for anti-aliasing, scaled Lanczos, rotation, and other non-streamable options.
+Measured against the #298 baseline on the same `tests/corpus/watchmaker.djvu`
+PDF fixture (12 pages, default PDF options: 150 dpi, JPEG-80).
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple M1 Max, 10 cores
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: Apple ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- RUSTFLAGS: unset
+- Source artifact: local run on `codex/issue-299-pdf-streaming`
+
+**Command(s).**
+
+```sh
+cargo bench --bench render --features std -- pdf_export_sequential
+cargo bench --bench render --features std,parallel -- pdf_export_parallel
+cargo bench --bench render --features std,parallel -- pdf_export_parallel
+
+/usr/bin/time -l cargo run --release --example pdf_memory_probe -- \
+  tests/corpus/watchmaker.djvu
+/usr/bin/time -l cargo run --release --features parallel \
+  --example pdf_memory_probe -- tests/corpus/watchmaker.djvu
+```
+
+**Numbers.**
+
+| Measurement | #298 baseline | #299 row streaming |
+|-------------|--------------:|-------------------:|
+| Criterion `pdf_export_sequential` median | 955.42 ms | 811.83 ms (`810.13..813.58 ms`) |
+| Criterion `pdf_export_parallel` median | 154.05 ms | 165.57 ms rerun (`154.19..178.74 ms`) |
+| Sequential probe `pdf_export_ms` | 893.827 ms | 852.285 ms |
+| Parallel probe `pdf_export_ms` | 187.183 ms | 155.745 ms |
+| Sequential peak RSS | 80,379,904 bytes (76.7 MiB) | 77,512,704 bytes (73.9 MiB) |
+| Parallel peak RSS | 240,058,368 bytes (228.9 MiB) | 177,684,480 bytes (169.5 MiB) |
+| Output PDF bytes | 6,651,085 | 6,651,085 |
+
+The first parallel Criterion run after the change measured
+`219.65 ms` (`206.80..232.42 ms`) and reported a regression; an immediate rerun
+measured `165.57 ms` (`154.19..178.74 ms`). The single-run probe also measured
+parallel export at `155.745 ms`. Treat parallel timing as noisy on this host;
+the stable win is peak RSS.
+
+**Decision.** Kept.
+
+**Reason.** The change preserves PDF bytes and keeps the fallback path for
+non-streamable render options. It removes the extra full RGBA page allocation
+from the streamable PDF color path. Sequential RSS falls modestly from
+`76.7 MiB` to `73.9 MiB`; parallel RSS falls materially from `228.9 MiB` to
+`169.5 MiB` (-26%). The remaining peak is dominated by retained per-page
+encoded RGB/JPEG/PDF object bodies, so a larger memory reduction would require
+streaming PDF object emission rather than only row-streamed rendering.
