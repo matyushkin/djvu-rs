@@ -41,6 +41,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
 use crate::djvu_document::DjVuBookmark;
@@ -292,7 +293,10 @@ impl DjVuDocumentMut {
             return Ok(self.original_bytes);
         }
         recompute_dirm_offsets(&mut self.file.root)?;
-        Ok(iff::emit(&self.file))
+        Ok(
+            emit_patched_single_page(&self.file.root, &self.original_bytes)
+                .unwrap_or_else(|| iff::emit(&self.file)),
+        )
     }
 
     // ---- High-level setters (PR2 of #222) ----------------------------------
@@ -447,6 +451,115 @@ fn is_bundled_djvm(chunk: &Chunk) -> bool {
     children.iter().any(|c| {
         matches!(c, Chunk::Leaf { id, data } if id == b"DIRM" && !data.is_empty() && (data[0] & 0x80) != 0)
     })
+}
+
+/// Original byte range for one direct child of a single-page FORM:DJVU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OriginalChildRange {
+    id: [u8; 4],
+    data: Vec<u8>,
+    range: Range<usize>,
+}
+
+/// Emit an edited single-page FORM:DJVU while copying unchanged child chunks
+/// from the original byte buffer. Returns `None` when the original layout is
+/// outside the narrow, safely-patchable shape; callers then use full-tree emit.
+fn emit_patched_single_page(root: &Chunk, original: &[u8]) -> Option<Vec<u8>> {
+    let Chunk::Form {
+        secondary_id,
+        children,
+        ..
+    } = root
+    else {
+        return None;
+    };
+    if secondary_id != b"DJVU" {
+        return None;
+    }
+    let original_children = original_single_page_child_ranges(original)?;
+    if original_children.len() != children.len() {
+        return None;
+    }
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"DJVU");
+    for (child, original_child) in children.iter().zip(original_children.iter()) {
+        match child {
+            Chunk::Leaf { id, data }
+                if id == &original_child.id && data == &original_child.data =>
+            {
+                payload.extend_from_slice(&original[original_child.range.clone()]);
+            }
+            Chunk::Leaf { .. } => emit_leaf_chunk(child, &mut payload),
+            Chunk::Form { .. } => return None,
+        }
+    }
+
+    let len = u32::try_from(payload.len()).ok()?;
+    let mut out = Vec::with_capacity(12 + payload.len() + (payload.len() & 1));
+    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&payload);
+    if (8 + payload.len()) & 1 == 1 {
+        out.push(0);
+    }
+    Some(out)
+}
+
+fn emit_leaf_chunk(chunk: &Chunk, out: &mut Vec<u8>) {
+    let Chunk::Leaf { id, data } = chunk else {
+        unreachable!("caller passes leaf chunks only")
+    };
+    let len = data.len() as u32;
+    out.extend_from_slice(id);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(data);
+    if (8 + data.len()) & 1 == 1 {
+        out.push(0);
+    }
+}
+
+fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChildRange>> {
+    if original.len() < 16 || &original[..4] != b"AT&T" || &original[4..8] != b"FORM" {
+        return None;
+    }
+    let form_len = u32::from_be_bytes(original[8..12].try_into().ok()?) as usize;
+    let body_end = 12usize.checked_add(form_len)?;
+    if body_end > original.len() || &original[12..16] != b"DJVU" {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut pos = 16usize;
+    while pos < body_end {
+        if pos + 8 > body_end {
+            return None;
+        }
+        let id: [u8; 4] = original[pos..pos + 4].try_into().ok()?;
+        if &id == b"FORM" {
+            return None;
+        }
+        let data_len = u32::from_be_bytes(original[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let data_start = pos + 8;
+        let data_end = data_start.checked_add(data_len)?;
+        if data_end > body_end {
+            return None;
+        }
+        let mut next = data_end;
+        if next & 1 == 1 {
+            if next >= body_end {
+                return None;
+            }
+            next += 1;
+        }
+        ranges.push(OriginalChildRange {
+            id,
+            data: original[data_start..data_end].to_vec(),
+            range: pos..next,
+        });
+        pos = next;
+    }
+    Some(ranges)
 }
 
 /// Compute the byte length the chunk will occupy when emitted by [`iff::emit`]:
@@ -723,6 +836,50 @@ mod tests {
         let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
         let new_first = reparsed.chunk_at_path(&[0]).unwrap();
         assert_eq!(new_first.data(), marker.as_slice());
+    }
+
+    #[test]
+    fn single_page_patch_preserves_unedited_child_bytes() {
+        let original = read_corpus("chicken.djvu");
+        let original_ranges =
+            original_single_page_child_ranges(&original).expect("single-page child ranges");
+        assert!(
+            original_ranges.len() > 2,
+            "fixture must have unrelated chunks to preserve"
+        );
+
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.replace_leaf(&[0], b"PATCHED_INFO".to_vec()).unwrap();
+        let edited = doc.try_into_bytes().unwrap();
+        let edited_ranges =
+            original_single_page_child_ranges(&edited).expect("edited child ranges");
+        assert_eq!(edited_ranges.len(), original_ranges.len());
+
+        for (idx, (before, after)) in original_ranges.iter().zip(edited_ranges.iter()).enumerate() {
+            if idx == 0 {
+                assert_ne!(
+                    &original[before.range.clone()],
+                    &edited[after.range.clone()]
+                );
+                continue;
+            }
+            assert_eq!(before.id, after.id);
+            assert_eq!(
+                &original[before.range.clone()],
+                &edited[after.range.clone()],
+                "unchanged child #{idx} must be copied byte-for-byte"
+            );
+        }
+    }
+
+    #[test]
+    fn single_page_patch_falls_back_for_bundled_djvm() {
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        assert!(
+            emit_patched_single_page(&doc.file.root, &original).is_none(),
+            "single-page patch path must decline bundled DJVM layouts"
+        );
     }
 
     #[test]
