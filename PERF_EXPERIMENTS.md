@@ -441,16 +441,14 @@ compression to update text/annotations/metadata. With this PR the
 `librarian` consumer (#158) can finally drop its `djvused` shell-out for
 single-page DjVu files.
 
-**Open follow-ups (PR3-4 of #222 sequence).**
-1. **PR3**: bundled DJVM mutation (DIRM offset recomputation) plus
-   `DjVuDocumentMut::set_bookmarks(&[DjVuBookmark])` for NAVM at the
-   bundle root.
-2. **PR4**: byte-range patching for true byte-identical round-trip even
-   *with* edits (only changed chunks are rewritten; unchanged regions are
-   memcpy'd). Currently any mutation triggers a full `iff::emit` which
-   may differ from the original byte layout in incidental ways.
-3. **PR5**: indirect DJVM support — the issue's "per-file rewrite vs
-   re-bundle" decision still needs a concrete answer.
+**Follow-up status.**
+1. Bundled DJVM mutation and `DjVuDocumentMut::set_bookmarks(&[DjVuBookmark])`
+   have landed.
+2. Single-page byte-range patching was implemented in #302; bundled-DJVM and
+   indirect-DJVM byte-range work remain tracked separately.
+3. Indirect DJVM support is intentionally deferred after #303; the decision
+   record is `docs/indirect-djvm-mutation.md`, with implementation follow-ups
+   in #325 and #326.
 
 ### #222 PR1 — `DjVuDocumentMut::from_bytes` + chunk-replacement primitive — **Kept** (2026-04-30)
 
@@ -508,19 +506,15 @@ the high-level setter design (`set_metadata`, `set_bookmarks`,
 (`encode_navm`, `encode_annotations*`, `encode_metadata`,
 `encode_text_layer`).
 
-**Open follow-ups (PR2-4 of #222 sequence).**
-1. **PR2**: high-level setters (`set_metadata`, `set_bookmarks`,
-   `page_mut(i).set_text_layer`, `…set_annotations`) on top of
-   `replace_leaf`.
-2. **PR3**: byte-range patching for true byte-identical round-trip even
-   *with* edits (only changed chunks are rewritten; unchanged regions are
-   memcpy'd). Currently any mutation triggers a full `iff::emit` which
-   may differ from the original byte layout in incidental ways (FORM
-   length recomputation, padding).
-3. **PR4**: indirect DJVM support — the issue's "per-file rewrite vs
-   re-bundle" decision still needs a concrete answer.
-4. `librarian` consumer migration off `djvused` shell-out (#158
-   follow-up) — depends on PR2 setters.
+**Follow-up status.**
+1. High-level setters (`set_metadata`, `set_bookmarks`,
+   `page_mut(i).set_text_layer`, `…set_annotations`) have landed.
+2. Single-page byte-range patching landed in #302; bundled-DJVM byte-range
+   patching remains a separate follow-up.
+3. Indirect DJVM support was scoped by #303 and remains intentionally
+   unsupported until the external-file rewrite/re-bundle work in #325/#326.
+4. `librarian` consumer migration off `djvused` shell-out (#158 follow-up)
+   can use the setter surface, but is outside this repository.
 
 ### #229 PR1 — extract `djvu-zp` into a standalone workspace crate — **Kept** (2026-04-30)
 
@@ -645,8 +639,8 @@ Both pass on the local x86_64 host. All 405 lib tests pass; clippy
 speedup over scalar at this hot path (called once per (block × band) =
 ~1024 blocks/page × 10 bands = ~10K calls/page) is on the order of
 4–8× from replacing the scalar 16-iteration loop with three AVX2 ops + a
-narrow + horizontal OR. End-to-end `iw44_decode_*` benches will pick up
-the change at the next `bench.yml` AVX2 runner pass.
+narrow + horizontal OR. End-to-end `iw44_decode_*` benches were later sampled
+by the #189 validation run and the #307 AVX2 spike.
 
 **Reason kept.** Two more AVX2 kernels close the parity gap with NEON
 that issue #189 calls out (lines 11–14 of the issue body listed
@@ -658,12 +652,10 @@ established for the remaining kernels (`row_pass_neon_s1_row`,
 `lifting_even`, `predict_inner`, `predict_avg`).
 
 **Open follow-ups.**
-1. `row_pass_neon_s1_row` AVX2 port — significantly larger because AVX2
-   has no native `vld2q_s16` deinterleave; `### #184` below is the
-   cautionary tale of attempting strided loads in AVX2 without gather.
+1. `row_pass_neon_s1_row` AVX2 port was measured in #307 and rejected: full
+   decode improved, but the sensitive sub2/sub4 partial-decode paths regressed.
 2. Encoder-side ports (`forward_row_neon_s1_row`, `forward_col_predict_neon`).
-3. Bench numbers from the next `bench.yml` AVX2 runner pass should be
-   recorded here once available.
+3. ARM64 NEON validation was refreshed in #308.
 
 ### #225 Phase 2 — public `render_streaming` API — **Kept** (2026-04-30)
 
@@ -743,13 +735,15 @@ primitive without changing the public API. Three new module-private functions:
   `render_into`, `render_region`, `render_coarse`, and `render_progressive`.
 
 - `pub(crate) render_rows<F>` — decode/setup entry point (mirrors
-  `render_pixmap`'s decode logic) that calls `composite_rows`. This is the
-  Phase 2 hook: future `render_streaming` will delegate here instead of
+  `render_pixmap`'s decode logic) that calls `composite_rows`. This became the
+  shared row source for the public `render_streaming` API instead of
   allocating a full Pixmap.
 
-`render_pixmap` is now a thin adapter: it pre-allocates `Pixmap::white(w, h)`,
-calls `render_rows` with a sink that copies each row into `pm.data`, then
-applies the existing aa/Lanczos/rotation post-processing steps.
+At the time, `render_pixmap` was a thin adapter: it pre-allocated
+`Pixmap::white(w, h)`, called `render_rows` with a sink that copied each row
+into `pm.data`, then applied the existing aa/Lanczos/rotation post-processing
+steps. Current strict renders use the direct full-pixmap path, while permissive
+renders still share row-based recovery with `render_streaming`.
 
 Two new unit tests — `render_rows_byte_identical_to_render_into_color` and
 `render_rows_byte_identical_to_render_into_bilevel` — verify that
@@ -778,8 +772,7 @@ with zero public API change, bit-exact output verified by tests, all 550 tests
 pass, clippy and fmt clean. The `render_rows` hook is in place for Phase 2.
 
 **Open follow-ups.**
-1. Phase 2 (future PR): expose `pub fn render_streaming` with a user-visible
-   row callback, enabling true zero-full-pixmap rendering for WASM / embedded.
+1. Phase 2 shipped `pub fn render_streaming` with a user-visible row callback.
 2. `render_region`, `render_coarse`, `render_progressive` could similarly be
    refactored to use `composite_rows` for API symmetry, but are not hot paths.
 
