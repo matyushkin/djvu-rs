@@ -129,6 +129,18 @@ enum Cmd {
         /// Encoding profile.
         #[arg(short, long, default_value = "lossless", value_enum)]
         quality: EncodeQualityArg,
+        /// Mask binarization for layered quality/archival encodes.
+        #[arg(long, default_value = "fixed", value_enum)]
+        binarization: BinarizationArg,
+        /// Sauvola local window size in pixels, used with --binarization sauvola.
+        #[arg(long, default_value = "25")]
+        sauvola_window: u32,
+        /// Sauvola k factor, used with --binarization sauvola.
+        #[arg(long, default_value = "0.34")]
+        sauvola_k: f32,
+        /// Inpaint fully masked background blocks for layered encodes.
+        #[arg(long)]
+        bg_inpaint: bool,
         /// (Multi-page only.) Promote a connected component to the
         /// shared Djbz dictionary if it appears on at least this many
         /// distinct pages. Default: 2.
@@ -210,6 +222,14 @@ enum EncodeQualityArg {
     Archival,
 }
 
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum BinarizationArg {
+    /// Fixed BT.601 luminance threshold.
+    Fixed,
+    /// Sauvola local adaptive threshold.
+    Sauvola,
+}
+
 #[derive(Clone, ValueEnum)]
 enum Layer {
     /// Full composite render (default).
@@ -276,8 +296,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output,
             dpi,
             quality,
+            binarization,
+            sauvola_window,
+            sauvola_k,
+            bg_inpaint,
             shared_dict_pages,
-        } => cmd_encode(&input, &output, dpi, quality, shared_dict_pages),
+        } => cmd_encode(
+            &input,
+            &output,
+            dpi,
+            quality,
+            EncodeSegmentArgs {
+                binarization,
+                sauvola_window,
+                sauvola_k,
+                bg_inpaint,
+            },
+            shared_dict_pages,
+        ),
     }
 }
 
@@ -1041,6 +1077,7 @@ fn cmd_encode(
     output: &Path,
     dpi: u16,
     quality: EncodeQualityArg,
+    segment_args: EncodeSegmentArgs,
     shared_dict_pages: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
@@ -1052,6 +1089,7 @@ fn cmd_encode(
         EncodeQualityArg::Quality => EncodeQuality::Quality,
         EncodeQualityArg::Archival => EncodeQuality::Archival,
     };
+    let segment_options = segment_args.to_options(q)?;
 
     if input.is_dir() {
         let entries = directory_png_entries(input)?;
@@ -1085,9 +1123,13 @@ fn cmd_encode(
         let mut pages = Vec::with_capacity(entries.len());
         for path in &entries {
             let pixmap = decode_png_to_pixmap(path)?;
-            let page = PageEncoder::from_pixmap(&pixmap)
+            let mut encoder = PageEncoder::from_pixmap(&pixmap)
                 .with_dpi(dpi)
-                .with_quality(q)
+                .with_quality(q);
+            if let Some(opts) = segment_options {
+                encoder = encoder.with_segment_options(opts);
+            }
+            let page = encoder
                 .encode()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             pages.push(page);
@@ -1115,10 +1157,15 @@ fn cmd_encode(
                 .with_quality(EncodeQuality::Lossless)
                 .encode()
         }
-        EncodeQuality::Quality | EncodeQuality::Archival => PageEncoder::from_pixmap(&pixmap)
-            .with_dpi(dpi)
-            .with_quality(q)
-            .encode(),
+        EncodeQuality::Quality | EncodeQuality::Archival => {
+            let mut encoder = PageEncoder::from_pixmap(&pixmap)
+                .with_dpi(dpi)
+                .with_quality(q);
+            if let Some(opts) = segment_options {
+                encoder = encoder.with_segment_options(opts);
+            }
+            encoder.encode()
+        }
     }
     .map_err(|e| format!("encode: {e}"))?;
 
@@ -1132,6 +1179,53 @@ fn cmd_encode(
         bytes.len(),
     );
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct EncodeSegmentArgs {
+    binarization: BinarizationArg,
+    sauvola_window: u32,
+    sauvola_k: f32,
+    bg_inpaint: bool,
+}
+
+impl EncodeSegmentArgs {
+    fn to_options(
+        self,
+        quality: djvu_rs::djvu_encode::EncodeQuality,
+    ) -> Result<Option<djvu_rs::segment::SegmentOptions>, Box<dyn std::error::Error>> {
+        use djvu_rs::djvu_encode::EncodeQuality;
+        use djvu_rs::segment::{Binarization, SegmentOptions};
+
+        let has_segment_flags = self.binarization != BinarizationArg::Fixed || self.bg_inpaint;
+        if !has_segment_flags {
+            return Ok(None);
+        }
+        if matches!(quality, EncodeQuality::Lossless) {
+            return Err(
+                "--binarization and --bg-inpaint require --quality quality or --quality archival"
+                    .into(),
+            );
+        }
+
+        let mut opts = match quality {
+            EncodeQuality::Quality => SegmentOptions::default(),
+            EncodeQuality::Archival => SegmentOptions {
+                bg_subsample: 6,
+                ..SegmentOptions::default()
+            },
+            EncodeQuality::Lossless => unreachable!(),
+        };
+        opts.binarization = match self.binarization {
+            BinarizationArg::Fixed => Binarization::Fixed,
+            BinarizationArg::Sauvola => Binarization::Sauvola {
+                window: self.sauvola_window,
+                k: self.sauvola_k,
+            },
+        };
+        opts.bg_inpaint = self.bg_inpaint;
+        Ok(Some(opts))
+    }
 }
 
 fn directory_png_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
