@@ -1017,9 +1017,9 @@ x86_64 CI host. The stride-aware helpers would be reusable if the ARM64
 follow-up lands, but committing them today costs complexity for zero measured
 gain.
 
-**Next step.** Re-attempt on ARM64 (M1) with raw NEON `vld2q_s16`, measure
-against the baseline `iw44_decode_first_chunk` (715 µs) on the reference
-hardware listed in `BENCHMARKS_RESULTS.md`.
+**Next step.** Addressed by #308: the current raw NEON row-pass and related
+IW44 decode/render paths were remeasured on Apple ARM64 and recorded in the
+cross-architecture matrix.
 
 ### #194 Phase 2 — multi-page shared Djbz with Hamming clustering — **Reverted default, kept tunable knob** (2026-04-28)
 
@@ -1669,3 +1669,53 @@ though within the 3% threshold. Because no production optimization landed,
 manually because the current PR path filter does not include `crates/**`; a
 follow-up should widen that filter so future crate-only performance PRs run
 benchmark validation automatically.
+
+### #308 — aarch64 NEON validation — **Kept partial** (2026-05-17)
+
+**Approach.** Reran the current IW44 decode, partial decode, and
+`render_colorbook` benchmark filters on the Apple Silicon host to validate the
+current NEON paths after #292 established the cross-architecture matrix. No new
+NEON kernel was added. Linux aarch64 benchmark cells remain explicitly missing:
+#305 added native Linux aarch64 smoke coverage, but there is not yet a Linux
+aarch64 benchmark workflow or artifact.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple M1 Max, 10 cores
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- RUSTFLAGS: unset
+
+**Command(s).**
+
+```sh
+cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode' --output-format bencher
+cargo bench --bench render -- 'render_corpus_color|render_colorbook' --output-format bencher
+```
+
+**Numbers.**
+
+| Bench | Apple ARM64 ns/iter | Matrix value |
+|-------|--------------------:|--------------|
+| `iw44_decode_corpus_color` | 636,847 | 637 us |
+| `iw44_decode_first_chunk` | 557,004 | 557 us |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 5,470,697 | 5.47 ms |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 1,301,311 | 1.30 ms |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 337,043 | 337 us |
+| `render_colorbook` | 6,921,690 | 6.92 ms |
+| `render_colorbook_stages/full_render` | 6,932,763 | 6.93 ms |
+| `render_colorbook_stages/bg_only_warm` | 0 | 0 ns |
+| `render_colorbook_stages/mask_decode` | 4,173,642 | 4.17 ms |
+| `render_colorbook_cold` | 17,426,166 | 17.4 ms |
+| `render_corpus_color` | 68,726,395 | 68.7 ms |
+
+**Decision.** Kept partial.
+
+**Reason.** Current Apple ARM64 NEON paths remain healthy: first-chunk decode
+is now `557 us` versus the stale #184 note's `715 us` reference, corpus IW44
+decode remains `637 us`, and sub2/sub4 partial decode stay near the existing
+matrix values. This closes the stale ARM64 remeasurement note without adding
+new kernels. The result is "partial" because Linux aarch64 still has only
+build/test smoke coverage and no authoritative benchmark artifact; the matrix
+keeps those cells as `missing`.
