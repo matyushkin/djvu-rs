@@ -4,6 +4,7 @@
 //! Benchmarks are skipped gracefully if the test files are not found.
 
 use std::hint::black_box;
+use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::path::PathBuf;
@@ -399,6 +400,109 @@ fn bench_render_compositor_only(c: &mut Criterion) {
     group.finish();
 }
 
+/// A/B current direct `render_into` against a row-scratch adapter that copies
+/// `render_streaming` rows into the final RGBA buffer. This is intentionally a
+/// measurement harness for #294; render behavior is unchanged by the bench.
+fn bench_render_row_scratch_ab(c: &mut Criterion) {
+    let cases = [
+        (
+            "thumbnail_dpi72",
+            assets_path().join("boy.djvu"),
+            72.0_f32 / 100.0_f32,
+        ),
+        (
+            "thumbnail_half_bilinear",
+            assets_path().join("boy.djvu"),
+            0.5_f32,
+        ),
+        (
+            "colorbook_downscale",
+            assets_path().join("colorbook.djvu"),
+            150.0_f32 / 400.0_f32,
+        ),
+        (
+            "corpus_color_native",
+            corpus_path().join("watchmaker.djvu"),
+            1.0_f32,
+        ),
+        (
+            "corpus_bilevel_native",
+            corpus_path().join("cable_1973_100133.djvu"),
+            1.0_f32,
+        ),
+    ];
+
+    let mut group = c.benchmark_group("render_row_scratch_ab");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    for (label, path, scale) in cases {
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "skipping render_row_scratch_ab/{label}: {} not found",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping render_row_scratch_ab/{label}: parse failed");
+                continue;
+            }
+        };
+        let page = match doc.page(0) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping render_row_scratch_ab/{label}: page 0 missing");
+                continue;
+            }
+        };
+
+        let width = ((page.width() as f32 * scale).round() as u32).max(1);
+        let height = ((page.height() as f32 * scale).round() as u32).max(1);
+        let opts = render_opts(width, height, scale);
+        let mut direct_buf = vec![0u8; width as usize * height as usize * 4];
+        let mut scratch_buf = vec![0u8; direct_buf.len()];
+
+        djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts))
+            .expect("warm render caches");
+
+        group.bench_function(BenchmarkId::new("direct_render_into", label), |b| {
+            b.iter(|| {
+                djvu_rs::djvu_render::render_into(
+                    black_box(page),
+                    black_box(&opts),
+                    black_box(direct_buf.as_mut_slice()),
+                )
+                .expect("render_into");
+                black_box(&direct_buf);
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("row_scratch_copy", label), |b| {
+            b.iter(|| {
+                djvu_rs::djvu_render::render_streaming(
+                    black_box(page),
+                    black_box(&opts),
+                    |y, row| {
+                        let start = y * width as usize * 4;
+                        scratch_buf[start..start + row.len()].copy_from_slice(row);
+                    },
+                )
+                .expect("render_streaming");
+                black_box(&scratch_buf);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Benchmark 0.5× scaling with Bilinear vs Lanczos3 resampling on a color page.
 ///
 /// Lanczos3 re-renders at native resolution first, so the difference reveals
@@ -670,6 +774,7 @@ criterion_group!(
     bench_render_corpus_bilevel,
     bench_render_native_stage_breakdown,
     bench_render_compositor_only,
+    bench_render_row_scratch_ab,
     bench_render_scaled,
     bench_pdf_export,
 );
