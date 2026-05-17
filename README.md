@@ -279,6 +279,9 @@ djvu encode scan.png --quality quality --output scan.djvu --dpi 300
 # Use the conservative archival color profile for a single PNG
 djvu encode scan.png --quality archival --output scan.djvu --dpi 300
 
+# Opt into adaptive mask segmentation for uneven scans
+djvu encode scan.png --quality quality --binarization sauvola --bg-inpaint --output scan.djvu
+
 # Encode a directory of PNGs into a bundled DJVM with shared Djbz
 djvu encode pages/ --output book.djvu --shared-dict-pages 2
 ```
@@ -293,11 +296,13 @@ independently encoded layered pages so each page keeps its own `Sjbz`, `BG44`,
 and optional `FGbz` chunks. The `--shared-dict-pages` knob only affects the
 lossless directory path.
 
-Library callers can override color segmentation with `PageEncoder::with_segment_options`.
-The default remains fixed BT.601 thresholding; `SegmentOptions` also exposes
-Sauvola adaptive binarisation and fully-masked background-block inpainting for
-mixed text/photo scans where a single global threshold masks dark paper or misses
-light ink.
+Layered `quality` / `archival` encodes default to fixed BT.601 thresholding.
+`--binarization sauvola` opts into adaptive local thresholding for mixed or
+uneven lighting; tune it with `--sauvola-window` and `--sauvola-k`.
+`--bg-inpaint` fills fully masked background blocks from neighbouring unmasked
+pixels, which can reduce dark boxes under heavy text strokes. These knobs are
+opt-in, only affect layered profiles, and do not change lossless JB2 defaults.
+Library callers can use the same controls with `PageEncoder::with_segment_options`.
 
 ## hOCR and ALTO XML export
 
