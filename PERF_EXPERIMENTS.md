@@ -1485,3 +1485,63 @@ RGB/YCbCr conversion, inside the forward wavelet / coefficient quantization /
 reconstruction-tracking path on high-detail color backgrounds. Follow-up #320
 isolates that path with coefficient-plane diagnostics before any encoder
 tuning.
+
+### #301 — JB2 cross-size refinement byte-cost estimator — **Proceed** (2026-05-17)
+
+**Approach.** Extended the existing #283 cross-size candidate-count probe with
+an approximate byte-cost model. For near cross-size candidates, the model
+compares the current record-1 fresh-symbol payload estimate against a
+hypothetical cross-size record-6 estimate that includes symbol-index/context
+overhead, width/height/refinement overhead, and a packed Hamming-payload proxy.
+No bytes are emitted and `encode_djvm_bundle_jb2` behavior is unchanged.
+
+**Platform.**
+- OS: macOS / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple Silicon host
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: Apple ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- RUSTFLAGS: unset
+
+**Command(s).**
+
+```sh
+cargo run --release --example encode_quality_djbz -- \
+  tests/corpus/watchmaker.djvu tests/corpus/pathogenic_bacteria_1896.djvu \
+  --cc-stats --cross-size-stats \
+  > /private/tmp/jb2_cost_301.jsonl \
+  2> /private/tmp/jb2_cost_301.stderr
+```
+
+**Numbers.**
+
+Bundle baseline from the same run:
+
+| File | Pages | Original Sjbz | Independent dict | Bundled shared-Djbz | Bundle / independent | Round-trip |
+|------|------:|--------------:|-----------------:|--------------------:|---------------------:|------------|
+| `watchmaker.djvu` | 12 | 122,923 | 130,036 | 122,832 | 0.9446x | pixel-exact |
+| `pathogenic_bacteria_1896.djvu` | 517 | 24,849,842 | 34,254,905 | 33,430,276 | 0.9759x | pixel-exact |
+
+Cross-size estimator:
+
+| File | Fresh CCs | Eligible | Candidates | Near @ 5% | Near pixels | Median best Hamming | Est current rec-1 | Est cross-size rec-6 | Est delta | Delta / independent |
+|------|----------:|---------:|-----------:|----------:|------------:|--------------------:|-----------------:|---------------------:|----------:|--------------------:|
+| `watchmaker.djvu` | 2,652 | 2,649 | 2,331 | 547 (20.65%) | 525,061 | 92 | 75,632 B | 5,641 B | -69,991 B | -53.82% |
+| `pathogenic_bacteria_1896.djvu` | 759,291 | 703,928 | 686,402 | 61,485 (8.73%) | 67,245,972 | 88 | 9,677,015 B | 830,556 B | -8,846,459 B | -25.83% |
+
+Semantics: a real cross-size record-6 path should be lossless if it emits the
+full refinement bitmap correctly. This probe is not an emitting encoder path;
+it uses nearest-neighbor scaled Hamming only for candidate selection and cost
+estimation. The byte model is deliberately approximate and optimistic because
+the packed Hamming proxy is not a real ZP-coded refinement bitstream.
+
+**Decision.** Proceed.
+
+**Reason.** Both required corpora show enough estimated byte headroom to justify
+a narrow emitting spike: `watchmaker` has 547 near cross-size matches and
+`pathogenic_bacteria_1896` has 61,485, with large estimated negative deltas.
+The result is not sufficient to change defaults because the estimator does not
+prove actual ZP-coded record-6 byte cost or round-trip behavior. Follow-up #322
+should implement an experiment-only cross-size rec-6 emitter, compare actual
+bytes against this estimate, and stop before tuning if output is not
+pixel-exact. The shipped default remains exact shared-Djbz rec-7 plus rec-1.

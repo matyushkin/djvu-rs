@@ -464,6 +464,22 @@ pub struct CrossSizeRefinementStats {
     pub near_match_pixels: u64,
     /// Best normalized Hamming score observed for every near-size candidate.
     pub best_hamming: Vec<u32>,
+    /// Approximate bytes current record-1 emissions spend on near-match symbols.
+    ///
+    /// This includes direct bitmap payload bytes plus a small fixed record
+    /// overhead approximation. It intentionally excludes coordinate coding
+    /// because both record-1 and hypothetical record-6 still place a symbol.
+    pub estimated_rec1_bytes: u64,
+    /// Approximate bytes a hypothetical cross-size record-6 path would spend
+    /// for the same near-match symbols.
+    ///
+    /// Includes an estimated symbol-index/context overhead and a packed
+    /// refinement-difference payload estimate. No encoder behavior depends on
+    /// this value; it is measurement-only.
+    pub estimated_cross_size_rec6_bytes: u64,
+    /// Estimated byte delta: `cross_size_rec6 - current_rec1`.
+    /// Negative means the hypothetical path may save bytes.
+    pub estimated_byte_delta: i64,
 }
 
 /// Extract all 8-connected components of black pixels from `bitmap`.
@@ -591,6 +607,27 @@ fn scaled_hamming(cand: &Bitmap, reference: &Bitmap) -> u32 {
     diff
 }
 
+fn packed_bytes_for_pixels(pixels: u64) -> u64 {
+    pixels.div_ceil(8)
+}
+
+fn index_overhead_bytes(dict_len: usize) -> u64 {
+    let bits = usize::BITS - dict_len.max(1).leading_zeros();
+    u64::from(bits).div_ceil(8)
+}
+
+fn estimate_record1_symbol_bytes(symbol: &Bitmap) -> u64 {
+    const RECORD1_OVERHEAD_BYTES: u64 = 3; // record type + width + height, approximate.
+    symbol.data.len() as u64 + RECORD1_OVERHEAD_BYTES
+}
+
+fn estimate_cross_size_rec6_symbol_bytes(hamming: u32, dict_len: usize) -> u64 {
+    const RECORD6_OVERHEAD_BYTES: u64 = 5; // record type + wdiff/hdiff + refinement flags, approximate.
+    RECORD6_OVERHEAD_BYTES
+        + index_overhead_bytes(dict_len)
+        + packed_bytes_for_pixels(u64::from(hamming))
+}
+
 /// Estimate cross-size refinement headroom without changing encoder output.
 ///
 /// The JB2 format can encode record-6 refinements where the reference symbol
@@ -677,6 +714,11 @@ pub fn analyze_jb2_cross_size_refinement(
                 if best <= max_diff {
                     stats.near_matches += 1;
                     stats.near_match_pixels += pixels;
+                    let rec1 = estimate_record1_symbol_bytes(&cc.bitmap);
+                    let rec6 = estimate_cross_size_rec6_symbol_bytes(best, dict_entries.len());
+                    stats.estimated_rec1_bytes += rec1;
+                    stats.estimated_cross_size_rec6_bytes += rec6;
+                    stats.estimated_byte_delta += rec6 as i64 - rec1 as i64;
                 }
             }
         }
@@ -2340,6 +2382,8 @@ mod tests {
         let stats = analyze_jb2_cross_size_refinement(&page, &[shared_glyph], 1, 0.05);
         assert_eq!(stats.near_matches, 1);
         assert_eq!(stats.near_match_pixels, 42);
+        assert!(stats.estimated_rec1_bytes > 0);
+        assert!(stats.estimated_cross_size_rec6_bytes > 0);
         assert!(
             stats.candidate_ccs >= stats.near_matches,
             "near matches must be a subset of cross-size candidates"
