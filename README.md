@@ -466,19 +466,21 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Latest full Criterion run: Apple M1 Max / macOS `arm64`, Rust 1.92,
-release profile (`cargo bench --workspace --features cli,tiff`, 2026-05-17).
+Latest post-roadmap Criterion refresh: Apple M1 Max / macOS `arm64`, Rust 1.92.
+The codec/document/PDF rows come from `cargo bench --workspace --features
+cli,tiff`; render rows below use targeted `cargo bench --bench render` reruns
+after the full workspace run produced noisy render outliers.
 
 | Benchmark | Time |
 |-----------|-----:|
 | `render_page/dpi/72` | **246 µs** |
-| `render_page/dpi/144` | **934 µs** |
-| `render_page/dpi/300` | **6.96 ms** |
-| `render_colorbook` (150 dpi, warm) | **8.78 ms** |
-| `render_colorbook_cold` | **48.9 ms** |
-| `render_corpus_color` (native 600 dpi) | **151 ms** |
+| `render_page/dpi/144` | **938 µs** |
+| `render_page/dpi/300` | **3.59 ms** |
+| `render_colorbook` (150 dpi, warm) | **7.22 ms** |
+| `render_colorbook_cold` | **18.8 ms** |
+| `render_corpus_color` (native 600 dpi) | **71.2 ms** |
 | `render_corpus_bilevel` (native 600 dpi) | **75.4 ms** |
-| `render_native_stages/render_streaming_discard` (color) | **195 ms** |
+| `render_native_stages/render_streaming_discard` (color) | **70.2 ms** |
 | `jb2_decode` | **132 µs** |
 | `iw44_decode_first_chunk` | **592 µs** |
 | `iw44_decode_corpus_color` | **655 µs** |
@@ -486,9 +488,9 @@ release profile (`cargo bench --workspace --features cli,tiff`, 2026-05-17).
 | `render_large_doc_first_page` | **10.6 ms** |
 | `pdf_export_sequential` (12 pages, JPEG-80) | **821 ms** |
 
-This post-roadmap refresh supersedes the 2026-05-16 broad local summary. Some
-native and cold render groups were noisy in this full workspace run; use the
-confidence intervals in `BENCHMARKS_RESULTS.md` for detailed comparisons.
+The initial full-workspace render rows from this refresh were rejected as a
+noisy local artifact and preserved only in `PERF_EXPERIMENTS.md`; the public
+render baseline uses the targeted rerun recorded in `BENCHMARKS_RESULTS.md`.
 
 ### Comparison with DjVuLibre
 
@@ -501,8 +503,8 @@ Current local matrix (2026-05-17):
 | Scenario | djvu-rs | DjVuLibre | Ratio |
 |----------|--------:|----------:|------:|
 | Small color IW44, 72 dpi | **246 µs** | **159 µs** | DjVuLibre **1.5x faster** |
-| Large color IW44, 150 dpi | **8.78 ms** | **5.96 ms** | DjVuLibre **1.5x faster** |
-| Native color corpus, 300 dpi | **151 ms** | **36.44 ms** | DjVuLibre **4.2x faster** |
+| Large color IW44, 150 dpi | **7.22 ms** | **5.96 ms** | DjVuLibre **1.2x faster** |
+| Native color corpus, 300 dpi | **71.2 ms** | **36.44 ms** | DjVuLibre **2.0x faster** |
 | Native bilevel JB2 corpus, 300 dpi | **75.45 ms** | **35.25 ms** | DjVuLibre **2.1x faster** |
 
 The same workflow also records `ddjvu` CLI timings for these files

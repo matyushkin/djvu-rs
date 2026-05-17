@@ -5,7 +5,58 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
-### Post-roadmap full benchmark refresh — **Kept** (2026-05-17)
+### Post-roadmap render baseline correction — **Kept** (2026-05-17)
+
+**Approach.** Reran the render filters from #308 on the same code after the
+post-roadmap full workspace run produced implausibly slow render rows. The
+rerun confirmed that the public render baseline should use the targeted render
+artifact, not the full-run outliers from PR #335.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple M1 Max, 10 cores
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- Cargo: `cargo 1.92.0 (344c4567c 2025-10-21)`
+- RUSTFLAGS: unset
+
+**Command(s).**
+
+```sh
+cargo bench --bench render -- 'render_corpus_color|render_colorbook' --output-format bencher
+cargo bench --bench render -- 'render_page/dpi|render_corpus_bilevel|render_native_stages' --output-format bencher
+```
+
+**Numbers.**
+
+| Benchmark | Corrected render baseline |
+|-----------|--------------------------:|
+| `render_page/dpi/72` | 246,839 ns |
+| `render_page/dpi/144` | 937,501 ns |
+| `render_page/dpi/300` | 3,586,208 ns |
+| `render_page/dpi/600` | 13,911,536 ns |
+| `render_colorbook` | 7,221,910 ns |
+| `render_colorbook_stages/full_render` | 7,256,342 ns |
+| `render_colorbook_stages/mask_decode` | 4,392,493 ns |
+| `render_colorbook_cold` | 18,838,014 ns |
+| `render_corpus_color` | 71,247,374 ns |
+| `render_native_stages/render_pixmap/watchmaker_color` | 71,532,521 ns |
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | 70,452,562 ns |
+| `render_native_stages/render_streaming_discard/watchmaker_color` | 70,185,520 ns |
+| `render_native_stages/mask_decode/watchmaker_color` | 2,735,714 ns |
+| `render_native_stages/bg_to_rgb_warm/watchmaker_color` | 2,962,458 ns |
+
+**Decision.** Kept.
+
+**Reason.** No render-path code changed between the #308 targeted baseline and
+the bad #335 full-run artifact; the only intervening render source edits were
+documentation comments. The targeted rerun restored the expected range, so
+`README.md`, `BENCHMARKS_RESULTS.md`, and `BENCHMARKS.md` now use this
+corrected render baseline. The bad full-run render rows remain recorded below
+as a rejected artifact instead of being used as public claims.
+
+### Post-roadmap full benchmark refresh — **Needs follow-up** (2026-05-17)
 
 **Approach.** Reran the public full workspace Criterion command after the
 roadmap PR series was merged through #310, then reran the DjVuLibre comparison
@@ -61,13 +112,12 @@ DjVuLibre comparison on the same local fixture matrix:
 | `watchmaker.djvu` @ 300 dpi | 151 ms | 36.44 ms | 79.8 ms | djvu-rs 4.2x slower |
 | `cable_1973_100133.djvu` @ 300 dpi | 75.45 ms | 35.25 ms | 73.8 ms | djvu-rs 2.1x slower |
 
-**Decision.** Kept.
+**Decision.** Needs follow-up.
 
-**Reason.** This run is the current broad Apple ARM64 public snapshot after all
-roadmap work through #310. `README.md`, `BENCHMARKS_RESULTS.md`, and the
-current-summary block in `BENCHMARKS.md` were updated. Several native/cold
-render rows had wide Criterion intervals, so the docs record the measurements
-without making a narrow regression claim.
+**Reason.** Codec, document, and PDF rows from this run remain useful, but the
+render rows were too noisy to use as public baseline claims. They were
+superseded by the targeted render correction above, and the public docs were
+updated accordingly.
 
 ### #306 — wasm32 scalar vs simd128 benchmark harness — **Kept** (2026-05-17)
 
