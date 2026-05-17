@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/matyushkin/djvu-rs/compare/v0.18.0...v0.19.0) (2026-05-17)
+
+
+### Features
+
+* **cli:** expose adaptive segmentation flags ([#317](https://github.com/matyushkin/djvu-rs/issues/317)) ([aee5450](https://github.com/matyushkin/djvu-rs/commit/aee5450690c224375f27d6376a5790e55c432890)), closes [#297](https://github.com/matyushkin/djvu-rs/issues/297)
+* embed OCR text layers in DjVu output ([#315](https://github.com/matyushkin/djvu-rs/issues/315)) ([bfb9257](https://github.com/matyushkin/djvu-rs/commit/bfb9257b31d4eb4c70ebef0976d30333ecbeb73a))
+
+
+### Performance Improvements
+
+* **iw44:** record ARM64 NEON validation ([418d4fb](https://github.com/matyushkin/djvu-rs/commit/418d4fb06ac79518dc6a933c6386a9f02b3803fa))
+* **iw44:** record rejected AVX2 row-pass spike ([5b6cdf3](https://github.com/matyushkin/djvu-rs/commit/5b6cdf38e6609949a74255604bb1e3a1dd08e289))
+* **pdf:** record export memory baseline ([#318](https://github.com/matyushkin/djvu-rs/issues/318)) ([3b29f6b](https://github.com/matyushkin/djvu-rs/commit/3b29f6b119e363845d0d79ce2a8754f05b469277)), closes [#298](https://github.com/matyushkin/djvu-rs/issues/298)
+* **pdf:** stream RGB staging for color pages ([#319](https://github.com/matyushkin/djvu-rs/issues/319)) ([445ed11](https://github.com/matyushkin/djvu-rs/commit/445ed11c2457bd563c10fd579052c93729b2d273)), closes [#299](https://github.com/matyushkin/djvu-rs/issues/299)
+
 ## [0.18.0](https://github.com/matyushkin/djvu-rs/compare/v0.17.0...v0.18.0) (2026-05-17)
 
 
