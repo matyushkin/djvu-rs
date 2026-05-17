@@ -97,6 +97,28 @@ jobs:
           cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
+  # ── Windows smoke ───────────────────────────────────────────────────────────
+  windows-msvc:
+    name: Windows MSVC smoke
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-msvc
+
+      - name: Build CLI
+        run: cargo build --features cli
+
+      - name: CLI smoke (djvu info)
+        run: .\target\debug\djvu.exe info tests\fixtures\boy_jb2.djvu
+
   # ── MSRV ─────────────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.88)
