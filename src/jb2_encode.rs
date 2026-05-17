@@ -741,7 +741,7 @@ pub fn analyze_jb2_cross_size_refinement(
 /// instead of the original CC. Visual loss is bounded by the threshold.
 ///
 /// Used by [`Jb2EncodeOptions::lossy_threshold`] (#224 Phase 4); independent
-/// of [`find_refinement_ref`] which gates record-6 (lossless refinement).
+/// of `find_refinement_ref`, which gated record-6 (lossless refinement).
 fn find_lossy_copy_ref(
     cand: &Bitmap,
     dict_entries: &[Bitmap],

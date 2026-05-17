@@ -10,8 +10,8 @@
 //!
 //! ## API
 //!
-//! * [`decode_smmr`] — chunk payload → [`Bitmap`]
-//! * [`encode_smmr`] — [`Bitmap`] → chunk payload (horizontal-mode only;
+//! * [`decode_smmr`](crate::smmr::decode_smmr) — chunk payload → [`Bitmap`]
+//! * [`encode_smmr`](crate::smmr::encode_smmr) — [`Bitmap`] → chunk payload (horizontal-mode only;
 //!   correct but not size-optimal — see fn docs for trade-offs vs JB2)
 
 #[cfg(not(feature = "std"))]
