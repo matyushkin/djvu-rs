@@ -16,6 +16,66 @@ were ~10–12% slower.
 
 ---
 
+## Cross-architecture benchmark matrix
+
+Use this table for architecture-sensitive benchmark updates. Every row must
+identify the operating system, CPU, Rust toolchain, `target_arch`, relevant
+`target_feature`s, and `RUSTFLAGS`; missing architecture cells are kept explicit
+so follow-up SIMD work can fill them without changing the schema.
+
+### Platform metadata template
+
+```md
+**Platform.**
+- OS:
+- CPU:
+- target_arch:
+- target_feature(s):
+- Rust:
+- RUSTFLAGS:
+- Source artifact:
+```
+
+### Seed matrix (2026-05-17)
+
+| Target family | OS | CPU / runner | target_arch | target_feature(s) | Rust | RUSTFLAGS | Source artifact | Status |
+|---------------|----|--------------|-------------|-------------------|------|-----------|-----------------|--------|
+| Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | Current local `cargo bench --workspace --features cli,tiff` summary below | Current broad baseline |
+| Linux x86_64 baseline | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | baseline x86-64 codegen | stable from workflow | unset | #189 artifact run `25299920836` from `.github/workflows/bench.yml` `bench-x86-64-v3` validation | Current selected IW44/render baseline |
+| Linux x86_64-v3 / AVX2 | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | `avx2` via x86-64-v3 codegen | stable from workflow | `-C target-cpu=x86-64-v3` | `.github/workflows/bench.yml` `bench-x86-64-v3` job; #189 artifact run `25299920836` | Current AVX2 validation exists for selected IW44/render benches |
+| wasm32 scalar | — | — | `wasm32` | scalar | — | — | Blocked pending #306 harness | Missing |
+| wasm32 simd128 | — | — | `wasm32` | `simd128` | — | `-C target-feature=+simd128` | Blocked pending #306 harness | Missing |
+| Linux aarch64 | — | — | `aarch64` | NEON | — | — | No trustworthy current artifact | Missing |
+
+### Architecture-sensitive seed numbers
+
+These rows intentionally cover only measurements that already have trustworthy
+source artifacts. Later issues should add rows instead of changing the platform
+metadata format.
+
+| Benchmark | Apple ARM64 local | Linux x86_64 baseline | Linux x86_64-v3 / AVX2 | wasm32 scalar | wasm32 simd128 | Linux aarch64 |
+|-----------|------------------:|----------------------:|-----------------------:|--------------:|----------------:|--------------:|
+| `iw44_decode_corpus_color` | **637 µs** | 1,385,461 ns | 1,123,865 ns | missing | missing | missing |
+| `iw44_decode_first_chunk` | **571 µs** | 765,703 ns | 728,565 ns | missing | missing | missing |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **5.39 ms** | 9,231,033 ns | 9,129,333 ns | missing | missing | missing |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.29 ms** | 2,164,523 ns | 2,199,280 ns | missing | missing | missing |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | **337 µs** | 565,640 ns | 583,519 ns | missing | missing | missing |
+| `render_colorbook` | **6.90 ms** | 13,072,440 ns | 12,826,562 ns | missing | missing | missing |
+| `render_colorbook_cold` | **17.3 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
+| `render_colorbook_stages/mask_decode` | **4.13 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
+| `render_corpus_color` | **68.7 ms** | 133,813,976 ns | 133,185,634 ns | missing | missing | missing |
+
+Notes:
+
+- Apple ARM64 values come from the current broad local benchmark summary in
+  this file.
+- Linux x86_64 baseline and x86_64-v3 values come from the #189 AVX2 validation
+  artifact recorded in `PERF_EXPERIMENTS.md`.
+- The wasm32 and Linux aarch64 cells are explicitly missing. #306 and #308 are
+  expected to fill them using the metadata template above.
+
+---
+
 ## Codec benchmarks (`cargo bench --bench codecs`)
 
 Test files: `references/djvujs/library/assets/` and `tests/corpus/`
