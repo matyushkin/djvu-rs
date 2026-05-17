@@ -5,6 +5,113 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #295 — JB2 encoder corpus round-trip and size baseline — **Needs follow-up** (2026-05-17)
+
+**Approach.** Refreshed the existing JB2 quality harnesses without changing
+encoder behavior. The page-level run measured original `Sjbz`, direct
+`encode_jb2`, and dict `encode_jb2_dict` bytes/bpp/round-trip status across
+current JB2-bearing fixtures and corpus files. The shared-Djbz run measured
+`encode_jb2_dict` independent page totals vs bundled shared-Djbz totals, with
+CC accounting and cross-size probe output enabled.
+
+**Platform.**
+- OS: macOS 26.3.1 (Darwin 25.3)
+- CPU: Apple M1 Max, 10 cores
+- target_arch: `aarch64`
+- target_feature(s): ARM64 baseline; NEON available on Apple Silicon
+- Rust: 1.92.0 stable (`aarch64-apple-darwin`)
+- RUSTFLAGS: unset
+- Source artifact: local run on `codex/issue-295-jb2-quality-refresh`
+
+**Command(s).**
+
+```sh
+cargo run --release --example encode_quality_jb2 -- \
+  references/djvujs/library/assets/boy_jb2.djvu \
+  references/djvujs/library/assets/boy.djvu \
+  references/djvujs/library/assets/carte.djvu \
+  references/djvujs/library/assets/chicken.djvu \
+  references/djvujs/library/assets/colorbook.djvu \
+  references/djvujs/library/assets/DjVu3Spec_bundled.djvu \
+  references/djvujs/library/assets/irish.djvu \
+  references/djvujs/library/assets/navm_fgbz.djvu \
+  tests/corpus/cable_1973_100133.djvu \
+  tests/corpus/conquete_paix.djvu \
+  tests/corpus/pathogenic_bacteria_1896.djvu \
+  tests/corpus/watchmaker.djvu
+
+cargo run --release --example encode_quality_djbz -- \
+  --cc-stats --cross-size-stats \
+  references/djvujs/library/assets/colorbook.djvu \
+  references/djvujs/library/assets/DjVu3Spec_bundled.djvu \
+  references/djvujs/library/assets/navm_fgbz.djvu \
+  tests/corpus/conquete_paix.djvu \
+  tests/corpus/pathogenic_bacteria_1896.djvu \
+  tests/corpus/watchmaker.djvu
+```
+
+**Numbers.**
+
+Page-level JB2 refresh:
+
+| Mode | Pages | Bytes | bpp | vs original | Round-trip |
+|------|------:|------:|----:|------------:|------------|
+| Original `Sjbz` | 692 | 26,569,542 | 0.0263 | 1.000x | source |
+| Direct `encode_jb2` | 692 | 46,252,033 | 0.0457 | 1.741x | 464 ok, 228 decode errors |
+| Dict `encode_jb2_dict` | 692 | 36,016,741 | 0.0356 | 1.356x | 692 ok, 0 failures |
+
+Per-file dict ratios:
+
+| File | Pages | Dict/orig | Dict failures | Direct failures |
+|------|------:|----------:|--------------:|----------------:|
+| `boy_jb2.djvu` | 1 | 1.000x | 0 | 0 |
+| `colorbook.djvu` | 62 | 1.030x | 0 | 46 decode errors |
+| `DjVu3Spec_bundled.djvu` | 70 | 1.627x | 0 | 70 decode errors |
+| `irish.djvu` | 1 | 0.302x | 0 | 0 |
+| `navm_fgbz.djvu` | 5 | 0.301x | 0 | 5 decode errors |
+| `cable_1973_100133.djvu` | 2 | 1.136x | 0 | 0 |
+| `conquete_paix.djvu` | 22 | 1.025x | 0 | 16 decode errors |
+| `pathogenic_bacteria_1896.djvu` | 517 | 1.378x | 0 | 80 decode errors |
+| `watchmaker.djvu` | 12 | 1.058x | 0 | 11 decode errors |
+
+`carte.djvu` was skipped by the harness because the checked-in fixture is
+truncated and does not parse.
+
+Shared-Djbz refresh:
+
+| Mode | Files/pages | Bytes | bpp | vs original | Round-trip |
+|------|------------:|------:|----:|------------:|------------|
+| Original `Sjbz` totals | 6 / 688 | 26,424,220 | 0.0262 | 1.000x | source |
+| Independent dict pages | 6 / 688 | 35,963,419 | 0.0356 | 1.361x | all pages ok |
+| Bundled shared-Djbz | 6 / 688 | 34,986,136 | 0.0347 | 1.324x | all bundles ok |
+
+Bundled shared-Djbz was `0.973x` of independent dict output (`-2.7%`) on this
+six-file run. Individual bundle/independent ratios were: `colorbook` 1.002x,
+`DjVu3Spec_bundled` 0.642x, `navm_fgbz` 0.955x, `conquete_paix` 1.029x,
+`pathogenic_bacteria_1896` 0.976x, and `watchmaker` 0.945x.
+
+Failure buckets:
+- Direct `encode_jb2` decode errors are oversized whole-image record-3 symbols
+  hitting decoder symbol-size limits on large pages.
+- Dict `encode_jb2_dict` has no current mismatch or decode-error bucket on the
+  refreshed corpus; the old `483/553` dict round-trip number is stale.
+- Shared-Djbz has no current mismatch or decode-error bucket with byte-exact
+  clustering; all six bundles round-trip pixel-exact.
+- `carte.djvu` is a harness/input bucket: truncated fixture parse failure, not
+  an encoder failure.
+
+**Decision.** Needs follow-up. The refreshed safe baseline is dict encoding:
+it round-trips all 692 pages but remains `1.356x` original bytes overall.
+Shared-Djbz is safe and saves `2.7%` vs independent dict on this corpus, but it
+still remains `1.324x` original bytes overall.
+
+**Reason.** Correctness is no longer the blocker for the dict path on the
+current corpus; byte cost is. The next narrow JB2 implementation issue should
+be #301: add a byte-cost estimator for cross-size refinement before emitting
+any new cross-size or lossy/lossless refinement records. The largest measured
+size gaps are still `pathogenic_bacteria_1896` and `DjVu3Spec_bundled`, while
+`watchmaker` shows cross-size candidate headroom already recorded by the probe.
+
 ### #294 — thumbnail row-scratch A/B — **Rejected** (2026-05-17)
 
 **Approach.** Added a `render_row_scratch_ab` Criterion group to compare the

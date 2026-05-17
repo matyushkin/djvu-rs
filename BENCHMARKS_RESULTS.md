@@ -99,6 +99,33 @@ Note: `bzz_decode` measures the 89-byte NAVM payload in navm_fgbz.djvu. BZZ perf
 scales with payload size (BWT requires a full-block sort); large payloads (e.g. 6 KB DIRM
 in a 520-page document) take ~1–5 ms.
 
+### JB2 encoder quality baseline (#295)
+
+Measured with `examples/encode_quality_jb2.rs` and
+`examples/encode_quality_djbz.rs` on 2026-05-17. See `PERF_EXPERIMENTS.md`
+for commands, platform metadata, and failure buckets.
+
+Page-level JB2 corpus refresh:
+
+| Mode | Pages | Bytes | bpp | vs original | Round-trip |
+|------|------:|------:|----:|------------:|------------|
+| Original `Sjbz` | 692 | 26,569,542 | 0.0263 | 1.000x | source |
+| Direct `encode_jb2` | 692 | 46,252,033 | 0.0457 | 1.741x | 464 ok, 228 decode errors |
+| Dict `encode_jb2_dict` | 692 | 36,016,741 | 0.0356 | 1.356x | 692 ok |
+
+Shared-Djbz multi-page refresh:
+
+| Mode | Files/pages | Bytes | bpp | vs original | Round-trip |
+|------|------------:|------:|----:|------------:|------------|
+| Original `Sjbz` totals | 6 / 688 | 26,424,220 | 0.0262 | 1.000x | source |
+| Independent dict pages | 6 / 688 | 35,963,419 | 0.0356 | 1.361x | all pages ok |
+| Bundled shared-Djbz | 6 / 688 | 34,986,136 | 0.0347 | 1.324x | all bundles ok |
+
+Shared-Djbz is `0.973x` of independent dict output on this run, but the
+current safe encoder family remains larger than the source `Sjbz` corpus
+overall. The old `483/553` dict round-trip number is stale: dict encoding now
+round-trips every refreshed page.
+
 ---
 
 ## Render benchmarks (`cargo bench --bench render`)
