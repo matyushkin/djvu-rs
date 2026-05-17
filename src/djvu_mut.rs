@@ -332,12 +332,12 @@ impl DjVuDocumentMut {
     ///   indirect (non-bundled) `FORM:DJVM` — page bytes live in external
     ///   files, so editing in place is not supported by this primitive.
     pub fn page_mut(&mut self, index: usize) -> Result<PageMut<'_>, MutError> {
-        let count = self.page_count();
-        if index >= count {
-            return Err(MutError::PageOutOfRange { index, count });
-        }
         let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
         if &root_form_type == b"DJVU" {
+            let count = self.page_count();
+            if index >= count {
+                return Err(MutError::PageOutOfRange { index, count });
+            }
             debug_assert_eq!(index, 0);
             return Ok(PageMut {
                 form: &mut self.file.root,
@@ -347,6 +347,10 @@ impl DjVuDocumentMut {
         debug_assert_eq!(&root_form_type, b"DJVM");
         if !is_bundled_djvm(&self.file.root) {
             return Err(MutError::IndirectDjvmUnsupported);
+        }
+        let count = self.page_count();
+        if index >= count {
+            return Err(MutError::PageOutOfRange { index, count });
         }
         // Walk the root's children, returning the index-th FORM:DJVU.
         let children = match &mut self.file.root {
@@ -814,6 +818,45 @@ mod tests {
         let count = doc.page_count();
         let err = doc.page_mut(count).err().unwrap();
         assert!(matches!(err, MutError::PageOutOfRange { .. }));
+    }
+
+    #[test]
+    fn page_mut_indirect_djvm_returns_unsupported_before_range_check() {
+        let mut doc = DjVuDocumentMut::from_bytes(&indirect_djvm_bytes()).unwrap();
+        let err = doc.page_mut(0).err().unwrap();
+        assert!(matches!(err, MutError::IndirectDjvmUnsupported));
+    }
+
+    fn indirect_djvm_bytes() -> Vec<u8> {
+        let bzz_meta: &[u8] = &[
+            0xff, 0xff, 0xed, 0xbf, 0x8a, 0x1f, 0xbe, 0xad, 0x14, 0x57, 0x10, 0xc9, 0x63, 0x19,
+            0x11, 0xf0, 0x85, 0x28, 0x12, 0x8a, 0xbf,
+        ];
+
+        let mut dirm_data = Vec::new();
+        dirm_data.push(0x00);
+        dirm_data.push(0x00);
+        dirm_data.push(0x01);
+        dirm_data.extend_from_slice(bzz_meta);
+
+        let mut dirm_chunk = Vec::new();
+        dirm_chunk.extend_from_slice(b"DIRM");
+        dirm_chunk.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
+        dirm_chunk.extend_from_slice(&dirm_data);
+        if !dirm_data.len().is_multiple_of(2) {
+            dirm_chunk.push(0);
+        }
+
+        let mut form_body = Vec::new();
+        form_body.extend_from_slice(b"DJVM");
+        form_body.extend_from_slice(&dirm_chunk);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"AT&T");
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&(form_body.len() as u32).to_be_bytes());
+        out.extend_from_slice(&form_body);
+        out
     }
 
     #[test]

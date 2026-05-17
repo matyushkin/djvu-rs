@@ -805,17 +805,18 @@ fn cmd_ocr(
     let ocr_backend = build_ocr_backend(backend, model_path)?;
 
     let data = std::fs::read(path)?;
-    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+    let mut doc_mut = djvu_rs::djvu_mut::DjVuDocumentMut::from_bytes(&data)?;
+    let _ = doc_mut.page_mut(0)?;
 
     let options = OcrOptions {
         languages: lang.to_string(),
         dpi: 300,
     };
 
-    // OCR each page and collect text layers
-    let count = doc.page_count();
-    let mut text_chunks: Vec<Vec<u8>> = Vec::new();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
 
+    // OCR each page and inject the recognized text layer.
+    let count = doc.page_count();
     for i in 0..count {
         let page = doc.page(i)?;
         let w = page.width() as u32;
@@ -835,25 +836,19 @@ fn cmd_ocr(
             text_layer.zones.len()
         );
 
-        let encoded = djvu_rs::text_encode::encode_text_layer(&text_layer, h);
-        text_chunks.push(encoded);
+        doc_mut.page_mut(i)?.set_text_layer(&text_layer)?;
     }
 
-    // Write output: copy original file and inject TXTa chunks
-    // For now, write the encoded text layers as standalone files
-    // (full DjVu rewriting requires IFF mutation which is future work)
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Copy original file, then append text chunks info
-    std::fs::copy(path, output)?;
-    eprintln!("OCR complete. Output written to {}", output.display());
+    std::fs::write(output, doc_mut.try_into_bytes()?)?;
     eprintln!(
-        "Note: text layer injection into DjVu IFF is pending; \
-         encoded TXTa data available via djvu_rs::text_encode"
+        "OCR complete. Embedded text layers for {count} page(s) into {}",
+        output.display()
     );
 
     Ok(())
