@@ -1259,7 +1259,7 @@ struct CompositeContext<'a> {
 /// Look up the palette color for a foreground pixel at (px, py).
 ///
 /// Uses the blit map to find the per-glyph blit index, then maps it through
-/// the FGbz index table to get the final color. Falls back to palette[0] when
+/// the FGbz index table to get the final color. Falls back to `palette[0]` when
 /// no index table is present, and to black when lookup fails.
 #[inline]
 fn lookup_palette_color(
@@ -1794,9 +1794,9 @@ fn composite_rows_area_avg_one(
 ///
 /// `rgba_row` contains `opts.width * 4` bytes (RGBA, alpha = 255).
 ///
-/// This is the internal streaming primitive for Phase 1.  Public callers should
-/// use [`render_pixmap`] (allocates a complete `Pixmap`) or, in a future Phase
-/// 2 PR, a public `render_streaming` API.
+/// This is the internal streaming primitive used by [`render_streaming`] and by
+/// permissive [`render_pixmap`] fallback. Public callers that need full-pixmap
+/// post-processing should use [`render_pixmap`].
 ///
 /// # Errors
 ///
@@ -2012,10 +2012,9 @@ pub fn render_into(
 
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
 ///
-/// Internally delegates to [`render_rows`], which composites each output row
-/// into a per-row scratch buffer and copies it into the pre-allocated `Pixmap`.
-/// This thin adapter keeps the public API unchanged while the per-row path
-/// prepares Phase 2 streaming support (issue #225).
+/// Strict renders composite directly into the full pixmap. Permissive renders
+/// reuse the row path so decode-error recovery remains shared with
+/// [`render_streaming`].
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     let w = opts.width;
     let h = opts.height;

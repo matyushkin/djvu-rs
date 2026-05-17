@@ -275,8 +275,8 @@ pub mod navm_encode;
 
 /// Smmr chunk codec — ITU-T G4 (MMR) bilevel image compression.
 ///
-/// Provides [`smmr::decode_smmr`] (chunk → [`Bitmap`]) and
-/// [`smmr::encode_smmr`] ([`Bitmap`] → chunk). Useful as an alternative
+/// Provides [`decode_smmr`](crate::smmr::decode_smmr) (chunk → [`Bitmap`]) and
+/// [`encode_smmr`](crate::smmr::encode_smmr) ([`Bitmap`] → chunk). Useful as an alternative
 /// to JB2 for fax-style scans without recurring glyph structure.
 pub mod smmr;
 

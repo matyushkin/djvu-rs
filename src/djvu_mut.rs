@@ -1,15 +1,16 @@
 //! In-place DjVu document mutation — byte-preserving rewrite of the IFF tree.
 //!
-//! PR1 of [#222](https://github.com/matyushkin/djvu-rs/issues/222). This is the
-//! foundation layer: parse a document into an editable tree, walk to a leaf
+//! Originated in [#222](https://github.com/matyushkin/djvu-rs/issues/222).
+//! This module parses a document into an editable tree, can walk to a leaf
 //! chunk by path, replace its data, and serialise back. When no mutations have
-//! happened, [`DjVuDocumentMut::into_bytes`] returns the original bytes
-//! verbatim (byte-identical round-trip).
+//! happened, [`into_bytes`](crate::djvu_mut::DjVuDocumentMut::into_bytes)
+//! returns the original bytes verbatim (byte-identical round-trip). High-level
+//! setters are available for page text, annotations, metadata, and bundled-DJVM
+//! bookmarks.
 //!
-//! Future PRs in the [#222](https://github.com/matyushkin/djvu-rs/issues/222)
-//! sequence add high-level setters (`set_metadata`, `set_bookmarks`,
-//! `page_mut(i).set_text_layer`, `…set_annotations`) plus indirect-DJVM
-//! support, which all build on the chunk-replacement primitive defined here.
+//! Indirect `FORM:DJVM` mutation remains unsupported because it requires a
+//! concrete external-file rewrite or re-bundle policy; see
+//! [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md).
 //!
 //! ## Example
 //!
@@ -102,9 +103,9 @@ pub enum MutError {
     /// The operation requires DIRM offset recomputation, which is not
     /// implemented for indirect (non-bundled) `FORM:DJVM` documents — those
     /// reference page bytes in external files via a resolver, so editing them
-    /// in place would also need the external files rewritten. Tracked as a
-    /// follow-up PR (PR5) in the
-    /// [#222](https://github.com/matyushkin/djvu-rs/issues/222) sequence.
+    /// in place would also need the external files rewritten. The current
+    /// decision record is
+    /// [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md).
     #[error("mutation of indirect DJVM documents is not supported")]
     IndirectDjvmUnsupported,
 
