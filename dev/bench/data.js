@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778995128012,
+  "lastUpdate": 1778998195560,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -9020,6 +9020,402 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_150",
             "value": 47549000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5a03fdab3e494b7b2c89cc08fd489e2ba50a9d88",
+          "message": "Estimate cross-size JB2 refinement byte cost (#323)",
+          "timestamp": "2026-05-17T14:55:38+09:00",
+          "tree_id": "b55e26697cc513230e0f7c3ff8a92ad0a405e88e",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/5a03fdab3e494b7b2c89cc08fd489e2ba50a9d88"
+        },
+        "date": 1778998194517,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 117,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 164408,
+            "range": "± 1352",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 772502,
+            "range": "± 9766",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 575029,
+            "range": "± 3199",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1430100,
+            "range": "± 21157",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2675,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9183805,
+            "range": "± 146090",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 574694,
+            "range": "± 4670",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2194486,
+            "range": "± 71679",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 2752419,
+            "range": "± 12344",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 30257778,
+            "range": "± 1284166",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 227846,
+            "range": "± 468",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 372723,
+            "range": "± 1387",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 1606907,
+            "range": "± 8901",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 6200750,
+            "range": "± 16723",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 24364963,
+            "range": "± 136656",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1683802,
+            "range": "± 36747",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 11652290,
+            "range": "± 236602",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 11593064,
+            "range": "± 184482",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 1,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5394910,
+            "range": "± 75425",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 26509528,
+            "range": "± 484894",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 129909599,
+            "range": "± 5011455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 132484907,
+            "range": "± 318575",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_pixmap/watchmaker_color",
+            "value": 129654664,
+            "range": "± 454284",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_into_reuse_buffer/watchmaker_color",
+            "value": 127651413,
+            "range": "± 242574",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_streaming_discard/watchmaker_color",
+            "value": 122691432,
+            "range": "± 199427",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/mask_decode/watchmaker_color",
+            "value": 3407840,
+            "range": "± 115945",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/bg_to_rgb_warm/watchmaker_color",
+            "value": 4448692,
+            "range": "± 16296",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_pixmap/cable_bilevel",
+            "value": 132323611,
+            "range": "± 266349",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_into_reuse_buffer/cable_bilevel",
+            "value": 130313174,
+            "range": "± 233928",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_streaming_discard/cable_bilevel",
+            "value": 125146565,
+            "range": "± 595416",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/mask_decode/cable_bilevel",
+            "value": 568090,
+            "range": "± 2321",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/bg_to_rgb_warm/cable_bilevel",
+            "value": 4430111,
+            "range": "± 19834",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/color_native_cached",
+            "value": 127462761,
+            "range": "± 173724",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/bilevel_native_cached",
+            "value": 130063483,
+            "range": "± 1031115",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/color_downscale_cached",
+            "value": 11116823,
+            "range": "± 40131",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/small_color_downscale_cached",
+            "value": 239034,
+            "range": "± 451",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/thumbnail_dpi72",
+            "value": 370746,
+            "range": "± 162",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/thumbnail_dpi72",
+            "value": 355328,
+            "range": "± 378",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/thumbnail_half_bilinear",
+            "value": 238698,
+            "range": "± 141",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/thumbnail_half_bilinear",
+            "value": 213872,
+            "range": "± 486",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/colorbook_downscale",
+            "value": 11148637,
+            "range": "± 101029",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/colorbook_downscale",
+            "value": 12583225,
+            "range": "± 32234",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/corpus_color_native",
+            "value": 127132830,
+            "range": "± 228320",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/corpus_color_native",
+            "value": 126007565,
+            "range": "± 235341",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/corpus_bilevel_native",
+            "value": 129995369,
+            "range": "± 113446",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/corpus_bilevel_native",
+            "value": 127777277,
+            "range": "± 145101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 239413,
+            "range": "± 5123",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 8545166,
+            "range": "± 13663",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1355477843,
+            "range": "± 7401231",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 4198446,
+            "range": "± 27664",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 3321,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 20735955,
+            "range": "± 111049",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 20787563,
+            "range": "± 81781",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3183315,
+            "range": "± 7670",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 22952041,
+            "range": "± 37881",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 199757,
+            "range": "± 1061",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8199999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 49428000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 47133000,
             "range": "± 0",
             "unit": "ns/iter"
           }
