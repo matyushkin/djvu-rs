@@ -40,7 +40,7 @@ so follow-up SIMD work can fill them without changing the schema.
 
 | Target family | OS | CPU / runner | target_arch | target_feature(s) | Rust | RUSTFLAGS | Source artifact | Status |
 |---------------|----|--------------|-------------|-------------------|------|-----------|-----------------|--------|
-| Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | Current local `cargo bench --workspace --features cli,tiff` summary below | Current broad baseline |
+| Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | #308 local filtered IW44/render run | Current IW44/NEON validation baseline |
 | Linux x86_64 baseline | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | baseline x86-64 codegen | stable from workflow | unset | #189 artifact run `25299920836` from `.github/workflows/bench.yml` `bench-x86-64-v3` validation | Current selected IW44/render baseline |
 | Linux x86_64-v3 / AVX2 | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | `avx2` via x86-64-v3 codegen | stable from workflow | `-C target-cpu=x86-64-v3` | `.github/workflows/bench.yml` `bench-x86-64-v3` job; #189 artifact run `25299920836` | Current AVX2 validation exists for selected IW44/render benches |
 | wasm32 scalar | macOS 26.3.1 host / Node.js v26.0.0 | Apple M1 Max host running Node.js wasm | `wasm32` | scalar | 1.92.0 stable | unset | `scripts/bench_wasm_simd128.sh` local run (#306) | Current small-fixture wasm baseline |
@@ -56,13 +56,13 @@ metadata format.
 | Benchmark | Apple ARM64 local | Linux x86_64 baseline | Linux x86_64-v3 / AVX2 | wasm32 scalar | wasm32 simd128 | Linux aarch64 |
 |-----------|------------------:|----------------------:|-----------------------:|--------------:|----------------:|--------------:|
 | `iw44_decode_corpus_color` | **637 µs** | 1,385,461 ns | 1,123,865 ns | missing | missing | missing |
-| `iw44_decode_first_chunk` | **571 µs** | 765,703 ns | 728,565 ns | missing | missing | missing |
-| `iw44_to_rgb_colorbook/sub1_full_decode` | **5.39 ms** | 9,231,033 ns | 9,129,333 ns | missing | missing | missing |
-| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.29 ms** | 2,164,523 ns | 2,199,280 ns | missing | missing | missing |
+| `iw44_decode_first_chunk` | **557 µs** | 765,703 ns | 728,565 ns | missing | missing | missing |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | **5.47 ms** | 9,231,033 ns | 9,129,333 ns | missing | missing | missing |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.30 ms** | 2,164,523 ns | 2,199,280 ns | missing | missing | missing |
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **337 µs** | 565,640 ns | 583,519 ns | missing | missing | missing |
-| `render_colorbook` | **6.90 ms** | 13,072,440 ns | 12,826,562 ns | missing | missing | missing |
-| `render_colorbook_cold` | **17.3 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
-| `render_colorbook_stages/mask_decode` | **4.13 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
+| `render_colorbook` | **6.92 ms** | 13,072,440 ns | 12,826,562 ns | missing | missing | missing |
+| `render_colorbook_cold` | **17.4 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
+| `render_colorbook_stages/mask_decode` | **4.17 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
 | `render_corpus_color` | **68.7 ms** | 133,813,976 ns | 133,185,634 ns | missing | missing | missing |
 | `wasm_render_150dpi_fresh_doc` | n/a | n/a | n/a | 2.715 ms | 2.548 ms | n/a |
 | `wasm_render_150dpi_cached_page` | n/a | n/a | n/a | 2.685 ms | 2.491 ms | n/a |
@@ -70,14 +70,16 @@ metadata format.
 
 Notes:
 
-- Apple ARM64 values come from the current broad local benchmark summary in
-  this file.
+- Apple ARM64 IW44/render values come from the #308 local filtered Criterion
+  run on Apple M1 Max. Older broad local benchmark rows below remain useful for
+  non-IW44 context, but the architecture matrix uses the fresher #308 filters.
 - Linux x86_64 baseline and x86_64-v3 values come from the #189 AVX2 validation
   artifact recorded in `PERF_EXPERIMENTS.md`.
 - The wasm32 rows come from the Node.js harness added in #306 and are not
   directly comparable to native Criterion rows. Linux aarch64 benchmark cells
-  are still missing; #308 is expected to fill them using the metadata template
-  above. #305 only records Linux aarch64 build/test support coverage.
+  remain missing after #308; #305 only records Linux aarch64 build/test smoke
+  coverage, and a future benchmark artifact is needed before filling those
+  cells.
 
 ---
 
