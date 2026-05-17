@@ -1,5 +1,10 @@
 # djvu-rs Benchmark Results
 
+> Historical benchmark log. Current benchmark claims and the cross-architecture
+> matrix live in [`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md). Compare the
+> older sections below only within their dated context; benchmark definitions,
+> corpus coverage, and output sizes have changed across the roadmap work.
+
 ## How to reproduce
 
 ```sh
