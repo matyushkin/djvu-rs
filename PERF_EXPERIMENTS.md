@@ -1603,3 +1603,69 @@ prove actual ZP-coded record-6 byte cost or round-trip behavior. Follow-up #322
 should implement an experiment-only cross-size rec-6 emitter, compare actual
 bytes against this estimate, and stop before tuning if output is not
 pixel-exact. The shipped default remains exact shared-Djbz rec-7 plus rec-1.
+
+### #307 — x86_64 AVX2 row-pass feasibility spike — **Rejected** (2026-05-17)
+
+**Approach.** Prototyped an x86_64 AVX2 `s == 1` horizontal IW44 row pass
+behind compile-time `target_feature = "avx2"`, mirroring the AArch64 row-local
+NEON shape and leaving baseline x86-64/default-codegen hosts on the existing
+path. The spike included a gated AVX2 row-pass equivalence test covering short
+rows, chunk boundaries, and scalar tails. The code was removed after the clean
+measurement showed sensitive partial-decode regressions.
+
+**Platform.**
+- OS: Ubuntu GitHub-hosted runner (`ubuntu-latest`)
+- CPU: GitHub-hosted x86_64 runner
+- arch: `x86_64`
+- target features: baseline x86-64 vs `x86-64-v3` / AVX2 codegen
+- Rust: stable toolchain installed by `.github/workflows/bench.yml`
+- RUSTFLAGS: unset for baseline; `-C target-cpu=x86-64-v3` for AVX2 pass
+
+**Command(s).**
+
+```sh
+gh workflow run bench.yml -r codex/issue-307-avx2-row-pass
+gh run download 25984542554 --dir /private/tmp/djvu-307-clean-artifacts
+```
+
+Workflow commands run by `Benchmark (x86-64-v3 AVX2 validation)`:
+
+```sh
+cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode' --output-format bencher
+cargo bench --bench render -- 'render_corpus_color|render_colorbook' --output-format bencher
+RUSTFLAGS='-C target-cpu=x86-64-v3' cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode' --output-format bencher
+RUSTFLAGS='-C target-cpu=x86-64-v3' cargo bench --bench render -- 'render_corpus_color|render_colorbook' --output-format bencher
+```
+
+**Numbers.**
+
+Source: GitHub Actions run `25984542554`, artifact
+`bench-x86-64-v3-4ad38655adc465a16dc766efa5ac12c34c144fc9`.
+Negative delta means the AVX2/x86-64-v3 pass is faster.
+
+| Bench | default ns | +x86-64-v3 ns | Delta |
+|-------|-----------:|--------------:|------:|
+| `iw44_decode_corpus_color` | 1,372,742 | 1,133,708 | -17.41% |
+| `iw44_decode_first_chunk` | 766,885 | 729,423 | -4.88% |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 9,334,768 | 9,485,209 | +1.61% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,154,494 | 2,258,179 | +4.81% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 559,566 | 600,388 | +7.30% |
+| `render_colorbook` | 11,523,817 | 11,760,347 | +2.05% |
+| `render_colorbook_cold` | 27,060,741 | 27,560,588 | +1.85% |
+| `render_colorbook_stages/bg_only_warm` | 1 | 1 | +0.00% |
+| `render_colorbook_stages/full_render` | 11,495,717 | 11,795,482 | +2.61% |
+| `render_colorbook_stages/mask_decode` | 5,368,030 | 5,132,471 | -4.39% |
+| `render_corpus_color` | 129,285,417 | 129,176,157 | -0.08% |
+
+**Decision.** Rejected; the prototype was removed before merge.
+
+**Reason.** The full IW44 decode benches improved (`-17.41%` corpus decode,
+`-4.88%` first chunk), but #307 explicitly called out sub2/sub4 partial decode
+as sensitive benches. Those regressed by `+4.81%` and `+7.30%`, respectively,
+which fails the acceptance criterion of a relevant win with no meaningful
+regression. `render_colorbook` and full-render stages also drifted slower,
+though within the 3% threshold. Because no production optimization landed,
+`BENCHMARKS_RESULTS.md` was not updated. The benchmark workflow was triggered
+manually because the current PR path filter does not include `crates/**`; a
+follow-up should widen that filter so future crate-only performance PRs run
+benchmark validation automatically.
