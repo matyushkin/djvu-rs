@@ -254,6 +254,12 @@ requested output rectangle is larger than the native page.
 - JB2 and IW44 pure decode are sub-millisecond to low-millisecond for typical pages.
 - Full native-resolution render (2550×3301 px): ~67–70 ms.
 - Corpus benchmarks use public domain files from Internet Archive.
+- PDF export baseline for `tests/corpus/watchmaker.djvu` (12 pages, 150 dpi,
+  JPEG-80, Apple M1 Max / macOS arm64, Rust 1.92, 2026-05-17):
+  `pdf_export_sequential` median **955 ms**, `pdf_export_parallel` median
+  **154 ms**. Memory probe peak RSS: sequential **76.7 MiB**, parallel
+  **228.9 MiB**. See `PERF_EXPERIMENTS.md` entry #298 for commands and
+  per-stage byte counts.
 - `render_large_doc_first_page` improved from ~43 ms → 10.4 ms across v0.5.2–v0.5.3:
   - `Pixmap::new` fill changed from per-pixel push to `vec![fill; n]`
   - JB2 symbol dictionary cached via `RwLock<HashMap<usize, Arc<JB2Dict>>>`

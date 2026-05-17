@@ -1263,3 +1263,71 @@ block and one public cross-architecture result schema for #306, #307, and #308.
 **Reason.** Normalizing the table first avoids each downstream architecture
 issue inventing a different platform format, while preserving measurement
 discipline by distinguishing current numbers from missing/untrusted cells.
+
+### #298 — PDF export memory and parallel baseline — **Needs follow-up** (2026-05-17)
+
+**Approach.** Measured the existing PDF export pipeline before any streaming
+rewrite. Criterion measured the stable `pdf_export_sequential` and
+`pdf_export_parallel` benches on `tests/corpus/watchmaker.djvu` (12 pages,
+default PDF options: 150 dpi, JPEG-80). A new reproducible
+`examples/pdf_memory_probe.rs` harness recorded read/parse, one-page
+render/RGB/JPEG staging, full PDF export time, PDF bytes, and peak RSS via
+`/usr/bin/time -l`.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple M1 Max, 10 cores
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: Apple ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- RUSTFLAGS: unset
+- Source artifact: local run on `codex/issue-298-pdf-baseline`
+
+**Command(s).**
+
+```sh
+cargo bench --bench render --features std -- pdf_export_sequential
+cargo bench --bench render --features std,parallel -- pdf_export_parallel
+
+/usr/bin/time -l cargo run --release --example pdf_memory_probe -- \
+  tests/corpus/watchmaker.djvu
+
+/usr/bin/time -l cargo run --release --features parallel \
+  --example pdf_memory_probe -- tests/corpus/watchmaker.djvu
+```
+
+**Numbers.**
+
+| Measurement | Sequential | Parallel |
+|-------------|-----------:|---------:|
+| Criterion `pdf_export_*` | 955.42 ms median (`916.16..999.54 ms`) | 154.05 ms median (`153.41..154.66 ms`) |
+| Probe `pdf_export_ms` | 893.827 ms | 187.183 ms |
+| Peak RSS (`maximum resident set size`) | 80,379,904 bytes (76.7 MiB) | 240,058,368 bytes (228.9 MiB) |
+| Peak memory footprint | 79,479,872 bytes (75.8 MiB) | 239,175,232 bytes (228.1 MiB) |
+| Output PDF bytes | 6,651,085 | 6,651,085 |
+
+Single-page breakdown from the same probe, page 0 rendered at 150 dpi
+(`1275x1651`):
+
+| Stage | Time | Bytes |
+|-------|-----:|------:|
+| Read input | 0.075 ms | 183,352 |
+| Parse document | 0.152 ms | - |
+| Render full RGBA pixmap | 43.822 ms | 8,420,100 |
+| Convert RGBA to RGB staging buffer | 2.904 ms | 6,315,075 |
+| JPEG-80 encode staging buffer | 13.065 ms | 312,922 |
+
+The parallel probe uses the same one-page breakdown before full export; that
+single-page section stayed essentially unchanged (`render_pixmap_ms=44.410`,
+`rgb_stage_ms=3.183`, `jpeg_stage_ms=13.228`) while full export dropped to
+`187.183 ms` and peak RSS rose to `228.9 MiB`.
+
+**Decision.** Needs follow-up.
+
+**Reason.** Parallel export is about 5.3-6.2x faster on the 12-page color
+fixture, but it increases peak RSS by about 3.0x because `djvu_to_pdf_impl`
+collects every `RenderedPage` before sequential object emission. The concrete
+baseline for #299 is therefore: beat ~894 ms sequential wall time and reduce
+or cap the ~76.7 MiB sequential peak RSS / ~228.9 MiB parallel peak RSS by
+streaming page render/RGB/JPEG data into PDF objects instead of retaining all
+encoded page bodies at once.
