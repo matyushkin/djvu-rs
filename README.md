@@ -437,23 +437,30 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Latest full Criterion run: macOS `arm64`, Rust 1.92, release profile
-(2026-05-04).
+Latest full Criterion run: Apple M1 Max / macOS `arm64`, Rust 1.92,
+release profile (`cargo bench --workspace --features cli,tiff`, 2026-05-16).
 
 | Benchmark | Time |
 |-----------|-----:|
-| `render_page/dpi/72` | **216 µs** |
-| `render_page/dpi/144` | **895 µs** |
-| `render_page/dpi/300` | **3.42 ms** |
-| `render_colorbook` (150 dpi, warm) | **7.29 ms** |
-| `render_colorbook_cold` | **17.9 ms** |
-| `render_corpus_color` (native 600 dpi) | **71.2 ms** |
-| `render_corpus_bilevel` (native 600 dpi) | **70.4 ms** |
-| `jb2_decode` | **134 µs** |
-| `iw44_decode_first_chunk` | **599 µs** |
-| `iw44_decode_corpus_color` | **671 µs** |
-| `parse_multipage_520p` | **2.27 ms** |
-| `render_large_doc_first_page` | **12.8 ms** |
+| `render_page/dpi/72` | **238 µs** |
+| `render_page/dpi/144` | **904 µs** |
+| `render_page/dpi/300` | **3.44 ms** |
+| `render_colorbook` (150 dpi, warm) | **6.90 ms** |
+| `render_colorbook_cold` | **17.3 ms** |
+| `render_corpus_color` (native 600 dpi) | **68.7 ms** |
+| `render_corpus_bilevel` (native 600 dpi) | **69.7 ms** |
+| `render_native_stages/render_streaming_discard` (color) | **65.1 ms** |
+| `jb2_decode` | **128 µs** |
+| `iw44_decode_first_chunk` | **571 µs** |
+| `iw44_decode_corpus_color` | **637 µs** |
+| `parse_multipage_520p` | **2.19 ms** |
+| `render_large_doc_first_page` | **10.6 ms** |
+| `pdf_export_sequential` (12 pages, JPEG-80) | **848 ms** |
+
+Criterion compared this run against the previous local baseline: native render,
+codec, and document benches mostly improved; `pdf_export_sequential` was
+unchanged; small thumbnail paths (`render_page/dpi/72` and 0.5× bilinear) were
+reported ~10–12% slower and are noted as a caveat.
 
 ### Comparison with DjVuLibre
 
@@ -461,17 +468,17 @@ The benchmark workflow still runs a DjVuLibre comparison via
 [`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) and formats it with
 [`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py).
 
-Current local matrix:
+Current local matrix (2026-05-16):
 
 | Scenario | djvu-rs | DjVuLibre | Ratio |
 |----------|--------:|----------:|------:|
-| Small color IW44, 72 dpi | **217 µs** | **122 µs** | DjVuLibre **1.8x faster** |
-| Large color IW44, 150 dpi | **7.29 ms** | **6.00 ms** | DjVuLibre **1.2x faster** |
-| Native color corpus, 300 dpi | **73.28 ms** | **36.47 ms** | DjVuLibre **2.0x faster** |
-| Native bilevel JB2 corpus, 300 dpi | **72.33 ms** | **35.26 ms** | DjVuLibre **2.1x faster** |
+| Small color IW44, 72 dpi | **238 µs** | **179 µs** | DjVuLibre **1.3x faster** |
+| Large color IW44, 150 dpi | **6.90 ms** | **5.87 ms** | DjVuLibre **1.2x faster** |
+| Native color corpus, 300 dpi | **68.71 ms** | **35.13 ms** | DjVuLibre **2.0x faster** |
+| Native bilevel JB2 corpus, 300 dpi | **69.73 ms** | **33.89 ms** | DjVuLibre **2.1x faster** |
 
 The same workflow also records `ddjvu` CLI timings for these files
-(30.20-81.00 ms locally), including process startup and PPM output.
+(27.6-74.1 ms locally), including process startup and PPM output.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
 run, methodology, and the full DjVuLibre comparison. Historical multi-platform
