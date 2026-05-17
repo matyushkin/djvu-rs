@@ -24,22 +24,22 @@ kept/reverted decisions are recorded in [`PERF_EXPERIMENTS.md`](PERF_EXPERIMENTS
 including recent async lazy loading and x86-64-v3 AVX2 validation results.
 
 The latest full local Criterion run is summarized in
-[`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md) (2026-05-16, macOS arm64,
+[`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md) (2026-05-17, macOS arm64,
 Rust 1.92.0). Selected results from that run:
 
 | Benchmark | Time |
 |-----------|-----:|
-| `render_page/dpi/72` | 238 µs |
-| `render_page/dpi/144` | 904 µs |
-| `render_page/dpi/300` | 3.44 ms |
-| `render_colorbook` | 6.90 ms |
-| `render_colorbook_cold` | 17.3 ms |
-| `render_corpus_color` | 68.7 ms |
-| `render_corpus_bilevel` | 69.7 ms |
-| `jb2_decode` | 128 µs |
-| `iw44_decode_first_chunk` | 571 µs |
-| `iw44_decode_corpus_color` | 637 µs |
-| `parse_multipage_520p` | 2.19 ms |
+| `render_page/dpi/72` | 246 µs |
+| `render_page/dpi/144` | 934 µs |
+| `render_page/dpi/300` | 6.96 ms |
+| `render_colorbook` | 8.78 ms |
+| `render_colorbook_cold` | 48.9 ms |
+| `render_corpus_color` | 151 ms |
+| `render_corpus_bilevel` | 75.4 ms |
+| `jb2_decode` | 132 µs |
+| `iw44_decode_first_chunk` | 592 µs |
+| `iw44_decode_corpus_color` | 655 µs |
+| `parse_multipage_520p` | 2.29 ms |
 | `render_large_doc_first_page` | 10.6 ms |
 
 ## Contributing results
