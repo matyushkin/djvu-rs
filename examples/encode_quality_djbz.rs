@@ -202,6 +202,9 @@ fn process_file(
             total.near_matches += s.near_matches;
             total.near_match_pixels += s.near_match_pixels;
             total.best_hamming.extend(s.best_hamming);
+            total.estimated_rec1_bytes += s.estimated_rec1_bytes;
+            total.estimated_cross_size_rec6_bytes += s.estimated_cross_size_rec6_bytes;
+            total.estimated_byte_delta += s.estimated_byte_delta;
         }
         let median = if total.best_hamming.is_empty() {
             0
@@ -218,6 +221,16 @@ fn process_file(
             total.near_matches as f64 / total.eligible_fresh_ccs.max(1) as f64 * 100.0,
             total.near_match_pixels,
             median,
+        );
+        eprintln!(
+            "  cross-size byte estimate: current_rec1={}B hypothetical_rec6={}B delta={}B ({:.2}% of independent)",
+            total.estimated_rec1_bytes,
+            total.estimated_cross_size_rec6_bytes,
+            total.estimated_byte_delta,
+            total.estimated_byte_delta as f64 / indep_total.max(1) as f64 * 100.0,
+        );
+        eprintln!(
+            "  cross-size semantics: hypothetical rec-6 would be lossless if emitted with a full refinement bitmap; this probe does not emit bytes and uses nearest-neighbor scaled Hamming only for candidate selection/cost estimation",
         );
     }
 
