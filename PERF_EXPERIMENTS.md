@@ -1390,3 +1390,98 @@ from the streamable PDF color path. Sequential RSS falls modestly from
 `169.5 MiB` (-26%). The remaining peak is dominated by retained per-page
 encoded RGB/JPEG/PDF object bodies, so a larger memory reduction would require
 streaming PDF object emission rather than only row-streamed rendering.
+
+### #300 — IW44 low-PSNR diagnosis on `conquete_paix` — **Needs follow-up** (2026-05-17)
+
+**Approach.** Added a repeatable diagnostic example that re-encodes existing
+BG44 backgrounds from `watchmaker` and `conquete_paix` with controlled variants:
+current pre-quantization RGB-to-YCbCr model, inverse-compatible pre-quantization
+model, default IW44 encode, full-resolution chroma, 200 total slices, and
+gray-luma-only encode. This issue intentionally did not change default encoder
+behavior.
+
+**Platform.**
+- OS: macOS / Darwin 25.3.0 (`RELEASE_ARM64_T6000`)
+- CPU: Apple Silicon host
+- arch: `arm64` / Rust host `aarch64-apple-darwin`
+- target features: Apple ARM64 baseline; NEON available on Apple Silicon
+- Rust: `rustc 1.92.0 (ded5c06cf 2025-12-08)`
+- RUSTFLAGS: unset
+
+**Command(s).**
+
+```sh
+cargo run --release --features std --example diagnose_iw44_quality -- \
+  tests/corpus/watchmaker.djvu tests/corpus/conquete_paix.djvu \
+  > /private/tmp/iw44_diag_300.jsonl \
+  2> /private/tmp/iw44_diag_300.stderr
+```
+
+`watchmaker` pages 0-4, 7-9, and 11 were skipped because the original BG44
+stream did not decode through the strict full-stream diagnostic path; pages 5,
+6, and 10 were enough to confirm the good-page baseline.
+
+**Numbers.**
+
+| File | Variant | Pages | Avg luma PSNR | Min luma PSNR | Avg byte ratio |
+|------|---------|------:|--------------:|--------------:|---------------:|
+| `watchmaker.djvu` | default | 3 | 46.42 dB | 44.99 dB | 0.73x |
+| `watchmaker.djvu` | full chroma | 3 | 46.37 dB | 44.99 dB | 0.73x |
+| `watchmaker.djvu` | 200 slices | 3 | 46.31 dB | 44.93 dB | 137.32x |
+| `watchmaker.djvu` | gray luma only, 200 slices | 3 | 46.41 dB | 44.95 dB | 137.31x |
+| `conquete_paix.djvu` | pre-quant current YCbCr model | 20 | 47.90 dB | 42.97 dB | n/a |
+| `conquete_paix.djvu` | pre-quant inverse-compatible model | 20 | 52.53 dB | 51.32 dB | n/a |
+| `conquete_paix.djvu` | default | 20 | 15.49 dB | 9.75 dB | 1.16x |
+| `conquete_paix.djvu` | full chroma | 20 | 16.35 dB | 9.15 dB | 1.24x |
+| `conquete_paix.djvu` | 200 slices | 20 | 15.43 dB | 10.84 dB | 55.87x |
+| `conquete_paix.djvu` | gray luma only, 200 slices | 20 | 14.57 dB | 9.21 dB | 40.40x |
+
+Per-page `watchmaker` baseline:
+
+| Page | Orig BG44 bytes | Default bytes | Default luma PSNR | Full chroma luma PSNR | 200 slices luma PSNR | Gray luma-only PSNR |
+|------|----------------:|--------------:|------------------:|----------------------:|---------------------:|--------------------:|
+| 5 | 2,028 | 1,788 | 44.994 dB | 44.988 dB | 44.934 dB | 44.950 dB |
+| 6 | 1,804 | 1,178 | 47.268 dB | 47.123 dB | 47.036 dB | 47.302 dB |
+| 10 | 1,772 | 1,161 | 46.984 dB | 46.988 dB | 46.975 dB | 46.979 dB |
+
+Per-page `conquete_paix` diagnostic:
+
+| Page | Orig BG44 bytes | Default bytes | Default luma PSNR | Full chroma luma PSNR | 200 slices luma PSNR | Gray luma-only PSNR |
+|------|----------------:|--------------:|------------------:|----------------------:|---------------------:|--------------------:|
+| 2 | 75,375 | 86,138 | 13.716 dB | 18.130 dB | 10.842 dB | 15.499 dB |
+| 3 | 36,721 | 37,994 | 9.746 dB | 16.749 dB | 14.251 dB | 19.829 dB |
+| 4 | 41,754 | 49,853 | 12.713 dB | 9.148 dB | 15.914 dB | 9.764 dB |
+| 5 | 32,415 | 39,573 | 12.125 dB | 12.345 dB | 13.436 dB | 9.961 dB |
+| 6 | 125,387 | 140,114 | 15.159 dB | 18.328 dB | 13.634 dB | 17.737 dB |
+| 7 | 90,023 | 102,677 | 14.429 dB | 9.876 dB | 11.275 dB | 18.507 dB |
+| 8 | 97,611 | 110,499 | 20.826 dB | 14.056 dB | 16.937 dB | 16.546 dB |
+| 9 | 94,750 | 107,785 | 16.934 dB | 14.794 dB | 21.151 dB | 20.543 dB |
+| 10 | 102,842 | 116,915 | 18.350 dB | 20.647 dB | 17.430 dB | 12.006 dB |
+| 11 | 91,607 | 104,672 | 11.219 dB | 19.431 dB | 11.875 dB | 17.791 dB |
+| 12 | 104,131 | 117,898 | 16.722 dB | 14.036 dB | 17.168 dB | 10.354 dB |
+| 13 | 96,424 | 109,673 | 20.043 dB | 18.464 dB | 20.039 dB | 9.210 dB |
+| 14 | 102,115 | 115,874 | 18.909 dB | 18.312 dB | 19.579 dB | 13.873 dB |
+| 15 | 91,303 | 103,789 | 11.826 dB | 13.003 dB | 11.657 dB | 16.271 dB |
+| 16 | 112,528 | 126,994 | 19.714 dB | 19.820 dB | 13.751 dB | 11.713 dB |
+| 17 | 110,328 | 124,617 | 12.350 dB | 16.952 dB | 11.208 dB | 17.077 dB |
+| 18 | 36,292 | 43,735 | 11.783 dB | 19.109 dB | 18.280 dB | 9.960 dB |
+| 19 | 26,855 | 38,856 | 20.226 dB | 21.302 dB | 14.453 dB | 11.716 dB |
+| 20 | 45,896 | 53,610 | 16.041 dB | 15.038 dB | 17.046 dB | 15.550 dB |
+| 21 | 87,548 | 99,228 | 16.901 dB | 17.430 dB | 18.767 dB | 17.463 dB |
+
+**Decision.** Needs follow-up.
+
+**Reason.** The failure is reproduced on `conquete_paix` while `watchmaker`
+remains high quality. It is not explained by BG44 byte budget: default output
+is already larger than the original on `conquete_paix` (`1.16x` average), and
+200 slices explodes output size (`55.87x`) without improving luma PSNR. It is
+not solved by chroma subsampling alone: full-resolution chroma improves some
+bad pages substantially (for example page 3: `9.746 dB` to `16.749 dB`, page
+11: `11.219 dB` to `19.431 dB`) but still leaves the corpus at only
+`16.35 dB` average and worsens other pages. The pre-quantization color-model
+probes stay much higher (`47.90 dB` current model, `52.53 dB`
+inverse-compatible model), so the catastrophic luma loss appears after
+RGB/YCbCr conversion, inside the forward wavelet / coefficient quantization /
+reconstruction-tracking path on high-detail color backgrounds. Follow-up #320
+isolates that path with coefficient-plane diagnostics before any encoder
+tuning.
