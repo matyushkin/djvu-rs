@@ -43,8 +43,8 @@ so follow-up SIMD work can fill them without changing the schema.
 | Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | Current local `cargo bench --workspace --features cli,tiff` summary below | Current broad baseline |
 | Linux x86_64 baseline | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | baseline x86-64 codegen | stable from workflow | unset | #189 artifact run `25299920836` from `.github/workflows/bench.yml` `bench-x86-64-v3` validation | Current selected IW44/render baseline |
 | Linux x86_64-v3 / AVX2 | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | `avx2` via x86-64-v3 codegen | stable from workflow | `-C target-cpu=x86-64-v3` | `.github/workflows/bench.yml` `bench-x86-64-v3` job; #189 artifact run `25299920836` | Current AVX2 validation exists for selected IW44/render benches |
-| wasm32 scalar | — | — | `wasm32` | scalar | — | — | Blocked pending #306 harness | Missing |
-| wasm32 simd128 | — | — | `wasm32` | `simd128` | — | `-C target-feature=+simd128` | Blocked pending #306 harness | Missing |
+| wasm32 scalar | macOS 26.3.1 host / Node.js v26.0.0 | Apple M1 Max host running Node.js wasm | `wasm32` | scalar | 1.92.0 stable | unset | `scripts/bench_wasm_simd128.sh` local run (#306) | Current small-fixture wasm baseline |
+| wasm32 simd128 | macOS 26.3.1 host / Node.js v26.0.0 | Apple M1 Max host running Node.js wasm | `wasm32` | `simd128` | 1.92.0 stable | `-C target-feature=+simd128` | `scripts/bench_wasm_simd128.sh` local run (#306) | Current small-fixture wasm simd128 baseline |
 | Linux aarch64 | Ubuntu GitHub-hosted arm64 runner | `ubuntu-24.04-arm` | `aarch64` | NEON baseline | stable from workflow | unset | `.github/workflows/ci.yml` `Linux aarch64 smoke` job (#305) | CI smoke coverage only; benchmark numbers still missing |
 
 ### Architecture-sensitive seed numbers
@@ -64,6 +64,9 @@ metadata format.
 | `render_colorbook_cold` | **17.3 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
 | `render_colorbook_stages/mask_decode` | **4.13 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
 | `render_corpus_color` | **68.7 ms** | 133,813,976 ns | 133,185,634 ns | missing | missing | missing |
+| `wasm_render_150dpi_fresh_doc` | n/a | n/a | n/a | 2.715 ms | 2.548 ms | n/a |
+| `wasm_render_150dpi_cached_page` | n/a | n/a | n/a | 2.685 ms | 2.491 ms | n/a |
+| `wasm_progressive_150dpi_chunk0` | n/a | n/a | n/a | 2.693 ms | 2.463 ms | n/a |
 
 Notes:
 
@@ -71,9 +74,10 @@ Notes:
   this file.
 - Linux x86_64 baseline and x86_64-v3 values come from the #189 AVX2 validation
   artifact recorded in `PERF_EXPERIMENTS.md`.
-- The wasm32 and Linux aarch64 benchmark cells are explicitly missing. #306 and
-  #308 are expected to fill them using the metadata template above; #305 only
-  records Linux aarch64 build/test support coverage.
+- The wasm32 rows come from the Node.js harness added in #306 and are not
+  directly comparable to native Criterion rows. Linux aarch64 benchmark cells
+  are still missing; #308 is expected to fill them using the metadata template
+  above. #305 only records Linux aarch64 build/test support coverage.
 
 ---
 
