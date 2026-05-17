@@ -5,6 +5,64 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #306 — wasm32 scalar vs simd128 benchmark harness — **Kept** (2026-05-17)
+
+**Approach.** Added a reproducible Node.js harness for the existing
+`wasm-bindgen` API. The wrapper builds two `wasm-pack --target nodejs` bundles:
+one scalar wasm32 bundle and one simd128 bundle built with
+`RUSTFLAGS="-C target-feature=+simd128"`. The benchmark then imports both
+bundles in Node.js and times parse, full render, cached render, and first
+progressive render on `tests/fixtures/boy.djvu` at 150 dpi.
+
+**Platform.**
+- OS: macOS 26.3.1 (Darwin 25.3)
+- CPU: Apple M1 Max, 10 cores
+- host arch: `arm64`
+- wasm target_arch: `wasm32`
+- target_feature(s): scalar vs `simd128`
+- Rust: 1.92.0 stable (`aarch64-apple-darwin`)
+- wasm-pack: 0.13.1
+- Node.js: v26.0.0
+- RUSTFLAGS: unset for scalar; `-C target-feature=+simd128` for simd128
+
+**Command(s).**
+
+```sh
+ITERATIONS=30 WARMUP=8 DPI=150 ./scripts/bench_wasm_simd128.sh
+
+node scripts/bench_wasm_simd128.mjs \
+  --scalar target/wasm-bench/scalar \
+  --simd target/wasm-bench/simd128 \
+  --fixture tests/fixtures/boy.djvu \
+  --iterations 30 \
+  --warmup 8 \
+  --dpi 150 \
+  --json
+```
+
+**Numbers.** Median milliseconds, 30 measured iterations after 8 warmups.
+Negative delta means the simd128 bundle is faster.
+
+| Benchmark | scalar median ms | simd128 median ms | delta |
+|-----------|-----------------:|------------------:|------:|
+| `parse_document` | 0.003 | 0.002 | -30.4% |
+| `render_150dpi_fresh_doc` | 2.715 | 2.548 | -6.1% |
+| `render_150dpi_cached_page` | 2.685 | 2.491 | -7.2% |
+| `progressive_150dpi_chunk0` | 2.693 | 2.463 | -8.5% |
+
+Checksums matched between scalar and simd128 for all render benchmarks
+(`-663404102` for full render/cached render; `-663404261` for progressive
+chunk 0), and the harness now fails if per-iteration checksums are unstable or
+if scalar and simd128 checksums differ.
+
+**Decision.** Kept.
+
+**Reason.** The harness gives future wasm SIMD work a reproducible local
+baseline and already confirms a modest render-path win on the existing
+simd128 IW44 code. CI syntax-checks the harness and still build-checks both
+plain wasm32 and `+simd128`; it does not run timing comparisons because hosted
+runner variance would make the numbers unsuitable as a regression gate.
+
 ### #295 — JB2 encoder corpus round-trip and size baseline — **Needs follow-up** (2026-05-17)
 
 **Approach.** Refreshed the existing JB2 quality harnesses without changing

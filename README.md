@@ -425,6 +425,21 @@ ctx.putImageData(img, 0, 0);
 
 See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo.
 
+### WASM scalar vs simd128 benchmark
+
+The local Node.js harness builds two `wasm-pack --target nodejs` bundles and
+compares scalar wasm32 against `RUSTFLAGS="-C target-feature=+simd128"`:
+
+```sh
+ITERATIONS=50 WARMUP=10 DPI=150 ./scripts/bench_wasm_simd128.sh
+```
+
+The script uses `tests/fixtures/boy.djvu` by default and reports parse,
+full-render, cached-render, and first progressive-render timings. CI
+syntax-checks the harness and build-checks both wasm targets, but does not run
+timing comparisons because hosted runner variance is too high for stable
+regression gates.
+
 ## Feature flags
 
 | Flag | Default | Description |

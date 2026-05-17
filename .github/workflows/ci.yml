@@ -205,6 +205,13 @@ jobs:
           RUSTFLAGS: -C target-feature=+simd128
         run: cargo check --target wasm32-unknown-unknown --features wasm
 
+      # Timing is intentionally not run in CI; Node/runner variance is too high.
+      # Keep the reproducible local scalar-vs-simd128 harness syntax-checked.
+      - name: wasm simd128 benchmark harness syntax check
+        run: |
+          bash -n scripts/bench_wasm_simd128.sh
+          node --check scripts/bench_wasm_simd128.mjs
+
       # Consumer-side no_std smoke (#227). The wasm32 build above proves the
       # lib *itself* is no_std-clean; this sub-crate proves the four codec
       # entry points (iff::parse_form, bzz_new::bzz_decode, jb2::decode_dict,
