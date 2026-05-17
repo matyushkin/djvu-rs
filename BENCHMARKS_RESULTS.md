@@ -260,6 +260,11 @@ requested output rectangle is larger than the native page.
   **154 ms**. Memory probe peak RSS: sequential **76.7 MiB**, parallel
   **228.9 MiB**. See `PERF_EXPERIMENTS.md` entry #298 for commands and
   per-stage byte counts.
+- PDF color row streaming (#299, same fixture/platform): sequential
+  `pdf_export_sequential` median **812 ms**; parallel probe peak RSS improved
+  from **228.9 MiB** to **169.5 MiB** with unchanged PDF bytes. See
+  `PERF_EXPERIMENTS.md` entry #299 for the noisy parallel Criterion runs and
+  full command log.
 - `render_large_doc_first_page` improved from ~43 ms → 10.4 ms across v0.5.2–v0.5.3:
   - `Pixmap::new` fill changed from per-pixel push to `vec![fill; n]`
   - JB2 symbol dictionary cached via `RwLock<HashMap<usize, Arc<JB2Dict>>>`
