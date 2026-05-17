@@ -5,6 +5,46 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #293 — compositor-only render baselines — **Kept** (2026-05-17)
+
+**Approach.** Added a `render_compositor_only` Criterion group to
+`benches/render.rs`. Each case warms page-level decode caches with one
+`render_pixmap` call, then measures `render_into` into a reused RGBA buffer.
+This isolates cached compositor/output materialization from document parse,
+codec decode/cache setup, and output allocation.
+
+**Platform.**
+- OS: macOS 26.3.1 (Darwin 25.3)
+- CPU: Apple M1 Max, 10 cores
+- target_arch: `aarch64`
+- target_feature(s): ARM64 baseline; NEON available on Apple Silicon
+- Rust: 1.92.0 stable
+- RUSTFLAGS: unset
+- Source artifact: local run on `codex/issue-293-compositor-baselines`
+
+**Command(s).**
+
+```sh
+cargo bench --bench render -- render_compositor_only \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10
+```
+
+**Numbers.**
+
+| Bench | Fixture/path | Cached path | Time |
+|-------|--------------|-------------|-----:|
+| `render_compositor_only/color_native_cached` | `tests/corpus/watchmaker.djvu` | color native, decoded caches warm, reused RGBA buffer | 71.061 ms |
+| `render_compositor_only/bilevel_native_cached` | `tests/corpus/cable_1973_100133.djvu` | bilevel native, decoded caches warm, reused RGBA buffer | 72.171 ms |
+| `render_compositor_only/color_downscale_cached` | `references/djvujs/library/assets/colorbook.djvu` | color downscale, decoded caches warm, reused RGBA buffer | 7.4213 ms |
+| `render_compositor_only/small_color_downscale_cached` | `references/djvujs/library/assets/boy.djvu` | small color 0.5x downscale, decoded caches warm, reused RGBA buffer | 152.00 µs |
+
+**Decision.** Kept. The new benches can be run independently with a single
+Criterion filter, and their names identify color/bilevel, native/downscale,
+and cached decode state.
+
+**Reason.** This gives #294 and later compositor work a narrow baseline without
+changing render behavior or mixing optimization into the measurement issue.
+
 ### #290 — layered multi-page DJVM directory encode — **Kept** (2026-05-16)
 
 **Approach.** Extended `djvu encode <dir> --quality quality|archival` to encode

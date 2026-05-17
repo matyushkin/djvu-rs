@@ -16,6 +16,19 @@ fn corpus_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
 }
 
+fn render_opts(width: u32, height: u32, scale: f32) -> djvu_rs::djvu_render::RenderOptions {
+    djvu_rs::djvu_render::RenderOptions {
+        width,
+        height,
+        scale,
+        bold: 0,
+        aa: false,
+        rotation: djvu_rs::djvu_render::UserRotation::None,
+        permissive: false,
+        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+    }
+}
+
 /// Load a DjVuDocument from a test file, returning None if not found.
 fn load_doc(filename: &str) -> Option<djvu_rs::DjVuDocument> {
     let path = assets_path().join(filename);
@@ -305,6 +318,87 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compositor-only baselines for cached pages.
+///
+/// Each case first runs `render_pixmap` once to populate page-level decode
+/// caches, then measures strict `render_into` into a reused RGBA buffer. These
+/// benches intentionally exclude parse/decode setup and output allocation.
+fn bench_render_compositor_only(c: &mut Criterion) {
+    let cases = [
+        (
+            "color_native_cached",
+            corpus_path().join("watchmaker.djvu"),
+            1.0_f32,
+        ),
+        (
+            "bilevel_native_cached",
+            corpus_path().join("cable_1973_100133.djvu"),
+            1.0_f32,
+        ),
+        (
+            "color_downscale_cached",
+            assets_path().join("colorbook.djvu"),
+            150.0_f32 / 400.0_f32,
+        ),
+        (
+            "small_color_downscale_cached",
+            assets_path().join("boy.djvu"),
+            0.5_f32,
+        ),
+    ];
+
+    let mut group = c.benchmark_group("render_compositor_only");
+
+    for (label, path, scale) in cases {
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "skipping render_compositor_only/{label}: {} not found",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping render_compositor_only/{label}: parse failed");
+                continue;
+            }
+        };
+        let page = match doc.page(0) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping render_compositor_only/{label}: page 0 missing");
+                continue;
+            }
+        };
+
+        let width = ((page.width() as f32 * scale).round() as u32).max(1);
+        let height = ((page.height() as f32 * scale).round() as u32).max(1);
+        let opts = render_opts(width, height, scale);
+        let mut buf = vec![0u8; width as usize * height as usize * 4];
+
+        djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts))
+            .expect("warm render caches");
+
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                djvu_rs::djvu_render::render_into(
+                    black_box(page),
+                    black_box(&opts),
+                    black_box(buf.as_mut_slice()),
+                )
+                .expect("render_into");
+                black_box(&buf);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Benchmark 0.5× scaling with Bilinear vs Lanczos3 resampling on a color page.
 ///
 /// Lanczos3 re-renders at native resolution first, so the difference reveals
@@ -575,6 +669,7 @@ criterion_group!(
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
     bench_render_native_stage_breakdown,
+    bench_render_compositor_only,
     bench_render_scaled,
     bench_pdf_export,
 );
