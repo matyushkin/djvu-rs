@@ -119,6 +119,33 @@ jobs:
       - name: CLI smoke (djvu info)
         run: .\target\debug\djvu.exe info tests\fixtures\boy_jb2.djvu
 
+  # ── Linux aarch64 smoke ─────────────────────────────────────────────────────
+  linux-aarch64:
+    name: Linux aarch64 smoke
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-aarch64
+
+      # Native Linux aarch64 runner. NEON is part of baseline aarch64, but this
+      # job is support coverage only; #308 owns ARM64 performance validation.
+      - name: Build workspace + CLI
+        run: cargo build --workspace --exclude djvu-py --features cli
+
+      - name: Test libraries
+        run: cargo test --lib --workspace --exclude djvu-py
+
+      - name: CLI smoke (djvu info)
+        run: ./target/debug/djvu info tests/fixtures/boy_jb2.djvu
+
   # ── MSRV ─────────────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.88)
