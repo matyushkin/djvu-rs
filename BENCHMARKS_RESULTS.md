@@ -45,7 +45,7 @@ so follow-up SIMD work can fill them without changing the schema.
 | Linux x86_64-v3 / AVX2 | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | `avx2` via x86-64-v3 codegen | stable from workflow | `-C target-cpu=x86-64-v3` | `.github/workflows/bench.yml` `bench-x86-64-v3` job; #189 artifact run `25299920836` | Current AVX2 validation exists for selected IW44/render benches |
 | wasm32 scalar | — | — | `wasm32` | scalar | — | — | Blocked pending #306 harness | Missing |
 | wasm32 simd128 | — | — | `wasm32` | `simd128` | — | `-C target-feature=+simd128` | Blocked pending #306 harness | Missing |
-| Linux aarch64 | — | — | `aarch64` | NEON | — | — | No trustworthy current artifact | Missing |
+| Linux aarch64 | Ubuntu GitHub-hosted arm64 runner | `ubuntu-24.04-arm` | `aarch64` | NEON baseline | stable from workflow | unset | `.github/workflows/ci.yml` `Linux aarch64 smoke` job (#305) | CI smoke coverage only; benchmark numbers still missing |
 
 ### Architecture-sensitive seed numbers
 
@@ -71,8 +71,9 @@ Notes:
   this file.
 - Linux x86_64 baseline and x86_64-v3 values come from the #189 AVX2 validation
   artifact recorded in `PERF_EXPERIMENTS.md`.
-- The wasm32 and Linux aarch64 cells are explicitly missing. #306 and #308 are
-  expected to fill them using the metadata template above.
+- The wasm32 and Linux aarch64 benchmark cells are explicitly missing. #306 and
+  #308 are expected to fill them using the metadata template above; #305 only
+  records Linux aarch64 build/test support coverage.
 
 ---
 
