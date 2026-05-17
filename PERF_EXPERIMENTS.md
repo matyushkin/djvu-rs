@@ -1651,7 +1651,7 @@ reconstruction-tracking path on high-detail color backgrounds. Follow-up #320
 isolates that path with coefficient-plane diagnostics before any encoder
 tuning.
 
-### #301 — JB2 cross-size refinement byte-cost estimator — **Proceed** (2026-05-17)
+### #301 — JB2 cross-size refinement byte-cost estimator — **Needs follow-up** (2026-05-17)
 
 **Approach.** Extended the existing #283 cross-size candidate-count probe with
 an approximate byte-cost model. For near cross-size candidates, the model
@@ -1700,7 +1700,7 @@ it uses nearest-neighbor scaled Hamming only for candidate selection and cost
 estimation. The byte model is deliberately approximate and optimistic because
 the packed Hamming proxy is not a real ZP-coded refinement bitstream.
 
-**Decision.** Proceed.
+**Decision.** Needs follow-up.
 
 **Reason.** Both required corpora show enough estimated byte headroom to justify
 a narrow emitting spike: `watchmaker` has 547 near cross-size matches and
