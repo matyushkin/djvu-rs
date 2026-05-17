@@ -5,6 +5,60 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #294 — thumbnail row-scratch A/B — **Rejected** (2026-05-17)
+
+**Approach.** Added a `render_row_scratch_ab` Criterion group to compare the
+current strict direct `render_into` path against a row-scratch adapter that
+copies `render_streaming` rows into the final RGBA buffer. The comparison uses
+the issue's thumbnail and native targets with warmed decode caches.
+
+**Platform.**
+- OS: macOS 26.3.1 (Darwin 25.3)
+- CPU: Apple M1 Max, 10 cores
+- target_arch: `aarch64`
+- target_feature(s): ARM64 baseline; NEON available on Apple Silicon
+- Rust: 1.92.0 stable
+- RUSTFLAGS: unset
+- Source artifact: local run on `codex/issue-294-row-scratch-ab`
+
+**Command(s).**
+
+```sh
+cargo bench --bench render -- render_row_scratch_ab \
+  --warm-up-time 1 --measurement-time 2 --sample-size 10
+```
+
+**Numbers.**
+
+First run:
+
+| Target | Direct `render_into` | Row-scratch copy | Decision signal |
+|--------|---------------------:|-----------------:|-----------------|
+| `thumbnail_dpi72` | 248.21 µs | 205.35 µs | row-scratch faster |
+| `thumbnail_half_bilinear` | 153.55 µs | 399.13 µs | row-scratch much slower |
+| `colorbook_downscale` | 23.674 ms | 18.925 ms | row-scratch faster, noisy |
+| `corpus_color_native` | 207.96 ms | 248.74 ms | native regression |
+| `corpus_bilevel_native` | 150.93 ms | 198.23 ms | native regression |
+
+Rerun after bounding the A/B group to keep full CI benchmark runtime stable:
+
+| Target | Direct `render_into` | Row-scratch copy | Decision signal |
+|--------|---------------------:|-----------------:|-----------------|
+| `thumbnail_dpi72` | 306.59 µs | 199.09 µs | row-scratch faster |
+| `thumbnail_half_bilinear` | 143.84 µs | 124.58 µs | row-scratch faster |
+| `colorbook_downscale` | 15.966 ms | 11.861 ms | row-scratch faster, noisy |
+| `corpus_color_native` | 155.40 ms | 135.02 ms | row-scratch faster, noisy |
+| `corpus_bilevel_native` | 146.10 ms | 160.35 ms | no clear signal |
+
+**Decision.** Rejected as a render heuristic. No production render path changed.
+The A/B harness is kept so future thumbnail work can rerun the comparison.
+
+**Reason.** The repeated short A/B runs are too noisy and inconsistent to justify
+a production heuristic: the first run showed a thumbnail loss and native
+regressions, while the rerun showed broader wins but still no clean bilevel
+native signal. A threshold heuristic would be fragile without a more stable
+predictor than output size alone.
+
 ### #293 — compositor-only render baselines — **Kept** (2026-05-17)
 
 **Approach.** Added a `render_compositor_only` Criterion group to
