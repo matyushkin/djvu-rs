@@ -6,16 +6,18 @@ Rust: 1.92.0 stable (edition 2024)
 Profile: release (opt-level 3, lto = thin)
 Date: 2026-05-17
 
-Command: `cargo bench --workspace --features cli,tiff`
+Primary command: `cargo bench --workspace --features cli,tiff`
+Render correction command: `cargo bench --bench render -- 'render_corpus_color|render_colorbook' --output-format bencher`
+Additional render correction command: `cargo bench --bench render -- 'render_page/dpi|render_corpus_bilevel|render_native_stages' --output-format bencher`
 
 Most Criterion benchmarks use 100 samples, 3 s warm-up, and 5 s measurement;
 the bounded `render_row_scratch_ab/*` A/B group uses 10 samples and 1 s warm-up
-to keep full-run time practical. Rows below report Criterion mean point
-estimates from the post-roadmap full workspace run. Some native and cold render
-groups had wide confidence intervals in this run, so treat those rows as a
-fresh public snapshot rather than a narrow regression claim.
+to keep full-run time practical. Codec, document, and PDF rows below report
+Criterion mean point estimates from the post-roadmap full workspace run.
+Render rows use targeted reruns after the initial full-workspace render rows
+proved non-representative.
 
-Notable wide Criterion intervals from this run:
+Rejected full-workspace render artifact preserved for context:
 
 | Benchmark | Mean | 95% confidence interval |
 |-----------|-----:|------------------------:|
@@ -25,6 +27,10 @@ Notable wide Criterion intervals from this run:
 | `render_colorbook_cold` | 48.9 ms | 41.1-57.3 ms |
 | `render_corpus_color` | 151 ms | 129-175 ms |
 | `render_native_stages/render_streaming_discard/watchmaker_color` | 195 ms | 174-218 ms |
+
+Targeted reruns on the same code returned the render rows below to the expected
+range. The rejected artifact remains recorded in `PERF_EXPERIMENTS.md` and is
+not used for public render claims.
 
 ---
 
@@ -52,7 +58,7 @@ so follow-up SIMD work can fill them without changing the schema.
 
 | Target family | OS | CPU / runner | target_arch | target_feature(s) | Rust | RUSTFLAGS | Source artifact | Status |
 |---------------|----|--------------|-------------|-------------------|------|-----------|-----------------|--------|
-| Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | Post-roadmap local full run, `cargo bench --workspace --features cli,tiff` (2026-05-17) | Current broad Apple ARM64 baseline |
+| Apple ARM64 | macOS 26.3.1 (Darwin 25.3) | Apple M1 Max, 10 cores | `aarch64` | ARM64 baseline; NEON available on Apple Silicon | 1.92.0 stable | unset | Post-roadmap full run plus targeted render rerun (2026-05-17) | Current broad Apple ARM64 baseline |
 | Linux x86_64 baseline | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | baseline x86-64 codegen | stable from workflow | unset | #189 artifact run `25299920836` from `.github/workflows/bench.yml` `bench-x86-64-v3` validation | Current selected IW44/render baseline |
 | Linux x86_64-v3 / AVX2 | Ubuntu GitHub-hosted runner | `ubuntu-latest` | `x86_64` | `avx2` via x86-64-v3 codegen | stable from workflow | `-C target-cpu=x86-64-v3` | `.github/workflows/bench.yml` `bench-x86-64-v3` job; #189 artifact run `25299920836` | Current AVX2 validation exists for selected IW44/render benches |
 | wasm32 scalar | macOS 26.3.1 host / Node.js v26.0.0 | Apple M1 Max host running Node.js wasm | `wasm32` | scalar | 1.92.0 stable | unset | `scripts/bench_wasm_simd128.sh` local run (#306) | Current small-fixture wasm baseline |
@@ -72,20 +78,19 @@ metadata format.
 | `iw44_to_rgb_colorbook/sub1_full_decode` | **5.73 ms** | 9,231,033 ns | 9,129,333 ns | missing | missing | missing |
 | `iw44_to_rgb_colorbook/sub2_partial_decode` | **1.34 ms** | 2,164,523 ns | 2,199,280 ns | missing | missing | missing |
 | `iw44_to_rgb_colorbook/sub4_partial_decode` | **347 µs** | 565,640 ns | 583,519 ns | missing | missing | missing |
-| `render_colorbook` | **8.78 ms** | 13,072,440 ns | 12,826,562 ns | missing | missing | missing |
-| `render_colorbook_cold` | **48.9 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
-| `render_colorbook_stages/mask_decode` | **12.7 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
-| `render_corpus_color` | **151 ms** | 133,813,976 ns | 133,185,634 ns | missing | missing | missing |
+| `render_colorbook` | **7.22 ms** | 13,072,440 ns | 12,826,562 ns | missing | missing | missing |
+| `render_colorbook_cold` | **18.8 ms** | 28,127,606 ns | 27,105,326 ns | missing | missing | missing |
+| `render_colorbook_stages/mask_decode` | **4.39 ms** | 5,325,125 ns | 5,107,550 ns | missing | missing | missing |
+| `render_corpus_color` | **71.2 ms** | 133,813,976 ns | 133,185,634 ns | missing | missing | missing |
 | `wasm_render_150dpi_fresh_doc` | n/a | n/a | n/a | 2.715 ms | 2.548 ms | n/a |
 | `wasm_render_150dpi_cached_page` | n/a | n/a | n/a | 2.685 ms | 2.491 ms | n/a |
 | `wasm_progressive_150dpi_chunk0` | n/a | n/a | n/a | 2.693 ms | 2.463 ms | n/a |
 
 Notes:
 
-- Apple ARM64 IW44/render values come from the 2026-05-17 post-roadmap full
-  local run on Apple M1 Max. The earlier #308 filtered run remains recorded in
-  `PERF_EXPERIMENTS.md` as targeted NEON validation, but this table now tracks
-  the broad public baseline.
+- Apple ARM64 codec values come from the 2026-05-17 post-roadmap full local
+  run on Apple M1 Max. Render values come from the targeted rerun after the
+  initial full-workspace render rows were rejected as noisy.
 - Linux x86_64 baseline and x86_64-v3 values come from the #189 AVX2 validation
   artifact recorded in `PERF_EXPERIMENTS.md`.
 - The wasm32 rows come from the Node.js harness added in #306 and are not
@@ -158,20 +163,20 @@ Corpus files: `tests/corpus/`, colorbook: `references/djvujs/library/assets/colo
 | DPI | Approx output size | Time (Criterion mean) |
 |-----|--------------------|--------------|
 | 72 dpi | ~138×184 px | **246 µs** |
-| 144 dpi | ~276×368 px | **934 µs** |
-| 300 dpi | ~576×768 px | **6.96 ms** |
-| 600 dpi | ~1152×1536 px | **42.1 ms** |
+| 144 dpi | ~276×368 px | **938 µs** |
+| 300 dpi | ~576×768 px | **3.59 ms** |
+| 600 dpi | ~1152×1536 px | **13.9 ms** |
 
 ### Full-resolution corpus render
 
 | Benchmark | File | Native size | Time (Criterion mean) | Notes |
 |-----------|------|-------------|--------------|-------|
 | `render_coarse` | boy.djvu | 192×256 | **3.41 ms** | |
-| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **8.78 ms** | 150 dpi, warm (sub=4 mask + partial BG44) |
-| `render_colorbook_stages/full_render` | colorbook.djvu | 2260×3669 (400 dpi) | **7.16 ms** | Warm full render stage |
-| `render_colorbook_stages/mask_decode` | colorbook.djvu | 2260×3669 (400 dpi) | **12.7 ms** | JB2 mask decode stage |
-| `render_colorbook_cold` | colorbook.djvu | 2260×3669 (400 dpi) | **48.9 ms** | cold (ZP + wavelet + RGB, first render) |
-| `render_corpus_color` | watchmaker.djvu | 2550×3301 | **151 ms** | native 600 dpi, full IW44 |
+| `render_colorbook` | colorbook.djvu | 2260×3669 (400 dpi) | **7.22 ms** | 150 dpi, warm (sub=4 mask + partial BG44) |
+| `render_colorbook_stages/full_render` | colorbook.djvu | 2260×3669 (400 dpi) | **7.26 ms** | Warm full render stage |
+| `render_colorbook_stages/mask_decode` | colorbook.djvu | 2260×3669 (400 dpi) | **4.39 ms** | JB2 mask decode stage |
+| `render_colorbook_cold` | colorbook.djvu | 2260×3669 (400 dpi) | **18.8 ms** | cold (ZP + wavelet + RGB, first render) |
+| `render_corpus_color` | watchmaker.djvu | 2550×3301 | **71.2 ms** | native 600 dpi, full IW44 |
 | `render_corpus_bilevel` | cable_1973_100133.djvu | 2550×3301 | **75.4 ms** | native 600 dpi, bilevel JB2 |
 | `render_scaled_0.5x/bilinear` | boy.djvu | 0.5× output | **149 µs** | Built-in bilinear downscale |
 | `render_scaled_0.5x/lanczos3` | boy.djvu | 0.5× output | **3.85 ms** | Higher quality separable Lanczos3 |
@@ -193,16 +198,16 @@ API, `render_into_reuse_buffer` composites into a caller-owned buffer, and
 
 | Benchmark | Page | Time (Criterion mean) | Notes |
 |-----------|------|--------------:|-------|
-| `render_native_stages/render_pixmap` | watchmaker color | **70.8 ms** | public `Pixmap` path, warm decode caches |
-| `render_native_stages/render_into_reuse_buffer` | watchmaker color | **70.4 ms** | caller-owned RGBA buffer |
-| `render_native_stages/render_streaming_discard` | watchmaker color | **195 ms** | row streaming, no retained output; noisy in this run |
-| `render_native_stages/mask_decode` | watchmaker color | **7.26 ms** | JB2 mask decode only |
-| `render_native_stages/bg_to_rgb_warm` | watchmaker color | **7.48 ms** | cached IW44 inverse + RGB |
+| `render_native_stages/render_pixmap` | watchmaker color | **71.5 ms** | public `Pixmap` path, warm decode caches |
+| `render_native_stages/render_into_reuse_buffer` | watchmaker color | **70.5 ms** | caller-owned RGBA buffer |
+| `render_native_stages/render_streaming_discard` | watchmaker color | **70.2 ms** | row streaming, no retained output |
+| `render_native_stages/mask_decode` | watchmaker color | **2.74 ms** | JB2 mask decode only |
+| `render_native_stages/bg_to_rgb_warm` | watchmaker color | **2.96 ms** | cached IW44 inverse + RGB |
 | `render_native_stages/render_pixmap` | cable mixed bilevel | **85.1 ms** | public `Pixmap` path, warm decode caches |
 | `render_native_stages/render_into_reuse_buffer` | cable mixed bilevel | **71.6 ms** | caller-owned RGBA buffer |
-| `render_native_stages/render_streaming_discard` | cable mixed bilevel | **70.9 ms** | row streaming, no retained output |
-| `render_native_stages/mask_decode` | cable mixed bilevel | **428 µs** | JB2 mask decode only |
-| `render_native_stages/bg_to_rgb_warm` | cable mixed bilevel | **8.86 ms** | cached IW44 inverse + RGB |
+| `render_native_stages/render_streaming_discard` | cable mixed bilevel | **71.0 ms** | row streaming, no retained output |
+| `render_native_stages/mask_decode` | cable mixed bilevel | **427 µs** | JB2 mask decode only |
+| `render_native_stages/bg_to_rgb_warm` | cable mixed bilevel | **2.91 ms** | cached IW44 inverse + RGB |
 
 The diagnostic split shows the native-resolution gap is dominated by compositor
 sampling and output materialization, not by warm JB2/IW44 decode alone.
@@ -246,12 +251,12 @@ Current local run (2026-05-17):
 | Benchmark | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |
 |-----------|--------:|-------------------:|----------:|------:|
 | `boy.djvu` @ 72 dpi, small color IW44 | **246 µs** | **159 µs** | **30.6 ms** | djvu-rs **1.5x slower** |
-| `colorbook.djvu` @ 150 dpi, color IW44 | **8.78 ms** | **5.96 ms** | **67.3 ms** | djvu-rs **1.5x slower** |
-| `watchmaker.djvu` @ 300 dpi, native color corpus | **151 ms** | **36.44 ms** | **79.8 ms** | djvu-rs **4.2x slower** |
+| `colorbook.djvu` @ 150 dpi, color IW44 | **7.22 ms** | **5.96 ms** | **67.3 ms** | djvu-rs **1.2x slower** |
+| `watchmaker.djvu` @ 300 dpi, native color corpus | **71.2 ms** | **36.44 ms** | **79.8 ms** | djvu-rs **2.0x slower** |
 | `cable_1973_100133.djvu` @ 300 dpi, native bilevel JB2 corpus | **75.45 ms** | **35.25 ms** | **73.8 ms** | djvu-rs **2.1x slower** |
 
 For the closest cold-path djvu-rs Criterion comparison,
-`render_colorbook_cold` is **48.9 ms**. That benchmark includes document
+`render_colorbook_cold` is **18.8 ms**. That benchmark includes document
 parsing and first render work, but it is not identical to libdjvulibre's
 open+decode measurement. The libdjvulibre C API harness intentionally avoids
 upscale cases because `ddjvu_page_render` can return a zero buffer when the
@@ -261,10 +266,10 @@ requested output rectangle is larger than the native page.
 
 | Scenario | Winner | Margin |
 |----------|--------|--------|
-| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.5x faster in this matrix |
-| Native-resolution corpus render | **DjVuLibre** | 2.1-4.2x faster |
+| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2-1.5x faster in this matrix |
+| Native-resolution corpus render | **DjVuLibre** | 2.0-2.1x faster |
 | `ddjvu` CLI subprocess baseline | comparable to slower than djvu-rs render-only | 30.6-79.8 ms across measured cases |
-| djvu-rs cold colorbook render | — | 48.9 ms; not directly equivalent to libdjvulibre open+decode |
+| djvu-rs cold colorbook render | — | 18.8 ms; not directly equivalent to libdjvulibre open+decode |
 | Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.29 ms |
 
 ---
@@ -272,8 +277,8 @@ requested output rectangle is larger than the native page.
 ## Notes
 
 - JB2 and IW44 pure decode are sub-millisecond to low-millisecond for typical pages.
-- Full native-resolution render (2550×3301 px): ~75–151 ms in the 2026-05-17
-  full local run; the color corpus row was noisy.
+- Full native-resolution render (2550×3301 px): ~71-75 ms in the corrected
+  2026-05-17 local render baseline.
 - Corpus benchmarks use public domain files from Internet Archive.
 - PDF export baseline for `tests/corpus/watchmaker.djvu` (12 pages, 150 dpi,
   JPEG-80, Apple M1 Max / macOS arm64, Rust 1.92, 2026-05-17):
