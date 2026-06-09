@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1](https://github.com/matyushkin/djvu-rs/compare/v0.19.0...v0.19.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **iw44:** decode all slices — drop ZP-exhaustion early-exit ([bd9b736](https://github.com/matyushkin/djvu-rs/commit/bd9b736dce1bdf0ef42030fefe62e2e79e8899d1))
+* **iw44:** decode all slices — drop ZP-exhaustion early-exit in decode_chunk ([7365f26](https://github.com/matyushkin/djvu-rs/commit/7365f26227d2ecc7029b34f7168aaa30d834ad05))
+
 ## [0.19.0](https://github.com/matyushkin/djvu-rs/compare/v0.18.0...v0.19.0) (2026-05-17)
 
 
