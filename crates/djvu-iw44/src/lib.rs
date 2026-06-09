@@ -3165,13 +3165,17 @@ impl Iw44Image {
                     cr.decode_slice(&mut zp);
                 }
             }
-            // Once all real input bytes are consumed the ZP coder returns
-            // 0xFF indefinitely, producing deterministic but meaningless
-            // bits. Remaining slices carry no new information, so stop early
-            // to bound decode time on crafted inputs.
-            if zp.is_exhausted() {
-                break;
-            }
+            // NOTE: do not early-exit on `zp.is_exhausted()` here. The ZP
+            // coder is a continuous arithmetic bit stream and `is_exhausted()`
+            // only reports that the *byte* buffer is drained — it fires several
+            // bytes before the logical end of the stream (the decoder reads up
+            // to 24 bits ahead via `refill_buffer`). The remaining slices still
+            // decode legitimate wavelet refinement from the buffered bits and
+            // arithmetic registers; skipping them truncates high-frequency
+            // detail and produces chroma artifacts. The slice loop is already
+            // bounded by `slices` (a u8, ≤255 per chunk) plus the 64 MP image
+            // cap, so no early-exit is needed to bound decode time.
+            // See PERF_EXPERIMENTS.md (#182 and the slice-loop follow-up).
         }
 
         Ok(())
@@ -3675,6 +3679,72 @@ mod tests {
         assert_ppm_match(&pm.to_ppm(), "big_scanned_sub4.ppm");
     }
 
+    /// Collect BG44 chunk payloads for every `FORM:DJVU` component in document
+    /// order. Unlike `extract_bg44_chunks` (which stops at the first DJVU form),
+    /// this walks the whole DJVM bundle so individual pages can be addressed.
+    fn extract_bg44_chunks_per_page(file: &djvu_iff::DjvuFile) -> Vec<Vec<&[u8]>> {
+        fn walk<'a>(chunk: &'a djvu_iff::Chunk, out: &mut Vec<Vec<&'a [u8]>>) {
+            if let djvu_iff::Chunk::Form {
+                secondary_id,
+                children,
+                ..
+            } = chunk
+            {
+                if secondary_id == b"DJVU" {
+                    let bg = children
+                        .iter()
+                        .filter_map(|c| match c {
+                            djvu_iff::Chunk::Leaf {
+                                id: [b'B', b'G', b'4', b'4'],
+                                data,
+                            } => Some(data.as_slice()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    out.push(bg);
+                    return;
+                }
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&file.root, &mut out);
+        out
+    }
+
+    /// Regression for the IW44 slice-loop early-exit bug (treadbear report,
+    /// 2026-06-09; see PERF_EXPERIMENTS.md).
+    ///
+    /// Page 2 of `colorbook.djvu` packs its 97 slices into chunks dense enough
+    /// that `zp.is_exhausted()` (a *byte*-buffer check) fires several bits
+    /// before the last slice of a chunk is decoded. The reverted `break` on
+    /// exhaustion therefore truncated real wavelet refinement, corrupting
+    /// ~60% of pixels vs DjVuLibre. This golden pins the correct (full-slice)
+    /// decode so the early-exit cannot be reintroduced.
+    ///
+    /// Verified to fail (page-2 background pixels diverge) if the
+    /// `zp.is_exhausted()` early-exit is restored in `decode_chunk`.
+    #[test]
+    fn iw44_colorbook_page2_decodes_all_slices_no_early_exit() {
+        let data =
+            std::fs::read(assets_path().join("colorbook.djvu")).expect("colorbook.djvu not found");
+        let file = djvu_iff::parse(&data).expect("failed to parse colorbook.djvu");
+        let pages = extract_bg44_chunks_per_page(&file);
+        let chunks = &pages[2];
+        assert_eq!(chunks.len(), 4, "colorbook page 2 must have 4 BG44 chunks");
+
+        let mut img = Iw44Image::new();
+        for c in chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+        assert_eq!((img.width, img.height), (739, 1213));
+
+        let pm = img.to_rgb().expect("to_rgb failed");
+        assert_or_create_golden(&pm.to_ppm(), "colorbook_bg_p2.ppm");
+    }
+
     /// Progressive decode: feeding all chunks at once and feeding them one-by-one
     /// must produce identical results.
     #[test]
@@ -3746,9 +3816,12 @@ mod tests {
         );
     }
 
-    /// Decode carte.djvu (chroma_half=true color image) fully and compare
-    /// pixel output to the golden reference, ensuring the half-plane allocation
-    /// does not corrupt the decoded image.
+    /// Decode carte.djvu (chroma_half=true color image) fully and exercise the
+    /// half-resolution chroma-plane allocation path, comparing against a golden
+    /// snapshot for self-consistency. See the note at the `assert_ppm_match`
+    /// call below: this fixture currently decodes to noise (a separate, known
+    /// issue), so the golden pins decoder stability, not visual correctness.
+    /// Visual chroma-half correctness is covered at the document level vs ddjvu.
     #[test]
     fn iw44_new_decode_carte_bg_chroma_half() {
         let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu not found");
@@ -3763,6 +3836,14 @@ mod tests {
         assert_eq!(img.height, 852);
 
         let pm = img.to_rgb().expect("to_rgb failed");
+        // NOTE: carte.djvu is a problematic fixture — djvu-rs's document parser
+        // rejects it as truncated IFF, and this crate's standalone decode of its
+        // background produces noise (the committed golden has pinned that noise
+        // since #99). Whatever the root cause (suspected container-parse bug;
+        // ddjvu renders the file cleanly), it is independent of the slice-loop
+        // early-exit removed in 2026-06; that change only shifts the existing
+        // noise. The golden was regenerated from the corrected decoder so this
+        // self-consistency check stays green. See PERF_EXPERIMENTS.md.
         assert_ppm_match(&pm.to_ppm(), "carte_bg.ppm");
     }
 

@@ -1826,3 +1826,43 @@ matrix values. This closes the stale ARM64 remeasurement note without adding
 new kernels. The result is "partial" because Linux aarch64 still has only
 build/test smoke coverage and no authoritative benchmark artifact; the matrix
 keeps those cells as `missing`.
+
+### IW44 slice-loop early-exit on `zp.is_exhausted()` — **Reverted** (2026-06-09)
+
+**Issue.** External bug report (treadbear): a color page in
+`colorbook.djvu` (and a user-attached file) decoded with "sparkly rainbow
+artifacts". Reporter's proposed fix: delete the `if zp.is_exhausted() { break; }`
+guard at the end of the slice loop in `Iw44Image::decode_chunk`.
+
+**Approach (the reverted code).** The slice loop
+(`for _ in 0..slices`) broke early once the ZP byte buffer was drained,
+on the assumption that "remaining slices carry no new information" and to
+"bound decode time on crafted inputs".
+
+**Numbers.** Differential test vs DjVuLibre `ddjvu` at native resolution
+(`--width 2260 --tolerance 4`):
+
+| `colorbook.djvu` page | with early-exit | without early-exit |
+|-----------------------|-----------------|--------------------|
+| p0 | 0.27% | 0.27% |
+| p1 | 0.64% | 0.64% |
+| **p2** | **60.87%** mismatch, mean Δ 3.05 | **0.31%**, mean Δ 0.05 |
+| p3 | 1.50% | 1.50% |
+
+Page 2's IW44 chunk packs many slices into few bytes, so `is_exhausted()`
+fires mid-stream and the `break` drops ~all remaining chroma/luma refinement.
+
+**Decision.** Reverted (early-exit removed).
+
+**Reason.** Same root cause as #182, one level up. `is_exhausted()` reports
+only `pos >= data.len()` (the *byte* buffer), but the ZP coder is a
+continuous arithmetic bit stream that reads up to 24 bits ahead via
+`refill_buffer`, so the byte pointer reaches the end several bytes before the
+logical end of decisions. The remaining slices still decode legitimate
+refinement from the buffered bits + arithmetic registers; skipping them
+desynchronises nothing (each slice is self-contained work) but truncates real
+high-frequency detail → chroma artifacts. The "bound decode time" rationale
+was unfounded: the loop is already bounded by `slices` (a `u8`, ≤255 per
+chunk) and the 64 MP image cap, so no early-exit is required to bound work.
+Regression test: `iw44_colorbook_page2_decodes_all_slices_no_early_exit` in
+`crates/djvu-iw44/src/lib.rs` (and the native-res diff gate).
