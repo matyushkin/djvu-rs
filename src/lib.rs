@@ -95,6 +95,10 @@ pub mod bzz_encode;
 #[cfg(feature = "std")]
 pub mod djvm;
 
+/// `DIRM` directory-chunk model — the single owner of the DIRM byte layout,
+/// shared by the read model, the byte-preserving mutator, and DJVM merge/split.
+pub(crate) mod dirm;
+
 /// JB2 bilevel image decoder — clean-room implementation.
 ///
 /// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
