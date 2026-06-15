@@ -8,9 +8,16 @@
 //! setters are available for page text, annotations, metadata, and bundled-DJVM
 //! bookmarks.
 //!
-//! Indirect `FORM:DJVM` mutation remains unsupported because it requires a
-//! concrete external-file rewrite or re-bundle policy; see
-//! [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md).
+//! Indirect `FORM:DJVM` mutation via the plain
+//! [`from_bytes`](crate::djvu_mut::DjVuDocumentMut::from_bytes) entry point
+//! remains unsupported ([`page_mut`](crate::djvu_mut::DjVuDocumentMut::page_mut)
+//! returns [`MutError::IndirectDjvmUnsupported`]). To edit an indirect document,
+//! use [`from_indirect_resolved`](crate::djvu_mut::DjVuDocumentMut::from_indirect_resolved),
+//! which resolves the external components and rebundles them into an owned
+//! bundled `FORM:DJVM` tree; see
+//! [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md). The
+//! explicit external-file rewrite path is provided separately by
+//! [`IndirectRewritePlan`](crate::djvu_mut::IndirectRewritePlan).
 //!
 //! ## Example
 //!
@@ -130,6 +137,61 @@ pub enum MutError {
     /// NAVM bookmarks live in `FORM:DJVM` bundles only.
     #[error("set_bookmarks requires a FORM:DJVM bundle (this document is FORM:DJVU)")]
     BookmarksRequireDjvm,
+
+    /// [`DjVuDocumentMut::from_indirect_resolved`] was called on a document
+    /// that is not an indirect `FORM:DJVM` (it is single-page `FORM:DJVU` or an
+    /// already-bundled `FORM:DJVM`). Use [`DjVuDocumentMut::from_bytes`] for
+    /// those — only indirect bundles need resolver-backed rebundling.
+    #[error("from_indirect_resolved requires an indirect FORM:DJVM document")]
+    NotIndirectDjvm,
+
+    /// A DIRM component could not be obtained from the caller-provided resolver
+    /// (the resolver returned an error or no bytes for this component name).
+    #[error("resolver did not supply DIRM component {name:?}")]
+    ComponentResolve {
+        /// The DIRM component id passed to the resolver.
+        name: String,
+    },
+
+    /// A resolved DIRM component did not parse as a `FORM:DJVU`/`FORM:DJVI`/
+    /// `FORM:THUM` chunk, so it cannot be embedded in a bundled output.
+    #[error("DIRM component {name:?} is malformed: {reason}")]
+    ComponentMalformed {
+        /// The DIRM component id that failed to parse.
+        name: String,
+        /// Why the component bytes were rejected.
+        reason: &'static str,
+    },
+
+    /// A DIRM component name (or the root index name) is not a safe relative
+    /// file name and was rejected by the external-file rewrite path. Absolute
+    /// paths, names with path separators, drive letters, `.`/`..`, and embedded
+    /// NUL bytes are all rejected so a rewrite can never escape the destination
+    /// directory.
+    #[error("unsafe component file name {name:?}: {reason}")]
+    UnsafeComponentName {
+        /// The offending name.
+        name: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+
+    /// Two DIRM entries resolve to the same component file name, which would
+    /// make an external-file rewrite ambiguous (one file would shadow another).
+    #[error("duplicate DIRM component file name {name:?}")]
+    DuplicateComponentName {
+        /// The duplicated name.
+        name: String,
+    },
+
+    /// A filesystem error occurred while committing an external-file rewrite.
+    #[error("rewrite I/O error for {name:?}: {message}")]
+    RewriteIo {
+        /// The file the error is associated with.
+        name: String,
+        /// The underlying error message.
+        message: String,
+    },
 }
 
 /// A DjVu document opened for in-place mutation.
@@ -160,6 +222,127 @@ impl DjVuDocumentMut {
         Ok(Self {
             file,
             original_bytes: data.to_vec(),
+            dirty: false,
+        })
+    }
+
+    /// Resolve an indirect `FORM:DJVM` document into an owned **bundled**
+    /// mutation tree, fetching every external component through `resolver`.
+    ///
+    /// An indirect DJVM stores only a `DIRM` directory in `root_bytes`; the
+    /// page (and shared-dictionary / thumbnail) component bytes live in
+    /// separate files. [`Self::from_bytes`] keeps indirect documents
+    /// unsupported because in-place editing would also need those external
+    /// files rewritten. This constructor instead implements the *rebundling*
+    /// strategy from [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md):
+    /// it resolves each `DIRM` component (in declaration order), embeds them
+    /// into a single bundled `FORM:DJVM`, and returns a [`DjVuDocumentMut`]
+    /// whose [`Self::try_into_bytes`] yields one self-contained bundled byte
+    /// stream that no longer needs a resolver.
+    ///
+    /// The resolver is called once per `DIRM` entry with that entry's id (the
+    /// same key [`crate::djvu_document::DjVuDocument::parse_with_resolver`]
+    /// uses) and must return the raw bytes of that component file. Returning an
+    /// error for any component aborts the whole construction.
+    ///
+    /// After construction the returned handle behaves like any bundled
+    /// `FORM:DJVM`: [`Self::page_mut`], [`Self::set_bookmarks`], and
+    /// [`Self::try_into_bytes`] all work, with `DIRM` offsets recomputed on
+    /// serialisation.
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::NotIndirectDjvm`] if `root_bytes` is not an indirect
+    ///   `FORM:DJVM` (single-page `FORM:DJVU` or an already-bundled bundle).
+    /// - [`MutError::ComponentResolve`] if the resolver fails for a component.
+    /// - [`MutError::ComponentMalformed`] if a resolved component does not parse
+    ///   as a `FORM:DJVU`/`DJVI`/`THUM`.
+    /// - [`MutError::DirmMalformed`] if the `DIRM` chunk cannot be read.
+    /// - [`MutError::InfoParse`] if `root_bytes` is not a parseable IFF FORM.
+    pub fn from_indirect_resolved<R, E>(root_bytes: &[u8], resolver: R) -> Result<Self, MutError>
+    where
+        R: Fn(&str) -> Result<Vec<u8>, E>,
+    {
+        let form = iff::parse_form(root_bytes)?;
+        if &form.form_type != b"DJVM" {
+            return Err(MutError::NotIndirectDjvm);
+        }
+        let dirm = form
+            .chunks
+            .iter()
+            .find(|c| &c.id == b"DIRM")
+            .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?;
+
+        let (components, is_bundled) = crate::djvu_document::parse_dirm_components(dirm.data)
+            .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
+        if is_bundled {
+            // Already bundled — no external files to resolve; from_bytes works.
+            return Err(MutError::NotIndirectDjvm);
+        }
+        if components.is_empty() {
+            return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
+        }
+        if !components.iter().any(|c| c.is_page) {
+            return Err(MutError::DirmMalformed(
+                "indirect DIRM lists no page component",
+            ));
+        }
+
+        // Resolve every component (page + shared + thumbnail) in DIRM order and
+        // parse each into its owned FORM subtree.
+        let mut component_forms: Vec<Chunk> = Vec::with_capacity(components.len());
+        for comp in &components {
+            let bytes = resolver(&comp.id).map_err(|_| MutError::ComponentResolve {
+                name: comp.id.clone(),
+            })?;
+            let parsed = iff::parse(&bytes).map_err(|_| MutError::ComponentMalformed {
+                name: comp.id.clone(),
+                reason: "not a parseable IFF document",
+            })?;
+            match &parsed.root {
+                Chunk::Form { secondary_id, .. }
+                    if secondary_id == b"DJVU"
+                        || secondary_id == b"DJVI"
+                        || secondary_id == b"THUM" => {}
+                _ => {
+                    return Err(MutError::ComponentMalformed {
+                        name: comp.id.clone(),
+                        reason: "root is not a FORM:DJVU/DJVI/THUM",
+                    });
+                }
+            }
+            component_forms.push(parsed.root);
+        }
+
+        // Convert the indirect DIRM into a bundled one: flip the bundled bit,
+        // splice in a zeroed offset table (recomputed below), and keep the
+        // BZZ-compressed metadata tail verbatim so component ids / names /
+        // flags survive the round-trip.
+        let bundled_dirm = bundled_dirm_from_indirect(dirm.data, component_forms.len())?;
+
+        // Assemble the bundled FORM:DJVM tree: DIRM first, then components in
+        // DIRM order. `length` is recomputed by `iff::emit`.
+        let mut children: Vec<Chunk> = Vec::with_capacity(1 + component_forms.len());
+        children.push(Chunk::Leaf {
+            id: *b"DIRM",
+            data: bundled_dirm,
+        });
+        children.extend(component_forms);
+        let mut file = DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVM",
+                length: 0,
+                children,
+            },
+        };
+
+        // Fill the DIRM offset table for the about-to-be-emitted layout, then
+        // freeze the bundled bytes as this document's canonical (unedited) form.
+        recompute_dirm_offsets(&mut file.root)?;
+        let bundled_bytes = iff::emit(&file);
+        Ok(Self {
+            file,
+            original_bytes: bundled_bytes,
             dirty: false,
         })
     }
@@ -432,6 +615,31 @@ impl DjVuDocumentMut {
         self.dirty = true;
         Ok(())
     }
+}
+
+/// Convert an indirect `DIRM` payload into the bundled form expected by a
+/// rebundled `FORM:DJVM`.
+///
+/// Indirect and bundled DIRM share the same `[flags][nfiles:u16][BZZ meta]`
+/// framing; bundled documents additionally carry a `4 × nfiles` offset table
+/// between `nfiles` and the BZZ metadata. This sets the bundled flag bit, splices
+/// a zeroed offset table (filled later by [`recompute_dirm_offsets`]), and keeps
+/// the original BZZ metadata tail verbatim — preserving component ids, names,
+/// titles, and per-component flags.
+fn bundled_dirm_from_indirect(indirect: &[u8], nfiles: usize) -> Result<Vec<u8>, MutError> {
+    if indirect.len() < 3 {
+        return Err(MutError::DirmMalformed("indirect DIRM payload < 3 bytes"));
+    }
+    let table_len = 4usize
+        .checked_mul(nfiles)
+        .ok_or(MutError::DirmMalformed("DIRM offset table size overflow"))?;
+    let mut out = Vec::with_capacity(3 + table_len + (indirect.len() - 3));
+    out.push(indirect[0] | 0x80); // set the bundled bit
+    out.push(indirect[1]);
+    out.push(indirect[2]);
+    out.extend(core::iter::repeat_n(0u8, table_len)); // offsets recomputed later
+    out.extend_from_slice(&indirect[3..]); // BZZ metadata tail, unchanged
+    Ok(out)
 }
 
 /// Whether `chunk` is a bundled (rather than indirect) `FORM:DJVM`.
@@ -762,6 +970,383 @@ impl PageMut<'_> {
     fn replace_or_insert_text(&mut self, data: Vec<u8>) {
         self.replace_or_insert(b"TXTa", b"TXTz", data);
     }
+}
+
+// ---- #326: explicit external-file rewrite plan for indirect DJVM -----------
+
+/// One entry in an [`IndirectRewritePlan`] preview, describing a file the plan
+/// will touch on commit.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewriteItem {
+    /// The file name (relative to the destination directory). For the root
+    /// index this is the name passed to [`IndirectRewritePlan::commit_to_dir`].
+    pub name: String,
+    /// Whether this is the root DJVM index file (`true`) or a page/shared
+    /// component (`false`).
+    pub is_root: bool,
+    /// Whether this file's bytes differ from the resolved original — i.e.
+    /// whether an edit changed it. Unchanged files are still (re)written on
+    /// commit so the destination directory holds a complete component set.
+    pub changed: bool,
+}
+
+/// One resolved component staged inside an [`IndirectRewritePlan`].
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+struct PlannedComponent {
+    /// DIRM component id, used both as the resolver key and the external file
+    /// name. Validated to be a safe relative file name at construction.
+    name: String,
+    /// Whether this component is a page (vs. shared dictionary / thumbnail).
+    is_page: bool,
+    /// The bytes originally returned by the resolver.
+    original: Vec<u8>,
+    /// Edited bytes, if a page edit changed this component.
+    edited: Option<Vec<u8>>,
+}
+
+/// A staged, side-effect-free plan to rewrite an **indirect** `FORM:DJVM`
+/// document across its external component files.
+///
+/// This is the explicit multi-file counterpart to
+/// [`DjVuDocumentMut::from_indirect_resolved`]. Where `from_indirect_resolved`
+/// collapses an indirect document into a single self-contained **bundled**
+/// byte stream (no destination policy needed), `IndirectRewritePlan` keeps the
+/// document **indirect**: each page stays in its own external file, and edits
+/// are written back to per-component files in a destination directory.
+///
+/// The two paths differ deliberately:
+///
+/// | | `from_indirect_resolved` | `IndirectRewritePlan` |
+/// |---|---|---|
+/// | Output | one bundled DJVM byte stream | a directory of component files + index |
+/// | Side effects | none (`try_into_bytes` returns bytes) | files written on `commit_to_dir` |
+/// | Caller policy | none | destination dir, file names, atomicity |
+/// | Document shape | becomes bundled | stays indirect |
+///
+/// # Mutation model
+///
+/// Edits never touch the filesystem. They are staged in memory via
+/// [`Self::edit_page`] / [`Self::set_bookmarks`] and only written when
+/// [`Self::commit_to_dir`] is called. Call [`Self::plan`] at any time to
+/// preview exactly which files a commit will write and which have changed.
+///
+/// # Name safety
+///
+/// Every DIRM component id (and the root index name supplied at commit) must be
+/// a safe *flat* relative file name: no path separators, no `.`/`..`, no
+/// drive-letter `:`/absolute path, no embedded NUL. Names that could escape the
+/// destination directory are rejected with [`MutError::UnsafeComponentName`];
+/// two entries mapping to one file name are rejected with
+/// [`MutError::DuplicateComponentName`]. Both checks run at construction, so an
+/// invalid directory can never reach the write phase. Nested component
+/// sub-directories are intentionally not supported by this path.
+///
+/// # Atomicity
+///
+/// Each file is written by staging a sibling temporary file in the destination
+/// directory and atomically renaming it over the target, so a reader never sees
+/// a half-written component file (on platforms where same-directory rename is
+/// atomic — POSIX and modern Windows `ReplaceFile`/`rename`). The root index is
+/// written **last**.
+///
+/// What is **not** guaranteed: the multi-file commit is not transactional. A
+/// crash partway through can leave some component files updated and others not.
+/// Because indirect components are independent, self-describing page files
+/// (the index lists names, not byte offsets), every individual file remains a
+/// valid DjVu page either way — but the document set as a whole may be a mix of
+/// old and new pages until the commit finishes. Callers needing cross-file
+/// atomicity should commit to a fresh directory and swap it in themselves.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct IndirectRewritePlan {
+    /// The current (possibly edited) root index bytes.
+    root_bytes: Vec<u8>,
+    /// Whether the root index has been edited since construction.
+    root_changed: bool,
+    components: Vec<PlannedComponent>,
+}
+
+#[cfg(feature = "std")]
+impl IndirectRewritePlan {
+    /// Resolve an indirect `FORM:DJVM` document into a rewrite plan, fetching
+    /// every external component through `resolver`.
+    ///
+    /// The resolver is called once per `DIRM` entry with that entry's id (the
+    /// same key [`DjVuDocumentMut::from_indirect_resolved`] uses), which is also
+    /// the external file name the component will be written back to.
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::NotIndirectDjvm`] if `root_bytes` is not an indirect
+    ///   `FORM:DJVM`.
+    /// - [`MutError::UnsafeComponentName`] / [`MutError::DuplicateComponentName`]
+    ///   if a DIRM component id is not a safe, unique flat file name.
+    /// - [`MutError::ComponentResolve`] if the resolver fails for a component.
+    /// - [`MutError::ComponentMalformed`] if a resolved component does not parse
+    ///   as a `FORM:DJVU`/`DJVI`/`THUM`.
+    /// - [`MutError::DirmMalformed`] / [`MutError::InfoParse`] if the index or its
+    ///   `DIRM` chunk cannot be read.
+    pub fn from_indirect_resolved<R, E>(root_bytes: &[u8], resolver: R) -> Result<Self, MutError>
+    where
+        R: Fn(&str) -> Result<Vec<u8>, E>,
+    {
+        let form = iff::parse_form(root_bytes)?;
+        if &form.form_type != b"DJVM" {
+            return Err(MutError::NotIndirectDjvm);
+        }
+        let dirm = form
+            .chunks
+            .iter()
+            .find(|c| &c.id == b"DIRM")
+            .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?;
+        let (infos, is_bundled) = crate::djvu_document::parse_dirm_components(dirm.data)
+            .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
+        if is_bundled {
+            return Err(MutError::NotIndirectDjvm);
+        }
+        if infos.is_empty() {
+            return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
+        }
+
+        // Validate every component file name up front: safe + unique. This runs
+        // before any resolution or write, so an invalid directory is rejected
+        // without side effects.
+        let mut seen = std::collections::HashSet::new();
+        for info in &infos {
+            validate_safe_component_name(&info.id)?;
+            if !seen.insert(info.id.clone()) {
+                return Err(MutError::DuplicateComponentName {
+                    name: info.id.clone(),
+                });
+            }
+        }
+
+        let mut components = Vec::with_capacity(infos.len());
+        for info in &infos {
+            let bytes = resolver(&info.id).map_err(|_| MutError::ComponentResolve {
+                name: info.id.clone(),
+            })?;
+            // Validate the bytes parse as a component FORM so later commits never
+            // write a file we already know is malformed.
+            let parsed = iff::parse(&bytes).map_err(|_| MutError::ComponentMalformed {
+                name: info.id.clone(),
+                reason: "not a parseable IFF document",
+            })?;
+            match &parsed.root {
+                Chunk::Form { secondary_id, .. }
+                    if secondary_id == b"DJVU"
+                        || secondary_id == b"DJVI"
+                        || secondary_id == b"THUM" => {}
+                _ => {
+                    return Err(MutError::ComponentMalformed {
+                        name: info.id.clone(),
+                        reason: "root is not a FORM:DJVU/DJVI/THUM",
+                    });
+                }
+            }
+            components.push(PlannedComponent {
+                name: info.id.clone(),
+                is_page: info.is_page,
+                original: bytes,
+                edited: None,
+            });
+        }
+
+        Ok(Self {
+            root_bytes: root_bytes.to_vec(),
+            root_changed: false,
+            components,
+        })
+    }
+
+    /// Number of page components in the document (shared dictionaries and
+    /// thumbnails are not counted).
+    pub fn page_count(&self) -> usize {
+        self.components.iter().filter(|c| c.is_page).count()
+    }
+
+    /// Total number of components (pages + shared dictionaries + thumbnails).
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Edit the `index`-th page component in memory.
+    ///
+    /// The closure receives a [`DjVuDocumentMut`] opened on that page's current
+    /// (possibly already-edited) bytes — a single-page `FORM:DJVU`, so
+    /// `doc.page_mut(0)` exposes the usual `set_text_layer` / `set_metadata` /
+    /// `set_annotations` setters. Nothing is written to disk; the resulting
+    /// bytes are staged for the next [`Self::commit_to_dir`].
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::PageOutOfRange`] if `index >= self.page_count()`.
+    /// - Any [`MutError`] returned by the closure or by re-serialising the page.
+    pub fn edit_page<F>(&mut self, index: usize, edit: F) -> Result<(), MutError>
+    where
+        F: FnOnce(&mut DjVuDocumentMut) -> Result<(), MutError>,
+    {
+        let count = self.page_count();
+        let comp = self
+            .components
+            .iter_mut()
+            .filter(|c| c.is_page)
+            .nth(index)
+            .ok_or(MutError::PageOutOfRange { index, count })?;
+        let current: &[u8] = comp.edited.as_deref().unwrap_or(&comp.original);
+        let mut doc = DjVuDocumentMut::from_bytes(current)?;
+        edit(&mut doc)?;
+        if doc.is_dirty() {
+            comp.edited = Some(doc.try_into_bytes()?);
+        }
+        Ok(())
+    }
+
+    /// Replace, insert, or remove the document's `NAVM` bookmarks in the root
+    /// index file. The edit is staged in memory and written on commit; only the
+    /// root index file changes (bookmarks live in the index, not page files).
+    pub fn set_bookmarks(&mut self, bookmarks: &[DjVuBookmark]) -> Result<(), MutError> {
+        let mut root = DjVuDocumentMut::from_bytes(&self.root_bytes)?;
+        root.set_bookmarks(bookmarks)?;
+        if root.is_dirty() {
+            self.root_bytes = root.try_into_bytes()?;
+            self.root_changed = true;
+        }
+        Ok(())
+    }
+
+    /// Preview the files a [`Self::commit_to_dir`] will write, in commit order
+    /// (every component, then the root index). `changed` flags which files
+    /// differ from their resolved originals.
+    ///
+    /// `root_name` is the file name the root index will be written under; it is
+    /// reported as the final, `is_root` item but is **not** validated here (that
+    /// happens at commit).
+    pub fn plan(&self, root_name: &str) -> Vec<RewriteItem> {
+        let mut items: Vec<RewriteItem> = self
+            .components
+            .iter()
+            .map(|c| RewriteItem {
+                name: c.name.clone(),
+                is_root: false,
+                changed: c.edited.is_some(),
+            })
+            .collect();
+        items.push(RewriteItem {
+            name: root_name.to_string(),
+            is_root: true,
+            changed: self.root_changed,
+        });
+        items
+    }
+
+    /// Commit the plan: write the full indirect document set (every component
+    /// plus the root index) into `dir`, staging each file as a sibling temporary
+    /// file and atomically renaming it into place. The root index is written
+    /// last.
+    ///
+    /// All name validation happens before the first byte is written, so a
+    /// validation failure (e.g. an unsafe `root_name`) leaves `dir` untouched.
+    /// Returns the absolute paths written, in the same order as [`Self::plan`].
+    ///
+    /// See the type-level docs for the atomicity guarantees and their limits.
+    pub fn commit_to_dir(
+        &self,
+        dir: impl AsRef<std::path::Path>,
+        root_name: &str,
+    ) -> Result<Vec<std::path::PathBuf>, MutError> {
+        let dir = dir.as_ref();
+
+        // ---- Validate everything before writing anything --------------------
+        validate_safe_component_name(root_name)?;
+        // Component names were validated at construction, but the root name must
+        // also not collide with a component file.
+        if self.components.iter().any(|c| c.name == root_name) {
+            return Err(MutError::DuplicateComponentName {
+                name: root_name.to_string(),
+            });
+        }
+
+        std::fs::create_dir_all(dir).map_err(|e| MutError::RewriteIo {
+            name: dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+
+        // ---- Write component files, then the root index ---------------------
+        let mut written = Vec::with_capacity(self.components.len() + 1);
+        for comp in &self.components {
+            let bytes = comp.edited.as_deref().unwrap_or(&comp.original);
+            written.push(stage_and_rename(dir, &comp.name, bytes)?);
+        }
+        written.push(stage_and_rename(dir, root_name, &self.root_bytes)?);
+        Ok(written)
+    }
+}
+
+/// Reject any component / index name that is not a safe flat relative file name.
+///
+/// Permitted names are non-empty, contain no path separator (`/` or `\\`), no
+/// drive/ADS colon, no NUL, and are not `.` or `..`. This guarantees a write can
+/// never escape the destination directory.
+#[cfg(feature = "std")]
+fn validate_safe_component_name(name: &str) -> Result<(), MutError> {
+    let reject = |reason: &'static str| {
+        Err(MutError::UnsafeComponentName {
+            name: name.to_string(),
+            reason,
+        })
+    };
+    if name.is_empty() {
+        return reject("name is empty");
+    }
+    if name.contains('\0') {
+        return reject("name contains a NUL byte");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return reject("name contains a path separator");
+    }
+    if name.contains(':') {
+        return reject("name contains a drive-letter / stream colon");
+    }
+    if name == "." || name == ".." {
+        return reject("name is a relative directory reference");
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `dir/name` by staging a sibling temp file and atomically
+/// renaming it over the target. Returns the final path.
+#[cfg(feature = "std")]
+fn stage_and_rename(
+    dir: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, MutError> {
+    use std::io::Write;
+
+    let final_path = dir.join(name);
+    // A stable, collision-resistant-enough temp name in the same directory so
+    // the rename stays on one filesystem (and is therefore atomic).
+    let tmp_path = dir.join(format!(".{name}.djvu-rs.tmp"));
+
+    let io_err = |path: &std::path::Path, e: std::io::Error| MutError::RewriteIo {
+        name: path.display().to_string(),
+        message: e.to_string(),
+    };
+
+    {
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| io_err(&tmp_path, e))?;
+        f.write_all(bytes).map_err(|e| io_err(&tmp_path, e))?;
+        f.sync_all().map_err(|e| io_err(&tmp_path, e))?;
+    }
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+        // Best-effort cleanup of the temp file on rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
+        io_err(&final_path, e)
+    })?;
+    Ok(final_path)
 }
 
 #[cfg(test)]
@@ -1490,6 +2075,397 @@ mod tests {
                 "FORM at top-level child #{i} must be byte-identical after edit"
             );
         }
+    }
+
+    // ---- #325: resolver-backed indirect DJVM rebundling -------------------
+
+    /// Build an indirect FORM:DJVM index over `page_names` and a resolver that
+    /// serves each named fixture from `tests/fixtures`.
+    fn indirect_over_fixtures(
+        page_names: &[&str],
+    ) -> (
+        Vec<u8>,
+        impl Fn(&str) -> Result<Vec<u8>, std::io::Error> + use<>,
+    ) {
+        let index = crate::djvm::create_indirect(page_names).expect("create_indirect");
+        // Snapshot the fixture bytes keyed by name so the resolver is owned.
+        let map: std::collections::HashMap<String, Vec<u8>> = page_names
+            .iter()
+            .map(|n| (n.to_string(), read_corpus(n)))
+            .collect();
+        let resolver = move |name: &str| -> Result<Vec<u8>, std::io::Error> {
+            map.get(name).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such component")
+            })
+        };
+        (index, resolver)
+    }
+
+    #[test]
+    fn from_indirect_resolved_rebundles_single_page() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu"]);
+        let doc = DjVuDocumentMut::from_indirect_resolved(&index, resolver).unwrap();
+        assert_eq!(doc.root_form_type(), Some(b"DJVM"));
+        assert_eq!(doc.page_count(), 1);
+        assert!(!doc.is_dirty());
+
+        // Output must parse as a bundled DJVM without any resolver.
+        let bundled = doc.try_into_bytes().unwrap();
+        let reparsed =
+            crate::djvu_document::DjVuDocument::parse(&bundled).expect("bundled output parses");
+        assert_eq!(reparsed.page_count(), 1);
+        // The single page's pixel dimensions come from the resolved chicken.djvu.
+        assert_eq!(reparsed.page(0).unwrap().width(), 181);
+        assert_eq!(reparsed.page(0).unwrap().height(), 240);
+
+        // DIRM offsets must point at the actual component FORM positions.
+        let (declared, actual) = dirm_offsets_and_actual(&bundled);
+        assert_eq!(declared, actual);
+    }
+
+    #[test]
+    fn from_indirect_resolved_multi_page_preserves_order() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu", "irish.djvu"]);
+        let doc = DjVuDocumentMut::from_indirect_resolved(&index, resolver).unwrap();
+        assert_eq!(doc.page_count(), 2);
+        let bundled = doc.try_into_bytes().unwrap();
+
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&bundled).expect("parses");
+        assert_eq!(reparsed.page_count(), 2);
+        // Page 0 == chicken (181x240), page 1 == irish (different size).
+        assert_eq!(reparsed.page(0).unwrap().width(), 181);
+        let irish_doc = crate::djvu_document::DjVuDocument::parse(&read_corpus("irish.djvu"))
+            .expect("irish parses standalone");
+        assert_eq!(
+            reparsed.page(1).unwrap().dimensions(),
+            irish_doc.page(0).unwrap().dimensions()
+        );
+
+        let (declared, actual) = dirm_offsets_and_actual(&bundled);
+        assert_eq!(declared, actual);
+    }
+
+    #[test]
+    fn from_indirect_resolved_then_metadata_edit_roundtrips() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu", "irish.djvu"]);
+        let mut doc = DjVuDocumentMut::from_indirect_resolved(&index, resolver).unwrap();
+
+        let meta = DjVuMetadata {
+            title: Some("rebundled indirect".into()),
+            author: Some("djvu-rs #325".into()),
+            ..Default::default()
+        };
+        doc.page_mut(1).unwrap().set_metadata(&meta);
+        assert!(doc.is_dirty());
+        let edited = doc.into_bytes();
+
+        // Offsets stay consistent after the page-1 metadata grows.
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+
+        // Metadata round-trips through the high-level parser on the edited page.
+        let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        let mut djvu_seen = 0usize;
+        let mut found = None;
+        for child in reparsed.file.root.children() {
+            if let Chunk::Form {
+                secondary_id,
+                children,
+                ..
+            } = child
+                && secondary_id == b"DJVU"
+            {
+                if djvu_seen == 1 {
+                    found = children
+                        .iter()
+                        .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
+                        .map(|c| c.data().to_vec());
+                    break;
+                }
+                djvu_seen += 1;
+            }
+        }
+        let metz = found.expect("page 1 should have METz after edit");
+        let parsed = crate::metadata::parse_metadata_bzz(&metz).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("rebundled indirect"));
+    }
+
+    #[test]
+    fn from_indirect_resolved_then_text_layer_edit() {
+        use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu"]);
+        let mut doc = DjVuDocumentMut::from_indirect_resolved(&index, resolver).unwrap();
+        let layer = TextLayer {
+            text: "rebundled text".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 50,
+                },
+                text: "rebundled text".into(),
+                children: vec![],
+            }],
+        };
+        doc.page_mut(0).unwrap().set_text_layer(&layer).unwrap();
+        let edited = doc.into_bytes();
+
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&edited).expect("parses");
+        let text = reparsed.page(0).unwrap().text_layer().unwrap();
+        assert!(text.is_some(), "edited page should expose a text layer");
+        assert_eq!(text.unwrap().text, "rebundled text");
+    }
+
+    #[test]
+    fn from_indirect_resolved_missing_component_errors() {
+        // Resolver that never produces bytes ⇒ ComponentResolve.
+        let index = crate::djvm::create_indirect(&["missing.djvu"]).expect("create_indirect");
+        let err = DjVuDocumentMut::from_indirect_resolved(&index, |_name: &str| {
+            Err::<Vec<u8>, _>(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
+        })
+        .unwrap_err();
+        match err {
+            MutError::ComponentResolve { name } => assert_eq!(name, "missing.djvu"),
+            other => panic!("expected ComponentResolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_indirect_resolved_malformed_component_errors() {
+        let index = crate::djvm::create_indirect(&["garbage.djvu"]).expect("create_indirect");
+        let err = DjVuDocumentMut::from_indirect_resolved(&index, |_name: &str| {
+            Ok::<Vec<u8>, std::io::Error>(b"not an iff document".to_vec())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, MutError::ComponentMalformed { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn from_indirect_resolved_rejects_bundled_input() {
+        // A genuinely bundled DJVM is not indirect ⇒ NotIndirectDjvm.
+        let bundled = read_corpus("DjVu3Spec_bundled.djvu");
+        let err = DjVuDocumentMut::from_indirect_resolved(&bundled, |_n: &str| {
+            Ok::<Vec<u8>, std::io::Error>(Vec::new())
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::NotIndirectDjvm), "{err:?}");
+    }
+
+    #[test]
+    fn from_indirect_resolved_rejects_single_page_djvu() {
+        let chicken = read_corpus("chicken.djvu");
+        let err = DjVuDocumentMut::from_indirect_resolved(&chicken, |_n: &str| {
+            Ok::<Vec<u8>, std::io::Error>(Vec::new())
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::NotIndirectDjvm), "{err:?}");
+    }
+
+    #[test]
+    fn from_bytes_on_indirect_still_unsupported_for_page_mut() {
+        // The plain entry point keeps the documented unsupported behavior.
+        let index = crate::djvm::create_indirect(&["chicken.djvu"]).expect("create_indirect");
+        let mut doc = DjVuDocumentMut::from_bytes(&index).unwrap();
+        let err = doc.page_mut(0).err().unwrap();
+        assert!(matches!(err, MutError::IndirectDjvmUnsupported), "{err:?}");
+    }
+
+    // ---- #326: explicit external-file rewrite plan ------------------------
+
+    /// A fresh, empty temp directory unique to `tag` (cleared if it exists).
+    fn fresh_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("djvu_rs_rewrite_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rewrite_plan_commits_full_set_to_dir() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu", "irish.djvu"]);
+        let mut plan = IndirectRewritePlan::from_indirect_resolved(&index, resolver).unwrap();
+        assert_eq!(plan.page_count(), 2);
+
+        // Edit page 0's metadata in memory only.
+        plan.edit_page(0, |doc| {
+            let meta = DjVuMetadata {
+                title: Some("rewrite path".into()),
+                ..Default::default()
+            };
+            doc.page_mut(0)?.set_metadata(&meta);
+            Ok(())
+        })
+        .unwrap();
+
+        // The preview marks page 0 changed, page 1 and root unchanged.
+        let preview = plan.plan("index.djvu");
+        assert_eq!(preview.len(), 3);
+        assert_eq!(preview[0].name, "chicken.djvu");
+        assert!(preview[0].changed, "edited page must show changed");
+        assert_eq!(preview[1].name, "irish.djvu");
+        assert!(!preview[1].changed, "untouched page must be unchanged");
+        assert!(preview[2].is_root);
+        assert!(!preview[2].changed, "root unchanged for a page-only edit");
+
+        let dir = fresh_temp_dir("commit_full_set");
+        let written = plan.commit_to_dir(&dir, "index.djvu").unwrap();
+        assert_eq!(written.len(), 3);
+        for p in &written {
+            assert!(p.exists(), "committed file {p:?} must exist");
+        }
+        // No stray temp files left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files must be renamed away");
+
+        // The rewritten directory parses as an indirect document and the edit
+        // landed on page 0.
+        let index_bytes = std::fs::read(dir.join("index.djvu")).unwrap();
+        let doc = crate::djvu_document::DjVuDocument::parse_from_dir(&index_bytes, &dir).unwrap();
+        assert_eq!(doc.page_count(), 2);
+        let meta_page0 = doc.page(0).unwrap();
+        // metadata is read at the document level; confirm the edited component
+        // round-trips through the single-page parser.
+        let edited_comp = std::fs::read(dir.join("chicken.djvu")).unwrap();
+        let reparsed = DjVuDocumentMut::from_bytes(&edited_comp).unwrap();
+        let has_metz = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"));
+        assert!(has_metz, "edited component file must contain METz");
+        // The unedited component is byte-identical to the source fixture.
+        let irish_src = read_corpus("irish.djvu");
+        let irish_out = std::fs::read(dir.join("irish.djvu")).unwrap();
+        assert_eq!(irish_out, irish_src, "unedited component copied verbatim");
+        let _ = meta_page0;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_plan_rejects_duplicate_dirm_names() {
+        // Two DIRM entries with the same id ⇒ DuplicateComponentName.
+        let index = crate::djvm::create_indirect(&["dup.djvu", "dup.djvu"]).expect("create");
+        let err = IndirectRewritePlan::from_indirect_resolved(&index, |_n: &str| {
+            Ok::<Vec<u8>, std::io::Error>(read_corpus("chicken.djvu"))
+        })
+        .unwrap_err();
+        match err {
+            MutError::DuplicateComponentName { name } => assert_eq!(name, "dup.djvu"),
+            other => panic!("expected DuplicateComponentName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_plan_rejects_unsafe_dirm_names() {
+        for bad in [
+            "../evil.djvu",
+            "/abs.djvu",
+            "sub/page.djvu",
+            "..",
+            "a:b.djvu",
+        ] {
+            let index = crate::djvm::create_indirect(&[bad]).expect("create");
+            let err = IndirectRewritePlan::from_indirect_resolved(&index, |_n: &str| {
+                Ok::<Vec<u8>, std::io::Error>(read_corpus("chicken.djvu"))
+            })
+            .unwrap_err();
+            assert!(
+                matches!(err, MutError::UnsafeComponentName { .. }),
+                "name {bad:?} should be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_plan_unsafe_root_name_leaves_dir_unchanged() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu"]);
+        let plan = IndirectRewritePlan::from_indirect_resolved(&index, resolver).unwrap();
+
+        let dir = fresh_temp_dir("unsafe_root");
+        // Drop a sentinel file that must survive a failed commit.
+        std::fs::write(dir.join("sentinel"), b"keep me").unwrap();
+
+        let err = plan.commit_to_dir(&dir, "../escape.djvu").unwrap_err();
+        assert!(
+            matches!(err, MutError::UnsafeComponentName { .. }),
+            "{err:?}"
+        );
+
+        // Nothing was written: only the sentinel remains.
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["sentinel".to_string()]);
+        assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"keep me");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_plan_root_name_collision_rejected() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu"]);
+        let plan = IndirectRewritePlan::from_indirect_resolved(&index, resolver).unwrap();
+        let dir = fresh_temp_dir("root_collision");
+        // Root name equals a component name — would shadow the page file.
+        let err = plan.commit_to_dir(&dir, "chicken.djvu").unwrap_err();
+        assert!(
+            matches!(err, MutError::DuplicateComponentName { .. }),
+            "{err:?}"
+        );
+        // Validation failed before writing: directory is still empty.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_plan_set_bookmarks_marks_root_changed() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu"]);
+        let mut plan = IndirectRewritePlan::from_indirect_resolved(&index, resolver).unwrap();
+        plan.set_bookmarks(&[DjVuBookmark {
+            title: "Top".into(),
+            url: "#1".into(),
+            children: vec![],
+        }])
+        .unwrap();
+
+        let preview = plan.plan("index.djvu");
+        let root = preview.iter().find(|i| i.is_root).unwrap();
+        assert!(root.changed, "root index must be marked changed");
+
+        // Commit and confirm the index file carries NAVM bookmarks.
+        let dir = fresh_temp_dir("bookmarks");
+        plan.commit_to_dir(&dir, "index.djvu").unwrap();
+        let index_bytes = std::fs::read(dir.join("index.djvu")).unwrap();
+        let form = crate::iff::parse_form(&index_bytes).unwrap();
+        assert!(
+            form.chunks.iter().any(|c| &c.id == b"NAVM"),
+            "committed index must contain NAVM"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_plan_rejects_bundled_input() {
+        let bundled = read_corpus("DjVu3Spec_bundled.djvu");
+        let err = IndirectRewritePlan::from_indirect_resolved(&bundled, |_n: &str| {
+            Ok::<Vec<u8>, std::io::Error>(Vec::new())
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::NotIndirectDjvm), "{err:?}");
     }
 
     /// Walk top-level children of the outer FORM and return their absolute
