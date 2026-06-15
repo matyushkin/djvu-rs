@@ -173,24 +173,32 @@ pub mod djvu_mut;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// FGbz foreground-palette parser — decodes the `FGbz` chunk into a color
+/// palette and per-blit index table so [`djvu_render`] receives already-decoded
+/// data and never calls `bzz_decode` directly.
+pub(crate) mod fgbz;
+
 /// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
 ///
-/// Provides [`text::parse_text_layer`] and [`text::parse_text_layer_bzz`]
-/// plus typed structs [`text::TextLayer`], [`text::TextZone`],
-/// [`text::TextZoneKind`], and [`text::Rect`].
+/// Provides the pure [`text::parse_text_layer`] parser plus typed structs
+/// [`text::TextLayer`], [`text::TextZone`], [`text::TextZoneKind`], and
+/// [`text::Rect`].  BZZ-compressed `TXTz` payloads are decompressed upstream by
+/// [`DjVuPage::chunk_payload`].
 pub mod text;
 
 /// Annotation parser for DjVu ANTz/ANTa chunks — phase 4.
 ///
-/// Provides [`annotation::parse_annotations`] and [`annotation::parse_annotations_bzz`]
-/// plus typed structs [`annotation::Annotation`], [`annotation::MapArea`],
-/// [`annotation::Shape`], and [`annotation::Color`].
+/// Provides the pure [`annotation::parse_annotations`] parser plus typed
+/// structs [`annotation::Annotation`], [`annotation::MapArea`],
+/// [`annotation::Shape`], and [`annotation::Color`].  BZZ-compressed `ANTz`
+/// payloads are decompressed upstream by [`DjVuPage::chunk_payload`].
 pub mod annotation;
 
 /// Document metadata parser for METa/METz chunks — phase 4 extension.
 ///
-/// Provides [`metadata::parse_metadata`] and [`metadata::parse_metadata_bzz`]
-/// plus [`metadata::DjVuMetadata`] and [`metadata::MetadataError`].
+/// Provides the pure [`metadata::parse_metadata`] parser plus
+/// [`metadata::DjVuMetadata`] and [`metadata::MetadataError`].  BZZ-compressed
+/// `METz` payloads are decompressed upstream by [`DjVuDocument::chunk_payload`].
 pub mod metadata;
 
 /// DjVu to PDF converter — phase 6.

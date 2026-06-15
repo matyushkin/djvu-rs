@@ -152,14 +152,17 @@ fn test_parse_multiple_mapareas() {
 
 #[test]
 fn test_parse_annotations_bzz() {
-    use djvu_rs::annotation::parse_annotations_bzz;
+    use djvu_rs::annotation::parse_annotations;
+    use djvu_rs::bzz_new::bzz_decode;
     // Pre-computed BZZ encoding of "(background #aabbcc)"
     // Generated with: printf '(background #aabbcc)' | bzz -e - -
     let encoded: &[u8] = &[
         0xff, 0xff, 0xea, 0xfe, 0xb5, 0xe5, 0x65, 0x34, 0xc2, 0xb9, 0xa6, 0x8d, 0xed, 0xd2, 0x83,
         0x46, 0xfe, 0xf5, 0xcd, 0x8c, 0x47, 0x1d, 0x8c, 0x97,
     ];
-    let (ann, _) = parse_annotations_bzz(encoded).expect("bzz parse should succeed");
+    // ANTz decompresses via the shared BZZ path; the parser itself is pure.
+    let decoded = bzz_decode(encoded).expect("bzz decode should succeed");
+    let (ann, _) = parse_annotations(&decoded).expect("parse should succeed");
     let bg = ann.background.expect("background");
     assert_eq!(
         bg,

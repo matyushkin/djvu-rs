@@ -249,7 +249,7 @@ mod tests {
         let indices: Vec<i16> = vec![0, 1, 2, 1, 0, 2];
         let bytes = encode_fgbz(&palette, Some(&indices));
 
-        let parsed = crate::djvu_render::parse_fgbz(&bytes).expect("parse_fgbz");
+        let parsed = crate::fgbz::parse_fgbz(&bytes).expect("parse_fgbz");
         assert_eq!(parsed.colors.len(), palette.len());
         for (a, b) in parsed.colors.iter().zip(palette.iter()) {
             assert_eq!((a.r, a.g, a.b), (b.r, b.g, b.b));
