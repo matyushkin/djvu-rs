@@ -258,6 +258,26 @@ impl RenderOptions {
             ..Default::default()
         }
     }
+
+    /// Whether `page` can be rendered with [`render_streaming`] under these
+    /// options, producing pixels identical to [`render_pixmap`].
+    ///
+    /// The streaming path emits the page row-by-row without buffering a full
+    /// [`Pixmap`], so callers that only need to forward rows (PDF/TIFF image
+    /// encoders) can avoid the intermediate allocation. It is only equivalent
+    /// to the buffered path when no whole-image post-pass is required: no
+    /// anti-aliasing, no rotation, and either bilinear resampling or a 1:1
+    /// (unscaled) render.
+    ///
+    /// This is the single source of truth for streaming eligibility; export
+    /// paths call it instead of re-deriving the rule.
+    pub fn can_stream(&self, page: &crate::djvu_document::DjVuPage) -> bool {
+        !self.aa
+            && (self.resampling == Resampling::Bilinear
+                || (page.width() as u32 == self.width && page.height() as u32 == self.height))
+            && page.rotation() == crate::info::Rotation::None
+            && self.rotation == UserRotation::None
+    }
 }
 
 /// Return `(display_width, display_height)` — dimensions after rotation.
