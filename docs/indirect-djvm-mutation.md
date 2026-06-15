@@ -103,23 +103,71 @@ plan, destination policy, and atomic replacement behavior.
 
 ## Follow-Up Scope
 
-1. Add an indirect-to-bundled mutation constructor.
+1. Add an indirect-to-bundled mutation constructor. **(Implemented — #325.)**
    - Input: root DJVM bytes plus a resolver for DIRM component names.
    - Output: `DjVuDocumentMut` backed by a bundled DJVM tree.
    - Preserve current `IndirectDjvmUnsupported` behavior for plain
      `from_bytes`.
    - Cover resolver errors, missing components, and successful page metadata or
      text-layer mutation.
+   - Shipped as
+     [`DjVuDocumentMut::from_indirect_resolved`](../src/djvu_mut.rs). It resolves
+     every `DIRM` component, validates each is a `FORM:DJVU`/`DJVI`/`THUM`,
+     reuses the original BZZ directory metadata while flipping the bundled bit
+     and recomputing the offset table, and returns a side-effect-free bundled
+     byte stream from `try_into_bytes`.
 
 2. Add an explicit external-file rewrite API only after the rebundling path is
-   shipped.
+   shipped. **(Implemented — #326.)**
    - Expose a write plan before commit.
    - Require a destination directory or per-component writer.
    - Stage temporary files and document atomicity guarantees.
    - Reject unsafe or duplicate DIRM names.
+   - Shipped as
+     [`IndirectRewritePlan`](../src/djvu_mut.rs); see
+     [External-File Rewrite Path](#external-file-rewrite-path-326) below.
+
+## External-File Rewrite Path (#326)
+
+`IndirectRewritePlan` implements the second strategy: it keeps the document
+indirect and writes edits back to per-component files, rather than collapsing
+everything into one bundled stream.
+
+How it differs from the rebundled-output path:
+
+| | `DjVuDocumentMut::from_indirect_resolved` | `IndirectRewritePlan` |
+|---|---|---|
+| Output | one bundled `FORM:DJVM` byte stream | a directory of component files + index |
+| Side effects | none (`try_into_bytes` returns bytes) | files written by `commit_to_dir` |
+| Caller policy | none | destination dir, file names, atomicity |
+| Document shape | becomes bundled | stays indirect |
+
+Commit protocol:
+
+- Edits are staged in memory (`edit_page`, `set_bookmarks`); nothing is written
+  during setters.
+- `plan(root_name)` previews every file a commit will write and flags which
+  changed.
+- `commit_to_dir(dir, root_name)` validates all names first (so an invalid
+  request leaves the destination untouched), then writes each component and the
+  root index by staging a sibling temp file and atomically renaming it into
+  place. The root index is written last.
+
+Name safety: component ids and the root name must be safe *flat* relative names
+— no path separators, `.`/`..`, drive/stream colon, or NUL — so a rewrite can
+never escape the destination directory. Duplicate names (including a root name
+colliding with a component) are rejected.
+
+Atomicity: each individual file is replaced atomically on platforms with
+same-directory atomic rename. The multi-file commit as a whole is **not**
+transactional — a crash mid-commit can leave a mix of old and new component
+files. Because indirect components are independent, self-describing page files,
+each remains individually valid; callers needing all-or-nothing semantics should
+commit to a fresh directory and swap it in.
 
 ## Current Unsupported Behavior
 
-Until the first follow-up lands, mutation of indirect DJVM documents is not
-supported. Callers should either edit the individual page files directly or
-create a bundled DJVM first.
+In-place mutation through the plain `DjVuDocumentMut::from_bytes` entry point
+remains unsupported for indirect DJVM documents (`page_mut` returns
+`IndirectDjvmUnsupported`). Use `from_indirect_resolved` for a bundled result,
+or `IndirectRewritePlan` to rewrite the external component files.
