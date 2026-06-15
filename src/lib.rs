@@ -205,6 +205,12 @@ pub mod annotation;
 /// `METz` payloads are decompressed upstream by [`DjVuDocument::chunk_payload`].
 pub mod metadata;
 
+/// Shared document-to-export traversal primitives (#345) used by the PDF,
+/// EPUB, TIFF, and OCR exporters: the per-page loop, the scale→size kernel,
+/// the leaf word/character zone-walk, and the vertical coordinate flip.
+#[cfg(feature = "std")]
+mod export_common;
+
 /// DjVu to PDF converter — phase 6.
 ///
 /// Converts DjVu documents to PDF preserving structure: rasterized page images,
