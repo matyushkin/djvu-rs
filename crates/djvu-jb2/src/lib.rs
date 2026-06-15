@@ -41,6 +41,12 @@ use std::{vec, vec::Vec};
 use djvu_bitmap::Bitmap;
 use djvu_zp::ZpDecoder;
 
+/// JB2 bilevel image encoder (`std`-only). Produces `Sjbz`/`Djbz` payloads
+/// decodable by this crate. Kept behind `std` so the decoder stays
+/// `no_std`-capable.
+#[cfg(feature = "std")]
+pub mod encode;
+
 /// JB2 bitonal image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Jb2Error {
@@ -93,18 +99,20 @@ pub enum Jb2Error {
 // NumContext: binary-tree arena for variable-length integer decoding
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Binary-tree context store used to decode variable-length integers with ZP.
+/// Binary-tree context store used to encode/decode variable-length integers
+/// with ZP.
 ///
 /// Each node in the tree holds one adaptive ZP context byte. Nodes are
-/// allocated lazily as the decoder traverses the tree.
-struct NumContext {
-    ctx: Vec<u8>,
+/// allocated lazily as the coder traverses the tree. Shared between the
+/// decoder (this module) and the `std`-only [`encode`] module.
+pub(crate) struct NumContext {
+    pub(crate) ctx: Vec<u8>,
     left: Vec<u32>,
     right: Vec<u32>,
 }
 
 impl NumContext {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // Index 0 = unused sentinel; index 1 = root.
         NumContext {
             ctx: vec![0, 0],
@@ -113,11 +121,11 @@ impl NumContext {
         }
     }
 
-    fn root(&self) -> usize {
+    pub(crate) fn root(&self) -> usize {
         1
     }
 
-    fn get_left(&mut self, node: usize) -> usize {
+    pub(crate) fn get_left(&mut self, node: usize) -> usize {
         if self.left[node] == 0 {
             let idx = self.ctx.len() as u32;
             self.ctx.push(0);
@@ -128,7 +136,7 @@ impl NumContext {
         self.left[node] as usize
     }
 
-    fn get_right(&mut self, node: usize) -> usize {
+    pub(crate) fn get_right(&mut self, node: usize) -> usize {
         if self.right[node] == 0 {
             let idx = self.ctx.len() as u32;
             self.ctx.push(0);

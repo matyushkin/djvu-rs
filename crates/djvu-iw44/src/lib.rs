@@ -32,6 +32,14 @@ use std::{vec, vec::Vec};
 use djvu_pixmap::Pixmap;
 use djvu_zp::ZpDecoder;
 
+/// IW44 wavelet image encoder — produces BG44/FG44/TH44 chunk payloads (std-only).
+///
+/// Shares the band/quant/state-flag/zigzag spec data with the decoder (this
+/// module) instead of re-declaring it. Requires `std` for the ZP encoder and the
+/// SIMD forward-transform paths.
+#[cfg(feature = "std")]
+pub mod encode;
+
 /// IW44 wavelet image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Iw44Error {
@@ -77,9 +85,13 @@ pub enum Iw44Error {
 }
 
 // ---- Band-bucket mapping: 10 bands, each mapped to a range of buckets --------
+//
+// The band/quant/state-flag/zigzag definitions below are the IW44 *spec* — one
+// source of truth shared between the decoder (this module) and the std-only
+// [`encode`] module, which is why they are `pub(crate)` rather than private.
 
 /// `BAND_BUCKETS[band]` = `(first_bucket, last_bucket)` inclusive.
-const BAND_BUCKETS: [(usize, usize); 10] = [
+pub(crate) const BAND_BUCKETS: [(usize, usize); 10] = [
     (0, 0),
     (1, 1),
     (2, 2),
@@ -93,29 +105,29 @@ const BAND_BUCKETS: [(usize, usize); 10] = [
 ];
 
 /// Initial quantization step table for the low-frequency band (band 0).
-const QUANT_LO_INIT: [u32; 16] = [
+pub(crate) const QUANT_LO_INIT: [u32; 16] = [
     0x004000, 0x008000, 0x008000, 0x010000, 0x010000, 0x010000, 0x010000, 0x010000, 0x010000,
     0x010000, 0x010000, 0x010000, 0x020000, 0x020000, 0x020000, 0x020000,
 ];
 
 /// Initial quantization step table for high-frequency bands (bands 1–9).
-const QUANT_HI_INIT: [u32; 10] = [
+pub(crate) const QUANT_HI_INIT: [u32; 10] = [
     0, 0x020000, 0x020000, 0x040000, 0x040000, 0x040000, 0x080000, 0x040000, 0x040000, 0x080000,
 ];
 
 // ---- Coefficient state flags -------------------------------------------------
 
-const ZERO: u8 = 1;
-const ACTIVE: u8 = 2;
-const NEW: u8 = 4;
-const UNK: u8 = 8;
+pub(crate) const ZERO: u8 = 1;
+pub(crate) const ACTIVE: u8 = 2;
+pub(crate) const NEW: u8 = 4;
+pub(crate) const UNK: u8 = 8;
 
 // ---- Zigzag scan tables ------------------------------------------------------
 //
 // Each coefficient index `i` (0..1024) maps to a `(row, col)` within the 32×32
 // block via bit-interleaving: even bits → column, odd bits → row.
 
-const fn zigzag_row(i: usize) -> u8 {
+pub(crate) const fn zigzag_row(i: usize) -> u8 {
     let b1 = ((i >> 1) & 1) as u8;
     let b3 = ((i >> 3) & 1) as u8;
     let b5 = ((i >> 5) & 1) as u8;
@@ -124,7 +136,7 @@ const fn zigzag_row(i: usize) -> u8 {
     b1 * 16 + b3 * 8 + b5 * 4 + b7 * 2 + b9
 }
 
-const fn zigzag_col(i: usize) -> u8 {
+pub(crate) const fn zigzag_col(i: usize) -> u8 {
     let b0 = (i & 1) as u8;
     let b2 = ((i >> 2) & 1) as u8;
     let b4 = ((i >> 4) & 1) as u8;
