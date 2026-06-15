@@ -25,7 +25,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
-    format,
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -34,8 +33,9 @@ use alloc::{
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
     bzz_new::bzz_decode,
+    dirm::{DirmComponentKind, DirmPayload},
     error::{BzzError, IffError, Iw44Error, Jb2Error},
-    iff::{IffChunk, parse_form},
+    iff::{IffChunk, parse_form, parse_form_body},
     info::PageInfo,
     iw44_new::Iw44Image,
     jb2::Jb2Dict,
@@ -1286,55 +1286,7 @@ fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
     let body = data
         .get(4..)
         .ok_or(DocError::Malformed("sub-form body missing"))?;
-    let chunks = parse_iff_body_chunks(body)?;
-    Ok(chunks)
-}
-
-/// Parse sequential IFF chunks from a raw byte slice (no AT&T / FORM wrapper).
-fn parse_iff_body_chunks(mut buf: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
-    let mut chunks = Vec::new();
-
-    while buf.len() >= 8 {
-        let id: [u8; 4] = buf
-            .get(0..4)
-            .and_then(|s| s.try_into().ok())
-            .ok_or(IffError::Truncated)?;
-        let data_len = buf
-            .get(4..8)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_be_bytes)
-            .map(|n| n as usize)
-            .ok_or(IffError::Truncated)?;
-
-        let data_start = 8usize;
-        let data_end = data_start
-            .checked_add(data_len)
-            .ok_or(IffError::Truncated)?;
-
-        if data_end > buf.len() {
-            return Err(DocError::Iff(IffError::ChunkTooLong {
-                id,
-                claimed: data_len as u32,
-                available: buf.len().saturating_sub(data_start),
-            }));
-        }
-
-        let chunk_data = buf.get(data_start..data_end).ok_or(IffError::Truncated)?;
-
-        // If this is a nested FORM, expose it as a FORM chunk with raw data
-        // (form_type + children) so callers can handle FORM:DJVU sub-forms.
-        chunks.push(IffChunk {
-            id,
-            data: chunk_data,
-        });
-
-        let padded_len = data_len + (data_len & 1);
-        let next = data_start
-            .checked_add(padded_len)
-            .ok_or(IffError::Truncated)?;
-        buf = buf.get(next.min(buf.len())..).ok_or(IffError::Truncated)?;
-    }
-
+    let chunks = parse_form_body(body).map_err(DocError::Iff)?;
     Ok(chunks)
 }
 
@@ -1387,111 +1339,20 @@ pub(crate) fn parse_dirm_components(
 /// corresponding component's outer `b"FORM"` header within the original
 /// document buffer.
 fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool, Vec<u32>), DocError> {
-    if data.len() < 3 {
-        return Err(DocError::Malformed("DIRM chunk too short"));
-    }
-
-    let dflags = *data.first().ok_or(DocError::Malformed("DIRM empty"))?;
-    let is_bundled = (dflags >> 7) != 0;
-    let nfiles = u16::from_be_bytes([
-        *data.get(1).ok_or(DocError::Malformed("DIRM too short"))?,
-        *data.get(2).ok_or(DocError::Malformed("DIRM too short"))?,
-    ]) as usize;
-
-    let mut pos = 3usize;
-
-    // Bundled documents embed 4-byte BE offsets to each component's FORM header.
-    let mut offsets: Vec<u32> = Vec::new();
-    if is_bundled {
-        let offsets_size = nfiles * 4;
-        let end = pos
-            .checked_add(offsets_size)
-            .ok_or(DocError::Malformed("DIRM offset arithmetic overflow"))?;
-        if end > data.len() {
-            return Err(DocError::Malformed("DIRM offset table truncated"));
-        }
-        offsets.reserve(nfiles);
-        for i in 0..nfiles {
-            let base = pos + i * 4;
-            let bytes = data
-                .get(base..base + 4)
-                .ok_or(DocError::Malformed("DIRM offset slice OOB"))?;
-            offsets.push(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-        }
-        pos = end;
-    }
-
-    // Remaining bytes are BZZ-compressed metadata.
-    let bzz_data = data
-        .get(pos..)
-        .ok_or(DocError::Malformed("DIRM bzz data missing"))?;
-    let meta = bzz_decode(bzz_data).unwrap_or_default();
-
-    // If BZZ metadata is too short (e.g. from a minimal DIRM without full
-    // metadata), generate synthetic entries — callers derive types from FORM.
-    // Layout: sizes(3 bytes × N), flags(1 byte × N), then null-terminated IDs…
-    let mut mpos = nfiles * 3; // skip per-component sizes
-
-    if mpos + nfiles > meta.len() {
-        // Generate synthetic entries with unknown type — the caller will
-        // reassign types based on the actual FORM type (DJVU/DJVI/etc.)
-        let entries: Vec<DirmEntry> = (0..nfiles)
-            .map(|i| DirmEntry {
-                comp_type: ComponentType::Page,
-                id: format!("p{:04}", i),
-            })
-            .collect();
-        return Ok((entries, is_bundled, offsets));
-    }
-    let flags: Vec<u8> = meta
-        .get(mpos..mpos + nfiles)
-        .ok_or(DocError::Malformed("DIRM flags truncated"))?
-        .to_vec();
-    mpos += nfiles;
-
-    let mut entries = Vec::with_capacity(nfiles);
-    for &flag in flags.iter().take(nfiles) {
-        let id = read_str_nt(&meta, &mut mpos)?;
-
-        // Optional name and title fields
-        if (flag & 0x80) != 0 {
-            let _ = read_str_nt(&meta, &mut mpos)?;
-        }
-        if (flag & 0x40) != 0 {
-            let _ = read_str_nt(&meta, &mut mpos)?;
-        }
-
-        let comp_type = match flag & 0x3f {
-            1 => ComponentType::Page,
-            2 => ComponentType::Thumbnail,
-            _ => ComponentType::Shared,
-        };
-
-        entries.push(DirmEntry { comp_type, id });
-    }
-
-    Ok((entries, is_bundled, offsets))
-}
-
-/// Read a null-terminated UTF-8 string from `data` at `*pos`, advancing `*pos`.
-fn read_str_nt(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
-    let start = *pos;
-    while *pos < data.len() && *data.get(*pos).ok_or(DocError::Malformed("str read OOB"))? != 0 {
-        *pos += 1;
-    }
-    if *pos >= data.len() {
-        return Err(DocError::Malformed(
-            "null terminator missing in DIRM string",
-        ));
-    }
-    let s = core::str::from_utf8(
-        data.get(start..*pos)
-            .ok_or(DocError::Malformed("str slice OOB"))?,
-    )
-    .map_err(|_| DocError::InvalidUtf8)?
-    .to_string();
-    *pos += 1; // consume null terminator
-    Ok(s)
+    let payload = DirmPayload::decode(data).map_err(DocError::Malformed)?;
+    let entries = payload
+        .components()
+        .into_iter()
+        .map(|c| DirmEntry {
+            comp_type: match c.kind {
+                DirmComponentKind::Page => ComponentType::Page,
+                DirmComponentKind::Thumbnail => ComponentType::Thumbnail,
+                DirmComponentKind::Shared => ComponentType::Shared,
+            },
+            id: c.id,
+        })
+        .collect();
+    Ok((entries, payload.is_bundled(), payload.offsets))
 }
 
 /// Parse NAVM bookmarks from the chunk list of a FORM:DJVM.
