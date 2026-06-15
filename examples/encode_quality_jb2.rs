@@ -112,7 +112,14 @@ fn process_file(path: &Path, lossy_threshold: f32) -> Vec<PageResult> {
         let rs_encoded = encode_jb2(&bitmap);
         let rs_dict_encoded = encode_jb2_dict(&bitmap);
         let rs_lossy_encoded = if lossy_threshold > 0.0 {
-            encode_jb2_dict_with_options(&bitmap, &[], &Jb2EncodeOptions { lossy_threshold })
+            encode_jb2_dict_with_options(
+                &bitmap,
+                &[],
+                &Jb2EncodeOptions {
+                    lossy_threshold,
+                    ..Default::default()
+                },
+            )
         } else {
             rs_dict_encoded.clone()
         };
