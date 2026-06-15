@@ -5,6 +5,105 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Cross-size JB2 record-6 refinement emitter (#322) — **Reverted / kept disabled** (2026-06-15)
+
+**Issue.** #322: build an *experiment-only* cross-size record-6 refinement
+emitter behind a probe flag (`max_dim_delta = 2`, `max_hamming_fraction =
+0.05`), decode + pixel-compare on `watchmaker` and `pathogenic_bacteria_1896`,
+and record the real byte deltas + round-trip status. Keep
+`encode_djvm_bundle_jb2` (and the other shipped encoders) unchanged.
+
+**Approach.** Added `CrossSizeRec6Probe` to `Jb2EncodeOptions` (default `None`).
+When enabled, a fresh connected component with no exact dictionary hit searches
+dictionary entries whose bbox differs by ≤ `max_dim_delta` per axis, scores them
+with nearest-neighbor-resampled Hamming distance, and — if within the budget —
+emits a **lossless** record-6 matched refinement (`wdiff`/`hdiff` + 11-bit
+refinement bitmap against the chosen reference) instead of a record-1 new
+symbol. This required finishing the dormant `encode_bitmap_ref` helper: it was
+written in image (top-down) space, but the decoder's `decode_bitmap_ref` walks
+packed Jbm rows **bottom-up**, and the `>> 1` centre-alignment floor is not
+symmetric under that flip — so a non-solid refinement bitmap desynchronised the
+ZP stream (`UnknownRecordType` on decode). Rewriting the encoder to mirror the
+decoder's Jbm-row traversal exactly made it round-trip.
+
+**Numbers** (re-encoding existing page masks; baseline = shipped rec-1/7 only):
+
+| corpus | pages | pages changed | baseline | probe | delta | round-trip |
+|--------|-------|---------------|----------|-------|-------|------------|
+| watchmaker (all) | 12 | 12 | 130 036 B | 135 720 B | **+5 684 B (+4.37%)** | lossless |
+| pathogenic_bacteria_1896 (first 40) | 38 | 36 | 1 539 929 B | 1 543 596 B | **+3 667 B (+0.24%)** | lossless |
+
+**Decision.** Reverted as a shipping path; the probe stays `None` by default, so
+all shipped encoders (`encode_jb2_dict`, `encode_jb2_dict_with_shared`,
+`encode_djvm_bundle_jb2`) are byte-identical to before (asserted by
+`cross_size_rec6_probe_off_is_byte_identical`). Kept behind the flag with two
+round-trip regression tests and an `--ignored` corpus measurement driver
+(`cross_size_rec6_probe_corpus_measurement`).
+
+**Reason.** Cross-size refinement *loses* bytes on both corpora. A cross-size
+reference must be nearest-neighbor resampled before it can drive the refinement
+context; the geometric misalignment makes the 11-bit context mispredict, so the
+refinement bitmap costs nearly as much as a fresh direct symbol — and then adds
+the record-6 index + `wdiff`/`hdiff` overhead on top. It is also strictly worse
+than record-1 for *future* repeats, because record-6 is blit-only and never
+extends the dictionary, so a later exact copy of the same glyph can no longer
+hit rec-7. The earlier analysis-only scaffold's estimated deltas pointed the
+same way; this confirms it with real bytes. Net: not worth pursuing at these
+thresholds.
+
+### IW44 forward-transform reconstruction-loss localization (#320) — **Kept (diagnostic only)** (2026-06-15)
+
+**Issue.** #320: localize IW44 BG44 reconstruction loss on the photographic
+`conquete_paix` pages 3 & 11, among four candidate stages — forward wavelet
+transform, quantization threshold schedule, coefficient state transitions, and
+reconstruction tracking. Keep default encoder behavior unchanged.
+
+**Approach.** Added in-crate diagnostics (`src/iw44_encode.rs`, module
+`loss_diagnostics`):
+1. A full-precision i32 reference forward transform compared coefficient-wise
+   against the production i16 transform on the real page-3/11 luma planes, plus
+   a max-intermediate-magnitude probe for i16 headroom.
+2. Per-band reconstruction residual `Σ|blocks − recon|` vs band energy
+   `Σ|blocks|`, driving the real encoder slice loop, mapping each IW44 band to
+   its contiguous zigzag-coefficient range.
+
+**Numbers.**
+- *Forward transform:* production i16 transform equals the i32 reference
+  **exactly** (0 / 3.2 M coefficients diverge on p3, 0 / 3.3 M on p11). Largest
+  intermediate magnitude 6 845 (p3) / 11 378 (p11) ≪ `i16::MAX` (32 767) — no
+  overflow. The transform is lossless on these pages.
+- *Per-band residual after the default 100 slices (rel = resid/energy):*
+
+  | band | p3 rel | p11 rel |
+  |------|--------|---------|
+  | 0 (coarsest) | 23.0% | 17.6% |
+  | 3 | 59.4% | 25.5% |
+  | 6 | 99.8% | 65.7% |
+  | 9 (finest) | 100.0% | 99.9% |
+
+  Residual grows monotonically with frequency; band 9 `recon` is all-zero
+  (p3) or within 0.1% of it (p11) — never activated within budget.
+- *Pixel-domain floor (gray round-trip, 96×96 broadband):* avg abs error
+  plateaus at 8.72 from 200 slices onward (identical at 255) — not a
+  transform-pair mismatch but the refinement-schedule floor (`s>>1`, `s>>2`,
+  `s>>3` round to 0 at small steps, so refinement deltas vanish before `recon`
+  reaches `blocks`).
+
+**Decision.** Kept as diagnostics; **no encoder change**. Two regression tests
+(`forward_transform_is_lossless`, `loss_concentrates_in_high_frequency_bands`)
+plus an `--ignored` table dump (`print_band_table`).
+
+**Reason.** The loss is the progressive **quantization / slice budget**, not the
+forward transform, state transitions, or reconstruction tracking: the forward
+transform is bit-exact and overflow-free, and the coarse bands reconstruct
+correctly (which they could not if state/tracking were broken). The finest
+bands are simply starved — their small coefficients never cross the activation
+threshold within 100 slices. An earlier i32 reference falsely reported a
+forward-transform "divergence"; the bug was in the *reference* (it ran the
+column pass over every column instead of the `s·ℤ` multiresolution sublattice),
+not in production. Acting on quality would mean a different slice/quant schedule
+or budget, which is out of scope for this diagnostic-only issue.
+
 ### Post-roadmap render baseline correction — **Kept** (2026-05-17)
 
 **Approach.** Reran the render filters from #308 on the same code after the

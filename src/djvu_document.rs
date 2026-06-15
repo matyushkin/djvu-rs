@@ -1324,6 +1324,41 @@ struct DirmEntry {
     id: String,
 }
 
+/// One resolved DIRM component descriptor exposed to the mutation layer.
+///
+/// `id` is the directory entry id passed to a resolver to fetch the component
+/// bytes; `is_page` is `true` for `Page` components and `false` for shared
+/// (`DJVI`) or thumbnail components.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub(crate) struct DirmComponentInfo {
+    /// Resolver key / component id (the first DIRM string field).
+    pub id: String,
+    /// Whether this component is a page (`ComponentType::Page`).
+    pub is_page: bool,
+}
+
+/// Parse a DIRM chunk's component directory for the mutation layer.
+///
+/// Returns `(components, is_bundled)` in DIRM declaration order. This is a thin
+/// wrapper over [`parse_dirm`] that drops the bundled offset table (callers that
+/// rebundle recompute offsets) and exposes only the fields needed to resolve and
+/// re-assemble components.
+#[cfg(feature = "std")]
+pub(crate) fn parse_dirm_components(
+    data: &[u8],
+) -> Result<(Vec<DirmComponentInfo>, bool), DocError> {
+    let (entries, is_bundled, _offsets) = parse_dirm(data)?;
+    let components = entries
+        .into_iter()
+        .map(|e| DirmComponentInfo {
+            id: e.id,
+            is_page: e.comp_type == ComponentType::Page,
+        })
+        .collect();
+    Ok((components, is_bundled))
+}
+
 /// Parse the DIRM chunk (directory of files in FORM:DJVM).
 ///
 /// Returns `(entries, is_bundled, offsets)`. `offsets` is non-empty only for
