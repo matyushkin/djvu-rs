@@ -231,21 +231,18 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
 /// Encode `cbm` relative to a reference (matched) bitmap `mbm` using the
 /// refinement 11-pixel context.
 ///
-/// Mirrors `decode_bitmap_ref` in `jb2.rs`. Center alignment is used per
-/// the DjVu spec: the reference bitmap is anchored at the centre of the
-/// child.
+/// Mirrors `decode_bitmap_ref` in the `djvu-jb2` crate **exactly**, including
+/// its row traversal order and centre alignment. The decoder works in packed
+/// Jbm storage, which is bottom-up: Jbm row `r` is image row `H - 1 - r`. It
+/// decodes rows from `r = H-1` (image top) down to `r = 0` (image bottom),
+/// and its centre-alignment `row_shift = mrow - crow` is applied in that
+/// Jbm-row space. Because the `>> 1` centre floor is not symmetric under a
+/// top-down/bottom-up flip, the encoder must operate in the *same* Jbm-row
+/// space rather than image space — otherwise the reference rows the two sides
+/// sample disagree on odd/even size deltas and the ZP streams desynchronise.
 ///
-/// Both bitmaps are in [`Bitmap`] top-down storage (y=0 = top of image).
-/// The decoder's bottom-up Jbm traversal corresponds to top-down image
-/// processing, so we iterate `y in 0..ch`. Context rows are then:
-///   * c_r1 = the row just above current in image  (Y - 1 in Bitmap storage)
-///   * m_r1 = mbm row at the same image height as the current cbm row
-///   * m_r0 = mbm row one below current in image    (m_r1's Bitmap Y + 1)
-///   * m_r2 = mbm row one above current in image    (m_r1's Bitmap Y - 1)
-///
-/// `row_offset = mrow - crow` is the centre-alignment shift expressed in
-/// Bitmap (top-down) row indices.
-#[allow(dead_code)]
+/// Both `cbm` and `mbm` are [`Bitmap`]s in top-down storage; the closures
+/// below translate Jbm row indices back into top-down `get` calls.
 fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bitmap) {
     debug_assert_eq!(ctx.len(), 2048);
     let cw = cbm.width as i32;
@@ -260,47 +257,49 @@ fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bit
     let ccol = (cw - 1) >> 1;
     let mrow = (mh - 1) >> 1;
     let mcol = (mw - 1) >> 1;
-    let row_offset = mrow - crow;
+    let row_shift = mrow - crow;
     let col_shift = mcol - ccol;
 
-    let mbm_pixel = |y: i32, x: i32| -> u32 {
-        if y < 0 || y >= mh || x < 0 || x >= mw {
+    // Jbm-space pixel reads: Jbm row `r` ↔ image row `height - 1 - r`.
+    let mbm_pix = |r: i32, x: i32| -> u32 {
+        if r < 0 || r >= mh || x < 0 || x >= mw {
             0
         } else {
-            mbm.get(x as u32, y as u32) as u32
+            mbm.get(x as u32, (mh - 1 - r) as u32) as u32
         }
     };
-    let cbm_pixel = |y: i32, x: i32| -> u32 {
-        if y < 0 || y >= ch || x < 0 || x >= cw {
+    let cbm_pix = |r: i32, x: i32| -> u32 {
+        if r < 0 || r >= ch || x < 0 || x >= cw {
             0
         } else {
-            cbm.get(x as u32, y as u32) as u32
+            cbm.get(x as u32, (ch - 1 - r) as u32) as u32
         }
     };
 
-    for y in 0..ch {
-        let my = y + row_offset; // mbm row at same image height as cbm row y
+    for row in (0..ch).rev() {
+        let mr = row + row_shift;
 
-        // Initialise rolling windows at col=0 (col-1 / col-2 OOB → 0).
-        let mut c_r1 = (cbm_pixel(y - 1, 0) << 1) | cbm_pixel(y - 1, 1);
+        // Rolling windows at col=0 (col-1 / col-2 OOB → 0). `c_r1` is the row
+        // decoded just before this one — Jbm row `row + 1`.
+        let mut c_r1 = (cbm_pix(row + 1, 0) << 1) | cbm_pix(row + 1, 1);
         let mut c_r0: u32 = 0;
-        let mut m_r1 = (mbm_pixel(my, col_shift - 1) << 2)
-            | (mbm_pixel(my, col_shift) << 1)
-            | mbm_pixel(my, col_shift + 1);
-        let mut m_r0 = (mbm_pixel(my + 1, col_shift - 1) << 2)
-            | (mbm_pixel(my + 1, col_shift) << 1)
-            | mbm_pixel(my + 1, col_shift + 1);
+        let mut m_r1 = (mbm_pix(mr, col_shift - 1) << 2)
+            | (mbm_pix(mr, col_shift) << 1)
+            | mbm_pix(mr, col_shift + 1);
+        let mut m_r0 = (mbm_pix(mr - 1, col_shift - 1) << 2)
+            | (mbm_pix(mr - 1, col_shift) << 1)
+            | mbm_pix(mr - 1, col_shift + 1);
 
         for col in 0..cw {
-            let m_r2 = mbm_pixel(my - 1, col + col_shift);
+            let m_r2 = mbm_pix(mr + 1, col + col_shift);
             let idx = ((c_r1 << 8) | (c_r0 << 7) | (m_r2 << 6) | (m_r1 << 3) | m_r0) & 2047;
-            let bit = cbm_pixel(y, col) != 0;
+            let bit = cbm_pix(row, col) != 0;
             zp.encode_bit(&mut ctx[idx as usize], bit);
 
-            c_r1 = ((c_r1 << 1) & 0b111) | cbm_pixel(y - 1, col + 2);
+            c_r1 = ((c_r1 << 1) & 0b111) | cbm_pix(row + 1, col + 2);
             c_r0 = bit as u32;
-            m_r1 = ((m_r1 << 1) & 0b111) | mbm_pixel(my, col + col_shift + 2);
-            m_r0 = ((m_r0 << 1) & 0b111) | mbm_pixel(my + 1, col + col_shift + 2);
+            m_r1 = ((m_r1 << 1) & 0b111) | mbm_pix(mr, col + col_shift + 2);
+            m_r0 = ((m_r0 << 1) & 0b111) | mbm_pix(mr - 1, col + col_shift + 2);
         }
     }
 }
@@ -775,6 +774,85 @@ fn find_lossy_copy_ref(
     best.map(|(i, _)| i)
 }
 
+/// Find the closest **cross-size** dict entry suitable for a lossless record-6
+/// matched refinement (#322 experiment).
+///
+/// Candidates are dict entries whose width and height each differ from `cand`
+/// by at most `max_dim_delta` (and are not exactly `cand`'s size). Distance is
+/// scored with [`scaled_hamming`] — nearest-neighbor resampling of the
+/// candidate into `cand`'s grid — and accepted when within
+/// `pixel_count × max_hamming_fraction` flipped pixels. Returns the dict index
+/// of the best (lowest-distance) accepted candidate.
+///
+/// The match only selects the *reference* glyph; the emitted refinement bitmap
+/// reproduces `cand` exactly, so this is lossless regardless of the score.
+fn find_cross_size_refine_ref(
+    cand: &Bitmap,
+    dict_entries: &[Bitmap],
+    by_size: &BTreeMap<(u32, u32), Vec<usize>>,
+    max_dim_delta: u32,
+    max_hamming_fraction: f32,
+) -> Option<usize> {
+    let pixel_count = (cand.width as u64) * (cand.height as u64);
+    if pixel_count < REFINEMENT_MIN_PIXELS {
+        return None;
+    }
+    let max_diff = ((pixel_count as f64) * (max_hamming_fraction as f64)).round() as u32;
+    let min_w = cand.width.saturating_sub(max_dim_delta);
+    let max_w = cand.width.saturating_add(max_dim_delta);
+    let min_h = cand.height.saturating_sub(max_dim_delta);
+    let max_h = cand.height.saturating_add(max_dim_delta);
+    let mut best: Option<(usize, u32)> = None;
+    for w in min_w..=max_w {
+        for h in min_h..=max_h {
+            if w == cand.width && h == cand.height {
+                continue;
+            }
+            let Some(indices) = by_size.get(&(w, h)) else {
+                continue;
+            };
+            for &idx in indices {
+                let d = scaled_hamming(cand, &dict_entries[idx]);
+                if d > max_diff {
+                    continue;
+                }
+                match best {
+                    None => best = Some((idx, d)),
+                    Some((_, bd)) if d < bd => best = Some((idx, d)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Experiment-only knobs for the cross-size record-6 refinement emitter (#322).
+///
+/// When present in [`Jb2EncodeOptions::cross_size_rec6_probe`], fresh
+/// connected components that have no exact dictionary hit are matched against
+/// dictionary entries whose bounding box differs by at most `max_dim_delta`
+/// pixels in each axis. If a near-twin is found within the normalized Hamming
+/// budget, the component is emitted as a **lossless** record-6 matched
+/// refinement (`wdiff`/`hdiff` + 11-bit refinement bitmap) referencing that
+/// entry instead of a fresh record-1.
+///
+/// This is a measurement vehicle: the refinement bitmap reproduces the
+/// component exactly (round-trip is pixel-lossless), but it is *not* wired into
+/// any shipped encoder path. [`encode_jb2_dict`] /
+/// [`encode_jb2_dict_with_shared`] / [`encode_djvm_bundle_jb2`] leave it
+/// disabled, so default output is byte-identical to before.
+#[derive(Debug, Clone, Copy)]
+pub struct CrossSizeRec6Probe {
+    /// Maximum per-axis bounding-box difference (in pixels) between a fresh
+    /// component and a candidate dictionary entry.
+    pub max_dim_delta: u32,
+    /// Accepted normalized Hamming budget as a fraction of the component's
+    /// pixel count, scored after nearest-neighbor resampling of the candidate
+    /// into the component's dimensions.
+    pub max_hamming_fraction: f32,
+}
+
 /// Tunable knobs for the JB2 dictionary encoder.
 ///
 /// Default values reproduce the lossless behavior of [`encode_jb2_dict`]
@@ -792,12 +870,18 @@ pub struct Jb2EncodeOptions {
     /// `0.0` (default) = lossless: rec-7 fires only on byte-exact matches.
     /// `cjb2 -lossy` ships at roughly the equivalent of 0.04–0.05 here.
     pub lossy_threshold: f32,
+    /// Experiment-only cross-size record-6 refinement (#322). `None` (default)
+    /// keeps the shipped behavior — only record-1 (new) and record-7 (copy)
+    /// are emitted. `Some(_)` enables the lossless cross-size refinement path
+    /// described on [`CrossSizeRec6Probe`].
+    pub cross_size_rec6_probe: Option<CrossSizeRec6Probe>,
 }
 
 impl Default for Jb2EncodeOptions {
     fn default() -> Self {
         Self {
             lossy_threshold: 0.0,
+            cross_size_rec6_probe: None,
         }
     }
 }
@@ -894,6 +978,13 @@ pub fn encode_jb2_dict_with_options(
     let mut symbol_height_ctx = NumContext::new();
     let mut symbol_index_ctx = NumContext::new();
     let mut inherit_dict_size_ctx = NumContext::new();
+    // Cross-size record-6 refinement contexts (#322 experiment). Declared
+    // unconditionally to mirror the decoder's context layout, but only touched
+    // when `opts.cross_size_rec6_probe` diverts a component to refinement —
+    // leaving the ZP state byte-identical for the default (probe-off) path.
+    let mut symbol_width_diff_ctx = NumContext::new();
+    let mut symbol_height_diff_ctx = NumContext::new();
+    let mut refinement_bitmap_ctx = vec![0u8; 2048];
     let mut hoff_ctx = NumContext::new();
     let mut voff_ctx = NumContext::new();
     let mut shoff_ctx = NumContext::new();
@@ -961,6 +1052,8 @@ pub fn encode_jb2_dict_with_options(
         enum Action {
             New,
             Copy(usize),
+            /// Cross-size record-6 matched refinement (#322 experiment).
+            Refine(usize),
         }
         let action = if let Some(idx) = exact_match {
             Action::Copy(idx)
@@ -977,9 +1070,23 @@ pub fn encode_jb2_dict_with_options(
             } else {
                 None
             };
-            match lossy_copy {
-                Some(idx) => Action::Copy(idx),
-                None => Action::New,
+            if let Some(idx) = lossy_copy {
+                Action::Copy(idx)
+            } else if let Some(probe) = opts.cross_size_rec6_probe {
+                // #322 experiment: divert fresh components with a near-size
+                // dictionary twin to a lossless cross-size rec-6 refinement.
+                match find_cross_size_refine_ref(
+                    &cc.bitmap,
+                    &dict_entries,
+                    &by_size,
+                    probe.max_dim_delta,
+                    probe.max_hamming_fraction,
+                ) {
+                    Some(idx) => Action::Refine(idx),
+                    None => Action::New,
+                }
+            } else {
+                Action::New
             }
         };
 
@@ -1000,6 +1107,26 @@ pub fn encode_jb2_dict_with_options(
                     (dict_size - 1) as i32,
                     *dict_idx as i32,
                 );
+            }
+            Action::Refine(dict_idx) => {
+                // Record type 6: matched refinement, blit only. The decoder
+                // computes the child size as `dict[idx].dim + diff`, decodes the
+                // refinement bitmap against that reference, then blits — it does
+                // not extend the dict (handled by the `Action::New` guard below).
+                let reference = &dict_entries[*dict_idx];
+                let wdiff = cc_w - reference.width as i32;
+                let hdiff = cc_h - reference.height as i32;
+                encode_num(&mut zp, &mut record_type_ctx, 0, 11, 6);
+                encode_num(
+                    &mut zp,
+                    &mut symbol_index_ctx,
+                    0,
+                    (dict_size - 1) as i32,
+                    *dict_idx as i32,
+                );
+                encode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142, wdiff);
+                encode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142, hdiff);
+                encode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, &cc.bitmap, reference);
             }
         }
 
@@ -1993,6 +2120,180 @@ mod tests {
         assert_eq!(packed_hamming(&c, &d), 16);
     }
 
+    // ── #322 cross-size record-6 refinement probe ────────────────────────────
+
+    const REC6_PROBE: CrossSizeRec6Probe = CrossSizeRec6Probe {
+        max_dim_delta: 2,
+        max_hamming_fraction: 0.05,
+    };
+
+    fn probe_opts() -> Jb2EncodeOptions {
+        Jb2EncodeOptions {
+            cross_size_rec6_probe: Some(REC6_PROBE),
+            ..Jb2EncodeOptions::default()
+        }
+    }
+
+    #[test]
+    fn cross_size_rec6_probe_off_is_byte_identical() {
+        // With the probe disabled (default options), the option-based encoder
+        // must reproduce the shipped `encode_jb2_dict` byte stream exactly.
+        let src = make_bitmap(80, 40, |x, y| {
+            let a = (4..16).contains(&x) && (4..28).contains(&y);
+            let b = (40..53).contains(&x) && (4..28).contains(&y);
+            a || b
+        });
+        let shipped = encode_jb2_dict(&src);
+        let opt = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        assert_eq!(shipped, opt, "default options must match shipped output");
+    }
+
+    #[test]
+    fn cross_size_rec6_probe_roundtrips_solid_near_twins() {
+        // Two solid rectangles differing only in width by one pixel. The first
+        // is a fresh rec-1; the second is a cross-size near twin (resampled
+        // Hamming 0) so the probe diverts it to a lossless rec-6 refinement.
+        let src = make_bitmap(80, 40, |x, y| {
+            let a = (4..16).contains(&x) && (4..28).contains(&y); // 12×24 solid
+            let b = (40..53).contains(&x) && (4..28).contains(&y); // 13×24 solid
+            a || b
+        });
+
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let probe_bytes = encode_jb2_dict_with_options(&src, &[], &probe_opts());
+
+        // The probe must actually take the refinement path (different bytes)…
+        assert_ne!(
+            default_bytes, probe_bytes,
+            "probe should emit a rec-6 refinement, changing the byte stream"
+        );
+        // …and stay lossless.
+        let decoded = jb2::decode(&probe_bytes, None).expect("probe decode failed");
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[test]
+    fn cross_size_rec6_probe_roundtrips_perturbed_glyphs() {
+        // A column of near-duplicate near-solid "glyphs": a base block plus a
+        // few variants that differ by one bounding-box pixel and a small corner
+        // notch — keeping the resampled Hamming distance under the 5% budget so
+        // the probe fires, while still exercising non-trivial refinement
+        // bitmaps (a handful of differing pixels, not just solid blocks).
+        let mut src = Bitmap::new(64, 130);
+        let draw_block = |bm: &mut Bitmap, ox: u32, oy: u32, w: u32, h: u32, notch: bool| {
+            for y in 0..h {
+                for x in 0..w {
+                    // Solid fill minus a small 2×2 corner notch when requested.
+                    if notch && x >= w - 2 && y >= h - 2 {
+                        continue;
+                    }
+                    bm.set(ox + x, oy + y, true);
+                }
+            }
+        };
+        draw_block(&mut src, 4, 2, 14, 18, false); // reference, 14×18 solid
+        draw_block(&mut src, 4, 24, 15, 18, false); // +1 width, solid
+        draw_block(&mut src, 4, 46, 14, 19, true); // +1 height, corner notch
+        draw_block(&mut src, 4, 70, 15, 19, true); // +1/+1, corner notch
+        draw_block(&mut src, 4, 94, 13, 18, false); // −1 width, solid
+
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let probe_bytes = encode_jb2_dict_with_options(&src, &[], &probe_opts());
+        assert_ne!(
+            default_bytes, probe_bytes,
+            "probe should fire on near twins"
+        );
+
+        let decoded = jb2::decode(&probe_bytes, None).expect("probe decode failed");
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    /// Aggregated cross-size rec-6 probe measurement over a set of page masks.
+    #[derive(Default)]
+    struct Rec6ProbeReport {
+        pages: usize,
+        pages_changed: usize,
+        baseline_bytes: u64,
+        probe_bytes: u64,
+        roundtrip_failures: usize,
+    }
+
+    fn measure_rec6_probe(path: &str, max_pages: usize) -> Rec6ProbeReport {
+        let data = std::fs::read(path).unwrap();
+        let doc = crate::DjVuDocument::parse(&data).unwrap();
+        let opts = probe_opts();
+        let mut report = Rec6ProbeReport::default();
+        let n = doc.page_count().min(max_pages);
+        for i in 0..n {
+            let page = doc.page(i).unwrap();
+            let Some(src) = page.extract_mask().unwrap() else {
+                continue;
+            };
+            if src.width == 0 || src.height == 0 {
+                continue;
+            }
+            report.pages += 1;
+
+            let baseline = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+            let probe = encode_jb2_dict_with_options(&src, &[], &opts);
+            report.baseline_bytes += baseline.len() as u64;
+            report.probe_bytes += probe.len() as u64;
+            if baseline != probe {
+                report.pages_changed += 1;
+            }
+
+            // Round-trip the probe stream and require pixel-exact reconstruction
+            // (the cross-size rec-6 refinement is lossless).
+            match jb2::decode(&probe, None) {
+                Ok(decoded) => {
+                    let same = decoded.width == src.width
+                        && decoded.height == src.height
+                        && (0..src.height)
+                            .all(|y| (0..src.width).all(|x| decoded.get(x, y) == src.get(x, y)));
+                    if !same {
+                        report.roundtrip_failures += 1;
+                    }
+                }
+                Err(_) => report.roundtrip_failures += 1,
+            }
+        }
+        report
+    }
+
+    /// Experiment driver for #322. Ignored by default — it re-encodes corpus
+    /// page masks (slow) and prints the measured byte deltas + round-trip
+    /// status recorded in PERF_EXPERIMENTS.md. Run with:
+    ///   cargo test --lib --release cross_size_rec6_probe_corpus_measurement -- --ignored --nocapture
+    #[test]
+    #[ignore = "slow corpus re-encode; measurement driver for #322"]
+    fn cross_size_rec6_probe_corpus_measurement() {
+        for (path, max_pages) in [
+            ("tests/corpus/watchmaker.djvu", usize::MAX),
+            ("tests/corpus/pathogenic_bacteria_1896.djvu", 40),
+        ] {
+            let r = measure_rec6_probe(path, max_pages);
+            let delta = r.probe_bytes as i64 - r.baseline_bytes as i64;
+            let pct = if r.baseline_bytes > 0 {
+                100.0 * delta as f64 / r.baseline_bytes as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{path}: pages={} changed={} baseline={}B probe={}B delta={}B ({pct:+.3}%) roundtrip_failures={}",
+                r.pages,
+                r.pages_changed,
+                r.baseline_bytes,
+                r.probe_bytes,
+                delta,
+                r.roundtrip_failures
+            );
+            assert_eq!(
+                r.roundtrip_failures, 0,
+                "cross-size rec-6 probe must round-trip losslessly on {path}"
+            );
+        }
+    }
+
     // ── #194 multi-page shared Djbz ────────────────────────────────────────────
 
     fn render_glyph(bm: &mut Bitmap, x: u32, y: u32, glyph: &[&[u8]]) {
@@ -2253,6 +2554,7 @@ mod tests {
             &[],
             &Jb2EncodeOptions {
                 lossy_threshold: 0.0,
+                ..Jb2EncodeOptions::default()
             },
         );
         let lossy = encode_jb2_dict_with_options(
@@ -2260,6 +2562,7 @@ mod tests {
             &[],
             &Jb2EncodeOptions {
                 lossy_threshold: 0.05,
+                ..Jb2EncodeOptions::default()
             },
         );
 
