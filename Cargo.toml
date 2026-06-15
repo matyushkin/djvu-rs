@@ -86,6 +86,10 @@ ocr-neural = ["std"]
 # Deprecated compatibility alias. Kept as a no-op to avoid pulling the former
 # Candle/tokenizers dependency stack into --all-features builds.
 ocr-neural-candle = ["ocr-neural"]
+# Experiment-only encoder surface in the codec crates (e.g. the #322 cross-size
+# rec-6 refinement probe and its analysis helpers). Off by default; not part of
+# the published API. Implies `std` since the encoders are std-only.
+experimental = ["std", "djvu-jb2/experimental"]
 
 [dev-dependencies]
 criterion = "0.5"
@@ -109,6 +113,10 @@ required-features = ["async"]
 [[example]]
 name = "probe_tiff_streaming_memory"
 required-features = ["tiff"]
+
+[[example]]
+name = "encode_quality_djbz"
+required-features = ["experimental"]
 
 [[bench]]
 name = "codecs"
