@@ -134,14 +134,6 @@ pub struct DjVuBookmark {
 
 // ---- Page -------------------------------------------------------------------
 
-/// Component type in the DIRM directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComponentType {
-    Shared,
-    Page,
-    Thumbnail,
-}
-
 /// A raw chunk extracted from a page FORM:DJVU.
 #[derive(Debug, Clone)]
 struct RawChunk {
@@ -733,7 +725,10 @@ impl DjVuDocument {
                     .find(|c| &c.id == b"DIRM")
                     .ok_or(DocError::MissingChunk("DIRM"))?;
 
-                let (entries, is_bundled, comp_offsets) = parse_dirm(dirm_chunk.data)?;
+                let payload = DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
+                let entries = payload.components();
+                let is_bundled = payload.is_bundled();
+                let comp_offsets = payload.offsets;
 
                 // Collect NAVM bookmarks (BZZ-compressed)
                 let bookmarks = parse_navm_bookmarks(&form.chunks)?;
@@ -768,7 +763,7 @@ impl DjVuDocument {
                     let djvi_djbz: BTreeMap<String, Arc<Vec<u8>>> = entries
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.comp_type == ComponentType::Shared)
+                        .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
                         .filter_map(|(comp_idx, entry)| {
                             let sf = sub_forms.get(comp_idx)?;
                             let chunks = parse_sub_form(sf.data).ok()?;
@@ -780,7 +775,7 @@ impl DjVuDocument {
                     let djvi_djbz: BTreeMap<String, Vec<u8>> = entries
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.comp_type == ComponentType::Shared)
+                        .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
                         .filter_map(|(comp_idx, entry)| {
                             let sf = sub_forms.get(comp_idx)?;
                             let chunks = parse_sub_form(sf.data).ok()?;
@@ -793,7 +788,7 @@ impl DjVuDocument {
                     let mut page_byte_ranges = Vec::new();
                     let mut page_idx = 0usize;
                     for (comp_idx, entry) in entries.iter().enumerate() {
-                        if entry.comp_type != ComponentType::Page {
+                        if entry.kind != DirmComponentKind::Page {
                             continue;
                         }
                         let sub_form = sub_forms.get(comp_idx).ok_or(DocError::Malformed(
@@ -860,7 +855,7 @@ impl DjVuDocument {
                     let mut pages = Vec::new();
                     let mut page_idx = 0usize;
                     for entry in &entries {
-                        if entry.comp_type != ComponentType::Page {
+                        if entry.kind != DirmComponentKind::Page {
                             continue;
                         }
                         let resolved_data = resolver(&entry.id)
@@ -1219,71 +1214,6 @@ fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
         .ok_or(DocError::Malformed("sub-form body missing"))?;
     let chunks = parse_form_body(body).map_err(DocError::Iff)?;
     Ok(chunks)
-}
-
-/// A DIRM component entry.
-#[derive(Debug, Clone)]
-struct DirmEntry {
-    comp_type: ComponentType,
-    id: String,
-}
-
-/// One resolved DIRM component descriptor exposed to the mutation layer.
-///
-/// `id` is the directory entry id passed to a resolver to fetch the component
-/// bytes; `is_page` is `true` for `Page` components and `false` for shared
-/// (`DJVI`) or thumbnail components.
-#[cfg(feature = "std")]
-#[derive(Debug, Clone)]
-pub(crate) struct DirmComponentInfo {
-    /// Resolver key / component id (the first DIRM string field).
-    pub id: String,
-    /// Whether this component is a page (`ComponentType::Page`).
-    pub is_page: bool,
-}
-
-/// Parse a DIRM chunk's component directory for the mutation layer.
-///
-/// Returns `(components, is_bundled)` in DIRM declaration order. This is a thin
-/// wrapper over [`parse_dirm`] that drops the bundled offset table (callers that
-/// rebundle recompute offsets) and exposes only the fields needed to resolve and
-/// re-assemble components.
-#[cfg(feature = "std")]
-pub(crate) fn parse_dirm_components(
-    data: &[u8],
-) -> Result<(Vec<DirmComponentInfo>, bool), DocError> {
-    let (entries, is_bundled, _offsets) = parse_dirm(data)?;
-    let components = entries
-        .into_iter()
-        .map(|e| DirmComponentInfo {
-            id: e.id,
-            is_page: e.comp_type == ComponentType::Page,
-        })
-        .collect();
-    Ok((components, is_bundled))
-}
-
-/// Parse the DIRM chunk (directory of files in FORM:DJVM).
-///
-/// Returns `(entries, is_bundled, offsets)`. `offsets` is non-empty only for
-/// bundled documents; each entry is the absolute byte offset of the
-/// corresponding component's outer `b"FORM"` header within the original
-/// document buffer.
-fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool, Vec<u32>), DocError> {
-    let payload = DirmPayload::decode(data).map_err(DocError::Malformed)?;
-    let entries = payload
-        .components()
-        .into_iter()
-        .map(|c| DirmEntry {
-            comp_type: match c.kind {
-                DirmComponentKind::Page => ComponentType::Page,
-                DirmComponentKind::Thumbnail => ComponentType::Thumbnail,
-                DirmComponentKind::Shared => ComponentType::Shared,
-            },
-            id: c.id,
-        })
-        .collect();
-    Ok((entries, payload.is_bundled(), payload.offsets))
 }
 
 /// Parse NAVM bookmarks from the chunk list of a FORM:DJVM.
