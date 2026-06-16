@@ -105,10 +105,7 @@ impl WasmPage {
     pub fn width_at(&self, target_dpi: u32) -> u32 {
         self.doc
             .page(self.index)
-            .map(|p| {
-                let scale = target_dpi as f32 / p.dpi() as f32;
-                ((p.width() as f32 * scale).round() as u32).max(1)
-            })
+            .map(|p| crate::export_common::size_at_dpi(p, target_dpi as f32).0)
             .unwrap_or(1)
     }
 
@@ -116,10 +113,7 @@ impl WasmPage {
     pub fn height_at(&self, target_dpi: u32) -> u32 {
         self.doc
             .page(self.index)
-            .map(|p| {
-                let scale = target_dpi as f32 / p.dpi() as f32;
-                ((p.height() as f32 * scale).round() as u32).max(1)
-            })
+            .map(|p| crate::export_common::size_at_dpi(p, target_dpi as f32).1)
             .unwrap_or(1)
     }
 
@@ -150,9 +144,7 @@ impl WasmPage {
             .page(self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        let scale = target_dpi as f32 / page.dpi() as f32;
-        let render_w = ((page.width() as f32 * scale).round() as u32).max(1);
-        let render_h = ((page.height() as f32 * scale).round() as u32).max(1);
+        let (render_w, render_h) = crate::export_common::size_at_dpi(page, target_dpi as f32);
 
         let Some(layer) = page
             .text_layer_at_size(render_w, render_h)
@@ -268,9 +260,8 @@ impl WasmPage {
 /// AA is disabled so `pixels.length == width_at(dpi) * height_at(dpi) * 4`
 /// always holds (see [`WasmPage::render`] for details).
 fn render_opts_for_dpi(page: &crate::djvu_document::DjVuPage, target_dpi: u32) -> RenderOptions {
-    let scale = target_dpi as f32 / page.dpi() as f32;
-    let w = ((page.width() as f32 * scale).round() as u32).max(1);
-    let h = ((page.height() as f32 * scale).round() as u32).max(1);
+    let scale = crate::export_common::scale_at_dpi(page, target_dpi as f32);
+    let (w, h) = crate::export_common::size_at_dpi(page, target_dpi as f32);
     RenderOptions {
         width: w,
         height: h,

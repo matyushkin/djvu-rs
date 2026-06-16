@@ -191,9 +191,7 @@ fn write_color_page_streaming<W: Write + Seek>(
             return;
         }
 
-        for rgba in rgba_row.chunks_exact(4) {
-            strip.extend_from_slice(&rgba[..3]);
-        }
+        crate::export_common::rgba_row_to_rgb(&mut strip, rgba_row);
 
         if strip.len() > next_strip_samples {
             encode_error = Some(
