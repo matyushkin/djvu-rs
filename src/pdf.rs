@@ -296,15 +296,11 @@ fn render_rgb_for_pdf(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, PdfError> {
-    if opts.can_stream(page) {
-        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        djvu_render::render_streaming(page, opts, |_, rgba_row| {
-            crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
-        })?;
-        Ok(rgb)
-    } else {
-        Ok(djvu_render::render_pixmap(page, opts)?.to_rgb())
-    }
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    crate::export_common::render_rows_or_pixmap(page, opts, |rgba_row| {
+        crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
+    })?;
+    Ok(rgb)
 }
 
 /// Decode and deflate the JB2 foreground mask into a PDF ImageMask XObject body.
@@ -723,30 +719,10 @@ fn count_outline_items(bookmarks: &[DjVuBookmark]) -> usize {
 /// Resolve a DjVu bookmark URL to a PDF destination string.
 /// DjVu internal URLs look like `#page_N` or `#+N` or `#-N`.
 fn resolve_bookmark_dest(url: &str, page_ids: &[usize]) -> String {
-    if let Some(stripped) = url.strip_prefix('#') {
-        // Try to parse as page number
-        if let Some(page_str) = stripped.strip_prefix("page")
-            && let Ok(page_num) = page_str.trim_start_matches('_').parse::<usize>()
-        {
-            let idx = page_num.saturating_sub(1);
-            if let Some(&pid) = page_ids.get(idx) {
-                return format!(" /Dest [{pid} 0 R /Fit]");
-            }
-        }
-        // Try +N / -N (relative, but treat as absolute from 1)
-        if let Ok(n) = stripped.parse::<i64>() {
-            let idx = (n.max(1) - 1) as usize;
-            if let Some(&pid) = page_ids.get(idx) {
-                return format!(" /Dest [{pid} 0 R /Fit]");
-            }
-        }
-        // Try bare number
-        if let Ok(n) = stripped.parse::<usize>() {
-            let idx = n.saturating_sub(1);
-            if let Some(&pid) = page_ids.get(idx) {
-                return format!(" /Dest [{pid} 0 R /Fit]");
-            }
-        }
+    if let Some(idx) = crate::export_common::bookmark_page_index(url)
+        && let Some(&pid) = page_ids.get(idx)
+    {
+        return format!(" /Dest [{pid} 0 R /Fit]");
     }
 
     // External URL or unparseable — use URI action
