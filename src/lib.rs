@@ -205,6 +205,11 @@ pub mod annotation;
 /// `METz` payloads are decompressed upstream by [`DjVuDocument::chunk_payload`].
 pub mod metadata;
 
+/// Shared, depth-guarded S-expression reader used by the annotation and
+/// metadata parsers (#368). Owns the tokenizer and recursive-descent reader so
+/// the recursion-depth guard protects both consumers.
+mod sexp;
+
 /// Shared document-to-export traversal primitives (#345) used by the PDF,
 /// EPUB, TIFF, and OCR exporters: the per-page loop, the scale→size kernel,
 /// the leaf word/character zone-walk, and the vertical coordinate flip.

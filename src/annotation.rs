@@ -31,6 +31,8 @@ use alloc::{
     vec::Vec,
 };
 
+use crate::sexp::SExpr;
+
 // ---- Error ------------------------------------------------------------------
 
 /// Errors from annotation parsing.
@@ -138,158 +140,6 @@ pub fn parse_annotations(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), Anno
     parse_annotation_text(text)
 }
 
-// ---- S-expression tokenizer -------------------------------------------------
-
-/// Minimal S-expression token.
-#[derive(Debug, PartialEq)]
-enum Token<'a> {
-    LParen,
-    RParen,
-    Atom(&'a str),
-    Quoted(String),
-}
-
-/// Tokenize an S-expression string into a flat Vec of tokens.
-fn tokenize(input: &str) -> Vec<Token<'_>> {
-    let mut tokens = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        match bytes.get(i) {
-            Some(b'(') => {
-                tokens.push(Token::LParen);
-                i += 1;
-            }
-            Some(b')') => {
-                tokens.push(Token::RParen);
-                i += 1;
-            }
-            Some(b'"') => {
-                i += 1;
-                let start = i;
-                let mut s = String::new();
-                while i < bytes.len() {
-                    match bytes.get(i) {
-                        Some(b'\\') if i + 1 < bytes.len() => {
-                            i += 1;
-                            if let Some(&c) = bytes.get(i) {
-                                s.push(c as char);
-                            }
-                            i += 1;
-                        }
-                        Some(b'"') => {
-                            i += 1;
-                            break;
-                        }
-                        Some(&c) => {
-                            s.push(c as char);
-                            i += 1;
-                        }
-                        None => break,
-                    }
-                }
-                let _ = start; // consumed above
-                tokens.push(Token::Quoted(s));
-            }
-            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {
-                i += 1;
-            }
-            Some(b';') => {
-                // line comment
-                while i < bytes.len() && bytes.get(i) != Some(&b'\n') {
-                    i += 1;
-                }
-            }
-            _ => {
-                let start = i;
-                while i < bytes.len() {
-                    match bytes.get(i) {
-                        Some(b'(') | Some(b')') | Some(b'"') | Some(b' ') | Some(b'\t')
-                        | Some(b'\n') | Some(b'\r') => break,
-                        _ => i += 1,
-                    }
-                }
-                if let Some(slice) = input.get(start..i)
-                    && !slice.is_empty()
-                {
-                    tokens.push(Token::Atom(slice));
-                }
-            }
-        }
-    }
-
-    tokens
-}
-
-// ---- S-expression tree ------------------------------------------------------
-
-/// A node in the parsed S-expression tree.
-#[derive(Debug)]
-enum SExpr {
-    Atom(String),
-    List(Vec<SExpr>),
-}
-
-const MAX_SEXPR_DEPTH: usize = 64;
-
-/// Parse tokens into a list of top-level S-expressions.
-fn parse_sexprs(tokens: &[Token<'_>]) -> Vec<SExpr> {
-    let mut result = Vec::new();
-    let mut pos = 0usize;
-    while pos < tokens.len() {
-        if let Some(expr) = parse_one(tokens, &mut pos, 0) {
-            result.push(expr);
-        }
-    }
-    result
-}
-
-fn parse_one(tokens: &[Token<'_>], pos: &mut usize, depth: usize) -> Option<SExpr> {
-    if depth > MAX_SEXPR_DEPTH {
-        return None;
-    }
-    match tokens.get(*pos) {
-        Some(Token::LParen) => {
-            *pos += 1;
-            let mut items = Vec::new();
-            loop {
-                match tokens.get(*pos) {
-                    Some(Token::RParen) => {
-                        *pos += 1;
-                        break;
-                    }
-                    None => break,
-                    _ => {
-                        if let Some(child) = parse_one(tokens, pos, depth + 1) {
-                            items.push(child);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            Some(SExpr::List(items))
-        }
-        Some(Token::RParen) => {
-            // Unexpected RParen — skip
-            *pos += 1;
-            None
-        }
-        Some(Token::Atom(s)) => {
-            let s = s.to_string();
-            *pos += 1;
-            Some(SExpr::Atom(s))
-        }
-        Some(Token::Quoted(s)) => {
-            let s = s.clone();
-            *pos += 1;
-            Some(SExpr::Atom(s))
-        }
-        None => None,
-    }
-}
-
 // ---- Annotation builder from S-expressions ----------------------------------
 
 fn parse_annotation_text(text: &str) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
@@ -297,8 +147,7 @@ fn parse_annotation_text(text: &str) -> Result<(Annotation, Vec<MapArea>), Annot
         return Ok((Annotation::default(), Vec::new()));
     }
 
-    let tokens = tokenize(text);
-    let exprs = parse_sexprs(&tokens);
+    let exprs = crate::sexp::parse_sexprs(text);
 
     let mut annotation = Annotation::default();
     let mut mapareas = Vec::new();
@@ -589,51 +438,8 @@ fn quote_str(s: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── Tokenizer ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_tokenize_basic() {
-        let tokens = tokenize("(background #ffffff)");
-        assert_eq!(tokens.len(), 4);
-        assert_eq!(tokens[0], Token::LParen);
-        assert!(matches!(&tokens[1], Token::Atom(s) if s == &"background"));
-        assert!(matches!(&tokens[2], Token::Atom(s) if s == &"#ffffff"));
-        assert_eq!(tokens[3], Token::RParen);
-    }
-
-    #[test]
-    fn test_tokenize_quoted_string() {
-        let tokens = tokenize(r#"(maparea "http://example.com" "desc")"#);
-        assert!(
-            tokens
-                .iter()
-                .any(|t| matches!(t, Token::Quoted(s) if s == "http://example.com"))
-        );
-    }
-
-    #[test]
-    fn test_tokenize_escape_in_quoted() {
-        let tokens = tokenize(r#""hello\"world""#);
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Quoted(s) if s == r#"hello"world"#));
-    }
-
-    #[test]
-    fn test_tokenize_line_comment() {
-        let tokens = tokenize("; this is a comment\n(zoom 100)");
-        // Comment should be skipped
-        assert!(
-            tokens
-                .iter()
-                .any(|t| matches!(t, Token::Atom(s) if s == &"zoom"))
-        );
-    }
-
-    #[test]
-    fn test_tokenize_empty() {
-        assert!(tokenize("").is_empty());
-        assert!(tokenize("   \n\t  ").is_empty());
-    }
+    // Tokenizer-level behaviour (atoms, quoted strings, comments, escapes,
+    // depth guard) now lives in `crate::sexp` and is covered by its own tests.
 
     // ── Color parsing ───────────────────────────────────────────────────────
 
@@ -780,12 +586,11 @@ mod tests {
 
     #[test]
     fn test_parse_deeply_nested_does_not_overflow() {
-        // 200 open parens deeper than MAX_SEXPR_DEPTH — must not stack-overflow.
+        // 200 open parens deeper than the reader's depth guard — must not
+        // stack-overflow. Goes through the public entry point now that the
+        // reader lives in `crate::sexp`.
         let input = format!("{}{}", "(".repeat(200), ")".repeat(200));
-        let tokens = tokenize(&input);
-        let result = parse_sexprs(&tokens);
-        // Doesn't matter what we get back — the point is we return without crashing.
-        let _ = result;
+        let _ = parse_annotations(input.as_bytes());
     }
 
     #[test]
