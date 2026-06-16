@@ -61,7 +61,15 @@ impl Default for OcrOptions {
 pub trait OcrBackend {
     /// Recognize text in the given page image.
     ///
-    /// Returns a [`TextLayer`] with zone hierarchy (page -> line -> word)
-    /// and bounding boxes in the pixmap's coordinate system (top-left origin).
+    /// Returns a [`TextLayer`] whose bounding boxes are in the pixmap's
+    /// coordinate system (top-left origin).
+    ///
+    /// **Minimum granularity guarantee.** Callers may rely only on a populated
+    /// top-level [`TextLayer`]`::text` string and at least one page-level zone;
+    /// the richer `page -> line -> word` hierarchy is best-effort and
+    /// backend-dependent. The Tesseract backend produces the full hierarchy;
+    /// the experimental `ocr-onnx`/`ocr-neural` backends (see the module docs)
+    /// may emit a coarser tree or none at all. Consumers that need word-level
+    /// rects (e.g. the hOCR/ALTO exporters) must tolerate a flatter layer.
     fn recognize(&self, pixmap: &Pixmap, options: &OcrOptions) -> Result<TextLayer, OcrError>;
 }

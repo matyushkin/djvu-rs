@@ -177,12 +177,15 @@ fn test_parse_text_layer_bzz() {
     //   "compressed text"  (15 bytes)
     //   \x00  (version)
     // Generated with: printf '\x00\x00\x0fcompressed text\x00' | bzz -e - -
-    use djvu_rs::text::parse_text_layer_bzz;
+    use djvu_rs::bzz_new::bzz_decode;
+    use djvu_rs::text::parse_text_layer;
     let encoded: &[u8] = &[
         0xff, 0xff, 0xeb, 0xbf, 0x8b, 0x1f, 0xc5, 0x04, 0x22, 0xcf, 0xef, 0xba, 0x6b, 0x2b, 0x4e,
         0x9f, 0x25, 0x6a, 0x9a, 0xa3, 0x86, 0x3f,
     ];
-    let layer = parse_text_layer_bzz(encoded, 300).expect("bzz parse should succeed");
+    // TXTz decompresses via the shared BZZ path; the parser itself is pure.
+    let decoded = bzz_decode(encoded).expect("bzz decode should succeed");
+    let layer = parse_text_layer(&decoded, 300).expect("parse should succeed");
     assert_eq!(layer.text, "compressed text");
 }
 

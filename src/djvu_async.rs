@@ -51,6 +51,7 @@ use tokio::{
 };
 
 use crate::{
+    dirm::{DirmComponentKind, DirmPayload},
     djvu_document::{DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
     error::IffError,
@@ -341,82 +342,29 @@ where
 }
 
 fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
-    if data.len() < 3 {
-        return Err(AsyncLazyError::Unsupported("DIRM chunk too short"));
-    }
-    let dflags = data[0];
-    if (dflags >> 7) == 0 {
+    let payload = DirmPayload::decode(data).map_err(AsyncLazyError::Unsupported)?;
+    if !payload.is_bundled() {
         return Err(AsyncLazyError::Unsupported(
             "indirect DJVM lazy loading is not implemented yet",
         ));
     }
-    let nfiles = u16::from_be_bytes([data[1], data[2]]) as usize;
-    let offsets_start = 3usize;
-    let offsets_end = offsets_start
-        .checked_add(nfiles.saturating_mul(4))
-        .ok_or(AsyncLazyError::Unsupported("DIRM offset table overflow"))?;
-    if offsets_end > data.len() {
-        return Err(AsyncLazyError::Unsupported("DIRM offset table truncated"));
-    }
 
-    let mut offsets = Vec::with_capacity(nfiles);
-    for i in 0..nfiles {
-        let base = offsets_start + i * 4;
-        offsets.push(u32::from_be_bytes([
-            data[base],
-            data[base + 1],
-            data[base + 2],
-            data[base + 3],
-        ]));
-    }
-
-    let meta = djvu_bzz::bzz_decode(&data[offsets_end..]).unwrap_or_default();
-    let mut comp_types = Vec::with_capacity(nfiles);
-    let mut ids = Vec::with_capacity(nfiles);
-    let flags_start = nfiles * 3;
-    if flags_start + nfiles <= meta.len() {
-        let mut pos = flags_start + nfiles;
-        for flag in &meta[flags_start..flags_start + nfiles] {
-            let comp_type = match flag & 0x3f {
-                1 => LazyComponentType::Page,
-                2 => LazyComponentType::Thumbnail,
-                _ => LazyComponentType::Shared,
-            };
-            comp_types.push(comp_type);
-            ids.push(read_lazy_dirm_string(&meta, &mut pos).unwrap_or_default());
-
-            if (flag & 0x80) != 0 {
-                let _ = read_lazy_dirm_string(&meta, &mut pos);
-            }
-            if (flag & 0x40) != 0 {
-                let _ = read_lazy_dirm_string(&meta, &mut pos);
-            }
-        }
-    } else {
-        comp_types.resize(nfiles, LazyComponentType::Page);
-        ids.extend((0..nfiles).map(|i| format!("p{i:04}")));
-    }
-
-    Ok(offsets
+    // `components()` and `offsets` are both indexed by component, so zipping them
+    // pairs each entry with its FORM-header offset.
+    Ok(payload
+        .components()
         .into_iter()
-        .zip(comp_types)
-        .zip(ids)
-        .map(|((offset, comp_type), id)| LazyDirmEntry {
-            comp_type,
-            id,
+        .zip(payload.offsets)
+        .map(|(c, offset)| LazyDirmEntry {
+            comp_type: match c.kind {
+                DirmComponentKind::Page => LazyComponentType::Page,
+                DirmComponentKind::Thumbnail => LazyComponentType::Thumbnail,
+                DirmComponentKind::Shared => LazyComponentType::Shared,
+            },
+            id: c.id,
             offset,
         })
         .collect())
-}
-
-fn read_lazy_dirm_string(data: &[u8], pos: &mut usize) -> Option<String> {
-    let start = *pos;
-    let rest = data.get(start..)?;
-    let nul = rest.iter().position(|&b| b == 0)?;
-    *pos = start + nul + 1;
-    core::str::from_utf8(&rest[..nul])
-        .ok()
-        .map(ToOwned::to_owned)
 }
 
 // ── Async document loader ─────────────────────────────────────────────────────
@@ -617,30 +565,21 @@ pub fn render_progressive_stream(
     // Single clone wrapped in Arc — all spawn_blocking closures share
     // this one allocation instead of cloning the full page each time.
     let page = Arc::new(page.clone());
-    let n_chunks = page.bg44_chunks().len();
+    // The "max(1, bg44 chunks)" frame count and the per-frame coarse/progressive
+    // choice live in the render module; the stream just drives the step index.
+    let steps = djvu_render::progressive_steps(&page);
 
     async_stream::stream! {
-        if n_chunks == 0 {
+        for step in 0..steps {
             let page = Arc::clone(&page);
             let opts = opts.clone();
             let result = tokio::task::spawn_blocking(move || {
-                djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
+                djvu_render::render_progressive_step(&page, &opts, step)
+                    .map_err(AsyncRenderError::Render)
             })
             .await
             .map_err(|e| AsyncRenderError::Join(e.to_string()));
             yield result.and_then(|r| r);
-        } else {
-            for chunk_n in 0..n_chunks {
-                let page = Arc::clone(&page);
-                let opts = opts.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    djvu_render::render_progressive(&page, &opts, chunk_n)
-                        .map_err(AsyncRenderError::Render)
-                })
-                .await
-                .map_err(|e| AsyncRenderError::Join(e.to_string()));
-                yield result.and_then(|r| r);
-            }
         }
     }
 }

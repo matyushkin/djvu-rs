@@ -10,8 +10,9 @@ use djvu_rs::Bitmap;
 use djvu_rs::Pixmap;
 use djvu_rs::annotation::{
     Annotation, Border, Color, Highlight, MapArea, Rect, Shape, encode_annotations,
-    encode_annotations_bzz, parse_annotations, parse_annotations_bzz,
+    encode_annotations_bzz, parse_annotations,
 };
+use djvu_rs::bzz_new::bzz_decode;
 use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
 use djvu_rs::segment::{SegmentOptions, segment_page};
@@ -354,7 +355,8 @@ proptest! {
         areas in prop::collection::vec(arb_maparea(), 1..=4),
     ) {
         let bytes = encode_annotations_bzz(&ann, &areas);
-        let (ann2, areas2) = parse_annotations_bzz(&bytes).expect("parse failed");
+        let decoded = bzz_decode(&bytes).expect("bzz decode failed");
+        let (ann2, areas2) = parse_annotations(&decoded).expect("parse failed");
         prop_assert_eq!(&ann.background, &ann2.background);
         prop_assert_eq!(ann.zoom, ann2.zoom);
         prop_assert_eq!(&ann.mode, &ann2.mode);

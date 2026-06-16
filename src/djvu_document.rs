@@ -25,7 +25,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
-    format,
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -34,8 +33,9 @@ use alloc::{
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
     bzz_new::bzz_decode,
+    dirm::{DirmComponentKind, DirmPayload},
     error::{BzzError, IffError, Iw44Error, Jb2Error},
-    iff::{IffChunk, parse_form},
+    iff::{IffChunk, parse_form, parse_form_body},
     info::PageInfo,
     iw44_new::Iw44Image,
     jb2::Jb2Dict,
@@ -147,6 +147,30 @@ enum ComponentType {
 struct RawChunk {
     id: [u8; 4],
     data: Vec<u8>,
+}
+
+/// Decode the payload of a paired `*z` (BZZ-compressed) / `*a` (raw) chunk.
+///
+/// DjVu stores most variable-length payloads as a pair of chunk ids: a
+/// BZZ-compressed `*z` variant (`TXTz`, `ANTz`, `METz`, …) and a raw `*a`
+/// variant (`TXTa`, `ANTa`, `METa`, …).  This is the single place that owns
+/// the "is it compressed?" decision: it prefers the compressed chunk, falls
+/// back to the raw chunk, and treats a present-but-empty chunk as "no payload"
+/// (DjVu uses a zero-length chunk as a placeholder).  Callers receive already
+/// decoded bytes, so the format parsers stay pure `&[u8]` functions that never
+/// touch compression.
+fn decode_paired_payload(z: Option<&[u8]>, a: Option<&[u8]>) -> Result<Option<Vec<u8>>, BzzError> {
+    if let Some(z) = z {
+        return if z.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(bzz_decode(z)?))
+        };
+    }
+    if let Some(a) = a {
+        return Ok(if a.is_empty() { None } else { Some(a.to_vec()) });
+    }
+    Ok(None)
 }
 
 /// A lazy DjVu page handle.
@@ -343,18 +367,34 @@ impl DjVuPage {
         self.chunks.iter().map(|c| c.id).collect()
     }
 
-    /// Find the first chunk with the given 4-byte ID.
-    ///
-    /// Equivalent to [`Self::raw_chunk`]; kept for internal use.
+    /// Deprecated alias for [`Self::raw_chunk`]; kept for internal callers.
+    #[doc(hidden)]
     pub fn find_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
         self.raw_chunk(id)
     }
 
-    /// Find all chunks with the given 4-byte ID.
-    ///
-    /// Equivalent to [`Self::all_chunks`]; kept for internal use.
+    /// Deprecated alias for [`Self::all_chunks`]; kept for internal callers.
+    #[doc(hidden)]
     pub fn find_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
         self.all_chunks(id)
+    }
+
+    /// Decode the payload of a paired `*z` (BZZ-compressed) / `*a` (raw) chunk,
+    /// e.g. `chunk_payload(b"TXTz", b"TXTa")` for the text layer.
+    ///
+    /// This is the single seam that owns the BZZ-or-raw decision for every
+    /// paired chunk on a page; the per-format parsers receive the returned
+    /// already-decoded bytes.  Returns `Ok(None)` when neither chunk is present
+    /// (or the present chunk is empty), `Err` only if BZZ decompression fails.
+    pub fn chunk_payload(
+        &self,
+        id_z: &[u8; 4],
+        id_a: &[u8; 4],
+    ) -> Result<Option<Vec<u8>>, DocError> {
+        Ok(decode_paired_payload(
+            self.raw_chunk(id_z),
+            self.raw_chunk(id_a),
+        )?)
     }
 
     /// Return all BG44 background chunk data slices, in order.
@@ -457,24 +497,10 @@ impl DjVuPage {
     /// Returns `Ok(None)` if the page has no text layer.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, DocError> {
         let page_height = self.info.height as u32;
-
-        if let Some(txtz) = self.find_chunk(b"TXTz") {
-            if txtz.is_empty() {
-                return Ok(None);
-            }
-            let layer = crate::text::parse_text_layer_bzz(txtz, page_height)?;
-            return Ok(Some(layer));
+        match self.chunk_payload(b"TXTz", b"TXTa")? {
+            Some(bytes) => Ok(Some(crate::text::parse_text_layer(&bytes, page_height)?)),
+            None => Ok(None),
         }
-
-        if let Some(txta) = self.find_chunk(b"TXTa") {
-            if txta.is_empty() {
-                return Ok(None);
-            }
-            let layer = crate::text::parse_text_layer(txta, page_height)?;
-            return Ok(Some(layer));
-        }
-
-        Ok(None)
     }
 
     /// Parse the text layer and transform all zone rectangles to match a
@@ -511,23 +537,10 @@ impl DjVuPage {
     ///
     /// Returns `Ok(None)` if the page has no annotation chunk.
     pub fn annotations(&self) -> Result<Option<(Annotation, Vec<MapArea>)>, DocError> {
-        if let Some(antz) = self.find_chunk(b"ANTz") {
-            if antz.is_empty() {
-                return Ok(None);
-            }
-            let result = crate::annotation::parse_annotations_bzz(antz)?;
-            return Ok(Some(result));
+        match self.chunk_payload(b"ANTz", b"ANTa")? {
+            Some(bytes) => Ok(Some(crate::annotation::parse_annotations(&bytes)?)),
+            None => Ok(None),
         }
-
-        if let Some(anta) = self.find_chunk(b"ANTa") {
-            if anta.is_empty() {
-                return Ok(None);
-            }
-            let result = crate::annotation::parse_annotations(anta)?;
-            return Ok(Some(result));
-        }
-
-        Ok(None)
     }
 
     /// Return all hyperlinks (MapAreas with a non-empty URL) on this page.
@@ -998,19 +1011,10 @@ impl DjVuDocument {
     ///
     /// Returns `Ok(None)` if no METa/METz chunk is present.
     pub fn metadata(&self) -> Result<Option<DjVuMetadata>, DocError> {
-        if let Some(metz) = self.raw_chunk(b"METz") {
-            if metz.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(crate::metadata::parse_metadata_bzz(metz)?));
+        match self.chunk_payload(b"METz", b"METa")? {
+            Some(bytes) => Ok(Some(crate::metadata::parse_metadata(&bytes)?)),
+            None => Ok(None),
         }
-        if let Some(meta) = self.raw_chunk(b"METa") {
-            if meta.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(crate::metadata::parse_metadata(meta)?));
-        }
-        Ok(None)
     }
 
     /// Return the raw bytes of the first document-level chunk with the given
@@ -1046,6 +1050,23 @@ impl DjVuDocument {
     /// (DIRM, NAVM, …).  Duplicate IDs appear once per chunk.
     pub fn chunk_ids(&self) -> Vec<[u8; 4]> {
         self.global_chunks.iter().map(|c| c.id).collect()
+    }
+
+    /// Decode the payload of a paired `*z` (BZZ-compressed) / `*a` (raw)
+    /// document-level chunk, e.g. `chunk_payload(b"METz", b"METa")` for
+    /// document metadata.
+    ///
+    /// The document-level counterpart of [`DjVuPage::chunk_payload`]; it owns
+    /// the BZZ-or-raw decision once so the format parsers stay pure.
+    pub fn chunk_payload(
+        &self,
+        id_z: &[u8; 4],
+        id_a: &[u8; 4],
+    ) -> Result<Option<Vec<u8>>, DocError> {
+        Ok(decode_paired_payload(
+            self.raw_chunk(id_z),
+            self.raw_chunk(id_a),
+        )?)
     }
 
     /// Parse an indirect DjVu document from bytes, resolving component files
@@ -1265,55 +1286,7 @@ fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
     let body = data
         .get(4..)
         .ok_or(DocError::Malformed("sub-form body missing"))?;
-    let chunks = parse_iff_body_chunks(body)?;
-    Ok(chunks)
-}
-
-/// Parse sequential IFF chunks from a raw byte slice (no AT&T / FORM wrapper).
-fn parse_iff_body_chunks(mut buf: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
-    let mut chunks = Vec::new();
-
-    while buf.len() >= 8 {
-        let id: [u8; 4] = buf
-            .get(0..4)
-            .and_then(|s| s.try_into().ok())
-            .ok_or(IffError::Truncated)?;
-        let data_len = buf
-            .get(4..8)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_be_bytes)
-            .map(|n| n as usize)
-            .ok_or(IffError::Truncated)?;
-
-        let data_start = 8usize;
-        let data_end = data_start
-            .checked_add(data_len)
-            .ok_or(IffError::Truncated)?;
-
-        if data_end > buf.len() {
-            return Err(DocError::Iff(IffError::ChunkTooLong {
-                id,
-                claimed: data_len as u32,
-                available: buf.len().saturating_sub(data_start),
-            }));
-        }
-
-        let chunk_data = buf.get(data_start..data_end).ok_or(IffError::Truncated)?;
-
-        // If this is a nested FORM, expose it as a FORM chunk with raw data
-        // (form_type + children) so callers can handle FORM:DJVU sub-forms.
-        chunks.push(IffChunk {
-            id,
-            data: chunk_data,
-        });
-
-        let padded_len = data_len + (data_len & 1);
-        let next = data_start
-            .checked_add(padded_len)
-            .ok_or(IffError::Truncated)?;
-        buf = buf.get(next.min(buf.len())..).ok_or(IffError::Truncated)?;
-    }
-
+    let chunks = parse_form_body(body).map_err(DocError::Iff)?;
     Ok(chunks)
 }
 
@@ -1366,111 +1339,20 @@ pub(crate) fn parse_dirm_components(
 /// corresponding component's outer `b"FORM"` header within the original
 /// document buffer.
 fn parse_dirm(data: &[u8]) -> Result<(Vec<DirmEntry>, bool, Vec<u32>), DocError> {
-    if data.len() < 3 {
-        return Err(DocError::Malformed("DIRM chunk too short"));
-    }
-
-    let dflags = *data.first().ok_or(DocError::Malformed("DIRM empty"))?;
-    let is_bundled = (dflags >> 7) != 0;
-    let nfiles = u16::from_be_bytes([
-        *data.get(1).ok_or(DocError::Malformed("DIRM too short"))?,
-        *data.get(2).ok_or(DocError::Malformed("DIRM too short"))?,
-    ]) as usize;
-
-    let mut pos = 3usize;
-
-    // Bundled documents embed 4-byte BE offsets to each component's FORM header.
-    let mut offsets: Vec<u32> = Vec::new();
-    if is_bundled {
-        let offsets_size = nfiles * 4;
-        let end = pos
-            .checked_add(offsets_size)
-            .ok_or(DocError::Malformed("DIRM offset arithmetic overflow"))?;
-        if end > data.len() {
-            return Err(DocError::Malformed("DIRM offset table truncated"));
-        }
-        offsets.reserve(nfiles);
-        for i in 0..nfiles {
-            let base = pos + i * 4;
-            let bytes = data
-                .get(base..base + 4)
-                .ok_or(DocError::Malformed("DIRM offset slice OOB"))?;
-            offsets.push(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-        }
-        pos = end;
-    }
-
-    // Remaining bytes are BZZ-compressed metadata.
-    let bzz_data = data
-        .get(pos..)
-        .ok_or(DocError::Malformed("DIRM bzz data missing"))?;
-    let meta = bzz_decode(bzz_data).unwrap_or_default();
-
-    // If BZZ metadata is too short (e.g. from a minimal DIRM without full
-    // metadata), generate synthetic entries — callers derive types from FORM.
-    // Layout: sizes(3 bytes × N), flags(1 byte × N), then null-terminated IDs…
-    let mut mpos = nfiles * 3; // skip per-component sizes
-
-    if mpos + nfiles > meta.len() {
-        // Generate synthetic entries with unknown type — the caller will
-        // reassign types based on the actual FORM type (DJVU/DJVI/etc.)
-        let entries: Vec<DirmEntry> = (0..nfiles)
-            .map(|i| DirmEntry {
-                comp_type: ComponentType::Page,
-                id: format!("p{:04}", i),
-            })
-            .collect();
-        return Ok((entries, is_bundled, offsets));
-    }
-    let flags: Vec<u8> = meta
-        .get(mpos..mpos + nfiles)
-        .ok_or(DocError::Malformed("DIRM flags truncated"))?
-        .to_vec();
-    mpos += nfiles;
-
-    let mut entries = Vec::with_capacity(nfiles);
-    for &flag in flags.iter().take(nfiles) {
-        let id = read_str_nt(&meta, &mut mpos)?;
-
-        // Optional name and title fields
-        if (flag & 0x80) != 0 {
-            let _ = read_str_nt(&meta, &mut mpos)?;
-        }
-        if (flag & 0x40) != 0 {
-            let _ = read_str_nt(&meta, &mut mpos)?;
-        }
-
-        let comp_type = match flag & 0x3f {
-            1 => ComponentType::Page,
-            2 => ComponentType::Thumbnail,
-            _ => ComponentType::Shared,
-        };
-
-        entries.push(DirmEntry { comp_type, id });
-    }
-
-    Ok((entries, is_bundled, offsets))
-}
-
-/// Read a null-terminated UTF-8 string from `data` at `*pos`, advancing `*pos`.
-fn read_str_nt(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
-    let start = *pos;
-    while *pos < data.len() && *data.get(*pos).ok_or(DocError::Malformed("str read OOB"))? != 0 {
-        *pos += 1;
-    }
-    if *pos >= data.len() {
-        return Err(DocError::Malformed(
-            "null terminator missing in DIRM string",
-        ));
-    }
-    let s = core::str::from_utf8(
-        data.get(start..*pos)
-            .ok_or(DocError::Malformed("str slice OOB"))?,
-    )
-    .map_err(|_| DocError::InvalidUtf8)?
-    .to_string();
-    *pos += 1; // consume null terminator
-    Ok(s)
+    let payload = DirmPayload::decode(data).map_err(DocError::Malformed)?;
+    let entries = payload
+        .components()
+        .into_iter()
+        .map(|c| DirmEntry {
+            comp_type: match c.kind {
+                DirmComponentKind::Page => ComponentType::Page,
+                DirmComponentKind::Thumbnail => ComponentType::Thumbnail,
+                DirmComponentKind::Shared => ComponentType::Shared,
+            },
+            id: c.id,
+        })
+        .collect();
+    Ok((entries, payload.is_bundled(), payload.offsets))
 }
 
 /// Parse NAVM bookmarks from the chunk list of a FORM:DJVM.
@@ -1633,6 +1515,113 @@ mod tests {
             matches!(err, DocError::PageOutOfRange { index: 1, count: 1 }),
             "unexpected error: {err:?}"
         );
+    }
+
+    // ---- #342: chunk-payload dispatch (compressed / raw / missing) ----------
+    //
+    // These exercise the single BZZ-or-raw seam directly, decoupled from any
+    // format parser: `decode_paired_payload` (the free function) and the
+    // `DjVuPage::chunk_payload` accessor built on it.
+
+    #[test]
+    fn paired_payload_prefers_compressed_z_chunk() {
+        let raw = b"the quick brown fox".as_slice();
+        let z = crate::bzz_encode::bzz_encode(raw);
+        // Both present: the compressed `*z` chunk wins.
+        let out = decode_paired_payload(Some(&z), Some(b"ignored raw"))
+            .expect("bzz decode should succeed");
+        assert_eq!(out.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn paired_payload_falls_back_to_raw_a_chunk() {
+        let raw = b"plain uncompressed payload".as_slice();
+        let out = decode_paired_payload(None, Some(raw)).expect("raw passthrough");
+        assert_eq!(out.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn paired_payload_missing_both_is_none() {
+        assert_eq!(decode_paired_payload(None, None).expect("none"), None);
+    }
+
+    #[test]
+    fn paired_payload_empty_chunk_is_placeholder_none() {
+        // DjVu uses a zero-length chunk as a "no payload" placeholder for both
+        // the compressed and raw variants.
+        assert_eq!(
+            decode_paired_payload(Some(&[]), None).expect("empty z"),
+            None
+        );
+        assert_eq!(
+            decode_paired_payload(None, Some(&[])).expect("empty a"),
+            None
+        );
+    }
+
+    #[test]
+    fn paired_payload_invalid_bzz_errors() {
+        // A non-empty `*z` chunk that is not valid BZZ must surface the error,
+        // not be silently treated as missing.
+        let result = decode_paired_payload(Some(&[0xff, 0x00, 0x13, 0x37]), None);
+        assert!(result.is_err(), "invalid BZZ must error, got {result:?}");
+    }
+
+    /// Build a minimal valid INFO chunk payload (10 bytes) for the given size.
+    fn make_info(width: u16, height: u16) -> Vec<u8> {
+        let mut v = Vec::with_capacity(10);
+        v.extend_from_slice(&width.to_be_bytes());
+        v.extend_from_slice(&height.to_be_bytes());
+        v.extend_from_slice(&[0, 0]); // version bytes (unused here)
+        v.extend_from_slice(&100u16.to_le_bytes()); // dpi (little-endian)
+        v.push(22); // gamma byte → 2.2
+        v.push(0); // flags → no rotation
+        v
+    }
+
+    /// Build a `DjVuPage` directly from hand-made chunks (INFO + extras), so the
+    /// accessor can be tested without a full file round-trip through a parser.
+    fn page_with_chunks(extra: &[(&[u8; 4], &[u8])]) -> DjVuPage {
+        let info = make_info(64, 48);
+        let mut chunks = Vec::new();
+        chunks.push(IffChunk {
+            id: *b"INFO",
+            data: &info,
+        });
+        for (id, data) in extra {
+            chunks.push(IffChunk { id: **id, data });
+        }
+        parse_page_from_chunks(&chunks, 0, None).expect("page should build")
+    }
+
+    #[test]
+    fn chunk_payload_decodes_compressed_txtz() {
+        let raw = b"decoded text-layer payload".as_slice();
+        let z = crate::bzz_encode::bzz_encode(raw);
+        let page = page_with_chunks(&[(b"TXTz", &z)]);
+        let out = page
+            .chunk_payload(b"TXTz", b"TXTa")
+            .expect("chunk_payload should succeed");
+        assert_eq!(out.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn chunk_payload_passes_through_raw_txta() {
+        let raw = b"raw text-layer payload".as_slice();
+        let page = page_with_chunks(&[(b"TXTa", raw)]);
+        let out = page
+            .chunk_payload(b"TXTz", b"TXTa")
+            .expect("chunk_payload should succeed");
+        assert_eq!(out.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn chunk_payload_missing_chunk_is_none() {
+        let page = page_with_chunks(&[]); // INFO only, no TXT* chunks
+        let out = page
+            .chunk_payload(b"TXTz", b"TXTa")
+            .expect("chunk_payload should succeed");
+        assert_eq!(out, None);
     }
 
     /// Single-page document: no thumbnails expected.

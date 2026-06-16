@@ -111,6 +111,10 @@ fn process_file(path: &Path, lossy_threshold: f32) -> Vec<PageResult> {
 
         let rs_encoded = encode_jb2(&bitmap);
         let rs_dict_encoded = encode_jb2_dict(&bitmap);
+        // `..Default::default()` is needless without the `experimental` feature
+        // (then `lossy_threshold` is the only field) but required with it
+        // (it also has `cross_size_rec6_probe`); allow rather than cfg-split.
+        #[allow(clippy::needless_update)]
         let rs_lossy_encoded = if lossy_threshold > 0.0 {
             encode_jb2_dict_with_options(
                 &bitmap,

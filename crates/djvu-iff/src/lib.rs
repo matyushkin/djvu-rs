@@ -438,16 +438,21 @@ pub fn parse_form(data: &[u8]) -> Result<Form<'_>, IffError> {
     // Parse chunks from the FORM body (after form_type)
     let body = data.get(16..form_data_end).ok_or(IffError::Truncated)?;
 
-    let chunks = parse_iff_chunks(body)?;
+    let chunks = parse_form_body(body)?;
 
     Ok(Form { form_type, chunks })
 }
 
-/// Parse a sequence of IFF chunks from a byte slice (new spec-based parser).
+/// Parse a sequence of IFF chunks from a FORM body (the bytes *after* the
+/// 4-byte form type), returning zero-copy [`IffChunk`] slices.
 ///
 /// Each chunk is: `[4-byte id][4-byte big-endian length][length bytes data]`,
-/// with data padded to an even byte boundary.
-fn parse_iff_chunks(mut buf: &[u8]) -> Result<Vec<IffChunk<'_>>, IffError> {
+/// with data padded to an even byte boundary. This is the single chunk-walker
+/// shared by the document reader, the mutator, and DJVM merge/split — callers
+/// that already stripped the `AT&T`/`FORM`/length/form-type prologue (e.g. a
+/// sub-FORM body, or a `FORM:DJVU` page extracted from a bundle) pass the
+/// remaining bytes here instead of re-implementing the walk.
+pub fn parse_form_body(mut buf: &[u8]) -> Result<Vec<IffChunk<'_>>, IffError> {
     let mut chunks = Vec::new();
 
     while buf.len() >= 8 {

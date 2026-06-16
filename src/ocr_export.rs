@@ -98,12 +98,7 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, OcrExpo
     writeln!(out, "</head>")?;
     writeln!(out, "<body>")?;
 
-    let page_range: Box<dyn Iterator<Item = usize>> = match opts.page_index {
-        Some(i) => Box::new(std::iter::once(i)),
-        None => Box::new(0..doc.page_count()),
-    };
-
-    for page_idx in page_range {
+    for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
         let pw = page.width() as u32;
         let ph = page.height() as u32;
@@ -174,12 +169,7 @@ pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, OcrExpo
     writeln!(out, "  </Description>")?;
     writeln!(out, "  <Layout>")?;
 
-    let page_range: Box<dyn Iterator<Item = usize>> = match opts.page_index {
-        Some(i) => Box::new(std::iter::once(i)),
-        None => Box::new(0..doc.page_count()),
-    };
-
-    for page_idx in page_range {
+    for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
         let pw = page.width() as u32;
         let ph = page.height() as u32;

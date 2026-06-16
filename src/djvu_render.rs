@@ -258,10 +258,33 @@ impl RenderOptions {
             ..Default::default()
         }
     }
+
+    /// Whether `page` can be rendered with [`render_streaming`] under these
+    /// options, producing pixels identical to [`render_pixmap`].
+    ///
+    /// The streaming path emits the page row-by-row without buffering a full
+    /// [`Pixmap`], so callers that only need to forward rows (PDF/TIFF image
+    /// encoders) can avoid the intermediate allocation. It is only equivalent
+    /// to the buffered path when no whole-image post-pass is required: no
+    /// anti-aliasing, no rotation, and either bilinear resampling or a 1:1
+    /// (unscaled) render.
+    ///
+    /// This is the single source of truth for streaming eligibility; export
+    /// paths call it instead of re-deriving the rule.
+    pub fn can_stream(&self, page: &crate::djvu_document::DjVuPage) -> bool {
+        !self.aa
+            && (self.resampling == Resampling::Bilinear
+                || (page.width() as u32 == self.width && page.height() as u32 == self.height))
+            && page.rotation() == crate::info::Rotation::None
+            && self.rotation == UserRotation::None
+    }
 }
 
 /// Return `(display_width, display_height)` — dimensions after rotation.
-fn display_dimensions(page: &crate::djvu_document::DjVuPage) -> (u32, u32) {
+///
+/// The single source of the INFO-rotation dimension swap; the `fit_to_*`
+/// constructors and `Page::display_dims` both call it instead of re-deriving it.
+pub(crate) fn display_dimensions(page: &crate::djvu_document::DjVuPage) -> (u32, u32) {
     let w = page.width() as u32;
     let h = page.height() as u32;
     match page.rotation() {
@@ -593,124 +616,6 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
     )
 }
 
-// ── Lanczos-3 resampling ─────────────────────────────────────────────────────
-
-/// Lanczos-3 kernel: `sinc(x) * sinc(x/3)` for `|x| < 3`, 0 otherwise.
-///
-/// Uses the normalised sinc: `sinc(x) = sin(π x) / (π x)`, `sinc(0) = 1`.
-#[inline]
-fn lanczos3_kernel(x: f32) -> f32 {
-    let ax = x.abs();
-    if ax >= 3.0 {
-        return 0.0;
-    }
-    if ax < 1e-6 {
-        return 1.0;
-    }
-    let pi_x = core::f32::consts::PI * ax;
-    let sinc_x = pi_x.sin() / pi_x;
-    let pi_x3 = pi_x / 3.0;
-    let sinc_x3 = pi_x3.sin() / pi_x3;
-    sinc_x * sinc_x3
-}
-
-/// Scale `src` to `dst_w × dst_h` using separable Lanczos-3 resampling.
-///
-/// Two-pass implementation:
-/// 1. Horizontal pass: `src_w × src_h` → `dst_w × src_h` intermediate.
-/// 2. Vertical pass: `dst_w × src_h` → `dst_w × dst_h` output.
-///
-/// Only RGBA pixmaps are handled (alpha is passed through unchanged at 255).
-pub fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
-    let src_w = src.width;
-    let src_h = src.height;
-
-    // Short-circuit: nothing to scale.
-    if src_w == dst_w && src_h == dst_h {
-        return src.clone();
-    }
-    if dst_w == 0 || dst_h == 0 {
-        return Pixmap::white(dst_w.max(1), dst_h.max(1));
-    }
-
-    // ── Horizontal pass ───────────────────────────────────────────────────────
-    // Map each output column `ox` (0..dst_w) to a source position, then sum
-    // the Lanczos-3 kernel over the contributing source columns.
-    let h_scale = src_w as f32 / dst_w as f32;
-    let h_support = (3.0_f32 * h_scale.max(1.0)).ceil() as i32; // kernel half-width in src pixels
-
-    let mut mid = Pixmap::new(dst_w, src_h, 255, 255, 255, 255);
-    for oy in 0..src_h {
-        for ox in 0..dst_w {
-            // Centre of the output pixel in source coordinates.
-            let cx = (ox as f32 + 0.5) * h_scale - 0.5;
-            let x0 = (cx.floor() as i32 - h_support + 1).max(0);
-            let x1 = (cx.floor() as i32 + h_support).min(src_w as i32 - 1);
-
-            let mut r = 0.0_f32;
-            let mut g = 0.0_f32;
-            let mut b = 0.0_f32;
-            let mut w_sum = 0.0_f32;
-
-            for sx in x0..=x1 {
-                let w = lanczos3_kernel((sx as f32 - cx) / h_scale.max(1.0));
-                let (pr, pg, pb) = src.get_rgb(sx as u32, oy);
-                r += pr as f32 * w;
-                g += pg as f32 * w;
-                b += pb as f32 * w;
-                w_sum += w;
-            }
-
-            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
-            mid.set_rgb(
-                ox,
-                oy,
-                (r * norm).round().clamp(0.0, 255.0) as u8,
-                (g * norm).round().clamp(0.0, 255.0) as u8,
-                (b * norm).round().clamp(0.0, 255.0) as u8,
-            );
-        }
-    }
-
-    // ── Vertical pass ─────────────────────────────────────────────────────────
-    let v_scale = src_h as f32 / dst_h as f32;
-    let v_support = (3.0_f32 * v_scale.max(1.0)).ceil() as i32;
-
-    let mut out = Pixmap::new(dst_w, dst_h, 255, 255, 255, 255);
-    for oy in 0..dst_h {
-        let cy = (oy as f32 + 0.5) * v_scale - 0.5;
-        let y0 = (cy.floor() as i32 - v_support + 1).max(0);
-        let y1 = (cy.floor() as i32 + v_support).min(src_h as i32 - 1);
-
-        for ox in 0..dst_w {
-            let mut r = 0.0_f32;
-            let mut g = 0.0_f32;
-            let mut b = 0.0_f32;
-            let mut w_sum = 0.0_f32;
-
-            for sy in y0..=y1 {
-                let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
-                let (pr, pg, pb) = mid.get_rgb(ox, sy as u32);
-                r += pr as f32 * w;
-                g += pg as f32 * w;
-                b += pb as f32 * w;
-                w_sum += w;
-            }
-
-            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
-            out.set_rgb(
-                ox,
-                oy,
-                (r * norm).round().clamp(0.0, 255.0) as u8,
-                (g * norm).round().clamp(0.0, 255.0) as u8,
-                (b * norm).round().clamp(0.0, 255.0) as u8,
-            );
-        }
-    }
-
-    out
-}
-
 /// Check whether any pixel in the mask box is set (foreground).
 /// Used for area-averaging downscale to determine if a box has foreground.
 #[inline]
@@ -873,92 +778,10 @@ fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
 
 // ── FGbz palette parsing ──────────────────────────────────────────────────────
 
-/// An RGB color from the FGbz palette.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct PaletteColor {
-    pub(crate) r: u8,
-    pub(crate) g: u8,
-    pub(crate) b: u8,
-}
-
-/// Parsed FGbz data: palette colors and optional per-blit color indices.
-pub(crate) struct FgbzPalette {
-    pub(crate) colors: Vec<PaletteColor>,
-    /// Per-blit color index: `indices[blit_idx]` → index into `colors`.
-    /// Empty when the FGbz chunk has no index table (version bit 7 unset).
-    pub(crate) indices: Vec<i16>,
-}
-
-/// Parse the FGbz chunk into palette colors and per-blit index table.
-///
-/// FGbz format:
-/// - byte 0: version (bit 7 = has index table, bits 6-0 must be 0)
-/// - byte 1-2: big-endian u16 palette size (number of colors)
-/// - next `palette_size * 3` bytes: BGR triples (raw if version=0, BZZ if version has bit 0 set)
-/// - if bit 7 set: 3-byte big-endian count + BZZ-compressed i16be index table
-pub(crate) fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, RenderError> {
-    if data.len() < 3 {
-        return Ok(FgbzPalette {
-            colors: vec![],
-            indices: vec![],
-        });
-    }
-
-    let version = data[0];
-    let has_indices = (version & 0x80) != 0;
-
-    let n_colors =
-        u16::from_be_bytes([*data.get(1).unwrap_or(&0), *data.get(2).unwrap_or(&0)]) as usize;
-
-    if n_colors == 0 {
-        return Ok(FgbzPalette {
-            colors: vec![],
-            indices: vec![],
-        });
-    }
-
-    // Colors: raw BGR triples starting at byte 3
-    let color_bytes = n_colors * 3;
-    let color_data = data.get(3..).unwrap_or(&[]);
-
-    let mut colors = Vec::with_capacity(n_colors);
-    for i in 0..n_colors {
-        let base = i * 3;
-        if base + 2 < color_data.len().min(color_bytes) {
-            colors.push(PaletteColor {
-                r: color_data[base + 2],
-                g: color_data[base + 1],
-                b: color_data[base],
-            });
-        } else {
-            colors.push(PaletteColor { r: 0, g: 0, b: 0 });
-        }
-    }
-
-    // Per-blit index table
-    let mut indices = Vec::new();
-    if has_indices {
-        let idx_start = 3 + color_bytes;
-        if idx_start + 3 <= data.len() {
-            let num_indices = ((data[idx_start] as u32) << 16)
-                | ((data[idx_start + 1] as u32) << 8)
-                | (data[idx_start + 2] as u32);
-
-            let bzz_data = data.get(idx_start + 3..).unwrap_or(&[]);
-            let decoded = crate::bzz_new::bzz_decode(bzz_data)?;
-
-            let n = num_indices as usize;
-            indices.reserve(n);
-            for i in 0..n {
-                if i * 2 + 1 < decoded.len() {
-                    indices.push(i16::from_be_bytes([decoded[i * 2], decoded[i * 2 + 1]]));
-                }
-            }
-        }
-    }
-
-    Ok(FgbzPalette { colors, indices })
-}
+// FGbz chunk parsing lives in `crate::fgbz` so this module receives already-decoded
+// palette data and never calls `bzz_decode` itself. `parse_fgbz` returns a
+// `BzzError`; callers below propagate it through `RenderError`'s `From<BzzError>`.
+use crate::fgbz::{FgbzPalette, PaletteColor, parse_fgbz};
 
 // ── Core compositor ───────────────────────────────────────────────────────────
 
@@ -1132,6 +955,94 @@ fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
     }
 
     Ok(None)
+}
+
+/// The page layers decoded for a full (non-progressive) composite: background,
+/// foreground palette, mask, optional indexed blit map, and the FG44/FGjp
+/// foreground pixmap.
+struct DecodedLayers {
+    bg: Option<Pixmap>,
+    fg_palette: Option<FgbzPalette>,
+    mask: Option<crate::bitmap::Bitmap>,
+    blit_map: Option<Vec<i32>>,
+    fg44: Option<Pixmap>,
+}
+
+/// Decode every layer needed for a full composite at `bg_subsample` — the one
+/// home for the permissive-vs-strict decode decision.
+///
+/// In permissive mode each step swallows errors (`.ok().flatten()`) and the
+/// background stops at the first corrupt chunk; in strict mode any decode error
+/// propagates. The returned `mask` already has `opts.bold` dilation applied,
+/// since both callers do that immediately after decoding.
+///
+/// Both [`render_rows`] (the row path behind `render_pixmap` / `render_into` /
+/// `render_streaming`) and [`render_region`] build their `CompositeContext`
+/// from this, keeping their decode logic identical. The progressive path
+/// decodes differently (partial background up to `chunk_n`) and is not routed
+/// through here.
+fn decode_layers(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    bg_subsample: u32,
+) -> Result<DecodedLayers, RenderError> {
+    let bg;
+    let fg_palette;
+    let mask;
+    let blit_map;
+    let fg44;
+
+    if opts.permissive {
+        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
+        fg_palette = decode_fg_palette_full(page).ok().flatten();
+        let indexed = if fg_palette.is_some() {
+            decode_mask_indexed(page).ok().flatten()
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = decode_mask(page).ok().flatten();
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page).ok().flatten();
+    } else {
+        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+        fg_palette = decode_fg_palette_full(page)?;
+        let indexed_result = if fg_palette.is_some() {
+            decode_mask_indexed(page)?
+        } else {
+            None
+        };
+        if let Some((bm, bm_map)) = indexed_result {
+            mask = Some(bm);
+            blit_map = Some(bm_map);
+        } else {
+            mask = if fg_palette.is_none() {
+                decode_mask(page)?
+            } else {
+                None
+            };
+            blit_map = None;
+        }
+        fg44 = decode_fg44(page)?;
+    }
+
+    let mask = if opts.bold > 0 {
+        mask.map(|m| m.dilate_n(opts.bold as u32))
+    } else {
+        mask
+    };
+
+    Ok(DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    })
 }
 
 /// Decode a BGjp (JPEG-encoded background) chunk into an RGB [`Pixmap`].
@@ -1824,55 +1735,13 @@ where
 
     let bg_subsample = best_iw44_subsample(opts.scale);
 
-    let bg;
-    let fg_palette;
-    let mask;
-    let blit_map;
-    let fg44;
-
-    if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
-        fg_palette = decode_fg_palette_full(page).ok().flatten();
-        let indexed = if fg_palette.is_some() {
-            decode_mask_indexed(page).ok().flatten()
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = decode_mask(page).ok().flatten();
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page).ok().flatten();
-    } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
-        fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
-            } else {
-                None
-            };
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page)?;
-    }
-
-    let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
-    } else {
-        mask
-    };
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample)?;
 
     let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
     let (ctx_mask, mask_shift) = if use_sub4_mask {
@@ -1950,27 +1819,15 @@ pub fn render_into(
 
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    // Decode all layers
+    // Decode all layers (shared permissive/strict seam, same as render_rows).
     let bg_subsample = best_iw44_subsample(opts.scale);
-    let bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
-    let fg_palette = decode_fg_palette_full(page)?;
-
-    // Use indexed mask when we have a palette (for per-glyph colors)
-    let (mask, blit_map) = if fg_palette.is_some() {
-        match decode_mask_indexed(page)? {
-            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
-            None => (None, None),
-        }
-    } else {
-        (decode_mask(page)?, None)
-    };
-
-    let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
-    } else {
-        mask
-    };
-    let fg44 = decode_fg44(page)?;
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample)?;
 
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
@@ -2010,6 +1867,67 @@ pub fn render_into(
     Ok(())
 }
 
+/// Build the options for the native-resolution pre-pass that feeds the
+/// Lanczos-3 post-filter: full page size, no scaling, no AA, no rotation, and
+/// bilinear resampling (so the recursive render never re-enters this path).
+///
+/// Bold and permissive flags are carried through so the high-resolution
+/// re-render matches the requested render in everything but the final
+/// resampling step.
+fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
+    RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        scale: 1.0,
+        bold: opts.bold,
+        aa: false,
+        rotation: UserRotation::None, // rotation applied after scaling
+        permissive: opts.permissive,
+        resampling: Resampling::Bilinear, // avoid infinite recursion
+    }
+}
+
+/// Apply the shared Lanczos-3 post-pass to a freshly composited pixmap.
+///
+/// When `opts.resampling` is [`Resampling::Lanczos3`] *and* actual scaling
+/// happened (`page` native size differs from `full_w × full_h`), the page is
+/// re-rendered at native resolution via `render_native` and downscaled to
+/// `out_w × out_h` with [`crate::pixmap::scale_lanczos3`]. Otherwise `pm` is
+/// returned unchanged — covering both the non-Lanczos case and the 1:1 case
+/// where Lanczos would be a no-op. If the native re-render fails, the original
+/// (bilinear) `pm` is kept, matching the previous per-call behaviour.
+///
+/// `full` is the full output size used to decide whether scaling occurred;
+/// `out` is the target the result is scaled to. They differ only for
+/// [`render_region`], where the comparison is against the full page render but
+/// the output is the (smaller) region.
+fn apply_lanczos_postpass<F>(
+    pm: Pixmap,
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    full: (u32, u32),
+    out: (u32, u32),
+    render_native: F,
+) -> Pixmap
+where
+    F: FnOnce(&RenderOptions) -> Result<Pixmap, RenderError>,
+{
+    if opts.resampling != Resampling::Lanczos3 {
+        return pm;
+    }
+    let (full_w, full_h) = full;
+    let need_scale = page.width() as u32 != full_w || page.height() as u32 != full_h;
+    if !need_scale {
+        return pm;
+    }
+    let native_opts = native_render_opts(page, opts);
+    match render_native(&native_opts) {
+        Ok(native_pm) => crate::pixmap::scale_lanczos3(&native_pm, out.0, out.1),
+        // Native render failed — keep the bilinear result already in `pm`.
+        Err(_) => pm,
+    }
+}
+
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
 ///
 /// Strict renders composite directly into the full pixmap. Permissive renders
@@ -2046,31 +1964,11 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         pm = aa_downscale(&pm);
     }
 
-    // Apply Lanczos-3 post-processing when requested.
-    // The composited pixmap is already at `w × h`; if the page dimensions
-    // differ from the output (i.e. actual scaling happened) reprocess it
-    // with the higher-quality Lanczos filter.
-    if opts.resampling == Resampling::Lanczos3 {
-        let need_scale = page.width() as u32 != w || page.height() as u32 != h;
-        if need_scale {
-            // Re-render at native resolution, then downscale with Lanczos.
-            let native_opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                scale: 1.0,
-                bold: opts.bold,
-                aa: false,
-                rotation: UserRotation::None, // rotation applied after scaling
-                permissive: opts.permissive,
-                resampling: Resampling::Bilinear, // avoid infinite recursion
-            };
-            // Render at full resolution (may fail gracefully).
-            if let Ok(native_pm) = render_pixmap(page, &native_opts) {
-                pm = scale_lanczos3(&native_pm, w, h);
-            }
-            // If native render failed, pm already holds the bilinear result.
-        }
-    }
+    // Apply the shared Lanczos-3 post-pass (re-render at native size, then
+    // downscale) when requested and scaling actually happened.
+    let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
+        render_pixmap(page, native_opts)
+    });
 
     Ok(rotate_pixmap(
         pm,
@@ -2185,57 +2083,14 @@ pub fn render_region(
     let full_h = opts.height.max(1);
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    let bg;
-    let fg_palette;
-    let mask;
-    let blit_map;
-    let fg44;
-
     let bg_subsample = best_iw44_subsample(opts.scale);
-
-    if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
-        fg_palette = decode_fg_palette_full(page).ok().flatten();
-        let indexed = if fg_palette.is_some() {
-            decode_mask_indexed(page).ok().flatten()
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = decode_mask(page).ok().flatten();
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page).ok().flatten();
-    } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
-        fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
-            } else {
-                None
-            };
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page)?;
-    }
-
-    let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
-    } else {
-        mask
-    };
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample)?;
 
     let out_w = region.width;
     let out_h = region.height;
@@ -2272,25 +2127,16 @@ pub fn render_region(
     };
     composite_into(&ctx, &mut pm.data)?;
 
-    // Apply Lanczos-3 post-processing when requested (same logic as render_pixmap).
-    if opts.resampling == Resampling::Lanczos3 {
-        let need_scale = page.width() as u32 != full_w || page.height() as u32 != full_h;
-        if need_scale {
-            let native_opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                scale: 1.0,
-                bold: opts.bold,
-                aa: false,
-                rotation: UserRotation::None,
-                permissive: opts.permissive,
-                resampling: Resampling::Bilinear,
-            };
-            if let Ok(native_pm) = render_region(page, region, &native_opts) {
-                pm = scale_lanczos3(&native_pm, out_w, out_h);
-            }
-        }
-    }
+    // Shared Lanczos-3 post-pass: scaling is judged against the full render
+    // size (full_w/full_h) but the result is scaled to the region (out_w/out_h).
+    let pm = apply_lanczos_postpass(
+        pm,
+        page,
+        opts,
+        (full_w, full_h),
+        (out_w, out_h),
+        |native_opts| render_region(page, region, native_opts),
+    );
 
     Ok(rotate_pixmap(
         pm,
@@ -2491,30 +2337,63 @@ pub fn render_progressive(
         composite_into(&ctx, &mut pm.data)?;
     }
 
-    // Apply Lanczos-3 post-processing when requested (same logic as render_pixmap).
-    if opts.resampling == Resampling::Lanczos3 {
-        let need_scale = page.width() as u32 != w || page.height() as u32 != h;
-        if need_scale {
-            let native_opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                scale: 1.0,
-                bold: opts.bold,
-                aa: false,
-                rotation: UserRotation::None,
-                permissive: opts.permissive,
-                resampling: Resampling::Bilinear,
-            };
-            if let Ok(native_pm) = render_progressive(page, &native_opts, chunk_n) {
-                pm = scale_lanczos3(&native_pm, w, h);
-            }
-        }
-    }
+    // Shared Lanczos-3 post-pass; the native re-render decodes the same
+    // `chunk_n` refinement level.
+    let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
+        render_progressive(page, native_opts, chunk_n)
+    });
 
     Ok(rotate_pixmap(
         pm,
         combine_rotations(page.rotation(), opts.rotation),
     ))
+}
+
+/// Number of progressive refinement frames a page yields: one per BG44 chunk,
+/// or a single frame for bilevel/JB2-only pages with no BG44 data.
+///
+/// This is the seam that hides the `max(1, bg44_chunks().len())` convention from
+/// callers, so progressive consumers never reach into [`DjVuPage::bg44_chunks`]
+/// to size their own loops.
+pub fn progressive_steps(page: &DjVuPage) -> usize {
+    page.bg44_chunks().len().max(1)
+}
+
+/// Render progressive frame `step` (`0..`[`progressive_steps`]).
+///
+/// Encapsulates the "no BG44 chunks ⇒ a single full [`render_pixmap`], otherwise
+/// [`render_progressive`]`(step)`" decision that every progressive caller (the
+/// `Page::render_scaled_progressive` collector and the async
+/// `render_progressive_stream`) previously open-coded. `step` is interpreted as
+/// the BG44 chunk index on multi-chunk pages.
+pub fn render_progressive_step(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    step: usize,
+) -> Result<Pixmap, RenderError> {
+    if page.bg44_chunks().is_empty() {
+        render_pixmap(page, opts)
+    } else {
+        render_progressive(page, opts, step)
+    }
+}
+
+/// Eagerly render every progressive frame into a `Vec`, coarsest first.
+///
+/// The convenience form of [`render_progressive_step`] over the full
+/// [`progressive_steps`] range; the last frame equals [`render_pixmap`].
+/// Streaming consumers that want one frame at a time should drive
+/// [`render_progressive_step`] directly instead of collecting.
+pub fn render_progressive_all(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+) -> Result<Vec<Pixmap>, RenderError> {
+    let steps = progressive_steps(page);
+    let mut frames = Vec::with_capacity(steps);
+    for step in 0..steps {
+        frames.push(render_progressive_step(page, opts, step)?);
+    }
+    Ok(frames)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2921,6 +2800,36 @@ mod tests {
                 "chunk {chunk_n}: rendered frame should not be all-zero"
             );
         }
+    }
+
+    /// `render_progressive_all` yields `progressive_steps` frames and its last
+    /// frame is byte-identical to `render_pixmap` (the sealed protocol contract).
+    #[test]
+    fn render_progressive_all_seals_chunk_loop() {
+        let doc = load_doc("boy.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 80,
+            height: 100,
+            ..Default::default()
+        };
+
+        // The seam hides `max(1, bg44_chunks().len())` from callers.
+        let steps = progressive_steps(page);
+        assert_eq!(steps, page.bg44_chunks().len().max(1));
+
+        let frames = render_progressive_all(page, &opts).expect("progressive_all must succeed");
+        assert_eq!(frames.len(), steps, "one frame per progressive step");
+
+        let full = render_pixmap(page, &opts).expect("render_pixmap must succeed");
+        assert_eq!(
+            frames.last().unwrap().data,
+            full.data,
+            "final progressive frame must equal the full render"
+        );
+        // `render_progressive_step(0)` is also a valid (coarse) frame.
+        let first = render_progressive_step(page, &opts, 0).expect("step 0 must succeed");
+        assert_eq!(first.data, frames[0].data);
     }
 
     /// render_progressive with chunk_n out of range returns ChunkOutOfRange.
@@ -3427,57 +3336,9 @@ mod tests {
     }
 
     // ── Lanczos-3 tests ───────────────────────────────────────────────────────
-
-    /// `lanczos3_kernel(0)` == 1.0 (unity at origin).
-    #[test]
-    fn lanczos3_kernel_unity_at_zero() {
-        assert!((lanczos3_kernel(0.0) - 1.0).abs() < 1e-5);
-    }
-
-    /// `lanczos3_kernel` is zero outside |x| ≥ 3.
-    #[test]
-    fn lanczos3_kernel_zero_outside_support() {
-        assert_eq!(lanczos3_kernel(3.0), 0.0);
-        assert_eq!(lanczos3_kernel(-3.5), 0.0);
-        assert_eq!(lanczos3_kernel(10.0), 0.0);
-    }
-
-    /// `scale_lanczos3` preserves dimensions.
-    #[test]
-    fn scale_lanczos3_correct_dimensions() {
-        let src = Pixmap::white(100, 80);
-        let dst = scale_lanczos3(&src, 50, 40);
-        assert_eq!(dst.width, 50);
-        assert_eq!(dst.height, 40);
-    }
-
-    /// `scale_lanczos3` returns a clone when source and target match.
-    #[test]
-    fn scale_lanczos3_noop_when_same_size() {
-        let src = Pixmap::new(4, 4, 200, 100, 50, 255);
-        let dst = scale_lanczos3(&src, 4, 4);
-        assert_eq!(dst.width, 4);
-        assert_eq!(dst.height, 4);
-        assert_eq!(dst.data, src.data);
-    }
-
-    /// Scaling a solid-color pixmap with Lanczos-3 preserves the color.
-    #[test]
-    fn scale_lanczos3_preserves_solid_color() {
-        // Solid red 20×20 → 10×10
-        let src = Pixmap::new(20, 20, 200, 0, 0, 255);
-        let dst = scale_lanczos3(&src, 10, 10);
-        assert_eq!(dst.width, 10);
-        assert_eq!(dst.height, 10);
-        // All output pixels should be close to red (200, 0, 0).
-        for chunk in dst.data.chunks_exact(4) {
-            let (r, g, b) = (chunk[0], chunk[1], chunk[2]);
-            assert!(
-                (r as i32 - 200).abs() <= 5 && g <= 5 && b <= 5,
-                "expected near-red (200,0,0), got ({r},{g},{b})"
-            );
-        }
-    }
+    // (The raw resampler `scale_lanczos3` and its `lanczos3_kernel` now live in
+    // the `pixmap` module and are unit-tested there; these exercise the render
+    // path's use of Lanczos-3.)
 
     /// `Resampling::Lanczos3` produces the correct output dimensions.
     #[test]

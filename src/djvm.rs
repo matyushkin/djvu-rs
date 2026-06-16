@@ -9,9 +9,12 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::djvu_document::DjVuDocument;
+use crate::dirm::DirmPayload;
 use crate::error::IffError;
 use crate::iff;
+
+#[cfg(test)]
+use crate::djvu_document::DjVuDocument;
 
 /// Error type for merge/split operations.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,28 @@ pub enum DjvmError {
         end: usize,
         count: usize,
     },
+}
+
+/// Re-serialize a sub-FORM child — the raw `data` of a `FORM` chunk, which
+/// begins with its 4-byte form type — back into a standalone `AT&T`-prefixed
+/// FORM document. Inverse of [`strip_att`].
+fn wrap_sub_form(form_data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + form_data.len());
+    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&(form_data.len() as u32).to_be_bytes());
+    out.extend_from_slice(form_data);
+    out
+}
+
+/// Strip a leading `AT&T` magic from a standalone FORM document, yielding the
+/// `FORM`-chunk bytes to embed inside a DJVM bundle. Inverse of [`wrap_sub_form`].
+fn strip_att(form: &[u8]) -> &[u8] {
+    if form.len() >= 4 && &form[..4] == b"AT&T" {
+        &form[4..]
+    } else {
+        form
+    }
 }
 
 /// Merge multiple DjVu documents (raw bytes) into a single bundled DJVM.
@@ -65,18 +90,10 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
                 if &chunk.id == b"FORM" && chunk.data.len() >= 4 {
                     let child_form_type = &chunk.data[..4];
 
-                    // Wrap the chunk data back into a full FORM with AT&T header
-                    let mut form_bytes = Vec::with_capacity(4 + 4 + 4 + chunk.data.len());
-                    form_bytes.extend_from_slice(b"AT&T");
-                    form_bytes.extend_from_slice(b"FORM");
-                    let form_len = chunk.data.len() as u32;
-                    form_bytes.extend_from_slice(&form_len.to_be_bytes());
-                    form_bytes.extend_from_slice(chunk.data);
-
-                    components.push(form_bytes);
-                    component_ids.push(format!("d{}p{:04}.djvu", doc_idx, components.len()));
-
                     let flag = if child_form_type == b"DJVI" { 0 } else { 1 }; // 0 = shared, 1 = page
+
+                    components.push(wrap_sub_form(chunk.data));
+                    component_ids.push(format!("d{}p{:04}.djvu", doc_idx, components.len()));
                     component_flags.push(flag);
                 }
             }
@@ -94,14 +111,24 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
 ///
 /// Returns raw DjVu bytes for a new document containing only the requested pages.
 pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmError> {
-    let doc = DjVuDocument::parse(doc_data)?;
-    let count = doc.page_count();
+    let form = iff::parse_form(doc_data)?;
+
+    // Page count derived from the same FORM walk used for extraction below, so
+    // the bounds check can never disagree with what is actually present (a
+    // DIRM-based page count and the FORM:DJVU children can diverge).
+    let count = match &form.form_type {
+        b"DJVU" => 1,
+        b"DJVM" => form
+            .chunks
+            .iter()
+            .filter(|c| &c.id == b"FORM" && c.data.len() >= 4 && &c.data[..4] == b"DJVU")
+            .count(),
+        _ => 0,
+    };
 
     if start >= count || end > count || start >= end {
         return Err(DjvmError::PageRangeOutOfBounds { start, end, count });
     }
-
-    let form = iff::parse_form(doc_data)?;
 
     // Single-page document: just return the whole thing
     if &form.form_type == b"DJVU" && start == 0 && end == 1 {
@@ -114,13 +141,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
         for chunk in &form.chunks {
             if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
                 if page_idx == start {
-                    let mut result = Vec::with_capacity(4 + 4 + 4 + chunk.data.len());
-                    result.extend_from_slice(b"AT&T");
-                    result.extend_from_slice(b"FORM");
-                    let len = chunk.data.len() as u32;
-                    result.extend_from_slice(&len.to_be_bytes());
-                    result.extend_from_slice(chunk.data);
-                    return Ok(result);
+                    return Ok(wrap_sub_form(chunk.data));
                 }
                 page_idx += 1;
             }
@@ -135,13 +156,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     // First pass: collect shared components (DJVI) that might be needed
     for chunk in &form.chunks {
         if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVI" {
-            let mut form_bytes = Vec::with_capacity(4 + 4 + 4 + chunk.data.len());
-            form_bytes.extend_from_slice(b"AT&T");
-            form_bytes.extend_from_slice(b"FORM");
-            let len = chunk.data.len() as u32;
-            form_bytes.extend_from_slice(&len.to_be_bytes());
-            form_bytes.extend_from_slice(chunk.data);
-            components.push(form_bytes);
+            components.push(wrap_sub_form(chunk.data));
             component_ids.push(format!("shared{}.djvi", components.len()));
             component_flags.push(0); // shared
         }
@@ -152,13 +167,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     for chunk in &form.chunks {
         if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
             if page_idx >= start && page_idx < end {
-                let mut form_bytes = Vec::with_capacity(4 + 4 + 4 + chunk.data.len());
-                form_bytes.extend_from_slice(b"AT&T");
-                form_bytes.extend_from_slice(b"FORM");
-                let len = chunk.data.len() as u32;
-                form_bytes.extend_from_slice(&len.to_be_bytes());
-                form_bytes.extend_from_slice(chunk.data);
-                components.push(form_bytes);
+                components.push(wrap_sub_form(chunk.data));
                 component_ids.push(format!("p{:04}.djvu", page_idx + 1));
                 component_flags.push(1); // page
             }
@@ -173,8 +182,9 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
 fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Vec<u8>, DjvmError> {
     let n = components.len();
 
-    // Build DIRM chunk
-    let dirm_data = build_dirm(n, flags, ids);
+    // Build DIRM chunk (bundled; offset slots zeroed — readers fall back to
+    // FORM boundaries, matching prior behavior).
+    let dirm_data = DirmPayload::build_bundled(n, flags, ids).encode();
 
     // Calculate total FORM body size
     let mut body_size: usize = 4; // "DJVM"
@@ -184,11 +194,7 @@ fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Ve
     }
     for comp in components {
         // Each component includes AT&T prefix — strip it for embedding
-        let comp_data = if comp.len() >= 4 && &comp[..4] == b"AT&T" {
-            &comp[4..]
-        } else {
-            comp.as_slice()
-        };
+        let comp_data = strip_att(comp);
         body_size += comp_data.len();
         if !comp_data.len().is_multiple_of(2) {
             body_size += 1; // IFF padding
@@ -215,11 +221,7 @@ fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Ve
 
     // Component FORM chunks
     for comp in components {
-        let comp_data = if comp.len() >= 4 && &comp[..4] == b"AT&T" {
-            &comp[4..]
-        } else {
-            comp.as_slice()
-        };
+        let comp_data = strip_att(comp);
         output.extend_from_slice(comp_data);
         if !comp_data.len().is_multiple_of(2) {
             output.push(0); // IFF padding
@@ -253,7 +255,7 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
     // All entries are pages (flag = 1)
     let flags: Vec<u8> = vec![1u8; count];
 
-    let dirm_data = build_dirm_indirect(count, &flags, &ids);
+    let dirm_data = DirmPayload::build_indirect(count, &flags, &ids).encode();
 
     let mut body_size: usize = 4; // "DJVM"
     body_size += 8 + dirm_data.len(); // DIRM chunk header + data
@@ -274,105 +276,6 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
     }
 
     Ok(output)
-}
-
-/// Build an indirect (non-bundled) DIRM chunk.
-///
-/// Unlike the bundled variant, there is no per-component offset table.
-fn build_dirm_indirect(count: usize, flags: &[u8], ids: &[String]) -> Vec<u8> {
-    let mut data = Vec::new();
-
-    // Flags byte: 0x00 = indirect (not bundled)
-    data.push(0x00);
-
-    // Component count (16-bit big-endian)
-    data.push((count >> 8) as u8);
-    data.push(count as u8);
-
-    // No offset table for indirect documents.
-
-    let mut meta = Vec::new();
-    for _ in 0..count {
-        meta.extend_from_slice(&[0, 0, 0]); // sizes (unused for indirect)
-    }
-    for &f in flags {
-        meta.push(f);
-    }
-    for id in ids {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    for id in ids {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    meta.extend(core::iter::repeat_n(0u8, count)); // empty titles
-
-    let compressed = crate::bzz_encode::bzz_encode(&meta);
-    data.extend_from_slice(&compressed);
-
-    data
-}
-
-/// Build the DIRM chunk data.
-///
-/// Format:
-/// - 1 byte: flags (0x80 = bundled)
-/// - 2 bytes: component count (big-endian)
-/// - 4 bytes x n: component offsets (big-endian, computed from component sizes)
-/// - BZZ-compressed metadata: sizes(3b×N), flags(1b×N), IDs, names, titles
-///
-/// The BZZ-compressed section is built by reusing the existing reference
-/// BZZ stream from the first input document when possible. For fresh
-/// construction, we build the raw metadata and use a minimal BZZ wrapper.
-fn build_dirm(count: usize, flags: &[u8], ids: &[String]) -> Vec<u8> {
-    let mut data = Vec::new();
-
-    // Flags byte: 0x80 = bundled format
-    data.push(0x80);
-
-    // Component count (16-bit big-endian)
-    data.push((count >> 8) as u8);
-    data.push(count as u8);
-
-    // Placeholder for offsets (4 bytes each) — filled in below
-    let _offsets_start = data.len();
-    for _ in 0..count {
-        data.extend_from_slice(&[0, 0, 0, 0]);
-    }
-
-    // Build the raw metadata that would normally be BZZ-compressed.
-    // Layout: sizes(3b × N) + flags(1b × N) + IDs(null-term) + names(null-term) + titles(null-term)
-    let mut meta = Vec::new();
-
-    // Component sizes — 3 bytes each, set to 0 (readers use FORM boundaries)
-    for _ in 0..count {
-        meta.extend_from_slice(&[0, 0, 0]);
-    }
-    // Component flags (1 byte each)
-    for &f in flags {
-        meta.push(f);
-    }
-    // Component IDs (null-terminated)
-    for id in ids {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    // Names (null-terminated, same as IDs)
-    for id in ids {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    // Titles (empty, null-terminated)
-    meta.extend(core::iter::repeat_n(0u8, count));
-
-    // Encode the metadata using BZZ. We use a trivial BZZ stream:
-    // the raw metadata is small enough that we can encode it directly
-    // using the BZZ block format with a passthrough identity encoding.
-    let compressed = crate::bzz_encode::bzz_encode(&meta);
-    data.extend_from_slice(&compressed);
-
-    data
 }
 
 #[cfg(test)]

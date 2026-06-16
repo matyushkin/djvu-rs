@@ -31,17 +31,11 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::{bzz_new::bzz_decode, error::BzzError};
-
 // ---- Error ------------------------------------------------------------------
 
 /// Errors from annotation parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum AnnotationError {
-    /// BZZ decompression failed.
-    #[error("bzz decode failed: {0}")]
-    Bzz(#[from] BzzError),
-
     /// A hex color string is malformed.
     #[error("invalid color value: {0}")]
     InvalidColor(String),
@@ -134,16 +128,13 @@ pub struct Annotation {
 
 // ---- Entry points -----------------------------------------------------------
 
-/// Parse an ANTa (plain-text) annotation chunk.
+/// Parse a decoded annotation payload (the bytes of an `ANTa` chunk, or a
+/// BZZ-decompressed `ANTz` chunk).
+///
+/// This is a pure parser: BZZ decompression for `ANTz` is handled upstream by
+/// [`DjVuPage::chunk_payload`](crate::DjVuPage::chunk_payload).
 pub fn parse_annotations(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
     let text = core::str::from_utf8(data).unwrap_or("");
-    parse_annotation_text(text)
-}
-
-/// Parse an ANTz (BZZ-compressed) annotation chunk.
-pub fn parse_annotations_bzz(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
-    let decoded = bzz_decode(data)?;
-    let text = core::str::from_utf8(&decoded).unwrap_or("");
     parse_annotation_text(text)
 }
 
