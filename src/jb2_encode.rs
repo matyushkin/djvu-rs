@@ -11,6 +11,7 @@
 pub use djvu_jb2::encode::*;
 
 use crate::Bitmap;
+use crate::iff;
 
 /// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
 ///
@@ -96,36 +97,12 @@ pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -
         comp_form_bodies.push((djvu_body, true, pid));
     }
 
-    // ── Build DIRM directly (bundled, with offsets) ──
+    // ── DIRM metadata table (BZZ-compressed sizes/flags/ids/names/titles) ──
     //
-    // Reuses the shape of `crate::djvm::build_djvm` but inlined here because
-    // we have FORM bodies (not full FORM chunks with header) to embed. The
-    // simpler path: build full FORM chunks here, then call `iff::emit_form`.
-    // Each component is a FORM chunk: { id: "FORM", body: <DJVU/DJVI ...> }.
-    let comp_form_data: Vec<&[u8]> = comp_form_bodies
-        .iter()
-        .map(|(b, _, _)| b.as_slice())
-        .collect();
-
-    // DIRM payload: build matching the bundled-format layout in
-    // `djvu_document.rs::parse` (flags=0x81 → bundled+1.0; count u16-be;
-    // per-component offsets u32-be; bzz-compressed metadata table).
+    // Matches the bundled-format layout read by `djvu_document.rs::parse`:
+    // flags=0x81 (bundled + v1.0), u16-be count, u32-be per-component offsets,
+    // then this BZZ-compressed metadata blob.
     let n = comp_form_bodies.len();
-    let mut dirm = Vec::new();
-    dirm.push(0x81); // bundled (high bit) + version 1
-    dirm.extend_from_slice(&(n as u16).to_be_bytes());
-
-    // Compute offsets after the DIRM chunk has been laid down.
-    // Layout: AT&T (4) + FORM (4) + form_size (4) + "DJVM" (4) + "DIRM" (4) +
-    //         dirm_size (4) + dirm_payload_with_offsets+bzz_meta + pad +
-    //         each FORM chunk header (8) + body + pad.
-    //
-    // Offsets in the DIRM are *file-byte* offsets to the AT&T-stripped FORM
-    // chunk header for each component. So offset[i] = position of "FORM" id
-    // bytes for that component within the file.
-    //
-    // We don't know the DIRM size until we know the offsets; resolve via
-    // two-pass: build metadata table first, then layout.
     let mut meta = Vec::new();
     for (body, _, _) in &comp_form_bodies {
         let total = body.len() + 8; // FORM + size + body
@@ -146,59 +123,47 @@ pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -
     meta.extend(core::iter::repeat_n(0u8, n)); // empty titles
     let bzz_meta = crate::bzz_encode::bzz_encode(&meta);
 
-    // dirm payload final size = 1 (flags) + 2 (count) + 4*n (offsets) + bzz_meta.len()
-    let dirm_size = 1 + 2 + 4 * n + bzz_meta.len();
-
-    // Compute DJVM body size and component offsets.
-    let dirm_chunk_total = 8 + dirm_size + (dirm_size & 1); // header + payload + pad
-    let mut form_body_size: usize = 4; // "DJVM"
-    form_body_size += dirm_chunk_total;
-    let mut comp_offsets: Vec<u32> = Vec::with_capacity(n);
-    for body in &comp_form_data {
-        // File offset = AT&T(4) + FORM(4) + size(4) + DJVM(4) + dirm_chunk_total
-        //             + sum-of-prior-comp-totals
-        // The decoder treats DIRM offsets as byte offsets from start of file
-        // pointing at the "FORM" id bytes of the component. Offset 0 of the
-        // file = 'A' of "AT&T", so offset = 12 + 4 + dirm_chunk_total + prior.
-        let off = 4 + 4 + 4 + 4 + dirm_chunk_total + (form_body_size - 4 - dirm_chunk_total);
-        comp_offsets.push(off as u32);
-        let tot = body.len() + 8;
-        form_body_size += tot + (tot & 1); // pad component to even
-    }
-
-    // Now write final dirm payload with offsets.
-    let _ = dirm; // computed above for reference; final form built fresh below.
-    let mut dirm_full = Vec::with_capacity(dirm_size);
-    dirm_full.push(0x81);
-    dirm_full.extend_from_slice(&(n as u16).to_be_bytes());
-    for off in &comp_offsets {
-        dirm_full.extend_from_slice(&off.to_be_bytes());
-    }
-    dirm_full.extend_from_slice(&bzz_meta);
-    debug_assert_eq!(dirm_full.len(), dirm_size);
-
-    // Emit final file.
-    let mut out = Vec::with_capacity(12 + form_body_size);
-    out.extend_from_slice(b"AT&T");
-    out.extend_from_slice(b"FORM");
-    out.extend_from_slice(&(form_body_size as u32).to_be_bytes());
-    out.extend_from_slice(b"DJVM");
-    out.extend_from_slice(b"DIRM");
-    out.extend_from_slice(&(dirm_size as u32).to_be_bytes());
-    out.extend_from_slice(&dirm_full);
-    if dirm_size & 1 == 1 {
-        out.push(0);
-    }
-    for body in &comp_form_data {
-        out.extend_from_slice(b"FORM");
-        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        out.extend_from_slice(body);
-        if body.len() & 1 == 1 {
-            out.push(0);
+    // ── Assemble through the IFF emission seam ──
+    //
+    // The bundle is a leading DIRM chunk followed by one component FORM per
+    // page/dict. The DIRM carries a file-offset table pointing at each
+    // component FORM, so this is the seam's documented two-pass shape: emit
+    // once with a zeroed table to learn the offsets, refill the table, then
+    // re-emit. `partial_emit_with_offsets` owns all framing/padding; only the
+    // DIRM payload layout (bundled flag, count, offset table) lives here.
+    let build_dirm = |offsets: &[u32]| -> Vec<u8> {
+        let mut d = Vec::with_capacity(3 + 4 * n + bzz_meta.len());
+        d.push(0x81); // bundled (high bit) + version 1
+        d.extend_from_slice(&(n as u16).to_be_bytes());
+        for &off in offsets {
+            d.extend_from_slice(&off.to_be_bytes());
         }
-    }
+        d.extend_from_slice(&bzz_meta);
+        d
+    };
+    let emit = |dirm_data: Vec<u8>| -> (Vec<u8>, Vec<usize>) {
+        let dirm = iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_data,
+        };
+        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
+        parts.push(iff::EmitPart::Chunk(&dirm));
+        parts.extend(
+            comp_form_bodies
+                .iter()
+                .map(|(b, _, _)| iff::EmitPart::Form(b.as_slice())),
+        );
+        iff::partial_emit_with_offsets(*b"DJVM", &parts)
+            .expect("DJVM bundle exceeds the 4 GiB IFF FORM limit")
+    };
 
-    out
+    // Pass 1: placeholder offsets → learn each component FORM's file offset
+    // (`part_offsets[0]` is the DIRM itself; the rest are the components).
+    let (_, part_offsets) = emit(build_dirm(&vec![0u32; n]));
+    let comp_offsets: Vec<u32> = part_offsets[1..].iter().map(|&o| o as u32).collect();
+
+    // Pass 2: real offsets written into the DIRM table.
+    emit(build_dirm(&comp_offsets)).0
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -345,6 +310,35 @@ mod tests {
             .expect("mask 1 present");
         assert_decoded_eq(&p1, &d1);
         assert_decoded_eq(&p2, &d2);
+    }
+
+    #[test]
+    fn djvm_bundle_dirm_offsets_point_at_component_forms() {
+        // The bundled DIRM offset table is filled in by the emission seam's
+        // two-pass `partial_emit_with_offsets`. Each offset must address the
+        // `FORM` tag of its component within the file.
+        let p1 = make_text_page(&[b"AABB", b"BABA"]);
+        let p2 = make_text_page(&[b"AABB", b"BABA"]);
+        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2);
+
+        let form = iff::parse_form(&bundle).expect("parse DJVM");
+        let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
+        let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
+        assert!(payload.is_bundled());
+        assert!(
+            !payload.offsets.is_empty(),
+            "bundled DIRM must carry an offset table"
+        );
+        for &off in &payload.offsets {
+            let off = off as usize;
+            assert_eq!(
+                &bundle[off..off + 4],
+                b"FORM",
+                "DIRM offset {off} must point at a component FORM tag"
+            );
+        }
+        // One offset per component (1 shared DJVI + 2 page DJVUs here).
+        assert_eq!(payload.offsets.len(), 3);
     }
 
     // ── #322 cross-size record-6 probe corpus driver ─────────────────────────

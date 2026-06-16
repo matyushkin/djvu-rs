@@ -1543,24 +1543,13 @@ mod tests {
         dirm_data.push(0x01);
         dirm_data.extend_from_slice(bzz_meta);
 
-        let mut dirm_chunk = Vec::new();
-        dirm_chunk.extend_from_slice(b"DIRM");
-        dirm_chunk.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
-        dirm_chunk.extend_from_slice(&dirm_data);
-        if !dirm_data.len().is_multiple_of(2) {
-            dirm_chunk.push(0);
-        }
-
-        let mut form_body = Vec::new();
-        form_body.extend_from_slice(b"DJVM");
-        form_body.extend_from_slice(&dirm_chunk);
-
-        let mut out = Vec::new();
-        out.extend_from_slice(b"AT&T");
-        out.extend_from_slice(b"FORM");
-        out.extend_from_slice(&(form_body.len() as u32).to_be_bytes());
-        out.extend_from_slice(&form_body);
-        out
+        // FORM:DJVM carrying a single (indirect) DIRM chunk, built through the
+        // emission seam rather than hand-assembled framing.
+        let dirm = Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_data,
+        };
+        iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).expect("fits within u32")
     }
 
     #[test]
