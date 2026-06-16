@@ -27,17 +27,13 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::{bzz_new::bzz_decode, error::BzzError, info::Rotation};
+use crate::info::Rotation;
 
 // ---- Error ------------------------------------------------------------------
 
 /// Errors from text layer parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum TextError {
-    /// BZZ decompression failed.
-    #[error("bzz decode failed: {0}")]
-    Bzz(#[from] BzzError),
-
     /// The binary data is too short to be a valid text layer.
     #[error("text layer data too short")]
     TooShort,
@@ -298,19 +294,14 @@ fn transform_zone(zone: &TextZone, t: &ZoneTransform) -> TextZone {
 
 // ---- Entry points -----------------------------------------------------------
 
-/// Parse a TXTa (uncompressed) text layer chunk.
+/// Parse a decoded text-layer payload (the bytes of a `TXTa` chunk, or a
+/// BZZ-decompressed `TXTz` chunk).
 ///
-/// `page_height` is used to remap DjVu bottom-left coordinates to top-left.
+/// This is a pure parser: BZZ decompression for `TXTz` is handled upstream by
+/// [`DjVuPage::chunk_payload`](crate::DjVuPage::chunk_payload).  `page_height`
+/// is used to remap DjVu bottom-left coordinates to top-left.
 pub fn parse_text_layer(data: &[u8], page_height: u32) -> Result<TextLayer, TextError> {
     parse_text_layer_inner(data, page_height)
-}
-
-/// Parse a TXTz (BZZ-compressed) text layer chunk.
-///
-/// Decompresses with BZZ first, then delegates to [`parse_text_layer`].
-pub fn parse_text_layer_bzz(data: &[u8], page_height: u32) -> Result<TextLayer, TextError> {
-    let decoded = bzz_decode(data)?;
-    parse_text_layer_inner(&decoded, page_height)
 }
 
 // ---- Internal parsing -------------------------------------------------------

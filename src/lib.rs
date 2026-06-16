@@ -95,6 +95,10 @@ pub mod bzz_encode;
 #[cfg(feature = "std")]
 pub mod djvm;
 
+/// `DIRM` directory-chunk model — the single owner of the DIRM byte layout,
+/// shared by the read model, the byte-preserving mutator, and DJVM merge/split.
+pub(crate) mod dirm;
+
 /// JB2 bilevel image decoder — clean-room implementation.
 ///
 /// Decodes JB2-encoded bitonal images from DjVu Sjbz and Djbz chunks using
@@ -173,25 +177,39 @@ pub mod djvu_mut;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// FGbz foreground-palette parser — decodes the `FGbz` chunk into a color
+/// palette and per-blit index table so [`djvu_render`] receives already-decoded
+/// data and never calls `bzz_decode` directly.
+pub(crate) mod fgbz;
+
 /// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
 ///
-/// Provides [`text::parse_text_layer`] and [`text::parse_text_layer_bzz`]
-/// plus typed structs [`text::TextLayer`], [`text::TextZone`],
-/// [`text::TextZoneKind`], and [`text::Rect`].
+/// Provides the pure [`text::parse_text_layer`] parser plus typed structs
+/// [`text::TextLayer`], [`text::TextZone`], [`text::TextZoneKind`], and
+/// [`text::Rect`].  BZZ-compressed `TXTz` payloads are decompressed upstream by
+/// [`DjVuPage::chunk_payload`].
 pub mod text;
 
 /// Annotation parser for DjVu ANTz/ANTa chunks — phase 4.
 ///
-/// Provides [`annotation::parse_annotations`] and [`annotation::parse_annotations_bzz`]
-/// plus typed structs [`annotation::Annotation`], [`annotation::MapArea`],
-/// [`annotation::Shape`], and [`annotation::Color`].
+/// Provides the pure [`annotation::parse_annotations`] parser plus typed
+/// structs [`annotation::Annotation`], [`annotation::MapArea`],
+/// [`annotation::Shape`], and [`annotation::Color`].  BZZ-compressed `ANTz`
+/// payloads are decompressed upstream by [`DjVuPage::chunk_payload`].
 pub mod annotation;
 
 /// Document metadata parser for METa/METz chunks — phase 4 extension.
 ///
-/// Provides [`metadata::parse_metadata`] and [`metadata::parse_metadata_bzz`]
-/// plus [`metadata::DjVuMetadata`] and [`metadata::MetadataError`].
+/// Provides the pure [`metadata::parse_metadata`] parser plus
+/// [`metadata::DjVuMetadata`] and [`metadata::MetadataError`].  BZZ-compressed
+/// `METz` payloads are decompressed upstream by [`DjVuDocument::chunk_payload`].
 pub mod metadata;
+
+/// Shared document-to-export traversal primitives (#345) used by the PDF,
+/// EPUB, TIFF, and OCR exporters: the per-page loop, the scale→size kernel,
+/// the leaf word/character zone-walk, and the vertical coordinate flip.
+#[cfg(feature = "std")]
+mod export_common;
 
 /// DjVu to PDF converter — phase 6.
 ///
@@ -433,12 +451,44 @@ impl<'a> Page<'a> {
     }
 
     fn display_dims(&self) -> (u32, u32) {
-        let w = self.page.width() as u32;
-        let h = self.page.height() as u32;
-        match self.page.rotation() {
-            info::Rotation::Cw90 | info::Rotation::Ccw90 => (h, w),
-            _ => (w, h),
+        djvu_render::display_dimensions(self.page)
+    }
+
+    /// Build options that render the (rotation-aware) display size scaled by
+    /// `scale`. The single home for the `display × scale` size idiom the
+    /// scale-based render methods share.
+    fn opts_for_scale(&self, scale: f32) -> djvu_render::RenderOptions {
+        let (dw, dh) = self.display_dims();
+        let w = ((dw as f32 * scale).round() as u32).max(1);
+        let h = ((dh as f32 * scale).round() as u32).max(1);
+        djvu_render::RenderOptions {
+            width: w,
+            height: h,
+            scale,
+            ..Default::default()
         }
+    }
+
+    /// Build options for an explicit target `width × height`, deriving the
+    /// rotation-aware `scale` from [`RenderOptions::fit_to_width`] and then
+    /// honoring the caller's exact `height` (which need not preserve aspect).
+    /// The single home for the size-based scale idiom.
+    fn opts_for_size(&self, width: u32, height: u32) -> djvu_render::RenderOptions {
+        let mut opts = djvu_render::RenderOptions::fit_to_width(self.page, width);
+        opts.height = height;
+        opts
+    }
+
+    /// Render with caller-supplied [`RenderOptions`] — the single entry point
+    /// the convenience methods funnel through.
+    ///
+    /// Build `opts` with the rotation-aware
+    /// [`RenderOptions::fit_to_width`](djvu_render::RenderOptions::fit_to_width)
+    /// / `fit_to_height` / `fit_to_box` constructors, then set
+    /// `bold` / `aa` / `resampling` as needed. This supersedes the bespoke
+    /// `render_bold` / `render_aa` / `render_scaled*` methods.
+    pub fn render_with(&self, opts: &djvu_render::RenderOptions) -> Result<Pixmap, Error> {
+        djvu_render::render_pixmap(self.page, opts).map_err(Self::render_err)
     }
 
     /// Page resolution in dots per inch.
@@ -471,86 +521,50 @@ impl<'a> Page<'a> {
 
     /// Render the page to an RGBA pixmap at native resolution.
     pub fn render(&self) -> Result<Pixmap, Error> {
-        let (w, h) = self.display_dims();
-        let opts = djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            scale: 1.0,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+        self.render_with(&self.opts_for_scale(1.0))
     }
 
     /// Render the page to an RGBA pixmap at a target size.
     pub fn render_to_size(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
-        let (dw, dh) = self.display_dims();
-        let scale = if dw > 0 {
-            width as f32 / dw as f32
-        } else {
-            1.0
-        };
-        let _ = dh;
-        let opts = djvu_render::RenderOptions {
-            width,
-            height,
-            scale,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+        self.render_with(&self.opts_for_size(width, height))
     }
 
     /// Render the page at native resolution with mask dilation for bolder text.
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `render_with` with `RenderOptions { bold, ..fit_to_width(page, w) }`"
+    )]
     pub fn render_bold(&self, dilate_passes: u32) -> Result<Pixmap, Error> {
-        let (w, h) = self.display_dims();
-        let opts = djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            scale: 1.0,
-            bold: dilate_passes.min(255) as u8,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+        let mut opts = self.opts_for_scale(1.0);
+        opts.bold = dilate_passes.min(255) as u8;
+        self.render_with(&opts)
     }
 
     /// Render the page to a target size with mask dilation for bolder text.
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `render_with` with `RenderOptions { bold, ..fit_to_width(page, w) }`"
+    )]
     pub fn render_to_size_bold(
         &self,
         width: u32,
         height: u32,
         dilate_passes: u32,
     ) -> Result<Pixmap, Error> {
-        let (dw, _dh) = self.display_dims();
-        let scale = if dw > 0 {
-            width as f32 / dw as f32
-        } else {
-            1.0
-        };
-        let opts = djvu_render::RenderOptions {
-            width,
-            height,
-            scale,
-            bold: dilate_passes.min(255) as u8,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+        let mut opts = self.opts_for_size(width, height);
+        opts.bold = dilate_passes.min(255) as u8;
+        self.render_with(&opts)
     }
 
     /// Render the page at a target size with anti-aliased downscaling.
-    pub fn render_aa(&self, width: u32, height: u32, _boldness: f32) -> Result<Pixmap, Error> {
-        let (dw, _dh) = self.display_dims();
-        let scale = if dw > 0 {
-            width as f32 / dw as f32
-        } else {
-            1.0
-        };
-        let opts = djvu_render::RenderOptions {
-            width,
-            height,
-            scale,
-            aa: true,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `render_with` with `RenderOptions { aa: true, ..fit_to_width(page, w) }`"
+    )]
+    pub fn render_aa(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
+        let mut opts = self.opts_for_size(width, height);
+        opts.aa = true;
+        self.render_with(&opts)
     }
 
     /// Decode the page thumbnail, if available.
@@ -573,56 +587,31 @@ impl<'a> Page<'a> {
     }
 
     /// Fast coarse render: decode only the first BG44 chunk (blurry preview).
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `djvu_render::render_coarse` with `RenderOptions::fit_to_width`"
+    )]
     pub fn render_scaled_coarse(&self, scale: f32) -> Result<Option<Pixmap>, Error> {
-        let (dw, dh) = self.display_dims();
-        let w = ((dw as f32 * scale).round() as u32).max(1);
-        let h = ((dh as f32 * scale).round() as u32).max(1);
-        let opts = djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            scale,
-            ..Default::default()
-        };
-        djvu_render::render_coarse(self.page, &opts).map_err(Self::render_err)
+        djvu_render::render_coarse(self.page, &self.opts_for_scale(scale)).map_err(Self::render_err)
     }
 
     /// Progressive rendering: returns increasingly refined pixmaps.
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `djvu_render::render_progressive_all` with `RenderOptions::fit_to_width`"
+    )]
     pub fn render_scaled_progressive(&self, scale: f32) -> Result<Vec<Pixmap>, Error> {
-        let (dw, dh) = self.display_dims();
-        let w = ((dw as f32 * scale).round() as u32).max(1);
-        let h = ((dh as f32 * scale).round() as u32).max(1);
-        let opts = djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            scale,
-            ..Default::default()
-        };
-        let n_bg44 = self.page.bg44_chunks().len();
-        if n_bg44 == 0 {
-            let pixmap = djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)?;
-            return Ok(vec![pixmap]);
-        }
-        let mut result = Vec::with_capacity(n_bg44);
-        for chunk_n in 0..n_bg44 {
-            let pixmap = djvu_render::render_progressive(self.page, &opts, chunk_n)
-                .map_err(Self::render_err)?;
-            result.push(pixmap);
-        }
-        Ok(result)
+        djvu_render::render_progressive_all(self.page, &self.opts_for_scale(scale))
+            .map_err(Self::render_err)
     }
 
     /// Render the page scaled by a factor (e.g. 0.5 = half size, 2.0 = double).
+    #[deprecated(
+        since = "0.20.0",
+        note = "use `render_with` with `RenderOptions::fit_to_width`/`fit_to_box`"
+    )]
     pub fn render_scaled(&self, scale: f32) -> Result<Pixmap, Error> {
-        let (dw, dh) = self.display_dims();
-        let w = ((dw as f32 * scale).round() as u32).max(1);
-        let h = ((dh as f32 * scale).round() as u32).max(1);
-        let opts = djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            scale,
-            ..Default::default()
-        };
-        djvu_render::render_pixmap(self.page, &opts).map_err(Self::render_err)
+        self.render_with(&self.opts_for_scale(scale))
     }
 }
 

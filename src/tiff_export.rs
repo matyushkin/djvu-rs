@@ -147,7 +147,7 @@ fn write_color_page<W: Write + Seek>(
     let (w, h, opts) = color_render_options(page, scale);
     let dpi = (page.dpi() as f32 * scale).round() as u32;
 
-    if can_stream_color_render(page, &opts) {
+    if opts.can_stream(page) {
         write_color_page_streaming(encoder, page, &opts, w, h, dpi)
     } else {
         write_color_page_pixmap(encoder, page, &opts, w, h, dpi)
@@ -155,10 +155,8 @@ fn write_color_page<W: Write + Seek>(
 }
 
 fn color_render_options(page: &DjVuPage, scale: f32) -> (u32, u32, RenderOptions) {
-    let pw = page.width() as f32;
-    let ph = page.height() as f32;
-    let w = ((pw * scale).round() as u32).max(1);
-    let h = ((ph * scale).round() as u32).max(1);
+    let (w, h) =
+        crate::export_common::scaled_size(page.width() as u32, page.height() as u32, scale);
 
     let opts = RenderOptions {
         width: w,
@@ -171,14 +169,6 @@ fn color_render_options(page: &DjVuPage, scale: f32) -> (u32, u32, RenderOptions
         resampling: djvu_render::Resampling::Bilinear,
     };
     (w, h, opts)
-}
-
-fn can_stream_color_render(page: &DjVuPage, opts: &RenderOptions) -> bool {
-    !opts.aa
-        && (opts.resampling == djvu_render::Resampling::Bilinear
-            || (page.width() as u32 == opts.width && page.height() as u32 == opts.height))
-        && page.rotation() == crate::info::Rotation::None
-        && opts.rotation == djvu_render::UserRotation::None
 }
 
 fn write_color_page_streaming<W: Write + Seek>(
@@ -338,7 +328,7 @@ mod tests {
         let page = doc.page(0).unwrap();
         let (_, _, render_opts) = color_render_options(page, 1.0);
         assert!(
-            can_stream_color_render(page, &render_opts),
+            render_opts.can_stream(page),
             "fixture should use the streaming TIFF color path"
         );
 

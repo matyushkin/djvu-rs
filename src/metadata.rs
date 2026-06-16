@@ -35,17 +35,11 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::{bzz_new::bzz_decode, error::BzzError};
-
 // ---- Error ------------------------------------------------------------------
 
 /// Errors from metadata parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
-    /// BZZ decompression failed.
-    #[error("bzz decode failed: {0}")]
-    Bzz(#[from] BzzError),
-
     /// The chunk is not valid UTF-8.
     #[error("metadata chunk is not valid UTF-8")]
     InvalidUtf8,
@@ -86,14 +80,6 @@ pub struct DjVuMetadata {
 pub fn parse_metadata(data: &[u8]) -> Result<DjVuMetadata, MetadataError> {
     let text = core::str::from_utf8(data).map_err(|_| MetadataError::InvalidUtf8)?;
     Ok(parse_metadata_text(text))
-}
-
-/// Parse a METz (BZZ-compressed) metadata chunk.
-///
-/// Decompresses with BZZ first, then delegates to [`parse_metadata`].
-pub fn parse_metadata_bzz(data: &[u8]) -> Result<DjVuMetadata, MetadataError> {
-    let decoded = bzz_decode(data)?;
-    parse_metadata(&decoded)
 }
 
 // ---- Encoder ----------------------------------------------------------------
@@ -503,7 +489,9 @@ mod tests {
         m.author = Some("Author X".into());
         let bytes = encode_metadata_bzz(&m);
         assert!(!bytes.is_empty());
-        let parsed = parse_metadata_bzz(&bytes).unwrap();
+        // METz payload decompresses via the shared BZZ path, then the pure parser.
+        let decoded = crate::bzz_new::bzz_decode(&bytes).unwrap();
+        let parsed = parse_metadata(&decoded).unwrap();
         assert_eq!(parsed, m);
     }
 }

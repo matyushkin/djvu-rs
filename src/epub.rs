@@ -26,7 +26,6 @@ use crate::{
     annotation::{MapArea, Shape},
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
-    text::TextZoneKind,
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -159,8 +158,7 @@ fn write_page(
 
     // Scale to the requested output DPI
     let scale = opts.dpi as f32 / page_dpi;
-    let w = ((pw as f32 * scale).round() as u32).max(1);
-    let h = ((ph as f32 * scale).round() as u32).max(1);
+    let (w, h) = crate::export_common::scaled_size(pw, ph, scale);
 
     let render_opts = RenderOptions {
         width: w,
@@ -257,34 +255,20 @@ fn build_text_overlay(page: &DjVuPage, pw: u32, ph: u32) -> Vec<(f32, f32, f32, 
 
     let mut spans = Vec::new();
 
-    fn walk(
-        zones: &[crate::text::TextZone],
-        spans: &mut Vec<(f32, f32, f32, f32, String)>,
-        pw: u32,
-        ph: u32,
-    ) {
-        for zone in zones {
-            match zone.kind {
-                TextZoneKind::Word | TextZoneKind::Character => {
-                    if zone.text.is_empty() {
-                        continue;
-                    }
-                    let r = &zone.rect;
-                    let x = r.x as f32 / pw as f32 * 100.0;
-                    // DjVu y is bottom-left origin; invert for CSS top
-                    let y = (ph.saturating_sub(r.y + r.height)) as f32 / ph as f32 * 100.0;
-                    let w = r.width as f32 / pw as f32 * 100.0;
-                    let h = r.height as f32 / ph as f32 * 100.0;
-                    if w > 0.0 && h > 0.0 {
-                        spans.push((x, y, w, h, xml_escape(&zone.text)));
-                    }
-                }
-                _ => walk(&zone.children, spans, pw, ph),
-            }
+    // Map each leaf word/character zone (shared zone-walk) to a CSS-percentage
+    // overlay rect. DjVu rects are top-left origin; the overlay is anchored
+    // from the bottom, so the vertical position is flipped.
+    for span in crate::export_common::word_spans(&text_layer) {
+        let r = span.rect;
+        let x = r.x as f32 / pw as f32 * 100.0;
+        let y = crate::export_common::flip_y_bottom(ph, r) as f32 / ph as f32 * 100.0;
+        let w = r.width as f32 / pw as f32 * 100.0;
+        let h = r.height as f32 / ph as f32 * 100.0;
+        if w > 0.0 && h > 0.0 {
+            spans.push((x, y, w, h, xml_escape(span.text)));
         }
     }
 
-    walk(&text_layer.zones, &mut spans, pw, ph);
     spans
 }
 

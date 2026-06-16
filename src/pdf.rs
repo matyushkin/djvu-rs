@@ -26,7 +26,7 @@ use crate::{
     annotation::Shape,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderOptions},
-    text::{TextZone, TextZoneKind},
+    text::Rect,
 };
 
 // ---- Error ------------------------------------------------------------------
@@ -200,9 +200,7 @@ fn render_dims(native_w: u32, native_h: u32, native_dpi: f32, output_dpi: u32) -
         return (native_w, native_h);
     }
     let scale = output_dpi as f32 / native_dpi;
-    let rw = ((native_w as f32 * scale).round() as u32).max(1);
-    let rh = ((native_h as f32 * scale).round() as u32).max(1);
-    (rw, rh)
+    crate::export_common::scaled_size(native_w, native_h, scale)
 }
 
 /// Pre-rendered page data — all expensive compute done, ready for sequential PDF emit.
@@ -297,7 +295,7 @@ fn render_rgb_for_pdf(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, PdfError> {
-    if can_stream_pdf_render(page, opts) {
+    if opts.can_stream(page) {
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
         djvu_render::render_streaming(page, opts, |_, rgba_row| {
             for rgba in rgba_row.chunks_exact(4) {
@@ -308,14 +306,6 @@ fn render_rgb_for_pdf(
     } else {
         Ok(djvu_render::render_pixmap(page, opts)?.to_rgb())
     }
-}
-
-fn can_stream_pdf_render(page: &DjVuPage, opts: &RenderOptions) -> bool {
-    !opts.aa
-        && (opts.resampling == djvu_render::Resampling::Bilinear
-            || (page.width() as u32 == opts.width && page.height() as u32 == opts.height))
-        && page.rotation() == crate::info::Rotation::None
-        && opts.rotation == djvu_render::UserRotation::None
 }
 
 /// Decode and deflate the JB2 foreground mask into a PDF ImageMask XObject body.
@@ -452,9 +442,9 @@ fn build_text_content(page: &DjVuPage, dpi: f32, pt_h: f32) -> String {
     // Set font — use a small size, we scale per-word
     ops.push_str("/F1 1 Tf\n");
 
-    // Walk the zone tree and emit text for word/character zones
-    for zone in &text_layer.zones {
-        emit_text_zones(&mut ops, zone, dpi, pt_h);
+    // Emit one positioned run per leaf word/character zone (shared zone-walk).
+    for span in crate::export_common::word_spans(&text_layer) {
+        emit_word_span(&mut ops, span.rect, span.text, dpi, pt_h);
     }
 
     ops.push_str("ET\n");
@@ -467,61 +457,49 @@ fn build_text_content(page: &DjVuPage, dpi: f32, pt_h: f32) -> String {
     ops
 }
 
-/// Recursively emit text positioning operators for word-level zones.
-fn emit_text_zones(ops: &mut String, zone: &TextZone, dpi: f32, pt_h: f32) {
-    match zone.kind {
-        TextZoneKind::Word | TextZoneKind::Character => {
-            if zone.text.is_empty() {
-                return;
-            }
-            let r = &zone.rect;
-            // zone.rect is in top-left-origin pixel coords
-            // PDF uses bottom-left origin, so: pdf_y = pt_h - (r.y + r.height) * 72/dpi
-            let x = px_to_pt(r.x as f32, dpi);
-            let y = pt_h - px_to_pt((r.y + r.height) as f32, dpi);
-            let w = px_to_pt(r.width as f32, dpi);
-            let h = px_to_pt(r.height as f32, dpi);
+/// Emit text positioning operators for one leaf word/character span.
+///
+/// `rect` is top-left-origin pixels; PDF uses bottom-left origin, so the
+/// baseline is flipped in point space: `pdf_y = pt_h - (r.y + r.height) * 72/dpi`.
+/// (This subtract-after-convert order is what produces byte-identical output;
+/// see the note on [`crate::export_common::flip_y_bottom`].)
+fn emit_word_span(ops: &mut String, rect: &Rect, text: &str, dpi: f32, pt_h: f32) {
+    let x = px_to_pt(rect.x as f32, dpi);
+    let y = pt_h - px_to_pt((rect.y + rect.height) as f32, dpi);
+    let w = px_to_pt(rect.width as f32, dpi);
+    let h = px_to_pt(rect.height as f32, dpi);
 
-            if w <= 0.0 || h <= 0.0 {
-                return;
-            }
-
-            // Font size = zone height in points
-            let font_size = h;
-            if font_size < 0.5 {
-                return;
-            }
-
-            // Horizontal scale to fit text width
-            let text_escaped = pdf_escape_string(&zone.text);
-            // Sum per-character advance widths using Helvetica metrics.
-            let natural_width: f32 = zone
-                .text
-                .chars()
-                .map(|c| helvetica_advance(c) * font_size)
-                .sum::<f32>()
-                .max(0.01);
-            let h_scale = if natural_width > 0.01 {
-                (w / natural_width) * 100.0
-            } else {
-                100.0
-            };
-
-            ops.push_str(&format!(
-                "{font_size:.2} 0 0 {font_size:.2} {x:.4} {y:.4} Tm\n"
-            ));
-            if (h_scale - 100.0).abs() > 1.0 {
-                ops.push_str(&format!("{h_scale:.2} Tz\n"));
-            }
-            ops.push_str(&format!("({text_escaped}) Tj\n"));
-        }
-        _ => {
-            // Recurse into children
-            for child in &zone.children {
-                emit_text_zones(ops, child, dpi, pt_h);
-            }
-        }
+    if w <= 0.0 || h <= 0.0 {
+        return;
     }
+
+    // Font size = zone height in points
+    let font_size = h;
+    if font_size < 0.5 {
+        return;
+    }
+
+    // Horizontal scale to fit text width
+    let text_escaped = pdf_escape_string(text);
+    // Sum per-character advance widths using Helvetica metrics.
+    let natural_width: f32 = text
+        .chars()
+        .map(|c| helvetica_advance(c) * font_size)
+        .sum::<f32>()
+        .max(0.01);
+    let h_scale = if natural_width > 0.01 {
+        (w / natural_width) * 100.0
+    } else {
+        100.0
+    };
+
+    ops.push_str(&format!(
+        "{font_size:.2} 0 0 {font_size:.2} {x:.4} {y:.4} Tm\n"
+    ));
+    if (h_scale - 100.0).abs() > 1.0 {
+        ops.push_str(&format!("{h_scale:.2} Tz\n"));
+    }
+    ops.push_str(&format!("({text_escaped}) Tj\n"));
 }
 
 /// Return the normalized advance width (fraction of em) for `c` in Helvetica.

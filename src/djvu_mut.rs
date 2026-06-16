@@ -52,9 +52,10 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
+use crate::dirm::DirmPayload;
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
-use crate::iff::{self, Chunk, DjvuFile};
+use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
 use crate::info::PageInfo;
 use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
 use crate::navm_encode::encode_navm;
@@ -263,25 +264,7 @@ impl DjVuDocumentMut {
     where
         R: Fn(&str) -> Result<Vec<u8>, E>,
     {
-        let form = iff::parse_form(root_bytes)?;
-        if &form.form_type != b"DJVM" {
-            return Err(MutError::NotIndirectDjvm);
-        }
-        let dirm = form
-            .chunks
-            .iter()
-            .find(|c| &c.id == b"DIRM")
-            .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?;
-
-        let (components, is_bundled) = crate::djvu_document::parse_dirm_components(dirm.data)
-            .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
-        if is_bundled {
-            // Already bundled — no external files to resolve; from_bytes works.
-            return Err(MutError::NotIndirectDjvm);
-        }
-        if components.is_empty() {
-            return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
-        }
+        let (dirm_data, components) = resolve_indirect_components(root_bytes)?;
         if !components.iter().any(|c| c.is_page) {
             return Err(MutError::DirmMalformed(
                 "indirect DIRM lists no page component",
@@ -318,7 +301,7 @@ impl DjVuDocumentMut {
         // splice in a zeroed offset table (recomputed below), and keep the
         // BZZ-compressed metadata tail verbatim so component ids / names /
         // flags survive the round-trip.
-        let bundled_dirm = bundled_dirm_from_indirect(dirm.data, component_forms.len())?;
+        let bundled_dirm = bundled_dirm_from_indirect(dirm_data, component_forms.len())?;
 
         // Assemble the bundled FORM:DJVM tree: DIRM first, then components in
         // DIRM order. `length` is recomputed by `iff::emit`.
@@ -617,6 +600,47 @@ impl DjVuDocumentMut {
     }
 }
 
+/// Shared prologue for the two indirect-DJVM resolvers
+/// ([`DjVuDocumentMut::from_indirect_resolved`] and
+/// [`IndirectRewritePlan::from_indirect_resolved`]): parse the index FORM,
+/// confirm it is an *indirect* `FORM:DJVM` carrying a non-empty component
+/// directory, and return the raw `DIRM` bytes alongside the decoded component
+/// list (in DIRM order). Resolving the external component files and the
+/// per-caller assembly (rebundled tree vs. rewrite plan) stay with the callers.
+///
+/// # Errors
+///
+/// - [`MutError::NotIndirectDjvm`] if the root is not a `FORM:DJVM`, or is an
+///   already-bundled one.
+/// - [`MutError::DirmMalformed`] if the `DIRM` chunk is missing, unparseable, or
+///   lists no components.
+#[cfg(feature = "std")]
+fn resolve_indirect_components(
+    root_bytes: &[u8],
+) -> Result<(&[u8], Vec<crate::djvu_document::DirmComponentInfo>), MutError> {
+    let form = iff::parse_form(root_bytes)?;
+    if &form.form_type != b"DJVM" {
+        return Err(MutError::NotIndirectDjvm);
+    }
+    let dirm_data: &[u8] = form
+        .chunks
+        .iter()
+        .find(|c| &c.id == b"DIRM")
+        .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?
+        .data;
+
+    let (components, is_bundled) = crate::djvu_document::parse_dirm_components(dirm_data)
+        .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
+    if is_bundled {
+        // Already bundled — no external files to resolve.
+        return Err(MutError::NotIndirectDjvm);
+    }
+    if components.is_empty() {
+        return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
+    }
+    Ok((dirm_data, components))
+}
+
 /// Convert an indirect `DIRM` payload into the bundled form expected by a
 /// rebundled `FORM:DJVM`.
 ///
@@ -627,19 +651,14 @@ impl DjVuDocumentMut {
 /// the original BZZ metadata tail verbatim — preserving component ids, names,
 /// titles, and per-component flags.
 fn bundled_dirm_from_indirect(indirect: &[u8], nfiles: usize) -> Result<Vec<u8>, MutError> {
-    if indirect.len() < 3 {
-        return Err(MutError::DirmMalformed("indirect DIRM payload < 3 bytes"));
-    }
-    let table_len = 4usize
-        .checked_mul(nfiles)
-        .ok_or(MutError::DirmMalformed("DIRM offset table size overflow"))?;
-    let mut out = Vec::with_capacity(3 + table_len + (indirect.len() - 3));
-    out.push(indirect[0] | 0x80); // set the bundled bit
-    out.push(indirect[1]);
-    out.push(indirect[2]);
-    out.extend(core::iter::repeat_n(0u8, table_len)); // offsets recomputed later
-    out.extend_from_slice(&indirect[3..]); // BZZ metadata tail, unchanged
-    Ok(out)
+    let mut payload = DirmPayload::decode(indirect).map_err(MutError::DirmMalformed)?;
+    // Flip the bundled bit and splice in a zeroed offset table (one slot per
+    // component); the real positions are filled by `recompute_dirm_offsets`
+    // for the about-to-be-emitted layout. The BZZ metadata tail is carried
+    // through verbatim by `DirmPayload`, preserving ids / names / titles / flags.
+    payload.flags |= 0x80;
+    payload.offsets = core::iter::repeat_n(0u32, nfiles).collect();
+    Ok(payload.encode())
 }
 
 /// Whether `chunk` is a bundled (rather than indirect) `FORM:DJVM`.
@@ -738,35 +757,42 @@ fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChil
     if body_end > original.len() || &original[12..16] != b"DJVU" {
         return None;
     }
-    let mut ranges = Vec::new();
+
+    // Walk the FORM body (bytes after the 4-byte form type) with the shared
+    // `djvu-iff` chunk walker. It advances by `8 + data_len + (data_len & 1)`
+    // per chunk, so we can re-derive each child's absolute byte span in
+    // `original` by replaying the same contiguous tiling from offset 16.
+    let chunks = parse_form_body(original.get(16..body_end)?).ok()?;
+
+    let mut ranges = Vec::with_capacity(chunks.len());
     let mut pos = 16usize;
-    while pos < body_end {
-        if pos + 8 > body_end {
+    for chunk in &chunks {
+        // The narrow single-page shape we patch in place has no nested FORMs.
+        if &chunk.id == b"FORM" {
             return None;
         }
-        let id: [u8; 4] = original[pos..pos + 4].try_into().ok()?;
-        if &id == b"FORM" {
-            return None;
-        }
-        let data_len = u32::from_be_bytes(original[pos + 4..pos + 8].try_into().ok()?) as usize;
-        let data_start = pos + 8;
-        let data_end = data_start.checked_add(data_len)?;
-        if data_end > body_end {
-            return None;
-        }
+        let data_end = pos + 8 + chunk.data.len();
         let mut next = data_end;
         if next & 1 == 1 {
+            // Odd-length tail chunk with no room for its pad byte: bail to a
+            // full-tree emit rather than fabricate alignment bytes.
             if next >= body_end {
                 return None;
             }
             next += 1;
         }
         ranges.push(OriginalChildRange {
-            id,
-            data: original[data_start..data_end].to_vec(),
+            id: chunk.id,
+            data: chunk.data.to_vec(),
             range: pos..next,
         });
         pos = next;
+    }
+
+    // The chunks must tile the body exactly; a short tail (the walker stops on
+    // fewer than 8 remaining bytes) means a malformed layout we won't patch.
+    if pos != body_end {
+        return None;
     }
     Some(ranges)
 }
@@ -856,31 +882,22 @@ fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
         return Err(MutError::DirmMalformed("DIRM is not a leaf chunk"));
     };
 
-    if data.len() < 3 {
-        return Err(MutError::DirmMalformed("DIRM payload < 3 bytes"));
-    }
-    let bundled = (data[0] & 0x80) != 0;
-    if !bundled {
+    // Decode through the shared DIRM model, swap in the recomputed offsets, and
+    // re-encode. The metadata tail is preserved verbatim, so only the 4-byte
+    // offset slots change — the rewrite stays byte-preserving everywhere else.
+    let mut payload = DirmPayload::decode(data).map_err(MutError::DirmMalformed)?;
+    if !payload.is_bundled() {
         // Indirect DIRM has no offset table to update.
         return Ok(());
     }
-    let nfiles = u16::from_be_bytes([data[1], data[2]]) as usize;
-    if nfiles != new_offsets.len() {
+    if payload.nfiles as usize != new_offsets.len() {
         return Err(MutError::DirmComponentCountMismatch {
-            dirm: nfiles,
+            dirm: payload.nfiles as usize,
             children: new_offsets.len(),
         });
     }
-    let needed = 3usize
-        .checked_add(4 * nfiles)
-        .ok_or(MutError::DirmMalformed("DIRM offset table size overflow"))?;
-    if data.len() < needed {
-        return Err(MutError::DirmMalformed("DIRM offset table truncated"));
-    }
-    for (i, &off) in new_offsets.iter().enumerate() {
-        let base = 3 + i * 4;
-        data[base..base + 4].copy_from_slice(&off.to_be_bytes());
-    }
+    payload.offsets = new_offsets;
+    *data = payload.encode();
     Ok(())
 }
 
@@ -1092,23 +1109,9 @@ impl IndirectRewritePlan {
     where
         R: Fn(&str) -> Result<Vec<u8>, E>,
     {
-        let form = iff::parse_form(root_bytes)?;
-        if &form.form_type != b"DJVM" {
-            return Err(MutError::NotIndirectDjvm);
-        }
-        let dirm = form
-            .chunks
-            .iter()
-            .find(|c| &c.id == b"DIRM")
-            .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?;
-        let (infos, is_bundled) = crate::djvu_document::parse_dirm_components(dirm.data)
-            .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
-        if is_bundled {
-            return Err(MutError::NotIndirectDjvm);
-        }
-        if infos.is_empty() {
-            return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
-        }
+        // The rewrite plan keeps the original index bytes verbatim, so the DIRM
+        // bytes returned by the shared prologue are not needed here.
+        let (_dirm_data, infos) = resolve_indirect_components(root_bytes)?;
 
         // Validate every component file name up front: safe + unique. This runs
         // before any resolution or write, so an invalid directory is rejected
@@ -1667,8 +1670,9 @@ mod tests {
             .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"));
         assert!(antz.is_some(), "ANTz should be inserted");
         let data = antz.unwrap().data();
+        let decoded = crate::bzz_new::bzz_decode(data).expect("ANTz must decompress");
         let (parsed_ann, _areas) =
-            crate::annotation::parse_annotations_bzz(data).expect("ANTz must round-trip");
+            crate::annotation::parse_annotations(&decoded).expect("ANTz must round-trip");
         assert_eq!(parsed_ann.mode.as_deref(), Some("color"));
         assert_eq!(
             parsed_ann.background,
@@ -1699,7 +1703,8 @@ mod tests {
             .iter()
             .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
             .expect("METz should be inserted");
-        let parsed = crate::metadata::parse_metadata_bzz(metz.data()).unwrap();
+        let decoded = crate::bzz_new::bzz_decode(metz.data()).unwrap();
+        let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed, meta);
     }
 
@@ -2186,7 +2191,8 @@ mod tests {
             }
         }
         let metz = found.expect("page 1 should have METz after edit");
-        let parsed = crate::metadata::parse_metadata_bzz(&metz).unwrap();
+        let decoded = crate::bzz_new::bzz_decode(&metz).unwrap();
+        let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("rebundled indirect"));
     }
 

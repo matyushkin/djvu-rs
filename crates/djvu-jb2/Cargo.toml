@@ -22,3 +22,7 @@ djvu-iff = { version = "0.19.1", path = "../djvu-iff" }
 [features]
 default = ["std"]
 std = ["djvu-zp/std", "djvu-bitmap/std"]
+# Experiment-only encoder surface (#322 cross-size rec-6 refinement probe and
+# its analysis helpers). Off by default; not part of the published API. Implies
+# `std` since the encoder is std-only.
+experimental = ["std"]
