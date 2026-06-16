@@ -1,10 +1,14 @@
-//! hOCR and ALTO XML export for the DjVu text layer.
+//! hOCR and ALTO XML serialization for the DjVu text layer.
 //!
-//! Converts the structured [`TextLayer`] / [`TextZone`] hierarchy into two
-//! widely-used OCR interchange formats:
+//! This module does **not** run OCR. It serializes the structured
+//! [`TextLayer`] / [`TextZone`] hierarchy already present in a document's
+//! TXTz/TXTa chunk into two widely-used interchange formats:
 //!
 //! - **hOCR** — HTML micro-format used by Tesseract, Google Books, Internet Archive.
 //! - **ALTO XML** — ISO 25577:2013 standard used by national libraries (LoC, Europeana, BnF).
+//!
+//! Recognition (producing a text layer from page images) lives in the
+//! [`crate::ocr`] cluster; this module is purely the text-layer → markup half.
 //!
 //! ## Key public types
 //!
@@ -12,13 +16,13 @@
 //! - [`AltoOptions`] — options for ALTO output (page selection, DPI scale)
 //! - [`to_hocr`] — generate hOCR HTML string for a document
 //! - [`to_alto`] — generate ALTO XML string for a document
-//! - [`OcrExportError`] — typed errors from this module
+//! - [`TextSerializeError`] — typed errors from this module
 //!
-//! [`HocrOptions`]: crate::ocr_export::HocrOptions
-//! [`AltoOptions`]: crate::ocr_export::AltoOptions
-//! [`to_hocr`]: crate::ocr_export::to_hocr
-//! [`to_alto`]: crate::ocr_export::to_alto
-//! [`OcrExportError`]: crate::ocr_export::OcrExportError
+//! [`HocrOptions`]: crate::text_serialize::HocrOptions
+//! [`AltoOptions`]: crate::text_serialize::AltoOptions
+//! [`to_hocr`]: crate::text_serialize::to_hocr
+//! [`to_alto`]: crate::text_serialize::to_alto
+//! [`TextSerializeError`]: crate::text_serialize::TextSerializeError
 
 use std::fmt::Write as FmtWrite;
 
@@ -27,9 +31,9 @@ use crate::text::{TextLayer, TextZone, TextZoneKind};
 
 // ---- Error ------------------------------------------------------------------
 
-/// Errors from OCR export.
+/// Errors from text-layer serialization.
 #[derive(Debug, thiserror::Error)]
-pub enum OcrExportError {
+pub enum TextSerializeError {
     /// Accessing a page failed.
     #[error("document error: {0}")]
     Doc(#[from] crate::djvu_document::DocError),
@@ -42,6 +46,11 @@ pub enum OcrExportError {
     #[error("format error: {0}")]
     Fmt(#[from] std::fmt::Error),
 }
+
+/// Deprecated alias for [`TextSerializeError`], kept so code written against the
+/// former `ocr_export` module name still compiles.
+#[deprecated(since = "0.21.0", note = "renamed to `TextSerializeError`")]
+pub type OcrExportError = TextSerializeError;
 
 // ---- Options ----------------------------------------------------------------
 
@@ -81,9 +90,9 @@ pub struct AltoOptions {
 ///
 /// # Errors
 ///
-/// Returns [`OcrExportError`] if a page cannot be accessed or its text layer
+/// Returns [`TextSerializeError`] if a page cannot be accessed or its text layer
 /// cannot be decoded.
-pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, OcrExportError> {
+pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSerializeError> {
     let mut out = String::with_capacity(4096);
 
     writeln!(out, "<!DOCTYPE html>")?;
@@ -143,9 +152,9 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, OcrExpo
 ///
 /// # Errors
 ///
-/// Returns [`OcrExportError`] if a page cannot be accessed or its text layer
+/// Returns [`TextSerializeError`] if a page cannot be accessed or its text layer
 /// cannot be decoded.
-pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, OcrExportError> {
+pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, TextSerializeError> {
     let mut out = String::with_capacity(4096);
 
     writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
@@ -219,7 +228,7 @@ fn write_hocr_zones(
     out: &mut String,
     layer: &TextLayer,
     page_idx: usize,
-) -> Result<(), OcrExportError> {
+) -> Result<(), TextSerializeError> {
     let mut block_id = 0usize;
     let mut line_id = 0usize;
     let mut word_id = 0usize;
@@ -246,7 +255,7 @@ fn write_hocr_zone(
     line_id: &mut usize,
     word_id: &mut usize,
     indent: usize,
-) -> Result<(), OcrExportError> {
+) -> Result<(), TextSerializeError> {
     let pad = " ".repeat(indent);
     let r = &zone.rect;
     let bbox = format!("bbox {} {} {} {}", r.x, r.y, r.x + r.width, r.y + r.height);
@@ -300,7 +309,7 @@ fn write_hocr_zone(
         TextZoneKind::Word => {
             let id = *word_id;
             *word_id += 1;
-            let text = escape_html(&zone.text);
+            let text = escape_markup(&zone.text);
             writeln!(
                 out,
                 r#"{pad}<span class="ocrx_word" id="word_{page}_{id}" title="{bbox}">{text}</span>"#,
@@ -315,7 +324,12 @@ fn write_hocr_zone(
     Ok(())
 }
 
-fn escape_html(s: &str) -> String {
+/// Escape text for embedding in hOCR (XHTML) or ALTO (XML) markup.
+///
+/// Uses the numeric character reference `&#39;` for the apostrophe rather than
+/// the named `&apos;`: `&#39;` is valid in both XHTML and XML, so one escaper
+/// serves both writers (the two previously disagreed on this single character).
+fn escape_markup(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
             '&' => "&amp;".chars().collect::<Vec<_>>(),
@@ -334,7 +348,7 @@ fn write_alto_zones(
     out: &mut String,
     layer: &TextLayer,
     page_idx: usize,
-) -> Result<(), OcrExportError> {
+) -> Result<(), TextSerializeError> {
     let mut block_id = 0usize;
     let mut line_id = 0usize;
     let mut word_id = 0usize;
@@ -361,7 +375,7 @@ fn write_alto_zone(
     line_id: &mut usize,
     word_id: &mut usize,
     indent: usize,
-) -> Result<(), OcrExportError> {
+) -> Result<(), TextSerializeError> {
     let pad = " ".repeat(indent);
     let r = &zone.rect;
 
@@ -408,7 +422,7 @@ fn write_alto_zone(
         TextZoneKind::Word => {
             let id = *word_id;
             *word_id += 1;
-            let text = escape_xml(&zone.text);
+            let text = escape_markup(&zone.text);
             writeln!(
                 out,
                 r#"{pad}<String ID="word_{page}_{id}" HPOS="{hpos}" VPOS="{vpos}" WIDTH="{w}" HEIGHT="{h}" CONTENT="{text}"/>"#,
@@ -424,17 +438,4 @@ fn write_alto_zone(
         }
     }
     Ok(())
-}
-
-fn escape_xml(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect(),
-            '>' => "&gt;".chars().collect(),
-            '"' => "&quot;".chars().collect(),
-            '\'' => "&apos;".chars().collect(),
-            c => vec![c],
-        })
-        .collect()
 }

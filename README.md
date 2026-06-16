@@ -322,7 +322,7 @@ Library callers can use the same controls with `PageEncoder::with_segment_option
 ## hOCR and ALTO XML export
 
 ```rust
-use djvu_rs::{DjVuDocument, ocr_export::{to_hocr, to_alto, HocrOptions, AltoOptions}};
+use djvu_rs::{DjVuDocument, text_serialize::{to_hocr, to_alto, HocrOptions, AltoOptions}};
 
 let data = std::fs::read("scanned.djvu")?;
 let doc = DjVuDocument::parse(&data)?;
