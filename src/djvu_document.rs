@@ -198,30 +198,14 @@ pub struct DjVuPage {
     shared_djbz: Option<Arc<Vec<u8>>>,
     #[cfg(not(feature = "std"))]
     shared_djbz: Option<Vec<u8>>,
-    /// Lazily decoded BG44 background wavelet image (all chunks).  Used for
-    /// full-resolution and half-resolution renders.  Populated on first use.
+    /// Render-tier cache of this page's decoded layers (background, mask,
+    /// quarter-resolution mask, foreground).  The decode logic and the
+    /// compositor-subsampling concern live in
+    /// [`crate::djvu_render::PageLayers`]; the page only holds the handle so
+    /// repeated renders reuse the decode.  Populated on first render.
     /// Only available when the `std` feature is enabled (`OnceLock` requires std).
     #[cfg(feature = "std")]
-    bg44_decoded: std::sync::OnceLock<Option<Iw44Image>>,
-    /// Lazily decoded BG44 background wavelet image from the first chunk only.
-    /// Used for sub=4 and sub=8 downscaled renders to avoid decoding the
-    /// high-frequency refinement chunks whose detail is invisible at 1/4 scale.
-    #[cfg(feature = "std")]
-    bg44_decoded_partial: std::sync::OnceLock<Option<Iw44Image>>,
-    /// Lazily decoded JB2 foreground mask (Sjbz chunk → full-resolution Bitmap).
-    /// Populated on the first call to `decoded_mask()`.  Subsequent renders at
-    /// any scale reuse the same Bitmap via the compositor's coordinate division.
-    #[cfg(feature = "std")]
-    mask_decoded: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
-    /// Lazily computed 1/4-resolution downsampled mask.  Populated on first call
-    /// to `decoded_mask_sub4()`.  Used by the compositor for sub=4 renders so
-    /// that each output pixel needs only one bit lookup instead of 4–9.
-    #[cfg(feature = "std")]
-    mask_decoded_sub4: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
-    /// Lazily decoded FG44 foreground color image (all FG44 chunks → Pixmap).
-    /// Populated on the first call to `decoded_fg44()`.
-    #[cfg(feature = "std")]
-    fg44_decoded: std::sync::OnceLock<Option<Pixmap>>,
+    render_layers: std::sync::OnceLock<crate::djvu_render::PageLayers>,
     /// Lazily decoded JB2 shared dictionary.  Populated on first use by
     /// `decoded_shared_dict()` and reused on subsequent renders, avoiding
     /// repeated multi-megabyte allocations.
@@ -238,15 +222,7 @@ impl Clone for DjVuPage {
             shared_djbz: self.shared_djbz.clone(),
             // Caches are not cloned — they will be lazily recomputed.
             #[cfg(feature = "std")]
-            bg44_decoded: std::sync::OnceLock::new(),
-            #[cfg(feature = "std")]
-            bg44_decoded_partial: std::sync::OnceLock::new(),
-            #[cfg(feature = "std")]
-            mask_decoded: std::sync::OnceLock::new(),
-            #[cfg(feature = "std")]
-            mask_decoded_sub4: std::sync::OnceLock::new(),
-            #[cfg(feature = "std")]
-            fg44_decoded: std::sync::OnceLock::new(),
+            render_layers: std::sync::OnceLock::new(),
             #[cfg(feature = "std")]
             jb2_dict_decoded: std::sync::OnceLock::new(),
         }
@@ -402,6 +378,17 @@ impl DjVuPage {
         self.find_chunks(b"BG44")
     }
 
+    /// The render-tier layer cache for this page (decoded on first render).
+    ///
+    /// The page holds the handle; the decode logic, the cached forms, and the
+    /// compositor-subsampling concern all live in
+    /// [`crate::djvu_render::PageLayers`].
+    #[cfg(feature = "std")]
+    pub(crate) fn render_layers(&self) -> &crate::djvu_render::PageLayers {
+        self.render_layers
+            .get_or_init(crate::djvu_render::PageLayers::new)
+    }
+
     /// Return the fully decoded BG44 wavelet image, decoding and caching on first call.
     ///
     /// Returns `None` if the page has no BG44 chunks.  On decode error the error
@@ -409,27 +396,14 @@ impl DjVuPage {
     /// path), so this method is infallible.
     ///
     /// The result is computed once (all ZP arithmetic decode + block assembly) and
-    /// then cached inside the page.  Subsequent calls return the cached value
-    /// immediately.  The wavelet inverse-transform and YCbCr→RGB conversion are
-    /// **not** cached; they are applied at each render at the appropriate subsample
-    /// level via [`Iw44Image::to_rgb_subsample`].
+    /// then cached in the page's [`crate::djvu_render::PageLayers`].  Subsequent
+    /// calls return the cached value immediately.  The wavelet inverse-transform
+    /// and YCbCr→RGB conversion are **not** cached; they are applied at each
+    /// render at the appropriate subsample level via
+    /// [`Iw44Image::to_rgb_subsample`].
     #[cfg(feature = "std")]
     pub fn decoded_bg44(&self) -> Option<&Iw44Image> {
-        self.bg44_decoded
-            .get_or_init(|| {
-                let chunks = self.bg44_chunks();
-                if chunks.is_empty() {
-                    return None;
-                }
-                let mut img = Iw44Image::new();
-                for chunk_data in &chunks {
-                    if img.decode_chunk(chunk_data).is_err() {
-                        break;
-                    }
-                }
-                if img.width == 0 { None } else { Some(img) }
-            })
-            .as_ref()
+        self.render_layers().bg44(self)
     }
 
     #[cfg(not(feature = "std"))]
@@ -446,20 +420,7 @@ impl DjVuPage {
     /// Use this instead of [`Self::decoded_bg44`] when `subsample >= 4`.
     #[cfg(feature = "std")]
     pub fn decoded_bg44_partial(&self) -> Option<&Iw44Image> {
-        self.bg44_decoded_partial
-            .get_or_init(|| {
-                let chunks = self.bg44_chunks();
-                if chunks.is_empty() {
-                    return None;
-                }
-                let mut img = Iw44Image::new();
-                // Decode only the first chunk; skip high-frequency refinement.
-                if img.decode_chunk(chunks[0]).is_err() {
-                    return None;
-                }
-                if img.width == 0 { None } else { Some(img) }
-            })
-            .as_ref()
+        self.render_layers().bg44_partial(self)
     }
 
     #[cfg(not(feature = "std"))]
@@ -626,43 +587,19 @@ impl DjVuPage {
 
     /// Return the decoded JB2 mask (Sjbz), decoding and caching on first call.
     ///
-    /// Unlike [`Self::extract_mask`] this method caches the result so that repeated
-    /// renders of the same page — e.g. at different DPI levels — do not re-run
-    /// the ZP arithmetic + symbol decode.
+    /// Unlike [`Self::extract_mask`] this method caches the result (in the
+    /// page's [`crate::djvu_render::PageLayers`]) so that repeated renders of
+    /// the same page — e.g. at different DPI levels — do not re-run the ZP
+    /// arithmetic + symbol decode.
     ///
     /// Returns `None` if the page has no Sjbz chunk or if decoding fails.
     #[cfg(feature = "std")]
     pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
-        self.mask_decoded
-            .get_or_init(|| self.extract_mask().ok().flatten())
-            .as_ref()
+        self.render_layers().mask(self)
     }
 
     #[cfg(not(feature = "std"))]
     pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
-        None
-    }
-
-    /// Return a 1/4-resolution downsampled version of the JB2 mask.
-    ///
-    /// Each bit in the result is 1 if ANY of the corresponding 4×4 block in the
-    /// full-resolution mask is 1 (max-pool downsample).  The compositor can use
-    /// this instead of the full-resolution mask for sub=4 renders, replacing
-    /// 4–9 bit lookups per output pixel with a single lookup.
-    ///
-    /// Computed once and cached alongside `mask_decoded`.
-    #[cfg(feature = "std")]
-    pub fn decoded_mask_sub4(&self) -> Option<&crate::bitmap::Bitmap> {
-        self.mask_decoded_sub4
-            .get_or_init(|| {
-                let src = self.decoded_mask()?;
-                Some(downsample_mask_4x(src))
-            })
-            .as_ref()
-    }
-
-    #[cfg(not(feature = "std"))]
-    pub fn decoded_mask_sub4(&self) -> Option<&crate::bitmap::Bitmap> {
         None
     }
 
@@ -672,9 +609,7 @@ impl DjVuPage {
     /// Returns `None` if the page has no FG44 chunks or if decoding fails.
     #[cfg(feature = "std")]
     pub fn decoded_fg44(&self) -> Option<&Pixmap> {
-        self.fg44_decoded
-            .get_or_init(|| self.extract_foreground().ok().flatten())
-            .as_ref()
+        self.render_layers().fg44(self)
     }
 
     #[cfg(not(feature = "std"))]
@@ -1235,11 +1170,7 @@ fn parse_page_from_chunks(
         chunks: raw_chunks,
         index,
         shared_djbz,
-        bg44_decoded: std::sync::OnceLock::new(),
-        bg44_decoded_partial: std::sync::OnceLock::new(),
-        mask_decoded: std::sync::OnceLock::new(),
-        mask_decoded_sub4: std::sync::OnceLock::new(),
-        fg44_decoded: std::sync::OnceLock::new(),
+        render_layers: std::sync::OnceLock::new(),
         jb2_dict_decoded: std::sync::OnceLock::new(),
     })
 }
@@ -1447,33 +1378,6 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
     core::str::from_utf8(bytes)
         .map(|s| s.to_string())
         .map_err(|_| DocError::InvalidUtf8)
-}
-
-/// Max-pool 4× downsample of a bilevel mask.
-///
-/// Each output pixel is 1 if ANY bit in the corresponding 4×4 block of `src`
-/// is set.  Used by [`DjVuPage::decoded_mask_sub4`] to build the 1/4-resolution
-/// mask cache, which lets the compositor avoid `mask_box_any` for sub=4 renders.
-#[cfg(feature = "std")]
-fn downsample_mask_4x(src: &crate::bitmap::Bitmap) -> crate::bitmap::Bitmap {
-    let out_w = src.width.div_ceil(4);
-    let out_h = src.height.div_ceil(4);
-    let mut out = crate::bitmap::Bitmap::new(out_w, out_h);
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            'outer: for dy in 0..4u32 {
-                for dx in 0..4u32 {
-                    let sx = ox * 4 + dx;
-                    let sy = oy * 4 + dy;
-                    if sx < src.width && sy < src.height && src.get(sx, sy) {
-                        out.set(ox, oy, true);
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 // ---- Tests ------------------------------------------------------------------

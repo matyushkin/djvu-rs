@@ -815,13 +815,160 @@ fn best_iw44_subsample(scale: f32) -> u32 {
     s.min(8)
 }
 
+/// Render-tier cache of a page's decoded layers.
+///
+/// These are the decoded wavelet / bitmap forms the compositor consumes —
+/// background (`bg44`, plus the first-chunk-only `bg44_partial` used at
+/// subsample ≥ 4), the JB2 mask (`mask`), its quarter-resolution max-pool
+/// downsample (`mask_sub4`, a pure compositor concern), and the FG44 colour
+/// layer (`fg44`). They live here in the render tier rather than on
+/// [`DjVuPage`] so the page model stays close to its raw bytes and every
+/// render concern — including compositor subsampling — concentrates in one
+/// place.
+///
+/// Each layer is decoded lazily and cached, so repeated renders of the same
+/// page (e.g. thumbnails then full resolution) reuse the expensive ZP
+/// arithmetic decode. A `DjVuPage` holds one of these behind a `OnceLock`;
+/// the accessors borrow the page only to decode on a cache miss, so the
+/// returned reference is tied to the cache, not the call.
+#[cfg(feature = "std")]
+#[derive(Default)]
+pub struct PageLayers {
+    bg44: std::sync::OnceLock<Option<Iw44Image>>,
+    bg44_partial: std::sync::OnceLock<Option<Iw44Image>>,
+    mask: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
+    mask_sub4: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
+    fg44: std::sync::OnceLock<Option<Pixmap>>,
+}
+
+#[cfg(feature = "std")]
+impl PageLayers {
+    /// An empty cache. Layers are decoded on first access.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The fully decoded BG44 wavelet image (all chunks), decoding on first
+    /// call. `None` when the page has no BG44 chunks. Decode errors are
+    /// swallowed (the partial image so far is kept, matching the permissive
+    /// render path). The wavelet inverse-transform / YCbCr→RGB conversion is
+    /// *not* cached here — it runs per render at the requested subsample.
+    pub fn bg44(&self, page: &DjVuPage) -> Option<&Iw44Image> {
+        self.bg44
+            .get_or_init(|| {
+                let chunks = page.bg44_chunks();
+                if chunks.is_empty() {
+                    return None;
+                }
+                let mut img = Iw44Image::new();
+                for chunk_data in &chunks {
+                    if img.decode_chunk(chunk_data).is_err() {
+                        break;
+                    }
+                }
+                if img.width == 0 { None } else { Some(img) }
+            })
+            .as_ref()
+    }
+
+    /// A partially-decoded BG44 image — first chunk only — decoding on first
+    /// call. Roughly 4× cheaper to decode; used at subsample ≥ 4 where the
+    /// high-frequency refinement chunks are imperceptible.
+    pub fn bg44_partial(&self, page: &DjVuPage) -> Option<&Iw44Image> {
+        self.bg44_partial
+            .get_or_init(|| {
+                let chunks = page.bg44_chunks();
+                if chunks.is_empty() {
+                    return None;
+                }
+                let mut img = Iw44Image::new();
+                if img.decode_chunk(chunks[0]).is_err() {
+                    return None;
+                }
+                if img.width == 0 { None } else { Some(img) }
+            })
+            .as_ref()
+    }
+
+    /// The decoded JB2 / G4 foreground mask, decoding on first call. `None`
+    /// when the page has no mask chunk or decoding fails.
+    pub fn mask(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+        self.mask
+            .get_or_init(|| page.extract_mask().ok().flatten())
+            .as_ref()
+    }
+
+    /// A 1/4-resolution max-pool downsample of the mask, decoding the mask
+    /// first if needed. Each bit is 1 if any bit in the corresponding 4×4
+    /// block is set, letting the compositor do one lookup per output pixel at
+    /// subsample ≥ 4 instead of 4–9. Purely a compositor optimisation, which
+    /// is why it lives in the render tier rather than on the page.
+    pub fn mask_sub4(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+        self.mask_sub4
+            .get_or_init(|| {
+                let src = self.mask(page)?;
+                Some(downsample_mask_4x(src))
+            })
+            .as_ref()
+    }
+
+    /// The decoded FG44 foreground colour layer, decoding on first call.
+    /// `None` when the page has no FG44 chunks or decoding fails.
+    pub fn fg44(&self, page: &DjVuPage) -> Option<&Pixmap> {
+        self.fg44
+            .get_or_init(|| page.extract_foreground().ok().flatten())
+            .as_ref()
+    }
+}
+
+/// Max-pool 4× downsample of a bilevel mask.
+///
+/// Each output pixel is 1 if any bit in the corresponding 4×4 block of `src`
+/// is set. Used by [`PageLayers::mask_sub4`] to build the 1/4-resolution mask
+/// the compositor uses for sub=4 renders instead of `mask_box_any`.
+#[cfg(feature = "std")]
+fn downsample_mask_4x(src: &crate::bitmap::Bitmap) -> crate::bitmap::Bitmap {
+    let out_w = src.width.div_ceil(4);
+    let out_h = src.height.div_ceil(4);
+    let mut out = crate::bitmap::Bitmap::new(out_w, out_h);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            'outer: for dy in 0..4u32 {
+                for dx in 0..4u32 {
+                    let sx = ox * 4 + dx;
+                    let sy = oy * 4 + dy;
+                    if sx < src.width && sy < src.height && src.get(sx, sy) {
+                        out.set(ox, oy, true);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The page's render-tier `mask_sub4` layer, or `None` without `std`.
+///
+/// Wraps the `std`-only [`PageLayers`] cache so the compositor's sub=4 path
+/// compiles identically with and without the `std` feature.
+#[cfg(feature = "std")]
+fn page_mask_sub4(page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+    page.render_layers().mask_sub4(page)
+}
+
+#[cfg(not(feature = "std"))]
+fn page_mask_sub4(_page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+    None
+}
+
 /// Decode background from BG44 chunks up to `max_chunks`.
 ///
 /// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
 /// Use `best_iw44_subsample(opts.scale)` to pick an appropriate value.
 ///
 /// When `max_chunks == usize::MAX`, the decoded wavelet image is fetched from
-/// [`DjVuPage::decoded_bg44`]'s cache, avoiding repeated ZP arithmetic decode.
+/// the page's [`PageLayers`] cache, avoiding repeated ZP arithmetic decode.
 ///
 /// Returns `None` if there are no BG44 chunks.
 /// `max_chunks = usize::MAX` means decode all chunks.
@@ -1550,7 +1697,7 @@ where
 
     let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
     let (ctx_mask, mask_shift) = if use_sub4_mask {
-        (page.decoded_mask_sub4(), 2u32)
+        (page_mask_sub4(page), 2u32)
     } else {
         (mask.as_ref().map(|m| m as &_), 0u32)
     };
@@ -1638,7 +1785,7 @@ pub fn render_into(
     // 4-9 lookups per pixel in the full-res mask).
     let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
     let (ctx_mask, mask_shift) = if use_sub4_mask {
-        (page.decoded_mask_sub4(), 2u32) // sub=4 → shift by 2
+        (page_mask_sub4(page), 2u32) // sub=4 → shift by 2
     } else {
         (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
     };
@@ -3425,6 +3572,36 @@ mod tests {
             page.height() as u32,
             "cached bg44 height must equal page height"
         );
+    }
+
+    /// `downsample_mask_4x` is render-tier logic now testable on a hand-built
+    /// bitmap — no DjVu bytes to parse. Each 4×4 source block collapses to one
+    /// output bit that is set iff any source bit in the block is set.
+    #[test]
+    fn downsample_mask_4x_max_pools_each_block() {
+        // 8×8 mask: set a single pixel in the top-left block and one in the
+        // bottom-right block; the other two blocks stay clear.
+        let mut src = crate::bitmap::Bitmap::new(8, 8);
+        src.set(1, 2, true); // top-left 4×4 block
+        src.set(6, 5, true); // bottom-right 4×4 block
+        let out = downsample_mask_4x(&src);
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(out.get(0, 0), "top-left block had a set bit");
+        assert!(!out.get(1, 0), "top-right block was empty");
+        assert!(!out.get(0, 1), "bottom-left block was empty");
+        assert!(out.get(1, 1), "bottom-right block had a set bit");
+    }
+
+    /// A non-multiple-of-4 mask rounds up: a 5×5 source yields a 2×2 result and
+    /// the ragged edge block still max-pools its single column/row.
+    #[test]
+    fn downsample_mask_4x_rounds_up_ragged_edges() {
+        let mut src = crate::bitmap::Bitmap::new(5, 5);
+        src.set(4, 4, true); // lone pixel in the ragged bottom-right block
+        let out = downsample_mask_4x(&src);
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(out.get(1, 1), "ragged corner block must capture its bit");
+        assert!(!out.get(0, 0));
     }
 
     /// `render_region` applies page rotation the same way as `render_pixmap`.
