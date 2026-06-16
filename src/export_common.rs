@@ -84,6 +84,71 @@ pub(crate) fn rgba_row_to_rgb(dst: &mut Vec<u8>, rgba_row: &[u8]) {
     }
 }
 
+/// Render `page` at `opts` and hand each RGBA scanline to `row_cb`, streaming
+/// straight from the compositor when [`RenderOptions::can_stream`] allows it and
+/// falling back to a fully-allocated pixmap (walked row by row) otherwise.
+///
+/// This is the single home for the "stream when streamable, else render a pixmap
+/// and walk its rows" decision the raster exporters share. PDF and EPUB both
+/// build a full buffer from the rows; TIFF keeps its own strip-incremental
+/// encoder loop (it streams into the TIFF writer, not into a `Vec`), so it does
+/// not route through here. Centralizing it means a streamable page can never be
+/// silently full-allocated in one exporter but streamed in another.
+///
+/// `#[allow(dead_code)]`: only the `pdf`/`epub`-gated exporters call it, so
+/// builds without those features compile it unused.
+///
+/// [`RenderOptions::can_stream`](crate::djvu_render::RenderOptions::can_stream)
+#[allow(dead_code)]
+pub(crate) fn render_rows_or_pixmap(
+    page: &DjVuPage,
+    opts: &crate::djvu_render::RenderOptions,
+    mut row_cb: impl FnMut(&[u8]),
+) -> Result<(), crate::djvu_render::RenderError> {
+    if opts.can_stream(page) {
+        crate::djvu_render::render_streaming(page, opts, |_, rgba_row| row_cb(rgba_row))
+    } else {
+        let pixmap = crate::djvu_render::render_pixmap(page, opts)?;
+        let stride = pixmap.width as usize * 4;
+        if stride > 0 {
+            for row in pixmap.data.chunks_exact(stride) {
+                row_cb(row);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parse a DjVu bookmark URL to a 0-based target page index, if it points
+/// inside the document.
+///
+/// Handles the union of internal-link spellings the PDF and EPUB outline writers
+/// each parsed on their own — and disagreed on: `#page=N`, `#page_N`, `#pageN`
+/// (all 1-based), a bare `#N`, and the `#+N` / `#-N` relative forms (resolved as
+/// 1-based absolute, matching the long-standing PDF behavior). Returns `None`
+/// for external URLs, bare anchors, and anything unparseable, leaving the caller
+/// to decide how those render.
+///
+/// `#[allow(dead_code)]`: only the `pdf`/`epub`-gated exporters call it.
+#[allow(dead_code)]
+pub(crate) fn bookmark_page_index(url: &str) -> Option<usize> {
+    let frag = url.strip_prefix('#')?;
+    if let Some(rest) = frag.strip_prefix("page") {
+        let digits = rest
+            .strip_prefix('=')
+            .or_else(|| rest.strip_prefix('_'))
+            .unwrap_or(rest)
+            .trim();
+        if let Ok(n) = digits.parse::<usize>() {
+            return Some(n.saturating_sub(1));
+        }
+    }
+    if let Ok(n) = frag.trim().parse::<i64>() {
+        return Some((n.max(1) - 1) as usize);
+    }
+    None
+}
+
 /// A leaf text span: a `Word` or `Character` zone with non-empty text.
 ///
 /// Borrows from the source [`TextLayer`]; `rect` is in top-left-origin pixels

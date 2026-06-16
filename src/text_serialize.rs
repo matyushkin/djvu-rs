@@ -109,13 +109,9 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSer
 
     for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
-        let pw = page.width() as u32;
-        let ph = page.height() as u32;
-        let page_dpi = page.dpi() as u32;
-        let (out_w, out_h) = if let Some(target_dpi) = opts.dpi {
-            (pw * target_dpi / page_dpi, ph * target_dpi / page_dpi)
-        } else {
-            (pw, ph)
+        let (out_w, out_h) = match opts.dpi {
+            Some(target_dpi) => crate::export_common::size_at_dpi(page, target_dpi as f32),
+            None => (page.width() as u32, page.height() as u32),
         };
 
         // bbox for the full page
@@ -180,13 +176,9 @@ pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, TextSer
 
     for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
-        let pw = page.width() as u32;
-        let ph = page.height() as u32;
-        let page_dpi = page.dpi() as u32;
-        let (out_w, out_h) = if let Some(target_dpi) = opts.dpi {
-            (pw * target_dpi / page_dpi, ph * target_dpi / page_dpi)
-        } else {
-            (pw, ph)
+        let (out_w, out_h) = match opts.dpi {
+            Some(target_dpi) => crate::export_common::size_at_dpi(page, target_dpi as f32),
+            None => (page.width() as u32, page.height() as u32),
         };
 
         writeln!(
