@@ -957,11 +957,6 @@ fn page_mask_sub4(page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
     page.render_layers().mask_sub4(page)
 }
 
-#[cfg(not(feature = "std"))]
-fn page_mask_sub4(_page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
-    None
-}
-
 /// Decode background from BG44 chunks up to `max_chunks`.
 ///
 /// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
@@ -1157,24 +1152,11 @@ fn decode_layers(
         fg44 = decode_fg44(page).ok().flatten();
     } else {
         bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
-        fg_palette = decode_fg_palette_full(page)?;
-        let indexed_result = if fg_palette.is_some() {
-            decode_mask_indexed(page)?
-        } else {
-            None
-        };
-        if let Some((bm, bm_map)) = indexed_result {
-            mask = Some(bm);
-            blit_map = Some(bm_map);
-        } else {
-            mask = if fg_palette.is_none() {
-                decode_mask(page)?
-            } else {
-                None
-            };
-            blit_map = None;
-        }
-        fg44 = decode_fg44(page)?;
+        let fg = decode_foreground_strict(page)?;
+        fg_palette = fg.fg_palette;
+        mask = fg.mask;
+        blit_map = fg.blit_map;
+        fg44 = fg.fg44;
     }
 
     let mask = if opts.bold > 0 {
@@ -1185,6 +1167,42 @@ fn decode_layers(
 
     Ok(DecodedLayers {
         bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    })
+}
+
+/// The foreground layers (mask + blit map, FGbz palette, FG44 colour) decoded in
+/// strict mode, *before* any bold dilation.
+struct ForegroundLayers {
+    fg_palette: Option<FgbzPalette>,
+    mask: Option<crate::bitmap::Bitmap>,
+    blit_map: Option<Vec<i32>>,
+    fg44: Option<Pixmap>,
+}
+
+/// Strict-mode decode of a page's foreground layers, shared by the full
+/// [`decode_layers`] path and [`render_progressive`] (which decodes a partial
+/// background but the same foreground).
+///
+/// Owns the "indexed mask when an FGbz palette is present, plain mask
+/// otherwise" decision so the two callers cannot drift apart. Bold dilation is
+/// applied by the caller, since `decode_layers` shares one dilation step across
+/// its permissive and strict branches.
+fn decode_foreground_strict(page: &DjVuPage) -> Result<ForegroundLayers, RenderError> {
+    let fg_palette = decode_fg_palette_full(page)?;
+    let (mask, blit_map) = if fg_palette.is_some() {
+        match decode_mask_indexed(page)? {
+            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
+            None => (None, None),
+        }
+    } else {
+        (decode_mask(page)?, None)
+    };
+    let fg44 = decode_fg44(page)?;
+    Ok(ForegroundLayers {
         fg_palette,
         mask,
         blit_map,
@@ -1312,6 +1330,95 @@ struct CompositeContext<'a> {
     out_w: u32,
     /// Output height (may be smaller than opts.height for region renders).
     out_h: u32,
+}
+
+impl<'a> CompositeContext<'a> {
+    /// Build a composite context from already-decoded layers.
+    ///
+    /// This is the single home for the per-render wiring that was copy-pasted
+    /// across all five render entry points: the q24 cell-pitch arithmetic (where
+    /// the #199 BG/FG alignment fix lives), the page-dimension lookup, and the
+    /// gamma-LUT / offset / output-size plumbing. Callers decode their layers
+    /// (full or partial background, optionally sub-4 mask) and hand them here so
+    /// a q24 / offset / gamma bug can only ever be fixed in one place.
+    ///
+    /// The `(mask, mask_shift)` pair is passed in rather than derived because it
+    /// legitimately varies per entry point — the full-page paths swap in the
+    /// 1/4-resolution mask via [`resolve_sub4_mask`], while region / coarse /
+    /// progressive renders always composite against the full-resolution mask.
+    #[allow(clippy::too_many_arguments)]
+    fn from_layers(
+        page: &DjVuPage,
+        opts: &'a RenderOptions,
+        bg: Option<&'a Pixmap>,
+        mask: Option<&'a crate::bitmap::Bitmap>,
+        mask_shift: u32,
+        fg_palette: Option<&'a FgbzPalette>,
+        blit_map: Option<&'a [i32]>,
+        fg44: Option<&'a Pixmap>,
+        gamma_lut: &'a [u8; 256],
+        offset: (u32, u32),
+        out: (u32, u32),
+    ) -> Self {
+        let page_w = page.width() as u32;
+        let page_h = page.height() as u32;
+        let (fg_x_q24, fg_y_q24) = fg_q24(fg44, page_w, page_h);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg, page_w, page_h);
+        CompositeContext {
+            opts,
+            page_w,
+            page_h,
+            bg,
+            bg_x_q24,
+            bg_y_q24,
+            mask,
+            mask_shift,
+            fg_palette,
+            blit_map,
+            fg44,
+            fg_x_q24,
+            fg_y_q24,
+            gamma_lut,
+            offset_x: offset.0,
+            offset_y: offset.1,
+            out_w: out.0,
+            out_h: out.1,
+        }
+    }
+}
+
+/// Pick the mask plane and shift for a full-page composite.
+///
+/// At background subsample ≥ 4 (and only when no bold dilation or FGbz palette
+/// is in play, since those need full-resolution lookups) the compositor reads a
+/// pre-downsampled 1/4-resolution mask — one bit lookup per output pixel instead
+/// of 4–9. The returned shift is `mask_sub.trailing_zeros()` (2 for the 1/4-res
+/// mask, 0 for the full-res mask). This is the single home for that decision,
+/// previously copy-pasted into `render_rows` and `render_into`.
+#[cfg(feature = "std")]
+fn resolve_sub4_mask<'a>(
+    page: &'a DjVuPage,
+    bg_subsample: u32,
+    opts: &RenderOptions,
+    full_mask: Option<&'a crate::bitmap::Bitmap>,
+    fg_palette: Option<&FgbzPalette>,
+) -> (Option<&'a crate::bitmap::Bitmap>, u32) {
+    if bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none() {
+        (page_mask_sub4(page), 2)
+    } else {
+        (full_mask, 0)
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn resolve_sub4_mask<'a>(
+    _page: &'a DjVuPage,
+    _bg_subsample: u32,
+    _opts: &RenderOptions,
+    full_mask: Option<&'a crate::bitmap::Bitmap>,
+    _fg_palette: Option<&FgbzPalette>,
+) -> (Option<&'a crate::bitmap::Bitmap>, u32) {
+    (full_mask, 0)
 }
 
 /// Look up the palette color for a foreground pixel at (px, py).
@@ -1695,37 +1802,21 @@ where
         fg44,
     } = decode_layers(page, opts, bg_subsample)?;
 
-    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
-    let (ctx_mask, mask_shift) = if use_sub4_mask {
-        (page_mask_sub4(page), 2u32)
-    } else {
-        (mask.as_ref().map(|m| m as &_), 0u32)
-    };
-
-    let page_w = page.width() as u32;
-    let page_h = page.height() as u32;
-    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
-    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
-    let ctx = CompositeContext {
+    let (ctx_mask, mask_shift) =
+        resolve_sub4_mask(page, bg_subsample, opts, mask.as_ref(), fg_palette.as_ref());
+    let ctx = CompositeContext::from_layers(
+        page,
         opts,
-        page_w,
-        page_h,
-        bg: bg.as_ref(),
-        bg_x_q24,
-        bg_y_q24,
-        mask: ctx_mask,
+        bg.as_ref(),
+        ctx_mask,
         mask_shift,
-        fg_palette: fg_palette.as_ref(),
-        blit_map: blit_map.as_deref(),
-        fg44: fg44.as_ref(),
-        fg_x_q24,
-        fg_y_q24,
-        gamma_lut: &gamma_lut,
-        offset_x: 0,
-        offset_y: 0,
-        out_w: w,
-        out_h: h,
-    };
+        fg_palette.as_ref(),
+        blit_map.as_deref(),
+        fg44.as_ref(),
+        &gamma_lut,
+        (0, 0),
+        (w, h),
+    );
     composite_rows(&ctx, sink)
 }
 
@@ -1783,37 +1874,21 @@ pub fn render_into(
 
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
-    let use_sub4_mask = bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none();
-    let (ctx_mask, mask_shift) = if use_sub4_mask {
-        (page_mask_sub4(page), 2u32) // sub=4 → shift by 2
-    } else {
-        (mask.as_ref().map(|m| m as &_), 0u32) // sub=1 → shift by 0
-    };
-
-    let page_w = page.width() as u32;
-    let page_h = page.height() as u32;
-    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
-    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
-    let ctx = CompositeContext {
+    let (ctx_mask, mask_shift) =
+        resolve_sub4_mask(page, bg_subsample, opts, mask.as_ref(), fg_palette.as_ref());
+    let ctx = CompositeContext::from_layers(
+        page,
         opts,
-        page_w,
-        page_h,
-        bg: bg.as_ref(),
-        bg_x_q24,
-        bg_y_q24,
-        mask: ctx_mask,
+        bg.as_ref(),
+        ctx_mask,
         mask_shift,
-        fg_palette: fg_palette.as_ref(),
-        blit_map: blit_map.as_deref(),
-        fg44: fg44.as_ref(),
-        fg_x_q24,
-        fg_y_q24,
-        gamma_lut: &gamma_lut,
-        offset_x: 0,
-        offset_y: 0,
-        out_w: w,
-        out_h: h,
-    };
+        fg_palette.as_ref(),
+        blit_map.as_deref(),
+        fg44.as_ref(),
+        &gamma_lut,
+        (0, 0),
+        (w, h),
+    );
     composite_into(&ctx, buf)?;
 
     Ok(())
@@ -2053,30 +2128,19 @@ pub fn render_region(
         height: full_h,
         ..*opts
     };
-    let page_w = page.width() as u32;
-    let page_h = page.height() as u32;
-    let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
-    let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
-    let ctx = CompositeContext {
-        opts: &region_opts,
-        page_w,
-        page_h,
-        bg: bg.as_ref(),
-        bg_x_q24,
-        bg_y_q24,
-        mask: mask.as_ref(),
-        mask_shift: 0,
-        fg_palette: fg_palette.as_ref(),
-        blit_map: blit_map.as_deref(),
-        fg44: fg44.as_ref(),
-        fg_x_q24,
-        fg_y_q24,
-        gamma_lut: &gamma_lut,
-        offset_x: region.x,
-        offset_y: region.y,
-        out_w,
-        out_h,
-    };
+    let ctx = CompositeContext::from_layers(
+        page,
+        &region_opts,
+        bg.as_ref(),
+        mask.as_ref(),
+        0,
+        fg_palette.as_ref(),
+        blit_map.as_deref(),
+        fg44.as_ref(),
+        &gamma_lut,
+        (region.x, region.y),
+        (out_w, out_h),
+    );
     composite_into(&ctx, &mut pm.data)?;
 
     // Shared Lanczos-3 post-pass: scaling is judged against the full render
@@ -2170,29 +2234,19 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
     let mut pm = Pixmap::white(w, h);
 
     {
-        let page_w = page.width() as u32;
-        let page_h = page.height() as u32;
-        let (bg_x_q24, bg_y_q24) = bg_q24(Some(&bg), page_w, page_h);
-        let ctx = CompositeContext {
+        let ctx = CompositeContext::from_layers(
+            page,
             opts,
-            page_w,
-            page_h,
-            bg: Some(&bg),
-            bg_x_q24,
-            bg_y_q24,
-            mask: None,
-            mask_shift: 0,
-            fg_palette: None,
-            blit_map: None,
-            fg44: None,
-            fg_x_q24: 0,
-            fg_y_q24: 0,
-            gamma_lut: &gamma_lut,
-            offset_x: 0,
-            offset_y: 0,
-            out_w: w,
-            out_h: h,
-        };
+            Some(&bg),
+            None,
+            0,
+            None,
+            None,
+            None,
+            &gamma_lut,
+            (0, 0),
+            (w, h),
+        );
         composite_into(&ctx, &mut pm.data)?;
     }
 
@@ -2242,50 +2296,34 @@ pub fn render_progressive(
     // Decode background up to chunk_n + 1 chunks
     let bg_subsample = best_iw44_subsample(opts.scale);
     let bg = decode_background_chunks(page, chunk_n + 1, bg_subsample)?;
-    let fg_palette = decode_fg_palette_full(page)?;
 
-    let (mask, blit_map) = if fg_palette.is_some() {
-        match decode_mask_indexed(page)? {
-            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
-            None => (None, None),
-        }
-    } else {
-        (decode_mask(page)?, None)
-    };
-
+    // Same strict foreground decode as the full render; only the background
+    // (capped at `chunk_n + 1` chunks) differs.
+    let fg = decode_foreground_strict(page)?;
+    let fg_palette = fg.fg_palette;
+    let blit_map = fg.blit_map;
+    let fg44 = fg.fg44;
     let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
+        fg.mask.map(|m| m.dilate_n(opts.bold as u32))
     } else {
-        mask
+        fg.mask
     };
-    let fg44 = decode_fg44(page)?;
 
     let mut pm = Pixmap::white(w, h);
     {
-        let page_w = page.width() as u32;
-        let page_h = page.height() as u32;
-        let (fg_x_q24, fg_y_q24) = fg_q24(fg44.as_ref(), page_w, page_h);
-        let (bg_x_q24, bg_y_q24) = bg_q24(bg.as_ref(), page_w, page_h);
-        let ctx = CompositeContext {
+        let ctx = CompositeContext::from_layers(
+            page,
             opts,
-            page_w,
-            page_h,
-            bg: bg.as_ref(),
-            bg_x_q24,
-            bg_y_q24,
-            mask: mask.as_ref(),
-            mask_shift: 0,
-            fg_palette: fg_palette.as_ref(),
-            blit_map: blit_map.as_deref(),
-            fg44: fg44.as_ref(),
-            fg_x_q24,
-            fg_y_q24,
-            gamma_lut: &gamma_lut,
-            offset_x: 0,
-            offset_y: 0,
-            out_w: w,
-            out_h: h,
-        };
+            bg.as_ref(),
+            mask.as_ref(),
+            0,
+            fg_palette.as_ref(),
+            blit_map.as_deref(),
+            fg44.as_ref(),
+            &gamma_lut,
+            (0, 0),
+            (w, h),
+        );
         composite_into(&ctx, &mut pm.data)?;
     }
 
