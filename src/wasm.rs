@@ -421,7 +421,7 @@ mod native_tests {
     fn wasm_bg44_chunk_count_color_page() {
         let bytes = boy_bytes();
         let doc = DjVuDocument::parse(&bytes).unwrap();
-        assert!(doc.page(0).unwrap().bg44_chunks().len() > 0);
+        assert!(!doc.page(0).unwrap().bg44_chunks().is_empty());
     }
 
     /// render_progressive with chunk_n = 0 succeeds and returns correct pixel count.

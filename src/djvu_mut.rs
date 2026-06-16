@@ -708,43 +708,26 @@ fn emit_patched_single_page(root: &Chunk, original: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(b"DJVU");
+    // Untouched children pass through verbatim (their original padded bytes);
+    // edited leaves are re-framed. The IFF framing — header, padding, FORM
+    // length — lives in `iff::partial_emit`, so this path can't drift from the
+    // canonical emitter.
+    let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(children.len());
     for (child, original_child) in children.iter().zip(original_children.iter()) {
         match child {
             Chunk::Leaf { id, data }
                 if id == &original_child.id && data == &original_child.data =>
             {
-                payload.extend_from_slice(&original[original_child.range.clone()]);
+                parts.push(iff::EmitPart::Verbatim(
+                    &original[original_child.range.clone()],
+                ));
             }
-            Chunk::Leaf { .. } => emit_leaf_chunk(child, &mut payload),
+            Chunk::Leaf { .. } => parts.push(iff::EmitPart::Chunk(child)),
             Chunk::Form { .. } => return None,
         }
     }
 
-    let len = u32::try_from(payload.len()).ok()?;
-    let mut out = Vec::with_capacity(12 + payload.len() + (payload.len() & 1));
-    out.extend_from_slice(b"AT&T");
-    out.extend_from_slice(b"FORM");
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(&payload);
-    if (8 + payload.len()) & 1 == 1 {
-        out.push(0);
-    }
-    Some(out)
-}
-
-fn emit_leaf_chunk(chunk: &Chunk, out: &mut Vec<u8>) {
-    let Chunk::Leaf { id, data } = chunk else {
-        unreachable!("caller passes leaf chunks only")
-    };
-    let len = data.len() as u32;
-    out.extend_from_slice(id);
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(data);
-    if (8 + data.len()) & 1 == 1 {
-        out.push(0);
-    }
+    iff::partial_emit(*secondary_id, &parts)
 }
 
 fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChildRange>> {
@@ -796,30 +779,6 @@ fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChil
     Some(ranges)
 }
 
-/// Compute the byte length the chunk will occupy when emitted by [`iff::emit`]:
-/// 8-byte chunk header + payload + word-alignment padding.
-///
-/// For `FORM` chunks the payload is recomputed recursively (4 bytes for
-/// secondary_id + sum of children's emitted sizes), to mirror what
-/// [`iff::emit`] writes after a tree mutation.
-fn emitted_chunk_size(chunk: &Chunk) -> usize {
-    match chunk {
-        Chunk::Form {
-            secondary_id: _,
-            children,
-            ..
-        } => {
-            let payload: usize = 4 + children.iter().map(emitted_chunk_size).sum::<usize>();
-            let total = 8 + payload;
-            total + (total & 1)
-        }
-        Chunk::Leaf { data, .. } => {
-            let total = 8 + data.len();
-            total + (total & 1)
-        }
-    }
-}
-
 /// Recompute the absolute byte offsets stored in the `DIRM` chunk so they
 /// point at each `FORM:DJVU`/`FORM:DJVI` component in the about-to-be-emitted
 /// document.
@@ -867,7 +826,7 @@ fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
             }
             _ => {}
         }
-        pos += emitted_chunk_size(child);
+        pos += iff::emitted_size(child);
     }
 
     let Some(dirm_idx) = dirm_idx else {
