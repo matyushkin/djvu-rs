@@ -225,6 +225,12 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
     ];
 
     let mut group = c.benchmark_group("render_native_stages");
+    // Diagnostic stage breakdown — used when actively optimizing a stage, not as
+    // the per-PR regression gate. Reduced sampling keeps PR bench time tractable;
+    // the end-to-end render benches carry the regression signal at full fidelity.
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
 
     for (label, filename) in cases {
         let path = corpus_path().join(filename);
@@ -349,6 +355,10 @@ fn bench_render_compositor_only(c: &mut Criterion) {
     ];
 
     let mut group = c.benchmark_group("render_compositor_only");
+    // Diagnostic compositor baseline — reduced sampling (see render_native_stages).
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
 
     for (label, path, scale) in cases {
         let data = match std::fs::read(&path) {
@@ -650,6 +660,10 @@ fn bench_render_colorbook_stages(c: &mut Criterion) {
     let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
 
     let mut group = c.benchmark_group("render_colorbook_stages");
+    // Diagnostic stage breakdown — reduced sampling (see render_native_stages).
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
 
     // Stage 1: full render (reference)
     group.bench_function("full_render", |b| {
