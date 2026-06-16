@@ -103,12 +103,17 @@ std::fs::write("scan.tiff", tiff_bytes)?;
 
 Requires the `async` feature flag: `djvu-rs = { version = "…", features = ["async"] }`.
 
+The render entry points are synchronous and CPU-bound; run them on the
+blocking thread pool with `tokio::task::spawn_blocking` so they stay off the
+async runtime. The render error type stays the typed `RenderError` — there is
+no wrapper enum.
+
 ```rust
-use djvu_rs::{DjVuDocument, djvu_render::RenderOptions, djvu_async::render_pixmap_async};
+use djvu_rs::{DjVuDocument, djvu_render::{self, RenderOptions}};
 
 let data = std::fs::read("file.djvu")?;
 let doc = DjVuDocument::parse(&data)?;
-let page = doc.page(0)?;
+let page = doc.page(0)?.clone();
 
 let target_dpi = 150u32;
 let opts = RenderOptions {
@@ -116,14 +121,20 @@ let opts = RenderOptions {
     height: ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
     ..Default::default()
 };
-let pixmap = render_pixmap_async(page, opts).await?;
+let pixmap = tokio::task::spawn_blocking(move || {
+    djvu_render::render_pixmap(&page, &opts)
+})
+.await??; // outer `?`: join error (panic); inner `?`: RenderError
 ```
+
+For progressive (per-BG44-chunk) rendering, `djvu_async::render_progressive_stream`
+yields a `Stream` of frames, each produced on the blocking pool.
 
 ## Lazy async loading
 
-Requires the `async` feature flag. Unlike `load_document_async`, the lazy
-loader keeps a seekable async reader and fetches page/component byte ranges
-only when `page_async(i)` is called. Parsed pages are cached as `Arc<DjVuPage>`.
+Requires the `async` feature flag. The lazy loader keeps a seekable async
+reader and fetches page/component byte ranges only when `page_async(i)` is
+called. Parsed pages are cached as `Arc<DjVuPage>`.
 
 ```rust
 use djvu_rs::djvu_async::from_async_reader_lazy;
