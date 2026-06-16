@@ -1247,7 +1247,9 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
 
     for (oy, row) in rows.enumerate() {
         if downscale {
-            composite_rows_area_avg_one(ctx, oy as u32, fx_step, fy_step, bg_fx_step, bg_fy_step, row);
+            composite_rows_area_avg_one(
+                ctx, oy as u32, fx_step, fy_step, bg_fx_step, bg_fy_step, row,
+            );
         } else {
             composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
         }
