@@ -388,7 +388,7 @@ impl DjVuPage {
     /// path), so this method is infallible.
     ///
     /// The result is computed once (all ZP arithmetic decode + block assembly) and
-    /// then cached in the page's [`crate::djvu_render::PageLayers`].  Subsequent
+    /// then cached in the page's render-tier layer cache.  Subsequent
     /// calls return the cached value immediately.  The wavelet inverse-transform
     /// and YCbCr→RGB conversion are **not** cached; they are applied at each
     /// render at the appropriate subsample level via
@@ -426,7 +426,7 @@ impl DjVuPage {
     /// The result is computed once and then cached so that repeated renders
     /// do not re-decode the dictionary each time.
     #[cfg(feature = "std")]
-    pub fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
+    pub(crate) fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
         self.jb2_dict_decoded
             .get_or_init(|| {
                 let djbz = self.shared_djbz.as_deref()?;
@@ -436,7 +436,7 @@ impl DjVuPage {
     }
 
     #[cfg(not(feature = "std"))]
-    pub fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
+    pub(crate) fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
         None
     }
 
@@ -586,12 +586,12 @@ impl DjVuPage {
     ///
     /// Returns `None` if the page has no Sjbz chunk or if decoding fails.
     #[cfg(feature = "std")]
-    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+    pub(crate) fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
         self.render_layers().mask(self)
     }
 
     #[cfg(not(feature = "std"))]
-    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+    pub(crate) fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
         None
     }
 
@@ -600,12 +600,12 @@ impl DjVuPage {
     ///
     /// Returns `None` if the page has no FG44 chunks or if decoding fails.
     #[cfg(feature = "std")]
-    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
+    pub(crate) fn decoded_fg44(&self) -> Option<&Pixmap> {
         self.render_layers().fg44(self)
     }
 
     #[cfg(not(feature = "std"))]
-    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
+    pub(crate) fn decoded_fg44(&self) -> Option<&Pixmap> {
         None
     }
 
