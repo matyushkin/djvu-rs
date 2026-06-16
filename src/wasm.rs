@@ -33,9 +33,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     djvu_document::DjVuDocument,
-    djvu_render::{
-        RenderOptions, Resampling, UserRotation, render_coarse, render_pixmap, render_progressive,
-    },
+    djvu_render::{render_coarse, render_progressive},
 };
 
 // ── WasmDocument ─────────────────────────────────────────────────────────────
@@ -54,7 +52,7 @@ impl WasmDocument {
     ///
     /// Throws a JavaScript `Error` if the bytes are not a valid DjVu file.
     pub fn from_bytes(data: &[u8]) -> Result<WasmDocument, JsError> {
-        let doc = DjVuDocument::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
+        let doc = crate::foreign::open(data).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmDocument {
             inner: Arc::new(doc),
         })
@@ -95,10 +93,7 @@ pub struct WasmPage {
 impl WasmPage {
     /// Native DPI stored in the INFO chunk.
     pub fn dpi(&self) -> u32 {
-        self.doc
-            .page(self.index)
-            .map(|p| p.dpi() as u32)
-            .unwrap_or(300)
+        crate::foreign::page_dpi(&self.doc, self.index).unwrap_or(300)
     }
 
     /// Output width in pixels when rendered at `target_dpi`.
@@ -122,11 +117,7 @@ impl WasmPage {
     /// Returns `undefined` (JS `None`) if the page has no text layer.
     /// Throws a JavaScript `Error` on decode failure.
     pub fn text(&self) -> Result<Option<String>, JsError> {
-        let page = self
-            .doc
-            .page(self.index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        page.text().map_err(|e| JsError::new(&e.to_string()))
+        crate::foreign::text(&self.doc, self.index).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Return text zone data for this page, scaled to match a render at `target_dpi`.
@@ -139,9 +130,7 @@ impl WasmPage {
     /// Returns `null` if the page has no text layer.
     /// Throws a JavaScript `Error` on decode failure.
     pub fn text_zones_json(&self, target_dpi: u32) -> Result<Option<String>, JsError> {
-        let page = self
-            .doc
-            .page(self.index)
+        let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         let (render_w, render_h) = crate::export_common::size_at_dpi(page, target_dpi as f32);
@@ -186,12 +175,10 @@ impl WasmPage {
         &self,
         target_dpi: u32,
     ) -> Result<Option<js_sys::Uint8ClampedArray>, JsError> {
-        let page = self
-            .doc
-            .page(self.index)
+        let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        let opts = render_opts_for_dpi(page, target_dpi);
+        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
         let pm = render_coarse(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(pm.map(|p| {
             let arr = js_sys::Uint8ClampedArray::new_with_length(p.data.len() as u32);
@@ -217,12 +204,10 @@ impl WasmPage {
         target_dpi: u32,
         chunk_n: u32,
     ) -> Result<js_sys::Uint8ClampedArray, JsError> {
-        let page = self
-            .doc
-            .page(self.index)
+        let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        let opts = render_opts_for_dpi(page, target_dpi);
+        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
         let pm = render_progressive(page, &opts, chunk_n as usize)
             .map_err(|e| JsError::new(&e.to_string()))?;
         let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
@@ -235,13 +220,8 @@ impl WasmPage {
     ///
     /// Throws on decode error.
     pub fn render(&self, target_dpi: u32) -> Result<js_sys::Uint8ClampedArray, JsError> {
-        let page = self
-            .doc
-            .page(self.index)
+        let pm = crate::foreign::render_at_dpi(&self.doc, self.index, target_dpi as f32)
             .map_err(|e| JsError::new(&e.to_string()))?;
-
-        let opts = render_opts_for_dpi(page, target_dpi);
-        let pm = render_pixmap(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
         // Allocate a new JS-side Uint8ClampedArray and copy the RGBA bytes
         // into it.  Using `Uint8ClampedArray::from(&[u8])` (which creates a
         // view into WASM linear memory) causes incorrect `length` values in
@@ -250,27 +230,6 @@ impl WasmPage {
         let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
         arr.copy_from(&pm.data);
         Ok(arr)
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Build [`RenderOptions`] for a given page and target DPI.
-///
-/// AA is disabled so `pixels.length == width_at(dpi) * height_at(dpi) * 4`
-/// always holds (see [`WasmPage::render`] for details).
-fn render_opts_for_dpi(page: &crate::djvu_document::DjVuPage, target_dpi: u32) -> RenderOptions {
-    let scale = crate::export_common::scale_at_dpi(page, target_dpi as f32);
-    let (w, h) = crate::export_common::size_at_dpi(page, target_dpi as f32);
-    RenderOptions {
-        width: w,
-        height: h,
-        scale,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: true,
-        resampling: Resampling::Bilinear,
     }
 }
 
@@ -335,6 +294,7 @@ fn json_escape_into(s: &str, buf: &mut String) {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+    use crate::djvu_render::{RenderOptions, Resampling, UserRotation, render_pixmap};
 
     fn boy_bytes() -> Vec<u8> {
         // boy.djvu: 192×256 px, 300 dpi, color IW44.
@@ -409,7 +369,7 @@ mod native_tests {
         let scale = 150_f32 / page.dpi() as f32;
         let w = ((page.width() as f32 * scale).round() as u32).max(1);
         let h = ((page.height() as f32 * scale).round() as u32).max(1);
-        let opts = render_opts_for_dpi(page, 150);
+        let opts = crate::foreign::render_opts_for_dpi(page, 150.0);
         let result = render_coarse(page, &opts).expect("render_coarse failed");
         // boy.djvu has BG44 chunks — coarse result must be Some
         let pm = result.expect("expected Some for color page");
@@ -433,7 +393,7 @@ mod native_tests {
         let scale = 150_f32 / page.dpi() as f32;
         let w = ((page.width() as f32 * scale).round() as u32).max(1);
         let h = ((page.height() as f32 * scale).round() as u32).max(1);
-        let opts = render_opts_for_dpi(page, 150);
+        let opts = crate::foreign::render_opts_for_dpi(page, 150.0);
         let pm = render_progressive(page, &opts, 0).expect("render_progressive failed");
         assert_eq!(pm.data.len(), (w * h * 4) as usize);
     }
