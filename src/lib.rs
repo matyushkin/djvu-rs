@@ -259,13 +259,23 @@ pub mod djvu_async;
 #[cfg(feature = "image")]
 pub mod image_compat;
 
-/// hOCR and ALTO XML export for the text layer.
+/// hOCR and ALTO XML serialization for the text layer.
 ///
-/// Key functions: [`ocr_export::to_hocr`], [`ocr_export::to_alto`].
-/// Key types: [`ocr_export::HocrOptions`], [`ocr_export::AltoOptions`],
-/// [`ocr_export::OcrExportError`].
+/// This serializes an existing text layer; it does **not** run OCR (see the
+/// [`ocr`] cluster for recognition).
+///
+/// Key functions: [`text_serialize::to_hocr`], [`text_serialize::to_alto`].
+/// Key types: [`text_serialize::HocrOptions`], [`text_serialize::AltoOptions`],
+/// [`text_serialize::TextSerializeError`].
 #[cfg(feature = "std")]
-pub mod ocr_export;
+pub mod text_serialize;
+
+/// Deprecated alias for [`text_serialize`], which was renamed to separate
+/// text-layer serialization from OCR recognition. Prefer `text_serialize`.
+#[cfg(feature = "std")]
+#[deprecated(since = "0.21.0", note = "renamed to `text_serialize`")]
+#[doc(hidden)]
+pub use crate::text_serialize as ocr_export;
 
 /// Pluggable OCR backend trait and error types.
 ///
