@@ -125,8 +125,7 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
 ) -> Result<(), TiffError> {
     let mut encoder = TiffEncoder::new(writer)?;
 
-    let count = doc.page_count();
-    for i in 0..count {
+    for i in crate::export_common::page_indices(doc, None) {
         let page = doc.page(i)?;
         match opts.mode {
             TiffMode::Color => write_color_page(&mut encoder, page, opts.scale)?,

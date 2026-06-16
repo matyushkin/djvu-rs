@@ -23,7 +23,7 @@ use std::io::Write;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    annotation::{MapArea, Shape},
+    annotation::MapArea,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{RenderError, RenderOptions},
 };
@@ -118,7 +118,7 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
 
     // 3. Per-page content
     let page_count = doc.page_count();
-    for i in 0..page_count {
+    for i in crate::export_common::page_indices(doc, None) {
         let page = doc.page(i)?;
         write_page(&mut zip, page, i, opts)?;
     }
@@ -265,7 +265,7 @@ fn build_text_overlay(page: &DjVuPage, pw: u32, ph: u32) -> Vec<(f32, f32, f32, 
     for span in crate::export_common::word_spans(&text_layer) {
         let r = span.rect;
         let x = r.x as f32 / pw as f32 * 100.0;
-        let y = crate::export_common::flip_y_bottom(ph, r) as f32 / ph as f32 * 100.0;
+        let y = crate::export_common::flip_y_bottom(ph, r.y, r.height) as f32 / ph as f32 * 100.0;
         let w = r.width as f32 / pw as f32 * 100.0;
         let h = r.height as f32 / ph as f32 * 100.0;
         if w > 0.0 && h > 0.0 {
@@ -361,48 +361,19 @@ body { margin: 0; padding: 0; }
 
 /// Convert a `MapArea` shape to CSS percentage coordinates `(left, top, width, height)`.
 ///
-/// Returns `None` for unsupported or degenerate shapes.
-/// DjVu annotation y is bottom-left origin; the result is flipped for CSS.
+/// Returns `None` for empty or degenerate (zero-area) shapes. The bounding box
+/// and that skip are the shared [`crate::export_common::shape_bbox`]; here we
+/// only scale into page percentages and flip the bottom-left-origin box to a
+/// CSS top offset via [`crate::export_common::flip_y_bottom`] — the same flip
+/// the text overlay uses.
 fn map_area_to_css(ma: &MapArea, pw: u32, ph: u32) -> Option<(f32, f32, f32, f32)> {
-    let rect = match &ma.shape {
-        Shape::Rect(r) | Shape::Oval(r) | Shape::Text(r) => r,
-        Shape::Poly(pts) => {
-            // Bounding box of polygon
-            let (min_x, min_y, max_x, max_y) = pts.iter().fold(
-                (u32::MAX, u32::MAX, 0u32, 0u32),
-                |(mnx, mny, mxx, mxy), &(px, py)| {
-                    (mnx.min(px), mny.min(py), mxx.max(px), mxy.max(py))
-                },
-            );
-            if max_x <= min_x || max_y <= min_y {
-                return None;
-            }
-            let w = max_x - min_x;
-            let h = max_y - min_y;
-            let x = (min_x as f32 / pw as f32) * 100.0;
-            let y = (ph.saturating_sub(max_y) as f32 / ph as f32) * 100.0;
-            let ww = (w as f32 / pw as f32) * 100.0;
-            let hh = (h as f32 / ph as f32) * 100.0;
-            return Some((x, y, ww, hh));
-        }
-        Shape::Line(x1, y1, x2, y2) => {
-            let min_x = (*x1).min(*x2);
-            let _min_y = (*y1).min(*y2);
-            let max_y = (*y1).max(*y2);
-            let w = ((*x1 as i64 - *x2 as i64).unsigned_abs() as u32).max(1);
-            let h = ((*y1 as i64 - *y2 as i64).unsigned_abs() as u32).max(1);
-            let x = (min_x as f32 / pw as f32) * 100.0;
-            let y = (ph.saturating_sub(max_y + h) as f32 / ph as f32) * 100.0;
-            let ww = (w as f32 / pw as f32) * 100.0;
-            let hh = (h as f32 / ph as f32) * 100.0;
-            return Some((x, y, ww, hh));
-        }
-    };
-    if rect.width == 0 || rect.height == 0 || pw == 0 || ph == 0 {
+    if pw == 0 || ph == 0 {
         return None;
     }
+    let rect = crate::export_common::shape_bbox(&ma.shape)?;
     let x = (rect.x as f32 / pw as f32) * 100.0;
-    let y = (ph.saturating_sub(rect.y + rect.height) as f32 / ph as f32) * 100.0;
+    let y =
+        (crate::export_common::flip_y_bottom(ph, rect.y, rect.height) as f32 / ph as f32) * 100.0;
     let ww = (rect.width as f32 / pw as f32) * 100.0;
     let hh = (rect.height as f32 / ph as f32) * 100.0;
     Some((x, y, ww, hh))
