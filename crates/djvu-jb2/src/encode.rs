@@ -1604,6 +1604,58 @@ mod tests {
         assert!(!encoded.is_empty());
     }
 
+    /// Regression for the JB2 post-EOF guard wrongly rejecting valid pages
+    /// (email report, 2026-06; companion to the IW44 early-exit bug).
+    ///
+    /// `encode_jb2` tiles at 1024 rows, row-major. These images pack a
+    /// high-entropy first tile (rows 0..1024) that drains the ZP byte buffer,
+    /// followed by **multiple** solid trailing tiles (rows ≥1024). After the
+    /// first solid tile consumes the last real bytes, a later solid tile's
+    /// header (a large, >4096px symbol) is read while `zp.is_exhausted()` is
+    /// already true — but it decodes correctly from the ~4 bytes of ZP
+    /// look-ahead. The previous `is_exhausted() && pixels > 4096` guard
+    /// returned `Truncated` here; the `synthetic_bytes()` guard does not,
+    /// because no synthetic `0xFF` padding has actually been consumed yet.
+    ///
+    /// Verified to fail (decode returns `Err(Truncated)` for 2100/3100) if the
+    /// guard is reverted to `is_exhausted()`.
+    #[test]
+    fn large_symbol_at_eof_not_wrongly_truncated() {
+        for &h in &[2100u32, 3100] {
+            let w = 200u32;
+            let src = make_bitmap(w, h, |x, y| {
+                if y < 1024 {
+                    // First tile: well-mixed hash with no spatial correlation,
+                    // so JB2's 10-bit context model can't compress it — this is
+                    // what actually drains the byte buffer.
+                    let mut s = x
+                        .wrapping_mul(374761393)
+                        .wrapping_add(y.wrapping_mul(668265263));
+                    s = (s ^ (s >> 13)).wrapping_mul(1274126177);
+                    (s ^ (s >> 16)) & 1 == 0
+                } else {
+                    // Solid trailing tiles: tiny compressed, large decoded.
+                    true
+                }
+            });
+            let encoded = encode_jb2(&src);
+            let decoded = jb2::decode(&encoded, None)
+                .unwrap_or_else(|e| panic!("{w}x{h} valid page wrongly rejected: {e:?}"));
+            assert_eq!((decoded.width, decoded.height), (w, h));
+            // Full pixel-exact verification: the page must decode in its
+            // entirety (every tile), not be truncated mid-stream.
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(
+                        decoded.get(x, y),
+                        src.get(x, y),
+                        "{w}x{h} pixel mismatch at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn zero_dimension_returns_empty() {
         assert!(encode_jb2(&Bitmap::new(0, 0)).is_empty());
