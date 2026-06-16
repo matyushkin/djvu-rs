@@ -19,7 +19,7 @@
 //! [`RenderOptions::can_stream`](crate::djvu_render::RenderOptions::can_stream)
 //! in the render module, where callers ask instead of re-deriving the rule.
 
-use crate::djvu_document::DjVuDocument;
+use crate::djvu_document::{DjVuDocument, DjVuPage};
 use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 
 /// Iterate the page indices to export: just page `only` when `Some`, otherwise
@@ -47,6 +47,41 @@ pub(crate) fn scaled_size(w: u32, h: u32, scale: f32) -> (u32, u32) {
     let sw = ((w as f32 * scale).round() as u32).max(1);
     let sh = ((h as f32 * scale).round() as u32).max(1);
     (sw, sh)
+}
+
+/// Pixel scale factor to render `page` at `target_dpi`, relative to the page's
+/// native DPI.
+///
+/// This is the first half of the export sizing idiom that every raster exporter
+/// and binding re-derived: `target_dpi / page.dpi()`. The page DPI is clamped to
+/// at least 1 so a degenerate `0`-DPI INFO chunk can never produce a non-finite
+/// scale.
+pub(crate) fn scale_at_dpi(page: &DjVuPage, target_dpi: f32) -> f32 {
+    target_dpi / page.dpi().max(1) as f32
+}
+
+/// Pixel `(width, height)` of `page` rendered at `target_dpi`.
+///
+/// The whole sizing idiom in one place: derive the scale from the two DPIs, then
+/// round-and-clamp via [`scaled_size`]. Exporters that also need the render-time
+/// `scale` (to populate [`RenderOptions`](crate::djvu_render::RenderOptions))
+/// pair this with [`scale_at_dpi`].
+pub(crate) fn size_at_dpi(page: &DjVuPage, target_dpi: f32) -> (u32, u32) {
+    scaled_size(
+        page.width() as u32,
+        page.height() as u32,
+        scale_at_dpi(page, target_dpi),
+    )
+}
+
+/// Append the RGB bytes of one RGBA scanline to `dst`, dropping the alpha.
+///
+/// The per-row strip both the PDF and TIFF streaming encoders build from their
+/// [`render_streaming`](crate::djvu_render::render_streaming) callback.
+pub(crate) fn rgba_row_to_rgb(dst: &mut Vec<u8>, rgba_row: &[u8]) {
+    for rgba in rgba_row.chunks_exact(4) {
+        dst.extend_from_slice(&rgba[..3]);
+    }
 }
 
 /// A leaf text span: a `Word` or `Character` zone with non-empty text.

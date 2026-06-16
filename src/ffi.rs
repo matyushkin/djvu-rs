@@ -260,10 +260,7 @@ pub unsafe extern "C" fn djvu_page_render(
         }
         let doc = unsafe { &(*doc).inner };
         let p = doc.page(page).map_err(|e| format!("{e}"))?;
-        let native_dpi = p.dpi() as f32;
-        let scale = dpi / native_dpi;
-        let w = ((p.width() as f32 * scale).round() as u32).max(1);
-        let h = ((p.height() as f32 * scale).round() as u32).max(1);
+        let (w, h) = p.size_at_dpi(dpi);
         let pixmap = p.render_to_size(w, h).map_err(|e| format!("{e}"))?;
         Ok(Box::into_raw(Box::new(DjvuPixmap { inner: pixmap })))
     }));

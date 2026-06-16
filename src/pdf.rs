@@ -195,12 +195,13 @@ fn px_to_pt(px: f32, dpi: f32) -> f32 {
 ///
 /// Returns `(render_w, render_h)` in pixels. When `output_dpi == 0` the native
 /// page resolution is returned unchanged.
-fn render_dims(native_w: u32, native_h: u32, native_dpi: f32, output_dpi: u32) -> (u32, u32) {
+fn render_dims(page: &DjVuPage, output_dpi: u32) -> (u32, u32) {
+    let native_dpi = page.dpi().max(1) as f32;
+    // PDF never upscales: a zero or above-native target DPI keeps native pixels.
     if output_dpi == 0 || output_dpi as f32 >= native_dpi {
-        return (native_w, native_h);
+        return (page.width() as u32, page.height() as u32);
     }
-    let scale = output_dpi as f32 / native_dpi;
-    crate::export_common::scaled_size(native_w, native_h, scale)
+    crate::export_common::size_at_dpi(page, output_dpi as f32)
 }
 
 /// Pre-rendered page data — all expensive compute done, ready for sequential PDF emit.
@@ -247,7 +248,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         let mask = collect_mask_stream(page);
         (mask, None)
     } else {
-        let (rw, rh) = render_dims(pw, ph, dpi, opts.output_dpi);
+        let (rw, rh) = render_dims(page, opts.output_dpi);
         let render_opts = RenderOptions {
             width: rw,
             height: rh,
@@ -298,9 +299,7 @@ fn render_rgb_for_pdf(
     if opts.can_stream(page) {
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
         djvu_render::render_streaming(page, opts, |_, rgba_row| {
-            for rgba in rgba_row.chunks_exact(4) {
-                rgb.extend_from_slice(&rgba[..3]);
-            }
+            crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
         })?;
         Ok(rgb)
     } else {
@@ -1266,12 +1265,7 @@ mod tests {
     fn pdf_rgb_streaming_matches_pixmap_rgb() {
         let doc = load_doc("boy.djvu");
         let page = doc.page(0).unwrap();
-        let (rw, rh) = render_dims(
-            page.width() as u32,
-            page.height() as u32,
-            page.dpi().max(1) as f32,
-            PdfOptions::default().output_dpi,
-        );
+        let (rw, rh) = render_dims(page, PdfOptions::default().output_dpi);
         let opts = RenderOptions {
             width: rw,
             height: rh,
