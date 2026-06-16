@@ -2,46 +2,40 @@
 //!
 //! Feature-gated: `--features async` (adds `tokio` as a dependency).
 //!
-//! All rendering is delegated to [`tokio::task::spawn_blocking`]: the CPU-bound
-//! IW44/JB2 decode work runs on the blocking thread pool and never blocks the
-//! async runtime thread.
+//! ## Rendering off the async runtime
 //!
-//! [`DjVuPage`] implements [`Clone`], so the page is cloned into the blocking
-//! closure with no unsafe code and no thread management by the caller.
-//!
-//! ## Key public functions
-//!
-//! - [`render_pixmap_async`] — async wrapper around [`djvu_render::render_pixmap`]
-//! - [`render_gray8_async`] — async wrapper around [`djvu_render::render_gray8`]
-//! - [`render_progressive_stream`] — streaming progressive render yielding one frame per BG44 chunk
-//!
-//! ## Example: concurrent multi-page rendering
+//! The sync render entry points ([`djvu_render::render_pixmap`],
+//! [`djvu_render::render_gray8`]) are CPU-bound IW44/JB2 decode work. To keep
+//! them off the async runtime thread, call them inside
+//! [`tokio::task::spawn_blocking`]. [`DjVuPage`] implements [`Clone`], so the
+//! page moves into the blocking closure with no unsafe code:
 //!
 //! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use djvu_rs::djvu_document::DjVuDocument;
-//! use djvu_rs::djvu_render::RenderOptions;
-//! use djvu_rs::djvu_async::render_pixmap_async;
+//! use djvu_rs::djvu_render::{self, RenderOptions};
 //!
-//! #[tokio::main]
-//! async fn main() {
-//!     let data = std::fs::read("document.djvu").unwrap();
-//!     let doc = std::sync::Arc::new(DjVuDocument::parse(&data).unwrap());
+//! let data = std::fs::read("file.djvu")?;
+//! let doc = DjVuDocument::parse(&data)?;
+//! let page = doc.page(0)?.clone();
+//! let opts = RenderOptions { width: 800, height: 600, ..Default::default() };
 //!
-//!     let futures: Vec<_> = (0..doc.page_count())
-//!         .filter_map(|i| doc.page(i).ok())
-//!         .map(|page| {
-//!             let page = page.clone();
-//!             let opts = RenderOptions { width: 800, height: 600, ..Default::default() };
-//!             tokio::spawn(async move { render_pixmap_async(&page, opts).await })
-//!         })
-//!         .collect();
-//!
-//!     for handle in futures {
-//!         let pixmap = handle.await.unwrap().unwrap();
-//!         println!("{}×{}", pixmap.width, pixmap.height);
-//!     }
-//! }
+//! let pixmap = tokio::task::spawn_blocking(move || {
+//!     djvu_render::render_pixmap(&page, &opts)
+//! })
+//! .await??; // outer `?`: join error (panic); inner `?`: RenderError
+//! println!("{}×{}", pixmap.width, pixmap.height);
+//! # Ok(()) }
 //! ```
+//!
+//! The render error type stays the typed [`djvu_render::RenderError`] — there
+//! is no wrapper enum to unwrap.
+//!
+//! ## Key public abstractions
+//!
+//! - [`LazyDocument`] — seek-based lazy indexing with a concurrent per-page cache
+//! - [`render_progressive_stream`] — streaming progressive render yielding one frame per BG44 chunk
+//! - [`load_document_async_streaming`] — head-first async loader exposing per-page byte ranges
 
 use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
@@ -56,7 +50,7 @@ use crate::{
     djvu_render::{self, RenderError, RenderOptions},
     error::IffError,
     iff::parse_form,
-    pixmap::{GrayPixmap, Pixmap},
+    pixmap::Pixmap,
 };
 
 // ── Error types ───────────────────────────────────────────────────────────────
@@ -358,39 +352,6 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
 
 // ── Async document loader ─────────────────────────────────────────────────────
 
-/// Asynchronously load and parse a DjVu document from any [`AsyncRead`].
-///
-/// **Phase 1 of #196.** Convenience constructor that buffers the full reader
-/// into memory before handing the bytes to [`DjVuDocument::parse`]. Memory
-/// still peaks at full file size, but removes the synchronous `std::fs::read`
-/// boundary at the call site — works directly with async file readers, HTTP
-/// body streams, S3 GetObject, etc.
-///
-/// Phases 2/3 will add genuine streaming: Phase 2 reads only the IFF
-/// header and DIRM up front and exposes per-page byte offsets; Phase 3
-/// makes [`DjVuDocument::page`] async and fetches each page's bytes on
-/// demand (HTTP Range requests, etc.).
-///
-/// # Example
-///
-/// ```no_run
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// use djvu_rs::djvu_async::load_document_async;
-///
-/// let data = std::fs::read("document.djvu")?;
-/// let doc = load_document_async(std::io::Cursor::new(data)).await?;
-/// println!("loaded {} pages", doc.page_count());
-/// # Ok(()) }
-/// ```
-pub async fn load_document_async<R>(mut reader: R) -> Result<DjVuDocument, AsyncLoadError>
-where
-    R: AsyncRead + Unpin + Send,
-{
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
-    Ok(DjVuDocument::parse(&buf)?)
-}
-
 /// Async loader that reads the IFF + FORM + DIRM head separately from the
 /// page bodies (#196 Phase 2).
 ///
@@ -462,56 +423,6 @@ where
 }
 
 // ── Async render functions ────────────────────────────────────────────────────
-
-/// Render `page` to an RGBA [`Pixmap`] asynchronously.
-///
-/// Clones the page and delegates to [`djvu_render::render_pixmap`] via
-/// [`tokio::task::spawn_blocking`]. The render runs on the blocking thread
-/// pool and does not block the async runtime.
-///
-/// # Example
-///
-/// ```no_run
-/// # async fn example() {
-/// use djvu_rs::djvu_document::DjVuDocument;
-/// use djvu_rs::djvu_render::RenderOptions;
-/// use djvu_rs::djvu_async::render_pixmap_async;
-///
-/// let data = std::fs::read("file.djvu").unwrap();
-/// let doc = DjVuDocument::parse(&data).unwrap();
-/// let page = doc.page(0).unwrap();
-/// let opts = RenderOptions { width: 400, height: 300, ..Default::default() };
-/// let pixmap = render_pixmap_async(page, opts).await.unwrap();
-/// println!("{}×{}", pixmap.width, pixmap.height);
-/// # }
-/// ```
-pub async fn render_pixmap_async(
-    page: &DjVuPage,
-    opts: RenderOptions,
-) -> Result<Pixmap, AsyncRenderError> {
-    let page = Arc::new(page.clone());
-    tokio::task::spawn_blocking(move || {
-        djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
-    })
-    .await
-    .map_err(|e| AsyncRenderError::Join(e.to_string()))?
-}
-
-/// Render `page` to an 8-bit grayscale [`GrayPixmap`] asynchronously.
-///
-/// Clones the page and delegates to [`djvu_render::render_gray8`] via
-/// [`tokio::task::spawn_blocking`].
-pub async fn render_gray8_async(
-    page: &DjVuPage,
-    opts: RenderOptions,
-) -> Result<GrayPixmap, AsyncRenderError> {
-    let page = Arc::new(page.clone());
-    tokio::task::spawn_blocking(move || {
-        djvu_render::render_gray8(&page, &opts).map_err(AsyncRenderError::Render)
-    })
-    .await
-    .map_err(|e| AsyncRenderError::Join(e.to_string()))?
-}
 
 /// Render a `DjVuPage` as a lazy progressive stream of [`Pixmap`] frames.
 ///
@@ -591,50 +502,10 @@ mod tests {
         DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// `render_pixmap_async` returns a pixmap with correct dimensions.
+    /// Rendering inside `spawn_blocking` (the documented caller pattern)
+    /// produces a pixmap identical to a direct sync render.
     #[tokio::test]
-    async fn render_pixmap_async_correct_dims() {
-        let doc = load_doc("chicken.djvu");
-        let page = doc.page(0).unwrap();
-        let pw = page.width() as u32;
-        let ph = page.height() as u32;
-
-        let opts = RenderOptions {
-            width: pw,
-            height: ph,
-            ..Default::default()
-        };
-        let pm = render_pixmap_async(page, opts)
-            .await
-            .expect("async render must succeed");
-        assert_eq!(pm.width, pw);
-        assert_eq!(pm.height, ph);
-    }
-
-    /// `render_gray8_async` returns a grayscale pixmap with the right size.
-    #[tokio::test]
-    async fn render_gray8_async_correct_dims() {
-        let doc = load_doc("chicken.djvu");
-        let page = doc.page(0).unwrap();
-        let pw = page.width() as u32;
-        let ph = page.height() as u32;
-
-        let opts = RenderOptions {
-            width: pw,
-            height: ph,
-            ..Default::default()
-        };
-        let gm = render_gray8_async(page, opts)
-            .await
-            .expect("async gray render must succeed");
-        assert_eq!(gm.width, pw);
-        assert_eq!(gm.height, ph);
-        assert_eq!(gm.data.len(), (pw * ph) as usize);
-    }
-
-    /// Async and sync renders produce identical results.
-    #[tokio::test]
-    async fn async_matches_sync() {
+    async fn spawn_blocking_render_matches_sync() {
         let doc = load_doc("chicken.djvu");
         let page = doc.page(0).unwrap();
         let pw = page.width() as u32;
@@ -646,47 +517,22 @@ mod tests {
             ..Default::default()
         };
         let sync_pm = djvu_render::render_pixmap(page, &opts).expect("sync render must succeed");
-        let async_pm = render_pixmap_async(page, opts.clone())
-            .await
-            .expect("async render must succeed");
 
+        let blocking_page = page.clone();
+        let blocking_opts = opts.clone();
+        let async_pm = tokio::task::spawn_blocking(move || {
+            djvu_render::render_pixmap(&blocking_page, &blocking_opts)
+        })
+        .await
+        .expect("spawn_blocking must not panic")
+        .expect("render must succeed");
+
+        assert_eq!(async_pm.width, pw);
+        assert_eq!(async_pm.height, ph);
         assert_eq!(
             sync_pm.data, async_pm.data,
-            "async and sync renders must match"
+            "spawn_blocking and sync renders must match"
         );
-    }
-
-    /// Concurrent rendering of multiple instances of the same page succeeds.
-    #[tokio::test]
-    async fn concurrent_render_multiple_tasks() {
-        let doc = load_doc("chicken.djvu");
-        let page = doc.page(0).unwrap();
-        let pw = page.width() as u32;
-        let ph = page.height() as u32;
-        let opts = RenderOptions {
-            width: pw / 2,
-            height: ph / 2,
-            scale: 0.5,
-            ..Default::default()
-        };
-
-        // Spawn 4 concurrent renders of the same page.
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let page_clone = page.clone();
-                let opts_clone = opts.clone();
-                tokio::spawn(async move { render_pixmap_async(&page_clone, opts_clone).await })
-            })
-            .collect();
-
-        for handle in handles {
-            let pm = handle
-                .await
-                .expect("task must not panic")
-                .expect("render must succeed");
-            assert_eq!(pm.width, pw / 2);
-            assert_eq!(pm.height, ph / 2);
-        }
     }
 
     /// `AsyncRenderError::Render` wraps `RenderError`.
@@ -766,14 +612,14 @@ mod tests {
         );
     }
 
-    // ── load_document_async tests ────────────────────────────────────────────
+    // ── load_document_async_streaming tests ──────────────────────────────────
 
-    /// `load_document_async` over an async reader matches `DjVuDocument::parse`.
+    /// The streaming loader over an async reader matches `DjVuDocument::parse`.
     #[tokio::test]
-    async fn load_document_async_matches_sync_parse() {
+    async fn streaming_loader_matches_sync_parse() {
         let path = assets_path().join("chicken.djvu");
         let sync_data = std::fs::read(&path).expect("sync read must succeed");
-        let async_doc = load_document_async(std::io::Cursor::new(sync_data.clone()))
+        let async_doc = load_document_async_streaming(std::io::Cursor::new(sync_data.clone()))
             .await
             .expect("async load must succeed");
         let sync_doc = DjVuDocument::parse(&sync_data).expect("sync parse must succeed");
@@ -787,26 +633,12 @@ mod tests {
         }
     }
 
-    /// `load_document_async` works with an in-memory `&[u8]` reader (e.g. HTTP body).
-    #[tokio::test]
-    async fn load_document_async_from_in_memory_reader() {
-        let path = assets_path().join("chicken.djvu");
-        let bytes = std::fs::read(&path).expect("read");
-
-        // `&[u8]` implements AsyncRead via tokio's blanket impl on slices.
-        let reader = std::io::Cursor::new(bytes.clone());
-        let doc = load_document_async(reader)
-            .await
-            .expect("async load from cursor must succeed");
-        assert!(doc.page_count() > 0);
-    }
-
     /// Truncated / non-DjVu bytes surface as `AsyncLoadError::Parse`, not panic.
     #[tokio::test]
-    async fn load_document_async_propagates_parse_error() {
+    async fn streaming_loader_propagates_parse_error() {
         let bogus = b"not a djvu file at all".to_vec();
         let reader = std::io::Cursor::new(bogus);
-        let err = load_document_async(reader)
+        let err = load_document_async_streaming(reader)
             .await
             .expect_err("must fail to parse garbage");
         assert!(
@@ -1018,7 +850,7 @@ mod tests {
 
     /// I/O failure surfaces as `AsyncLoadError::Io`, not panic.
     #[tokio::test]
-    async fn load_document_async_propagates_io_error() {
+    async fn streaming_loader_propagates_io_error() {
         struct FailingReader;
         impl tokio::io::AsyncRead for FailingReader {
             fn poll_read(
@@ -1029,7 +861,7 @@ mod tests {
                 std::task::Poll::Ready(Err(std::io::Error::other("simulated I/O failure")))
             }
         }
-        let err = load_document_async(FailingReader)
+        let err = load_document_async_streaming(FailingReader)
             .await
             .expect_err("must fail on I/O error");
         assert!(
