@@ -37,6 +37,28 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Detect whether a change touches the AVX2/SIMD hot paths. The x86-64-v3
+  # validation job below is only meaningful when iw44 SIMD code changes, so we
+  # skip it on PRs that don't — most refactors never touch these files, and
+  # running it there is ~5.5 min of compute and an irrelevant red/green check.
+  detect:
+    name: Detect SIMD-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      simd: ${{ steps.filter.outputs.simd }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            simd:
+              - 'src/iw44_new.rs'
+              - 'src/iw44_encode.rs'
+              - 'benches/codecs.rs'
+              - 'benches/render.rs'
+              - '.github/workflows/bench.yml'
+
   bench:
     name: Benchmark
     # Single platform for reproducible comparisons.
@@ -182,6 +204,12 @@ jobs:
   bench-x86-64-v3:
     name: Benchmark (x86-64-v3 AVX2 validation)
     runs-on: ubuntu-latest
+    needs: detect
+    # Always run on main / tags / manual dispatch (keep the validation current).
+    # On PRs, run only when iw44/SIMD files actually changed — see `detect`.
+    if: >
+      github.event_name != 'pull_request' ||
+      needs.detect.outputs.simd == 'true'
 
     permissions:
       pull-requests: write
