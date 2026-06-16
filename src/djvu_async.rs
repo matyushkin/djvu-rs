@@ -565,30 +565,21 @@ pub fn render_progressive_stream(
     // Single clone wrapped in Arc — all spawn_blocking closures share
     // this one allocation instead of cloning the full page each time.
     let page = Arc::new(page.clone());
-    let n_chunks = page.bg44_chunks().len();
+    // The "max(1, bg44 chunks)" frame count and the per-frame coarse/progressive
+    // choice live in the render module; the stream just drives the step index.
+    let steps = djvu_render::progressive_steps(&page);
 
     async_stream::stream! {
-        if n_chunks == 0 {
+        for step in 0..steps {
             let page = Arc::clone(&page);
             let opts = opts.clone();
             let result = tokio::task::spawn_blocking(move || {
-                djvu_render::render_pixmap(&page, &opts).map_err(AsyncRenderError::Render)
+                djvu_render::render_progressive_step(&page, &opts, step)
+                    .map_err(AsyncRenderError::Render)
             })
             .await
             .map_err(|e| AsyncRenderError::Join(e.to_string()));
             yield result.and_then(|r| r);
-        } else {
-            for chunk_n in 0..n_chunks {
-                let page = Arc::clone(&page);
-                let opts = opts.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    djvu_render::render_progressive(&page, &opts, chunk_n)
-                        .map_err(AsyncRenderError::Render)
-                })
-                .await
-                .map_err(|e| AsyncRenderError::Join(e.to_string()));
-                yield result.and_then(|r| r);
-            }
         }
     }
 }
