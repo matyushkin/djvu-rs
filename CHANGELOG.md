@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0](https://github.com/matyushkin/djvu-rs/compare/v0.19.1...v0.20.0) (2026-06-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **render:** `Page::render_aa` drops its ignored `_boldness` parameter, and six redundant `Page` render methods are deprecated in favor of `render_with` and `RenderOptions::fit_to_*`.
+
+### Features
+
+* **mut:** indirect DJVM rebundling + explicit external-file rewrite plan ([6df6e79](https://github.com/matyushkin/djvu-rs/commit/6df6e79a0252701e57c73f947008e83ef2e99b87))
+
+
+### Bug Fixes
+
+* **examples:** construct Jb2EncodeOptions with ..Default::default() ([cb864f7](https://github.com/matyushkin/djvu-rs/commit/cb864f786eb0d89d8733bcec50fc96e90caf81b4))
+* **examples:** restore encode_quality_jb2 build after Jb2EncodeOptions gained a field ([7b4f8f2](https://github.com/matyushkin/djvu-rs/commit/7b4f8f2bfc62cc8adbec2957946a38cd3c430186))
+* repair main CI — pyo3 advisory bump + broken jb2 example ([c1fc322](https://github.com/matyushkin/djvu-rs/commit/c1fc3229cb9d87b47c53e1c84895fcb385e19951))
+
+
+### Code Refactoring
+
+* **render:** shrink the Page render interface and seal internal duplication ([#346](https://github.com/matyushkin/djvu-rs/issues/346)) ([21fabd2](https://github.com/matyushkin/djvu-rs/commit/21fabd29ade6ff83830ed45ae226778902305507))
+
 ## [0.19.1](https://github.com/matyushkin/djvu-rs/compare/v0.19.0...v0.19.1) (2026-06-09)
 
 
