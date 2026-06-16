@@ -24,6 +24,7 @@
 
 use crate::bzz_encode::bzz_encode;
 use crate::bzz_new::bzz_decode;
+use crate::chunk_encode::EncodeError;
 use crate::error::DjVuError;
 
 /// One palette entry (24-bit RGB).
@@ -37,20 +38,22 @@ pub struct FgbzColor {
 /// Encode an FGbz chunk payload from a palette and optional per-blit
 /// index table.
 ///
-/// Panics if `palette.len() > 65 535` or `indices.map(len) > 2²⁴ − 1`
-/// (both are wire-format limits).
-pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Vec<u8> {
-    assert!(
-        palette.len() <= u16::MAX as usize,
-        "FGbz palette size {} exceeds wire-format limit 65535",
-        palette.len()
-    );
-    if let Some(idx) = indices {
-        assert!(
-            idx.len() < (1usize << 24),
-            "FGbz index count {} exceeds wire-format limit 2^24 - 1",
-            idx.len()
-        );
+/// # Errors
+///
+/// - [`EncodeError::PaletteOverflow`] if `palette.len() > 65 535`.
+/// - [`EncodeError::IndexCountOverflow`] if `indices.map(len) ≥ 2²⁴`.
+///
+/// Both are wire-format limits; this replaces the previous `assert!` panic.
+pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Result<Vec<u8>, EncodeError> {
+    if palette.len() > u16::MAX as usize {
+        return Err(EncodeError::PaletteOverflow {
+            found: palette.len(),
+        });
+    }
+    if let Some(idx) = indices
+        && idx.len() >= (1usize << 24)
+    {
+        return Err(EncodeError::IndexCountOverflow { found: idx.len() });
     }
 
     let cap = 3 + palette.len() * 3 + indices.map_or(0, |i| 3 + i.len() * 2);
@@ -78,7 +81,7 @@ pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Vec<u8> {
         out.extend_from_slice(&bzz_encode(&raw));
     }
 
-    out
+    Ok(out)
 }
 
 /// Decode an FGbz chunk payload.
@@ -146,7 +149,7 @@ mod tests {
 
     #[test]
     fn empty_palette_no_indices() {
-        let bytes = encode_fgbz(&[], None);
+        let bytes = encode_fgbz(&[], None).unwrap();
         assert_eq!(bytes, [0x00, 0x00, 0x00]);
         let (colors, idx) = decode_fgbz(&bytes).unwrap();
         assert!(colors.is_empty());
@@ -167,7 +170,7 @@ mod tests {
                 b: 0xcc,
             },
         ];
-        let bytes = encode_fgbz(&palette, None);
+        let bytes = encode_fgbz(&palette, None).unwrap();
         // version=0, n=0x0002, then BGR triples
         assert_eq!(
             bytes,
@@ -178,8 +181,8 @@ mod tests {
     #[test]
     fn version_byte_signals_index_presence() {
         let palette = [FgbzColor { r: 1, g: 2, b: 3 }];
-        let with_idx = encode_fgbz(&palette, Some(&[0]));
-        let without_idx = encode_fgbz(&palette, None);
+        let with_idx = encode_fgbz(&palette, Some(&[0])).unwrap();
+        let without_idx = encode_fgbz(&palette, None).unwrap();
         assert_eq!(with_idx[0] & 0x80, 0x80);
         assert_eq!(without_idx[0] & 0x80, 0x00);
     }
@@ -193,7 +196,7 @@ mod tests {
                 b: (i * 7) as u8,
             })
             .collect();
-        let bytes = encode_fgbz(&palette, None);
+        let bytes = encode_fgbz(&palette, None).unwrap();
         let (decoded, idx) = decode_fgbz(&bytes).unwrap();
         assert_eq!(decoded, palette);
         assert!(idx.is_empty());
@@ -207,7 +210,7 @@ mod tests {
             FgbzColor { r: 0, g: 0, b: 255 },
         ];
         let indices: Vec<i16> = (0..1000).map(|i| (i % 3) as i16).collect();
-        let bytes = encode_fgbz(&palette, Some(&indices));
+        let bytes = encode_fgbz(&palette, Some(&indices)).unwrap();
         let (dp, di) = decode_fgbz(&bytes).unwrap();
         assert_eq!(dp.as_slice(), palette.as_slice());
         assert_eq!(di, indices);
@@ -219,7 +222,7 @@ mod tests {
         // by encoders to mean "no palette entry / transparent".
         let palette = [FgbzColor { r: 1, g: 2, b: 3 }];
         let indices: Vec<i16> = vec![0, -1, 0, -1, 0];
-        let bytes = encode_fgbz(&palette, Some(&indices));
+        let bytes = encode_fgbz(&palette, Some(&indices)).unwrap();
         let (_, di) = decode_fgbz(&bytes).unwrap();
         assert_eq!(di, indices);
     }
@@ -247,7 +250,7 @@ mod tests {
             },
         ];
         let indices: Vec<i16> = vec![0, 1, 2, 1, 0, 2];
-        let bytes = encode_fgbz(&palette, Some(&indices));
+        let bytes = encode_fgbz(&palette, Some(&indices)).unwrap();
 
         let parsed = crate::fgbz::parse_fgbz(&bytes).expect("parse_fgbz");
         assert_eq!(parsed.colors.len(), palette.len());

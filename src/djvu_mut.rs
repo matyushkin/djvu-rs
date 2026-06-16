@@ -52,13 +52,13 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
+use crate::chunk_encode::{ChunkEncoder, NavmChunk};
 use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
 use crate::info::PageInfo;
 use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
-use crate::navm_encode::encode_navm;
 use crate::text::TextLayer;
 use crate::text_encode::encode_text_layer;
 
@@ -138,6 +138,11 @@ pub enum MutError {
     /// NAVM bookmarks live in `FORM:DJVM` bundles only.
     #[error("set_bookmarks requires a FORM:DJVM bundle (this document is FORM:DJVU)")]
     BookmarksRequireDjvm,
+
+    /// A chunk encoder rejected its input because a count exceeds the wire
+    /// format's fixed-width field (e.g. a bookmark node with > 255 children).
+    #[error("chunk encode error: {0}")]
+    Encode(#[from] crate::chunk_encode::EncodeError),
 
     /// [`DjVuDocumentMut::from_indirect_resolved`] was called on a document
     /// that is not an indirect `FORM:DJVM` (it is single-page `FORM:DJVU` or an
@@ -549,12 +554,15 @@ impl DjVuDocumentMut {
     ///
     /// Empty `bookmarks` removes any existing NAVM. The chunk lives at the
     /// `FORM:DJVM` bundle root, between `DIRM` and the per-page components,
-    /// and the encoder uses [`encode_navm`].
+    /// and the payload is built through the chunk-encoder seam
+    /// ([`NavmChunk`]).
     ///
     /// # Errors
     ///
     /// - [`MutError::BookmarksRequireDjvm`] if the document is a single-page
     ///   `FORM:DJVU` (no NAVM in non-bundled documents per the DjVu spec).
+    /// - [`MutError::Encode`] if the bookmark tree exceeds a NAVM wire limit
+    ///   (> 255 children on a node, or > 65 535 nodes total).
     pub fn set_bookmarks(&mut self, bookmarks: &[DjVuBookmark]) -> Result<(), MutError> {
         let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
         if &root_form_type != b"DJVM" {
@@ -572,10 +580,7 @@ impl DjVuDocumentMut {
                 children.remove(i);
             }
             (Some(i), false) => {
-                children[i] = Chunk::Leaf {
-                    id: *b"NAVM",
-                    data: encode_navm(bookmarks),
-                };
+                children[i] = NavmChunk(bookmarks).encode_chunk()?.into_leaf();
             }
             (None, true) => { /* nothing to remove and nothing to insert */ }
             (None, false) => {
@@ -586,13 +591,7 @@ impl DjVuDocumentMut {
                     .iter()
                     .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"DIRM"));
                 let insert_at = dirm_pos.map(|i| i + 1).unwrap_or(0);
-                children.insert(
-                    insert_at,
-                    Chunk::Leaf {
-                        id: *b"NAVM",
-                        data: encode_navm(bookmarks),
-                    },
-                );
+                children.insert(insert_at, NavmChunk(bookmarks).encode_chunk()?.into_leaf());
             }
         }
         self.dirty = true;
