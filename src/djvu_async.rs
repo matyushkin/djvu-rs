@@ -111,16 +111,9 @@ pub enum AsyncLazyError {
 
 // ── True lazy async document loader (#233 Phase 3 PR1) ───────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LazyComponentType {
-    Shared,
-    Page,
-    Thumbnail,
-}
-
 #[derive(Debug, Clone)]
 struct LazyDirmEntry {
-    comp_type: LazyComponentType,
+    comp_type: DirmComponentKind,
     id: String,
     offset: u32,
 }
@@ -331,11 +324,11 @@ where
         let size = u32::from_be_bytes(size_bytes) as u64;
         let range = start..start.saturating_add(8).saturating_add(size);
         match entry.comp_type {
-            LazyComponentType::Page => pages.push(LazyPageIndex { range }),
-            LazyComponentType::Shared => {
+            DirmComponentKind::Page => pages.push(LazyPageIndex { range }),
+            DirmComponentKind::Shared => {
                 shared.insert(entry.id, LazyComponentIndex { range });
             }
-            LazyComponentType::Thumbnail => {}
+            DirmComponentKind::Thumbnail => {}
         }
     }
     Ok((pages, shared))
@@ -356,11 +349,7 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
         .into_iter()
         .zip(payload.offsets)
         .map(|(c, offset)| LazyDirmEntry {
-            comp_type: match c.kind {
-                DirmComponentKind::Page => LazyComponentType::Page,
-                DirmComponentKind::Thumbnail => LazyComponentType::Thumbnail,
-                DirmComponentKind::Shared => LazyComponentType::Shared,
-            },
+            comp_type: c.kind,
             id: c.id,
             offset,
         })

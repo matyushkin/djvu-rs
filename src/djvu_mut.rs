@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
-use crate::dirm::DirmPayload;
+use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
@@ -265,7 +265,7 @@ impl DjVuDocumentMut {
         R: Fn(&str) -> Result<Vec<u8>, E>,
     {
         let (dirm_data, components) = resolve_indirect_components(root_bytes)?;
-        if !components.iter().any(|c| c.is_page) {
+        if !components.iter().any(|c| c.kind == DirmComponentKind::Page) {
             return Err(MutError::DirmMalformed(
                 "indirect DIRM lists no page component",
             ));
@@ -615,9 +615,7 @@ impl DjVuDocumentMut {
 /// - [`MutError::DirmMalformed`] if the `DIRM` chunk is missing, unparseable, or
 ///   lists no components.
 #[cfg(feature = "std")]
-fn resolve_indirect_components(
-    root_bytes: &[u8],
-) -> Result<(&[u8], Vec<crate::djvu_document::DirmComponentInfo>), MutError> {
+fn resolve_indirect_components(root_bytes: &[u8]) -> Result<(&[u8], Vec<DirmComponent>), MutError> {
     let form = iff::parse_form(root_bytes)?;
     if &form.form_type != b"DJVM" {
         return Err(MutError::NotIndirectDjvm);
@@ -629,12 +627,13 @@ fn resolve_indirect_components(
         .ok_or(MutError::DirmMalformed("indirect DJVM has no DIRM chunk"))?
         .data;
 
-    let (components, is_bundled) = crate::djvu_document::parse_dirm_components(dirm_data)
+    let payload = DirmPayload::decode(dirm_data)
         .map_err(|_| MutError::DirmMalformed("DIRM directory could not be parsed"))?;
-    if is_bundled {
+    if payload.is_bundled() {
         // Already bundled — no external files to resolve.
         return Err(MutError::NotIndirectDjvm);
     }
+    let components = payload.components();
     if components.is_empty() {
         return Err(MutError::DirmMalformed("indirect DIRM lists no components"));
     }
@@ -1151,7 +1150,7 @@ impl IndirectRewritePlan {
             }
             components.push(PlannedComponent {
                 name: info.id.clone(),
-                is_page: info.is_page,
+                is_page: info.kind == DirmComponentKind::Page,
                 original: bytes,
                 edited: None,
             });
