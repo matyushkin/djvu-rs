@@ -580,42 +580,21 @@ fn pdf_escape_string(s: &str) -> String {
 }
 
 /// Convert a DjVu shape to a PDF rectangle [x1, y1, x2, y2] in points.
-/// DjVu annotation coordinates use bottom-left origin (same as PDF).
+///
+/// DjVu annotation coordinates use bottom-left origin (same as PDF), so no
+/// vertical flip is needed — only the point conversion of each edge. The
+/// bounding box, and the empty/degenerate → `None` rule, are the shared
+/// [`crate::export_common::shape_bbox`]; a zero-area shape encloses no link
+/// region and is dropped. Because `px_to_pt` is monotonic, taking the bounding
+/// box in pixel space and converting its edges yields the same points as the
+/// previous per-point fold in point space.
 fn shape_to_pdf_rect(shape: &Shape, dpi: f32, _pt_h: f32) -> Option<(f32, f32, f32, f32)> {
-    match shape {
-        Shape::Rect(r) | Shape::Oval(r) | Shape::Text(r) => {
-            let x1 = px_to_pt(r.x as f32, dpi);
-            let y1 = px_to_pt(r.y as f32, dpi);
-            let x2 = px_to_pt((r.x + r.width) as f32, dpi);
-            let y2 = px_to_pt((r.y + r.height) as f32, dpi);
-            Some((x1, y1, x2, y2))
-        }
-        Shape::Poly(points) => {
-            if points.is_empty() {
-                return None;
-            }
-            let mut min_x = f32::MAX;
-            let mut min_y = f32::MAX;
-            let mut max_x = f32::MIN;
-            let mut max_y = f32::MIN;
-            for (px, py) in points {
-                let x = px_to_pt(*px as f32, dpi);
-                let y = px_to_pt(*py as f32, dpi);
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-            Some((min_x, min_y, max_x, max_y))
-        }
-        Shape::Line(x1, y1, x2, y2) => {
-            let px1 = px_to_pt(*x1 as f32, dpi);
-            let py1 = px_to_pt(*y1 as f32, dpi);
-            let px2 = px_to_pt(*x2 as f32, dpi);
-            let py2 = px_to_pt(*y2 as f32, dpi);
-            Some((px1.min(px2), py1.min(py2), px1.max(px2), py1.max(py2)))
-        }
-    }
+    let r = crate::export_common::shape_bbox(shape)?;
+    let x1 = px_to_pt(r.x as f32, dpi);
+    let y1 = px_to_pt(r.y as f32, dpi);
+    let x2 = px_to_pt((r.x + r.width) as f32, dpi);
+    let y2 = px_to_pt((r.y + r.height) as f32, dpi);
+    Some((x1, y1, x2, y2))
 }
 
 // ---- Bookmarks (PDF outline) ------------------------------------------------
