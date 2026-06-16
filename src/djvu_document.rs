@@ -725,8 +725,7 @@ impl DjVuDocument {
                     .find(|c| &c.id == b"DIRM")
                     .ok_or(DocError::MissingChunk("DIRM"))?;
 
-                let payload =
-                    DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
+                let payload = DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
                 let entries = payload.components();
                 let is_bundled = payload.is_bundled();
                 let comp_offsets = payload.offsets;

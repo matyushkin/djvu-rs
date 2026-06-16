@@ -615,9 +615,7 @@ impl DjVuDocumentMut {
 /// - [`MutError::DirmMalformed`] if the `DIRM` chunk is missing, unparseable, or
 ///   lists no components.
 #[cfg(feature = "std")]
-fn resolve_indirect_components(
-    root_bytes: &[u8],
-) -> Result<(&[u8], Vec<DirmComponent>), MutError> {
+fn resolve_indirect_components(root_bytes: &[u8]) -> Result<(&[u8], Vec<DirmComponent>), MutError> {
     let form = iff::parse_form(root_bytes)?;
     if &form.form_type != b"DJVM" {
         return Err(MutError::NotIndirectDjvm);
