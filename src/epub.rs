@@ -25,7 +25,7 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 use crate::{
     annotation::{MapArea, Shape},
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
-    djvu_render::{self, RenderError, RenderOptions},
+    djvu_render::{RenderError, RenderOptions},
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -165,10 +165,15 @@ fn write_page(
         scale,
         ..RenderOptions::default()
     };
-    let pixmap = djvu_render::render_pixmap(page, &render_opts)?;
+    // Stream the RGBA scanlines when the page allows it, else fall back to a
+    // full pixmap — the shared raster seam every exporter routes through.
+    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    crate::export_common::render_rows_or_pixmap(page, &render_opts, |row| {
+        rgba.extend_from_slice(row);
+    })?;
 
     // Encode as PNG
-    let png_bytes = encode_rgba_to_png(&pixmap.data, w, h);
+    let png_bytes = encode_rgba_to_png(&rgba, w, h);
 
     let page_num = index + 1;
     let img_name = format!("page_{page_num:04}.png");
@@ -582,14 +587,13 @@ fn build_bookmark_nav_items_inner(bookmarks: &[DjVuBookmark], depth: usize) -> S
 /// Convert a DjVu bookmark URL to an EPUB relative href.
 /// DjVu bookmarks use `#page=N` (1-based) or bare `#anchor` format.
 fn bookmark_href(url: &str) -> String {
-    // Try to parse `#page=N` pattern
-    if let Some(rest) = url.strip_prefix('#') {
-        if let Some(n_str) = rest.strip_prefix("page=")
-            && let Ok(n) = n_str.trim().parse::<usize>()
-            && n >= 1
-        {
-            return format!("pages/page_{n:04}.xhtml");
-        }
+    // Resolve internal `#page=N` / `#page_N` / `#N` references through the
+    // shared bookmark parser the PDF exporter also uses (#364).
+    if let Some(idx) = crate::export_common::bookmark_page_index(url) {
+        let page_num = idx + 1;
+        return format!("pages/page_{page_num:04}.xhtml");
+    }
+    if url.starts_with('#') {
         // plain anchor — link to page 1 with anchor
         return format!("pages/page_0001.xhtml{}", xml_escape(url));
     }
