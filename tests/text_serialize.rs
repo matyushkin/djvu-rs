@@ -1,4 +1,4 @@
-//! Integration tests for hOCR and ALTO XML export.
+//! Integration tests for hOCR and ALTO XML text-layer serialization.
 
 #[cfg(feature = "std")]
 mod tests {
@@ -6,7 +6,7 @@ mod tests {
 
     use djvu_rs::{
         DjVuDocument,
-        ocr_export::{AltoOptions, HocrOptions, to_alto, to_hocr},
+        text_serialize::{AltoOptions, HocrOptions, to_alto, to_hocr},
     };
 
     fn chicken_path() -> PathBuf {

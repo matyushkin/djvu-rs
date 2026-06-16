@@ -955,7 +955,7 @@ fn cmd_text(
         TextFormat::Hocr => {
             let data = std::fs::read(path)?;
             let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-            let opts = djvu_rs::ocr_export::HocrOptions {
+            let opts = djvu_rs::text_serialize::HocrOptions {
                 page_index: if all {
                     None
                 } else {
@@ -963,13 +963,13 @@ fn cmd_text(
                 },
                 dpi: None,
             };
-            let hocr = djvu_rs::ocr_export::to_hocr(&doc, &opts)?;
+            let hocr = djvu_rs::text_serialize::to_hocr(&doc, &opts)?;
             write_or_print(output, &hocr)?;
         }
         TextFormat::Alto => {
             let data = std::fs::read(path)?;
             let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-            let opts = djvu_rs::ocr_export::AltoOptions {
+            let opts = djvu_rs::text_serialize::AltoOptions {
                 page_index: if all {
                     None
                 } else {
@@ -977,7 +977,7 @@ fn cmd_text(
                 },
                 dpi: None,
             };
-            let alto = djvu_rs::ocr_export::to_alto(&doc, &opts)?;
+            let alto = djvu_rs::text_serialize::to_alto(&doc, &opts)?;
             write_or_print(output, &alto)?;
         }
     }
