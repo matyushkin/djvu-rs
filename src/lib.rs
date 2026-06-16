@@ -499,6 +499,15 @@ impl<'a> Page<'a> {
         self.page.dpi()
     }
 
+    /// Pixel `(width, height)` this page renders to at `target_dpi`.
+    ///
+    /// The rounding/clamping policy lives in one place (the crate-internal
+    /// `export_common` sizing helper); a `0`-DPI page is treated as 1 DPI so the
+    /// scale stays finite.
+    pub fn size_at_dpi(&self, target_dpi: f32) -> (u32, u32) {
+        export_common::size_at_dpi(self.page, target_dpi)
+    }
+
     /// The 0-based index of this page within the document.
     pub fn index(&self) -> usize {
         self.index

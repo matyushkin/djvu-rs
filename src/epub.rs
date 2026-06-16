@@ -154,11 +154,10 @@ fn write_page(
     // Native page dimensions in DjVu pixels
     let pw = page.width() as u32;
     let ph = page.height() as u32;
-    let page_dpi = page.dpi().max(1) as f32;
 
     // Scale to the requested output DPI
-    let scale = opts.dpi as f32 / page_dpi;
-    let (w, h) = crate::export_common::scaled_size(pw, ph, scale);
+    let scale = crate::export_common::scale_at_dpi(page, opts.dpi as f32);
+    let (w, h) = crate::export_common::size_at_dpi(page, opts.dpi as f32);
 
     let render_opts = RenderOptions {
         width: w,

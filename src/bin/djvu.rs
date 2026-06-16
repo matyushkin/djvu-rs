@@ -741,10 +741,7 @@ fn render_cbz(
 
     for (n, idx) in pages.iter().enumerate() {
         let p = doc.page(*idx)?;
-        let native_dpi = p.dpi() as f32;
-        let scale = dpi as f32 / native_dpi;
-        let w = ((p.width() as f32 * scale).round() as u32).max(1);
-        let h = ((p.height() as f32 * scale).round() as u32).max(1);
+        let (w, h) = p.size_at_dpi(dpi as f32);
         let pixmap = p.render_to_size(w, h)?;
         let pixmap = apply_user_rotation(pixmap, rotate);
 
@@ -796,10 +793,7 @@ fn render_page_png(
     out: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(idx)?;
-    let native_dpi = page.dpi() as f32;
-    let scale = dpi as f32 / native_dpi;
-    let w = ((page.width() as f32 * scale).round() as u32).max(1);
-    let h = ((page.height() as f32 * scale).round() as u32).max(1);
+    let (w, h) = page.size_at_dpi(dpi as f32);
     let pixmap = page.render_to_size(w, h)?;
     let pixmap = apply_user_rotation(pixmap, rotate);
     let file = std::fs::File::create(out)?;
