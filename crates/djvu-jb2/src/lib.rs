@@ -423,8 +423,20 @@ impl Jbm {
 /// Decodes top-to-bottom using an incremental rolling window that avoids
 /// recomputing all 10 context bits from scratch each pixel.
 const MAX_SYMBOL_PIXELS: usize = 16 * 1024 * 1024; // 16 MP per symbol — allows large connected components while bounding DoS input
-const MAX_EXHAUSTED_SYMBOL_PIXELS: usize = 4096; // synthetic post-EOF ZP fill — prevents fuzz-time DoS
-const MAX_EXHAUSTED_TOTAL_SYMBOL_PIXELS: usize = 4 * 1024 * 1024; // cumulative post-EOF decode work
+// Post-EOF spin guard. The ZP coder buffers up to 32 bits (4 bytes) of
+// look-ahead, so its byte buffer drains a few bytes *before* the logical end of
+// a valid stream: `zp.is_exhausted()` (pos ≥ len) flips while the final symbol
+// still decodes legitimately from buffered bits, and no synthetic padding has
+// been read yet. `synthetic_bytes()` counts only genuine post-EOF `0xFF` fill,
+// so it stays 0 through a valid tail and climbs without bound once the stream
+// is exhausted and spinning. Allowing this many synthetic bytes covers the
+// look-ahead flush (≈4–8 bytes) with margin; beyond it every remaining bit is
+// fill, so we stop. A single oversized symbol decoded within the slack window
+// is still capped by `check_pixel_budget` (16 MP/symbol, 256 MP total).
+//
+// Using `zp.is_exhausted()` here instead wrongly rejects valid pages whose last
+// symbol is larger than a few KB and finishes right at EOF (reported 2026-06).
+const ZP_EOF_SLACK_BYTES: usize = 16;
 // 256 MP cumulative decoded-symbol work. Dense JB2 pages can contain many
 // direct or refinement records whose individual symbols are valid and whose
 // blit work is bounded separately below; 64 MP was too low for the
@@ -455,11 +467,12 @@ fn check_symbol_decode_budget(
     h: i32,
     total: &mut usize,
 ) -> Result<(), Jb2Error> {
-    let pixels = (w.max(0) as usize).saturating_mul(h.max(0) as usize);
     check_pixel_budget(w, h, total)?;
-    if zp.is_exhausted()
-        && (pixels > MAX_EXHAUSTED_SYMBOL_PIXELS || *total > MAX_EXHAUSTED_TOTAL_SYMBOL_PIXELS)
-    {
+    // Once the ZP coder has emitted more synthetic `0xFF` padding than the
+    // look-ahead slack, every remaining bit is provably fill: real input is
+    // exhausted and we are spinning. Bail immediately — the in-window symbol we
+    // were about to decode is still size-capped by `check_pixel_budget` above.
+    if zp.synthetic_bytes() > ZP_EOF_SLACK_BYTES {
         return Err(Jb2Error::Truncated);
     }
     Ok(())
@@ -1509,6 +1522,16 @@ fn decode_image_with_pool(
     // Main decode loop — capped to prevent infinite spin when ZP input is exhausted
     let mut record_count = 0usize;
     loop {
+        if zp.synthetic_bytes() > ZP_EOF_SLACK_BYTES {
+            // ZP input is exhausted and the record loop is now spinning on
+            // synthetic `0xFF` fill: every record decoded past this point comes
+            // from padding, including types that decode no symbol (7/9/10) and
+            // so never reach `check_symbol_decode_budget`. Bail well before
+            // MAX_RECORDS so corrupt/truncated streams stop fast. A valid stream
+            // reaches its type-11 end record while `synthetic_bytes` is still
+            // within the look-ahead slack, so this never rejects a good page.
+            return Err(Jb2Error::Truncated);
+        }
         if record_count >= MAX_RECORDS {
             return Err(Jb2Error::TooManyRecords);
         }
@@ -1791,6 +1814,16 @@ fn decode_image_indexed_with_pool(
 
     let mut record_count = 0usize;
     loop {
+        if zp.synthetic_bytes() > ZP_EOF_SLACK_BYTES {
+            // ZP input is exhausted and the record loop is now spinning on
+            // synthetic `0xFF` fill: every record decoded past this point comes
+            // from padding, including types that decode no symbol (7/9/10) and
+            // so never reach `check_symbol_decode_budget`. Bail well before
+            // MAX_RECORDS so corrupt/truncated streams stop fast. A valid stream
+            // reaches its type-11 end record while `synthetic_bytes` is still
+            // within the look-ahead slack, so this never rejects a good page.
+            return Err(Jb2Error::Truncated);
+        }
         if record_count >= MAX_RECORDS {
             return Err(Jb2Error::TooManyRecords);
         }
@@ -2097,6 +2130,16 @@ fn decode_dictionary_with_pool(
     // Dict streams only accept types 2, 5, 9, 10, 11
     let mut record_count = 0usize;
     loop {
+        if zp.synthetic_bytes() > ZP_EOF_SLACK_BYTES {
+            // ZP input is exhausted and the record loop is now spinning on
+            // synthetic `0xFF` fill: every record decoded past this point comes
+            // from padding, including types that decode no symbol (7/9/10) and
+            // so never reach `check_symbol_decode_budget`. Bail well before
+            // MAX_RECORDS so corrupt/truncated streams stop fast. A valid stream
+            // reaches its type-11 end record while `synthetic_bytes` is still
+            // within the look-ahead slack, so this never rejects a good page.
+            return Err(Jb2Error::Truncated);
+        }
         if record_count >= MAX_RECORDS {
             return Err(Jb2Error::TooManyRecords);
         }

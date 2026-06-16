@@ -1965,3 +1965,54 @@ was unfounded: the loop is already bounded by `slices` (a `u8`, ≤255 per
 chunk) and the 64 MP image cap, so no early-exit is required to bound work.
 Regression test: `iw44_colorbook_page2_decodes_all_slices_no_early_exit` in
 `crates/djvu-iw44/src/lib.rs` (and the native-res diff gate).
+
+### JB2 post-EOF guard: `is_exhausted()` → synthetic-byte (`pos`) overshoot — **Kept** (2026-06-16)
+
+**Issue.** Follow-up to the IW44 report above: the same reporter noted "a
+similar issue in the JB2 code path" with a repro page, and proposed adding a
+`ZP_EOF_SLACK_BYTES` tolerance computed as `zp.pos.saturating_sub(data.len())`.
+JB2's per-symbol DoS guard (`check_symbol_decode_budget`) rejected a decode with
+`Jb2Error::Truncated` whenever `zp.is_exhausted() && symbol_pixels > 4096`. Like
+the IW44 `break`, `is_exhausted()` (`pos >= data.len()`) flips ~4–8 bytes before
+the logical end of a valid stream, so any page whose final tile/symbol is larger
+than 64×64 px and is decoded from the ZP look-ahead window was wrongly rejected.
+
+**Approach.** Adopted the reporter's slack idea but fixed its mechanism. The
+verbatim patch is a no-op as written: the canonical `ZpDecoder::read_byte`
+*saturated* `pos` at `data.len()`, so `pos - len` was always 0 and the guard
+would never fire — while the inlined hot-path byte readers in jb2/iw44/bzz
+*did* advance `pos` past the end (`wrapping_add`). The two byte-reading paths
+disagreed. Unified them: `read_byte` now also always advances `pos`, so
+`pos - data.len()` is the true synthetic-`0xFF` count across every reader, and
+`synthetic_bytes()` returns exactly that. The JB2 guards now bail only when
+`synthetic_bytes() > ZP_EOF_SLACK_BYTES` (16) — at the per-symbol check *and* at
+the top of all three record loops (covering record types 7/9/10, which decode no
+symbol and so never reached the per-symbol check — that gap let a post-EOF
+stream spin to `MAX_RECORDS` ≈ 14 s before the unconditional loop guard was
+added). Dropped the old `MAX_EXHAUSTED_SYMBOL_PIXELS` / `…_TOTAL_…` sub-budgets;
+in-window symbols stay capped by `check_pixel_budget` (16 MP/symbol, 256 MP).
+
+**Numbers.** Synthesised valid pages (`encode_jb2`: high-entropy first tile +
+solid trailing tiles, so a >4096 px symbol's header is read while
+`is_exhausted()` is true but no synthetic byte has been consumed):
+
+| page (`encode_jb2`) | old `is_exhausted` guard | new `synthetic_bytes` guard |
+|---------------------|--------------------------|-----------------------------|
+| 200×2100 | `Err(Truncated)` | `Ok`, pixel-exact round-trip |
+| 200×3100 | `Err(Truncated)` | `Ok`, pixel-exact round-trip |
+
+DoS regressions stay fast (`Err(Truncated)` in <1 s): the post-EOF refinement
+spin tests still bail, now via the loop-level guard. Full corpus + proptest
+round-trips unchanged (653 workspace tests pass).
+
+**Decision.** Kept (guard switched to synthetic-byte overshoot; `read_byte`
+no longer clamps `pos`).
+
+**Reason.** Same root cause as the IW44 fix and #182: `is_exhausted()` is a
+*byte*-buffer signal, not a logical-EOF signal. `pos`-overshoot counts only
+genuine post-EOF `0xFF` padding, which stays ~0 through a valid look-ahead tail
+and climbs without bound only when the coder is truly spinning — exactly the
+distinction the guard needs. Regression tests:
+`large_symbol_at_eof_not_wrongly_truncated` (encode.rs, positive case),
+`synthetic_bytes_distinguishes_eof_from_spinning` (djvu-zp), and the
+`exhausted_*_refinement_*` DoS tests in `crates/djvu-jb2/src/lib.rs`.
