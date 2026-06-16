@@ -363,6 +363,93 @@ fn emit_chunk_inner(chunk: &Chunk, out: &mut Vec<u8>, suppress_inner_pad: bool) 
     }
 }
 
+/// Number of bytes [`emit`] writes for `chunk`: the 8-byte header, the payload,
+/// and any word-alignment pad byte.
+///
+/// This is the single source of the framing/size arithmetic. It walks the same
+/// `suppress_last_pad` parity rule as [`emit_chunk_inner`], so `emitted_size`
+/// and `emit` can never disagree — a guarantee callers that pre-compute byte
+/// offsets (e.g. DIRM offset recomputation in the document mutator) rely on for
+/// correctness.
+pub fn emitted_size(chunk: &Chunk) -> usize {
+    emitted_size_inner(chunk, false)
+}
+
+fn emitted_size_inner(chunk: &Chunk, suppress_inner_pad: bool) -> usize {
+    match chunk {
+        Chunk::Form {
+            length: stored_length,
+            children,
+            ..
+        } => {
+            let suppress_last_pad = (*stored_length & 1) == 1;
+            let n = children.len();
+            let mut payload = 4usize; // secondary_id
+            for (i, child) in children.iter().enumerate() {
+                let last = i + 1 == n;
+                payload += emitted_size_inner(child, last && suppress_last_pad);
+            }
+            let total = 8 + payload;
+            total + usize::from(!suppress_inner_pad && total % 2 == 1)
+        }
+        Chunk::Leaf { data, .. } => {
+            let total = 8 + data.len();
+            total + usize::from(!suppress_inner_pad && total % 2 == 1)
+        }
+    }
+}
+
+/// One child for [`partial_emit`]: either a parsed [`Chunk`] to re-frame, or a
+/// verbatim byte slice copied as-is.
+pub enum EmitPart<'a> {
+    /// Re-frame this chunk through the canonical emitter (8-byte header,
+    /// payload, word-alignment pad).
+    Chunk(&'a Chunk),
+    /// Copy these bytes into the FORM payload verbatim. Use this for children
+    /// whose bytes must be preserved exactly (the byte-preserving path); any
+    /// word-alignment pad is added by [`partial_emit`] if the slice has odd
+    /// length, so callers may pass either padded or unpadded child blocks.
+    Verbatim(&'a [u8]),
+}
+
+/// Emit a complete DjVu file (`AT&T` magic + one root `FORM`) whose children
+/// are a mix of re-framed chunks and verbatim original slices.
+///
+/// This is the byte-preserving counterpart to [`emit`]: untouched children pass
+/// through as [`EmitPart::Verbatim`] (their original bytes), while edited
+/// children are re-framed as [`EmitPart::Chunk`]. Every child is word-aligned
+/// inside the payload, and the FORM length is computed here — through the same
+/// framing rules as [`emit`] / [`emitted_size`], so the three can't drift.
+///
+/// Returns `None` if the assembled FORM payload exceeds `u32::MAX`.
+pub fn partial_emit(secondary_id: ChunkId, parts: &[EmitPart<'_>]) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&secondary_id); // even start (4 bytes)
+    for part in parts {
+        match part {
+            EmitPart::Chunk(chunk) => emit_chunk(chunk, &mut payload),
+            EmitPart::Verbatim(bytes) => {
+                payload.extend_from_slice(bytes);
+                if payload.len() % 2 == 1 {
+                    payload.push(0);
+                }
+            }
+        }
+    }
+    let len = u32::try_from(payload.len()).ok()?;
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&payload);
+    // Payload stays even (even start + self-aligned parts), so no outer pad is
+    // ever needed; guard defensively to keep the invariant explicit.
+    if (8 + payload.len()) % 2 == 1 {
+        out.push(0);
+    }
+    Some(out)
+}
+
 // ---- New spec-based IFF parser (phase 1) ------------------------------------
 //
 // `parse_form` is a new zero-copy parser written from the sndjvu.org spec.
@@ -657,6 +744,109 @@ mod tests {
     #[test]
     fn structure_big_scanned_page() {
         assert_structure_matches("big-scanned-page.djvu", "big_scanned_page.dump");
+    }
+
+    // ---- emitted_size / partial_emit ----------------------------------------
+
+    /// `emitted_size(root)` must equal the bytes `emit` writes for that root
+    /// (the whole file minus the 4-byte `AT&T` magic) — the invariant DIRM
+    /// offset recomputation relies on. Checked across the real-asset corpus,
+    /// which mixes odd- and even-length FORM declarations.
+    fn assert_emitted_size_matches_emit(name: &str) {
+        let Ok(data) = std::fs::read(assets_path().join(name)) else {
+            return; // asset not vendored in this checkout
+        };
+        let file = parse(&data).unwrap();
+        let emitted = emit(&file);
+        assert_eq!(
+            emitted_size(&file.root),
+            emitted.len() - 4,
+            "emitted_size disagrees with emit() for {name}"
+        );
+    }
+
+    #[test]
+    fn emitted_size_matches_emit_corpus() {
+        for name in [
+            "boy_jb2.djvu",
+            "boy.djvu",
+            "chicken.djvu",
+            "carte.djvu",
+            "navm_fgbz.djvu",
+            "colorbook.djvu",
+            "DjVu3Spec_bundled.djvu",
+            "big-scanned-page.djvu",
+        ] {
+            assert_emitted_size_matches_emit(name);
+        }
+    }
+
+    #[test]
+    fn partial_emit_verbatim_matches_chunk_framing() {
+        // A child copied verbatim from a canonical emit must produce the same
+        // bytes as re-framing that child through EmitPart::Chunk — i.e. the
+        // byte-preserving path and the re-emit path agree. Build an even-parity
+        // tree (root length 0) so emit word-aligns every child, the convention
+        // partial_emit also uses.
+        let tree = DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0,
+                children: vec![
+                    Chunk::Leaf {
+                        id: *b"INFO",
+                        data: vec![0xAA; 5], // odd → forces a pad
+                    },
+                    Chunk::Leaf {
+                        id: *b"Sjbz",
+                        data: vec![0xBB; 4], // even
+                    },
+                ],
+            },
+        };
+        let canonical = emit(&tree); // AT&T + FORM + DJVU + framed children
+
+        let Chunk::Form { children, .. } = &tree.root else {
+            unreachable!()
+        };
+        // Re-emit each child into its own framed block to slice verbatim spans.
+        let mut info_bytes = Vec::new();
+        emit_chunk(&children[0], &mut info_bytes);
+        let mut sjbz_bytes = Vec::new();
+        emit_chunk(&children[1], &mut sjbz_bytes);
+
+        let via_verbatim = partial_emit(
+            *b"DJVU",
+            &[
+                EmitPart::Verbatim(&info_bytes),
+                EmitPart::Verbatim(&sjbz_bytes),
+            ],
+        )
+        .expect("fits in u32");
+        let via_chunks = partial_emit(
+            *b"DJVU",
+            &[EmitPart::Chunk(&children[0]), EmitPart::Chunk(&children[1])],
+        )
+        .expect("fits in u32");
+
+        assert_eq!(via_verbatim, canonical, "verbatim path must match emit");
+        assert_eq!(via_chunks, canonical, "chunk path must match emit");
+    }
+
+    #[test]
+    fn partial_emit_pads_odd_verbatim_child() {
+        // A 3-byte verbatim child must be padded to an even boundary inside the
+        // payload, exactly like an emitted odd-length chunk.
+        let parts = [EmitPart::Verbatim(&[1u8, 2, 3])];
+        let out = partial_emit(*b"DJVU", &parts).unwrap();
+        // AT&T(4) FORM(4) len(4) DJVU(4) + 3 data + 1 pad = 20 bytes.
+        assert_eq!(out.len(), 20);
+        assert_eq!(&out[..8], b"AT&TFORM");
+        // FORM length = DJVU(4) + 3 + 1 pad = 8.
+        assert_eq!(u32::from_be_bytes(out[8..12].try_into().unwrap()), 8);
+        assert_eq!(&out[12..16], b"DJVU");
+        assert_eq!(&out[16..19], &[1, 2, 3]);
+        assert_eq!(out[19], 0);
     }
 
     // ---- New spec-based parser tests ----------------------------------------

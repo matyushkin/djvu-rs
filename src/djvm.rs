@@ -38,6 +38,10 @@ pub enum DjvmError {
         end: usize,
         count: usize,
     },
+
+    /// The assembled document's FORM payload would exceed `u32::MAX` (4 GiB).
+    #[error("merged document exceeds the 4 GiB IFF FORM limit")]
+    OutputTooLarge,
 }
 
 /// Re-serialize a sub-FORM child — the raw `data` of a `FORM` chunk, which
@@ -179,56 +183,30 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
 }
 
 /// Build a bundled DJVM file from components.
+///
+/// The IFF framing — `FORM:DJVM` header, the `DIRM` chunk header, and the
+/// even-byte padding between components — is delegated to [`iff::partial_emit`]
+/// so this writer shares the one emission seam (#367). The DIRM goes through as
+/// a re-framed [`iff::Chunk`]; each component is copied verbatim (its AT&T magic
+/// stripped, since it is embedded, not a standalone file).
 fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Vec<u8>, DjvmError> {
     let n = components.len();
 
     // Build DIRM chunk (bundled; offset slots zeroed — readers fall back to
     // FORM boundaries, matching prior behavior).
-    let dirm_data = DirmPayload::build_bundled(n, flags, ids).encode();
+    let dirm = iff::Chunk::Leaf {
+        id: *b"DIRM",
+        data: DirmPayload::build_bundled(n, flags, ids).encode(),
+    };
 
-    // Calculate total FORM body size
-    let mut body_size: usize = 4; // "DJVM"
-    body_size += 8 + dirm_data.len(); // DIRM chunk header + data
-    if !dirm_data.len().is_multiple_of(2) {
-        body_size += 1; // IFF padding
-    }
-    for comp in components {
-        // Each component includes AT&T prefix — strip it for embedding
-        let comp_data = strip_att(comp);
-        body_size += comp_data.len();
-        if !comp_data.len().is_multiple_of(2) {
-            body_size += 1; // IFF padding
-        }
-    }
+    // Each component includes the AT&T prefix — strip it for embedding.
+    let stripped: Vec<&[u8]> = components.iter().map(|c| strip_att(c)).collect();
 
-    let mut output = Vec::with_capacity(4 + 4 + 4 + body_size);
+    let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
+    parts.push(iff::EmitPart::Chunk(&dirm));
+    parts.extend(stripped.iter().map(|s| iff::EmitPart::Verbatim(s)));
 
-    // AT&T magic
-    output.extend_from_slice(b"AT&T");
-    // FORM header
-    output.extend_from_slice(b"FORM");
-    output.extend_from_slice(&(body_size as u32).to_be_bytes());
-    // DJVM type
-    output.extend_from_slice(b"DJVM");
-
-    // DIRM chunk
-    output.extend_from_slice(b"DIRM");
-    output.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
-    output.extend_from_slice(&dirm_data);
-    if !dirm_data.len().is_multiple_of(2) {
-        output.push(0); // IFF padding
-    }
-
-    // Component FORM chunks
-    for comp in components {
-        let comp_data = strip_att(comp);
-        output.extend_from_slice(comp_data);
-        if !comp_data.len().is_multiple_of(2) {
-            output.push(0); // IFF padding
-        }
-    }
-
-    Ok(output)
+    iff::partial_emit(*b"DJVM", &parts).ok_or(DjvmError::OutputTooLarge)
 }
 
 /// Create an indirect (non-bundled) DJVM index file that references pages as
