@@ -319,6 +319,13 @@ pub mod smmr;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+/// Shared core for the foreign-language bindings (`ffi` and `wasm`).
+///
+/// Owns the open→size→render→text flow and the `DjVuError`→`(code, message)`
+/// taxonomy; `ffi` and `wasm` are thin target-specific caps over it.
+#[cfg(feature = "std")]
+mod foreign;
+
 /// C FFI bindings for foreign language integration.
 ///
 /// Provides `extern "C"` functions with no-panic guarantees.
