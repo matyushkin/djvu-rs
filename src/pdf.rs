@@ -249,6 +249,10 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         (mask, None)
     } else {
         let (rw, rh) = render_dims(page, opts.output_dpi);
+        // Set only the output size: the render pipeline derives the IW44 decode
+        // scale from `width` (see `RenderOptions::decode_scale`). Previously this
+        // left `scale = 1.0` at every DPI, forcing a full-resolution wavelet
+        // decode followed by a downscale (#377).
         let render_opts = RenderOptions {
             width: rw,
             height: rh,
