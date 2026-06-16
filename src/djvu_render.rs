@@ -833,7 +833,7 @@ fn best_iw44_subsample(scale: f32) -> u32 {
 /// returned reference is tied to the cache, not the call.
 #[cfg(feature = "std")]
 #[derive(Default)]
-pub struct PageLayers {
+pub(crate) struct PageLayers {
     bg44: std::sync::OnceLock<Option<Iw44Image>>,
     bg44_partial: std::sync::OnceLock<Option<Iw44Image>>,
     mask: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
@@ -844,7 +844,7 @@ pub struct PageLayers {
 #[cfg(feature = "std")]
 impl PageLayers {
     /// An empty cache. Layers are decoded on first access.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -853,7 +853,7 @@ impl PageLayers {
     /// swallowed (the partial image so far is kept, matching the permissive
     /// render path). The wavelet inverse-transform / YCbCr→RGB conversion is
     /// *not* cached here — it runs per render at the requested subsample.
-    pub fn bg44(&self, page: &DjVuPage) -> Option<&Iw44Image> {
+    pub(crate) fn bg44(&self, page: &DjVuPage) -> Option<&Iw44Image> {
         self.bg44
             .get_or_init(|| {
                 let chunks = page.bg44_chunks();
@@ -874,7 +874,7 @@ impl PageLayers {
     /// A partially-decoded BG44 image — first chunk only — decoding on first
     /// call. Roughly 4× cheaper to decode; used at subsample ≥ 4 where the
     /// high-frequency refinement chunks are imperceptible.
-    pub fn bg44_partial(&self, page: &DjVuPage) -> Option<&Iw44Image> {
+    pub(crate) fn bg44_partial(&self, page: &DjVuPage) -> Option<&Iw44Image> {
         self.bg44_partial
             .get_or_init(|| {
                 let chunks = page.bg44_chunks();
@@ -892,7 +892,7 @@ impl PageLayers {
 
     /// The decoded JB2 / G4 foreground mask, decoding on first call. `None`
     /// when the page has no mask chunk or decoding fails.
-    pub fn mask(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+    pub(crate) fn mask(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
         self.mask
             .get_or_init(|| page.extract_mask().ok().flatten())
             .as_ref()
@@ -903,7 +903,7 @@ impl PageLayers {
     /// block is set, letting the compositor do one lookup per output pixel at
     /// subsample ≥ 4 instead of 4–9. Purely a compositor optimisation, which
     /// is why it lives in the render tier rather than on the page.
-    pub fn mask_sub4(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
+    pub(crate) fn mask_sub4(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
         self.mask_sub4
             .get_or_init(|| {
                 let src = self.mask(page)?;
@@ -914,7 +914,7 @@ impl PageLayers {
 
     /// The decoded FG44 foreground colour layer, decoding on first call.
     /// `None` when the page has no FG44 chunks or decoding fails.
-    pub fn fg44(&self, page: &DjVuPage) -> Option<&Pixmap> {
+    pub(crate) fn fg44(&self, page: &DjVuPage) -> Option<&Pixmap> {
         self.fg44
             .get_or_init(|| page.extract_foreground().ok().flatten())
             .as_ref()
