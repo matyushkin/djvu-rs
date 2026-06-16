@@ -241,11 +241,14 @@ pub mod tiff_export;
 
 /// Async render surface for [`DjVuPage`] — phase 5 extension.
 ///
-/// Wraps the synchronous render pipeline in [`tokio::task::spawn_blocking`]
-/// so CPU-bound IW44/JB2 work runs on the blocking thread pool without
-/// blocking the async runtime.
+/// CPU-bound IW44/JB2 work belongs on the blocking thread pool: call the
+/// synchronous render entry points inside [`tokio::task::spawn_blocking`]
+/// rather than on the async runtime thread (see the module docs for the
+/// one-line pattern).
 ///
-/// Key functions: [`djvu_async::render_pixmap_async`], [`djvu_async::render_gray8_async`], [`djvu_async::render_progressive_stream`].
+/// Key abstractions: [`djvu_async::LazyDocument`],
+/// [`djvu_async::render_progressive_stream`],
+/// [`djvu_async::load_document_async_streaming`].
 #[cfg(feature = "async")]
 pub mod djvu_async;
 
