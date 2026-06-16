@@ -94,7 +94,6 @@ impl<'a> DjVuDecoder<'a> {
         let opts = RenderOptions {
             width: self.width,
             height: self.height,
-            scale: self.width as f32 / self.page.width().max(1) as f32,
             ..RenderOptions::default()
         };
         let size = (self.width as usize)

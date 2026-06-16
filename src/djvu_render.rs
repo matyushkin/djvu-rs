@@ -131,17 +131,14 @@ pub enum Resampling {
 /// # Example
 ///
 /// ```
-/// use djvu_rs::djvu_render::{RenderOptions, UserRotation};
+/// use djvu_rs::djvu_render::RenderOptions;
 ///
+/// // Set the output size; the pipeline derives the decode scale from `width`.
 /// let opts = RenderOptions {
 ///     width: 800,
 ///     height: 600,
-///     scale: 1.0,
-///     bold: 0,
 ///     aa: true,
-///     rotation: UserRotation::None,
-///     permissive: false,
-///     resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+///     ..Default::default()
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -150,7 +147,21 @@ pub struct RenderOptions {
     pub width: u32,
     /// Output height in pixels.
     pub height: u32,
-    /// Scale factor (informational; actual size is given by `width`/`height`).
+    /// Deprecated and **ignored by the render pipeline**.
+    ///
+    /// Rendering now derives its decode scale from `width` and the page's
+    /// rotation-aware display width (see the internal `decode_scale`), so this
+    /// field no longer controls anything. It is retained for backward
+    /// compatibility — the `fit_to_*` constructors still populate it — but
+    /// setting it by hand has no effect. Build options via
+    /// [`RenderOptions::fit_to_width`] / [`fit_to_box`](RenderOptions::fit_to_box)
+    /// instead of assembling the `(width, height, scale)` triple yourself.
+    #[deprecated(
+        since = "0.20.2",
+        note = "scale is derived from `width` by the render pipeline and is no longer read; \
+                build options via `RenderOptions::fit_to_width`/`fit_to_box`. \
+                This field is ignored and will be removed in a future release."
+    )]
     pub scale: f32,
     /// Bold level: number of dilation passes on the JB2 mask (0 = no dilation).
     pub bold: u8,
@@ -177,6 +188,7 @@ pub struct RenderOptions {
 }
 
 impl Default for RenderOptions {
+    #[allow(deprecated)] // still sets the retained-for-compat `scale` field
     fn default() -> Self {
         RenderOptions {
             width: 0,
@@ -191,6 +203,7 @@ impl Default for RenderOptions {
     }
 }
 
+#[allow(deprecated)] // the `fit_to_*` constructors still populate `scale` for back-compat
 impl RenderOptions {
     /// Create render options that scale the page to fit the given width,
     /// preserving aspect ratio. Respects page rotation from the INFO chunk.
@@ -277,6 +290,21 @@ impl RenderOptions {
                 || (page.width() as u32 == self.width && page.height() as u32 == self.height))
             && page.rotation() == crate::info::Rotation::None
             && self.rotation == UserRotation::None
+    }
+
+    /// The scale the decode pipeline uses to choose the IW44 wavelet subsample
+    /// level (via [`best_iw44_subsample`]), derived from the requested output
+    /// `width` and the page's rotation-aware display width.
+    ///
+    /// This is the single home of the `scale ≈ width / display_width` invariant
+    /// that every caller used to maintain by hand — and that the PDF exporter
+    /// got wrong, leaving `scale = 1.0` and silently over-decoding at every DPI.
+    /// Rendering reads *this*, never the deprecated public [`scale`](Self::scale)
+    /// field, so a caller can no longer cause a silent over- or under-decode by
+    /// building the size triple inconsistently.
+    pub(crate) fn decode_scale(&self, page: &crate::djvu_document::DjVuPage) -> f32 {
+        let (dw, _) = display_dimensions(page);
+        self.width as f32 / dw.max(1) as f32
     }
 }
 
@@ -960,7 +988,7 @@ fn page_mask_sub4(page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
 /// Decode background from BG44 chunks up to `max_chunks`.
 ///
 /// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
-/// Use `best_iw44_subsample(opts.scale)` to pick an appropriate value.
+/// Use `best_iw44_subsample(opts.decode_scale(page))` to pick an appropriate value.
 ///
 /// When `max_chunks == usize::MAX`, the decoded wavelet image is fetched from
 /// the page's [`PageLayers`] cache, avoiding repeated ZP arithmetic decode.
@@ -1792,7 +1820,7 @@ where
 
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
 
     let DecodedLayers {
         bg,
@@ -1863,7 +1891,7 @@ pub fn render_into(
     let gamma_lut = build_gamma_lut(page.gamma());
 
     // Decode all layers (shared permissive/strict seam, same as render_rows).
-    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let DecodedLayers {
         bg,
         fg_palette,
@@ -1902,15 +1930,15 @@ pub fn render_into(
 /// re-render matches the requested render in everything but the final
 /// resampling step.
 fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
+    // Full page size (decode scale derives to 1.0), bilinear resampling so the
+    // recursive render never re-enters this path, no AA / no rotation. Bold and
+    // permissive are carried through.
     RenderOptions {
         width: page.width() as u32,
         height: page.height() as u32,
-        scale: 1.0,
         bold: opts.bold,
-        aa: false,
-        rotation: UserRotation::None, // rotation applied after scaling
         permissive: opts.permissive,
-        resampling: Resampling::Bilinear, // avoid infinite recursion
+        ..Default::default()
     }
 }
 
@@ -2110,7 +2138,7 @@ pub fn render_region(
     let full_h = opts.height.max(1);
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let DecodedLayers {
         bg,
         fg_palette,
@@ -2197,12 +2225,7 @@ pub fn render_pages_parallel(
             let opts = RenderOptions {
                 width: w,
                 height: h,
-                scale,
-                bold: 0,
-                aa: false,
-                rotation: UserRotation::None,
-                permissive: false,
-                resampling: Resampling::Bilinear,
+                ..Default::default()
             };
             render_pixmap(page, &opts)
         })
@@ -2223,7 +2246,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
         });
     }
 
-    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let bg = decode_background_chunks(page, 1, bg_subsample)?;
     let bg = match bg {
         Some(b) => b,
@@ -2294,7 +2317,7 @@ pub fn render_progressive(
     let gamma_lut = build_gamma_lut(page.gamma());
 
     // Decode background up to chunk_n + 1 chunks
-    let bg_subsample = best_iw44_subsample(opts.scale);
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let bg = decode_background_chunks(page, chunk_n + 1, bg_subsample)?;
 
     // Same strict foreground decode as the full render; only the background
@@ -2509,7 +2532,6 @@ mod tests {
         assert_eq!(opts.height, 0);
         assert_eq!(opts.bold, 0);
         assert!(!opts.aa);
-        assert!((opts.scale - 1.0).abs() < 1e-6);
         assert_eq!(opts.resampling, Resampling::Bilinear);
     }
 
@@ -2519,18 +2541,15 @@ mod tests {
         let opts = RenderOptions {
             width: 400,
             height: 300,
-            scale: 0.5,
             bold: 1,
             aa: true,
             rotation: UserRotation::Cw90,
-            permissive: false,
-            resampling: Resampling::Bilinear,
+            ..Default::default()
         };
         assert_eq!(opts.width, 400);
         assert_eq!(opts.height, 300);
         assert_eq!(opts.bold, 1);
         assert!(opts.aa);
-        assert!((opts.scale - 0.5).abs() < 1e-6);
         assert_eq!(opts.rotation, UserRotation::Cw90);
     }
 
@@ -2546,7 +2565,9 @@ mod tests {
         assert_eq!(opts.width, 800);
         let expected_h = ((ph as f64 * 800.0) / pw as f64).round() as u32;
         assert_eq!(opts.height, expected_h);
-        assert!((opts.scale - 800.0 / pw as f32).abs() < 0.01);
+        // The pipeline's decode scale is derived from width; it matches the
+        // width/page-width ratio the deprecated `scale` field used to carry.
+        assert!((opts.decode_scale(page) - 800.0 / pw as f32).abs() < 0.01);
     }
 
     /// `fit_to_height` scales correctly, preserving aspect ratio.
@@ -2561,7 +2582,9 @@ mod tests {
         assert_eq!(opts.height, 600);
         let expected_w = ((pw as f64 * 600.0) / ph as f64).round() as u32;
         assert_eq!(opts.width, expected_w);
-        assert!((opts.scale - 600.0 / ph as f32).abs() < 0.01);
+        // fit_to_height preserves aspect, so width/page-width equals
+        // height/page-height — the decode scale matches either ratio.
+        assert!((opts.decode_scale(page) - 600.0 / ph as f32).abs() < 0.01);
     }
 
     /// `fit_to_box` chooses the smaller scale factor.
@@ -3291,12 +3314,7 @@ mod tests {
         let opts = RenderOptions {
             width: 4,
             height: 4,
-            scale: 1.0,
-            bold: 0,
-            aa: false,
-            rotation: UserRotation::None,
-            permissive: false,
-            resampling: Resampling::Bilinear,
+            ..Default::default()
         };
         let pm = render_pixmap(page, &opts).expect("render must succeed");
         assert_eq!(pm.width, 4);
@@ -3311,12 +3329,7 @@ mod tests {
         let opts = RenderOptions {
             width: 4,
             height: 4,
-            scale: 1.0,
-            bold: 0,
-            aa: false,
-            rotation: UserRotation::None,
-            permissive: false,
-            resampling: Resampling::Bilinear,
+            ..Default::default()
         };
         let pm = render_coarse(page, &opts).expect("render_coarse must succeed");
         assert!(pm.is_some(), "must return Some when BGjp present");
@@ -3343,7 +3356,6 @@ mod tests {
         let opts = RenderOptions {
             width: tw,
             height: th,
-            scale: 0.5,
             resampling: Resampling::Lanczos3,
             ..Default::default()
         };
@@ -3367,7 +3379,6 @@ mod tests {
             &RenderOptions {
                 width: tw,
                 height: th,
-                scale: 0.5,
                 resampling: Resampling::Bilinear,
                 ..Default::default()
             },
@@ -3379,7 +3390,6 @@ mod tests {
             &RenderOptions {
                 width: tw,
                 height: th,
-                scale: 0.5,
                 resampling: Resampling::Lanczos3,
                 ..Default::default()
             },
@@ -3543,16 +3553,53 @@ mod tests {
         );
     }
 
+    /// The IW44 decode subsample is derived from the output `width`, not from
+    /// the deprecated `scale` field — the regression guard for the PDF
+    /// over-decode (#377).
+    #[test]
+    #[allow(deprecated)] // deliberately writes the legacy `scale` field to prove it is ignored
+    fn decode_subsample_derives_from_width_not_scale_field() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let (dw, _) = display_dimensions(page);
+
+        // Quarter-width output. The PDF exporter built exactly this — a small
+        // `width` with `scale` left at the 1.0 default — and the old pipeline
+        // read `scale` and decoded at full wavelet resolution (subsample 1).
+        // The decode scale is now derived from `width`, so it is 0.25 →
+        // subsample 4, and the over-decode is gone.
+        let opts = RenderOptions {
+            width: dw / 4,
+            ..Default::default()
+        };
+        assert!((opts.decode_scale(page) - 0.25).abs() < 0.01);
+        assert_eq!(best_iw44_subsample(opts.decode_scale(page)), 4);
+
+        // Writing the legacy `scale` field by hand — to any value — must not
+        // change the width-derived subsample.
+        for misleading in [1.0_f32, 0.0, 0.5, 4.0] {
+            let mut o = RenderOptions {
+                width: dw / 4,
+                ..Default::default()
+            };
+            o.scale = misleading;
+            assert_eq!(
+                best_iw44_subsample(o.decode_scale(page)),
+                4,
+                "scale={misleading} must not change the width-derived subsample",
+            );
+        }
+    }
+
     /// Rendering with bg_subsample=2 (scale=0.5) produces the correct output dimensions.
     #[test]
     fn render_pixmap_subsampled_bg_correct_dimensions() {
         let doc = load_doc("boy.djvu");
         let page = doc.page(0).unwrap();
-        // scale=0.5 triggers bg_subsample=2 internally
+        // width = half the page → decode_scale ≈ 0.5 → bg_subsample=2 internally
         let opts = RenderOptions {
             width: (page.width() as f32 * 0.5) as u32,
             height: (page.height() as f32 * 0.5) as u32,
-            scale: 0.5,
             ..Default::default()
         };
         let pm = render_pixmap(page, &opts).expect("subsampled render should succeed");
