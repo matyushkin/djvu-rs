@@ -19,6 +19,23 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec::Vec};
 
+use core::ops::Range;
+
+/// Byte range of a bundled `FORM` container given its DIRM offset and the four
+/// big-endian size bytes from its `FORM` header.
+///
+/// A DIRM offset points at the 4-byte `b"FORM"` tag; the size at `offset + 4`
+/// (big-endian `u32`) covers `form_type + payload`, so the whole container
+/// spans `8 + size` bytes. This is the single source of that arithmetic, shared
+/// by the sync slice-based reader ([`crate::djvu_document`]) and the async
+/// seek-based loader ([`crate::djvu_async`]); each fetches the size bytes via
+/// its own I/O and routes them through here.
+pub(crate) fn form_byte_range(offset: u32, size_be: [u8; 4]) -> Range<u64> {
+    let begin = offset as u64;
+    let size = u32::from_be_bytes(size_be) as u64;
+    begin..begin.saturating_add(8).saturating_add(size)
+}
+
 /// Component classification from a DIRM per-component flags byte (low 6 bits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirmComponentKind {
@@ -230,6 +247,21 @@ fn read_nt_string(data: &[u8], pos: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_byte_range_spans_header_plus_payload() {
+        // offset 0x10, size 0x1234 → 0x10 .. 0x10 + 8 + 0x1234.
+        let r = form_byte_range(0x10, [0x00, 0x00, 0x12, 0x34]);
+        assert_eq!(r, 0x10..(0x10 + 8 + 0x1234));
+    }
+
+    #[test]
+    fn form_byte_range_saturates_on_overflow() {
+        // Max offset + max size must not wrap past u64::MAX.
+        let r = form_byte_range(u32::MAX, [0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(r.start, u32::MAX as u64);
+        assert_eq!(r.end, (u32::MAX as u64) + 8 + (u32::MAX as u64));
+    }
 
     #[test]
     fn decode_encode_roundtrip_bundled() {

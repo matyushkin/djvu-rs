@@ -67,19 +67,9 @@ pub enum AsyncRenderError {
     Join(String),
 }
 
-/// Errors from async document loading.
-#[derive(Debug, thiserror::Error)]
-pub enum AsyncLoadError {
-    /// I/O error from the underlying async reader.
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// The buffered bytes failed to parse as a DjVu document.
-    #[error("parse error: {0}")]
-    Parse(#[from] DocError),
-}
-
-/// Errors from true lazy async document loading (#233 Phase 3 PR1).
+/// Errors from async document loading (both the streaming loader and the true
+/// lazy loader). One enum spans the whole async "couldn't get the document /
+/// page" seam (#369).
 #[derive(Debug, thiserror::Error)]
 pub enum AsyncLazyError {
     /// I/O error from the underlying async reader.
@@ -311,12 +301,12 @@ where
     let mut pages = Vec::new();
     let mut shared = BTreeMap::new();
     for entry in entries {
-        let start = entry.offset as u64;
-        reader.seek(std::io::SeekFrom::Start(start + 4)).await?;
+        reader
+            .seek(std::io::SeekFrom::Start(entry.offset as u64 + 4))
+            .await?;
         let mut size_bytes = [0u8; 4];
         reader.read_exact(&mut size_bytes).await?;
-        let size = u32::from_be_bytes(size_bytes) as u64;
-        let range = start..start.saturating_add(8).saturating_add(size);
+        let range = crate::dirm::form_byte_range(entry.offset, size_bytes);
         match entry.comp_type {
             DirmComponentKind::Page => pages.push(LazyPageIndex { range }),
             DirmComponentKind::Shared => {
@@ -371,9 +361,9 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
 ///
 /// # Errors
 ///
-/// - `AsyncLoadError::Io` — any underlying read fails
-/// - `AsyncLoadError::Parse` — the assembled buffer fails [`DjVuDocument::parse`]
-pub async fn load_document_async_streaming<R>(mut reader: R) -> Result<DjVuDocument, AsyncLoadError>
+/// - `AsyncLazyError::Io` — any underlying read fails
+/// - `AsyncLazyError::Parse` — the assembled buffer fails [`DjVuDocument::parse`]
+pub async fn load_document_async_streaming<R>(mut reader: R) -> Result<DjVuDocument, AsyncLazyError>
 where
     R: AsyncRead + Unpin + Send,
 {
@@ -633,7 +623,7 @@ mod tests {
         }
     }
 
-    /// Truncated / non-DjVu bytes surface as `AsyncLoadError::Parse`, not panic.
+    /// Truncated / non-DjVu bytes surface as `AsyncLazyError::Parse`, not panic.
     #[tokio::test]
     async fn streaming_loader_propagates_parse_error() {
         let bogus = b"not a djvu file at all".to_vec();
@@ -642,7 +632,7 @@ mod tests {
             .await
             .expect_err("must fail to parse garbage");
         assert!(
-            matches!(err, AsyncLoadError::Parse(_)),
+            matches!(err, AsyncLazyError::Parse(_)),
             "expected Parse error, got {err:?}"
         );
     }
@@ -848,7 +838,7 @@ mod tests {
         );
     }
 
-    /// I/O failure surfaces as `AsyncLoadError::Io`, not panic.
+    /// I/O failure surfaces as `AsyncLazyError::Io`, not panic.
     #[tokio::test]
     async fn streaming_loader_propagates_io_error() {
         struct FailingReader;
@@ -865,7 +855,7 @@ mod tests {
             .await
             .expect_err("must fail on I/O error");
         assert!(
-            matches!(err, AsyncLoadError::Io(_)),
+            matches!(err, AsyncLazyError::Io(_)),
             "expected Io error, got {err:?}"
         );
     }

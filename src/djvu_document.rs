@@ -815,22 +815,16 @@ impl DjVuDocument {
                         let page = parse_page_from_chunks(&sub_chunks, page_idx, shared_djbz)?;
                         pages.push(page);
 
-                        // Record the byte range of this page's outer FORM. The DIRM
-                        // offset points at the 4 bytes `b"FORM"`; the size sits at
-                        // offset+4 (BE u32) and covers the form_type + payload bytes,
-                        // so the full container is `8 + size` bytes long.
+                        // Record the byte range of this page's outer FORM. The
+                        // offset→range arithmetic lives in `dirm::form_byte_range`;
+                        // here we just supply the four size bytes from the in-memory
+                        // FORM header.
                         if let Some(off) = comp_offsets.get(comp_idx) {
                             let start = *off as usize;
                             if let Some(size_bytes) = data.get(start + 4..start + 8) {
-                                let size = u32::from_be_bytes([
-                                    size_bytes[0],
-                                    size_bytes[1],
-                                    size_bytes[2],
-                                    size_bytes[3],
-                                ]) as u64;
-                                let begin = start as u64;
-                                let end = begin.saturating_add(8).saturating_add(size);
-                                page_byte_ranges.push(begin..end);
+                                let size_be =
+                                    [size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
+                                page_byte_ranges.push(crate::dirm::form_byte_range(*off, size_be));
                             }
                         }
                         page_idx += 1;
