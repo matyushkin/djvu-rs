@@ -48,12 +48,18 @@ pub enum DjvmError {
 /// begins with its 4-byte form type — back into a standalone `AT&T`-prefixed
 /// FORM document. Inverse of [`strip_att`].
 fn wrap_sub_form(form_data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + form_data.len());
-    out.extend_from_slice(b"AT&T");
-    out.extend_from_slice(b"FORM");
-    out.extend_from_slice(&(form_data.len() as u32).to_be_bytes());
-    out.extend_from_slice(form_data);
-    out
+    // `form_data` is a FORM body: it begins with the 4-byte secondary id
+    // (DJVU/DJVI/…) followed by the chunks. Route the AT&T/FORM/length framing
+    // through the emission seam rather than hand-assembling it. A well-formed
+    // FORM body is even-length (every inner chunk is word-aligned), so the seam
+    // reproduces the original bytes exactly; a malformed odd body merely gains a
+    // trailing pad, which re-parses identically.
+    let split = form_data.len().min(4);
+    let (id_bytes, body) = form_data.split_at(split);
+    let mut secondary_id = *b"    ";
+    secondary_id[..id_bytes.len()].copy_from_slice(id_bytes);
+    iff::partial_emit(secondary_id, &[iff::EmitPart::Verbatim(body)])
+        .expect("sub-FORM fits within the 4 GiB IFF FORM limit")
 }
 
 /// Strip a leading `AT&T` magic from a standalone FORM document, yielding the
@@ -233,27 +239,13 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
     // All entries are pages (flag = 1)
     let flags: Vec<u8> = vec![1u8; count];
 
-    let dirm_data = DirmPayload::build_indirect(count, &flags, &ids).encode();
-
-    let mut body_size: usize = 4; // "DJVM"
-    body_size += 8 + dirm_data.len(); // DIRM chunk header + data
-    if !dirm_data.len().is_multiple_of(2) {
-        body_size += 1;
-    }
-
-    let mut output = Vec::with_capacity(4 + 4 + 4 + body_size);
-    output.extend_from_slice(b"AT&T");
-    output.extend_from_slice(b"FORM");
-    output.extend_from_slice(&(body_size as u32).to_be_bytes());
-    output.extend_from_slice(b"DJVM");
-    output.extend_from_slice(b"DIRM");
-    output.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
-    output.extend_from_slice(&dirm_data);
-    if !dirm_data.len().is_multiple_of(2) {
-        output.push(0);
-    }
-
-    Ok(output)
+    // Indirect: a single DIRM chunk, no embedded component FORMs. Route the
+    // DJVM framing through the emission seam (same path as the bundled build).
+    let dirm = iff::Chunk::Leaf {
+        id: *b"DIRM",
+        data: DirmPayload::build_indirect(count, &flags, &ids).encode(),
+    };
+    iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).ok_or(DjvmError::OutputTooLarge)
 }
 
 #[cfg(test)]
