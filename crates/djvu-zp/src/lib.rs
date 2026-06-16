@@ -75,6 +75,14 @@ pub struct ZpDecoder<'a> {
     /// Compressed input bytes.
     pub data: &'a [u8],
     /// Current read position within `data`.
+    ///
+    /// Advances by one for every byte the coder consumes, **including synthetic
+    /// `0xFF` padding read past the end of `data`** — it is not clamped at
+    /// `data.len()`. The overshoot `pos - data.len()` is therefore the number of
+    /// synthetic bytes emitted so far; see [`synthetic_bytes`](Self::synthetic_bytes).
+    /// Every byte reader (this struct's [`read_byte`](Self::read_byte) and the
+    /// inlined hot-path readers in djvu-jb2 / djvu-iw44 / djvu-bzz) advances `pos`
+    /// the same way, so the overshoot is consistent regardless of which path read.
     pub pos: usize,
 }
 
@@ -116,15 +124,21 @@ impl<'a> ZpDecoder<'a> {
     }
 
     /// Read the next byte from the input stream, returning `0xFF` on exhaustion.
+    ///
+    /// `pos` advances on every call, even past the end of `data`, so that the
+    /// overshoot `pos - data.len()` counts synthetic padding (see
+    /// [`synthetic_bytes`](Self::synthetic_bytes)). This matches the inlined
+    /// hot-path byte readers in djvu-jb2 / djvu-iw44 / djvu-bzz, keeping the
+    /// synthetic-byte count consistent no matter which reader consumed the byte.
     #[inline(always)]
     fn read_byte(&mut self) -> u8 {
-        if self.pos < self.data.len() {
-            let b = self.data[self.pos];
-            self.pos += 1;
-            b
+        let b = if self.pos < self.data.len() {
+            self.data[self.pos]
         } else {
             0xff
-        }
+        };
+        self.pos = self.pos.wrapping_add(1);
+        b
     }
 
     /// Fill `bit_buf` with fresh bytes until it holds at least 24 bits.
@@ -191,6 +205,25 @@ impl<'a> ZpDecoder<'a> {
     /// remaining work that would otherwise loop on constant input.
     pub fn is_exhausted(&self) -> bool {
         self.pos >= self.data.len()
+    }
+
+    /// Number of synthetic `0xFF` bytes emitted past the end of the real input.
+    ///
+    /// Computed as the overshoot of [`pos`](Self::pos) beyond `data.len()`. Every
+    /// byte reader — this struct's [`read_byte`](Self::read_byte) and the inlined
+    /// hot-path readers in djvu-jb2 / djvu-iw44 / djvu-bzz — advances `pos` past
+    /// the end of `data` on each post-EOF read, so this is the true total across
+    /// all of them.
+    ///
+    /// Unlike [`is_exhausted`](Self::is_exhausted), which flips as soon as the
+    /// *byte* buffer drains — several bytes before the logical end of the
+    /// arithmetic stream, because the decoder buffers up to 32 bits of
+    /// look-ahead — this counts only genuine post-EOF padding reads. It lets a
+    /// caller tell "finishing the last buffered bits of a valid stream" (a
+    /// handful of synthetic bytes) apart from "spinning on exhausted input"
+    /// (unbounded), which `is_exhausted` cannot distinguish.
+    pub fn synthetic_bytes(&self) -> usize {
+        self.pos.saturating_sub(self.data.len())
     }
 
     /// Decode one bit in passthrough (context-free) mode.
@@ -275,6 +308,45 @@ mod tests {
     fn zp_decoder_accepts_two_byte_input() {
         assert!(ZpDecoder::new(&[0x00, 0x00]).is_ok());
         assert!(ZpDecoder::new(&[0xff, 0xff]).is_ok());
+    }
+
+    #[test]
+    fn synthetic_bytes_distinguishes_eof_from_spinning() {
+        // `new()` always consumes 6 bytes: a 2-byte code load plus a 4-byte
+        // initial `refill_buffer`. With exactly 6 bytes the byte buffer is
+        // drained (`is_exhausted`) yet NO synthetic padding was needed — this
+        // is the valid-tail case the JB2 budget guard must not treat as
+        // "spinning". `is_exhausted()` alone cannot tell it apart.
+        let zp = ZpDecoder::new(&[0u8; 6]).unwrap();
+        assert!(zp.is_exhausted(), "pos reached end of input");
+        assert_eq!(
+            zp.synthetic_bytes(),
+            0,
+            "no padding read despite exhaustion"
+        );
+
+        // A 2-byte stream forces the entire 4-byte refill from synthetic fill.
+        let zp2 = ZpDecoder::new(&[0u8; 2]).unwrap();
+        assert!(zp2.is_exhausted());
+        assert_eq!(zp2.synthetic_bytes(), 4, "refill faked 4 bytes past EOF");
+
+        // Ample input: neither exhausted nor padded.
+        let zp3 = ZpDecoder::new(&[0u8; 64]).unwrap();
+        assert!(!zp3.is_exhausted());
+        assert_eq!(zp3.synthetic_bytes(), 0);
+
+        // Decoding on past EOF accumulates padding without bound, blowing past
+        // any fixed slack — the signal that the stream is genuinely spinning.
+        let mut zp4 = ZpDecoder::new(&[0u8; 2]).unwrap();
+        let mut ctx = 0u8;
+        for _ in 0..10_000 {
+            let _ = zp4.decode_bit(&mut ctx);
+        }
+        assert!(
+            zp4.synthetic_bytes() > 16,
+            "spinning should exceed the slack, got {}",
+            zp4.synthetic_bytes()
+        );
     }
 
     #[test]
