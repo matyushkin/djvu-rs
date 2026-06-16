@@ -106,7 +106,7 @@ proptest! {
         ),
         indices in prop::option::of(prop::collection::vec(any::<i16>(), 0..1024usize)),
     ) {
-        let bytes = encode_fgbz(&palette, indices.as_deref());
+        let bytes = encode_fgbz(&palette, indices.as_deref()).expect("FGbz encode failed");
         let (decoded_palette, decoded_indices) =
             decode_fgbz(&bytes).expect("FGbz decode failed");
         prop_assert_eq!(decoded_palette, palette);

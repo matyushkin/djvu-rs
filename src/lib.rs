@@ -316,6 +316,12 @@ pub mod navm_encode;
 /// to JB2 for fax-style scans without recurring glyph structure.
 pub mod smmr;
 
+/// Chunk-encoder seam — one `(id, payload)` interface ([`chunk_encode::ChunkEncoder`])
+/// over the per-chunk encoders, with a single [`chunk_encode::EncodeError`]
+/// discipline (no panic, no silent truncation).
+#[cfg(feature = "std")]
+pub mod chunk_encode;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

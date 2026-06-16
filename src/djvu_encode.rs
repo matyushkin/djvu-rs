@@ -53,7 +53,8 @@
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
 
 use crate::bitmap::Bitmap;
-use crate::fgbz_encode::{FgbzColor, encode_fgbz};
+use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk};
+use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use crate::jb2_encode;
@@ -223,8 +224,8 @@ impl<'a> PageEncoder<'a> {
                         data: body,
                     });
                 }
-                if let Some(data) = fgbz {
-                    chunks.push(Chunk::Leaf { id: *b"FGbz", data });
+                if let Some(chunk) = fgbz {
+                    chunks.push(chunk.into_leaf());
                 }
                 Ok(encode_form_djvu(chunks))
             }
@@ -299,7 +300,7 @@ impl ColorAccum {
     }
 }
 
-fn foreground_fgbz(pm: &Pixmap, mask: &Bitmap, sjbz: &[u8]) -> Option<Vec<u8>> {
+fn foreground_fgbz(pm: &Pixmap, mask: &Bitmap, sjbz: &[u8]) -> Option<EncodedChunk> {
     let (decoded_mask, blit_map) = crate::jb2::decode_indexed(sjbz, None).ok()?;
     if decoded_mask.width != mask.width || decoded_mask.height != mask.height {
         return None;
@@ -348,7 +349,15 @@ fn foreground_fgbz(pm: &Pixmap, mask: &Bitmap, sjbz: &[u8]) -> Option<Vec<u8>> {
     } else {
         None
     };
-    Some(encode_fgbz(&palette, index_payload))
+    // Best-effort: the palette is bounded < i16::MAX above, so the FGbz
+    // wire limits cannot trip here; `.ok()` keeps this a soft skip if a
+    // future change relaxes that bound.
+    FgbzChunk {
+        palette: &palette,
+        indices: index_payload,
+    }
+    .encode_chunk()
+    .ok()
 }
 
 #[cfg(test)]
