@@ -70,10 +70,27 @@ pub(crate) struct DirmPayload {
     pub metadata: Vec<u8>,
 }
 
+/// DIRM flags bit 7: set ⇒ bundled document (the payload carries an offset
+/// table). The single definition of the bundled-bit position; every reader of
+/// the DIRM layout routes through it rather than spelling `0x80` out by hand.
+pub(crate) const BUNDLED_FLAG: u8 = 0x80;
+
 impl DirmPayload {
     /// Whether this is a bundled document (offset table present).
     pub fn is_bundled(&self) -> bool {
-        self.flags & 0x80 != 0
+        self.flags & BUNDLED_FLAG != 0
+    }
+
+    /// Test the bundled bit directly on raw `DIRM` payload bytes, without the
+    /// allocation a full [`DirmPayload::decode`] would incur.
+    ///
+    /// Returns `false` for an empty slice. Use this on hot paths that only need
+    /// the bundled/indirect distinction; use `decode` when the offset table or
+    /// metadata is also required. Gated to `std` because the only caller is the
+    /// byte-preserving mutator, mirroring [`DirmPayload::encode`].
+    #[cfg(feature = "std")]
+    pub fn peek_bundled(data: &[u8]) -> bool {
+        data.first().is_some_and(|&flags| flags & BUNDLED_FLAG != 0)
     }
 
     /// Decode the `DIRM` chunk payload (the bytes after the `DIRM` id+length).
@@ -86,7 +103,7 @@ impl DirmPayload {
         }
         let flags = data[0];
         let nfiles = u16::from_be_bytes([data[1], data[2]]);
-        let bundled = flags & 0x80 != 0;
+        let bundled = flags & BUNDLED_FLAG != 0;
 
         let mut pos = 3usize;
         let mut offsets = Vec::new();
