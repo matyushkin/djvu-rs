@@ -21,18 +21,31 @@
 //! ```
 
 use crate::bzz_encode::bzz_encode;
+use crate::chunk_encode::EncodeError;
 use crate::djvu_document::DjVuBookmark;
 
 /// Encode a list of bookmarks into a NAVM chunk payload (BZZ-compressed).
 ///
 /// Returns the bytes suitable for embedding directly as a `NAVM` chunk.
 /// Returns an empty `Vec` if `bookmarks` is empty.
-pub fn encode_navm(bookmarks: &[DjVuBookmark]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// - [`EncodeError::BookmarkChildrenOverflow`] if any node has more than 255
+///   children (the `u8` child-count field cannot express more).
+/// - [`EncodeError::BookmarkCountOverflow`] if the tree has more than 65 535
+///   nodes in total (the `u16` count field cannot express more).
+///
+/// Both were previously silent truncations of the wire fields.
+pub fn encode_navm(bookmarks: &[DjVuBookmark]) -> Result<Vec<u8>, EncodeError> {
     if bookmarks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let total = count_bookmarks(bookmarks);
+    if total > u16::MAX as usize {
+        return Err(EncodeError::BookmarkCountOverflow { found: total });
+    }
     let mut raw = Vec::new();
 
     // Total count — u16be
@@ -40,10 +53,10 @@ pub fn encode_navm(bookmarks: &[DjVuBookmark]) -> Vec<u8> {
     raw.push(total as u8);
 
     for bm in bookmarks {
-        write_bookmark(&mut raw, bm);
+        write_bookmark(&mut raw, bm)?;
     }
 
-    bzz_encode(&raw)
+    Ok(bzz_encode(&raw))
 }
 
 /// Count all bookmark nodes in the tree (all levels).
@@ -55,14 +68,18 @@ fn count_bookmarks(bookmarks: &[DjVuBookmark]) -> usize {
 }
 
 /// Serialize one bookmark node (and its children) into `buf`.
-fn write_bookmark(buf: &mut Vec<u8>, bm: &DjVuBookmark) {
-    let n_children = bm.children.len().min(255) as u8;
-    buf.push(n_children);
+fn write_bookmark(buf: &mut Vec<u8>, bm: &DjVuBookmark) -> Result<(), EncodeError> {
+    let n_children = bm.children.len();
+    if n_children > u8::MAX as usize {
+        return Err(EncodeError::BookmarkChildrenOverflow { found: n_children });
+    }
+    buf.push(n_children as u8);
     write_navm_str(buf, &bm.title);
     write_navm_str(buf, &bm.url);
     for child in &bm.children {
-        write_bookmark(buf, child);
+        write_bookmark(buf, child)?;
     }
+    Ok(())
 }
 
 /// Write a length-prefixed string: u24be length followed by UTF-8 bytes.
@@ -135,13 +152,13 @@ mod tests {
 
     #[test]
     fn empty_bookmarks_returns_empty() {
-        assert!(encode_navm(&[]).is_empty());
+        assert!(encode_navm(&[]).unwrap().is_empty());
     }
 
     #[test]
     fn single_bookmark_roundtrip() {
         let bookmarks = vec![bm("Chapter 1", "#page=1", vec![])];
-        let encoded = encode_navm(&bookmarks);
+        let encoded = encode_navm(&bookmarks).unwrap();
         assert!(!encoded.is_empty());
         let (total, decoded) = decode_raw(&encoded);
         assert_eq!(total, 1);
@@ -168,7 +185,7 @@ mod tests {
                 vec![bm("Chapter 3", "#page=25", vec![])],
             ),
         ];
-        let encoded = encode_navm(&bookmarks);
+        let encoded = encode_navm(&bookmarks).unwrap();
         let (total, decoded) = decode_raw(&encoded);
         // total = 2 parts + 3 chapters = 5
         assert_eq!(total, 5);
@@ -183,7 +200,7 @@ mod tests {
     #[test]
     fn unicode_title_roundtrip() {
         let bookmarks = vec![bm("Раздел 1 — Введение", "#page=1", vec![])];
-        let encoded = encode_navm(&bookmarks);
+        let encoded = encode_navm(&bookmarks).unwrap();
         let (total, decoded) = decode_raw(&encoded);
         assert_eq!(total, 1);
         assert_eq!(decoded[0].title, "Раздел 1 — Введение");
@@ -197,7 +214,7 @@ mod tests {
             "#1",
             vec![bm("B", "#2", vec![bm("C", "#3", vec![])])],
         )];
-        let encoded = encode_navm(&bookmarks);
+        let encoded = encode_navm(&bookmarks).unwrap();
         let (total, _) = decode_raw(&encoded);
         assert_eq!(total, 3); // A + B + C
     }
