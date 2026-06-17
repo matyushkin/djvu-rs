@@ -867,6 +867,51 @@ mod tests {
     // Lines 351-352: BadCode in decode_black_run.
     // H mode + W0 (WHITE_TERM run=0 = 0b00110101, 8 bits) leaves 5 zero-bits
     // which match no BLACK_TERM/BLACK_MAKEUP entry → SmmrError::BadCode.
+    // Lines 470-471: VL1 vertical mode (code=010, v_offset=-1).
+    // Row 0: [W,W,B,W,...] encoded as H W2 B1 H W5 B0 (27 bits)
+    // Row 1: VL1 VL1 Pass V0 → [W,B,W,W,...] (B shifted left by 1)
+    #[test]
+    fn decoder_vl1_vertical_mode_produces_correct_output() {
+        // Bitstream (ncols=8, nrows=2):
+        //   Row0: 001(H) 0111(W2) 010(B1) 001(H) 1100(W5) 0000110111(B0) = 27 bits
+        //   Row1: 010(VL1) 010(VL1) 0001(Pass) 1(V0) = 11 bits
+        //   EOFB: 000000000001 000000000001 = 24 bits (total 62 bits → 8 bytes)
+        let data: &[u8] = &[
+            0x00, 0x08, 0x00, 0x02,
+            0x2E, 0x8E, 0x06, 0xE9, 0x0C, 0x00, 0x40, 0x04,
+        ];
+        let bm = decode_smmr(data).expect("VL1 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W W B W W W W W
+        assert!(!bm.get(0, 0));
+        assert!(!bm.get(1, 0));
+        assert!(bm.get(2, 0));
+        assert!(!bm.get(3, 0));
+        // Row 1: W B W W W W W W (B shifted left by one via VL1)
+        assert!(!bm.get(0, 1));
+        assert!(bm.get(1, 1));
+        assert!(!bm.get(2, 1));
+    }
+
+    // Line 477: "else { break }" for an unknown/fill-bits G4 code.
+    // After H W1 B0 (a0=1, a0_color=W), remaining 5 zero-bits (0b00000) match
+    // no G4 code → fall through to `else { break }`.  The remaining pixels fill white.
+    #[test]
+    fn decoder_unknown_code_breaks_and_fills_remaining_white() {
+        // ncols=4, nrows=1
+        // bitstream: H(001) W1(000111) B0(0000110111) + 5 padding zeros
+        //   = 0x23, 0x86, 0xE0
+        let data: &[u8] = &[0x00, 0x04, 0x00, 0x01, 0x23, 0x86, 0xE0];
+        let bm = decode_smmr(data).expect("unknown-code break should not error");
+        assert_eq!(bm.width, 4);
+        assert_eq!(bm.height, 1);
+        // All pixels should be white (a0_color=W when break fires; remaining fills white)
+        for x in 0..4u32 {
+            assert!(!bm.get(x, 0), "col{x} should be white");
+        }
+    }
+
     #[test]
     fn decode_smmr_bad_black_run_code_returns_error() {
         // ncols=8, nrows=1
