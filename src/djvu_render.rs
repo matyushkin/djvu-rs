@@ -1163,6 +1163,7 @@ fn decode_layers(
     page: &DjVuPage,
     opts: &RenderOptions,
     bg_subsample: u32,
+    bg_chunk_limit: usize,
 ) -> Result<DecodedLayers, RenderError> {
     let bg;
     let fg_palette;
@@ -1171,7 +1172,7 @@ fn decode_layers(
     let fg44;
 
     if opts.permissive {
-        bg = decode_background_chunks_permissive(page, usize::MAX, bg_subsample);
+        bg = decode_background_chunks_permissive(page, bg_chunk_limit, bg_subsample);
         fg_palette = decode_fg_palette_full(page).ok().flatten();
         let indexed = if fg_palette.is_some() {
             decode_mask_indexed(page).ok().flatten()
@@ -1187,7 +1188,7 @@ fn decode_layers(
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, usize::MAX, bg_subsample)?;
+        bg = decode_background_chunks(page, bg_chunk_limit, bg_subsample)?;
         let fg = decode_foreground_strict(page)?;
         fg_palette = fg.fg_palette;
         mask = fg.mask;
@@ -1836,7 +1837,7 @@ where
         mask,
         blit_map,
         fg44,
-    } = decode_layers(page, opts, bg_subsample)?;
+    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
 
     let (ctx_mask, mask_shift) =
         resolve_sub4_mask(page, bg_subsample, opts, mask.as_ref(), fg_palette.as_ref());
@@ -1906,7 +1907,7 @@ pub fn render_into(
         mask,
         blit_map,
         fg44,
-    } = decode_layers(page, opts, bg_subsample)?;
+    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
 
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
@@ -2153,7 +2154,7 @@ pub fn render_region(
         mask,
         blit_map,
         fg44,
-    } = decode_layers(page, opts, bg_subsample)?;
+    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
 
     let out_w = region.width;
     let out_h = region.height;
@@ -2324,21 +2325,12 @@ pub fn render_progressive(
 
     let gamma_lut = build_gamma_lut(page.gamma());
 
-    // Decode background up to chunk_n + 1 chunks
+    // Decode background up to chunk_n + 1 chunks; full foreground + bold dilation
+    // via the shared decode_layers path so no logic can drift between this and the
+    // full render.
     let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let bg = decode_background_chunks(page, chunk_n + 1, bg_subsample)?;
-
-    // Same strict foreground decode as the full render; only the background
-    // (capped at `chunk_n + 1` chunks) differs.
-    let fg = decode_foreground_strict(page)?;
-    let fg_palette = fg.fg_palette;
-    let blit_map = fg.blit_map;
-    let fg44 = fg.fg44;
-    let mask = if opts.bold > 0 {
-        fg.mask.map(|m| m.dilate_n(opts.bold as u32))
-    } else {
-        fg.mask
-    };
+    let DecodedLayers { bg, fg_palette, mask, blit_map, fg44 } =
+        decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
 
     let mut pm = Pixmap::white(w, h);
     {
