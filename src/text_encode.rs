@@ -271,4 +271,37 @@ mod tests {
             .expect("all-kinds roundtrip must decode");
         assert_eq!(decoded.zones[0].kind, TextZoneKind::Column);
     }
+
+    #[test]
+    fn encode_sibling_lines_use_page_para_line_delta_branch() {
+        // Two sibling Line zones: the second has prev=Some and type_byte=5,
+        // which hits the `1|4|5` delta branch (lines 82-84).
+        let layer = TextLayer {
+            text: "hello world".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect { x: 0, y: 0, width: 200, height: 300 },
+                text: "hello world".into(),
+                children: vec![
+                    TextZone {
+                        kind: TextZoneKind::Line,
+                        rect: Rect { x: 0, y: 0, width: 200, height: 20 },
+                        text: "hello".into(),
+                        children: vec![],
+                    },
+                    TextZone {
+                        kind: TextZoneKind::Line,
+                        rect: Rect { x: 0, y: 30, width: 200, height: 20 },
+                        text: "world".into(),
+                        children: vec![],
+                    },
+                ],
+            }],
+        };
+        let page_height = 300u32;
+        let encoded = encode_text_layer(&layer, page_height);
+        let decoded = crate::text::parse_text_layer(&encoded, page_height)
+            .expect("sibling lines must roundtrip");
+        assert_eq!(decoded.zones[0].children.len(), 2);
+    }
 }
