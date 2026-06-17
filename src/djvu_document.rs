@@ -1902,6 +1902,66 @@ mod tests {
     }
 
     #[test]
+    fn extract_mask_from_smmr_chunk() {
+        // Build a page with an Smmr chunk (G4/MMR-encoded mask). This covers the
+        // Smmr decode path in extract_mask() (lines 545-546).
+        use crate::chunk_encode::{ChunkEncoder, SmmrChunk};
+        let mut bm = crate::bitmap::Bitmap::new(8, 8);
+        bm.set_black(2, 2);
+        let smmr_chunk = SmmrChunk(&bm).encode_chunk().unwrap();
+        let page = page_with_chunks(&[(b"Smmr", &smmr_chunk.payload)]);
+        let result = page.extract_mask().unwrap();
+        assert!(result.is_some(), "Smmr page should have a mask");
+        assert_eq!(result.unwrap().width, 8);
+    }
+
+    #[test]
+    fn extract_background_returns_none_for_jb2_only_page() {
+        // A page with only Sjbz (no BG44) → extract_background returns Ok(None)
+        // This covers lines 638-641 in djvu_document.rs.
+        let jb2_data = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&jb2_data).unwrap();
+        let page = doc.page(0).unwrap();
+        let bg = page.extract_background().unwrap();
+        assert!(bg.is_none(), "JB2-only page should have no background");
+    }
+
+    #[test]
+    fn extract_mask_indexed_smmr_path() {
+        // Page with Smmr chunk: extract_mask_indexed takes the Smmr path (lines 570-575).
+        use crate::chunk_encode::{ChunkEncoder, SmmrChunk};
+        let mut bm = crate::bitmap::Bitmap::new(4, 4);
+        bm.set_black(1, 1);
+        let smmr_chunk = SmmrChunk(&bm).encode_chunk().unwrap();
+        let page = page_with_chunks(&[(b"Smmr", &smmr_chunk.payload)]);
+        let result = page.extract_mask_indexed().unwrap();
+        assert!(result.is_some());
+        let (mask, indices) = result.unwrap();
+        assert_eq!(mask.width, 4);
+        assert_eq!(indices.len(), 4 * 4);
+    }
+
+    #[test]
+    fn extract_mask_indexed_no_chunks_returns_none() {
+        // Page with no Sjbz or Smmr → Ok(None) (line 588).
+        let page = page_with_chunks(&[]);
+        let result = page.extract_mask_indexed().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_background_decodes_iw44_from_color_page() {
+        // chicken.djvu has BG44 → extract_background decodes IW44 (lines 644-649).
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let bg = page.extract_background().unwrap();
+        assert!(bg.is_some(), "chicken.djvu page should have a background");
+        let pm = bg.unwrap();
+        assert!(pm.width > 0 && pm.height > 0);
+    }
+
+    #[test]
     fn djvu_page_debug_impl_does_not_panic() {
         let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
         let doc = DjVuDocument::parse(&data).unwrap();
