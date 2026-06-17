@@ -4007,6 +4007,23 @@ mod tests {
         assert_eq!(result.height, 40);
     }
 
+    /// Lanczos3 at native resolution skips the re-render (need_scale=false path).
+    #[test]
+    fn lanczos3_at_native_resolution_skips_rerender() {
+        let doc = load_doc("bgjp_test.djvu");
+        let page = doc.page(0).unwrap();
+        // bgjp_test.djvu is 4×4 — render at native size with Lanczos3
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("lanczos at native size must succeed");
+        assert_eq!(pm.width, page.width() as u32);
+        assert_eq!(pm.height, page.height() as u32);
+    }
+
     /// render_pixmap rejects zero width.
     #[test]
     fn render_pixmap_rejects_zero_width() {
