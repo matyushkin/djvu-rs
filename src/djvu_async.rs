@@ -49,7 +49,7 @@ use crate::{
     djvu_document::{DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
     error::IffError,
-    iff::parse_form,
+    iff::{MAGIC, parse_form},
     pixmap::Pixmap,
 };
 
@@ -245,7 +245,10 @@ where
             .map_err(|_| AsyncLazyError::Unsupported("page range exceeds addressable memory"))?;
         let mut bytes = Vec::with_capacity(len.saturating_add(4));
         if range.start != 0 {
-            bytes.extend_from_slice(b"AT&T");
+            // Reconstruct a standalone document from the on-disk component
+            // range by prepending the IFF magic (the FORM framing is already
+            // present in the range read from disk).
+            bytes.extend_from_slice(&MAGIC);
         }
         let mut reader = self.reader.lock().await;
         reader.seek(std::io::SeekFrom::Start(range.start)).await?;

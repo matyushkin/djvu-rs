@@ -1595,12 +1595,10 @@ mod tests {
     /// Non-DjVu file returns NotDjVu error.
     #[test]
     fn not_djvu_returns_error() {
-        // Construct a valid IFF with a non-DjVu form type
-        let mut data = Vec::new();
-        data.extend_from_slice(b"AT&T");
-        data.extend_from_slice(b"FORM");
-        data.extend_from_slice(&8u32.to_be_bytes());
-        data.extend_from_slice(b"XXXXXXXX"); // form_type = XXXX + 4 dummy bytes
+        // Construct a valid IFF with a non-DjVu form type ("XXXX" + 4 dummy
+        // bytes), routed through the emission seam.
+        let data = crate::iff::partial_emit(*b"XXXX", &[crate::iff::EmitPart::Verbatim(b"XXXX")])
+            .expect("fits within u32");
         let err = DjVuDocument::parse(&data).expect_err("should fail");
         assert!(
             matches!(err, DocError::NotDjVu(_) | DocError::Iff(_)),
@@ -1635,27 +1633,13 @@ mod tests {
     }
 
     fn build_djvm_with_dirm(dirm_data: &[u8]) -> Vec<u8> {
-        // DIRM chunk
-        let mut dirm_chunk = Vec::new();
-        dirm_chunk.extend_from_slice(b"DIRM");
-        dirm_chunk.extend_from_slice(&(dirm_data.len() as u32).to_be_bytes());
-        dirm_chunk.extend_from_slice(dirm_data);
-        if !dirm_data.len().is_multiple_of(2) {
-            dirm_chunk.push(0); // pad to even
-        }
-
-        // FORM:DJVM body
-        let mut form_body = Vec::new();
-        form_body.extend_from_slice(b"DJVM");
-        form_body.extend_from_slice(&dirm_chunk);
-
-        // Full file
-        let mut file = Vec::new();
-        file.extend_from_slice(b"AT&T");
-        file.extend_from_slice(b"FORM");
-        file.extend_from_slice(&(form_body.len() as u32).to_be_bytes());
-        file.extend_from_slice(&form_body);
-        file
+        // A FORM:DJVM carrying a single DIRM chunk, built through the seam.
+        let dirm = crate::iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_data.to_vec(),
+        };
+        crate::iff::partial_emit(*b"DJVM", &[crate::iff::EmitPart::Chunk(&dirm)])
+            .expect("fits within u32")
     }
 
     // ── raw chunk API (Issue #43) ────────────────────────────────────────────
