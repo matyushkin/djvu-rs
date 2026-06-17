@@ -460,6 +460,30 @@ mod tests {
     }
 
     #[test]
+    fn encode_rejects_pixmap_width_exceeding_u16() {
+        // width = 70000 > 65535: try_from fails → EncodeError::Unsupported
+        let pm = Pixmap { width: 70_000, height: 1, data: vec![] };
+        let err = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("width") || msg.contains("65"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn encode_rejects_bitmap_height_exceeding_u16() {
+        // height = 70000 > 65535: try_from fails → EncodeError::Unsupported
+        let bm = Bitmap { width: 1, height: 70_000, data: vec![0u8; 70_000 / 8 + 1] };
+        let err = PageEncoder::from_bitmap(&bm)
+            .with_quality(EncodeQuality::Lossless)
+            .encode()
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("height") || msg.contains("65"), "unexpected: {msg}");
+    }
+
+    #[test]
     fn quality_color_emits_info_sjbz_bg44() {
         // 64×64 page: white background with a black 16×16 ink square.
         let mut pm = Pixmap::white(64, 64);
