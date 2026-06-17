@@ -912,6 +912,109 @@ mod tests {
         }
     }
 
+    // Lines 455-456: VR3 vertical mode (7-bit code 0000011, a1 = b1+3).
+    // Row 0: [W,B,B,B,B,B,W,W] encoded with H W1 B5 V0.
+    // Row 1: [W,W,W,W,B,B,W,W] encoded with VR3(b1=1→a1=4) V0 V0.
+    #[test]
+    fn decoder_vr3_vertical_mode_produces_correct_output() {
+        // Row0 (14 bits): 001(H) 000111(W1) 0011(B5) 1(V0)
+        // Row1  (9 bits): 0000011(VR3) 1(V0) 1(V0)
+        // EOFB (24 bits): 000000000001 000000000001
+        // Pad  (1 bit):   0
+        // Bytes: 0x23, 0x9C, 0x1E, 0x00, 0x20, 0x02
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x23, 0x9C, 0x1E, 0x00, 0x20, 0x02];
+        let bm = decode_smmr(data).expect("VR3 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W B B B B B W W
+        assert!(!bm.get(0, 0));
+        assert!(bm.get(1, 0));
+        assert!(bm.get(5, 0));
+        assert!(!bm.get(6, 0));
+        // Row 1: W W W W B B W W
+        assert!(!bm.get(3, 1));
+        assert!(bm.get(4, 1));
+        assert!(bm.get(5, 1));
+        assert!(!bm.get(6, 1));
+    }
+
+    // Lines 457-458: VL3 vertical mode (7-bit code 0000010, a1 = b1-3).
+    // Row 0: [W,W,W,W,W,B,B,W] encoded with H W5 B2 V0.
+    // Row 1: [W,W,B,B,B,W,W,W] encoded with VL3(b1=5→a1=2) H B3 W3.
+    #[test]
+    fn decoder_vl3_vertical_mode_produces_correct_output() {
+        // Row0 (10 bits): 001(H) 1100(W5) 11(B2) 1(V0)   [WHITE_TERM run5=1100, 4 bits]
+        // Row1 (16 bits): 0000010(VL3) 001(H) 10(B3) 1000(W3)
+        // EOFB (24 bits): 000000000001 000000000001
+        // Pad  (6 bits):  000000
+        // Bytes: 0x39, 0xC1, 0x1A, 0x00, 0x04, 0x00, 0x40
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x39, 0xC1, 0x1A, 0x00, 0x04, 0x00, 0x40];
+        let bm = decode_smmr(data).expect("VL3 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W W W W W B B W
+        assert!(!bm.get(4, 0));
+        assert!(bm.get(5, 0));
+        assert!(!bm.get(7, 0));
+        // Row 1: W W B B B W W W
+        assert!(!bm.get(1, 1));
+        assert!(bm.get(2, 1));
+        assert!(bm.get(4, 1));
+        assert!(!bm.get(5, 1));
+    }
+
+    // Lines 461-462: VR2 vertical mode (6-bit code 000011, a1 = b1+2).
+    // Row 0: [W,W,W,B,B,B,B,W] encoded with H W3 B4 V0.
+    // Row 1: [W,W,W,W,W,B,B,W] encoded with VR2(b1=3→a1=5) V0 V0.
+    #[test]
+    fn decoder_vr2_vertical_mode_produces_correct_output() {
+        // Row0 (11 bits): 001(H) 1000(W3) 011(B4) 1(V0)
+        // Row1  (8 bits): 000011(VR2) 1(V0) 1(V0)
+        // EOFB (24 bits): 000000000001 000000000001
+        // Pad  (5 bits):  00000
+        // Bytes: 0x30, 0xE1, 0xE0, 0x02, 0x00, 0x20
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x30, 0xE1, 0xE0, 0x02, 0x00, 0x20];
+        let bm = decode_smmr(data).expect("VR2 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W W W B B B B W
+        assert!(!bm.get(2, 0));
+        assert!(bm.get(3, 0));
+        assert!(bm.get(6, 0));
+        assert!(!bm.get(7, 0));
+        // Row 1: W W W W W B B W
+        assert!(!bm.get(4, 1));
+        assert!(bm.get(5, 1));
+        assert!(bm.get(6, 1));
+        assert!(!bm.get(7, 1));
+    }
+
+    // Lines 463-464: VL2 vertical mode (6-bit code 000010, a1 = b1-2).
+    // Row 0: [W,W,W,W,W,B,B,W] encoded with H W5 B2 V0.
+    // Row 1: [W,W,W,B,B,W,W,W] encoded with VL2(b1=5→a1=3) H B2 W3.
+    #[test]
+    fn decoder_vl2_vertical_mode_produces_correct_output() {
+        // Row0 (10 bits): 001(H) 1100(W5) 11(B2) 1(V0)   [WHITE_TERM run5=1100, 4 bits]
+        // Row1 (15 bits): 000010(VL2) 001(H) 11(B2) 1000(W3)
+        // EOFB (24 bits): 000000000001 000000000001
+        // Pad  (7 bits):  0000000
+        // Bytes: 0x39, 0xC2, 0x3C, 0x00, 0x08, 0x00, 0x80
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x39, 0xC2, 0x3C, 0x00, 0x08, 0x00, 0x80];
+        let bm = decode_smmr(data).expect("VL2 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W W W W W B B W
+        assert!(!bm.get(4, 0));
+        assert!(bm.get(5, 0));
+        assert!(bm.get(6, 0));
+        assert!(!bm.get(7, 0));
+        // Row 1: W W W B B W W W
+        assert!(!bm.get(2, 1));
+        assert!(bm.get(3, 1));
+        assert!(bm.get(4, 1));
+        assert!(!bm.get(5, 1));
+    }
+
     #[test]
     fn decode_smmr_bad_black_run_code_returns_error() {
         // ncols=8, nrows=1
