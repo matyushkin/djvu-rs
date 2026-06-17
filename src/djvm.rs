@@ -373,6 +373,87 @@ mod tests {
     }
 
     #[test]
+    fn merge_with_djvm_input_extracts_all_pages() {
+        let path = fixture_path("DjVu3Spec_bundled.djvu");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(&path).expect("read");
+        let doc = DjVuDocument::parse(&data).expect("parse");
+        let expected_pages = doc.page_count();
+
+        // merge(&[djvm]) should expand the DJVM into its component pages
+        let merged = merge(&[&data]).expect("merge DJVM");
+        let form = iff::parse_form(&merged).expect("parse merged DJVM");
+        assert_eq!(&form.form_type, b"DJVM");
+        let page_count = form
+            .chunks
+            .iter()
+            .filter(|c| &c.id == b"FORM" && c.data.len() >= 4 && &c.data[..4] == b"DJVU")
+            .count();
+        assert_eq!(page_count, expected_pages);
+    }
+
+    #[test]
+    fn split_single_page_djvu_returns_original_bytes() {
+        let path = fixture_path("chicken.djvu");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(&path).expect("read");
+        let result = split(&data, 0, 1).expect("split single-page");
+        assert_eq!(result, data, "splitting a single-page doc must return original bytes");
+    }
+
+    #[test]
+    fn split_unknown_form_type_is_out_of_bounds() {
+        // A valid AT&T FORM with an unknown form type has 0 pages → always OOB
+        let mut fake: Vec<u8> = Vec::new();
+        fake.extend_from_slice(b"AT&T");
+        fake.extend_from_slice(b"FORM");
+        fake.extend_from_slice(&4u32.to_be_bytes()); // FORM content length = 4 (just type, no chunks)
+        fake.extend_from_slice(b"UNKN");
+        let result = split(&fake, 0, 1);
+        assert!(result.is_err(), "unknown form type must yield PageRangeOutOfBounds");
+    }
+
+    #[test]
+    fn split_range_from_multipage_djvm_builds_new_djvm() {
+        let path = fixture_path("DjVu3Spec_bundled.djvu");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(&path).expect("read");
+        let doc = DjVuDocument::parse(&data).expect("parse");
+        let count = doc.page_count();
+        if count < 3 {
+            return;
+        }
+        // Extract pages 1..3 — a multi-page range → hits build_djvm path
+        let extracted = split(&data, 1, 3).expect("split range");
+        let form = iff::parse_form(&extracted).expect("parse extracted");
+        assert_eq!(&form.form_type, b"DJVM");
+        let page_count = form
+            .chunks
+            .iter()
+            .filter(|c| &c.id == b"FORM" && c.data.len() >= 4 && &c.data[..4] == b"DJVU")
+            .count();
+        assert_eq!(page_count, 2);
+    }
+
+    #[test]
+    fn merge_unknown_form_type_returns_empty_merge_error() {
+        // All docs are unknown type → components stays empty → EmptyMerge
+        let mut fake: Vec<u8> = Vec::new();
+        fake.extend_from_slice(b"AT&T");
+        fake.extend_from_slice(b"FORM");
+        fake.extend_from_slice(&4u32.to_be_bytes());
+        fake.extend_from_slice(b"UNKN");
+        let result = merge(&[&fake]);
+        assert!(matches!(result, Err(DjvmError::EmptyMerge)));
+    }
+
+    #[test]
     fn parse_from_dir_indirect() {
         // Write an indirect DJVM index and chicken.djvu to a temp directory,
         // then open it via parse_from_dir.

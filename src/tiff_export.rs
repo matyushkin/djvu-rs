@@ -507,6 +507,24 @@ mod tests {
         );
     }
 
+    /// Color export on a rotated page forces the pixmap path (can_stream returns
+    /// false when page.rotation() != None), exercising write_color_page_pixmap.
+    #[test]
+    fn color_export_rotated_page_uses_pixmap_path() {
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).unwrap();
+        // Confirm rotation is set so can_stream returns false
+        assert_ne!(
+            page.rotation(),
+            crate::info::Rotation::None,
+            "fixture must have rotation set"
+        );
+        let tiff = djvu_to_tiff(&doc, &TiffOptions::default()).expect("rotated color export must succeed");
+        assert!(!tiff.is_empty());
+        let magic = &tiff[..4];
+        assert!(magic == b"II\x2A\x00" || magic == b"MM\x00\x2A");
+    }
+
     /// `TiffOptions::default()` selects color mode at 1.0 scale.
     #[test]
     fn tiff_options_default() {
