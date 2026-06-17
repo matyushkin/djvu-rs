@@ -332,9 +332,9 @@ mod tests {
 
         // Verify DIRM chunk has is_bundled = 0
         let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
-        assert_eq!(
-            dirm.data[0] & 0x80,
-            0,
+        let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
+        assert!(
+            !payload.is_bundled(),
             "indirect DIRM must not have bundled bit set"
         );
 
@@ -376,8 +376,8 @@ mod tests {
 
         // Component count = 3 in DIRM
         let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
-        let nfiles = u16::from_be_bytes([dirm.data[1], dirm.data[2]]) as usize;
-        assert_eq!(nfiles, 3);
+        let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
+        assert_eq!(payload.nfiles, 3);
     }
 
     #[test]
