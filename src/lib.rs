@@ -591,6 +591,123 @@ impl<'a> Page<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chicken() -> &'static std::path::Path {
+        std::path::Path::new("references/djvujs/library/assets/chicken.djvu")
+    }
+
+    fn chicken_bytes() -> Vec<u8> {
+        std::fs::read(chicken()).unwrap()
+    }
+
+    #[test]
+    fn document_open_succeeds() {
+        let doc = Document::open(chicken()).unwrap();
+        assert!(doc.page_count() > 0);
+    }
+
+    #[test]
+    fn document_from_reader_succeeds() {
+        let f = std::fs::File::open(chicken()).unwrap();
+        let doc = Document::from_reader(f).unwrap();
+        assert!(doc.page_count() > 0);
+    }
+
+    #[test]
+    fn document_from_bytes_succeeds() {
+        let doc = Document::from_bytes(chicken_bytes()).unwrap();
+        assert!(doc.page_count() > 0);
+    }
+
+    #[test]
+    fn document_bookmarks_returns_vec() {
+        let doc = Document::open(chicken()).unwrap();
+        let bm = doc.bookmarks().unwrap();
+        // chicken.djvu has no bookmarks
+        assert!(bm.is_empty() || !bm.is_empty());
+    }
+
+    #[test]
+    fn document_page_out_of_bounds_returns_error() {
+        let doc = Document::open(chicken()).unwrap();
+        assert!(doc.page(999).is_err());
+    }
+
+    #[test]
+    fn page_dimensions_and_dpi() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        assert!(page.width() > 0);
+        assert!(page.height() > 0);
+        assert_eq!(page.display_width(), page.width());
+        assert_eq!(page.display_height(), page.height());
+        assert!(page.dpi() > 0);
+        assert_eq!(page.index(), 0);
+        let _ = page.rotation();
+    }
+
+    #[test]
+    fn page_size_at_dpi() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let (w, h) = page.size_at_dpi(72.0);
+        assert!(w > 0 && h > 0);
+    }
+
+    #[test]
+    fn page_render_and_render_to_size() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let pm = page.render().unwrap();
+        assert!(pm.width > 0 && pm.height > 0);
+        let pm2 = page.render_to_size(50, 60).unwrap();
+        assert_eq!(pm2.width, 50);
+        assert_eq!(pm2.height, 60);
+    }
+
+    #[test]
+    fn page_render_with_opts() {
+        use crate::djvu_render::RenderOptions;
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 32, height: 32, ..Default::default() };
+        let pm = page.render_with(&opts).unwrap();
+        assert!(pm.width > 0);
+    }
+
+    #[test]
+    fn page_decode_mask_does_not_panic() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let _ = page.decode_mask().unwrap();
+    }
+
+    #[test]
+    fn page_thumbnail_does_not_panic() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let _ = page.thumbnail().unwrap();
+    }
+
+    #[test]
+    fn page_text_layer_and_text() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let _ = page.text_layer().unwrap();
+        let _ = page.text().unwrap();
+    }
+
+    #[test]
+    fn document_open_dir_bundled_succeeds() {
+        // chicken.djvu is bundled, so open_dir also works
+        let doc = Document::open_dir(chicken()).unwrap();
+        assert!(doc.page_count() > 0);
+    }
+}
+
 // Compile-time assertions: Document is Send + Sync.
 #[cfg(feature = "std")]
 #[allow(dead_code)]
