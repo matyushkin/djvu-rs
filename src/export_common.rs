@@ -437,4 +437,48 @@ mod tests {
         assert!(shape_bbox(&Shape::Line(2, 5, 20, 5)).is_none());
         assert!(shape_bbox(&Shape::Line(5, 2, 5, 20)).is_none());
     }
+
+    // ── bookmark_page_index ──────────────────────────────────────────────────
+
+    #[test]
+    fn bookmark_page_index_unparseable_returns_none() {
+        assert_eq!(bookmark_page_index("not-a-page-url"), None);
+        assert_eq!(bookmark_page_index("#pageXYZ"), None);
+        assert_eq!(bookmark_page_index(""), None);
+    }
+
+    #[test]
+    fn bookmark_page_index_page_underscore_form() {
+        assert_eq!(bookmark_page_index("#page_1"), Some(0));
+        assert_eq!(bookmark_page_index("#page_3"), Some(2));
+    }
+
+    #[test]
+    fn bookmark_page_index_numeric_fragment() {
+        assert_eq!(bookmark_page_index("#1"), Some(0));
+        assert_eq!(bookmark_page_index("#5"), Some(4));
+    }
+
+    // ── word_spans with Character leaf zone ─────────────────────────────────
+
+    #[test]
+    fn word_spans_character_leaf_outside_word_is_emitted() {
+        let layer = TextLayer {
+            text: String::new(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Line,
+                rect: Rect { x: 0, y: 0, width: 100, height: 20 },
+                text: String::new(),
+                children: vec![TextZone {
+                    kind: TextZoneKind::Character,
+                    rect: Rect { x: 0, y: 0, width: 10, height: 20 },
+                    text: "A".to_string(),
+                    children: vec![],
+                }],
+            }],
+        };
+        let spans = word_spans(&layer);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "A");
+    }
 }

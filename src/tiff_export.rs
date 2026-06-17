@@ -514,4 +514,21 @@ mod tests {
         assert_eq!(opts.mode, TiffMode::Color);
         assert!((opts.scale - 1.0).abs() < 1e-6);
     }
+
+    /// `From<tiff::TiffError> for TiffError` wraps the error message.
+    #[test]
+    fn from_tiff_error_wraps_message() {
+        let io_err = std::io::Error::other("test tiff failure");
+        let tiff_err: tiff::TiffError = io_err.into();
+        let djvu_tiff_err: TiffError = tiff_err.into();
+        let s = djvu_tiff_err.to_string();
+        assert!(s.contains("TIFF encoding error"), "must mention TIFF encoding error: {s}");
+    }
+
+    /// `TiffError::Encode` display includes the inner message.
+    #[test]
+    fn tiff_error_display() {
+        let e = TiffError::Encode("something went wrong".to_string());
+        assert!(e.to_string().contains("something went wrong"));
+    }
 }

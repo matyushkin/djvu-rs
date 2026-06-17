@@ -889,4 +889,34 @@ mod tests {
         }
         assert_eq!(count, 1, "JB2-only page must yield exactly one frame");
     }
+
+    // ── from_async_reader_lazy error paths ────────────────────────────────────
+
+    #[tokio::test]
+    async fn lazy_not_att_form_returns_unsupported() {
+        let bytes = b"XXXX0000XXXXXXXX"; // 16 bytes, not AT&T FORM
+        let cursor = std::io::Cursor::new(bytes.to_vec());
+        let result = from_async_reader_lazy(cursor).await;
+        assert!(
+            matches!(result, Err(AsyncLazyError::Unsupported(_))),
+            "non-AT&T FORM must return Unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_unknown_form_type_returns_unsupported() {
+        // Valid AT&T FORM header but with an unrecognized form type "DJVX"
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"AT&T"); // magic
+        bytes.extend_from_slice(b"FORM"); // container
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // length field
+        bytes.extend_from_slice(b"DJVX"); // unknown form type
+        // Pad to 16+ bytes (already 16)
+        let cursor = std::io::Cursor::new(bytes);
+        let result = from_async_reader_lazy(cursor).await;
+        assert!(
+            matches!(result, Err(AsyncLazyError::Unsupported(_))),
+            "unknown FORM type must return Unsupported"
+        );
+    }
 }
