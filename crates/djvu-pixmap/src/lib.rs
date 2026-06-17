@@ -129,6 +129,64 @@ impl Pixmap {
         out
     }
 
+    /// Rotate this pixmap 90° clockwise.
+    pub fn rotate_cw90(&self) -> Self {
+        let (w, h) = (self.width, self.height);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let src_off = ((y * w + x) * 4) as usize;
+                let dst_x = h - 1 - y;
+                let dst_y = x;
+                let dst_off = ((dst_y * h + dst_x) * 4) as usize;
+                dst[dst_off..dst_off + 4].copy_from_slice(&self.data[src_off..src_off + 4]);
+            }
+        }
+        Pixmap {
+            width: h,
+            height: w,
+            data: dst,
+        }
+    }
+
+    /// Rotate this pixmap 180°.
+    pub fn rotate_180(&self) -> Self {
+        let (w, h) = (self.width, self.height);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let src_off = ((y * w + x) * 4) as usize;
+                let dst_off = (((h - 1 - y) * w + (w - 1 - x)) * 4) as usize;
+                dst[dst_off..dst_off + 4].copy_from_slice(&self.data[src_off..src_off + 4]);
+            }
+        }
+        Pixmap {
+            width: w,
+            height: h,
+            data: dst,
+        }
+    }
+
+    /// Rotate this pixmap 90° counter-clockwise.
+    pub fn rotate_ccw90(&self) -> Self {
+        let (w, h) = (self.width, self.height);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let src_off = ((y * w + x) * 4) as usize;
+                let dst_x = y;
+                let dst_y = w - 1 - x;
+                let dst_off = ((dst_y * h + dst_x) * 4) as usize;
+                dst[dst_off..dst_off + 4].copy_from_slice(&self.data[src_off..src_off + 4]);
+            }
+        }
+        Pixmap {
+            width: h,
+            height: w,
+            data: dst,
+        }
+    }
+
     /// Convert to 8-bit grayscale using ITU-R BT.601 luminance weights.
     ///
     /// `Y = 0.299·R + 0.587·G + 0.114·B`
@@ -192,6 +250,59 @@ mod tests {
         pm.set_rgb(1, 1, 100, 150, 200);
         assert_eq!(pm.get_rgb(1, 1), (100, 150, 200));
         assert_eq!(pm.get_rgb(0, 0), (255, 255, 255));
+    }
+
+    #[test]
+    fn rotate_cw90_swaps_dimensions() {
+        let pm = Pixmap::white(4, 2);
+        let r = pm.rotate_cw90();
+        assert_eq!((r.width, r.height), (2, 4));
+    }
+
+    #[test]
+    fn rotate_180_preserves_dimensions() {
+        let pm = Pixmap::white(4, 2);
+        let r = pm.rotate_180();
+        assert_eq!((r.width, r.height), (4, 2));
+    }
+
+    #[test]
+    fn rotate_ccw90_swaps_dimensions() {
+        let pm = Pixmap::white(4, 2);
+        let r = pm.rotate_ccw90();
+        assert_eq!((r.width, r.height), (2, 4));
+    }
+
+    #[test]
+    fn rotate_cw90_then_ccw90_is_identity() {
+        let mut pm = Pixmap::white(3, 2);
+        pm.set_rgb(0, 0, 255, 0, 0); // red top-left
+        pm.set_rgb(2, 1, 0, 0, 255); // blue bottom-right
+        let roundtrip = pm.rotate_cw90().rotate_ccw90();
+        assert_eq!(roundtrip.data, pm.data);
+        assert_eq!((roundtrip.width, roundtrip.height), (pm.width, pm.height));
+    }
+
+    #[test]
+    fn rotate_180_twice_is_identity() {
+        let mut pm = Pixmap::white(3, 2);
+        pm.set_rgb(1, 0, 10, 20, 30);
+        let roundtrip = pm.rotate_180().rotate_180();
+        assert_eq!(roundtrip.data, pm.data);
+    }
+
+    #[test]
+    fn rotate_cw90_moves_top_left_to_top_right() {
+        // 2×1 pixmap: red pixel at (0,0), white at (1,0)
+        let mut pm = Pixmap::white(2, 1);
+        pm.set_rgb(0, 0, 255, 0, 0);
+        // After CW90: 1×2, red should be at (0,0) in new coords
+        // new_x = h-1-y = 1-1-0=0, new_y = x = 0 → (0,0)
+        let r = pm.rotate_cw90();
+        assert_eq!(r.width, 1);
+        assert_eq!(r.height, 2);
+        assert_eq!(r.get_rgb(0, 0), (255, 0, 0));
+        assert_eq!(r.get_rgb(0, 1), (255, 255, 255));
     }
 
     #[test]

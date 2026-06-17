@@ -2329,8 +2329,13 @@ pub fn render_progressive(
     // via the shared decode_layers path so no logic can drift between this and the
     // full render.
     let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers { bg, fg_palette, mask, blit_map, fg44 } =
-        decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
 
     let mut pm = Pixmap::white(w, h);
     {

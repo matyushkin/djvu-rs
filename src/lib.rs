@@ -155,6 +155,13 @@ pub mod djvu_encode;
 #[cfg(feature = "std")]
 pub mod segment;
 
+/// PNG file → [`Pixmap`] decoder.
+///
+/// Provides [`png_io::decode_png_to_pixmap`] for decoding any 8-bit PNG into
+/// the RGBA [`Pixmap`] format used throughout djvu-rs.
+#[cfg(feature = "std")]
+pub mod png_io;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
@@ -182,19 +189,12 @@ pub mod djvu_render;
 /// data and never calls `bzz_decode` directly.
 pub(crate) mod fgbz;
 
-/// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
+/// DjVu text layer — data model and parser.
 ///
-/// Provides the pure [`text::parse_text_layer`] parser plus typed structs
-/// Data model for the DjVu text layer — types shared by the parser, encoder,
-/// serialisers, and OCR backends.
-///
-/// Defines [`text_model::TextLayer`], [`text_model::TextZone`],
-/// [`text_model::TextZoneKind`], [`text_model::Rect`],
-/// [`text_model::Paragraph`], and [`text_model::TextError`].
-pub mod text_model;
-
-/// [`text::TextLayer`], [`text::TextZone`], [`text::TextZoneKind`], and
-/// [`text::Rect`].  BZZ-compressed `TXTz` payloads are decompressed upstream by
+/// Defines [`text::TextLayer`], [`text::TextZone`], [`text::TextZoneKind`],
+/// [`text::Rect`], [`text::Paragraph`], and [`text::TextError`], and provides
+/// the pure [`text::parse_text_layer`] parser for TXTa/TXTz chunks.
+/// BZZ-compressed `TXTz` payloads are decompressed upstream by
 /// [`DjVuPage::chunk_payload`].
 pub mod text;
 
@@ -589,7 +589,6 @@ impl<'a> Page<'a> {
     pub fn text(&self) -> Result<Option<String>, Error> {
         Ok(self.text_layer()?.map(|tl| tl.text))
     }
-
 }
 
 // Compile-time assertions: Document is Send + Sync.
