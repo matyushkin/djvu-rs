@@ -178,4 +178,17 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn scale_lanczos3_zero_dst_dimension_returns_white_fallback() {
+        let src = Pixmap::white(10, 10);
+        // dst_w=0 → Pixmap::white(max(0,1)=1, 5)
+        let dst = scale_lanczos3(&src, 0, 5);
+        assert_eq!(dst.width, 1);
+        assert_eq!(dst.height, 5);
+        // dst_h=0 → Pixmap::white(8, max(0,1)=1)
+        let dst2 = scale_lanczos3(&src, 8, 0);
+        assert_eq!(dst2.width, 8);
+        assert_eq!(dst2.height, 1);
+    }
 }

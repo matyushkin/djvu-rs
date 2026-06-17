@@ -342,6 +342,17 @@ mod tests {
         assert_eq!(parsed.title, m.title);
     }
 
+    #[test]
+    fn encode_subject_and_publisher_roundtrip() {
+        let mut m = DjVuMetadata::default();
+        m.subject = Some("Science".into());
+        m.publisher = Some("Acme Press".into());
+        let bytes = encode_metadata(&m);
+        let parsed = parse_metadata(&bytes).unwrap();
+        assert_eq!(parsed.subject, m.subject);
+        assert_eq!(parsed.publisher, m.publisher);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn encode_bzz_roundtrip() {

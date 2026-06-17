@@ -97,3 +97,46 @@ pub(crate) fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, BzzError> {
 
     Ok(FgbzPalette { colors, indices })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_fgbz_short_data_returns_empty() {
+        // data.len() < 3 → empty palette
+        let result = parse_fgbz(&[]).unwrap();
+        assert!(result.colors.is_empty());
+        assert!(result.indices.is_empty());
+
+        let result = parse_fgbz(&[0x00, 0x00]).unwrap();
+        assert!(result.colors.is_empty());
+    }
+
+    #[test]
+    fn parse_fgbz_zero_colors_returns_empty() {
+        // version=0, n_colors=0 → empty palette
+        let data = [0x00u8, 0x00, 0x00]; // version, n_colors (u16be) = 0
+        let result = parse_fgbz(&data).unwrap();
+        assert!(result.colors.is_empty());
+    }
+
+    #[test]
+    fn parse_fgbz_truncated_color_data_fills_black() {
+        // n_colors=2 but only 3 bytes of color data (1 full color, 1 truncated)
+        let mut data = Vec::new();
+        data.push(0x00); // version: no index table
+        data.extend_from_slice(&2u16.to_be_bytes()); // n_colors = 2
+        // Only 3 bytes for first color (BGR): b=10, g=20, r=30
+        data.extend_from_slice(&[10, 20, 30]);
+        // Second color is truncated (not enough bytes)
+        let result = parse_fgbz(&data).unwrap();
+        assert_eq!(result.colors.len(), 2);
+        // First color parsed: r=30, g=20, b=10
+        assert_eq!(result.colors[0].r, 30);
+        // Second color falls back to black (0,0,0)
+        assert_eq!(result.colors[1].r, 0);
+        assert_eq!(result.colors[1].g, 0);
+        assert_eq!(result.colors[1].b, 0);
+    }
+}

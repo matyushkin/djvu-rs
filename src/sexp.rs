@@ -229,4 +229,20 @@ mod tests {
         let exprs = parse_sexprs(&deep);
         assert_eq!(exprs.len(), 1);
     }
+
+    #[test]
+    fn unterminated_quoted_string_does_not_panic() {
+        // EOF inside a quoted string — tokenizer must break out of the loop
+        // rather than panic or loop infinitely.
+        let exprs = parse_sexprs(r#"(k "unterminated"#);
+        // Produces one list containing the atom "k" plus the partial string.
+        assert_eq!(exprs.len(), 1);
+    }
+
+    #[test]
+    fn unclosed_parenthesis_does_not_panic() {
+        // EOF inside a list — parser must break out rather than panic.
+        let exprs = parse_sexprs("(unclosed");
+        assert_eq!(exprs.len(), 1);
+    }
 }
