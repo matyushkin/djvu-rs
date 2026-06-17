@@ -1640,4 +1640,42 @@ mod tests {
         assert!(s.contains("/Last"), "outline item with children must set /Last");
         assert!(s.contains("/Count"), "outline item with children must set /Count");
     }
+
+    // Lines 411-415: hyperlink annotation block (/Annots [...]).
+    // Build a synthetic single-page DjVu with an ANTz maparea URL, then convert.
+    #[test]
+    fn djvu_to_pdf_with_hyperlinks_produces_annots() {
+        use crate::annotation::{self as ann, Annotation, MapArea};
+        use crate::djvu_document::DjVuDocument;
+        use crate::iff::{self as iff_mod, Chunk, DjvuFile};
+        let maparea = MapArea {
+            url: "https://example.com".to_string(),
+            description: String::new(),
+            shape: ann::Shape::Rect(ann::Rect { x: 0, y: 0, width: 100, height: 50 }),
+            border: None,
+            highlight: None,
+        };
+        let ant_data = ann::encode_annotations_bzz(&Annotation::default(), &[maparea]);
+        // Minimal INFO: width=100, height=100, dpi=0 (default), rest zero.
+        let mut info = vec![0u8; 10];
+        info[1] = 100; // width
+        info[3] = 100; // height
+        let bytes = iff_mod::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0,
+                children: vec![
+                    Chunk::Leaf { id: *b"INFO", data: info },
+                    Chunk::Leaf { id: *b"ANTz", data: ant_data },
+                ],
+            },
+        });
+        let doc = DjVuDocument::parse(&bytes).expect("synthetic doc must parse");
+        let pdf = djvu_to_pdf(&doc).expect("synthetic hyperlink page must convert to PDF");
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(
+            s.contains("/Annots"),
+            "PDF from hyperlink page must contain /Annots"
+        );
+    }
 }
