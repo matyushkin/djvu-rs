@@ -584,64 +584,9 @@ fn apply_user_rotation(
     use djvu_rs::djvu_render::UserRotation;
     match rot {
         UserRotation::None => src,
-        UserRotation::Cw90 => rotate_pixmap_cw90(src),
-        UserRotation::Rot180 => rotate_pixmap_180(src),
-        UserRotation::Ccw90 => rotate_pixmap_ccw90(src),
-    }
-}
-
-fn rotate_pixmap_cw90(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
-    let (w, h) = (src.width, src.height);
-    let mut dst = vec![0u8; (w * h * 4) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let src_off = ((y * w + x) * 4) as usize;
-            let dst_x = h - 1 - y;
-            let dst_y = x;
-            let dst_off = ((dst_y * h + dst_x) * 4) as usize;
-            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
-        }
-    }
-    djvu_rs::Pixmap {
-        width: h,
-        height: w,
-        data: dst,
-    }
-}
-
-fn rotate_pixmap_180(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
-    let (w, h) = (src.width, src.height);
-    let mut dst = vec![0u8; (w * h * 4) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let src_off = ((y * w + x) * 4) as usize;
-            let dst_off = (((h - 1 - y) * w + (w - 1 - x)) * 4) as usize;
-            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
-        }
-    }
-    djvu_rs::Pixmap {
-        width: w,
-        height: h,
-        data: dst,
-    }
-}
-
-fn rotate_pixmap_ccw90(src: djvu_rs::Pixmap) -> djvu_rs::Pixmap {
-    let (w, h) = (src.width, src.height);
-    let mut dst = vec![0u8; (w * h * 4) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let src_off = ((y * w + x) * 4) as usize;
-            let dst_x = y;
-            let dst_y = w - 1 - x;
-            let dst_off = ((dst_y * h + dst_x) * 4) as usize;
-            dst[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
-        }
-    }
-    djvu_rs::Pixmap {
-        width: h,
-        height: w,
-        data: dst,
+        UserRotation::Cw90 => src.rotate_cw90(),
+        UserRotation::Rot180 => src.rotate_180(),
+        UserRotation::Ccw90 => src.rotate_ccw90(),
     }
 }
 
@@ -1091,7 +1036,7 @@ fn cmd_encode(
         if matches!(quality, EncodeQualityArg::Lossless) {
             let mut masks = Vec::with_capacity(entries.len());
             for path in &entries {
-                let pixmap = decode_png_to_pixmap(path)?;
+                let pixmap = djvu_rs::png_io::decode_png_to_pixmap(path)?;
                 let seg = segment_page(&pixmap, &SegmentOptions::default());
                 masks.push(seg.mask);
             }
@@ -1116,7 +1061,7 @@ fn cmd_encode(
 
         let mut pages = Vec::with_capacity(entries.len());
         for path in &entries {
-            let pixmap = decode_png_to_pixmap(path)?;
+            let pixmap = djvu_rs::png_io::decode_png_to_pixmap(path)?;
             let mut encoder = PageEncoder::from_pixmap(&pixmap)
                 .with_dpi(dpi)
                 .with_quality(q);
@@ -1141,7 +1086,7 @@ fn cmd_encode(
         return Ok(());
     }
 
-    let pixmap = decode_png_to_pixmap(input)?;
+    let pixmap = djvu_rs::png_io::decode_png_to_pixmap(input)?;
 
     let bytes = match q {
         EncodeQuality::Lossless => {
@@ -1238,59 +1183,4 @@ fn directory_png_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error:
         return Err(format!("{}: no PNG files found in directory", dir.display()).into());
     }
     Ok(entries)
-}
-
-fn decode_png_to_pixmap(path: &Path) -> Result<djvu_rs::Pixmap, Box<dyn std::error::Error>> {
-    use djvu_rs::Pixmap;
-
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let mut reader = decoder.read_info()?;
-    let info = reader.info();
-    let width = info.width;
-    let height = info.height;
-    let color = info.color_type;
-    let depth = info.bit_depth;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let frame = reader.next_frame(&mut buf)?;
-    buf.truncate(frame.buffer_size());
-
-    if depth != png::BitDepth::Eight {
-        return Err(format!(
-            "{}: unsupported PNG bit depth {:?} (only 8-bit channels for v1)",
-            path.display(),
-            depth
-        )
-        .into());
-    }
-
-    let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
-    match color {
-        png::ColorType::Rgba => data.extend_from_slice(&buf),
-        png::ColorType::Rgb => {
-            for chunk in buf.chunks_exact(3) {
-                data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-        }
-        png::ColorType::GrayscaleAlpha => {
-            for chunk in buf.chunks_exact(2) {
-                let g = chunk[0];
-                data.extend_from_slice(&[g, g, g, chunk[1]]);
-            }
-        }
-        png::ColorType::Grayscale => {
-            for &g in &buf {
-                data.extend_from_slice(&[g, g, g, 255]);
-            }
-        }
-        png::ColorType::Indexed => {
-            return Err(format!("{}: indexed PNG not supported", path.display()).into());
-        }
-    }
-
-    Ok(Pixmap {
-        width,
-        height,
-        data,
-    })
 }

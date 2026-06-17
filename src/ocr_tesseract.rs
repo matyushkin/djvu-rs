@@ -188,6 +188,185 @@ fn extract_inner_text(html: &str) -> String {
     result.trim().to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- parse_bbox -----------------------------------------------------------
+
+    #[test]
+    fn parse_bbox_basic() {
+        let html = r#"<span class='ocrx_word' title='bbox 10 20 50 40; x_wconf 95'>hello</span>"#;
+        let r = parse_bbox(html).unwrap();
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 20);
+        assert_eq!(r.width, 40); // 50 - 10
+        assert_eq!(r.height, 20); // 40 - 20
+    }
+
+    #[test]
+    fn parse_bbox_no_semicolon() {
+        let html = r#"title="bbox 0 5 100 50""#;
+        let r = parse_bbox(html).unwrap();
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 5);
+        assert_eq!(r.width, 100);
+        assert_eq!(r.height, 45);
+    }
+
+    #[test]
+    fn parse_bbox_missing_returns_none() {
+        assert!(parse_bbox("no bbox here").is_none());
+    }
+
+    #[test]
+    fn parse_bbox_too_few_coords() {
+        // Only 3 numbers after "bbox" — not a valid bbox
+        assert!(parse_bbox("title='bbox 10 20 50'").is_none());
+    }
+
+    #[test]
+    fn parse_bbox_inverted_clamps_to_zero() {
+        // x2 < x1 would underflow — saturating_sub returns 0
+        let html = "title='bbox 50 40 10 20'";
+        let r = parse_bbox(html).unwrap();
+        assert_eq!(r.x, 50);
+        assert_eq!(r.y, 40);
+        assert_eq!(r.width, 0);
+        assert_eq!(r.height, 0);
+    }
+
+    // ---- extract_inner_text --------------------------------------------------
+
+    #[test]
+    fn extract_inner_text_basic() {
+        let html = "<span class='ocrx_word'>hello</span>";
+        assert_eq!(extract_inner_text(html), "hello");
+    }
+
+    #[test]
+    fn extract_inner_text_nested_tags() {
+        let html = "<p><span>foo</span> <em>bar</em></p>";
+        assert_eq!(extract_inner_text(html), "foo bar");
+    }
+
+    #[test]
+    fn extract_inner_text_trims_whitespace() {
+        let html = "  <span>  word  </span>  ";
+        assert_eq!(extract_inner_text(html), "word");
+    }
+
+    #[test]
+    fn extract_inner_text_no_tags() {
+        assert_eq!(extract_inner_text("plain text"), "plain text");
+    }
+
+    #[test]
+    fn extract_inner_text_empty() {
+        assert_eq!(extract_inner_text("<span></span>"), "");
+    }
+
+    // ---- parse_hocr_to_zones -------------------------------------------------
+
+    #[test]
+    fn parse_hocr_empty_input() {
+        let zones = parse_hocr_to_zones("", 100, 200);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].kind, TextZoneKind::Page);
+        assert!(zones[0].children.is_empty());
+    }
+
+    #[test]
+    fn parse_hocr_single_word() {
+        let hocr = "<span class='ocrx_word' title='bbox 10 20 50 40'>hello</span>";
+        let zones = parse_hocr_to_zones(hocr, 100, 200);
+        assert_eq!(zones[0].kind, TextZoneKind::Page);
+        assert_eq!(zones[0].rect.width, 100);
+        assert_eq!(zones[0].rect.height, 200);
+        // Word is flushed into a synthetic line
+        let lines = &zones[0].children;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].kind, TextZoneKind::Line);
+        assert_eq!(lines[0].children.len(), 1);
+        assert_eq!(lines[0].children[0].kind, TextZoneKind::Word);
+        assert_eq!(lines[0].children[0].text, "hello");
+    }
+
+    #[test]
+    fn parse_hocr_word_with_line() {
+        // A line followed by its word — the parser flushes words accumulated
+        // before the line marker into a line zone.
+        let hocr = [
+            "<span class='ocrx_word' title='bbox 10 20 50 40'>foo</span>",
+            "<span class='ocr_line' title='bbox 5 15 200 50'>...</span>",
+        ]
+        .join("\n");
+        let zones = parse_hocr_to_zones(&hocr, 800, 600);
+        let lines = &zones[0].children;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].kind, TextZoneKind::Line);
+        assert_eq!(lines[0].children[0].text, "foo");
+    }
+
+    #[test]
+    fn parse_hocr_page_rect_matches_input_dimensions() {
+        let zones = parse_hocr_to_zones("", 640, 480);
+        assert_eq!(zones[0].rect.x, 0);
+        assert_eq!(zones[0].rect.y, 0);
+        assert_eq!(zones[0].rect.width, 640);
+        assert_eq!(zones[0].rect.height, 480);
+    }
+
+    // ---- bounding_rect -------------------------------------------------------
+
+    #[test]
+    fn bounding_rect_empty() {
+        let r = bounding_rect(&[]);
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn bounding_rect_single() {
+        let zone = TextZone {
+            kind: TextZoneKind::Word,
+            rect: Rect {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 10,
+            },
+            text: String::new(),
+            children: vec![],
+        };
+        let r = bounding_rect(&[zone]);
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 20);
+        assert_eq!(r.width, 30);
+        assert_eq!(r.height, 10);
+    }
+
+    #[test]
+    fn bounding_rect_two_non_overlapping() {
+        let make = |x, y, w, h| TextZone {
+            kind: TextZoneKind::Word,
+            rect: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            text: String::new(),
+            children: vec![],
+        };
+        // First: x=0..30, y=0..10; Second: x=50..80, y=5..15
+        let r = bounding_rect(&[make(0, 0, 30, 10), make(50, 5, 30, 10)]);
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.width, 80); // max x2=80, min x1=0
+        assert_eq!(r.height, 15); // max y2=15, min y1=0
+    }
+}
+
 /// Compute bounding rect of a set of zones.
 fn bounding_rect(zones: &[TextZone]) -> Rect {
     if zones.is_empty() {
