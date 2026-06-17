@@ -2060,4 +2060,45 @@ mod tests {
         let doc = MmapDocument::open_indirect(&path).expect("open_indirect should work on bundled");
         assert!(doc.page_count() > 0);
     }
+
+    #[test]
+    fn extract_mask_uses_inline_djbz_when_present() {
+        // Build a page with both Sjbz (using shared shapes) and an inline Djbz.
+        // This hits the `find_chunk(b"Djbz")` branch in extract_mask (lines 535-537).
+        use crate::jb2_encode::{cluster_shared_symbols, encode_jb2_djbz, encode_jb2_dict_with_shared};
+
+        let mut shape = crate::bitmap::Bitmap::new(8, 8);
+        shape.set_black(2, 2);
+        shape.set_black(3, 3);
+        let shapes = cluster_shared_symbols(&[shape.clone(), shape.clone()], 2);
+        if shapes.is_empty() {
+            return; // no shared shapes; skip
+        }
+        let djbz_data = encode_jb2_djbz(&shapes);
+        let sjbz_data = encode_jb2_dict_with_shared(&shape, &shapes);
+
+        let page = page_with_chunks(&[(b"Djbz", &djbz_data), (b"Sjbz", &sjbz_data)]);
+        let result = page.extract_mask();
+        assert!(result.is_ok(), "extract_mask with inline Djbz should succeed");
+    }
+
+    #[test]
+    fn extract_mask_indexed_uses_inline_djbz_when_present() {
+        // Same as above but for extract_mask_indexed (lines 561-563).
+        use crate::jb2_encode::{cluster_shared_symbols, encode_jb2_djbz, encode_jb2_dict_with_shared};
+
+        let mut shape = crate::bitmap::Bitmap::new(8, 8);
+        shape.set_black(2, 2);
+        shape.set_black(3, 3);
+        let shapes = cluster_shared_symbols(&[shape.clone(), shape.clone()], 2);
+        if shapes.is_empty() {
+            return;
+        }
+        let djbz_data = encode_jb2_djbz(&shapes);
+        let sjbz_data = encode_jb2_dict_with_shared(&shape, &shapes);
+
+        let page = page_with_chunks(&[(b"Djbz", &djbz_data), (b"Sjbz", &sjbz_data)]);
+        let result = page.extract_mask_indexed();
+        assert!(result.is_ok(), "extract_mask_indexed with inline Djbz should succeed");
+    }
 }
