@@ -755,6 +755,56 @@ mod tests {
         );
     }
 
+    /// A bundled DJVM with no Page DIRM entries (only Shared): the lazy loader
+    /// returns Unsupported with "no lazy-loadable pages" (lines 164–165).
+    #[tokio::test]
+    async fn lazy_document_no_page_entries_returns_unsupported() {
+        use crate::dirm::DirmPayload;
+        use crate::iff::{self as iff_mod, Chunk, EmitPart};
+
+        // Build a bundled DIRM with 1 Shared entry (flag=0x00 = Shared)
+        let dirm_payload =
+            DirmPayload::build_bundled(1, &[0x00], &["shared.djvi".to_string()]);
+        let dirm = Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_payload.encode(),
+        };
+        // Also add a stub sub-FORM so the offset-based read doesn't panic
+        let stub_form: &[u8] = b"FORM\x00\x00\x00\x04DJVI";
+        let djvm = iff_mod::partial_emit(
+            *b"DJVM",
+            &[EmitPart::Chunk(&dirm), EmitPart::Verbatim(stub_form)],
+        )
+        .expect("fits within u32");
+
+        let result = from_async_reader_lazy(std::io::Cursor::new(djvm)).await;
+        assert!(result.is_err(), "Shared-only DJVM must error with no pages");
+        if let Err(e) = result {
+            assert!(
+                matches!(e, AsyncLazyError::Unsupported(_)),
+                "expected Unsupported, got {e:?}"
+            );
+        }
+    }
+
+    /// `LazyDocument` correctly skips THUM (thumbnail) DIRM entries while
+    /// indexing a bundled DJVM — exercises the Thumbnail arm in index_bundled_djvm.
+    #[tokio::test]
+    async fn lazy_document_skips_thumbnail_dirm_entries() {
+        let path = assets_path().join("DjVu3Spec_bundled.djvu");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skip: {} missing", path.display());
+            return;
+        };
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes.clone()))
+            .await
+            .expect("lazy index must succeed for DjVu3Spec");
+        let sync_doc = DjVuDocument::parse(&bytes).expect("sync parse");
+        // THUM entries are skipped so page count must still match
+        assert_eq!(lazy.page_count(), sync_doc.page_count());
+        assert!(lazy.page_count() > 0);
+    }
+
     /// `load_document_async_streaming` produces the same document as
     /// the buffered Phase 1 loader on a bundled DJVM.
     #[tokio::test]
@@ -920,17 +970,10 @@ mod tests {
         // Build a DJVM where DIRM has 1 Shared component (no Pages).
         // After index_bundled_djvm returns empty pages, lines 164-165 fire.
         use crate::dirm::DirmPayload;
+        use crate::iff::{self as iff_djvm, Chunk as IffChunk, EmitPart as IffEmitPart};
         let dirm_payload = DirmPayload::build_bundled(1, &[0u8], &["shared".to_string()]).encode();
-        let dirm_len = dirm_payload.len() as u32;
-        let inner_size = 4u32 + 8 + dirm_len; // DJVM type + DIRM hdr + payload
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"AT&T");
-        bytes.extend_from_slice(b"FORM");
-        bytes.extend_from_slice(&inner_size.to_be_bytes());
-        bytes.extend_from_slice(b"DJVM");
-        bytes.extend_from_slice(b"DIRM");
-        bytes.extend_from_slice(&dirm_len.to_be_bytes());
-        bytes.extend_from_slice(&dirm_payload);
+        let dirm_chunk = IffChunk::Leaf { id: *b"DIRM", data: dirm_payload };
+        let bytes = iff_djvm::partial_emit(*b"DJVM", &[IffEmitPart::Chunk(&dirm_chunk)]).unwrap();
         let cursor = std::io::Cursor::new(bytes);
         let result = from_async_reader_lazy(cursor).await;
         // The function should return Unsupported because pages is empty (line 164-165).
@@ -948,13 +991,9 @@ mod tests {
     async fn lazy_djvm_without_dirm_first_returns_unsupported() {
         // Valid AT&T FORM:DJVM but first inner chunk is INFO (not DIRM)
         // → triggers lines 293-294 in index_bundled_djvm
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"AT&T");
-        bytes.extend_from_slice(b"FORM");
-        bytes.extend_from_slice(&12u32.to_be_bytes()); // size = 4 (type) + 8 (chunk)
-        bytes.extend_from_slice(b"DJVM");
-        bytes.extend_from_slice(b"INFO"); // not DIRM
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // chunk size 0
+        use crate::iff::{self as iff_nodirm, Chunk as IffChunkNd, EmitPart as IffEmitPartNd};
+        let info = IffChunkNd::Leaf { id: *b"INFO", data: vec![] };
+        let bytes = iff_nodirm::partial_emit(*b"DJVM", &[IffEmitPartNd::Chunk(&info)]).unwrap();
         let cursor = std::io::Cursor::new(bytes);
         let result = from_async_reader_lazy(cursor).await;
         assert!(
@@ -966,12 +1005,8 @@ mod tests {
     #[tokio::test]
     async fn lazy_unknown_form_type_returns_unsupported() {
         // Valid AT&T FORM header but with an unrecognized form type "DJVX"
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"AT&T"); // magic
-        bytes.extend_from_slice(b"FORM"); // container
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // length field
-        bytes.extend_from_slice(b"DJVX"); // unknown form type
-        // Pad to 16+ bytes (already 16)
+        use crate::iff;
+        let bytes = iff::partial_emit(*b"DJVX", &[]).unwrap();
         let cursor = std::io::Cursor::new(bytes);
         let result = from_async_reader_lazy(cursor).await;
         assert!(
