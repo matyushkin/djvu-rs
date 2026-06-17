@@ -11,6 +11,14 @@
 //! - `ocr-neural` — placeholder Candle backend; `load()` returns a clear
 //!   unsupported-backend error until a concrete model implementation lands.
 //!
+//! ## Design
+//!
+//! The trait is a deliberate runtime seam, not a speculative abstraction: the
+//! `djvu ocr --backend` CLI selector builds a `Box<dyn OcrBackend>` and drives
+//! it polymorphically. It is retained by decision even though only Tesseract is
+//! fully wired today. See `docs/ocr-backend-seam.md` (issue #382) for the
+//! rationale and the deferred plan for `OcrOptions`.
+//!
 //! [`OcrBackend`]: crate::ocr::OcrBackend
 
 use crate::pixmap::Pixmap;
@@ -37,11 +45,19 @@ pub enum OcrError {
 }
 
 /// Configuration for an OCR run.
+///
+/// These are **advisory hints**: each backend honours the fields that apply to
+/// it and ignores the rest. The Tesseract backend uses both; an ONNX model fixes
+/// its own input size and vocabulary at load time and ignores them. A
+/// model-neutral recast is deferred until a second CLI-live backend needs to be
+/// configured through the trait — see `docs/ocr-backend-seam.md`.
 #[derive(Debug, Clone)]
 pub struct OcrOptions {
-    /// Languages to recognize (e.g. "eng", "rus+eng").
+    /// Languages to recognize (e.g. "eng", "rus+eng"). Advisory; ignored by
+    /// backends whose model is not language-parameterized.
     pub languages: String,
-    /// Page DPI (helps OCR engines scale internally).
+    /// Page DPI (helps OCR engines scale internally). Advisory; ignored by
+    /// backends with a fixed input resolution.
     pub dpi: u32,
 }
 
