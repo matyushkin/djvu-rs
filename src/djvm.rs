@@ -408,11 +408,7 @@ mod tests {
     #[test]
     fn split_unknown_form_type_is_out_of_bounds() {
         // A valid AT&T FORM with an unknown form type has 0 pages → always OOB
-        let mut fake: Vec<u8> = Vec::new();
-        fake.extend_from_slice(b"AT&T");
-        fake.extend_from_slice(b"FORM");
-        fake.extend_from_slice(&4u32.to_be_bytes()); // FORM content length = 4 (just type, no chunks)
-        fake.extend_from_slice(b"UNKN");
+        let fake = iff::partial_emit(*b"UNKN", &[]).unwrap();
         let result = split(&fake, 0, 1);
         assert!(result.is_err(), "unknown form type must yield PageRangeOutOfBounds");
     }
@@ -444,11 +440,7 @@ mod tests {
     #[test]
     fn merge_unknown_form_type_returns_empty_merge_error() {
         // All docs are unknown type → components stays empty → EmptyMerge
-        let mut fake: Vec<u8> = Vec::new();
-        fake.extend_from_slice(b"AT&T");
-        fake.extend_from_slice(b"FORM");
-        fake.extend_from_slice(&4u32.to_be_bytes());
-        fake.extend_from_slice(b"UNKN");
+        let fake = iff::partial_emit(*b"UNKN", &[]).unwrap();
         let result = merge(&[&fake]);
         assert!(matches!(result, Err(DjvmError::EmptyMerge)));
     }
