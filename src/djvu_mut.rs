@@ -675,7 +675,7 @@ fn is_bundled_djvm(chunk: &Chunk) -> bool {
         return false;
     }
     children.iter().any(|c| {
-        matches!(c, Chunk::Leaf { id, data } if id == b"DIRM" && !data.is_empty() && (data[0] & 0x80) != 0)
+        matches!(c, Chunk::Leaf { id, data } if id == b"DIRM" && crate::dirm::DirmPayload::peek_bundled(data))
     })
 }
 
@@ -1728,18 +1728,10 @@ mod tests {
             .iter()
             .find(|c| &c.id == b"DIRM")
             .expect("DIRM present");
-        let payload = dirm.data;
-        let nfiles = u16::from_be_bytes([payload[1], payload[2]]) as usize;
-        let mut declared = Vec::with_capacity(nfiles);
-        for i in 0..nfiles {
-            let base = 3 + i * 4;
-            declared.push(u32::from_be_bytes([
-                payload[base],
-                payload[base + 1],
-                payload[base + 2],
-                payload[base + 3],
-            ]));
-        }
+        // Decode through the canonical owner instead of hand-parsing bytes.
+        let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
+        let declared = payload.offsets;
+        let nfiles = declared.len();
 
         // Walk the file to find each FORM child's absolute byte offset.
         // Layout: AT&T(4) FORM(4) length(4) DJVM(4) chunks…
