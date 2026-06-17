@@ -284,6 +284,19 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_index_payload_too_short() {
+        // version=0x80 (has indices), 1 colour, 3 BGR bytes, then m=1 but 0 BZZ bytes
+        // bzz_decode([]) returns empty, raw.len()=0 < m*2=2 → error
+        let mut data = Vec::new();
+        data.push(0x80); // version: has index table
+        data.extend_from_slice(&1u16.to_be_bytes()); // n_colors = 1
+        data.extend_from_slice(&[0x01, 0x02, 0x03]); // BGR triple
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // m = 1
+        // no BZZ bytes follow → empty decoded payload
+        assert!(decode_fgbz(&data).is_err());
+    }
+
+    #[test]
     fn decode_rejects_truncated_index_header() {
         // version=0x80 (has indices), 1 colour, then nothing.
         let bytes = [0x80, 0x00, 0x01, 0x01, 0x02, 0x03];
