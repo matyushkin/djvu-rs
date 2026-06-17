@@ -3,6 +3,12 @@
 //! Uses real DjVu test files from the references/ and tests/corpus/ directories.
 //! Benchmarks are skipped gracefully if the test files are not found.
 
+// These harnesses build `RenderOptions` literals that still name the deprecated
+// `scale` field (now ignored — the pipeline derives the decode scale from
+// `width`; see #377). Allowed here so the perf harness keeps building while the
+// back-compat field exists.
+#![allow(deprecated)]
+
 use std::hint::black_box;
 use std::time::Duration;
 

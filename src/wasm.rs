@@ -294,7 +294,7 @@ fn json_escape_into(s: &str, buf: &mut String) {
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use crate::djvu_render::{RenderOptions, Resampling, UserRotation, render_pixmap};
+    use crate::djvu_render::{RenderOptions, render_pixmap};
 
     fn boy_bytes() -> Vec<u8> {
         // boy.djvu: 192×256 px, 300 dpi, color IW44.
@@ -349,12 +349,7 @@ mod native_tests {
         let opts = RenderOptions {
             width: w,
             height: h,
-            scale,
-            bold: 0,
-            aa: false,
-            rotation: UserRotation::None,
-            permissive: false,
-            resampling: Resampling::Bilinear,
+            ..Default::default()
         };
         let pm = render_pixmap(page, &opts).expect("render failed");
         assert_eq!(pm.data.len(), (w * h * 4) as usize);
