@@ -2428,6 +2428,48 @@ mod tests {
         assert!(t.is_some());
     }
 
+    // Line 585: (None, true) branch of set_bookmarks — no-op when DJVM has no NAVM and
+    // we try to set empty bookmarks.
+    #[test]
+    fn set_bookmarks_empty_on_djvm_without_navm_is_noop() {
+        // Strip NAVM from a bundled doc, then call set_bookmarks(&[]) on the stripped doc.
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_bookmarks(&[]).unwrap(); // removes NAVM if present
+        let stripped = doc.into_bytes();
+
+        // Now stripped has no NAVM; set_bookmarks(&[]) is a true no-op (None, true).
+        let mut doc2 = DjVuDocumentMut::from_bytes(&stripped).unwrap();
+        doc2.set_bookmarks(&[]).unwrap();
+        assert_eq!(doc2.into_bytes(), stripped, "no-op set_bookmarks should not change bytes");
+    }
+
+    // Line 936: (None, true) branch of replace_or_insert — set_metadata with default
+    // (empty) on a page that has no existing METa/METz chunk.
+    #[test]
+    fn set_metadata_empty_on_page_without_meta_is_noop() {
+        let original = read_corpus("chicken.djvu"); // known: no METa chunk
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        // Default metadata → encode_metadata returns empty → (None, true) no-op path.
+        doc.page_mut(0).unwrap().set_metadata(&DjVuMetadata::default());
+        // Dirty is still set (set_metadata always marks dirty), but no METa was inserted.
+        let bytes = doc.into_bytes();
+        let reparsed = DjVuDocumentMut::from_bytes(&bytes).unwrap();
+        let has_meta = reparsed.file.root.children().iter().any(|c| {
+            matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz")
+        });
+        assert!(!has_meta, "empty set_metadata should not insert a METa chunk");
+    }
+
+    // Lines 1131-1132: component_count() on IndirectRewritePlan.
+    #[test]
+    fn rewrite_plan_component_count() {
+        let (index, resolver) = indirect_over_fixtures(&["chicken.djvu", "irish.djvu"]);
+        let plan = IndirectRewritePlan::from_indirect_resolved(&index, resolver).unwrap();
+        assert_eq!(plan.component_count(), 2);
+        assert_eq!(plan.page_count(), 2);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn validate_safe_component_name_rejects_empty() {
