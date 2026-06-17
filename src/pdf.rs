@@ -1586,4 +1586,58 @@ mod tests {
         // 300px at 300dpi = 72pt
         assert!((px_to_pt(300.0, 300.0) - 72.0).abs() < 0.001);
     }
+
+    // ── emit_word_span guards ─────────────────────────────────────────────────
+
+    #[test]
+    fn emit_word_span_zero_width_produces_no_ops() {
+        use crate::text::Rect;
+        let rect = Rect { x: 0, y: 0, width: 0, height: 20 };
+        let mut ops = String::new();
+        emit_word_span(&mut ops, &rect, "hello", 72.0, 720.0);
+        assert!(ops.is_empty(), "zero-width rect must produce no output");
+    }
+
+    #[test]
+    fn emit_word_span_tiny_height_produces_no_ops() {
+        use crate::text::Rect;
+        // height=1px at 300dpi → h = 1*72/300 = 0.24pt < 0.5 → skip
+        let rect = Rect { x: 0, y: 0, width: 50, height: 1 };
+        let mut ops = String::new();
+        emit_word_span(&mut ops, &rect, "hi", 300.0, 720.0);
+        assert!(ops.is_empty(), "sub-0.5pt font size must produce no output");
+    }
+
+    // ── build_outline with nested bookmarks ──────────────────────────────────
+
+    #[test]
+    fn build_outline_with_nested_children_sets_first_last_count() {
+        use crate::djvu_document::DjVuBookmark;
+        let bookmarks = vec![DjVuBookmark {
+            title: "Chapter 1".into(),
+            url: "#page_1".into(),
+            children: vec![
+                DjVuBookmark {
+                    title: "Section 1.1".into(),
+                    url: "#page_2".into(),
+                    children: vec![],
+                },
+                DjVuBookmark {
+                    title: "Section 1.2".into(),
+                    url: "#page_3".into(),
+                    children: vec![],
+                },
+            ],
+        }];
+        let page_ids = [10usize, 20, 30];
+        let mut w = PdfWriter::new();
+        let outline_id = build_outline(&mut w, &bookmarks, &page_ids);
+        assert!(outline_id.is_some(), "nested bookmarks must produce an outline");
+        // Serialize and check that /First and /Last are present
+        let pdf = w.serialize();
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(s.contains("/First"), "outline item with children must set /First");
+        assert!(s.contains("/Last"), "outline item with children must set /Last");
+        assert!(s.contains("/Count"), "outline item with children must set /Count");
+    }
 }

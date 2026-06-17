@@ -308,4 +308,51 @@ mod tests {
         let result = decoder.read_rect(10, 0, 30, 24, &mut buf, 30 * 4);
         assert!(result.is_err(), "out-of-bounds read_rect must return error");
     }
+
+    #[test]
+    fn from_image_compat_error_for_image_error() {
+        use image::error::ImageError;
+        let err = ImageCompatError::Render(crate::djvu_render::RenderError::InvalidDimensions {
+            width: 0,
+            height: 0,
+        });
+        let image_err: ImageError = err.into();
+        let s = image_err.to_string();
+        assert!(s.contains("DjVu"), "ImageError must mention DjVu: {s}");
+    }
+
+    #[test]
+    fn read_image_boxed_works() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = Box::new(DjVuDecoder::new(page).unwrap().with_size(16, 12));
+        let n = (16 * 12 * 4) as usize;
+        let mut buf = vec![0u8; n];
+        decoder.read_image_boxed(&mut buf).unwrap();
+        assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn read_rect_x_plus_width_overflow_returns_error() {
+        use image::ImageDecoderRect;
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let mut decoder = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        let mut buf = vec![0u8; 4];
+        // x = u32::MAX, width = 1 → overflow
+        let result = decoder.read_rect(u32::MAX, 0, 1, 1, &mut buf, 4);
+        assert!(result.is_err(), "x+width overflow must return error");
+    }
+
+    #[test]
+    fn read_rect_y_plus_height_overflow_returns_error() {
+        use image::ImageDecoderRect;
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let mut decoder = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        let mut buf = vec![0u8; 4];
+        // y = u32::MAX, height = 1 → overflow
+        let result = decoder.read_rect(0, u32::MAX, 1, 1, &mut buf, 4);
+        assert!(result.is_err(), "y+height overflow must return error");
+    }
 }

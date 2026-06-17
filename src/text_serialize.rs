@@ -849,4 +849,24 @@ mod tests {
         assert!(one.len() <= all.len());
         assert!(one.contains(r#"ID="page_0""#), "must include page_0");
     }
+
+    // ---- DPI scaling path (text_layer_at_size) --------------------------------
+
+    #[test]
+    fn to_hocr_with_dpi_produces_valid_output() {
+        let doc = load_doc("chicken.djvu");
+        let opts = HocrOptions { page_index: None, dpi: Some(150) };
+        let out = to_hocr(&doc, &opts).unwrap();
+        assert!(out.contains("ocr_page"), "DPI-scaled hOCR must have ocr_page");
+        assert!(out.contains("</html>"), "DPI-scaled hOCR must close html");
+    }
+
+    #[test]
+    fn to_alto_with_dpi_produces_valid_output() {
+        let doc = load_doc("chicken.djvu");
+        let opts = AltoOptions { page_index: None, dpi: Some(150) };
+        let out = to_alto(&doc, &opts).unwrap();
+        assert!(out.contains("<Page"), "DPI-scaled ALTO must have Page element");
+        assert!(out.contains("</alto>"), "DPI-scaled ALTO must close alto");
+    }
 }
