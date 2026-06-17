@@ -2190,6 +2190,27 @@ mod tests {
         );
     }
 
+    // Lines 293-298: DjVuDocumentMut::from_indirect_resolved with FORM:FAKE component.
+    #[test]
+    fn from_indirect_resolved_wrong_form_type_errors() {
+        let index = crate::djvm::create_indirect(&["fake.djvu"]).expect("create_indirect");
+        let fake = iff::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"FAKE",
+                length: 0,
+                children: vec![],
+            },
+        });
+        let err = DjVuDocumentMut::from_indirect_resolved(&index, move |_name: &str| {
+            Ok::<Vec<u8>, std::io::Error>(fake.clone())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, MutError::ComponentMalformed { .. }),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn from_indirect_resolved_rejects_bundled_input() {
         // A genuinely bundled DJVM is not indirect ⇒ NotIndirectDjvm.
