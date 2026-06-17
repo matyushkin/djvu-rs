@@ -150,14 +150,14 @@ pub struct RenderOptions {
     /// Deprecated and **ignored by the render pipeline**.
     ///
     /// Rendering now derives its decode scale from `width` and the page's
-    /// rotation-aware display width (see the internal `decode_scale`), so this
-    /// field no longer controls anything. It is retained for backward
-    /// compatibility — the `fit_to_*` constructors still populate it — but
-    /// setting it by hand has no effect. Build options via
+    /// native width (see the internal `decode_scale`), so this field no longer
+    /// controls anything. It is retained for backward compatibility — the
+    /// `fit_to_*` constructors still populate it — but setting it by hand has no
+    /// effect. Build options via
     /// [`RenderOptions::fit_to_width`] / [`fit_to_box`](RenderOptions::fit_to_box)
     /// instead of assembling the `(width, height, scale)` triple yourself.
     #[deprecated(
-        since = "0.20.2",
+        since = "0.20.1",
         note = "scale is derived from `width` by the render pipeline and is no longer read; \
                 build options via `RenderOptions::fit_to_width`/`fit_to_box`. \
                 This field is ignored and will be removed in a future release."
@@ -294,17 +294,25 @@ impl RenderOptions {
 
     /// The scale the decode pipeline uses to choose the IW44 wavelet subsample
     /// level (via [`best_iw44_subsample`]), derived from the requested output
-    /// `width` and the page's rotation-aware display width.
+    /// `width` and the page's **native** width.
     ///
-    /// This is the single home of the `scale ≈ width / display_width` invariant
-    /// that every caller used to maintain by hand — and that the PDF exporter
-    /// got wrong, leaving `scale = 1.0` and silently over-decoding at every DPI.
+    /// The compositor scales the native page raster (`page.width()` ×
+    /// `page.height()`) into the `width` × `height` buffer and only *then*
+    /// applies INFO/user rotation (see `composite_rows` and `rotate_pixmap`).
+    /// The IW44 background is decoded in that pre-rotation native orientation, so
+    /// the subsample must be chosen against `width / page.width()`. Dividing by
+    /// the rotation-swapped *display* width would pick the wrong subsample for
+    /// INFO-rotated, non-square pages — over-subsampling a downscaled portrait
+    /// background and under-subsampling a landscape one.
+    ///
+    /// This is the single home of the `scale ≈ width / page-width` invariant that
+    /// every caller used to maintain by hand — and that the PDF exporter got
+    /// wrong, leaving `scale = 1.0` and silently over-decoding at every DPI.
     /// Rendering reads *this*, never the deprecated public [`scale`](Self::scale)
     /// field, so a caller can no longer cause a silent over- or under-decode by
     /// building the size triple inconsistently.
     pub(crate) fn decode_scale(&self, page: &crate::djvu_document::DjVuPage) -> f32 {
-        let (dw, _) = display_dimensions(page);
-        self.width as f32 / dw.max(1) as f32
+        self.width as f32 / (page.width() as u32).max(1) as f32
     }
 }
 
@@ -3589,6 +3597,40 @@ mod tests {
                 "scale={misleading} must not change the width-derived subsample",
             );
         }
+    }
+
+    /// INFO-rotated page: the decode scale follows the *native* page width, not
+    /// the rotation-swapped display width. The compositor scales the native
+    /// raster into the output buffer before `rotate_pixmap` runs, so a downscaled
+    /// rotated page must not pick its IW44 subsample from the swapped dimension —
+    /// doing so over-subsampled a downscaled portrait background (#377 follow-up).
+    #[test]
+    fn decode_scale_uses_native_width_for_rotated_page() {
+        // boy_jb2_rotate90 carries a 90° rotation in its INFO chunk.
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).unwrap();
+        let pw = page.width() as u32;
+        let (dw, _) = display_dimensions(page);
+        assert_ne!(dw, pw, "fixture must be a non-square INFO-rotated page");
+
+        // The raster exporters size the output from the native page width
+        // (page.width() * s); at s = 0.5 the half-size render must decode at 0.5.
+        let opts = RenderOptions {
+            width: pw / 2,
+            height: (page.height() as u32) / 2,
+            ..Default::default()
+        };
+        let native = opts.width as f32 / pw as f32; // correct: width / native width
+        let display = opts.width as f32 / dw as f32; // the old bug: width / display width
+        assert!(
+            (opts.decode_scale(page) - native).abs() < 1e-4,
+            "decode_scale {} should equal the native-width ratio {native}",
+            opts.decode_scale(page),
+        );
+        assert!(
+            (opts.decode_scale(page) - display).abs() > 1e-2,
+            "decode_scale must not follow the rotation-swapped display width ({display})",
+        );
     }
 
     /// Rendering with bg_subsample=2 (scale=0.5) produces the correct output dimensions.
