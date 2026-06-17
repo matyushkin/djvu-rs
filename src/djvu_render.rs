@@ -4038,6 +4038,73 @@ mod tests {
         assert!(matches!(err, RenderError::InvalidDimensions { .. }));
     }
 
+    /// Build a minimal single-page DJVU document with the given width and height.
+    fn make_doc_with_dims(w: u16, h: u16) -> Vec<u8> {
+        use crate::iff::{DjvuFile, Chunk, emit};
+        let mut info = vec![0u8; 10];
+        info[0] = (w >> 8) as u8;
+        info[1] = w as u8;
+        info[2] = (h >> 8) as u8;
+        info[3] = h as u8;
+        let file = DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0,
+                children: vec![Chunk::Leaf { id: *b"INFO", data: info }],
+            },
+        };
+        emit(&file)
+    }
+
+    // ── RenderOptions edge-case helpers ──────────────────────────────────────
+
+    #[test]
+    fn fit_to_width_zero_page_width_uses_requested_width() {
+        // Line 213: dw == 0 → height = width (same as requested width).
+        let bytes = make_doc_with_dims(0, 100);
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions::fit_to_width(page, 40);
+        assert_eq!(opts.width, 40);
+        assert_eq!(opts.height, 40); // because dw==0 → height = width
+    }
+
+    #[test]
+    fn fit_to_height_zero_page_height_uses_requested_height() {
+        // Line 232: dh == 0 → width = height (same as requested height).
+        let bytes = make_doc_with_dims(100, 0);
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions::fit_to_height(page, 60);
+        assert_eq!(opts.height, 60);
+        assert_eq!(opts.width, 60); // because dh==0 → width = height
+    }
+
+    #[test]
+    fn fit_to_box_zero_page_dims_falls_back_to_box_max() {
+        // Lines 255-259: dw==0 || dh==0 → return max_width × max_height with scale=1.
+        let bytes = make_doc_with_dims(0, 0);
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions::fit_to_box(page, 80, 60);
+        assert_eq!(opts.width, 80);
+        assert_eq!(opts.height, 60);
+    }
+
+    #[test]
+    fn can_stream_true_at_native_resolution_with_lanczos3() {
+        // Line 290: the "|| native dims" branch — evaluated when Bilinear is false.
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        assert!(opts.can_stream(page));
+    }
+
     /// Bold dilation (opts.bold > 0) thickens the mask.
     #[test]
     fn render_with_bold_dilation_produces_output() {

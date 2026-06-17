@@ -776,6 +776,32 @@ mod tests {
         assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
     }
 
+    // Decoder pass mode (0001) — craft a raw G4 bitstream by hand.
+    // Row 0 (ref=all-white): H W2 B2 V0  → [W,W,B,B,W,W,W,W]
+    // Row 1 (ref=WWBBWWWW): Pass V0       → [W,W,W,W,W,W,W,W]
+    // Pass is triggered because b1=2,b2=4 both lie before a1=8 (no changes in cur).
+    #[test]
+    fn decoder_pass_mode_produces_correct_output() {
+        // Bit layout (MSB-first within each byte):
+        //   Row0: 001(H) 0111(W2, 4 bits) 11(B2) 1(V0)
+        //   Row1: 0001(Pass) 1(V0)
+        //   EOFB: 000000000001 000000000001
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x2F, 0xC6, 0x00, 0x20, 0x02];
+        let bm = decode_smmr(data).expect("should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W W B B W W W W
+        assert!(!bm.get(0, 0));
+        assert!(!bm.get(1, 0));
+        assert!(bm.get(2, 0));
+        assert!(bm.get(3, 0));
+        assert!(!bm.get(4, 0));
+        // Row 1: all white (pass mode skipped over the BB run)
+        for x in 0..8u32 {
+            assert!(!bm.get(x, 1), "row1 col{x} should be white");
+        }
+    }
+
     #[test]
     fn encode_output_has_correct_header() {
         let bm = make_bm(200, 3, |_, _| false);
