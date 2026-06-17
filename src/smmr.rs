@@ -714,4 +714,75 @@ mod tests {
     fn error_too_short() {
         assert!(matches!(decode_smmr(&[0, 8]), Err(SmmrError::TooShort)));
     }
+
+    #[test]
+    fn error_empty_slice() {
+        assert!(matches!(decode_smmr(&[]), Err(SmmrError::TooShort)));
+    }
+
+    #[test]
+    fn error_three_bytes_too_short() {
+        // Three bytes — less than the 4-byte minimum header
+        assert!(matches!(decode_smmr(&[0, 8, 0]), Err(SmmrError::TooShort)));
+    }
+
+    #[test]
+    fn smmr_error_display() {
+        assert_eq!(SmmrError::TooShort.to_string(), "Smmr chunk too short");
+        assert_eq!(SmmrError::BadCode.to_string(), "invalid G4 MMR code");
+        assert_eq!(SmmrError::UnexpectedEof.to_string(), "G4 bitstream truncated");
+    }
+
+    // Wide bitmaps trigger MH makeup codes (runs ≥ 64 pixels)
+
+    #[test]
+    fn roundtrip_all_white_wide() {
+        // 128 pixels wide — forces a 128-run white makeup code
+        let bm = make_bm(128, 2, |_, _| false);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_all_black_wide() {
+        let bm = make_bm(128, 2, |_, _| true);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_wide_run_at_boundary() {
+        // 64-pixel white run followed by 64-pixel black run — exactly on the makeup boundary
+        let bm = make_bm(128, 1, |x, _| x >= 64);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_512_wide_all_white() {
+        // Forces multi-makeup code chains (512 = 448 + 64)
+        let bm = make_bm(512, 1, |_, _| false);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_512_wide_alternating_runs() {
+        // 64 white, 64 black, 64 white, ... — exercises makeup codes in both colors
+        let bm = make_bm(512, 1, |x, _| (x / 64) % 2 == 1);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn roundtrip_wide_multirow() {
+        // 256 wide, 4 rows, mixed content
+        let bm = make_bm(256, 4, |x, y| (x + y * 17) % 3 == 0);
+        assert!(bm_eq(&bm, &decode_smmr(&encode_smmr(&bm)).unwrap()));
+    }
+
+    #[test]
+    fn encode_output_has_correct_header() {
+        let bm = make_bm(200, 3, |_, _| false);
+        let data = encode_smmr(&bm);
+        let ncols = u16::from_be_bytes([data[0], data[1]]) as u32;
+        let nrows = u16::from_be_bytes([data[2], data[3]]) as u32;
+        assert_eq!(ncols, 200);
+        assert_eq!(nrows, 3);
+    }
 }
