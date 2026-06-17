@@ -245,4 +245,12 @@ mod tests {
         let exprs = parse_sexprs("(unclosed");
         assert_eq!(exprs.len(), 1);
     }
+
+    #[test]
+    fn unclosed_quoted_string_does_not_panic() {
+        // Line 98: EOF inside a quoted string — tokenizer hits None => break.
+        let exprs = parse_sexprs("\"unclosed");
+        assert_eq!(exprs.len(), 1);
+        assert_eq!(atom(&exprs[0]), Some("unclosed"));
+    }
 }
