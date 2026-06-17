@@ -112,6 +112,13 @@ pub use LegacyError as Error;
 
 // ---- IFF chunk types --------------------------------------------------------
 
+/// The 4-byte magic that prefixes every on-disk DjVu IFF stream.
+///
+/// The single source of the literal: writers prepend `&MAGIC` rather than
+/// re-spelling `b"AT&T"`, so the emission seam owns the framing bytes. (A
+/// guard test rejects raw `b"AT&T"`/`b"FORM"` assembly outside this crate.)
+pub const MAGIC: [u8; 4] = *b"AT&T";
+
 /// A 4-byte chunk identifier (e.g., b"FORM", b"INFO", b"Sjbz").
 pub type ChunkId = [u8; 4];
 
@@ -307,7 +314,7 @@ fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk>, E
 /// DjVu writer.
 pub fn emit(file: &DjvuFile) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(&MAGIC);
     emit_chunk(&file.root, &mut out);
     out
 }
@@ -399,8 +406,8 @@ fn emitted_size_inner(chunk: &Chunk, suppress_inner_pad: bool) -> usize {
     }
 }
 
-/// One child for [`partial_emit`]: either a parsed [`Chunk`] to re-frame, or a
-/// verbatim byte slice copied as-is.
+/// One child for [`partial_emit`]: a parsed [`Chunk`] to re-frame, a verbatim
+/// byte slice copied as-is, or a nested `FORM` container framed from its body.
 pub enum EmitPart<'a> {
     /// Re-frame this chunk through the canonical emitter (8-byte header,
     /// payload, word-alignment pad).
@@ -410,6 +417,13 @@ pub enum EmitPart<'a> {
     /// word-alignment pad is added by [`partial_emit`] if the slice has odd
     /// length, so callers may pass either padded or unpadded child blocks.
     Verbatim(&'a [u8]),
+    /// Frame a nested `FORM` container whose *body* is given verbatim. `body`
+    /// starts with the 4-byte secondary id (`DJVU`/`DJVI`/`THUM`/…); the seam
+    /// writes the `FORM` tag, the big-endian length, the body, and the
+    /// word-alignment pad. Use this for the component sub-FORMs of a bundle so
+    /// the `FORM` framing is never hand-rolled at the call site (and so the
+    /// component's start offset is reported by [`partial_emit_with_offsets`]).
+    Form(&'a [u8]),
 }
 
 /// Emit a complete DjVu file (`AT&T` magic + one root `FORM`) whose children
@@ -423,9 +437,39 @@ pub enum EmitPart<'a> {
 ///
 /// Returns `None` if the assembled FORM payload exceeds `u32::MAX`.
 pub fn partial_emit(secondary_id: ChunkId, parts: &[EmitPart<'_>]) -> Option<Vec<u8>> {
+    partial_emit_with_offsets(secondary_id, parts).map(|(bytes, _)| bytes)
+}
+
+/// Like [`partial_emit`], but also returns the absolute file-byte offset of
+/// each part within the returned buffer: `offsets[i]` is the index at which
+/// `parts[i]`'s framing begins, measured from the start of the leading `AT&T`
+/// magic.
+///
+/// This is the seam for writers that must record an external index of where
+/// each component landed — most notably a bundled `FORM:DJVM`, whose `DIRM`
+/// offset table stores the file offset of every component `FORM`. Those
+/// offsets live *inside* one part (the `DIRM`) yet describe the *others*, so
+/// such a writer is inherently two-pass: emit once to learn the offsets, write
+/// them into the `DIRM`, then emit again. The second pass yields identical
+/// offsets — a part's position depends only on the sizes of the parts before
+/// it, and a fixed-width offset table does not change size when its values
+/// change — so the two passes cannot disagree.
+///
+/// Returns `None` if the assembled FORM payload (or any [`EmitPart::Form`]
+/// body) exceeds `u32::MAX`.
+pub fn partial_emit_with_offsets(
+    secondary_id: ChunkId,
+    parts: &[EmitPart<'_>],
+) -> Option<(Vec<u8>, Vec<usize>)> {
+    // The file prologue before the payload is AT&T(4) + FORM(4) + length(4) =
+    // 12 bytes, so a part written while the payload already holds `k` bytes
+    // begins at file offset 12 + k.
+    const PROLOGUE: usize = 12;
     let mut payload = Vec::new();
     payload.extend_from_slice(&secondary_id); // even start (4 bytes)
+    let mut offsets = Vec::with_capacity(parts.len());
     for part in parts {
+        offsets.push(PROLOGUE + payload.len());
         match part {
             EmitPart::Chunk(chunk) => emit_chunk(chunk, &mut payload),
             EmitPart::Verbatim(bytes) => {
@@ -434,11 +478,20 @@ pub fn partial_emit(secondary_id: ChunkId, parts: &[EmitPart<'_>]) -> Option<Vec
                     payload.push(0);
                 }
             }
+            EmitPart::Form(body) => {
+                let len = u32::try_from(body.len()).ok()?;
+                payload.extend_from_slice(b"FORM");
+                payload.extend_from_slice(&len.to_be_bytes());
+                payload.extend_from_slice(body);
+                if payload.len() % 2 == 1 {
+                    payload.push(0);
+                }
+            }
         }
     }
     let len = u32::try_from(payload.len()).ok()?;
     let mut out = Vec::with_capacity(8 + payload.len());
-    out.extend_from_slice(b"AT&T");
+    out.extend_from_slice(&MAGIC);
     out.extend_from_slice(b"FORM");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&payload);
@@ -447,7 +500,7 @@ pub fn partial_emit(secondary_id: ChunkId, parts: &[EmitPart<'_>]) -> Option<Vec
     if (8 + payload.len()) % 2 == 1 {
         out.push(0);
     }
-    Some(out)
+    Some((out, offsets))
 }
 
 // ---- New spec-based IFF parser (phase 1) ------------------------------------
@@ -847,6 +900,60 @@ mod tests {
         assert_eq!(&out[12..16], b"DJVU");
         assert_eq!(&out[16..19], &[1, 2, 3]);
         assert_eq!(out[19], 0);
+    }
+
+    #[test]
+    fn partial_emit_form_part_frames_nested_form() {
+        // An `EmitPart::Form` body must be framed as `FORM` + len + body + pad,
+        // identical to copying a pre-framed FORM chunk verbatim.
+        let body: &[u8] = b"DJVUxyz"; // 7 bytes (odd) → forces a pad
+        let via_form = partial_emit(*b"DJVM", &[EmitPart::Form(body)]).unwrap();
+
+        // Hand-frame the same component to compare against the seam output.
+        let mut framed = Vec::new();
+        framed.extend_from_slice(b"FORM");
+        framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        framed.extend_from_slice(body);
+        framed.push(0); // odd body → pad
+        let via_verbatim = partial_emit(*b"DJVM", &[EmitPart::Verbatim(&framed)]).unwrap();
+
+        assert_eq!(via_form, via_verbatim, "Form part must match framed FORM");
+        // Spot-check the literal bytes too.
+        assert_eq!(&via_form[..8], b"AT&TFORM");
+        assert_eq!(&via_form[12..16], b"DJVM");
+        assert_eq!(&via_form[16..20], b"FORM");
+        assert_eq!(u32::from_be_bytes(via_form[20..24].try_into().unwrap()), 7);
+        assert_eq!(&via_form[24..31], body);
+        assert_eq!(via_form[31], 0); // pad
+    }
+
+    #[test]
+    fn partial_emit_with_offsets_reports_part_starts() {
+        // Each reported offset must point at the byte where that part's framing
+        // begins (the `FORM`/leaf-id tag), measured from the `AT&T` magic.
+        let dirm = Chunk::Leaf {
+            id: *b"DIRM",
+            data: vec![0xAB; 5], // odd → the DIRM chunk gets a pad
+        };
+        let comp0: &[u8] = b"DJVU0000"; // 8 bytes (even)
+        let comp1: &[u8] = b"DJVIaa"; // 6 bytes (even)
+        let parts = [
+            EmitPart::Chunk(&dirm),
+            EmitPart::Form(comp0),
+            EmitPart::Form(comp1),
+        ];
+        let (bytes, offsets) = partial_emit_with_offsets(*b"DJVM", &parts).unwrap();
+
+        assert_eq!(offsets.len(), 3);
+        // DIRM: AT&T(4)+FORM(4)+len(4)+DJVM(4) = 16.
+        assert_eq!(offsets[0], 16);
+        assert_eq!(&bytes[offsets[0]..offsets[0] + 4], b"DIRM");
+        // Component FORM tags land exactly where the offset table says.
+        for &off in &offsets[1..] {
+            assert_eq!(&bytes[off..off + 4], b"FORM", "offset must point at FORM");
+        }
+        // comp1 sits after comp0's full framing: 8 (header) + 8 (even body).
+        assert_eq!(offsets[2] - offsets[1], 16);
     }
 
     // ---- New spec-based parser tests ----------------------------------------
