@@ -1880,6 +1880,28 @@ mod tests {
     }
 
     #[test]
+    fn page_thumbnail_with_th44_data() {
+        // Extract real TH44 chunk bytes from carte.djvu (which contains TH44 data)
+        // and embed them in a synthetic page to cover the thumbnail decode path.
+        let carte = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        // Find TH44 in the raw bytes and extract chunk payload
+        let th44_pos = carte.windows(4).position(|w| w == b"TH44");
+        if let Some(pos) = th44_pos {
+            if pos + 8 <= carte.len() {
+                let chunk_len = u32::from_be_bytes([carte[pos+4], carte[pos+5], carte[pos+6], carte[pos+7]]) as usize;
+                let chunk_data = carte.get(pos+8..pos+8+chunk_len).unwrap_or(&[]);
+                if !chunk_data.is_empty() {
+                    let page = page_with_chunks(&[(b"TH44", chunk_data)]);
+                    // This should decode successfully (covers lines 298-303)
+                    let thumb = page.thumbnail();
+                    assert!(thumb.is_ok(), "thumbnail decode should not error");
+                    // The thumbnail may or may not be Some depending on IW44 data validity
+                }
+            }
+        }
+    }
+
+    #[test]
     fn djvu_page_debug_impl_does_not_panic() {
         let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
         let doc = DjVuDocument::parse(&data).unwrap();
