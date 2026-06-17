@@ -185,6 +185,14 @@ pub(crate) mod fgbz;
 /// Text layer parser for DjVu TXTz/TXTa chunks — phase 4.
 ///
 /// Provides the pure [`text::parse_text_layer`] parser plus typed structs
+/// Data model for the DjVu text layer — types shared by the parser, encoder,
+/// serialisers, and OCR backends.
+///
+/// Defines [`text_model::TextLayer`], [`text_model::TextZone`],
+/// [`text_model::TextZoneKind`], [`text_model::Rect`],
+/// [`text_model::Paragraph`], and [`text_model::TextError`].
+pub mod text_model;
+
 /// [`text::TextLayer`], [`text::TextZone`], [`text::TextZoneKind`], and
 /// [`text::Rect`].  BZZ-compressed `TXTz` payloads are decompressed upstream by
 /// [`DjVuPage::chunk_payload`].
@@ -274,13 +282,6 @@ pub mod image_compat;
 /// [`text_serialize::TextSerializeError`].
 #[cfg(feature = "std")]
 pub mod text_serialize;
-
-/// Deprecated alias for [`text_serialize`], which was renamed to separate
-/// text-layer serialization from OCR recognition. Prefer `text_serialize`.
-#[cfg(feature = "std")]
-#[deprecated(since = "0.21.0", note = "renamed to `text_serialize`")]
-#[doc(hidden)]
-pub use crate::text_serialize as ocr_export;
 
 /// Pluggable OCR backend trait and error types.
 ///
@@ -570,44 +571,6 @@ impl<'a> Page<'a> {
         self.render_with(&self.opts_for_size(width, height))
     }
 
-    /// Render the page at native resolution with mask dilation for bolder text.
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `render_with` with `RenderOptions { bold, ..fit_to_width(page, w) }`"
-    )]
-    pub fn render_bold(&self, dilate_passes: u32) -> Result<Pixmap, Error> {
-        let mut opts = self.opts_for_scale(1.0);
-        opts.bold = dilate_passes.min(255) as u8;
-        self.render_with(&opts)
-    }
-
-    /// Render the page to a target size with mask dilation for bolder text.
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `render_with` with `RenderOptions { bold, ..fit_to_width(page, w) }`"
-    )]
-    pub fn render_to_size_bold(
-        &self,
-        width: u32,
-        height: u32,
-        dilate_passes: u32,
-    ) -> Result<Pixmap, Error> {
-        let mut opts = self.opts_for_size(width, height);
-        opts.bold = dilate_passes.min(255) as u8;
-        self.render_with(&opts)
-    }
-
-    /// Render the page at a target size with anti-aliased downscaling.
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `render_with` with `RenderOptions { aa: true, ..fit_to_width(page, w) }`"
-    )]
-    pub fn render_aa(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
-        let mut opts = self.opts_for_size(width, height);
-        opts.aa = true;
-        self.render_with(&opts)
-    }
-
     /// Decode the page thumbnail, if available.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
         self.page
@@ -627,33 +590,6 @@ impl<'a> Page<'a> {
         Ok(self.text_layer()?.map(|tl| tl.text))
     }
 
-    /// Fast coarse render: decode only the first BG44 chunk (blurry preview).
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `djvu_render::render_coarse` with `RenderOptions::fit_to_width`"
-    )]
-    pub fn render_scaled_coarse(&self, scale: f32) -> Result<Option<Pixmap>, Error> {
-        djvu_render::render_coarse(self.page, &self.opts_for_scale(scale)).map_err(Self::render_err)
-    }
-
-    /// Progressive rendering: returns increasingly refined pixmaps.
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `djvu_render::render_progressive_all` with `RenderOptions::fit_to_width`"
-    )]
-    pub fn render_scaled_progressive(&self, scale: f32) -> Result<Vec<Pixmap>, Error> {
-        djvu_render::render_progressive_all(self.page, &self.opts_for_scale(scale))
-            .map_err(Self::render_err)
-    }
-
-    /// Render the page scaled by a factor (e.g. 0.5 = half size, 2.0 = double).
-    #[deprecated(
-        since = "0.20.0",
-        note = "use `render_with` with `RenderOptions::fit_to_width`/`fit_to_box`"
-    )]
-    pub fn render_scaled(&self, scale: f32) -> Result<Pixmap, Error> {
-        self.render_with(&self.opts_for_scale(scale))
-    }
 }
 
 // Compile-time assertions: Document is Send + Sync.

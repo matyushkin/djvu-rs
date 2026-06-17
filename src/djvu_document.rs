@@ -173,6 +173,16 @@ fn decode_paired_payload(z: Option<&[u8]>, a: Option<&[u8]>) -> Result<Option<Ve
 /// The fully decoded BG44 wavelet image is cached after the first render so
 /// that subsequent renders skip the expensive ZP arithmetic decode and only
 /// run the wavelet inverse-transform and compositor.
+///
+/// ## Caching
+///
+/// [`decoded_bg44`](Self::decoded_bg44), [`decoded_mask`](Self::decoded_mask),
+/// and [`decoded_fg44`](Self::decoded_fg44) cache their results in a
+/// `std::sync::OnceLock` after the first call. Prefer these over the
+/// `extract_*` methods in performance-sensitive loops.
+///
+/// **`Clone` resets the cache.** A cloned `DjVuPage` starts with empty caches;
+/// the first render on the clone re-runs the full decode.
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
     info: PageInfo,
@@ -511,6 +521,11 @@ impl DjVuPage {
     ///
     /// Handles both JB2 (`Sjbz`) and G4/MMR (`Smmr`) encoded masks.
     /// Returns `Ok(None)` if the page has neither chunk.
+    ///
+    /// **Performance note:** this method decodes fresh on every call. Prefer
+    /// [`decoded_mask`](Self::decoded_mask) in hot paths — it caches the result
+    /// after the first call. `extract_mask` remains useful when you need a
+    /// uniquely owned `Bitmap` or call it only once.
     pub fn extract_mask(&self) -> Result<Option<crate::bitmap::Bitmap>, DocError> {
         if let Some(sjbz) = self.find_chunk(b"Sjbz") {
             // Prefer an inline Djbz chunk (decoded fresh — rare, usually small).
@@ -563,6 +578,10 @@ impl DjVuPage {
     /// Decode the IW44 foreground layer (FG44 chunks) if present.
     ///
     /// Returns `Ok(None)` if the page has no FG44 chunks.
+    ///
+    /// **Performance note:** this method allocates a fresh `Pixmap` on every call.
+    /// Prefer [`decoded_fg44`](Self::decoded_fg44) in hot paths — it returns a
+    /// cached reference after the first call.
     pub fn extract_foreground(&self) -> Result<Option<Pixmap>, DocError> {
         let chunks = self.fg44_chunks();
         if chunks.is_empty() {
@@ -586,12 +605,12 @@ impl DjVuPage {
     ///
     /// Returns `None` if the page has no Sjbz chunk or if decoding fails.
     #[cfg(feature = "std")]
-    pub(crate) fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
         self.render_layers().mask(self)
     }
 
     #[cfg(not(feature = "std"))]
-    pub(crate) fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
+    pub fn decoded_mask(&self) -> Option<&crate::bitmap::Bitmap> {
         None
     }
 
@@ -600,18 +619,22 @@ impl DjVuPage {
     ///
     /// Returns `None` if the page has no FG44 chunks or if decoding fails.
     #[cfg(feature = "std")]
-    pub(crate) fn decoded_fg44(&self) -> Option<&Pixmap> {
+    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
         self.render_layers().fg44(self)
     }
 
     #[cfg(not(feature = "std"))]
-    pub(crate) fn decoded_fg44(&self) -> Option<&Pixmap> {
+    pub fn decoded_fg44(&self) -> Option<&Pixmap> {
         None
     }
 
     /// Decode the IW44 background layer (BG44 chunks) if present.
     ///
     /// Returns `Ok(None)` if the page has no BG44 chunks.
+    ///
+    /// **Performance note:** this method allocates a fresh `Pixmap` on every call.
+    /// Prefer [`decoded_bg44`](Self::decoded_bg44) in hot paths — it returns a
+    /// cached reference after the first call.
     pub fn extract_background(&self) -> Result<Option<Pixmap>, DocError> {
         let chunks = self.bg44_chunks();
         if chunks.is_empty() {
