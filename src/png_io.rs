@@ -64,3 +64,122 @@ pub fn decode_png_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::E
         data,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encode raw pixel bytes into a PNG file and return the path.
+    fn write_png(
+        dir: &tempfile::TempDir,
+        name: &str,
+        width: u32,
+        height: u32,
+        color: png::ColorType,
+        pixels: &[u8],
+    ) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        let mut encoder = png::Encoder::new(file, width, height);
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(pixels).unwrap();
+        path
+    }
+
+    #[test]
+    fn rgb_adds_alpha_255() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1×1 red pixel in RGB
+        let path = write_png(&dir, "rgb.png", 1, 1, png::ColorType::Rgb, &[255, 0, 0]);
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.width, 1);
+        assert_eq!(pm.height, 1);
+        assert_eq!(pm.data, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rgba_passthrough() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1×1 semi-transparent blue pixel
+        let path = write_png(
+            &dir,
+            "rgba.png",
+            1,
+            1,
+            png::ColorType::Rgba,
+            &[0, 0, 255, 128],
+        );
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data, vec![0, 0, 255, 128]);
+    }
+
+    #[test]
+    fn grayscale_expands_to_rgba() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1×1 gray=200
+        let path = write_png(&dir, "gray.png", 1, 1, png::ColorType::Grayscale, &[200]);
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data, vec![200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn grayscale_alpha_expands_to_rgba() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1×1 gray=100, alpha=50
+        let path = write_png(
+            &dir,
+            "graya.png",
+            1,
+            1,
+            png::ColorType::GrayscaleAlpha,
+            &[100, 50],
+        );
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data, vec![100, 100, 100, 50]);
+    }
+
+    #[test]
+    fn dimensions_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        // 3×2 RGB image
+        let pixels = vec![0u8; 3 * 2 * 3];
+        let path = write_png(&dir, "dim.png", 3, 2, png::ColorType::Rgb, &pixels);
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.width, 3);
+        assert_eq!(pm.height, 2);
+        assert_eq!(pm.data.len(), 3 * 2 * 4);
+    }
+
+    #[test]
+    fn nonexistent_file_returns_error() {
+        let result = decode_png_to_pixmap(std::path::Path::new("/nonexistent/file.png"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn multi_pixel_rgb_row_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2×1: red then green
+        let path = write_png(
+            &dir,
+            "two.png",
+            2,
+            1,
+            png::ColorType::Rgb,
+            &[255, 0, 0, 0, 255, 0],
+        );
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(&pm.data[0..4], &[255, 0, 0, 255]); // red pixel
+        assert_eq!(&pm.data[4..8], &[0, 255, 0, 255]); // green pixel
+    }
+
+    #[test]
+    fn write_error_message_contains_path() {
+        // write_png error path uses path.display() in the message
+        let path = std::path::Path::new("/no/such/dir/x.png");
+        let err = decode_png_to_pixmap(path).unwrap_err();
+        assert!(err.to_string().contains("x.png"));
+    }
+}

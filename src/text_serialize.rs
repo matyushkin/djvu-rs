@@ -431,3 +431,228 @@ fn write_alto_zone(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+
+    fn word_zone(text: &str, x: u32, y: u32, w: u32, h: u32) -> TextZone {
+        TextZone {
+            kind: TextZoneKind::Word,
+            rect: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            text: text.to_string(),
+            children: vec![],
+        }
+    }
+
+    fn line_zone(words: Vec<TextZone>, x: u32, y: u32, w: u32, h: u32) -> TextZone {
+        TextZone {
+            kind: TextZoneKind::Line,
+            rect: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            text: words
+                .iter()
+                .map(|z| z.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            children: words,
+        }
+    }
+
+    fn page_zone(children: Vec<TextZone>) -> TextZone {
+        TextZone {
+            kind: TextZoneKind::Page,
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            text: String::new(),
+            children,
+        }
+    }
+
+    fn simple_layer(words: &[(&str, u32, u32, u32, u32)]) -> TextLayer {
+        let word_zones: Vec<_> = words
+            .iter()
+            .map(|&(t, x, y, w, h)| word_zone(t, x, y, w, h))
+            .collect();
+        let line = line_zone(word_zones, 0, 0, 800, 40);
+        TextLayer {
+            text: words.iter().map(|w| w.0).collect::<Vec<_>>().join(" "),
+            zones: vec![page_zone(vec![line])],
+        }
+    }
+
+    // ---- escape_markup -------------------------------------------------------
+
+    #[test]
+    fn escape_ampersand() {
+        assert_eq!(escape_markup("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn escape_less_than() {
+        assert_eq!(escape_markup("<tag>"), "&lt;tag&gt;");
+    }
+
+    #[test]
+    fn escape_quote() {
+        assert_eq!(escape_markup(r#"say "hi""#), "say &quot;hi&quot;");
+    }
+
+    #[test]
+    fn escape_apostrophe_uses_numeric_ref() {
+        assert_eq!(escape_markup("it's"), "it&#39;s");
+    }
+
+    #[test]
+    fn escape_plain_text_unchanged() {
+        assert_eq!(escape_markup("hello world"), "hello world");
+    }
+
+    #[test]
+    fn escape_empty() {
+        assert_eq!(escape_markup(""), "");
+    }
+
+    // ---- hOCR ---------------------------------------------------------------
+
+    #[test]
+    fn hocr_word_contains_class_and_text() {
+        let layer = simple_layer(&[("hello", 10, 20, 50, 15)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("ocrx_word"), "expected ocrx_word class");
+        assert!(out.contains("hello"), "expected word text");
+    }
+
+    #[test]
+    fn hocr_word_bbox_format() {
+        // bbox in hOCR is "x1 y1 x2 y2"
+        let layer = simple_layer(&[("foo", 10, 20, 30, 10)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        // x2 = x + width = 10 + 30 = 40, y2 = 20 + 10 = 30
+        assert!(
+            out.contains("bbox 10 20 40 30"),
+            "expected bbox 10 20 40 30, got: {out}"
+        );
+    }
+
+    #[test]
+    fn hocr_word_ids_increment() {
+        let layer = simple_layer(&[("a", 0, 0, 10, 10), ("b", 20, 0, 10, 10)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("word_0_0"));
+        assert!(out.contains("word_0_1"));
+    }
+
+    #[test]
+    fn hocr_page_index_in_ids() {
+        let layer = simple_layer(&[("x", 0, 0, 10, 10)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 3).unwrap();
+        assert!(
+            out.contains("word_3_0"),
+            "page index should appear in id: {out}"
+        );
+    }
+
+    #[test]
+    fn hocr_escapes_special_chars_in_text() {
+        let layer = simple_layer(&[("a&b", 0, 0, 10, 10)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("a&amp;b"), "expected escaped ampersand: {out}");
+        assert!(!out.contains(" a&b "), "unescaped text must not appear");
+    }
+
+    #[test]
+    fn hocr_line_zone_has_ocr_line_class() {
+        let layer = simple_layer(&[("w", 0, 0, 50, 20)]);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("ocr_line"), "expected ocr_line class: {out}");
+    }
+
+    // ---- ALTO ---------------------------------------------------------------
+
+    #[test]
+    fn alto_word_has_string_element() {
+        let layer = simple_layer(&[("hello", 5, 10, 40, 12)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("<String"), "expected String element: {out}");
+        assert!(
+            out.contains(r#"CONTENT="hello""#),
+            "expected CONTENT attr: {out}"
+        );
+    }
+
+    #[test]
+    fn alto_word_hpos_vpos_width_height() {
+        let layer = simple_layer(&[("w", 5, 10, 40, 12)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains(r#"HPOS="5""#));
+        assert!(out.contains(r#"VPOS="10""#));
+        assert!(out.contains(r#"WIDTH="40""#));
+        assert!(out.contains(r#"HEIGHT="12""#));
+    }
+
+    #[test]
+    fn alto_word_ids_increment() {
+        let layer = simple_layer(&[("a", 0, 0, 10, 10), ("b", 20, 0, 10, 10)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains(r#"ID="word_0_0""#));
+        assert!(out.contains(r#"ID="word_0_1""#));
+    }
+
+    #[test]
+    fn alto_line_has_textline_element() {
+        let layer = simple_layer(&[("w", 0, 0, 50, 20)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(
+            out.contains("<TextLine"),
+            "expected TextLine element: {out}"
+        );
+        assert!(
+            out.contains("</TextLine>"),
+            "expected closing TextLine: {out}"
+        );
+    }
+
+    #[test]
+    fn alto_escapes_special_chars_in_content() {
+        let layer = simple_layer(&[("it's", 0, 0, 30, 10)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("&#39;"), "expected escaped apostrophe: {out}");
+    }
+
+    #[test]
+    fn alto_page_index_in_word_id() {
+        let layer = simple_layer(&[("x", 0, 0, 10, 10)]);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 5).unwrap();
+        assert!(
+            out.contains(r#"ID="word_5_0""#),
+            "page index in word id: {out}"
+        );
+    }
+}
