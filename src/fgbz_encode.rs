@@ -268,6 +268,22 @@ mod tests {
     }
 
     #[test]
+    fn decode_short_data_returns_empty() {
+        let (colors, idx) = decode_fgbz(&[]).unwrap();
+        assert!(colors.is_empty());
+        assert!(idx.is_empty());
+        let (colors2, _) = decode_fgbz(&[0x00, 0x00]).unwrap();
+        assert!(colors2.is_empty());
+    }
+
+    #[test]
+    fn decode_rejects_reserved_version_bits() {
+        // version byte = 0x01 → lower 7 bits non-zero → reserved bits set
+        let data = [0x01u8, 0x00, 0x00];
+        assert!(decode_fgbz(&data).is_err());
+    }
+
+    #[test]
     fn decode_rejects_truncated_index_header() {
         // version=0x80 (has indices), 1 colour, then nothing.
         let bytes = [0x80, 0x00, 0x01, 0x01, 0x02, 0x03];
