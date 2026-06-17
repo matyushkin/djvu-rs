@@ -12,13 +12,18 @@
 //!  * [`scaled_size`] — scale → pixel size with the shared `.max(1)` clamp.
 //!  * [`word_spans`] — the leaf Word/Character descent the PDF and EPUB text
 //!    layers both walk; callers map over it in their own coordinate units.
-//!  * [`flip_y_bottom`] — the top-left-origin → bottom-origin vertical flip
-//!    that PDF and EPUB both apply (OCR/hOCR/ALTO emit top-left as-is).
+//!  * [`shape_bbox`] — the annotation [`Shape`] → bounding-rect projection the
+//!    PDF and EPUB link writers both need, with one fold seed and one
+//!    zero-area skip; callers add only their unit conversion.
+//!  * [`flip_y_bottom`] — the vertical flip between top- and bottom-anchored
+//!    coordinates that the EPUB text overlay and link projection both apply
+//!    (OCR/hOCR/ALTO emit top-left as-is; PDF does the equivalent in points).
 //!
 //! Streaming-eligibility is *not* here: it lives on
 //! [`RenderOptions::can_stream`](crate::djvu_render::RenderOptions::can_stream)
 //! in the render module, where callers ask instead of re-deriving the rule.
 
+use crate::annotation::{Rect as AnnotRect, Shape};
 use crate::djvu_document::{DjVuDocument, DjVuPage};
 use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 
@@ -190,21 +195,77 @@ pub(crate) fn word_spans(layer: &TextLayer) -> Vec<WordSpan<'_>> {
     out
 }
 
-/// Vertical flip for a top-left-origin `rect` on a `total_h`-tall page: the gap
-/// from the page bottom to the rect's bottom edge,
-/// `total_h - (rect.y + rect.height)` (saturating at 0), in **pixels**.
+/// Vertical flip of a span on a `total_h`-tall page: the gap from the page
+/// bottom to the span's far edge, `total_h - (y + height)` (saturating at 0),
+/// in **pixels**.
 ///
-/// DjVu text rects are top-left origin; bottom-anchored exporters need this
-/// flip before scaling into their own units. The EPUB overlay uses it directly
-/// (then converts to a CSS percentage). PDF performs the *equivalent* flip in
-/// point space (`pt_h − px_to_pt(top_edge)`) rather than calling this, because
-/// reordering the `f32` operations would perturb its `{:.4}`-formatted output.
+/// This is the one flip expression the bottom-anchored EPUB output shares
+/// across both coordinate systems it ingests: top-left-origin text rects
+/// (where `y` is the distance from the top) and bottom-left-origin annotation
+/// rects (the [`shape_bbox`] result), which need the identical
+/// `total_h - (y + height)` arithmetic to land on a CSS top offset. Callers
+/// pass the rect's `y`/`height` and then scale into their own units. PDF
+/// performs the *equivalent* flip in point space (`pt_h − px_to_pt(top_edge)`)
+/// rather than calling this, because reordering the `f32` operations would
+/// perturb its `{:.4}`-formatted output.
 ///
-/// `#[allow(dead_code)]`: the only current caller is the `epub`-gated exporter,
-/// so std-only builds compile it unused.
+/// `#[allow(dead_code)]`: the only current callers are the `epub`-gated
+/// exporter paths, so std-only builds compile it unused.
 #[allow(dead_code)]
-pub(crate) fn flip_y_bottom(total_h: u32, rect: &Rect) -> u32 {
-    total_h.saturating_sub(rect.y + rect.height)
+pub(crate) fn flip_y_bottom(total_h: u32, y: u32, height: u32) -> u32 {
+    total_h.saturating_sub(y + height)
+}
+
+/// Bounding box of an annotation [`Shape`] in DjVu pixel space (bottom-left
+/// origin), or `None` when the shape encloses no area.
+///
+/// One fold seed for every variant: the box starts at the shape's first point
+/// and grows to cover the rest, so there is a single rule for the empty and
+/// degenerate cases — a shape whose bounding box has zero width or zero height
+/// (an empty polygon, a single repeated point, an axis-aligned line, a
+/// zero-size rect) maps to `None`. The PDF and EPUB link writers previously
+/// each re-derived this with different fold seeds — `f32::MAX/f32::MIN` (pdf)
+/// vs `u32::MAX/0` (epub) — which disagreed on a polygon whose maximum
+/// coordinate is the origin: pdf returned a degenerate `Some`, epub returned
+/// `None`. Centralizing the fold resolves that divergence (both now skip it)
+/// and lets the projection be unit-tested without emitting a document.
+///
+/// Exporters add only their own unit conversion: PDF maps each edge to points
+/// with no flip (it shares DjVu's bottom-left origin), EPUB scales to
+/// percentages and flips to CSS top-left via [`flip_y_bottom`].
+///
+/// `#[allow(dead_code)]`: the only callers are the `pdf`/`epub`-gated
+/// exporters, so builds without either feature compile it unused.
+#[allow(dead_code)]
+pub(crate) fn shape_bbox(shape: &Shape) -> Option<AnnotRect> {
+    let (x, y, width, height) = match shape {
+        Shape::Rect(r) | Shape::Oval(r) | Shape::Text(r) => (r.x, r.y, r.width, r.height),
+        Shape::Poly(points) => {
+            let (&(fx, fy), rest) = points.split_first()?;
+            let (min_x, min_y, max_x, max_y) =
+                rest.iter()
+                    .fold((fx, fy, fx, fy), |(mnx, mny, mxx, mxy), &(px, py)| {
+                        (mnx.min(px), mny.min(py), mxx.max(px), mxy.max(py))
+                    });
+            (min_x, min_y, max_x - min_x, max_y - min_y)
+        }
+        Shape::Line(x1, y1, x2, y2) => {
+            let min_x = (*x1).min(*x2);
+            let min_y = (*y1).min(*y2);
+            let max_x = (*x1).max(*x2);
+            let max_y = (*y1).max(*y2);
+            (min_x, min_y, max_x - min_x, max_y - min_y)
+        }
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(AnnotRect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 #[cfg(test)]
@@ -304,15 +365,76 @@ mod tests {
 
     #[test]
     fn flip_y_bottom_saturates_and_matches_formula() {
-        let r = Rect {
-            x: 0,
-            y: 10,
-            width: 5,
-            height: 20,
-        };
+        // y = 10, height = 20.
         // 100 - (10 + 20) = 70.
-        assert_eq!(flip_y_bottom(100, &r), 70);
-        // Rect taller than the page saturates to 0 instead of underflowing.
-        assert_eq!(flip_y_bottom(15, &r), 0);
+        assert_eq!(flip_y_bottom(100, 10, 20), 70);
+        // Span reaching past the page top saturates to 0 instead of underflowing.
+        assert_eq!(flip_y_bottom(15, 10, 20), 0);
+    }
+
+    fn arect(x: u32, y: u32, width: u32, height: u32) -> AnnotRect {
+        AnnotRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn shape_bbox_rect_oval_text_pass_through_when_non_degenerate() {
+        let r = arect(3, 7, 11, 13);
+        assert_eq!(shape_bbox(&Shape::Rect(r.clone())), Some(r.clone()));
+        assert_eq!(shape_bbox(&Shape::Oval(r.clone())), Some(r.clone()));
+        assert_eq!(shape_bbox(&Shape::Text(r.clone())), Some(r));
+    }
+
+    #[test]
+    fn shape_bbox_zero_area_rect_is_none() {
+        // Zero width or zero height encloses no area.
+        assert!(shape_bbox(&Shape::Rect(arect(5, 5, 0, 10))).is_none());
+        assert!(shape_bbox(&Shape::Rect(arect(5, 5, 10, 0))).is_none());
+    }
+
+    #[test]
+    fn shape_bbox_poly_is_the_point_cloud_bounding_box() {
+        let s = Shape::Poly(vec![(10, 4), (2, 20), (8, 1), (5, 12)]);
+        assert_eq!(shape_bbox(&s), Some(arect(2, 1, 8, 19)));
+    }
+
+    #[test]
+    fn shape_bbox_empty_poly_is_none() {
+        assert!(shape_bbox(&Shape::Poly(vec![])).is_none());
+    }
+
+    #[test]
+    fn shape_bbox_degenerate_poly_resolves_the_pdf_epub_divergence() {
+        // A polygon whose maximum coordinate is the origin: the historical
+        // divergence (pdf returned a degenerate Some, epub returned None).
+        // The single fold seed makes both skip it.
+        assert!(shape_bbox(&Shape::Poly(vec![(0, 0)])).is_none());
+        // A single non-origin point and any repeated point are likewise empty.
+        assert!(shape_bbox(&Shape::Poly(vec![(9, 9)])).is_none());
+        assert!(shape_bbox(&Shape::Poly(vec![(4, 6), (4, 6)])).is_none());
+    }
+
+    #[test]
+    fn shape_bbox_diagonal_line_is_the_endpoint_bounding_box() {
+        // Order-independent: the box spans both endpoints regardless of direction.
+        assert_eq!(
+            shape_bbox(&Shape::Line(2, 3, 12, 18)),
+            Some(arect(2, 3, 10, 15))
+        );
+        assert_eq!(
+            shape_bbox(&Shape::Line(12, 18, 2, 3)),
+            Some(arect(2, 3, 10, 15))
+        );
+    }
+
+    #[test]
+    fn shape_bbox_axis_aligned_line_is_none() {
+        // Horizontal (zero height) and vertical (zero width) lines enclose no area.
+        assert!(shape_bbox(&Shape::Line(2, 5, 20, 5)).is_none());
+        assert!(shape_bbox(&Shape::Line(5, 2, 5, 20)).is_none());
     }
 }
