@@ -2412,6 +2412,36 @@ mod tests {
         assert!(matches!(err, MutError::NotIndirectDjvm), "{err:?}");
     }
 
+    #[test]
+    fn chunk_at_path_rejects_empty_path() {
+        let original = read_corpus("chicken.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let err = doc.chunk_at_path(&[]).unwrap_err();
+        assert!(matches!(err, MutError::EmptyPath));
+    }
+
+    #[test]
+    fn root_form_type_returns_some_for_form_root() {
+        let original = read_corpus("chicken.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let t = doc.root_form_type();
+        assert!(t.is_some());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn validate_safe_component_name_rejects_empty() {
+        let err = validate_safe_component_name("").unwrap_err();
+        assert!(matches!(err, MutError::UnsafeComponentName { .. }));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn validate_safe_component_name_rejects_nul() {
+        let err = validate_safe_component_name("a\0b").unwrap_err();
+        assert!(matches!(err, MutError::UnsafeComponentName { .. }));
+    }
+
     /// Walk top-level children of the outer FORM and return their absolute
     /// byte ranges (header+payload+pad).
     fn top_form_ranges(data: &[u8]) -> Vec<core::ops::Range<usize>> {
