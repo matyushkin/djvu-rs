@@ -23,7 +23,7 @@
 //! A new foreign function is one core function plus a thin cap.
 
 use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
-use crate::djvu_render::{self, RenderError, RenderOptions, Resampling, UserRotation};
+use crate::djvu_render::{self, RenderError, RenderOptions};
 use crate::pixmap::Pixmap;
 
 /// Error taxonomy shared by every foreign binding.
@@ -115,17 +115,15 @@ pub(crate) fn text(doc: &DjVuDocument, index: usize) -> Result<Option<String>, F
 /// a few corrupt chunks still yields a best-effort image instead of an error —
 /// the right default for a viewer-facing binding.
 pub(crate) fn render_opts_for_dpi(page: &DjVuPage, target_dpi: f32) -> RenderOptions {
-    let scale = crate::export_common::scale_at_dpi(page, target_dpi);
     let (width, height) = crate::export_common::size_at_dpi(page, target_dpi);
+    // Only the size is set; the pipeline derives the decode scale from `width`
+    // (see `RenderOptions::decode_scale`). `permissive` is the viewer-facing
+    // default; the rest come from `RenderOptions::default()`.
     RenderOptions {
         width,
         height,
-        scale,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
         permissive: true,
-        resampling: Resampling::Bilinear,
+        ..RenderOptions::default()
     }
 }
 
