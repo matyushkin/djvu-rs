@@ -19,7 +19,10 @@
 //! Zone fields are delta-encoded relative to a parent or previous sibling.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 pub use crate::text_model::{
     Paragraph, Rect, TextError, TextLayer, TextZone, TextZoneKind,
