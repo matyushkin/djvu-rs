@@ -904,6 +904,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lazy_indirect_djvm_returns_unsupported() {
+        // create_indirect builds a non-bundled DJVM; parse_lazy_dirm rejects it
+        let indirect = crate::djvm::create_indirect(&["page1.djvu"]).expect("create_indirect");
+        let cursor = std::io::Cursor::new(indirect);
+        let result = from_async_reader_lazy(cursor).await;
+        assert!(
+            matches!(result, Err(AsyncLazyError::Unsupported(_))),
+            "indirect DJVM must return Unsupported (not yet implemented)"
+        );
+    }
+
+    #[tokio::test]
     async fn lazy_unknown_form_type_returns_unsupported() {
         // Valid AT&T FORM header but with an unrecognized form type "DJVX"
         let mut bytes = Vec::new();

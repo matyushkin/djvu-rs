@@ -776,6 +776,13 @@ mod tests {
         assert!(parse_annotations(data).is_err());
     }
 
+    #[test]
+    fn parse_shape_missing_coordinate_returns_error() {
+        // get_uint called with idx beyond the list length → Parse error
+        let data = b"(maparea \"url\" \"desc\" (rect 0 0))";
+        assert!(parse_annotations(data).is_err());
+    }
+
     // ── encode_annotations_bzz empty short-circuit ───────────────────────────
 
     #[test]
