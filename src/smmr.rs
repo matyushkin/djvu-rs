@@ -826,6 +826,56 @@ mod tests {
         }
     }
 
+    // Decoder VR1 vertical mode (code 011, v_offset=+1) — lines 466-468.
+    // Row 0: [W,B,W,W,W,W,W,W] encoded as H W1 B1 | H W6 B0 (29 bits).
+    // Row 1: [W,W,B,W,W,W,W,W] encoded as VR1 VR1 V0 against row 0.
+    //   VR1: a1 = b1+1; VR1 VR1 shifts colour from W to B (pos 2) then back to W.
+    #[test]
+    fn decoder_vr1_vertical_mode_produces_correct_output() {
+        // Bitstream layout:
+        //   Row0: 001(H) 000111(W1) 010(B1) 001(H) 1110(W6) 0000110111(B0) = 29 bits
+        //   Row1: 011(VR1) 011(VR1) 1(V0) = 7 bits
+        //   EOFB: 000000000001 000000000001 = 24 bits  (total 60 bits → 8 bytes)
+        let data: &[u8] = &[
+            0x00, 0x08, 0x00, 0x02,
+            0x23, 0xA3, 0xC1, 0xBB, 0x70, 0x01, 0x00, 0x10,
+        ];
+        let bm = decode_smmr(data).expect("VR1 test should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W B W W W W W W
+        assert!(!bm.get(0, 0));
+        assert!(bm.get(1, 0));
+        assert!(!bm.get(2, 0));
+        // Row 1: W W B W W W W W (B shifted right by one via VR1)
+        assert!(!bm.get(0, 1));
+        assert!(!bm.get(1, 1));
+        assert!(bm.get(2, 1));
+        assert!(!bm.get(3, 1));
+    }
+
+    // Lines 322-323: BadCode error path in decode_white_run.
+    // H mode followed by an all-zero bitstream (5 bits) that matches no MH code.
+    #[test]
+    fn decode_smmr_bad_white_run_code_returns_error() {
+        // ncols=8, nrows=1; bitstream = 0b001_00000 → H mode then 5 zero-bits
+        // which match no WHITE_TERM/WHITE_MAKEUP entry → SmmrError::BadCode.
+        let data = &[0x00u8, 0x08, 0x00, 0x01, 0x20];
+        assert!(matches!(decode_smmr(data), Err(SmmrError::BadCode)));
+    }
+
+    // Lines 351-352: BadCode in decode_black_run.
+    // H mode + W0 (WHITE_TERM run=0 = 0b00110101, 8 bits) leaves 5 zero-bits
+    // which match no BLACK_TERM/BLACK_MAKEUP entry → SmmrError::BadCode.
+    #[test]
+    fn decode_smmr_bad_black_run_code_returns_error() {
+        // ncols=8, nrows=1
+        // bitstream: H(001) W0(00110101) [then 5 zeros in last byte]
+        // = 0b001_00110_10100000 → 0x26, 0xA0
+        let data = &[0x00u8, 0x08, 0x00, 0x01, 0x26, 0xA0];
+        assert!(matches!(decode_smmr(data), Err(SmmrError::BadCode)));
+    }
+
     #[test]
     fn decode_smmr_zero_cols_returns_empty_bitmap() {
         // Line 504: ncols == 0 → early return with zero-size bitmap.
