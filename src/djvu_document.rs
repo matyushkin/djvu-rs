@@ -2132,4 +2132,27 @@ mod tests {
         let result = page.extract_mask_indexed();
         assert!(result.is_ok(), "extract_mask_indexed with inline Djbz should succeed");
     }
+
+    /// NAVM with BZZ-decoded payload shorter than 2 bytes returns Ok([]).
+    #[test]
+    fn parse_navm_bookmarks_short_decoded_returns_empty() {
+        use crate::bzz_encode::bzz_encode;
+        // Encode a single byte — decoded is 1 byte < 2 → line 1248
+        let bzz = bzz_encode(b"x");
+        let chunk = crate::iff::IffChunk { id: *b"NAVM", data: &bzz };
+        let result = parse_navm_bookmarks(&[chunk]).unwrap();
+        assert!(result.is_empty(), "NAVM with decoded < 2 bytes must yield empty bookmarks");
+    }
+
+    /// NAVM with total_count > 0 but no actual entries → truncated entry error.
+    #[test]
+    fn parse_navm_bookmarks_truncated_entry_returns_error() {
+        use crate::bzz_encode::bzz_encode;
+        // Declare total_count = 1 (2 bytes) but no bookmark data follows → line 1281
+        let payload = vec![0x00, 0x01]; // total_count = 1
+        let bzz = bzz_encode(&payload);
+        let chunk = crate::iff::IffChunk { id: *b"NAVM", data: &bzz };
+        let result = parse_navm_bookmarks(&[chunk]);
+        assert!(result.is_err(), "NAVM with declared count > 0 but no entry data must error");
+    }
 }
