@@ -3953,4 +3953,87 @@ mod tests {
         let pm = render_pixmap(page, &opts).expect("permissive render of FGbz page should succeed");
         assert!(pm.width > 0 && pm.height > 0);
     }
+
+    /// render_gray8 produces a grayscale pixmap.
+    #[test]
+    fn render_gray8_produces_grayscale_output() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 20, height: 20, ..Default::default() };
+        let gpm = render_gray8(page, &opts).expect("render_gray8 should succeed");
+        assert_eq!(gpm.width, 20);
+        assert_eq!(gpm.height, 20);
+        assert_eq!(gpm.data.len(), 20 * 20);
+    }
+
+    /// render_coarse rejects zero width.
+    #[test]
+    fn render_coarse_rejects_zero_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 0, height: 50, ..Default::default() };
+        let err = render_coarse(page, &opts).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidDimensions { .. }));
+    }
+
+    /// render_coarse on a JB2-only page returns None.
+    #[test]
+    fn render_coarse_jb2_only_page_returns_none() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 40, height: 40, ..Default::default() };
+        let result = render_coarse(page, &opts).expect("should not error");
+        assert!(result.is_none(), "JB2-only page has no BG44 so render_coarse yields None");
+    }
+
+    /// render_progressive rejects zero dimensions.
+    #[test]
+    fn render_progressive_rejects_zero_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 0, height: 50, ..Default::default() };
+        let err = render_progressive(page, &opts, 0).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidDimensions { .. }));
+    }
+
+    /// render_progressive on a JB2-only page (no BG44) completes successfully.
+    #[test]
+    fn render_progressive_jb2_only_page_succeeds() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions { width: 40, height: 40, ..Default::default() };
+        let result = render_progressive(page, &opts, 0).expect("render_progressive should succeed even without BG44");
+        assert_eq!(result.width, 40);
+        assert_eq!(result.height, 40);
+    }
+
+    /// render_pixmap rejects zero width.
+    #[test]
+    fn render_pixmap_rejects_zero_width() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 0,
+            height: 50,
+            ..Default::default()
+        };
+        let err = render_pixmap(page, &opts).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidDimensions { .. }));
+    }
+
+    /// Bold dilation (opts.bold > 0) thickens the mask.
+    #[test]
+    fn render_with_bold_dilation_produces_output() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 40,
+            height: 40,
+            bold: 1,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("bold render should succeed");
+        assert_eq!(pm.width, 40);
+        assert_eq!(pm.height, 40);
+    }
 }
