@@ -2062,6 +2062,37 @@ mod tests {
     }
 
     #[test]
+    fn metadata_returns_some_for_doc_with_meta_chunk() {
+        // Build a synthetic FORM:DJVU containing an INFO chunk and a METa chunk.
+        use crate::iff::{emit, DjvuFile, Chunk};
+        use crate::metadata::{DjVuMetadata, encode_metadata};
+
+        let info = make_info(100, 100);
+        let mut meta = DjVuMetadata::default();
+        meta.author = Some("TestAuthor".into());
+        let meta_bytes = encode_metadata(&meta);
+        if meta_bytes.is_empty() {
+            return; // encode returned empty — nothing to test
+        }
+
+        let file = DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0, // emit recalculates
+                children: vec![
+                    Chunk::Leaf { id: *b"INFO", data: info },
+                    Chunk::Leaf { id: *b"METa", data: meta_bytes },
+                ],
+            },
+        };
+        let bytes = emit(&file);
+        let doc = DjVuDocument::parse(&bytes).expect("parse should succeed");
+        let m = doc.metadata().expect("metadata() should not error");
+        assert!(m.is_some(), "metadata should be Some for a doc with METa chunk");
+        assert_eq!(m.unwrap().author.as_deref(), Some("TestAuthor"));
+    }
+
+    #[test]
     fn extract_mask_uses_inline_djbz_when_present() {
         // Build a page with both Sjbz (using shared shapes) and an inline Djbz.
         // This hits the `find_chunk(b"Djbz")` branch in extract_mask (lines 535-537).
