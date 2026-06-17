@@ -715,4 +715,72 @@ mod tests {
         let (_, dec_areas) = parse_annotations(&bytes).unwrap();
         assert_eq!(dec_areas[0].url, r#"has "quotes" and \backslash"#);
     }
+
+    // ── text / oval shapes (parse + encode) ──────────────────────────────────
+
+    #[test]
+    fn parse_text_shape_roundtrip() {
+        let data = b"(maparea \"url\" \"desc\" (text 5 10 100 50))";
+        let (_, areas) = parse_annotations(data).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert!(matches!(&areas[0].shape, Shape::Text(r) if r.x == 5 && r.width == 100));
+    }
+
+    #[test]
+    fn parse_oval_shape_roundtrip() {
+        let data = b"(maparea \"url\" \"desc\" (oval 1 2 30 40))";
+        let (_, areas) = parse_annotations(data).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert!(matches!(&areas[0].shape, Shape::Oval(r) if r.x == 1 && r.height == 40));
+    }
+
+    #[test]
+    fn encode_shape_oval_and_text_variants() {
+        let oval = Shape::Oval(Rect { x: 3, y: 4, width: 50, height: 60 });
+        let text = Shape::Text(Rect { x: 1, y: 2, width: 10, height: 20 });
+        assert_eq!(encode_shape(&oval), "(oval 3 4 50 60)");
+        assert_eq!(encode_shape(&text), "(text 1 2 10 20)");
+    }
+
+    // ── parse_maparea default url/desc / missing shape ────────────────────────
+
+    #[test]
+    fn parse_maparea_non_atom_url_and_desc_default_to_empty() {
+        // url (items[1]) and description (items[2]) are lists → default to ""
+        let data = b"(maparea () () (rect 0 0 10 10))";
+        let (_, areas) = parse_annotations(data).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].url, "");
+        assert_eq!(areas[0].description, "");
+    }
+
+    #[test]
+    fn parse_maparea_no_shape_list_is_skipped() {
+        // items[3] is an atom, not a list → returns None → area is dropped
+        let data = b"(maparea \"url\" \"desc\" notalist)";
+        let (_, areas) = parse_annotations(data).unwrap();
+        assert_eq!(areas.len(), 0);
+    }
+
+    // ── parse_shape error paths ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_shape_empty_list_returns_error() {
+        let data = b"(maparea \"url\" \"desc\" ())";
+        assert!(parse_annotations(data).is_err());
+    }
+
+    #[test]
+    fn parse_shape_bad_number_returns_error() {
+        let data = b"(maparea \"url\" \"desc\" (rect 0 0 abc 10))";
+        assert!(parse_annotations(data).is_err());
+    }
+
+    // ── encode_annotations_bzz empty short-circuit ───────────────────────────
+
+    #[test]
+    fn encode_annotations_bzz_empty_annotation_returns_empty() {
+        let result = encode_annotations_bzz(&Annotation::default(), &[]);
+        assert!(result.is_empty());
+    }
 }
