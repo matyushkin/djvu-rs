@@ -2014,4 +2014,50 @@ mod tests {
             assert_eq!(mp.dpi(), pp.dpi());
         }
     }
+
+    #[test]
+    fn extract_foreground_returns_none_when_no_fg44() {
+        // JB2-only page has no FG44 chunks — extract_foreground returns Ok(None).
+        let data = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let fg = doc.page(0).unwrap().extract_foreground().unwrap();
+        assert!(fg.is_none());
+    }
+
+    #[test]
+    fn metadata_returns_none_for_doc_without_meta_chunk() {
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let meta = doc.metadata().unwrap();
+        // chicken.djvu has no METa/METz chunk
+        assert!(meta.is_none());
+    }
+
+    #[test]
+    fn all_chunks_returns_matching_chunks() {
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        // INFO is a global chunk for single-page DJVU
+        let info = doc.all_chunks(b"INFO");
+        assert!(!info.is_empty());
+        // Non-existent chunk returns empty
+        let none = doc.all_chunks(b"XXXX");
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn chunk_ids_returns_nonempty_for_djvu() {
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let ids = doc.chunk_ids();
+        assert!(!ids.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn mmap_open_indirect_on_bundled_doc_succeeds() {
+        let path = assets_path().join("chicken.djvu");
+        let doc = MmapDocument::open_indirect(&path).expect("open_indirect should work on bundled");
+        assert!(doc.page_count() > 0);
+    }
 }
