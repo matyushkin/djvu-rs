@@ -454,6 +454,24 @@ mod tests {
     }
 
     #[test]
+    fn split_second_page_from_djvm_skips_first() {
+        // Extracting page at index 1 forces page_idx to increment past index 0,
+        // covering the page_idx += 1 path in the single-page DJVM loop.
+        let path = fixture_path("DjVu3Spec_bundled.djvu");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(&path).expect("read");
+        let doc = DjVuDocument::parse(&data).expect("parse");
+        if doc.page_count() < 2 {
+            return;
+        }
+        let result = split(&data, 1, 2).expect("split page 1");
+        let form = iff::parse_form(&result).expect("parse split page");
+        assert_eq!(&form.form_type, b"DJVU");
+    }
+
+    #[test]
     fn parse_from_dir_indirect() {
         // Write an indirect DJVM index and chicken.djvu to a temp directory,
         // then open it via parse_from_dir.
