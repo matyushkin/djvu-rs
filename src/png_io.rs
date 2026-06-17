@@ -176,6 +176,43 @@ mod tests {
     }
 
     #[test]
+    fn sixteen_bit_depth_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deep.png");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0u8; 6]).unwrap(); // 1×1 RGB 16-bit = 6 bytes
+        }
+        let result = decode_png_to_pixmap(&path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported") || msg.contains("bit depth") || msg.contains("Sixteen"), "msg={msg}");
+    }
+
+    #[test]
+    fn indexed_color_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("indexed.png");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 1, 1);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(vec![0, 0, 0]); // one-entry palette (black)
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0u8]).unwrap(); // index 0
+        }
+        let result = decode_png_to_pixmap(&path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("indexed") || msg.contains("Indexed"), "msg={msg}");
+    }
+
+    #[test]
     fn write_error_message_contains_path() {
         // write_png error path uses path.display() in the message
         let path = std::path::Path::new("/no/such/dir/x.png");
