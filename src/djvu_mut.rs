@@ -2461,6 +2461,61 @@ mod tests {
         assert!(!has_meta, "empty set_metadata should not insert a METa chunk");
     }
 
+    // Lines 391-393: PathTraversesLeaf first branch (children.is_empty && depth < len-1).
+    // A 3-deep path where [0] reaches INFO (Leaf): depth=1 triggers the first check.
+    #[test]
+    fn chunk_at_path_traverses_leaf_first_branch() {
+        let original = read_corpus("chicken.djvu");
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let err = doc.chunk_at_path(&[0, 0, 0]).unwrap_err();
+        assert!(
+            matches!(err, MutError::PathTraversesLeaf { depth: 1, len: 3 }),
+            "{err:?}"
+        );
+    }
+
+    // Lines 1089, 1094-1095: IndirectRewritePlan::from_indirect_resolved error paths.
+    #[test]
+    fn rewrite_plan_resolver_failure_returns_component_resolve_error() {
+        let (index, _) = indirect_over_fixtures(&["chicken.djvu"]);
+        let err = IndirectRewritePlan::from_indirect_resolved(&index, |_name: &str| {
+            Err::<Vec<u8>, std::io::Error>(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "nope",
+            ))
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::ComponentResolve { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rewrite_plan_non_iff_component_returns_malformed_error() {
+        let (index, _) = indirect_over_fixtures(&["chicken.djvu"]);
+        let err = IndirectRewritePlan::from_indirect_resolved(&index, |_name: &str| {
+            Ok::<Vec<u8>, std::io::Error>(b"not iff".to_vec())
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::ComponentMalformed { .. }), "{err:?}");
+    }
+
+    // Lines 1100-1105: wrong FORM type (not DJVU/DJVI/THUM) → ComponentMalformed.
+    #[test]
+    fn rewrite_plan_wrong_form_type_returns_malformed_error() {
+        let (index, _) = indirect_over_fixtures(&["chicken.djvu"]);
+        let fake = iff::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"FAKE",
+                length: 0,
+                children: vec![],
+            },
+        });
+        let err = IndirectRewritePlan::from_indirect_resolved(&index, move |_name: &str| {
+            Ok::<Vec<u8>, std::io::Error>(fake.clone())
+        })
+        .unwrap_err();
+        assert!(matches!(err, MutError::ComponentMalformed { .. }), "{err:?}");
+    }
+
     // Lines 1131-1132: component_count() on IndirectRewritePlan.
     #[test]
     fn rewrite_plan_component_count() {
