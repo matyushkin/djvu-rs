@@ -655,4 +655,198 @@ mod tests {
             "page index in word id: {out}"
         );
     }
+
+    // ---- hOCR: non-word zone kinds ------------------------------------------
+
+    fn zone(kind: TextZoneKind, children: Vec<TextZone>) -> TextZone {
+        TextZone {
+            kind,
+            rect: Rect { x: 0, y: 0, width: 100, height: 50 },
+            text: String::new(),
+            children,
+        }
+    }
+
+    fn layer_with_zone(z: TextZone) -> TextLayer {
+        TextLayer { text: String::new(), zones: vec![zone(TextZoneKind::Page, vec![z])] }
+    }
+
+    #[test]
+    fn hocr_column_zone_emits_ocr_block() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let col = zone(TextZoneKind::Column, vec![inner]);
+        let layer = layer_with_zone(col);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("ocr_block"), "Column must produce ocr_block: {out}");
+        assert!(out.contains("</div>"), "must close div: {out}");
+    }
+
+    #[test]
+    fn hocr_region_zone_emits_ocr_block() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let reg = zone(TextZoneKind::Region, vec![inner]);
+        let layer = layer_with_zone(reg);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("ocr_block"), "Region must produce ocr_block: {out}");
+    }
+
+    #[test]
+    fn hocr_para_zone_emits_ocr_par() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let para = zone(TextZoneKind::Para, vec![inner]);
+        let layer = layer_with_zone(para);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("ocr_par"), "Para must produce ocr_par: {out}");
+        assert!(out.contains("</p>"), "must close p: {out}");
+    }
+
+    #[test]
+    fn hocr_character_zone_is_skipped() {
+        let ch = zone(TextZoneKind::Character, vec![]);
+        let layer = layer_with_zone(ch);
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        // Character zones produce no output at all
+        assert!(!out.contains("span"), "Character must not emit span: {out}");
+        assert!(!out.contains("div"), "Character must not emit div: {out}");
+    }
+
+    #[test]
+    fn hocr_block_ids_increment_across_column_and_para() {
+        let w1 = word_zone("a", 0, 0, 10, 10);
+        let w2 = word_zone("b", 20, 0, 10, 10);
+        let col = zone(TextZoneKind::Column, vec![w1]);
+        let para = zone(TextZoneKind::Para, vec![w2]);
+        let layer = TextLayer {
+            text: String::new(),
+            zones: vec![zone(TextZoneKind::Page, vec![col, para])],
+        };
+        let mut out = String::new();
+        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("block_0_0"), "first block id: {out}");
+        assert!(out.contains("par_0_1"), "second block id (par): {out}");
+    }
+
+    // ---- ALTO: non-word zone kinds ------------------------------------------
+
+    #[test]
+    fn alto_column_zone_emits_textblock() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let col = zone(TextZoneKind::Column, vec![inner]);
+        let layer = layer_with_zone(col);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("<TextBlock"), "Column must produce TextBlock: {out}");
+        assert!(out.contains("</TextBlock>"), "must close TextBlock: {out}");
+    }
+
+    #[test]
+    fn alto_para_zone_emits_textblock() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let para = zone(TextZoneKind::Para, vec![inner]);
+        let layer = layer_with_zone(para);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("<TextBlock"), "Para must produce TextBlock: {out}");
+    }
+
+    #[test]
+    fn alto_region_zone_emits_textblock() {
+        let inner = zone(TextZoneKind::Word, vec![]);
+        let reg = zone(TextZoneKind::Region, vec![inner]);
+        let layer = layer_with_zone(reg);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("<TextBlock"), "Region must produce TextBlock: {out}");
+    }
+
+    #[test]
+    fn alto_character_zone_is_skipped() {
+        let ch = zone(TextZoneKind::Character, vec![]);
+        let layer = layer_with_zone(ch);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(!out.contains("String"), "Character must not emit String: {out}");
+        assert!(!out.contains("TextBlock"), "Character must not emit TextBlock: {out}");
+    }
+
+    #[test]
+    fn alto_nested_column_para_line_word() {
+        let word = word_zone("hello", 5, 5, 30, 10);
+        let line = line_zone(vec![word], 0, 0, 100, 20);
+        let para = TextZone {
+            kind: TextZoneKind::Para,
+            rect: Rect { x: 0, y: 0, width: 100, height: 20 },
+            text: String::new(),
+            children: vec![line],
+        };
+        let col = TextZone {
+            kind: TextZoneKind::Column,
+            rect: Rect { x: 0, y: 0, width: 100, height: 50 },
+            text: String::new(),
+            children: vec![para],
+        };
+        let layer = layer_with_zone(col);
+        let mut out = String::new();
+        write_alto_zones(&mut out, &layer, 0).unwrap();
+        assert!(out.contains("<TextBlock"), "must have TextBlock for column");
+        assert!(out.contains("<TextBlock"), "must have TextBlock for para");
+        assert!(out.contains("<TextLine"), "must have TextLine");
+        assert!(out.contains(r#"CONTENT="hello""#), "must have word content");
+    }
+
+    // ---- to_hocr / to_alto with real document -------------------------------
+
+    fn assets_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("references/djvujs/library/assets")
+    }
+
+    fn load_doc(name: &str) -> crate::djvu_document::DjVuDocument {
+        let data = std::fs::read(assets_path().join(name))
+            .unwrap_or_else(|_| panic!("{name} must exist"));
+        crate::djvu_document::DjVuDocument::parse(&data)
+            .unwrap_or_else(|e| panic!("parse: {e}"))
+    }
+
+    #[test]
+    fn to_hocr_output_is_valid_html_structure() {
+        let doc = load_doc("chicken.djvu");
+        let out = to_hocr(&doc, &HocrOptions::default()).unwrap();
+        assert!(out.starts_with("<!DOCTYPE html>"), "must start with DOCTYPE");
+        assert!(out.contains("<html"), "must have html element");
+        assert!(out.contains("</html>"), "must close html");
+        assert!(out.contains("ocr_page"), "must have ocr_page");
+    }
+
+    #[test]
+    fn to_hocr_page_index_option_limits_to_one_page() {
+        let doc = load_doc("chicken.djvu");
+        let all = to_hocr(&doc, &HocrOptions::default()).unwrap();
+        let one = to_hocr(&doc, &HocrOptions { page_index: Some(0), dpi: None }).unwrap();
+        assert!(one.len() <= all.len(), "single-page output must not exceed all-pages");
+        assert!(one.contains("page_0"), "must include page_0");
+    }
+
+    #[test]
+    fn to_alto_output_is_valid_xml_structure() {
+        let doc = load_doc("chicken.djvu");
+        let out = to_alto(&doc, &AltoOptions::default()).unwrap();
+        assert!(out.starts_with(r#"<?xml version="1.0""#), "must start with XML declaration");
+        assert!(out.contains("<alto"), "must have alto element");
+        assert!(out.contains("</alto>"), "must close alto");
+        assert!(out.contains("<Page"), "must have Page element");
+    }
+
+    #[test]
+    fn to_alto_page_index_option_limits_to_one_page() {
+        let doc = load_doc("chicken.djvu");
+        let all = to_alto(&doc, &AltoOptions::default()).unwrap();
+        let one = to_alto(&doc, &AltoOptions { page_index: Some(0), dpi: None }).unwrap();
+        assert!(one.len() <= all.len());
+        assert!(one.contains(r#"ID="page_0""#), "must include page_0");
+    }
 }

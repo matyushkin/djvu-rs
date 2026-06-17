@@ -200,3 +200,112 @@ impl<'a> ImageDecoderRect for DjVuDecoder<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ColorType, ImageDecoder};
+
+    fn assets_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("references/djvujs/library/assets")
+    }
+
+    fn load_page(name: &str) -> crate::djvu_document::DjVuDocument {
+        let data = std::fs::read(assets_path().join(name))
+            .unwrap_or_else(|_| panic!("{name} must exist"));
+        crate::djvu_document::DjVuDocument::parse(&data)
+            .unwrap_or_else(|e| panic!("parse: {e}"))
+    }
+
+    #[test]
+    fn dimensions_match_page_size() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap();
+        let (w, h) = decoder.dimensions();
+        assert_eq!(w, page.width() as u32);
+        assert_eq!(h, page.height() as u32);
+    }
+
+    #[test]
+    fn color_type_is_rgba8() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap();
+        assert_eq!(decoder.color_type(), ColorType::Rgba8);
+    }
+
+    #[test]
+    fn total_bytes_equals_w_times_h_times_4() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap();
+        let (w, h) = decoder.dimensions();
+        assert_eq!(decoder.total_bytes(), (w as u64) * (h as u64) * 4);
+    }
+
+    #[test]
+    fn read_image_fills_buffer() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap();
+        let n = decoder.total_bytes() as usize;
+        let mut buf = vec![0u8; n];
+        decoder.read_image(&mut buf).unwrap();
+        // At least some pixels must be non-zero for a real page
+        assert!(buf.iter().any(|&b| b != 0), "rendered image must have non-zero pixels");
+    }
+
+    #[test]
+    fn read_image_wrong_buffer_size_returns_error() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap();
+        let mut buf = vec![0u8; 4]; // far too small
+        let result = decoder.read_image(&mut buf);
+        assert!(result.is_err(), "wrong buffer size must return error");
+    }
+
+    #[test]
+    fn with_size_overrides_dimensions() {
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap().with_size(64, 48);
+        let (w, h) = decoder.dimensions();
+        assert_eq!((w, h), (64, 48));
+    }
+
+    #[test]
+    fn read_rect_full_page_matches_read_image() {
+        use image::ImageDecoderRect;
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let decoder = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        let (w, h) = decoder.dimensions();
+        let n = (w as usize) * (h as usize) * 4;
+
+        let mut full = vec![0u8; n];
+        // Use a separate decoder for read_image (consumes self)
+        let decoder2 = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        decoder2.read_image(&mut full).unwrap();
+
+        let mut rect_buf = vec![0u8; n];
+        let mut decoder3 = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        decoder3.read_rect(0, 0, w, h, &mut rect_buf, w as usize * 4).unwrap();
+
+        assert_eq!(full, rect_buf, "full read_image and read_rect(full page) must match");
+    }
+
+    #[test]
+    fn read_rect_out_of_bounds_returns_error() {
+        use image::ImageDecoderRect;
+        let doc = load_page("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let mut decoder = DjVuDecoder::new(page).unwrap().with_size(32, 24);
+        let mut buf = vec![0u8; 32 * 24 * 4];
+        // x + width > image width
+        let result = decoder.read_rect(10, 0, 30, 24, &mut buf, 30 * 4);
+        assert!(result.is_err(), "out-of-bounds read_rect must return error");
+    }
+}
