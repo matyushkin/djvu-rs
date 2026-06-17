@@ -157,15 +157,13 @@ fn color_render_options(page: &DjVuPage, scale: f32) -> (u32, u32, RenderOptions
     let (w, h) =
         crate::export_common::scaled_size(page.width() as u32, page.height() as u32, scale);
 
+    // Only the size is set; the pipeline derives the decode scale from `width`.
+    // The remaining fields (bold/aa/rotation/permissive/resampling) are the
+    // `RenderOptions` defaults.
     let opts = RenderOptions {
         width: w,
         height: h,
-        scale,
-        bold: 0,
-        aa: false,
-        rotation: djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_render::Resampling::Bilinear,
+        ..RenderOptions::default()
     };
     (w, h, opts)
 }

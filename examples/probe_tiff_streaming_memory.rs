@@ -10,6 +10,10 @@
 //!
 //! On Linux, use `/usr/bin/time -v` instead of `-l`.
 
+// Names the deprecated, now-ignored `RenderOptions::scale` field (#377); allowed
+// so this probe keeps building while the back-compat field exists.
+#![allow(deprecated)]
+
 use std::{env, error::Error, fs::File, path::PathBuf};
 
 use djvu_rs::{

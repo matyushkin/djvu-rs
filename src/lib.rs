@@ -492,10 +492,11 @@ impl<'a> Page<'a> {
         let (dw, dh) = self.display_dims();
         let w = ((dw as f32 * scale).round() as u32).max(1);
         let h = ((dh as f32 * scale).round() as u32).max(1);
+        // The pipeline re-derives the decode scale from `w` and the page's
+        // display width, so we set only the size; `scale` is no longer an input.
         djvu_render::RenderOptions {
             width: w,
             height: h,
-            scale,
             ..Default::default()
         }
     }

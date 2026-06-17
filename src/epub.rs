@@ -155,14 +155,13 @@ fn write_page(
     let pw = page.width() as u32;
     let ph = page.height() as u32;
 
-    // Scale to the requested output DPI
-    let scale = crate::export_common::scale_at_dpi(page, opts.dpi as f32);
+    // Scale to the requested output DPI. The pipeline derives the decode scale
+    // from `width`, so we set only the size.
     let (w, h) = crate::export_common::size_at_dpi(page, opts.dpi as f32);
 
     let render_opts = RenderOptions {
         width: w,
         height: h,
-        scale,
         ..RenderOptions::default()
     };
     // Stream the RGBA scanlines when the page allows it, else fall back to a
