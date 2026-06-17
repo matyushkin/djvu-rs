@@ -802,6 +802,48 @@ mod tests {
         }
     }
 
+    // Decoder H mode with a0_color=true (black) — line 441.
+    // Row 0: [W,B,W,W,W,W,W,W] encoded as H W1 B1 | H W6 B0
+    // Row 1: [W,B,B,B,B,B,B,B] encoded as V0 | H B7 W0
+    //   (V0 sets a0_color=B, then H B7 W0 exercises the else-branch at line 441)
+    #[test]
+    fn decoder_h_mode_black_first_exercises_else_branch() {
+        let data: &[u8] = &[
+            0x00, 0x08, 0x00, 0x02, // header: ncols=8, nrows=2
+            0x23, 0xA3, 0xC1, 0xBC, 0x8C, 0xD4, 0x00, 0x40, 0x04,
+        ];
+        let bm = decode_smmr(data).expect("should decode without error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: W B W W W W W W
+        assert!(!bm.get(0, 0)); // W
+        assert!(bm.get(1, 0));  // B
+        assert!(!bm.get(2, 0)); // W
+        // Row 1: W B B B B B B B
+        assert!(!bm.get(0, 1)); // W
+        for x in 1..8u32 {
+            assert!(bm.get(x, 1), "row1 col{x} should be black");
+        }
+    }
+
+    #[test]
+    fn decode_smmr_zero_cols_returns_empty_bitmap() {
+        // Line 504: ncols == 0 → early return with zero-size bitmap.
+        let data = &[0u8, 0, 0, 2]; // ncols=0, nrows=2
+        let bm = decode_smmr(data).expect("zero-cols should succeed");
+        assert_eq!(bm.width, 0);
+        assert_eq!(bm.height, 2);
+    }
+
+    #[test]
+    fn decode_smmr_bitstream_empty_stops_early() {
+        // Line 512: br.is_empty() at start of row — data only has the 4-byte header.
+        let data = &[0u8, 8, 0, 4]; // ncols=8, nrows=4, no bitstream bytes
+        let bm = decode_smmr(data).expect("empty bitstream should not error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 4);
+    }
+
     #[test]
     fn encode_output_has_correct_header() {
         let bm = make_bm(200, 3, |_, _| false);
