@@ -3904,4 +3904,53 @@ mod tests {
         let err = render_streaming(page, &opts, |_, _| {}).unwrap_err();
         assert!(matches!(err, RenderError::InvalidDimensions { .. }));
     }
+
+    // ── Permissive render path ────────────────────────────────────────────────
+
+    /// Permissive render on a standard IW44+JB2 page completes without error.
+    #[test]
+    fn permissive_render_iw44_jb2_page() {
+        let doc = load_doc("czech.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 40,
+            height: 40,
+            permissive: true,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("permissive render should not error");
+        assert_eq!(pm.width, 40);
+        assert_eq!(pm.height, 40);
+    }
+
+    /// Permissive render on a BGjp page (no BG44) falls through to decode_bgjp.
+    #[test]
+    fn permissive_render_bgjp_page() {
+        let doc = load_doc("bgjp_test.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 4,
+            height: 4,
+            permissive: true,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("permissive render of BGjp page should succeed");
+        assert_eq!(pm.width, 4);
+        assert_eq!(pm.height, 4);
+    }
+
+    /// Permissive render on a page with FGbz palette exercises the indexed mask path.
+    #[test]
+    fn permissive_render_fgbz_page() {
+        let doc = load_doc("navm_fgbz.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 40,
+            height: 40,
+            permissive: true,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("permissive render of FGbz page should succeed");
+        assert!(pm.width > 0 && pm.height > 0);
+    }
 }
