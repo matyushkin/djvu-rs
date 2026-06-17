@@ -3,17 +3,24 @@
 //! Exposes a stable C API for opening DjVu documents, querying metadata,
 //! rendering pages, and extracting text. All functions are `extern "C"`
 //! with no-panic guarantees via `catch_unwind`.
+//!
+//! The actual open→size→render→text flow and the `(code, message)` error
+//! taxonomy live in [`crate::foreign`]; this module is the C-specific cap over
+//! it — `CString` lifecycle, raw-pointer handles, and the [`guard`] panic
+//! boundary. Each fallible entry point is one [`guard`] call wrapping one core
+//! call.
 
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::slice;
 
-use crate::Document;
+use crate::djvu_document::DjVuDocument;
+use crate::foreign::{self, ForeignError};
 use crate::pixmap::Pixmap;
 
 /// Opaque document handle.
 pub struct DjvuDoc {
-    inner: Document,
+    inner: DjVuDocument,
 }
 
 /// Opaque pixmap handle.
@@ -51,6 +58,48 @@ fn clear_error(err: *mut DjvuError) {
     }
 }
 
+/// Run `f` behind the C panic/error boundary: clear `err`, catch any panic, and
+/// translate a [`ForeignError`] into `(code, message)` on `err`, returning
+/// `fallback` on either failure. This is the single place the C ABI maps the
+/// shared error taxonomy onto its `DjvuError` out-parameter.
+///
+/// `panic_code` / `panic_msg` are used only for the (should-never-happen) case
+/// where the core itself panics.
+fn guard<T>(
+    err: *mut DjvuError,
+    fallback: T,
+    panic_code: i32,
+    panic_msg: &str,
+    f: impl FnOnce() -> Result<T, ForeignError>,
+) -> T {
+    clear_error(err);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(e)) => {
+            set_error(err, e.code(), &e.to_string());
+            fallback
+        }
+        Err(_) => {
+            set_error(err, panic_code, panic_msg);
+            fallback
+        }
+    }
+}
+
+/// Borrow the document behind a handle, or an out-of-range error for a null
+/// handle (a null handle is an invalid reference, code `3`, like a bad index).
+///
+/// # Safety
+///
+/// `doc` must be null or a valid pointer returned by `djvu_doc_open` that has
+/// not yet been freed.
+unsafe fn doc_ref<'a>(doc: *const DjvuDoc) -> Result<&'a DjVuDocument, ForeignError> {
+    if doc.is_null() {
+        return Err(ForeignError::OutOfRange("null document".to_string()));
+    }
+    Ok(unsafe { &(*doc).inner })
+}
+
 /// Free an error message string.
 ///
 /// # Safety
@@ -84,28 +133,20 @@ pub unsafe extern "C" fn djvu_doc_open(
     len: usize,
     err: *mut DjvuError,
 ) -> *mut DjvuDoc {
-    clear_error(err);
-    let result = std::panic::catch_unwind(|| {
-        if data.is_null() || len == 0 {
-            return Err("null or empty input".to_string());
-        }
-        let bytes = unsafe { slice::from_raw_parts(data, len) }.to_vec();
-        Document::from_bytes(bytes)
-            .map(|doc| Box::into_raw(Box::new(DjvuDoc { inner: doc })))
-            .map_err(|e| format!("{e}"))
-    });
-
-    match result {
-        Ok(Ok(ptr)) => ptr,
-        Ok(Err(msg)) => {
-            set_error(err, 1, &msg);
-            std::ptr::null_mut()
-        }
-        Err(_) => {
-            set_error(err, 1, "panic during document open");
-            std::ptr::null_mut()
-        }
-    }
+    guard(
+        err,
+        std::ptr::null_mut(),
+        1,
+        "panic during document open",
+        || {
+            if data.is_null() || len == 0 {
+                return Err(ForeignError::Parse("null or empty input".to_string()));
+            }
+            let bytes = unsafe { slice::from_raw_parts(data, len) };
+            let doc = foreign::open(bytes)?;
+            Ok(Box::into_raw(Box::new(DjvuDoc { inner: doc })))
+        },
+    )
 }
 
 /// Free a document handle.
@@ -146,27 +187,10 @@ pub unsafe extern "C" fn djvu_page_width(
     page: usize,
     err: *mut DjvuError,
 ) -> u32 {
-    clear_error(err);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if doc.is_null() {
-            return Err("null document".to_string());
-        }
-        let doc = unsafe { &(*doc).inner };
-        doc.page(page)
-            .map(|p| p.width())
-            .map_err(|e| format!("{e}"))
-    }));
-    match result {
-        Ok(Ok(w)) => w,
-        Ok(Err(msg)) => {
-            set_error(err, 3, &msg);
-            0
-        }
-        Err(_) => {
-            set_error(err, 3, "panic");
-            0
-        }
-    }
+    guard(err, 0, 3, "panic", || {
+        let doc = unsafe { doc_ref(doc)? };
+        foreign::page_width(doc, page)
+    })
 }
 
 /// Get page height in pixels.
@@ -181,27 +205,10 @@ pub unsafe extern "C" fn djvu_page_height(
     page: usize,
     err: *mut DjvuError,
 ) -> u32 {
-    clear_error(err);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if doc.is_null() {
-            return Err("null document".to_string());
-        }
-        let doc = unsafe { &(*doc).inner };
-        doc.page(page)
-            .map(|p| p.height())
-            .map_err(|e| format!("{e}"))
-    }));
-    match result {
-        Ok(Ok(h)) => h,
-        Ok(Err(msg)) => {
-            set_error(err, 3, &msg);
-            0
-        }
-        Err(_) => {
-            set_error(err, 3, "panic");
-            0
-        }
-    }
+    guard(err, 0, 3, "panic", || {
+        let doc = unsafe { doc_ref(doc)? };
+        foreign::page_height(doc, page)
+    })
 }
 
 /// Get page DPI.
@@ -216,27 +223,10 @@ pub unsafe extern "C" fn djvu_page_dpi(
     page: usize,
     err: *mut DjvuError,
 ) -> u32 {
-    clear_error(err);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if doc.is_null() {
-            return Err("null document".to_string());
-        }
-        let doc = unsafe { &(*doc).inner };
-        doc.page(page)
-            .map(|p| p.dpi() as u32)
-            .map_err(|e| format!("{e}"))
-    }));
-    match result {
-        Ok(Ok(d)) => d,
-        Ok(Err(msg)) => {
-            set_error(err, 3, &msg);
-            0
-        }
-        Err(_) => {
-            set_error(err, 3, "panic");
-            0
-        }
-    }
+    guard(err, 0, 3, "panic", || {
+        let doc = unsafe { doc_ref(doc)? };
+        foreign::page_dpi(doc, page)
+    })
 }
 
 /// Render a page at the given DPI. Returns NULL on error.
@@ -253,28 +243,11 @@ pub unsafe extern "C" fn djvu_page_render(
     dpi: f32,
     err: *mut DjvuError,
 ) -> *mut DjvuPixmap {
-    clear_error(err);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if doc.is_null() {
-            return Err("null document".to_string());
-        }
-        let doc = unsafe { &(*doc).inner };
-        let p = doc.page(page).map_err(|e| format!("{e}"))?;
-        let (w, h) = p.size_at_dpi(dpi);
-        let pixmap = p.render_to_size(w, h).map_err(|e| format!("{e}"))?;
+    guard(err, std::ptr::null_mut(), 2, "panic during render", || {
+        let doc = unsafe { doc_ref(doc)? };
+        let pixmap = foreign::render_at_dpi(doc, page, dpi)?;
         Ok(Box::into_raw(Box::new(DjvuPixmap { inner: pixmap })))
-    }));
-    match result {
-        Ok(Ok(ptr)) => ptr,
-        Ok(Err(msg)) => {
-            set_error(err, 2, &msg);
-            std::ptr::null_mut()
-        }
-        Err(_) => {
-            set_error(err, 2, "panic during render");
-            std::ptr::null_mut()
-        }
-    }
+    })
 }
 
 /// Free a pixmap handle.
@@ -356,33 +329,22 @@ pub unsafe extern "C" fn djvu_page_text(
     page: usize,
     err: *mut DjvuError,
 ) -> *mut c_char {
-    clear_error(err);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if doc.is_null() {
-            return Err("null document".to_string());
-        }
-        let doc = unsafe { &(*doc).inner };
-        let p = doc.page(page).map_err(|e| format!("{e}"))?;
-        match p.text() {
-            Ok(Some(text)) => {
-                let c = CString::new(text).map_err(|e| format!("{e}"))?;
-                Ok(c.into_raw())
+    guard(
+        err,
+        std::ptr::null_mut(),
+        2,
+        "panic during text extraction",
+        || {
+            let doc = unsafe { doc_ref(doc)? };
+            match foreign::text(doc, page)? {
+                Some(text) => {
+                    let c = CString::new(text).map_err(|e| ForeignError::Decode(e.to_string()))?;
+                    Ok(c.into_raw())
+                }
+                None => Ok(std::ptr::null_mut()),
             }
-            Ok(None) => Ok(std::ptr::null_mut()),
-            Err(e) => Err(format!("{e}")),
-        }
-    }));
-    match result {
-        Ok(Ok(ptr)) => ptr,
-        Ok(Err(msg)) => {
-            set_error(err, 2, &msg);
-            std::ptr::null_mut()
-        }
-        Err(_) => {
-            set_error(err, 2, "panic during text extraction");
-            std::ptr::null_mut()
-        }
-    }
+        },
+    )
 }
 
 /// Free a text string returned by `djvu_page_text`.
