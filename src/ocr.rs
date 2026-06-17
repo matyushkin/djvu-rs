@@ -70,6 +70,18 @@ impl Default for OcrOptions {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_options_default_values() {
+        let opts = OcrOptions::default();
+        assert_eq!(opts.languages, "eng");
+        assert_eq!(opts.dpi, 300);
+    }
+}
+
 /// Trait for pluggable OCR backends.
 ///
 /// Implementations receive a rendered page pixmap and return a structured

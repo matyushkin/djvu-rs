@@ -360,6 +360,20 @@ mod tests {
     }
 
     #[test]
+    fn components_reads_name_and_title_when_flags_set() {
+        // flag & 0x80 → skip extra name string (line 191)
+        // flag & 0x40 → skip extra title string (line 194)
+        let ids = vec!["pg1".to_string(), "pg2".to_string()];
+        let flags = vec![0x81u8, 0x41u8]; // 0x81: page + has-name; 0x41: page + has-title
+        let p = DirmPayload::build_indirect(2, &flags, &ids);
+        let comps = p.components();
+        assert_eq!(comps.len(), 2);
+        // component 0 reads an extra name string (0x80 bit), component 1 reads
+        // an extra title string (0x40 bit); the stream position advances for each
+        assert_eq!(comps[0].id, "pg1");
+    }
+
+    #[test]
     fn components_short_metadata_yields_synthetic_pages() {
         // Bundled, nfiles=2, offsets present, but metadata too short to parse.
         let p = DirmPayload {
