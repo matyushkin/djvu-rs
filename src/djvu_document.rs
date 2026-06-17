@@ -1879,6 +1879,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn djvu_page_debug_impl_does_not_panic() {
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let s = format!("{page:?}");
+        assert!(s.contains("DjVuPage"));
+    }
+
+    #[test]
+    fn page_index_returns_zero_for_first_page() {
+        let data = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.index(), 0);
+    }
+
+    #[test]
+    fn page_text_returns_some_for_text_page() {
+        let data = std::fs::read(assets_path().join("colorbook.djvu")).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let t = page.text().unwrap();
+        assert!(t.is_some(), "colorbook page 0 should have text");
+    }
+
     /// Out-of-range page index returns None.
     #[test]
     fn page_byte_range_out_of_range() {
