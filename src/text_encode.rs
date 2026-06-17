@@ -231,4 +231,44 @@ mod tests {
         assert_eq!(decoded.zones[0].children[0].text, "Hello");
         assert_eq!(decoded.zones[0].children[1].text, "World");
     }
+
+    #[test]
+    fn encode_all_zone_kinds_roundtrip() {
+        // Covers Column(2), Region(3), Para(4), Line(5), Character(7) in encode_zone
+        let layer = TextLayer {
+            text: "hi".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Column,
+                rect: Rect { x: 0, y: 0, width: 200, height: 300 },
+                text: "hi".into(),
+                children: vec![TextZone {
+                    kind: TextZoneKind::Region,
+                    rect: Rect { x: 5, y: 5, width: 180, height: 280 },
+                    text: "hi".into(),
+                    children: vec![TextZone {
+                        kind: TextZoneKind::Para,
+                        rect: Rect { x: 5, y: 5, width: 180, height: 30 },
+                        text: "hi".into(),
+                        children: vec![TextZone {
+                            kind: TextZoneKind::Line,
+                            rect: Rect { x: 5, y: 5, width: 170, height: 20 },
+                            text: "hi".into(),
+                            children: vec![TextZone {
+                                kind: TextZoneKind::Character,
+                                rect: Rect { x: 5, y: 5, width: 8, height: 16 },
+                                text: "h".into(),
+                                children: vec![],
+                            }],
+                        }],
+                    }],
+                }],
+            }],
+        };
+        let page_height = 300u32;
+        let encoded = encode_text_layer(&layer, page_height);
+        assert!(!encoded.is_empty());
+        let decoded = crate::text::parse_text_layer(&encoded, page_height)
+            .expect("all-kinds roundtrip must decode");
+        assert_eq!(decoded.zones[0].kind, TextZoneKind::Column);
+    }
 }

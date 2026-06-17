@@ -869,4 +869,23 @@ mod tests {
         assert!(out.contains("<Page"), "DPI-scaled ALTO must have Page element");
         assert!(out.contains("</alto>"), "DPI-scaled ALTO must close alto");
     }
+
+    // Tests below use colorbook.djvu (has TXTz) so write_hocr_zones /
+    // write_alto_page are actually called when DPI scaling is active.
+
+    #[test]
+    fn to_hocr_dpi_with_text_layer_emits_zones() {
+        let doc = load_doc("colorbook.djvu");
+        let opts = HocrOptions { page_index: None, dpi: Some(150) };
+        let out = to_hocr(&doc, &opts).unwrap();
+        assert!(out.contains("ocr_page"), "hOCR must contain ocr_page");
+    }
+
+    #[test]
+    fn to_alto_dpi_with_text_layer_emits_page() {
+        let doc = load_doc("colorbook.djvu");
+        let opts = AltoOptions { page_index: None, dpi: Some(150) };
+        let out = to_alto(&doc, &opts).unwrap();
+        assert!(out.contains("<Page"), "ALTO must contain Page");
+    }
 }

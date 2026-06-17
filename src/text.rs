@@ -941,6 +941,52 @@ mod tests {
         assert_eq!(paras[0].text, "leading trailing middle");
     }
 
+    // ── Character zone (type_byte=7) ─────────────────────────────────────────
+
+    #[test]
+    fn parse_character_zone_type_7() {
+        // text "X", then a Character zone (type=7), no children
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // text_len = 1
+        data.push(b'X'); // text
+        data.push(0x00); // version
+        data.push(0x07); // zone type = Character (7)
+        data.extend_from_slice(&[0x80, 0x00]); // x = 0 (biased)
+        data.extend_from_slice(&[0x80, 0x00]); // y = 0
+        data.extend_from_slice(&[0x80, 0x0A]); // w = 10
+        data.extend_from_slice(&[0x80, 0x14]); // h = 20
+        data.extend_from_slice(&[0x80, 0x00]); // text_start = 0
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // text_len (i24) = 1
+        data.extend_from_slice(&[0x00, 0x00, 0x00]); // children_count = 0
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.zones.len(), 1);
+        assert_eq!(result.zones[0].kind, TextZoneKind::Character);
+    }
+
+    // ── ZoneTruncated from recursive child call ──────────────────────────────
+
+    #[test]
+    fn zone_truncated_when_child_data_missing() {
+        // A Page zone with children_count=1 but no child bytes follow
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // text_len = 1
+        data.push(b'A'); // text
+        data.push(0x00); // version
+        data.push(0x01); // zone type = Page (1)
+        data.extend_from_slice(&[0x80, 0x00]); // x
+        data.extend_from_slice(&[0x80, 0x00]); // y
+        data.extend_from_slice(&[0x80, 0x64]); // w = 100
+        data.extend_from_slice(&[0x80, 0x32]); // h = 50
+        data.extend_from_slice(&[0x80, 0x00]); // text_start
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // text_len (i24) = 1
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // children_count = 1 → triggers child
+        // NO child data → ZoneTruncated
+        assert!(matches!(
+            parse_text_layer(&data, 100),
+            Err(TextError::ZoneTruncated(_))
+        ));
+    }
+
     // ── Rect::scale zero-dimension guard ────────────────────────────────────
 
     #[test]
