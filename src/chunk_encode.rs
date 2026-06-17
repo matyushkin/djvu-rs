@@ -207,6 +207,39 @@ mod tests {
     }
 
     #[test]
+    fn encode_error_display_messages() {
+        assert!(EncodeError::BookmarkChildrenOverflow { found: 256 }
+            .to_string()
+            .contains("256"));
+        assert!(EncodeError::BookmarkCountOverflow { found: 65536 }
+            .to_string()
+            .contains("65536"));
+        assert!(EncodeError::PaletteOverflow { found: 70000 }
+            .to_string()
+            .contains("70000"));
+        assert!(EncodeError::IndexCountOverflow { found: 1 << 24 }
+            .to_string()
+            .contains("16777216"));
+    }
+
+    #[test]
+    fn text_chunk_yields_txta_id() {
+        use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
+        let layer = TextLayer {
+            text: "hi".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect { x: 0, y: 0, width: 100, height: 200 },
+                text: "hi".into(),
+                children: vec![],
+            }],
+        };
+        let chunk = TextChunk { layer: &layer, page_height: 200 }.encode_chunk().unwrap();
+        assert_eq!(&chunk.id, b"TXTa");
+        assert!(!chunk.payload.is_empty());
+    }
+
+    #[test]
     fn navm_chunk_yields_navm_id_and_bridges_to_leaf() {
         let bookmarks = vec![bm("Chapter 1", vec![])];
         let chunk = NavmChunk(&bookmarks).encode_chunk().unwrap();
