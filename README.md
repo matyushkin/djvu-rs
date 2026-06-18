@@ -477,54 +477,11 @@ text/annotation parsing — all codec primitives that work on byte slices.
 
 ## Performance
 
-Latest post-roadmap Criterion refresh: Apple M1 Max / macOS `arm64`, Rust 1.92.
-The codec/document/PDF rows come from `cargo bench --workspace --features
-cli,tiff`; render rows below use targeted `cargo bench --bench render` reruns
-after the full workspace run produced noisy render outliers.
-
-| Benchmark | Time |
-|-----------|-----:|
-| `render_page/dpi/72` | **211 µs** |
-| `render_page/dpi/144` | **938 µs** |
-| `render_page/dpi/300` | **3.59 ms** |
-| `render_colorbook` (150 dpi, warm) | **7.11 ms** |
-| `render_colorbook_cold` | **18.0 ms** |
-| `render_corpus_color` (native 600 dpi) | **73.1 ms** |
-| `render_corpus_bilevel` (native 600 dpi) | **73.8 ms** |
-| `render_native_stages/render_streaming_discard` (color) | **70.2 ms** |
-| `jb2_decode` | **132 µs** |
-| `iw44_decode_first_chunk` | **592 µs** |
-| `iw44_decode_corpus_color` | **655 µs** |
-| `parse_multipage_520p` | **2.29 ms** |
-| `render_large_doc_first_page` | **10.6 ms** |
-| `pdf_export_sequential` (12 pages, JPEG-80) | **821 ms** |
-
-The initial full-workspace render rows from this refresh were rejected as a
-noisy local artifact and preserved only in `PERF_EXPERIMENTS.md`; the public
-render baseline uses the targeted rerun recorded in `BENCHMARKS_RESULTS.md`.
-
-### Comparison with DjVuLibre
-
-The benchmark workflow still runs a DjVuLibre comparison via
-[`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) and formats it with
-[`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py).
-
-Current local matrix (2026-06-18):
-
-| Scenario | djvu-rs | DjVuLibre | Ratio |
-|----------|--------:|----------:|------:|
-| Small color IW44, 72 dpi | **211 µs** | **147 µs** | DjVuLibre **1.4x faster** |
-| Large color IW44, 150 dpi | **7.11 ms** | **5.90 ms** | DjVuLibre **1.2x faster** |
-| Native color corpus, 300 dpi | **73.1 ms** | **36.0 ms** | DjVuLibre **2.0x faster** |
-| Native bilevel JB2 corpus, 300 dpi | **73.8 ms** | **35.2 ms** | DjVuLibre **2.1x faster** |
-
-The same workflow also records `ddjvu` CLI timings for these files
-(31.1–75.1 ms locally), including process startup and PPM output.
-
-See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
-run, methodology, and the full DjVuLibre comparison. Historical multi-platform
-results are kept in [BENCHMARKS.md](BENCHMARKS.md); compare those carefully
-because some benchmark definitions and output sizes have changed over time.
+See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for Criterion numbers,
+methodology, and a DjVuLibre comparison (run via
+[`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) +
+[`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py)).
+Historical multi-platform results are in [BENCHMARKS.md](BENCHMARKS.md).
 
 Recent targeted experiments are recorded in
 [PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md), including:
