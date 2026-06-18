@@ -857,7 +857,11 @@ fn best_iw44_subsample(scale: f32) -> u32 {
     }
     // Allow up to 1.5× upscaling: the compositor handles the coordinate
     // division, so a slightly-too-small decoded plane is fine.
-    let max_sub = (1.5_f32 / scale) as u32; // truncating = floor for positive
+    // Round rather than truncate: pixel-rounding of width causes decode_scale
+    // to differ from the true scale by up to 0.5/page_width (≈0.023% for a
+    // 2260-px page), which can push 1.5/scale just below an integer and select
+    // a 2× coarser subsample — e.g. subsample 2 instead of 4 for colorbook.
+    let max_sub = (1.5_f32 / scale).round() as u32;
     let mut s = 1u32;
     while s * 2 <= max_sub {
         s *= 2;
@@ -1533,13 +1537,27 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     let fy_step = ((ctx.page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
 
     let row_stride = ctx.out_w as usize * 4;
-    let rows = buf.chunks_exact_mut(row_stride).take(ctx.out_h as usize);
 
     // Bilevel fast path: JB2-only page (no IW44 bg, no FG44, no palette).
     // Skips bilinear sampling and gamma LUT — just white fill + black mask writes.
     // The bilevel body writes alpha itself, so no fill_alpha_255 pass is needed.
     if ctx.bg.is_none() && ctx.fg44.is_none() && ctx.fg_palette.is_none() {
-        for (oy, row) in rows.enumerate() {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let n = ctx.out_h as usize * row_stride;
+            buf[..n]
+                .par_chunks_exact_mut(row_stride)
+                .enumerate()
+                .for_each(|(oy, row)| {
+                    composite_rows_bilevel_one(ctx, oy as u32, fx_step, fy_step, row);
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        for (oy, row) in buf[..ctx.out_h as usize * row_stride]
+            .chunks_exact_mut(row_stride)
+            .enumerate()
+        {
             composite_rows_bilevel_one(ctx, oy as u32, fx_step, fy_step, row);
         }
         return Ok(());
@@ -1550,7 +1568,34 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
     let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
 
-    for (oy, row) in rows.enumerate() {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let n = ctx.out_h as usize * row_stride;
+        buf[..n]
+            .par_chunks_exact_mut(row_stride)
+            .enumerate()
+            .for_each(|(oy, row)| {
+                if downscale {
+                    composite_rows_area_avg_one(
+                        ctx,
+                        oy as u32,
+                        fx_step,
+                        fy_step,
+                        bg_fx_step,
+                        bg_fy_step,
+                        row,
+                    );
+                } else {
+                    composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    for (oy, row) in buf[..ctx.out_h as usize * row_stride]
+        .chunks_exact_mut(row_stride)
+        .enumerate()
+    {
         if downscale {
             composite_rows_area_avg_one(
                 ctx, oy as u32, fx_step, fy_step, bg_fx_step, bg_fy_step, row,
@@ -1656,20 +1701,12 @@ fn composite_rows_bilevel_one(
         let stride = mask.row_stride();
         let py = (oy + ctx.offset_y).min(ctx.page_h.saturating_sub(1)) as usize;
         let mask_row = &mask.data[py * stride..(py + 1) * stride];
+        // Branchless expansion: is_fg=0 → 0xFFFFFFFF (white), is_fg=1 → 0xFF000000 (black).
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
-            let is_black = (mask_row[px / 8] >> (7 - (px % 8))) & 1 != 0;
-            if is_black {
-                pixel[0] = 0;
-                pixel[1] = 0;
-                pixel[2] = 0;
-                pixel[3] = 255;
-            } else {
-                pixel[0] = 255;
-                pixel[1] = 255;
-                pixel[2] = 255;
-                pixel[3] = 255;
-            }
+            let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
+            let rgba = 0xFF00_0000_u32 | (is_fg.wrapping_sub(1) & 0x00FF_FFFF);
+            pixel.copy_from_slice(&rgba.to_ne_bytes());
         }
         return;
     }
@@ -1720,6 +1757,110 @@ fn composite_rows_bilinear_one(
     let (page_w, page_h) = (ctx.page_w, ctx.page_h);
     let fy = (oy + ctx.offset_y) * fy_step;
     let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
+
+    // 1:1 fast path: fx and fy land on exact pixel centres (tx = ty = 0), so
+    // bilinear interpolation degrades to nearest-neighbour. Guard on the bg
+    // plane ratio too: if bg is at subsample > 1, the bg coordinates are not
+    // integer-aligned even at native scale and bilinear blending is needed.
+    if fx_step == FRAC && fy_step == FRAC
+        && ctx.bg_x_q24 == (1 << 24) && ctx.bg_y_q24 == (1 << 24)
+    {
+        // Extra-tight path for the common corpus case: bg present, mask
+        // present, no palette, no FG44, zero horizontal offset. Precompute
+        // the bg row and mask row slices so the inner loop only touches
+        // sequential memory with no per-pixel coordinate mapping calls.
+        if ctx.offset_x == 0
+            && ctx.fg_palette.is_none()
+            && ctx.fg44.is_none()
+        {
+            if let Some(bg) = ctx.bg {
+                let bg_py = py.min(bg.height.saturating_sub(1)) as usize;
+                let bg_stride = bg.width as usize * 4;
+                let bg_row = bg.data.get(bg_py * bg_stride..).unwrap_or(&[]);
+                let lut = &ctx.gamma_lut;
+
+                if let Some(mask) = ctx.mask {
+                    // Has mask: check each pixel for foreground (black).
+                    let mask_stride = mask.row_stride();
+                    let mask_py = py.min(mask.height.saturating_sub(1)) as usize;
+                    let mask_row =
+                        mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
+
+                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                        let px = ox.min(bg.width as usize - 1);
+                        let is_fg = px < mask.width as usize
+                            && (mask_row.get(ox >> 3).copied().unwrap_or(0)
+                                >> (7 - (ox & 7)))
+                                & 1
+                                != 0;
+                        let (r, g, b) = if is_fg {
+                            (0u8, 0u8, 0u8)
+                        } else {
+                            let off = px * 4;
+                            if let Some(q) = bg_row.get(off..off + 3) {
+                                (q[0], q[1], q[2])
+                            } else {
+                                (255, 255, 255)
+                            }
+                        };
+                        pixel[0] = lut[r as usize];
+                        pixel[1] = lut[g as usize];
+                        pixel[2] = lut[b as usize];
+                    }
+                } else {
+                    // No mask: pure background copy with gamma correction.
+                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                        let px = ox.min(bg.width as usize - 1);
+                        let off = px * 4;
+                        if let Some(q) = bg_row.get(off..off + 3) {
+                            pixel[0] = lut[q[0] as usize];
+                            pixel[1] = lut[q[1] as usize];
+                            pixel[2] = lut[q[2] as usize];
+                        } else {
+                            pixel[0] = 255;
+                            pixel[1] = 255;
+                            pixel[2] = 255;
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        // General 1:1 nearest-neighbour path (offset, palette, or FG44 present).
+        let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
+        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+            let fx = (ox as u32 + ctx.offset_x) * fx_step;
+            let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
+
+            let is_fg = ctx
+                .mask
+                .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
+
+            let (r, g, b) = if is_fg {
+                if let Some(pal) = ctx.fg_palette {
+                    let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
+                    (color.r, color.g, color.b)
+                } else if let Some(fg) = ctx.fg44 {
+                    let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
+                    let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+                    sample_nearest(fg, fg_fx, fg_fy)
+                } else {
+                    (0, 0, 0)
+                }
+            } else if let Some(bg) = ctx.bg {
+                let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
+                sample_nearest(bg, bg_fx, bg_fy)
+            } else {
+                (255, 255, 255)
+            };
+
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
+        return;
+    }
 
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
