@@ -375,6 +375,21 @@ const FRACBITS: u32 = 4;
 const FRAC: u32 = 1 << FRACBITS;
 const FRAC_MASK: u32 = FRAC - 1;
 
+/// Maps each byte value to 8 fg-mask bytes (MSB-first): 0xFF if bit set (fg), 0x00 otherwise.
+const MASK_EXPAND: [[u8; 8]; 256] = {
+    let mut lut = [[0u8; 8]; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        let mut bit = 0usize;
+        while bit < 8 {
+            lut[b][bit] = if (b >> (7 - bit)) & 1 != 0 { 0xFF } else { 0x00 };
+            bit += 1;
+        }
+        b += 1;
+    }
+    lut
+};
+
 // ── SIMD helpers ──────────────────────────────────────────────────────────────
 
 /// Set alpha = 255 on every RGBA pixel in `buf`.
@@ -565,6 +580,7 @@ fn bg_q24(bg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
 /// Coordinates are in fixed-point: `fx = x * FRAC`, etc.
 /// Returns (r, g, b).
 #[inline]
+#[cfg_attr(not(test), allow(dead_code))]
 fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
     let x0 = (fx >> FRACBITS).min(pm.width.saturating_sub(1));
     let y0 = (fy >> FRACBITS).min(pm.height.saturating_sub(1));
@@ -583,10 +599,48 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
         let top = a as u32 * (FRAC - tx) + b as u32 * tx;
         let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
         let numerator = top * (FRAC - ty) + bot * ty;
-        let v = (numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS);
-        v.min(255) as u8
+        // v ≤ (255*FRAC*FRAC + round) >> (2*FRACBITS) = 255 — no clamp needed.
+        ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
     };
 
+    (
+        lerp(r00, r10, r01, r11),
+        lerp(g00, g10, g01, g11),
+        lerp(b00, b10, b01, b11),
+    )
+}
+
+/// Bilinear sample using pre-fetched row slices (avoids repeated y-coord computation).
+/// `ty` is the vertical fractional weight (0..FRAC-1). Row slices are RGBA (4 bytes/pixel).
+#[inline]
+fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) -> (u8, u8, u8) {
+    let w = width.saturating_sub(1) as usize;
+    let x0 = (fx >> FRACBITS) as usize;
+    let x0 = x0.min(w);
+    let x1 = (x0 + 1).min(w);
+    let tx = fx & FRAC_MASK;
+
+    // Read 4 bytes (RGBA) per pixel — a single 32-bit load on all targets.
+    let get = |row: &[u8], x: usize| -> (u8, u8, u8) {
+        let off = x * 4;
+        if let Some(q) = row.get(off..off + 4) {
+            (q[0], q[1], q[2])
+        } else {
+            (0, 0, 0)
+        }
+    };
+    let (r00, g00, b00) = get(row0, x0);
+    let (r10, g10, b10) = get(row0, x1);
+    let (r01, g01, b01) = get(row1, x0);
+    let (r11, g11, b11) = get(row1, x1);
+
+    let lerp = |a: u8, b: u8, c: u8, d: u8| -> u8 {
+        let top = a as u32 * (FRAC - tx) + b as u32 * tx;
+        let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
+        let numerator = top * (FRAC - ty) + bot * ty;
+        // v ≤ (255*FRAC*FRAC + round) >> (2*FRACBITS) = 255 — no clamp needed.
+        ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
+    };
     (
         lerp(r00, r10, r01, r11),
         lerp(g00, g10, g01, g11),
@@ -1377,6 +1431,8 @@ struct CompositeContext<'a> {
     fg_x_q24: u64,
     fg_y_q24: u64,
     gamma_lut: &'a [u8; 256],
+    /// True when gamma_lut is the identity mapping (lut[i] == i for all i).
+    gamma_is_identity: bool,
     /// X offset within the full render (for region renders; 0 for full page).
     offset_x: u32,
     /// Y offset within the full render (for region renders; 0 for full page).
@@ -1434,6 +1490,7 @@ impl<'a> CompositeContext<'a> {
             fg_x_q24,
             fg_y_q24,
             gamma_lut,
+            gamma_is_identity: gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8),
             offset_x: offset.0,
             offset_y: offset.1,
             out_w: out.0,
@@ -1789,40 +1846,85 @@ fn composite_rows_bilinear_one(
                     let mask_row =
                         mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
 
-                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min((bg.width as usize).saturating_sub(1));
-                        let is_fg = px < mask.width as usize
-                            && (mask_row.get(ox >> 3).copied().unwrap_or(0)
-                                >> (7 - (ox & 7)))
-                                & 1
-                                != 0;
-                        let (r, g, b) = if is_fg {
-                            (0u8, 0u8, 0u8)
-                        } else {
-                            let off = px * 4;
-                            if let Some(q) = bg_row.get(off..off + 3) {
-                                (q[0], q[1], q[2])
-                            } else {
-                                (255, 255, 255)
+                    // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
+                    let bg_max_px = (bg.width as usize).saturating_sub(1);
+                    let mask_limit = mask.width as usize;
+                    let out_w = row_buf.len() / 4;
+                    // D1: hoist gamma identity check outside the pixel loop.
+                    macro_rules! a2_has_mask_loop {
+                        ($write:expr) => {
+                            for mb_idx in 0..(out_w + 7) / 8 {
+                                let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
+                                let exp = &MASK_EXPAND[mb as usize];
+                                for j in 0..8usize {
+                                    let ox = mb_idx * 8 + j;
+                                    if ox >= out_w {
+                                        break;
+                                    }
+                                    let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
+                                    let px = ox.min(bg_max_px);
+                                    let off = px * 4;
+                                    let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
+                                    let (r, g, b) = if let Some(q) = bg_row.get(off..off + 3) {
+                                        (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
+                                    } else {
+                                        (!fg_m, !fg_m, !fg_m)
+                                    };
+                                    $write(pixel, r, g, b);
+                                }
                             }
                         };
-                        pixel[0] = lut[r as usize];
-                        pixel[1] = lut[g as usize];
-                        pixel[2] = lut[b as usize];
+                    }
+                    if ctx.gamma_is_identity {
+                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                            pixel[0] = r;
+                            pixel[1] = g;
+                            pixel[2] = b;
+                        });
+                    } else {
+                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                            pixel[0] = lut[r as usize];
+                            pixel[1] = lut[g as usize];
+                            pixel[2] = lut[b as usize];
+                        });
                     }
                 } else {
                     // No mask: pure background copy with gamma correction.
-                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min((bg.width as usize).saturating_sub(1));
-                        let off = px * 4;
-                        if let Some(q) = bg_row.get(off..off + 3) {
-                            pixel[0] = lut[q[0] as usize];
-                            pixel[1] = lut[q[1] as usize];
-                            pixel[2] = lut[q[2] as usize];
+                    // D1: hoist gamma identity check outside the pixel loop.
+                    if ctx.gamma_is_identity {
+                        let out_w = row_buf.len() / 4;
+                        // E1: when bg covers the full output width, bulk-copy the row
+                        // via memcpy (fill_alpha_255 fixes the alpha channel afterwards).
+                        if bg.width as usize >= out_w {
+                            row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
                         } else {
-                            pixel[0] = 255;
-                            pixel[1] = 255;
-                            pixel[2] = 255;
+                            for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                                let px = ox.min((bg.width as usize).saturating_sub(1));
+                                let off = px * 4;
+                                if let Some(q) = bg_row.get(off..off + 3) {
+                                    pixel[0] = q[0];
+                                    pixel[1] = q[1];
+                                    pixel[2] = q[2];
+                                } else {
+                                    pixel[0] = 255;
+                                    pixel[1] = 255;
+                                    pixel[2] = 255;
+                                }
+                            }
+                        }
+                    } else {
+                        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                            let px = ox.min((bg.width as usize).saturating_sub(1));
+                            let off = px * 4;
+                            if let Some(q) = bg_row.get(off..off + 3) {
+                                pixel[0] = lut[q[0] as usize];
+                                pixel[1] = lut[q[1] as usize];
+                                pixel[2] = lut[q[2] as usize];
+                            } else {
+                                pixel[0] = 255;
+                                pixel[1] = 255;
+                                pixel[2] = 255;
+                            }
                         }
                     }
                 }
@@ -1858,20 +1960,59 @@ fn composite_rows_bilinear_one(
                 (255, 255, 255)
             };
 
-            pixel[0] = ctx.gamma_lut[r as usize];
-            pixel[1] = ctx.gamma_lut[g as usize];
-            pixel[2] = ctx.gamma_lut[b as usize];
+            if ctx.gamma_is_identity {
+                pixel[0] = r;
+                pixel[1] = g;
+                pixel[2] = b;
+            } else {
+                pixel[0] = ctx.gamma_lut[r as usize];
+                pixel[1] = ctx.gamma_lut[g as usize];
+                pixel[2] = ctx.gamma_lut[b as usize];
+            }
         }
         return;
     }
+
+    // B1: hoist bg_fy (row-invariant) and replace per-pixel u64 mul for bg_fx with
+    // an exact u64 accumulator (add per pixel instead of multiply).
+    // bg_fx_q tracks (page_frac + FRAC/2) * bg_x_q24 in Q48; >> 24 gives the
+    // FRAC-fixed-point coordinate; subtract FRAC/2 to get the centered sample pos.
+    let bg_fy_hoist = ctx.bg.map(|_| map_plane_center_frac(fy, ctx.bg_y_q24));
+    let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
+    let mut bg_fx_q: u64 =
+        (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+
+    // B2b: pre-hoist mask row slice for py (eliminates y*stride multiply per pixel).
+    let mask_hoist = ctx.mask.and_then(|m| {
+        if py >= m.height {
+            return None;
+        }
+        let stride = m.row_stride();
+        m.data.get(py as usize * stride..).map(|row| (row, m.width))
+    });
+
+    // B2: precompute bg row slices (y0/y1 are row-invariant) to avoid repeated
+    // y-coordinate arithmetic inside sample_bilinear.
+    let bg_rows = ctx.bg.map(|bg| {
+        let bg_fy = bg_fy_hoist.unwrap_or(0);
+        let y0 = (bg_fy >> FRACBITS).min(bg.height.saturating_sub(1)) as usize;
+        let y1 = (y0 + 1).min(bg.height.saturating_sub(1) as usize);
+        let ty = bg_fy & FRAC_MASK;
+        let stride = bg.width as usize * 4;
+        let row0 = bg.data.get(y0 * stride..).unwrap_or(&[]);
+        let row1 = bg.data.get(y1 * stride..).unwrap_or(&[]);
+        (row0, row1, bg.width, ty)
+    });
 
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-        let is_fg = ctx
-            .mask
-            .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
+        let is_fg = mask_hoist.is_some_and(|(mask_row, mask_w)| {
+            let pxu = px as usize;
+            pxu < mask_w as usize
+                && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+        });
 
         let (r, g, b) = if is_fg {
             if let Some(pal) = ctx.fg_palette {
@@ -1884,18 +2025,24 @@ fn composite_rows_bilinear_one(
             } else {
                 (0, 0, 0)
             }
-        } else if let Some(bg) = ctx.bg {
-            let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
-            let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
-            sample_bilinear(bg, bg_fx, bg_fy)
+        } else if let Some((row0, row1, bg_w, ty)) = bg_rows {
+            let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+            bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
         } else {
             (255, 255, 255)
         };
 
-        pixel[0] = ctx.gamma_lut[r as usize];
-        pixel[1] = ctx.gamma_lut[g as usize];
-        pixel[2] = ctx.gamma_lut[b as usize];
-        // alpha written by fill_alpha_255 in composite_rows
+        // D1: skip LUT scatter reads when gamma is the identity mapping.
+        if ctx.gamma_is_identity {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        } else {
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
+        bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
     }
 }
 
@@ -1947,9 +2094,15 @@ fn composite_rows_area_avg_one(
             (255, 255, 255)
         };
 
-        pixel[0] = ctx.gamma_lut[r as usize];
-        pixel[1] = ctx.gamma_lut[g as usize];
-        pixel[2] = ctx.gamma_lut[b as usize];
+        if ctx.gamma_is_identity {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        } else {
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
         // alpha written by fill_alpha_255 in composite_rows
     }
 }
