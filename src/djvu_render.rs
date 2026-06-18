@@ -375,6 +375,21 @@ const FRACBITS: u32 = 4;
 const FRAC: u32 = 1 << FRACBITS;
 const FRAC_MASK: u32 = FRAC - 1;
 
+/// Maps each byte value to 8 fg-mask bytes (MSB-first): 0xFF if bit set (fg), 0x00 otherwise.
+const MASK_EXPAND: [[u8; 8]; 256] = {
+    let mut lut = [[0u8; 8]; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        let mut bit = 0usize;
+        while bit < 8 {
+            lut[b][bit] = if (b >> (7 - bit)) & 1 != 0 { 0xFF } else { 0x00 };
+            bit += 1;
+        }
+        b += 1;
+    }
+    lut
+};
+
 // ── SIMD helpers ──────────────────────────────────────────────────────────────
 
 /// Set alpha = 255 on every RGBA pixel in `buf`.
@@ -1789,26 +1804,31 @@ fn composite_rows_bilinear_one(
                     let mask_row =
                         mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
 
-                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min((bg.width as usize).saturating_sub(1));
-                        let is_fg = px < mask.width as usize
-                            && (mask_row.get(ox >> 3).copied().unwrap_or(0)
-                                >> (7 - (ox & 7)))
-                                & 1
-                                != 0;
-                        let (r, g, b) = if is_fg {
-                            (0u8, 0u8, 0u8)
-                        } else {
-                            let off = px * 4;
-                            if let Some(q) = bg_row.get(off..off + 3) {
-                                (q[0], q[1], q[2])
-                            } else {
-                                (255, 255, 255)
+                    // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
+                    let bg_max_px = (bg.width as usize).saturating_sub(1);
+                    let mask_limit = mask.width as usize;
+                    let out_w = row_buf.len() / 4;
+                    for mb_idx in 0..(out_w + 7) / 8 {
+                        let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
+                        let exp = &MASK_EXPAND[mb as usize];
+                        for j in 0..8usize {
+                            let ox = mb_idx * 8 + j;
+                            if ox >= out_w {
+                                break;
                             }
-                        };
-                        pixel[0] = lut[r as usize];
-                        pixel[1] = lut[g as usize];
-                        pixel[2] = lut[b as usize];
+                            let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
+                            let px = ox.min(bg_max_px);
+                            let off = px * 4;
+                            let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
+                            let (r, g, b) = if let Some(q) = bg_row.get(off..off + 3) {
+                                (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
+                            } else {
+                                (!fg_m, !fg_m, !fg_m)
+                            };
+                            pixel[0] = lut[r as usize];
+                            pixel[1] = lut[g as usize];
+                            pixel[2] = lut[b as usize];
+                        }
                     }
                 } else {
                     // No mask: pure background copy with gamma correction.

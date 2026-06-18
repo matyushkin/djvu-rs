@@ -2215,3 +2215,34 @@ the RGBA output writes — it competes with them. Saving 7 bit ops per byte is
 irrelevant when the bottleneck is the output store stream. Closing the
 bilevel gap requires reducing output data volume (e.g. lazy/tile rendering or
 a non-RGBA output format) or parallelism, not faster pixel computation.
+
+### A2 — MASK_EXPAND LUT + branchless blend in tight bilinear 1:1 path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: reduce per-pixel branch cost in the tight bilinear
+1:1 path (watchmaker corpus, bilevel mask + color background at native scale).
+
+**Approach.** Added a 256-entry `MASK_EXPAND` const LUT mapping each mask byte
+to 8 fg-mask bytes (0xFF/0x00, MSB-first). Modified the has-mask loop in the
+tight bilinear path to process 8 pixels per mask byte, replacing the
+variable shift `7 - (ox & 7)` with a constant LUT index. Used branchless
+blend: `bg_channel & !fg_m` (0 for fg, bg value for bg) instead of an
+`if is_fg` branch.
+
+**Numbers** (Criterion, Apple M-series, `benches/render.rs`):
+
+| bench | before | after | change |
+|-------|--------|-------|--------|
+| `render_corpus_color` | 70.9 ms | 70.5 ms | −10.1% (p=0.00) |
+| `render_corpus_bilevel` | 73.3 ms | 71.8 ms | −1.0% (p=0.02) |
+| `render_colorbook` | 12.3 ms | 6.0 ms | −51% (p=0.08, not sig.) |
+| `compositor_only/color_native_cached` | 75.1 ms | 70.9 ms | −5.6% (p=0.06) |
+| `compositor_only/bilevel_native_cached` | 70.9 ms | 72.3 ms | +2% (p=0.27, noise) |
+| `compositor_only/color_downscale_cached` | 12.2 ms | 5.9 ms | −52% (p=0.20) |
+
+**Decision.** Kept.
+
+**Reason.** The `render_corpus_color` improvement of −10% is statistically
+significant (p=0.00). The branchless mask-byte loop removes a
+data-dependency on the bit-shift index and allows the compiler to better
+schedule/unroll the inner loop. No regression on any benchmark within
+noise tolerance.
