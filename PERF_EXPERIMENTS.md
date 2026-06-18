@@ -2369,3 +2369,33 @@ approach adds register pressure and causes bilevel regression.
 **Decision.** Reverted immediately. Returning a (u8, u8, u8, u8, u8, u8) tuple
 from the helper forces stack spills. The per-call `get` approach keeps values in
 registers.
+
+### LERP_NO_CLAMP — remove min(255) from bilinear lerp — **Kept** (2026-06-18)
+
+**Issue.** The `lerp` closure in `sample_bilinear` and `bilinear_from_rows`
+clamped the result with `v.min(255)` before casting to u8.
+
+**Proof it's redundant.** With FRAC=16, FRACBITS=4:
+- `tx, ty ∈ [0, 15]`
+- `top = a * (16-tx) + b * tx ≤ 255 * 16 = 4080` (since (16-tx)+tx=16, and a,b ≤ 255)
+- `numerator = top * (16-ty) + bot * ty ≤ 4080 * 16 = 65280`
+- `v = (65280 + 128) >> 8 = 255` — never exceeds 255
+
+**Approach.** Remove `v.min(255)` and cast directly: `... as u8`.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before | after | change |
+|-------|--------|-------|--------|
+| `compositor_only/color_native_cached` | 53.6 ms | 47.5 ms | −11.2% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 53.8 ms | 48.6 ms | −9.2% (p=0.00) |
+| `render_corpus_color` | ~54 ms | ~48 ms | −11% (p=0.00) |
+
+Cumulative improvement from session baseline (before all experiments):
+- `render_corpus_color`: 70.9 ms → 48.2 ms = **−32%**
+- `render_corpus_bilevel`: 73.3 ms → 48.0 ms = **−35%**
+
+**Decision.** Kept.
+
+**Reason.** The clamp was a no-op as proven by the arithmetic invariant. Removing
+it allows LLVM to better schedule and vectorize the lerp arithmetic.
