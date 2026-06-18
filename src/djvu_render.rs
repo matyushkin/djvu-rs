@@ -580,6 +580,7 @@ fn bg_q24(bg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
 /// Coordinates are in fixed-point: `fx = x * FRAC`, etc.
 /// Returns (r, g, b).
 #[inline]
+#[cfg_attr(not(test), allow(dead_code))]
 fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
     let x0 = (fx >> FRACBITS).min(pm.width.saturating_sub(1));
     let y0 = (fy >> FRACBITS).min(pm.height.saturating_sub(1));
@@ -602,6 +603,43 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
         v.min(255) as u8
     };
 
+    (
+        lerp(r00, r10, r01, r11),
+        lerp(g00, g10, g01, g11),
+        lerp(b00, b10, b01, b11),
+    )
+}
+
+/// Bilinear sample using pre-fetched row slices (avoids repeated y-coord computation).
+/// `ty` is the vertical fractional weight (0..FRAC-1). Row slices are RGBA (4 bytes/pixel).
+#[inline]
+fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) -> (u8, u8, u8) {
+    let w = width.saturating_sub(1) as usize;
+    let x0 = (fx >> FRACBITS) as usize;
+    let x0 = x0.min(w);
+    let x1 = (x0 + 1).min(w);
+    let tx = fx & FRAC_MASK;
+
+    let get = |row: &[u8], x: usize| -> (u8, u8, u8) {
+        let off = x * 4;
+        if let Some(q) = row.get(off..off + 3) {
+            (q[0], q[1], q[2])
+        } else {
+            (0, 0, 0)
+        }
+    };
+    let (r00, g00, b00) = get(row0, x0);
+    let (r10, g10, b10) = get(row0, x1);
+    let (r01, g01, b01) = get(row1, x0);
+    let (r11, g11, b11) = get(row1, x1);
+
+    let lerp = |a: u8, b: u8, c: u8, d: u8| -> u8 {
+        let top = a as u32 * (FRAC - tx) + b as u32 * tx;
+        let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
+        let numerator = top * (FRAC - ty) + bot * ty;
+        let v = (numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS);
+        v.min(255) as u8
+    };
     (
         lerp(r00, r10, r01, r11),
         lerp(g00, g10, g01, g11),
@@ -1894,6 +1932,19 @@ fn composite_rows_bilinear_one(
     let mut bg_fx_q: u64 =
         (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
 
+    // B2: precompute bg row slices (y0/y1 are row-invariant) to avoid repeated
+    // y-coordinate arithmetic inside sample_bilinear.
+    let bg_rows = ctx.bg.map(|bg| {
+        let bg_fy = bg_fy_hoist.unwrap_or(0);
+        let y0 = (bg_fy >> FRACBITS).min(bg.height.saturating_sub(1)) as usize;
+        let y1 = (y0 + 1).min(bg.height.saturating_sub(1) as usize);
+        let ty = bg_fy & FRAC_MASK;
+        let stride = bg.width as usize * 4;
+        let row0 = bg.data.get(y0 * stride..).unwrap_or(&[]);
+        let row1 = bg.data.get(y1 * stride..).unwrap_or(&[]);
+        (row0, row1, bg.width, ty)
+    });
+
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
@@ -1913,9 +1964,9 @@ fn composite_rows_bilinear_one(
             } else {
                 (0, 0, 0)
             }
-        } else if let Some(bg) = ctx.bg {
+        } else if let Some((row0, row1, bg_w, ty)) = bg_rows {
             let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-            sample_bilinear(bg, bg_fx, bg_fy_hoist.unwrap_or(0))
+            bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
         } else {
             (255, 255, 255)
         };
