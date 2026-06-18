@@ -24,25 +24,23 @@ kept/reverted decisions are recorded in [`PERF_EXPERIMENTS.md`](PERF_EXPERIMENTS
 including recent async lazy loading and x86-64-v3 AVX2 validation results.
 
 The latest full local Criterion run is summarized in
-[`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md) (2026-05-17, macOS arm64,
-Rust 1.92.0). Render rows use the targeted rerun recorded there because the
-initial full-workspace render rows were rejected as a noisy local artifact.
-Selected current results:
+[`BENCHMARKS_RESULTS.md`](BENCHMARKS_RESULTS.md) (2026-06-18, macOS arm64,
+Apple M1 Max, Rust stable). Selected current results:
 
 | Benchmark | Time |
 |-----------|-----:|
-| `render_page/dpi/72` | 246 µs |
-| `render_page/dpi/144` | 938 µs |
-| `render_page/dpi/300` | 3.59 ms |
-| `render_colorbook` | 7.22 ms |
-| `render_colorbook_cold` | 18.8 ms |
-| `render_corpus_color` | 71.2 ms |
-| `render_corpus_bilevel` | 75.4 ms |
-| `jb2_decode` | 132 µs |
-| `iw44_decode_first_chunk` | 592 µs |
-| `iw44_decode_corpus_color` | 655 µs |
-| `parse_multipage_520p` | 2.29 ms |
-| `render_large_doc_first_page` | 10.6 ms |
+| `render_page/dpi/72` | 211 µs |
+| `render_page/dpi/144` | 919 µs |
+| `render_page/dpi/300` | 3.48 ms |
+| `render_colorbook` | 7.11 ms |
+| `render_colorbook_cold` | 18.0 ms |
+| `render_corpus_color` | 73.1 ms |
+| `render_corpus_bilevel` | 73.8 ms |
+| `jb2_decode` | 130 µs |
+| `iw44_decode_first_chunk` | 587 µs |
+| `iw44_decode_corpus_color` | 676 µs |
+| `parse_multipage_520p` | 2.03 ms |
+| `render_large_doc_first_page` | 9.6 ms |
 
 ## Contributing results
 
