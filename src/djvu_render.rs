@@ -1932,6 +1932,15 @@ fn composite_rows_bilinear_one(
     let mut bg_fx_q: u64 =
         (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
 
+    // B2b: pre-hoist mask row slice for py (eliminates y*stride multiply per pixel).
+    let mask_hoist = ctx.mask.and_then(|m| {
+        if py >= m.height {
+            return None;
+        }
+        let stride = m.row_stride();
+        m.data.get(py as usize * stride..).map(|row| (row, m.width))
+    });
+
     // B2: precompute bg row slices (y0/y1 are row-invariant) to avoid repeated
     // y-coordinate arithmetic inside sample_bilinear.
     let bg_rows = ctx.bg.map(|bg| {
@@ -1949,9 +1958,11 @@ fn composite_rows_bilinear_one(
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-        let is_fg = ctx
-            .mask
-            .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
+        let is_fg = mask_hoist.is_some_and(|(mask_row, mask_w)| {
+            let pxu = px as usize;
+            pxu < mask_w as usize
+                && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+        });
 
         let (r, g, b) = if is_fg {
             if let Some(pal) = ctx.fg_palette {
