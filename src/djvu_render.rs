@@ -611,11 +611,17 @@ fn sample_nearest(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
 fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> (u8, u8, u8) {
     let x0 = (fx >> FRACBITS).min(pm.width.saturating_sub(1));
     let y0 = (fy >> FRACBITS).min(pm.height.saturating_sub(1));
-    let x1 = ((fx + fx_step) >> FRACBITS).min(pm.width.saturating_sub(1));
-    let y1 = ((fy + fy_step) >> FRACBITS).min(pm.height.saturating_sub(1));
+    // Exclusive upper bounds: the output pixel covers source [x0, x1) × [y0, y1).
+    // The old inclusive formula gave a 3×3 box at 2× downscale because x1 landed
+    // on the first pixel of the next output cell; exclusive gives the correct 2×2.
+    let x1 = ((fx + fx_step) >> FRACBITS).min(pm.width);
+    let y1 = ((fy + fy_step) >> FRACBITS).min(pm.height);
 
-    // Fast path: box is 1×1 pixel → just read it
-    if x0 == x1 && y0 == y1 {
+    let cols = (x1 - x0) as usize;
+    let rows = (y1 - y0) as usize;
+
+    // Fast path: 1×1 box → direct read.
+    if cols <= 1 && rows <= 1 {
         return pm.get_rgb(x0, y0);
     }
 
@@ -624,18 +630,14 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
     let mut b_sum = 0u32;
 
     let pw = pm.width as usize;
-    let cols = (x1 - x0 + 1) as usize;
-    let rows = (y1 - y0 + 1) as usize;
-
-    // Read directly from the RGBA data buffer for speed
-    for sy in y0..=y1 {
-        let row_off = (sy as usize * pw + x0 as usize) * 4;
-        for c in 0..cols {
-            let off = row_off + c * 4;
-            if let Some(px) = pm.data.get(off..off + 3) {
-                r_sum += px[0] as u32;
-                g_sum += px[1] as u32;
-                b_sum += px[2] as u32;
+    // One bounds check per row (not per pixel) to let the inner loop vectorize.
+    for sy in y0..y1 {
+        let row_off = sy as usize * pw * 4 + x0 as usize * 4;
+        if let Some(row) = pm.data.get(row_off..row_off + cols * 4) {
+            for chunk in row.chunks_exact(4) {
+                r_sum += chunk[0] as u32;
+                g_sum += chunk[1] as u32;
+                b_sum += chunk[2] as u32;
             }
         }
     }
@@ -645,11 +647,22 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
         return (255, 255, 255);
     }
 
-    (
-        ((r_sum + count / 2) / count) as u8,
-        ((g_sum + count / 2) / count) as u8,
-        ((b_sum + count / 2) / count) as u8,
-    )
+    // Power-of-2 counts (count=4 at 2× downscale): replace UDIV with shifts.
+    let half = count >> 1;
+    if count.is_power_of_two() {
+        let shift = count.trailing_zeros();
+        (
+            ((r_sum + half) >> shift) as u8,
+            ((g_sum + half) >> shift) as u8,
+            ((b_sum + half) >> shift) as u8,
+        )
+    } else {
+        (
+            ((r_sum + half) / count) as u8,
+            ((g_sum + half) / count) as u8,
+            ((b_sum + half) / count) as u8,
+        )
+    }
 }
 
 /// Check whether any pixel in the mask box is set (foreground).
@@ -664,11 +677,12 @@ fn mask_box_any(
 ) -> bool {
     let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
     let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
-    let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width.saturating_sub(1));
-    let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height.saturating_sub(1));
+    // Exclusive upper bounds, consistent with sample_area_avg.
+    let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width);
+    let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height);
 
-    for sy in y0..=y1 {
-        for sx in x0..=x1 {
+    for sy in y0..y1 {
+        for sx in x0..x1 {
             if mask.get(sx, sy) {
                 return true;
             }
