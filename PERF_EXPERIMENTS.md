@@ -5,6 +5,72 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #408 — area-avg exclusive-box bounds + power-of-2 shift — **Kept** (2026-06-18)
+
+**Issue.** #408 umbrella: close the 2× compositor gap vs DjVuLibre.
+
+**Approach.** Two related changes to `src/djvu_render.rs`:
+
+1. `sample_area_avg` and `mask_box_any`: switch x1/y1 from **inclusive** to
+   **exclusive** upper bounds. The old formula `((fx + fx_step) >> FRACBITS).min(w − 1)`
+   inclusive landed on the first pixel of the *next* output cell at exact power-of-2
+   downscale ratios, giving a 3×3 box at 2× downscale instead of the correct 2×2.
+   The fix: `((fx + fx_step) >> FRACBITS).min(w)` exclusive with `x0..x1` iteration.
+
+2. `sample_area_avg`: replace per-pixel bounds check (`data.get(off..off+3)`) with
+   one bounds check per row (`data.get(row_off..row_off + cols*4)` → `chunks_exact(4)`),
+   and replace UDIV by variable `count` with a rounding right-shift when `count` is
+   a power of 2 (the common case: count=4 at 2× downscale).
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.5.0
+- CPU: Apple M1 Max, aarch64
+- Rust: stable 1.92+, RUSTFLAGS: unset
+
+**Numbers.** All times are Criterion medians. "Baseline" = committed HEAD before
+this branch. The committed HEAD already contains the decode_scale regression
+(#377), which forces the colorbook bg plane to subsample 2 instead of 4 —
+making bg_fx_step = 32 (2× downscale into the bg plane), which hits the
+area_avg path. This makes the colorbook improvement large.
+
+```
+cargo bench --bench render -- 'render_corpus_color|render_corpus_bilevel'
+cargo bench --bench render -- 'render_compositor_only/color_downscale'
+cargo bench --bench render -- 'render_colorbook$'
+cargo bench --bench codecs -- 'iw44_to_rgb_colorbook/sub2|sub4'
+```
+
+| Benchmark | Baseline | After | Δ |
+|-----------|----------|-------|---|
+| `render_colorbook` (150 dpi, warm) | 25.5 ms | 12.2 ms | **−52%** |
+| `render_compositor_only/color_downscale_cached` | 25.2 ms | 14.4 ms | **−43%** |
+| `render_corpus_color` (300 dpi color) | 77.9 ms | 70.4 ms | **−10%** |
+| `render_corpus_bilevel` (300 dpi bilevel) | 71.9 ms | 71.5 ms | 0% (bilevel path, no area_avg) |
+| `compositor_only/color_native_cached` | 71.3 ms | 71.3 ms | 0% (bilinear path, unaffected) ✓ |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 1.339 ms | 1.353 ms | +1.0% (noise) ✓ |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 345.3 µs | 346.5 µs | +0.3% (noise) ✓ |
+
+**Explanation of improvements.**
+- `render_colorbook`: when decode_scale picks subsample 2 (wrong), bg_fx_step = 32
+  → area_avg path with 2× bg-plane downscale. Old code averaged 3×3=9 bg pixels
+  per output pixel; new code averages 2×2=4. −52%.
+- `render_corpus_color`: mask_box_any was scanning 3×3=9 bits per output pixel at
+  2× page downscale; now scans 2×2=4. −10%.
+- `render_corpus_bilevel`: bilevel pages use `composite_rows_bilevel_one` which
+  calls neither `sample_area_avg` nor `mask_box_any`. Unaffected by design. ✓
+- Bilinear path, sub2/sub4 partial decode: not touched. ✓
+
+**Output change.** The box averaging is now correct (2×2 instead of 3×3 at 2×
+downscale). Output pixel values will differ slightly from the old version but are
+closer to the mathematically correct box filter. All 608 lib tests pass.
+
+**Decision.** Kept.
+
+**Reason.** The old inclusive range was an off-by-one that inflated the box by
+one pixel in each dimension at exact-integer-ratio downscale. The fix is
+semantically correct, yields 2-3× speedup in the area_avg path, and leaves all
+non-area_avg paths (bilinear, bilevel, partial decode) statistically unchanged.
+
 ### Cross-size JB2 record-6 refinement emitter (#322) — **Reverted / kept disabled** (2026-06-15)
 
 **Issue.** #322: build an *experiment-only* cross-size record-6 refinement
