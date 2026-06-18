@@ -1915,22 +1915,22 @@ mod tests {
         let carte = std::fs::read(assets_path().join("carte.djvu")).unwrap();
         // Find TH44 in the raw bytes and extract chunk payload
         let th44_pos = carte.windows(4).position(|w| w == b"TH44");
-        if let Some(pos) = th44_pos {
-            if pos + 8 <= carte.len() {
-                let chunk_len = u32::from_be_bytes([
-                    carte[pos + 4],
-                    carte[pos + 5],
-                    carte[pos + 6],
-                    carte[pos + 7],
-                ]) as usize;
-                let chunk_data = carte.get(pos + 8..pos + 8 + chunk_len).unwrap_or(&[]);
-                if !chunk_data.is_empty() {
-                    let page = page_with_chunks(&[(b"TH44", chunk_data)]);
-                    // This should decode successfully (covers lines 298-303)
-                    let thumb = page.thumbnail();
-                    assert!(thumb.is_ok(), "thumbnail decode should not error");
-                    // The thumbnail may or may not be Some depending on IW44 data validity
-                }
+        if let Some(pos) = th44_pos
+            && pos + 8 <= carte.len()
+        {
+            let chunk_len = u32::from_be_bytes([
+                carte[pos + 4],
+                carte[pos + 5],
+                carte[pos + 6],
+                carte[pos + 7],
+            ]) as usize;
+            let chunk_data = carte.get(pos + 8..pos + 8 + chunk_len).unwrap_or(&[]);
+            if !chunk_data.is_empty() {
+                let page = page_with_chunks(&[(b"TH44", chunk_data)]);
+                // This should decode successfully (covers lines 298-303)
+                let thumb = page.thumbnail();
+                assert!(thumb.is_ok(), "thumbnail decode should not error");
+                // The thumbnail may or may not be Some depending on IW44 data validity
             }
         }
     }
@@ -2114,8 +2114,10 @@ mod tests {
         use crate::metadata::{DjVuMetadata, encode_metadata};
 
         let info = make_info(100, 100);
-        let mut meta = DjVuMetadata::default();
-        meta.author = Some("TestAuthor".into());
+        let meta = DjVuMetadata {
+            author: Some("TestAuthor".into()),
+            ..DjVuMetadata::default()
+        };
         let meta_bytes = encode_metadata(&meta);
         if meta_bytes.is_empty() {
             return; // encode returned empty — nothing to test
@@ -2300,7 +2302,8 @@ mod tests {
         std::fs::write(&abs_name, &chicken).expect("write tmp component");
         let abs_name_str = abs_name.to_str().unwrap().to_string();
 
-        let dirm_payload = DirmPayload::build_indirect(1, &[0x01], &[abs_name_str.clone()]);
+        let dirm_payload =
+            DirmPayload::build_indirect(1, &[0x01], std::slice::from_ref(&abs_name_str));
         let dirm = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
