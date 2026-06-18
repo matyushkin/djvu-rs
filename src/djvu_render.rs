@@ -1885,6 +1885,15 @@ fn composite_rows_bilinear_one(
         return;
     }
 
+    // B1: hoist bg_fy (row-invariant) and replace per-pixel u64 mul for bg_fx with
+    // an exact u64 accumulator (add per pixel instead of multiply).
+    // bg_fx_q tracks (page_frac + FRAC/2) * bg_x_q24 in Q48; >> 24 gives the
+    // FRAC-fixed-point coordinate; subtract FRAC/2 to get the centered sample pos.
+    let bg_fy_hoist = ctx.bg.map(|_| map_plane_center_frac(fy, ctx.bg_y_q24));
+    let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
+    let mut bg_fx_q: u64 =
+        (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
@@ -1905,9 +1914,8 @@ fn composite_rows_bilinear_one(
                 (0, 0, 0)
             }
         } else if let Some(bg) = ctx.bg {
-            let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
-            let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
-            sample_bilinear(bg, bg_fx, bg_fy)
+            let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+            sample_bilinear(bg, bg_fx, bg_fy_hoist.unwrap_or(0))
         } else {
             (255, 255, 255)
         };
@@ -1916,6 +1924,7 @@ fn composite_rows_bilinear_one(
         pixel[1] = ctx.gamma_lut[g as usize];
         pixel[2] = ctx.gamma_lut[b as usize];
         // alpha written by fill_alpha_255 in composite_rows
+        bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
     }
 }
 
