@@ -2569,3 +2569,30 @@ copy would be faster.
 **Reason.** LLVM already auto-vectorizes the j-loop for mb=0, optimizing away
 the `& 0xFF` no-op and emitting equivalent SIMD copy instructions. The extra
 branch overhead of the fast path matched the cost it avoided.
+
+### AA1 — B1-style u64 accumulator for `bg_fx` in area-avg path — **Reverted** (2026-06-18)
+
+**Issue.** `composite_rows_area_avg_one` computes `bg_fx = ((fx * bg_x_q24) >> 24)`
+per pixel (u64 multiply + shift), analogous to the per-pixel multiply that B1
+eliminated in the bilinear path.
+
+**Approach.** Replace with a u64 accumulator starting at
+`offset_x * fx_step * bg_x_q24`, stepping by `fx_step * bg_x_q24` per pixel.
+Also hoist row-invariant `fg_fy` and `fg_fy_step` out of the inner loop.
+
+**Numbers:**
+- `render_colorbook`: +1.8% (regression)
+- `render_corpus_color`: +2.2% (regression — does NOT use area-avg path)
+- `render_corpus_bilevel`: +4% (regression — does NOT use area-avg path)
+
+**Decision.** Reverted.
+
+**Reason.** `composite_rows_area_avg_one` is marked `#[inline]` and is inlined
+into the render loop alongside `composite_rows_bilinear_one`. Adding code to
+the area-avg function increases the total inlined code size in the render loop,
+degrading instruction-cache locality for corpus pages that only ever take the
+bilinear path. Removing `#[inline]` or using `#[inline(never)]` also causes
+regression because LLVM can no longer hoist the `if downscale` dispatch out of
+the per-row loop. B1 worked because its additions were in `bilinear_from_rows`
+(called from the hot path) and directly reduced per-pixel work; area-avg
+additions add dead code to the hot path's code layout.
