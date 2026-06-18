@@ -2453,3 +2453,70 @@ Cumulative improvement from session baseline (before all experiments):
 LLVM vectorize the write loop. The `gamma_is_identity` flag costs one boolean
 comparison per row (negligible) and correctly falls back to full LUT for
 non-standard gamma values.
+
+### E1 — no-mask bulk memcpy for tight 1:1 gamma-identity path — **Kept** (2026-06-18)
+
+**Issue.** The tight 1:1 no-mask path (pure background copy, no foreground mask)
+wrote pixels one-by-one with per-pixel bounds checks even when the BG pixmap is
+guaranteed to cover the full output width.
+
+**Approach.** When `bg.width >= out_w` and `gamma_is_identity`, replace the
+per-pixel loop with a single `copy_from_slice` (i.e., `memcpy`). LLVM and the
+platform memcpy implementation apply SIMD bulk copy; `fill_alpha_255` corrects
+the alpha channel afterwards as usual.
+
+**Numbers:** modest; corpus_color −1.3% (no-mask pages). No impact on
+corpus_bilevel (bilevel always has a mask layer).
+
+**Decision.** Kept.
+
+**Reason.** Clean single-call copy is the right abstraction for a full-row copy.
+The fallback path is unchanged for edge cases where BG is narrower.
+
+### E2 — specialized no-mask bilinear loop (early return) — **Reverted** (2026-06-18)
+
+**Issue.** When `mask_hoist.is_none()`, the bilinear inner loop always takes the
+`else` branch of `is_fg`, yet the per-pixel branch is still evaluated each
+iteration.
+
+**Approach.** Added an early-return block before the main loop: if no mask and
+gamma is identity, run a stripped-down loop with only the bilinear sample + write,
+then return.
+
+**Numbers:** `render_corpus_color` +6% (p=0.00) — regression.
+
+**Decision.** Reverted immediately.
+
+**Reason.** The early return created a second loop body, doubling the code size
+for the bilinear path. Instruction cache pressure and reduced inlining headroom
+outweighed the per-pixel branch savings. The corpus_color pages also have mask
+layers, so the fast path was never taken — the overhead of the outer `if` check
+remained with no benefit.
+
+### F3 — 4-byte pixel read in `bilinear_from_rows` — **Kept** (2026-06-18)
+
+**Issue.** `bilinear_from_rows` read each of the 4 bilinear-grid corner pixels as
+a 3-byte slice (`off..off+3`). No 3-byte load instruction exists on any target;
+LLVM must emit a 16-bit + 8-bit load pair, adding an instruction and lengthening
+the dependency chain.
+
+**Approach.** Since every pixel is stored as RGBA (4 bytes), change the get
+closure to `row.get(off..off+4)`. The bounds check is still valid because
+`x ≤ width-1` guarantees `x*4 + 4 ≤ width*4 = row.len()`. LLVM can now emit a
+single 32-bit load per corner.
+
+**Numbers:**
+
+| Benchmark | Before F3 | After F3 | Δ |
+|-------|--------|-------|--------|
+| `render_corpus_color` | 45.6 ms | 44.8 ms | −1.8% |
+| `compositor_only/color_native_cached` | 44.8 ms | 44.3 ms | −1.1% |
+
+**Decision.** Kept.
+
+**Reason.** Turning a 3-byte load into a 32-bit load is always strictly better;
+the 4th byte (alpha) is harmlessly ignored by the caller.
+
+Cumulative improvement from session baseline:
+- `render_corpus_color`: 70.9 ms → 44.8 ms = **−36.8%**
+- `render_corpus_bilevel`: 73.3 ms → 45.2 ms = **−38.3%**

@@ -620,9 +620,10 @@ fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) ->
     let x1 = (x0 + 1).min(w);
     let tx = fx & FRAC_MASK;
 
+    // Read 4 bytes (RGBA) per pixel — a single 32-bit load on all targets.
     let get = |row: &[u8], x: usize| -> (u8, u8, u8) {
         let off = x * 4;
-        if let Some(q) = row.get(off..off + 3) {
+        if let Some(q) = row.get(off..off + 4) {
             (q[0], q[1], q[2])
         } else {
             (0, 0, 0)
@@ -1891,17 +1892,24 @@ fn composite_rows_bilinear_one(
                     // No mask: pure background copy with gamma correction.
                     // D1: hoist gamma identity check outside the pixel loop.
                     if ctx.gamma_is_identity {
-                        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                            let px = ox.min((bg.width as usize).saturating_sub(1));
-                            let off = px * 4;
-                            if let Some(q) = bg_row.get(off..off + 3) {
-                                pixel[0] = q[0];
-                                pixel[1] = q[1];
-                                pixel[2] = q[2];
-                            } else {
-                                pixel[0] = 255;
-                                pixel[1] = 255;
-                                pixel[2] = 255;
+                        let out_w = row_buf.len() / 4;
+                        // E1: when bg covers the full output width, bulk-copy the row
+                        // via memcpy (fill_alpha_255 fixes the alpha channel afterwards).
+                        if bg.width as usize >= out_w {
+                            row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
+                        } else {
+                            for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                                let px = ox.min((bg.width as usize).saturating_sub(1));
+                                let off = px * 4;
+                                if let Some(q) = bg_row.get(off..off + 3) {
+                                    pixel[0] = q[0];
+                                    pixel[1] = q[1];
+                                    pixel[2] = q[2];
+                                } else {
+                                    pixel[0] = 255;
+                                    pixel[1] = 255;
+                                    pixel[2] = 255;
+                                }
                             }
                         }
                     } else {
