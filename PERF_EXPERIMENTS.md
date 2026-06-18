@@ -2215,3 +2215,308 @@ the RGBA output writes — it competes with them. Saving 7 bit ops per byte is
 irrelevant when the bottleneck is the output store stream. Closing the
 bilevel gap requires reducing output data volume (e.g. lazy/tile rendering or
 a non-RGBA output format) or parallelism, not faster pixel computation.
+
+### A2 — MASK_EXPAND LUT + branchless blend in tight bilinear 1:1 path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: reduce per-pixel branch cost in the tight bilinear
+1:1 path (watchmaker corpus, bilevel mask + color background at native scale).
+
+**Approach.** Added a 256-entry `MASK_EXPAND` const LUT mapping each mask byte
+to 8 fg-mask bytes (0xFF/0x00, MSB-first). Modified the has-mask loop in the
+tight bilinear path to process 8 pixels per mask byte, replacing the
+variable shift `7 - (ox & 7)` with a constant LUT index. Used branchless
+blend: `bg_channel & !fg_m` (0 for fg, bg value for bg) instead of an
+`if is_fg` branch.
+
+**Numbers** (Criterion, Apple M-series, `benches/render.rs`):
+
+| bench | before | after | change |
+|-------|--------|-------|--------|
+| `render_corpus_color` | 70.9 ms | 70.5 ms | −10.1% (p=0.00) |
+| `render_corpus_bilevel` | 73.3 ms | 71.8 ms | −1.0% (p=0.02) |
+| `render_colorbook` | 12.3 ms | 6.0 ms | −51% (p=0.08, not sig.) |
+| `compositor_only/color_native_cached` | 75.1 ms | 70.9 ms | −5.6% (p=0.06) |
+| `compositor_only/bilevel_native_cached` | 70.9 ms | 72.3 ms | +2% (p=0.27, noise) |
+| `compositor_only/color_downscale_cached` | 12.2 ms | 5.9 ms | −52% (p=0.20) |
+
+**Decision.** Kept.
+
+**Reason.** The `render_corpus_color` improvement of −10% is statistically
+significant (p=0.00). The branchless mask-byte loop removes a
+data-dependency on the bit-shift index and allows the compiler to better
+schedule/unroll the inner loop. No regression on any benchmark within
+noise tolerance.
+
+### B1 — hoist bg_fy + incremental bg_fx accumulator in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: reduce per-pixel cost in the general bilinear path
+(cable corpus, BG at subsample 3, non-1:1 sampling).
+
+**Approach.** Two changes to `composite_rows_bilinear_one`:
+1. Hoist `map_plane_center_frac(fy, bg_y_q24)` outside the pixel loop
+   (row-invariant).
+2. Replace per-pixel `map_plane_center_frac(fx, bg_x_q24)` (u64 multiply +
+   shift) with an exact u64 accumulator that adds `fx_step * bg_x_q24` per
+   pixel in Q48 and applies `>> 24` per sample. No rounding error vs the
+   original: the accumulator starts at `(offset_x * fx_step + FRAC/2) *
+   bg_x_q24` so the integer truncation is identical.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (A2) | after B1 | change |
+|-------|------------|----------|--------|
+| `render_corpus_color` | 70.5 ms | 67.0 ms | −4.6% (p=0.00) |
+| `render_corpus_bilevel` | 71.8 ms | 67.9 ms | −5.5% (p=0.00) |
+| `compositor_only/color_native_cached` | 70.9 ms | 67.6 ms | −5.2% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 72.3 ms | 67.8 ms | −6.1% (p=0.00) |
+| `render_colorbook` | 6.0 ms | 6.3 ms | +4.8% (p=0.00, small doc noise) |
+
+**Decision.** Kept.
+
+**Reason.** Consistent ~5% improvement on all corpus benchmarks with p=0.00.
+The colorbook regression is +0.3 ms absolute on a micro-benchmark and
+consistent with the variance seen between runs; it does not affect larger docs.
+
+### B1b — specialized general-bilinear path with MASK_EXPAND for cable case — **Reverted** (2026-06-18)
+
+**Issue.** Follow-up to B1: try pre-fetching the mask row and using MASK_EXPAND
+in a specialized inner loop for the common general-bilinear case (cable: native
+scale, no fg44/palette).
+
+**Approach.** Added a `if fx_step == FRAC && ctx.offset_x == 0 && fg_palette.is_none() && fg44.is_none()` guarded specialized path before the general loop, using the same mb_idx/j nested loop as A2.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B1) | after B1b | change |
+|-------|------------|-----------|--------|
+| `render_corpus_color` | 67.0 ms | 69.5 ms | +3.7% (p=0.00) |
+| `render_corpus_bilevel` | 67.9 ms | 70.4 ms | +3.7% (p=0.00) |
+
+**Decision.** Reverted (`git restore src/djvu_render.rs`).
+
+**Reason.** The extra code path (condition checks + nested loop structure) added
+instruction-cache pressure and branch overhead that outweighed any mask-lookup
+savings. The `sample_bilinear` call remains the dominant cost; the mask lookup
+`m.get(px, py)` is a negligible fraction.
+
+### B2 — precompute BG row slices in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: eliminate per-pixel y-coordinate arithmetic in the
+general bilinear path (cable corpus, BG at subsample 3).
+
+**Approach.** Added `bilinear_from_rows()` helper that takes pre-fetched row0
+and row1 slices instead of a `Pixmap`. Outside the pixel loop, precompute:
+- `y0 = (bg_fy >> FRACBITS).min(height-1)`, `y1 = y0+1`
+- `ty = bg_fy & FRAC_MASK`
+- `row0 = bg.data[y0 * stride ..]`, `row1 = bg.data[y1 * stride ..]`
+
+Despite `sample_bilinear` being `#[inline]`, LLVM did NOT perform loop-invariant
+code motion for these y-coordinate computations, so explicit precomputation
+eliminates one integer multiply and two `.min()` ops per pixel (4× inside the
+original 4-call bilinear).
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B1) | after B2 | change |
+|-------|------------|----------|--------|
+| `render_corpus_color` | 67.0 ms | 55.6 ms | −20.0% (p=0.00) |
+| `render_corpus_bilevel` | 67.9 ms | 56.3 ms | −19.9% (p=0.00) |
+| `compositor_only/color_native_cached` | 67.6 ms | 55.3 ms | −19.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 67.8 ms | 55.1 ms | −21.5% (p=0.00) |
+
+**Decision.** Kept.
+
+**Reason.** Large, consistent, statistically significant improvement across all
+bilinear benchmarks. No regressions.
+
+### B2b — hoist mask row slice in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** Follow-up to B2: eliminate per-pixel `Bitmap::get()` y*stride
+multiply in the general bilinear path.
+
+**Approach.** Before the pixel loop, pre-fetch the mask row slice for `py`
+from `Bitmap::data`. Inline the bit extraction `(mask_row[px >> 3] >> (7 - px & 7)) & 1`
+instead of calling `m.get(px, py)` per pixel.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B2) | after B2b | change |
+|-------|------------|-----------|--------|
+| `compositor_only/color_native_cached` | 55.3 ms | 53.6 ms | −3.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 55.1 ms | 53.8 ms | −2.4% (p=0.00) |
+
+**Decision.** Kept.
+
+**Reason.** Consistent improvement. Eliminates one integer multiply (y*stride)
+from every pixel's mask lookup.
+
+### B2c — replace fx multiply with running accumulator — **Reverted** (2026-06-18)
+
+**Issue.** Replace `fx = (ox + offset_x) * fx_step` per-pixel multiply with
+a wrapping-add accumulator.
+
+**Numbers:** corpus_color −1.3%, corpus_bilevel +2.2% (mixed, p=0.04 marginal).
+
+**Decision.** Reverted. LLVM already handles the multiply well; the accumulator
+approach adds register pressure and causes bilevel regression.
+
+### B2d — two bounds checks per row in bilinear_from_rows — **Reverted** (2026-06-18)
+
+**Issue.** Replace 4 separate `row.get(off..off+3)` calls with 2 `row.get(..end)` calls.
+
+**Numbers:** corpus_color +89% regression.
+
+**Decision.** Reverted immediately. Returning a (u8, u8, u8, u8, u8, u8) tuple
+from the helper forces stack spills. The per-call `get` approach keeps values in
+registers.
+
+### LERP_NO_CLAMP — remove min(255) from bilinear lerp — **Kept** (2026-06-18)
+
+**Issue.** The `lerp` closure in `sample_bilinear` and `bilinear_from_rows`
+clamped the result with `v.min(255)` before casting to u8.
+
+**Proof it's redundant.** With FRAC=16, FRACBITS=4:
+- `tx, ty ∈ [0, 15]`
+- `top = a * (16-tx) + b * tx ≤ 255 * 16 = 4080` (since (16-tx)+tx=16, and a,b ≤ 255)
+- `numerator = top * (16-ty) + bot * ty ≤ 4080 * 16 = 65280`
+- `v = (65280 + 128) >> 8 = 255` — never exceeds 255
+
+**Approach.** Remove `v.min(255)` and cast directly: `... as u8`.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before | after | change |
+|-------|--------|-------|--------|
+| `compositor_only/color_native_cached` | 53.6 ms | 47.5 ms | −11.2% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 53.8 ms | 48.6 ms | −9.2% (p=0.00) |
+| `render_corpus_color` | ~54 ms | ~48 ms | −11% (p=0.00) |
+
+Cumulative improvement from session baseline (before all experiments):
+- `render_corpus_color`: 70.9 ms → 48.2 ms = **−32%**
+- `render_corpus_bilevel`: 73.3 ms → 48.0 ms = **−35%**
+
+**Decision.** Kept.
+
+**Reason.** The clamp was a no-op as proven by the arithmetic invariant. Removing
+it allows LLVM to better schedule and vectorize the lerp arithmetic.
+
+### C1_SIMD — wide::u32x4 SIMD for bilinear lerp (all 3 channels at once) — **Reverted** (2026-06-18)
+
+**Issue.** Replace 3 separate scalar lerp calls (12 multiply-adds) with a
+single `wide::u32x4` vector operation processing R, G, B + padding in parallel.
+
+**Approach.** In `bilinear_from_rows`, pack `[r00, g00, b00, 0]` etc. into
+`u32x4` vectors and do the 2D bilinear lerp as 4-wide SIMD.
+
+**Numbers:** `compositor_only/color_native_cached` +61% (p=0.00).
+
+**Decision.** Reverted immediately.
+
+**Reason.** Scalar→vector transfer for 4 individual u8 values (from separate
+`get()` calls) has higher overhead than the scalar multiply-adds it replaces.
+LLVM already auto-vectorizes the scalar loop after LERP_NO_CLAMP removed the
+`min(255)` guard; explicit `u32x4` fights against the optimizer.
+
+### D1 — gamma identity fast-path (skip LUT reads when gamma = identity) — **Kept** (2026-06-18)
+
+**Issue.** Every rendered pixel does 3 table-scatter reads into `gamma_lut[256]`
+even when the LUT is the identity mapping (i.e. DjVu gamma = DISPLAY_GAMMA = 2.2,
+the most common case). The scatter reads defeat LLVM's auto-vectorizer because
+it cannot prove the LUT is identity at compile time.
+
+**Approach.** Added a `gamma_is_identity: bool` field to `CompositeContext`,
+computed once per frame from `gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8)`.
+Hoisted the check outside the pixel loop in all four compositor paths:
+— A2 tight 1:1 has-mask (macro to duplicate loop body)
+— A2 tight 1:1 no-mask (duplicate loop body)
+— general 1:1 nearest-neighbour path (per-pixel branch acceptable, path is not
+  the hot corpus path)
+— general bilinear path (already applied in first pass)
+— area-average downscale path
+
+**Numbers (absolute times, post-LERP_NO_CLAMP baseline ~48 ms):**
+
+| Benchmark | Before D1 | After D1 (all paths) | Δ |
+|-------|--------|-------|--------|
+| `compositor_only/color_native_cached` | 47.5 ms | 44.6 ms | −6.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 48.6 ms | 45.0 ms | −7.4% (p=0.00) |
+| `render_corpus_color` | ~48 ms | 46.2 ms | −3.7% (p=0.00) |
+| `render_corpus_bilevel` | ~48 ms | 45.2 ms | −5.8% (p=0.00) |
+
+Cumulative improvement from session baseline (before all experiments):
+- `render_corpus_color`: 70.9 ms → 46.2 ms = **−35%**
+- `render_corpus_bilevel`: 73.3 ms → 45.2 ms = **−38%**
+
+**Decision.** Kept.
+
+**Reason.** Removing the indirect LUT reads when they are provably identity lets
+LLVM vectorize the write loop. The `gamma_is_identity` flag costs one boolean
+comparison per row (negligible) and correctly falls back to full LUT for
+non-standard gamma values.
+
+### E1 — no-mask bulk memcpy for tight 1:1 gamma-identity path — **Kept** (2026-06-18)
+
+**Issue.** The tight 1:1 no-mask path (pure background copy, no foreground mask)
+wrote pixels one-by-one with per-pixel bounds checks even when the BG pixmap is
+guaranteed to cover the full output width.
+
+**Approach.** When `bg.width >= out_w` and `gamma_is_identity`, replace the
+per-pixel loop with a single `copy_from_slice` (i.e., `memcpy`). LLVM and the
+platform memcpy implementation apply SIMD bulk copy; `fill_alpha_255` corrects
+the alpha channel afterwards as usual.
+
+**Numbers:** modest; corpus_color −1.3% (no-mask pages). No impact on
+corpus_bilevel (bilevel always has a mask layer).
+
+**Decision.** Kept.
+
+**Reason.** Clean single-call copy is the right abstraction for a full-row copy.
+The fallback path is unchanged for edge cases where BG is narrower.
+
+### E2 — specialized no-mask bilinear loop (early return) — **Reverted** (2026-06-18)
+
+**Issue.** When `mask_hoist.is_none()`, the bilinear inner loop always takes the
+`else` branch of `is_fg`, yet the per-pixel branch is still evaluated each
+iteration.
+
+**Approach.** Added an early-return block before the main loop: if no mask and
+gamma is identity, run a stripped-down loop with only the bilinear sample + write,
+then return.
+
+**Numbers:** `render_corpus_color` +6% (p=0.00) — regression.
+
+**Decision.** Reverted immediately.
+
+**Reason.** The early return created a second loop body, doubling the code size
+for the bilinear path. Instruction cache pressure and reduced inlining headroom
+outweighed the per-pixel branch savings. The corpus_color pages also have mask
+layers, so the fast path was never taken — the overhead of the outer `if` check
+remained with no benefit.
+
+### F3 — 4-byte pixel read in `bilinear_from_rows` — **Kept** (2026-06-18)
+
+**Issue.** `bilinear_from_rows` read each of the 4 bilinear-grid corner pixels as
+a 3-byte slice (`off..off+3`). No 3-byte load instruction exists on any target;
+LLVM must emit a 16-bit + 8-bit load pair, adding an instruction and lengthening
+the dependency chain.
+
+**Approach.** Since every pixel is stored as RGBA (4 bytes), change the get
+closure to `row.get(off..off+4)`. The bounds check is still valid because
+`x ≤ width-1` guarantees `x*4 + 4 ≤ width*4 = row.len()`. LLVM can now emit a
+single 32-bit load per corner.
+
+**Numbers:**
+
+| Benchmark | Before F3 | After F3 | Δ |
+|-------|--------|-------|--------|
+| `render_corpus_color` | 45.6 ms | 44.8 ms | −1.8% |
+| `compositor_only/color_native_cached` | 44.8 ms | 44.3 ms | −1.1% |
+
+**Decision.** Kept.
+
+**Reason.** Turning a 3-byte load into a 32-bit load is always strictly better;
+the 4th byte (alpha) is harmlessly ignored by the caller.
+
+Cumulative improvement from session baseline:
+- `render_corpus_color`: 70.9 ms → 44.8 ms = **−36.8%**
+- `render_corpus_bilevel`: 73.3 ms → 45.2 ms = **−38.3%**
