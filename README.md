@@ -484,13 +484,13 @@ after the full workspace run produced noisy render outliers.
 
 | Benchmark | Time |
 |-----------|-----:|
-| `render_page/dpi/72` | **246 µs** |
+| `render_page/dpi/72` | **211 µs** |
 | `render_page/dpi/144` | **938 µs** |
 | `render_page/dpi/300` | **3.59 ms** |
-| `render_colorbook` (150 dpi, warm) | **7.22 ms** |
-| `render_colorbook_cold` | **18.8 ms** |
-| `render_corpus_color` (native 600 dpi) | **71.2 ms** |
-| `render_corpus_bilevel` (native 600 dpi) | **75.4 ms** |
+| `render_colorbook` (150 dpi, warm) | **7.11 ms** |
+| `render_colorbook_cold` | **18.0 ms** |
+| `render_corpus_color` (native 600 dpi) | **73.1 ms** |
+| `render_corpus_bilevel` (native 600 dpi) | **73.8 ms** |
 | `render_native_stages/render_streaming_discard` (color) | **70.2 ms** |
 | `jb2_decode` | **132 µs** |
 | `iw44_decode_first_chunk` | **592 µs** |
@@ -509,17 +509,17 @@ The benchmark workflow still runs a DjVuLibre comparison via
 [`scripts/bench_djvulibre.sh`](scripts/bench_djvulibre.sh) and formats it with
 [`scripts/djvulibre_compare.py`](scripts/djvulibre_compare.py).
 
-Current local matrix (2026-05-17):
+Current local matrix (2026-06-18):
 
 | Scenario | djvu-rs | DjVuLibre | Ratio |
 |----------|--------:|----------:|------:|
-| Small color IW44, 72 dpi | **246 µs** | **159 µs** | DjVuLibre **1.5x faster** |
-| Large color IW44, 150 dpi | **7.22 ms** | **5.96 ms** | DjVuLibre **1.2x faster** |
-| Native color corpus, 300 dpi | **71.2 ms** | **36.44 ms** | DjVuLibre **2.0x faster** |
-| Native bilevel JB2 corpus, 300 dpi | **75.45 ms** | **35.25 ms** | DjVuLibre **2.1x faster** |
+| Small color IW44, 72 dpi | **211 µs** | **147 µs** | DjVuLibre **1.4x faster** |
+| Large color IW44, 150 dpi | **7.11 ms** | **5.90 ms** | DjVuLibre **1.2x faster** |
+| Native color corpus, 300 dpi | **73.1 ms** | **36.0 ms** | DjVuLibre **2.0x faster** |
+| Native bilevel JB2 corpus, 300 dpi | **73.8 ms** | **35.2 ms** | DjVuLibre **2.1x faster** |
 
 The same workflow also records `ddjvu` CLI timings for these files
-(30.6-79.8 ms locally), including process startup and PPM output.
+(31.1–75.1 ms locally), including process startup and PPM output.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for the full Criterion
 run, methodology, and the full DjVuLibre comparison. Historical multi-platform
