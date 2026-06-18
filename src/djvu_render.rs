@@ -2486,6 +2486,18 @@ mod tests {
     }
 
     #[test]
+    fn plane_q24_some_branch_with_zero_dimension_plane() {
+        // Lines 508-512: plane_q24 Some(p) arm, reached via fg_q24 when fg has
+        // zero width (so fg_q24's inner guard p.width > 0 fails, falling through
+        // to plane_q24). With page_w > 0 && page_h > 0, plane_q24 takes its
+        // Some arm and returns (0/page_w, 0/page_h) = (0, 0).
+        let zero_width_fg = Pixmap::new(0, 10, 0, 0, 0, 0);
+        let (qx, qy) = fg_q24(Some(&zero_width_fg), 100, 100);
+        assert_eq!(qx, 0); // (0 << 24) / 100 = 0
+        assert_eq!(qy, (10u64 << 24) / 100); // height-based ratio
+    }
+
+    #[test]
     fn fg_q24_uses_integer_horizontal_cell_pitch() {
         let fg = Pixmap::white(189, 306);
         let (qx, qy) = fg_q24(Some(&fg), 2260, 3669);
@@ -3959,7 +3971,11 @@ mod tests {
     fn render_gray8_produces_grayscale_output() {
         let doc = load_doc("boy_jb2.djvu");
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 20, height: 20, ..Default::default() };
+        let opts = RenderOptions {
+            width: 20,
+            height: 20,
+            ..Default::default()
+        };
         let gpm = render_gray8(page, &opts).expect("render_gray8 should succeed");
         assert_eq!(gpm.width, 20);
         assert_eq!(gpm.height, 20);
@@ -3971,7 +3987,11 @@ mod tests {
     fn render_coarse_rejects_zero_dimensions() {
         let doc = load_doc("chicken.djvu");
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 0, height: 50, ..Default::default() };
+        let opts = RenderOptions {
+            width: 0,
+            height: 50,
+            ..Default::default()
+        };
         let err = render_coarse(page, &opts).unwrap_err();
         assert!(matches!(err, RenderError::InvalidDimensions { .. }));
     }
@@ -3981,9 +4001,16 @@ mod tests {
     fn render_coarse_jb2_only_page_returns_none() {
         let doc = load_doc("boy_jb2.djvu");
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 40, height: 40, ..Default::default() };
+        let opts = RenderOptions {
+            width: 40,
+            height: 40,
+            ..Default::default()
+        };
         let result = render_coarse(page, &opts).expect("should not error");
-        assert!(result.is_none(), "JB2-only page has no BG44 so render_coarse yields None");
+        assert!(
+            result.is_none(),
+            "JB2-only page has no BG44 so render_coarse yields None"
+        );
     }
 
     /// render_progressive rejects zero dimensions.
@@ -3991,7 +4018,11 @@ mod tests {
     fn render_progressive_rejects_zero_dimensions() {
         let doc = load_doc("chicken.djvu");
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 0, height: 50, ..Default::default() };
+        let opts = RenderOptions {
+            width: 0,
+            height: 50,
+            ..Default::default()
+        };
         let err = render_progressive(page, &opts, 0).unwrap_err();
         assert!(matches!(err, RenderError::InvalidDimensions { .. }));
     }
@@ -4001,8 +4032,13 @@ mod tests {
     fn render_progressive_jb2_only_page_succeeds() {
         let doc = load_doc("boy_jb2.djvu");
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 40, height: 40, ..Default::default() };
-        let result = render_progressive(page, &opts, 0).expect("render_progressive should succeed even without BG44");
+        let opts = RenderOptions {
+            width: 40,
+            height: 40,
+            ..Default::default()
+        };
+        let result = render_progressive(page, &opts, 0)
+            .expect("render_progressive should succeed even without BG44");
         assert_eq!(result.width, 40);
         assert_eq!(result.height, 40);
     }
@@ -4040,7 +4076,7 @@ mod tests {
 
     /// Build a minimal single-page DJVU document with the given width and height.
     fn make_doc_with_dims(w: u16, h: u16) -> Vec<u8> {
-        use crate::iff::{DjvuFile, Chunk, emit};
+        use crate::iff::{Chunk, DjvuFile, emit};
         let mut info = vec![0u8; 10];
         info[0] = (w >> 8) as u8;
         info[1] = w as u8;
@@ -4050,7 +4086,10 @@ mod tests {
             root: Chunk::Form {
                 secondary_id: *b"DJVU",
                 length: 0,
-                children: vec![Chunk::Leaf { id: *b"INFO", data: info }],
+                children: vec![Chunk::Leaf {
+                    id: *b"INFO",
+                    data: info,
+                }],
             },
         };
         emit(&file)
@@ -4103,6 +4142,22 @@ mod tests {
             ..Default::default()
         };
         assert!(opts.can_stream(page));
+    }
+
+    /// Rendering a JB2-only (no BG44) page at very small scale triggers
+    /// subsample >= 4 and exercises bg44_partial's empty-chunks path (line 918).
+    #[test]
+    fn render_bilevel_at_tiny_scale_exercises_bg44_partial_empty() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        // Use a tiny width so decode_scale << 0.25 and best_iw44_subsample >= 4.
+        let opts = RenderOptions {
+            width: 10,
+            height: 10,
+            ..Default::default()
+        };
+        let pm = render_pixmap(page, &opts).expect("tiny bilevel render should succeed");
+        assert!(pm.width > 0 && pm.height > 0);
     }
 
     /// Bold dilation (opts.bold > 0) thickens the mask.

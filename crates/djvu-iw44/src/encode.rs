@@ -2036,6 +2036,18 @@ mod tests {
         assert!(avg < 10.0, "flat avg error = {avg:.2} (expected < 10)");
     }
 
+    // Lines 426-432: tail loop in forward_row_pass for widths not a multiple of 8.
+    #[test]
+    fn encode_odd_width_roundtrips() {
+        // width=10 means the main 8-wide loop runs once (cols 0-7), then the
+        // tail loop runs twice (cols 8-9), covering lines 426-432.
+        let src = make_pixmap(10, 8, |x, y| ((x * 25) as u8, (y * 32) as u8, 128));
+        let opts = Iw44EncodeOptions::default();
+        let chunks = encode_iw44_color(&src, &opts);
+        let decoded = decode_color(&chunks);
+        assert_eq!((decoded.width, decoded.height), (10, 8));
+    }
+
     #[test]
     fn gray_low_error_many_slices() {
         // Test grayscale roundtrip quality — avoids the YCbCr color-space mismatch.
@@ -2057,5 +2069,21 @@ mod tests {
         }
         let avg = total as f64 / (64.0 * 64.0);
         assert!(avg < 30.0, "avg gray abs error = {avg:.2} (expected < 30)");
+    }
+
+    // Lines 1230, 1261-1268, 1441: chroma_half=false path in encode_iw44_color.
+    #[test]
+    fn encode_color_chroma_full_roundtrips() {
+        let src = make_pixmap(32, 32, |x, y| ((x * 8) as u8, (y * 8) as u8, 128));
+        let opts = Iw44EncodeOptions {
+            chroma_half: false,
+            ..Default::default()
+        };
+        let chunks = encode_iw44_color(&src, &opts);
+        assert!(!chunks.is_empty());
+        // delay_byte bit 7 should be set (0x80) for color + !chroma_half
+        assert_eq!(chunks[0][8] & 0x80, 0x80, "delay_byte bit 7 must be set");
+        let decoded = decode_color(&chunks);
+        assert_eq!((decoded.width, decoded.height), (32, 32));
     }
 }

@@ -190,7 +190,10 @@ mod tests {
         let result = decode_png_to_pixmap(&path);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unsupported") || msg.contains("bit depth") || msg.contains("Sixteen"), "msg={msg}");
+        assert!(
+            msg.contains("unsupported") || msg.contains("bit depth") || msg.contains("Sixteen"),
+            "msg={msg}"
+        );
     }
 
     #[test]
@@ -209,7 +212,10 @@ mod tests {
         let result = decode_png_to_pixmap(&path);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("indexed") || msg.contains("Indexed"), "msg={msg}");
+        assert!(
+            msg.contains("indexed") || msg.contains("Indexed"),
+            "msg={msg}"
+        );
     }
 
     #[test]

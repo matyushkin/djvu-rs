@@ -142,3 +142,81 @@ pub(crate) fn render_at_dpi(
 pub(crate) fn map_render_err(e: RenderError) -> ForeignError {
     ForeignError::Decode(e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chicken_bytes() -> Vec<u8> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("references/djvujs/library/assets/chicken.djvu");
+        std::fs::read(&path).expect("chicken.djvu must exist")
+    }
+
+    #[test]
+    fn foreign_error_codes() {
+        assert_eq!(ForeignError::Parse("p".into()).code(), 1);
+        assert_eq!(ForeignError::Decode("d".into()).code(), 2);
+        assert_eq!(ForeignError::OutOfRange("o".into()).code(), 3);
+    }
+
+    #[test]
+    fn foreign_error_display() {
+        assert_eq!(ForeignError::Parse("msg".into()).to_string(), "msg");
+        assert_eq!(ForeignError::Decode("msg".into()).to_string(), "msg");
+        assert_eq!(ForeignError::OutOfRange("msg".into()).to_string(), "msg");
+    }
+
+    #[test]
+    fn open_parses_valid_doc() {
+        let data = chicken_bytes();
+        let doc = open(&data).expect("chicken.djvu must parse");
+        assert_eq!(doc.page_count(), 1);
+    }
+
+    #[test]
+    fn open_invalid_bytes_returns_parse_error() {
+        let err = open(b"not a djvu file").unwrap_err();
+        assert!(matches!(err, ForeignError::Parse(_)));
+    }
+
+    #[test]
+    fn page_width_height_dpi_are_nonzero() {
+        let data = chicken_bytes();
+        let doc = open(&data).unwrap();
+        assert!(page_width(&doc, 0).unwrap() > 0);
+        assert!(page_height(&doc, 0).unwrap() > 0);
+        assert!(page_dpi(&doc, 0).unwrap() > 0);
+    }
+
+    #[test]
+    fn page_out_of_range_returns_out_of_range_error() {
+        let data = chicken_bytes();
+        let doc = open(&data).unwrap();
+        let err = page(&doc, 999).unwrap_err();
+        assert!(matches!(err, ForeignError::OutOfRange(_)), "{err:?}");
+    }
+
+    #[test]
+    fn text_returns_option() {
+        let data = chicken_bytes();
+        let doc = open(&data).unwrap();
+        // chicken.djvu may or may not have text; just check it doesn't error
+        let _ = text(&doc, 0).expect("text() must not error on valid page");
+    }
+
+    #[test]
+    fn map_render_err_returns_decode_error() {
+        let render_err = RenderError::BufTooSmall { need: 100, got: 10 };
+        let err = map_render_err(render_err);
+        assert!(matches!(err, ForeignError::Decode(_)), "{err:?}");
+    }
+
+    #[test]
+    fn render_at_dpi_returns_pixmap() {
+        let data = chicken_bytes();
+        let doc = open(&data).unwrap();
+        let pm = render_at_dpi(&doc, 0, 72.0).expect("render must succeed");
+        assert!(pm.width > 0 && pm.height > 0);
+    }
+}

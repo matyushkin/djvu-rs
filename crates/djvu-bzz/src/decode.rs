@@ -520,6 +520,16 @@ mod tests {
     // --- TDD: failing tests written first ---
 
     #[test]
+    fn decode_alias_delegates_to_bzz_decode() {
+        // `decode` is a compatibility alias — verify it forwards correctly.
+        let result = super::decode(&[]);
+        assert!(
+            result.is_err(),
+            "decode alias must return error for empty input"
+        );
+    }
+
+    #[test]
     fn empty_input_returns_error() {
         // Empty input: ZpDecoder::new requires at least 2 bytes
         let result = bzz_decode(&[]);

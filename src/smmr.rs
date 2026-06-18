@@ -730,7 +730,10 @@ mod tests {
     fn smmr_error_display() {
         assert_eq!(SmmrError::TooShort.to_string(), "Smmr chunk too short");
         assert_eq!(SmmrError::BadCode.to_string(), "invalid G4 MMR code");
-        assert_eq!(SmmrError::UnexpectedEof.to_string(), "G4 bitstream truncated");
+        assert_eq!(
+            SmmrError::UnexpectedEof.to_string(),
+            "G4 bitstream truncated"
+        );
     }
 
     // Wide bitmaps trigger MH makeup codes (runs ≥ 64 pixels)
@@ -817,7 +820,7 @@ mod tests {
         assert_eq!(bm.height, 2);
         // Row 0: W B W W W W W W
         assert!(!bm.get(0, 0)); // W
-        assert!(bm.get(1, 0));  // B
+        assert!(bm.get(1, 0)); // B
         assert!(!bm.get(2, 0)); // W
         // Row 1: W B B B B B B B
         assert!(!bm.get(0, 1)); // W
@@ -837,8 +840,7 @@ mod tests {
         //   Row1: 011(VR1) 011(VR1) 1(V0) = 7 bits
         //   EOFB: 000000000001 000000000001 = 24 bits  (total 60 bits → 8 bytes)
         let data: &[u8] = &[
-            0x00, 0x08, 0x00, 0x02,
-            0x23, 0xA3, 0xC1, 0xBB, 0x70, 0x01, 0x00, 0x10,
+            0x00, 0x08, 0x00, 0x02, 0x23, 0xA3, 0xC1, 0xBB, 0x70, 0x01, 0x00, 0x10,
         ];
         let bm = decode_smmr(data).expect("VR1 test should decode without error");
         assert_eq!(bm.width, 8);
@@ -877,8 +879,7 @@ mod tests {
         //   Row1: 010(VL1) 010(VL1) 0001(Pass) 1(V0) = 11 bits
         //   EOFB: 000000000001 000000000001 = 24 bits (total 62 bits → 8 bytes)
         let data: &[u8] = &[
-            0x00, 0x08, 0x00, 0x02,
-            0x2E, 0x8E, 0x06, 0xE9, 0x0C, 0x00, 0x40, 0x04,
+            0x00, 0x08, 0x00, 0x02, 0x2E, 0x8E, 0x06, 0xE9, 0x0C, 0x00, 0x40, 0x04,
         ];
         let bm = decode_smmr(data).expect("VL1 test should decode without error");
         assert_eq!(bm.width, 8);
@@ -948,7 +949,9 @@ mod tests {
         // EOFB (24 bits): 000000000001 000000000001
         // Pad  (6 bits):  000000
         // Bytes: 0x39, 0xC1, 0x1A, 0x00, 0x04, 0x00, 0x40
-        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x39, 0xC1, 0x1A, 0x00, 0x04, 0x00, 0x40];
+        let data: &[u8] = &[
+            0x00, 0x08, 0x00, 0x02, 0x39, 0xC1, 0x1A, 0x00, 0x04, 0x00, 0x40,
+        ];
         let bm = decode_smmr(data).expect("VL3 test should decode without error");
         assert_eq!(bm.width, 8);
         assert_eq!(bm.height, 2);
@@ -999,7 +1002,9 @@ mod tests {
         // EOFB (24 bits): 000000000001 000000000001
         // Pad  (7 bits):  0000000
         // Bytes: 0x39, 0xC2, 0x3C, 0x00, 0x08, 0x00, 0x80
-        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x39, 0xC2, 0x3C, 0x00, 0x08, 0x00, 0x80];
+        let data: &[u8] = &[
+            0x00, 0x08, 0x00, 0x02, 0x39, 0xC2, 0x3C, 0x00, 0x08, 0x00, 0x80,
+        ];
         let bm = decode_smmr(data).expect("VL2 test should decode without error");
         assert_eq!(bm.width, 8);
         assert_eq!(bm.height, 2);
@@ -1040,6 +1045,62 @@ mod tests {
         let bm = decode_smmr(data).expect("empty bitstream should not error");
         assert_eq!(bm.width, 8);
         assert_eq!(bm.height, 4);
+    }
+
+    // Line 421: bitstream exhausted mid-row → peek32 returns avail=0 → break.
+    //
+    // Row 0 (ncols=8, prev=all-white): H(001) W2(0111) B2(11) VL1(010) V0(1)
+    //   = 13 bits → [W,W,B,B,W,W,W,B].
+    // Row 1: 3 bits remain in buffer (lower 3 bits of byte 1 = 0b010 = VL1 code).
+    //   VL1 fires (a0: 0→1, a0_color: true), then peek32 → avail=0 → break 421.
+    //
+    // Bit layout (16 bits = 2 bytes):
+    //   Row0: 0,0,1,0,1,1,1,1,1,0,1,0,1  → bytes: 0x2F 0xA?
+    //   Row1 VL1: 0,1,0                   → last 3 bits of byte 1 = 0b010 → 0xAA
+    #[test]
+    fn decode_smmr_bits_exhausted_mid_row_breaks_gracefully() {
+        // ncols=8, nrows=2, bitstream=[0x2F, 0xAA].
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x02, 0x2F, 0xAA];
+        let bm = decode_smmr(data).expect("mid-row bit exhaustion must not error");
+        assert_eq!(bm.width, 8);
+        assert_eq!(bm.height, 2);
+        // Row 0: [W,W,B,B,W,W,W,B]
+        assert!(!bm.get(0, 0));
+        assert!(!bm.get(1, 0));
+        assert!(bm.get(2, 0));
+        assert!(bm.get(3, 0));
+        assert!(!bm.get(4, 0));
+        assert!(!bm.get(5, 0));
+        assert!(!bm.get(6, 0));
+        assert!(bm.get(7, 0));
+        // Row 1: VL1 sets a1=1 (b1-1 where b1=2 from row0), then bits exhausted → rest black
+        assert!(!bm.get(0, 1));
+        for x in 1..8u32 {
+            assert!(bm.get(x, 1), "row1 col {x} should be black");
+        }
+    }
+
+    // Line 304: decode_white_run returns UnexpectedEof when H-mode bitstream has
+    // a white makeup code (W64 = 11011, 5 bits) but no following term code.
+    // Data: AT&T header (ncols=100, nrows=1) + one bitstream byte:
+    //   0x3B = 0b00111011 → H-prefix(001) + W64-makeup(11011) = 8 bits exactly.
+    // After consuming, stream is empty; second outer-loop peek32 returns avail=0.
+    #[test]
+    fn decode_white_run_unexpected_eof_after_makeup() {
+        let data: &[u8] = &[0x00, 0x64, 0x00, 0x01, 0x3B];
+        assert!(matches!(decode_smmr(data), Err(SmmrError::UnexpectedEof)));
+    }
+
+    // Line 333: decode_black_run returns UnexpectedEof when H-mode bitstream has
+    // a black makeup code (B128) but no following term code.
+    // Data: ncols=200, nrows=1, 3 bitstream bytes:
+    //   0x3B 0xB0 0xC8 = H(001) W64-makeup(11011) W4-term(1011) B128-makeup(000011001000)
+    // That is exactly 24 bits (3 bytes); stream is empty after B128; second outer-loop
+    // peek32 returns avail=0 → UnexpectedEof.
+    #[test]
+    fn decode_black_run_unexpected_eof_after_makeup() {
+        let data: &[u8] = &[0x00, 0xC8, 0x00, 0x01, 0x3B, 0xB0, 0xC8];
+        assert!(matches!(decode_smmr(data), Err(SmmrError::UnexpectedEof)));
     }
 
     #[test]

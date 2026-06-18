@@ -231,6 +231,16 @@ mod tests {
     use super::*;
     use crate::ZpDecoder;
 
+    // Lines 34-35: ZpEncoder::default() delegates to ::new()
+    #[test]
+    fn default_is_same_as_new() {
+        let enc = ZpEncoder::default();
+        let compressed = enc.finish();
+        let enc2 = ZpEncoder::new();
+        let compressed2 = enc2.finish();
+        assert_eq!(compressed, compressed2);
+    }
+
     #[test]
     fn zp_roundtrip_passthrough_false() {
         let mut enc = ZpEncoder::new();

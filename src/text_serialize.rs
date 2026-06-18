@@ -661,14 +661,22 @@ mod tests {
     fn zone(kind: TextZoneKind, children: Vec<TextZone>) -> TextZone {
         TextZone {
             kind,
-            rect: Rect { x: 0, y: 0, width: 100, height: 50 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+            },
             text: String::new(),
             children,
         }
     }
 
     fn layer_with_zone(z: TextZone) -> TextLayer {
-        TextLayer { text: String::new(), zones: vec![zone(TextZoneKind::Page, vec![z])] }
+        TextLayer {
+            text: String::new(),
+            zones: vec![zone(TextZoneKind::Page, vec![z])],
+        }
     }
 
     #[test]
@@ -678,7 +686,10 @@ mod tests {
         let layer = layer_with_zone(col);
         let mut out = String::new();
         write_hocr_zones(&mut out, &layer, 0).unwrap();
-        assert!(out.contains("ocr_block"), "Column must produce ocr_block: {out}");
+        assert!(
+            out.contains("ocr_block"),
+            "Column must produce ocr_block: {out}"
+        );
         assert!(out.contains("</div>"), "must close div: {out}");
     }
 
@@ -689,7 +700,10 @@ mod tests {
         let layer = layer_with_zone(reg);
         let mut out = String::new();
         write_hocr_zones(&mut out, &layer, 0).unwrap();
-        assert!(out.contains("ocr_block"), "Region must produce ocr_block: {out}");
+        assert!(
+            out.contains("ocr_block"),
+            "Region must produce ocr_block: {out}"
+        );
     }
 
     #[test]
@@ -739,7 +753,10 @@ mod tests {
         let layer = layer_with_zone(col);
         let mut out = String::new();
         write_alto_zones(&mut out, &layer, 0).unwrap();
-        assert!(out.contains("<TextBlock"), "Column must produce TextBlock: {out}");
+        assert!(
+            out.contains("<TextBlock"),
+            "Column must produce TextBlock: {out}"
+        );
         assert!(out.contains("</TextBlock>"), "must close TextBlock: {out}");
     }
 
@@ -750,7 +767,10 @@ mod tests {
         let layer = layer_with_zone(para);
         let mut out = String::new();
         write_alto_zones(&mut out, &layer, 0).unwrap();
-        assert!(out.contains("<TextBlock"), "Para must produce TextBlock: {out}");
+        assert!(
+            out.contains("<TextBlock"),
+            "Para must produce TextBlock: {out}"
+        );
     }
 
     #[test]
@@ -760,7 +780,10 @@ mod tests {
         let layer = layer_with_zone(reg);
         let mut out = String::new();
         write_alto_zones(&mut out, &layer, 0).unwrap();
-        assert!(out.contains("<TextBlock"), "Region must produce TextBlock: {out}");
+        assert!(
+            out.contains("<TextBlock"),
+            "Region must produce TextBlock: {out}"
+        );
     }
 
     #[test]
@@ -769,8 +792,14 @@ mod tests {
         let layer = layer_with_zone(ch);
         let mut out = String::new();
         write_alto_zones(&mut out, &layer, 0).unwrap();
-        assert!(!out.contains("String"), "Character must not emit String: {out}");
-        assert!(!out.contains("TextBlock"), "Character must not emit TextBlock: {out}");
+        assert!(
+            !out.contains("String"),
+            "Character must not emit String: {out}"
+        );
+        assert!(
+            !out.contains("TextBlock"),
+            "Character must not emit TextBlock: {out}"
+        );
     }
 
     #[test]
@@ -779,13 +808,23 @@ mod tests {
         let line = line_zone(vec![word], 0, 0, 100, 20);
         let para = TextZone {
             kind: TextZoneKind::Para,
-            rect: Rect { x: 0, y: 0, width: 100, height: 20 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 20,
+            },
             text: String::new(),
             children: vec![line],
         };
         let col = TextZone {
             kind: TextZoneKind::Column,
-            rect: Rect { x: 0, y: 0, width: 100, height: 50 },
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+            },
             text: String::new(),
             children: vec![para],
         };
@@ -806,17 +845,19 @@ mod tests {
     }
 
     fn load_doc(name: &str) -> crate::djvu_document::DjVuDocument {
-        let data = std::fs::read(assets_path().join(name))
-            .unwrap_or_else(|_| panic!("{name} must exist"));
-        crate::djvu_document::DjVuDocument::parse(&data)
-            .unwrap_or_else(|e| panic!("parse: {e}"))
+        let data =
+            std::fs::read(assets_path().join(name)).unwrap_or_else(|_| panic!("{name} must exist"));
+        crate::djvu_document::DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse: {e}"))
     }
 
     #[test]
     fn to_hocr_output_is_valid_html_structure() {
         let doc = load_doc("chicken.djvu");
         let out = to_hocr(&doc, &HocrOptions::default()).unwrap();
-        assert!(out.starts_with("<!DOCTYPE html>"), "must start with DOCTYPE");
+        assert!(
+            out.starts_with("<!DOCTYPE html>"),
+            "must start with DOCTYPE"
+        );
         assert!(out.contains("<html"), "must have html element");
         assert!(out.contains("</html>"), "must close html");
         assert!(out.contains("ocr_page"), "must have ocr_page");
@@ -826,8 +867,18 @@ mod tests {
     fn to_hocr_page_index_option_limits_to_one_page() {
         let doc = load_doc("chicken.djvu");
         let all = to_hocr(&doc, &HocrOptions::default()).unwrap();
-        let one = to_hocr(&doc, &HocrOptions { page_index: Some(0), dpi: None }).unwrap();
-        assert!(one.len() <= all.len(), "single-page output must not exceed all-pages");
+        let one = to_hocr(
+            &doc,
+            &HocrOptions {
+                page_index: Some(0),
+                dpi: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            one.len() <= all.len(),
+            "single-page output must not exceed all-pages"
+        );
         assert!(one.contains("page_0"), "must include page_0");
     }
 
@@ -835,7 +886,10 @@ mod tests {
     fn to_alto_output_is_valid_xml_structure() {
         let doc = load_doc("chicken.djvu");
         let out = to_alto(&doc, &AltoOptions::default()).unwrap();
-        assert!(out.starts_with(r#"<?xml version="1.0""#), "must start with XML declaration");
+        assert!(
+            out.starts_with(r#"<?xml version="1.0""#),
+            "must start with XML declaration"
+        );
         assert!(out.contains("<alto"), "must have alto element");
         assert!(out.contains("</alto>"), "must close alto");
         assert!(out.contains("<Page"), "must have Page element");
@@ -845,7 +899,14 @@ mod tests {
     fn to_alto_page_index_option_limits_to_one_page() {
         let doc = load_doc("chicken.djvu");
         let all = to_alto(&doc, &AltoOptions::default()).unwrap();
-        let one = to_alto(&doc, &AltoOptions { page_index: Some(0), dpi: None }).unwrap();
+        let one = to_alto(
+            &doc,
+            &AltoOptions {
+                page_index: Some(0),
+                dpi: None,
+            },
+        )
+        .unwrap();
         assert!(one.len() <= all.len());
         assert!(one.contains(r#"ID="page_0""#), "must include page_0");
     }
@@ -855,18 +916,30 @@ mod tests {
     #[test]
     fn to_hocr_with_dpi_produces_valid_output() {
         let doc = load_doc("chicken.djvu");
-        let opts = HocrOptions { page_index: None, dpi: Some(150) };
+        let opts = HocrOptions {
+            page_index: None,
+            dpi: Some(150),
+        };
         let out = to_hocr(&doc, &opts).unwrap();
-        assert!(out.contains("ocr_page"), "DPI-scaled hOCR must have ocr_page");
+        assert!(
+            out.contains("ocr_page"),
+            "DPI-scaled hOCR must have ocr_page"
+        );
         assert!(out.contains("</html>"), "DPI-scaled hOCR must close html");
     }
 
     #[test]
     fn to_alto_with_dpi_produces_valid_output() {
         let doc = load_doc("chicken.djvu");
-        let opts = AltoOptions { page_index: None, dpi: Some(150) };
+        let opts = AltoOptions {
+            page_index: None,
+            dpi: Some(150),
+        };
         let out = to_alto(&doc, &opts).unwrap();
-        assert!(out.contains("<Page"), "DPI-scaled ALTO must have Page element");
+        assert!(
+            out.contains("<Page"),
+            "DPI-scaled ALTO must have Page element"
+        );
         assert!(out.contains("</alto>"), "DPI-scaled ALTO must close alto");
     }
 
@@ -876,7 +949,10 @@ mod tests {
     #[test]
     fn to_hocr_dpi_with_text_layer_emits_zones() {
         let doc = load_doc("colorbook.djvu");
-        let opts = HocrOptions { page_index: None, dpi: Some(150) };
+        let opts = HocrOptions {
+            page_index: None,
+            dpi: Some(150),
+        };
         let out = to_hocr(&doc, &opts).unwrap();
         assert!(out.contains("ocr_page"), "hOCR must contain ocr_page");
     }
@@ -884,7 +960,10 @@ mod tests {
     #[test]
     fn to_alto_dpi_with_text_layer_emits_page() {
         let doc = load_doc("colorbook.djvu");
-        let opts = AltoOptions { page_index: None, dpi: Some(150) };
+        let opts = AltoOptions {
+            page_index: None,
+            dpi: Some(150),
+        };
         let out = to_alto(&doc, &opts).unwrap();
         assert!(out.contains("<Page"), "ALTO must contain Page");
     }

@@ -991,13 +991,23 @@ mod tests {
 
     #[test]
     fn rect_scale_zero_from_w_returns_clone() {
-        let r = Rect { x: 5, y: 10, width: 20, height: 30 };
+        let r = Rect {
+            x: 5,
+            y: 10,
+            width: 20,
+            height: 30,
+        };
         assert_eq!(r.scale(0, 100, 200, 200), r);
     }
 
     #[test]
     fn rect_scale_zero_from_h_returns_clone() {
-        let r = Rect { x: 5, y: 10, width: 20, height: 30 };
+        let r = Rect {
+            x: 5,
+            y: 10,
+            width: 20,
+            height: 30,
+        };
         assert_eq!(r.scale(100, 0, 200, 200), r);
     }
 }

@@ -519,7 +519,8 @@ mod tests {
             crate::info::Rotation::None,
             "fixture must have rotation set"
         );
-        let tiff = djvu_to_tiff(&doc, &TiffOptions::default()).expect("rotated color export must succeed");
+        let tiff =
+            djvu_to_tiff(&doc, &TiffOptions::default()).expect("rotated color export must succeed");
         assert!(!tiff.is_empty());
         let magic = &tiff[..4];
         assert!(magic == b"II\x2A\x00" || magic == b"MM\x00\x2A");
@@ -540,7 +541,10 @@ mod tests {
         let tiff_err: tiff::TiffError = io_err.into();
         let djvu_tiff_err: TiffError = tiff_err.into();
         let s = djvu_tiff_err.to_string();
-        assert!(s.contains("TIFF encoding error"), "must mention TIFF encoding error: {s}");
+        assert!(
+            s.contains("TIFF encoding error"),
+            "must mention TIFF encoding error: {s}"
+        );
     }
 
     /// `TiffError::Encode` display includes the inner message.

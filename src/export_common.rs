@@ -467,11 +467,21 @@ mod tests {
             text: String::new(),
             zones: vec![TextZone {
                 kind: TextZoneKind::Line,
-                rect: Rect { x: 0, y: 0, width: 100, height: 20 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 20,
+                },
                 text: String::new(),
                 children: vec![TextZone {
                     kind: TextZoneKind::Character,
-                    rect: Rect { x: 0, y: 0, width: 10, height: 20 },
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 10,
+                        height: 20,
+                    },
                     text: "A".to_string(),
                     children: vec![],
                 }],
