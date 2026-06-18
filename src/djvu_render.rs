@@ -1865,7 +1865,7 @@ fn composite_rows_bilinear_one(
                                     let px = ox.min(bg_max_px);
                                     let off = px * 4;
                                     let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
-                                    let (r, g, b) = if let Some(q) = bg_row.get(off..off + 3) {
+                                    let (r, g, b) = if let Some(q) = bg_row.get(off..off + 4) {
                                         (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
                                     } else {
                                         (!fg_m, !fg_m, !fg_m)
@@ -1901,7 +1901,7 @@ fn composite_rows_bilinear_one(
                             for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
                                 let px = ox.min((bg.width as usize).saturating_sub(1));
                                 let off = px * 4;
-                                if let Some(q) = bg_row.get(off..off + 3) {
+                                if let Some(q) = bg_row.get(off..off + 4) {
                                     pixel[0] = q[0];
                                     pixel[1] = q[1];
                                     pixel[2] = q[2];
@@ -1916,7 +1916,7 @@ fn composite_rows_bilinear_one(
                         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
                             let px = ox.min((bg.width as usize).saturating_sub(1));
                             let off = px * 4;
-                            if let Some(q) = bg_row.get(off..off + 3) {
+                            if let Some(q) = bg_row.get(off..off + 4) {
                                 pixel[0] = lut[q[0] as usize];
                                 pixel[1] = lut[q[1] as usize];
                                 pixel[2] = lut[q[2] as usize];
