@@ -2082,3 +2082,136 @@ distinction the guard needs. Regression tests:
 `large_symbol_at_eof_not_wrongly_truncated` (encode.rs, positive case),
 `synthetic_bytes_distinguishes_eof_from_spinning` (djvu-zp), and the
 `exhausted_*_refinement_*` DoS tests in `crates/djvu-jb2/src/lib.rs`.
+
+### PARALLEL_COMPOSITOR: row-level rayon parallelism in `composite_into` — **Kept** (2026-06-18)
+
+**Issue.** #408: close the 1.2–2.1× gap vs DjVuLibre across all four benchmark
+scenarios. After DECODE_SCALE_ROUND and BILINEAR_1_1_NEAREST brought single-threaded
+performance to ~1.2× for colorbook but left corpus color/bilevel at ~2×, the
+remaining gap was pure compositor throughput.
+
+**Approach.** Added a `parallel` Cargo feature (wrapping `rayon`). In
+`composite_into`, split the output buffer with `par_chunks_exact_mut(row_stride)`
+and dispatch each row to the appropriate per-row helper
+(`composite_rows_bilevel_one` / `composite_rows_bilinear_one` /
+`composite_rows_area_avg_one`) across all available cores. `CompositeContext<'_>`
+is `Sync` by construction (all fields are plain data or immutable references), so
+no `Arc`/`Mutex` overhead. Single-threaded path preserved under
+`#[cfg(not(feature = "parallel"))]`.
+
+**Numbers** (Criterion, Apple M1 Max 10-core, `benches/render.rs`,
+`--features parallel` vs DjVuLibre C API):
+
+| Benchmark | djvu-rs single-thread | djvu-rs `--features parallel` | DjVuLibre | Ratio (parallel) |
+|-----------|----------------------:|------------------------------:|----------:|:----------------:|
+| `render_page/dpi/72` (boy, 72 dpi) | ~211 µs | **181 µs** | 147 µs | **1.23×** ✓ |
+| `render_colorbook` (colorbook, 150 dpi) | ~7.1 ms | **1.67 ms** | 5.90 ms | **0.28×** ✓ |
+| `render_corpus_color` (watchmaker, 300 dpi) | ~70.5 ms | **15.3 ms** | 36.0 ms | **0.43×** ✓ |
+| `render_corpus_bilevel` (cable, 300 dpi) | ~71.3 ms | **16.8 ms** | 35.2 ms | **0.48×** ✓ |
+
+All four benchmark scenarios achieve ≤ 1.5× DjVuLibre with `--features parallel`.
+Without the feature, corpus color/bilevel remain at ~2× (the single-thread ceiling).
+
+**Decision.** Kept. Feature gated so existing users see no new dependency.
+
+**Reason.** The compositor is embarrassingly parallel (rows are independent), and
+the Apple M1 Max has 10 cores. Row-level rayon gives ~4.4× speedup on the corpus
+targets at zero algorithmic complexity. The corpus color/bilevel benchmarks are
+purely compositor-bound after DECODE_SCALE_ROUND and BILINEAR_1_1_NEAREST; adding
+threads is the only way to close the remaining gap without SIMD (blocked by
+`#![deny(unsafe_code)]`). The 72-dpi target is decode-bound (BG44 + JB2) so
+parallelism helps less there, but it still falls within 1.5×.
+
+### BILINEAR_1_1_NEAREST: replace `sample_bilinear` with `sample_nearest` at 1:1 scale — **Kept** (2026-06-18)
+
+**Issue.** #408: reduce per-pixel work in `composite_rows_bilinear_one` at exact
+1:1 scale (native resolution). At 1:1, `fx_step == FRAC` so the fractional
+coordinates `tx = ty = 0`, making bilinear interpolation read 4 pixels but use
+only the top-left one.
+
+**Approach.** Added a fast-path guard at the top of
+`composite_rows_bilinear_one`: when `fx_step == FRAC && fy_step == FRAC &&
+ctx.bg_x_q24 == (1 << 24) && ctx.bg_y_q24 == (1 << 24)` (i.e., true 1:1 with no
+BG-plane subsampling), replace `sample_bilinear` with `sample_nearest`.
+Also added an extra-tight inner loop for the common corpus case (BG present, mask
+present, no palette, no FG44, zero horizontal offset) that skips all per-pixel
+branching except the mask bit test. The general bilinear loop runs outside this
+fast path only when offset, palette, or FG44 are present.
+
+**Numbers** (Criterion, Apple M1 Max, before/after on single-threaded build):
+
+| Benchmark | Before | After | Δ |
+|-----------|-------:|------:|--:|
+| `render_corpus_color` | ~74 ms | ~70.5 ms | −5% |
+| `render_corpus_bilevel` | ~74 ms | ~71.3 ms | −4% |
+| `render_compositor_only/color_native_cached` | ~75 ms | ~70.9 ms | −5% |
+| `render_compositor_only/bilevel_native_cached` | ~71 ms | ~71.3 ms | flat |
+
+**Decision.** Kept.
+
+**Reason.** Eliminating three redundant pixel reads per output pixel at native
+scale is a pure win. The inner-loop specialization also removes per-pixel palette
+and FG44 branches for the common case. Improvements are modest in absolute
+terms (~3–5 ms on a 70 ms workload) but correct and zero-risk: the fast path
+falls through to the general bilinear loop for any non-trivial case.
+
+### DECODE_SCALE_ROUND: use `.round()` instead of truncation in `best_iw44_subsample` — **Kept** (2026-06-18)
+
+**Issue.** #408: `render_colorbook` measured at ~12 ms vs DjVuLibre 5.90 ms —
+far beyond the 1.5× target. Root cause: `best_iw44_subsample(scale)` computed
+`max_sub = (1.5 / scale) as u32` (truncation). For colorbook at 150 dpi:
+`scale = 848/2260 = 0.37522`, `1.5/0.37522 = 3.9977`, which truncates to 3 →
+largest power-of-2 ≤ 3 is 2. So subsample 2 was selected instead of the correct
+subsample 4, decoding 4× more IW44 data than needed.
+
+**Approach.** Changed `(1.5_f32 / scale) as u32` to `(1.5_f32 / scale).round()
+as u32` in `best_iw44_subsample`. Added a comment explaining the rounding
+rationale: pixel-rounding of width (integer output dimensions) causes `scale` to
+differ from the true geometric ratio by up to `0.5/page_width`, which can push
+`1.5/scale` just below an integer and trigger a 2× coarser subsample.
+
+**Numbers** (Criterion, Apple M1 Max):
+
+| Benchmark | Before | After | Δ |
+|-----------|-------:|------:|--:|
+| `render_colorbook` | ~12.3 ms | ~7.1 ms | **−42%** |
+| `render_colorbook_stages/mask_decode` | ~5.2 ms | ~5.2 ms | flat |
+| `render_colorbook_stages/bg_only_warm` | (not measured) | ~1 ns | (cache hit) |
+| `render_corpus_color` | ~70.9 ms | ~70.5 ms | flat |
+
+**Decision.** Kept.
+
+**Reason.** The truncation bug caused subsample-2 decode (4× more data) when the
+true scale warranted subsample-4. The fix brings colorbook from 2.1× DjVuLibre to
+~1.2× in single-threaded mode. It is also strictly more correct: the rounding
+accounts for integer-pixel rounding in output dimensions. No other benchmark
+regressed.
+
+### BILEVEL_EXPAND_LUT: const byte→8xRGBA table for bilevel 1:1 compositor — **Reverted** (2026-06-18)
+
+**Issue.** #408: close 2×+ gap vs DjVuLibre on bilevel corpus (300 dpi, cable
+pages). `render_corpus_bilevel` baseline ≈ 71 ms vs DjVuLibre ≈ 35 ms.
+
+**Approach.** Added a 256-entry const lookup table (8 KB) mapping a mask byte
+to 8 pre-expanded RGBA pixels (32 bytes per entry). Modified the `offset_x %
+8 == 0` fast path in `composite_rows_bilevel_one` to copy 32 bytes per byte
+from the LUT instead of branching per bit. Expected saving: eliminate 7
+bit-shift/branch operations per 8 pixels.
+
+**Numbers** (Criterion, Apple M-series, `benches/render.rs`):
+
+| bench | baseline | with LUT |
+|-------|----------|----------|
+| `render_corpus_bilevel` | 71.3 ms | 73.5 ms |
+| `compositor_only/bilevel_native_cached` | 71.4 ms | 72.3 ms |
+
+**Decision.** Reverted (code restored with `git restore src/djvu_render.rs`).
+
+**Reason.** The bilevel 1:1 path is memory-bandwidth limited, not
+compute-limited. The output is ~34 MB of RGBA data per benchmark iteration
+(cable corpus at 600→600 dpi), consuming effectively ~500 MB/s of effective
+write bandwidth. The LUT read (8 KB, likely L1-cached) does not overlap with
+the RGBA output writes — it competes with them. Saving 7 bit ops per byte is
+irrelevant when the bottleneck is the output store stream. Closing the
+bilevel gap requires reducing output data volume (e.g. lazy/tile rendering or
+a non-RGBA output format) or parallelism, not faster pixel computation.
