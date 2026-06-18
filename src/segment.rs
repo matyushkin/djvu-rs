@@ -497,6 +497,23 @@ mod tests {
     }
 
     #[test]
+    fn inpaint_all_masked_single_block_falls_back_to_white() {
+        // 1×1 image entirely masked: inpaint_block_mean exhausts its radius loop
+        // (only pixel is the center, never on the border ring) and returns None.
+        let mut pm = Pixmap::white(1, 1);
+        pm.set_rgb(0, 0, 0, 0, 0);
+        let opts = SegmentOptions {
+            threshold: 128,
+            bg_subsample: 1,
+            bg_inpaint: true,
+            ..SegmentOptions::default()
+        };
+        let seg = segment_page(&pm, &opts);
+        // block_mean with mask_excluded=false falls back to the actual pixel
+        assert_eq!(seg.bg.get_rgb(0, 0), (0, 0, 0));
+    }
+
+    #[test]
     fn bg_subsample_zero_is_clamped_to_one() {
         let pm = Pixmap::white(3, 3);
         let seg = segment_page(

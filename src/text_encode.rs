@@ -239,23 +239,48 @@ mod tests {
             text: "hi".into(),
             zones: vec![TextZone {
                 kind: TextZoneKind::Column,
-                rect: Rect { x: 0, y: 0, width: 200, height: 300 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 300,
+                },
                 text: "hi".into(),
                 children: vec![TextZone {
                     kind: TextZoneKind::Region,
-                    rect: Rect { x: 5, y: 5, width: 180, height: 280 },
+                    rect: Rect {
+                        x: 5,
+                        y: 5,
+                        width: 180,
+                        height: 280,
+                    },
                     text: "hi".into(),
                     children: vec![TextZone {
                         kind: TextZoneKind::Para,
-                        rect: Rect { x: 5, y: 5, width: 180, height: 30 },
+                        rect: Rect {
+                            x: 5,
+                            y: 5,
+                            width: 180,
+                            height: 30,
+                        },
                         text: "hi".into(),
                         children: vec![TextZone {
                             kind: TextZoneKind::Line,
-                            rect: Rect { x: 5, y: 5, width: 170, height: 20 },
+                            rect: Rect {
+                                x: 5,
+                                y: 5,
+                                width: 170,
+                                height: 20,
+                            },
                             text: "hi".into(),
                             children: vec![TextZone {
                                 kind: TextZoneKind::Character,
-                                rect: Rect { x: 5, y: 5, width: 8, height: 16 },
+                                rect: Rect {
+                                    x: 5,
+                                    y: 5,
+                                    width: 8,
+                                    height: 16,
+                                },
                                 text: "h".into(),
                                 children: vec![],
                             }],
@@ -280,18 +305,33 @@ mod tests {
             text: "hello world".into(),
             zones: vec![TextZone {
                 kind: TextZoneKind::Page,
-                rect: Rect { x: 0, y: 0, width: 200, height: 300 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 300,
+                },
                 text: "hello world".into(),
                 children: vec![
                     TextZone {
                         kind: TextZoneKind::Line,
-                        rect: Rect { x: 0, y: 0, width: 200, height: 20 },
+                        rect: Rect {
+                            x: 0,
+                            y: 0,
+                            width: 200,
+                            height: 20,
+                        },
                         text: "hello".into(),
                         children: vec![],
                     },
                     TextZone {
                         kind: TextZoneKind::Line,
-                        rect: Rect { x: 0, y: 30, width: 200, height: 20 },
+                        rect: Rect {
+                            x: 0,
+                            y: 30,
+                            width: 200,
+                            height: 20,
+                        },
                         text: "world".into(),
                         children: vec![],
                     },

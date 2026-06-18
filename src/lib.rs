@@ -673,7 +673,11 @@ mod tests {
         use crate::djvu_render::RenderOptions;
         let doc = Document::open(chicken()).unwrap();
         let page = doc.page(0).unwrap();
-        let opts = RenderOptions { width: 32, height: 32, ..Default::default() };
+        let opts = RenderOptions {
+            width: 32,
+            height: 32,
+            ..Default::default()
+        };
         let pm = page.render_with(&opts).unwrap();
         assert!(pm.width > 0);
     }
@@ -698,6 +702,23 @@ mod tests {
         let page = doc.page(0).unwrap();
         let _ = page.text_layer().unwrap();
         let _ = page.text().unwrap();
+    }
+
+    #[test]
+    fn page_render_with_invalid_dims_returns_error() {
+        use crate::djvu_render::RenderOptions;
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 0,
+            height: 0,
+            ..Default::default()
+        };
+        let err = page.render_with(&opts).unwrap_err();
+        assert!(
+            matches!(err, Error::FormatError(_)),
+            "invalid dims must return FormatError, got {err:?}"
+        );
     }
 
     #[test]

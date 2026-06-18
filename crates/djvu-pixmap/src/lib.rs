@@ -305,6 +305,53 @@ mod tests {
         assert_eq!(r.get_rgb(0, 1), (255, 255, 255));
     }
 
+    // Lines 24-25: AsRef<[u8]> impl
+    #[test]
+    fn as_ref_returns_data_slice() {
+        let pm = Pixmap::white(1, 1);
+        let slice: &[u8] = pm.as_ref();
+        assert_eq!(slice.len(), 4);
+    }
+
+    // Lines 42, 45: Pixmap::new early returns for overflow and MAX_PIXELS exceeded
+    #[test]
+    fn new_overflow_returns_empty() {
+        let pm = Pixmap::new(u32::MAX, u32::MAX, 0, 0, 0, 0);
+        assert_eq!(pm.width, 0);
+        assert_eq!(pm.height, 0);
+    }
+
+    #[test]
+    fn new_exceeds_max_pixels_returns_empty() {
+        // 65536 * 65536 = 2^32 overflows usize on 32-bit but on 64-bit it's > MAX_PIXELS
+        let pm = Pixmap::new(10000, 10000, 255, 0, 0, 255);
+        assert_eq!(pm.width, 0);
+        assert_eq!(pm.height, 0);
+    }
+
+    // Lines 85-90: get_pixel() — bounds check and Some result
+    #[test]
+    fn get_pixel_out_of_bounds_returns_none() {
+        let pm = Pixmap::white(2, 2);
+        assert!(pm.get_pixel(2, 0).is_none());
+        assert!(pm.get_pixel(0, 2).is_none());
+    }
+
+    #[test]
+    fn get_pixel_in_bounds_returns_some() {
+        let mut pm = Pixmap::white(2, 2);
+        pm.set_rgb(1, 0, 10, 20, 30);
+        let p = pm.get_pixel(1, 0).expect("in bounds");
+        assert_eq!(&p[..3], &[10, 20, 30]);
+    }
+
+    // Line 100: get_rgb() out-of-bounds returns (0, 0, 0)
+    #[test]
+    fn get_rgb_out_of_bounds_returns_zero() {
+        let pm = Pixmap::white(2, 2);
+        assert_eq!(pm.get_rgb(5, 5), (0, 0, 0));
+    }
+
     #[test]
     fn to_ppm_format() {
         let mut pm = Pixmap::white(2, 1);

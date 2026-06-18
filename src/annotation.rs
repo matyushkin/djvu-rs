@@ -736,8 +736,18 @@ mod tests {
 
     #[test]
     fn encode_shape_oval_and_text_variants() {
-        let oval = Shape::Oval(Rect { x: 3, y: 4, width: 50, height: 60 });
-        let text = Shape::Text(Rect { x: 1, y: 2, width: 10, height: 20 });
+        let oval = Shape::Oval(Rect {
+            x: 3,
+            y: 4,
+            width: 50,
+            height: 60,
+        });
+        let text = Shape::Text(Rect {
+            x: 1,
+            y: 2,
+            width: 10,
+            height: 20,
+        });
         assert_eq!(encode_shape(&oval), "(oval 3 4 50 60)");
         assert_eq!(encode_shape(&text), "(text 1 2 10 20)");
     }

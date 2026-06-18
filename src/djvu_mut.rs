@@ -2238,14 +2238,13 @@ mod tests {
     fn from_indirect_resolved_no_page_component_returns_dirm_malformed() {
         use crate::dirm::DirmPayload;
         // Build indirect DJVM with 1 Shared entry (flag=0x00)
-        let dirm_payload =
-            DirmPayload::build_indirect(1, &[0x00], &["shared.djvi".to_string()]);
+        let dirm_payload = DirmPayload::build_indirect(1, &[0x00], &["shared.djvi".to_string()]);
         let dirm_chunk = iff::Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
         };
-        let index = iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm_chunk)])
-            .expect("fits");
+        let index =
+            iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm_chunk)]).expect("fits");
 
         let err = DjVuDocumentMut::from_indirect_resolved(&index, |_name: &str| {
             Ok::<Vec<u8>, std::io::Error>(Vec::new())
@@ -2487,7 +2486,11 @@ mod tests {
         // Now stripped has no NAVM; set_bookmarks(&[]) is a true no-op (None, true).
         let mut doc2 = DjVuDocumentMut::from_bytes(&stripped).unwrap();
         doc2.set_bookmarks(&[]).unwrap();
-        assert_eq!(doc2.into_bytes(), stripped, "no-op set_bookmarks should not change bytes");
+        assert_eq!(
+            doc2.into_bytes(),
+            stripped,
+            "no-op set_bookmarks should not change bytes"
+        );
     }
 
     // Line 936: (None, true) branch of replace_or_insert — set_metadata with default
@@ -2497,14 +2500,22 @@ mod tests {
         let original = read_corpus("chicken.djvu"); // known: no METa chunk
         let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
         // Default metadata → encode_metadata returns empty → (None, true) no-op path.
-        doc.page_mut(0).unwrap().set_metadata(&DjVuMetadata::default());
+        doc.page_mut(0)
+            .unwrap()
+            .set_metadata(&DjVuMetadata::default());
         // Dirty is still set (set_metadata always marks dirty), but no METa was inserted.
         let bytes = doc.into_bytes();
         let reparsed = DjVuDocumentMut::from_bytes(&bytes).unwrap();
-        let has_meta = reparsed.file.root.children().iter().any(|c| {
-            matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz")
-        });
-        assert!(!has_meta, "empty set_metadata should not insert a METa chunk");
+        let has_meta = reparsed
+            .file
+            .root
+            .children()
+            .iter()
+            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"));
+        assert!(
+            !has_meta,
+            "empty set_metadata should not insert a METa chunk"
+        );
     }
 
     // Lines 391-393: PathTraversesLeaf first branch (children.is_empty && depth < len-1).
@@ -2541,7 +2552,10 @@ mod tests {
             Ok::<Vec<u8>, std::io::Error>(b"not iff".to_vec())
         })
         .unwrap_err();
-        assert!(matches!(err, MutError::ComponentMalformed { .. }), "{err:?}");
+        assert!(
+            matches!(err, MutError::ComponentMalformed { .. }),
+            "{err:?}"
+        );
     }
 
     // Lines 1100-1105: wrong FORM type (not DJVU/DJVI/THUM) → ComponentMalformed.
@@ -2559,7 +2573,10 @@ mod tests {
             Ok::<Vec<u8>, std::io::Error>(fake.clone())
         })
         .unwrap_err();
-        assert!(matches!(err, MutError::ComponentMalformed { .. }), "{err:?}");
+        assert!(
+            matches!(err, MutError::ComponentMalformed { .. }),
+            "{err:?}"
+        );
     }
 
     // Lines 1131-1132: component_count() on IndirectRewritePlan.
@@ -2640,8 +2657,7 @@ mod tests {
             id: *b"DIRM",
             data: dirm_payload.encode(),
         };
-        let index =
-            iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).expect("fits");
+        let index = iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).expect("fits");
         let err = DjVuDocumentMut::from_indirect_resolved(&index, |_n: &str| {
             Ok::<Vec<u8>, std::io::Error>(Vec::new())
         })
@@ -2674,7 +2690,12 @@ mod tests {
             text: "hello".to_string(),
             zones: vec![TextZone {
                 kind: TextZoneKind::Page,
-                rect: Rect { x: 0, y: 0, width: 10, height: 10 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
                 text: "hello".to_string(),
                 children: vec![],
             }],
@@ -2702,7 +2723,10 @@ mod tests {
         // original_single_page_child_ranges succeeds (1 child, no FORM inside).
         let original = iff::partial_emit(
             *b"DJVU",
-            &[iff::EmitPart::Chunk(&Chunk::Leaf { id: *b"INFO", data: vec![0u8; 4] })],
+            &[iff::EmitPart::Chunk(&Chunk::Leaf {
+                id: *b"INFO",
+                data: vec![0u8; 4],
+            })],
         )
         .unwrap();
 

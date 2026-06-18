@@ -763,8 +763,7 @@ mod tests {
         use crate::iff::{self as iff_mod, Chunk, EmitPart};
 
         // Build a bundled DIRM with 1 Shared entry (flag=0x00 = Shared)
-        let dirm_payload =
-            DirmPayload::build_bundled(1, &[0x00], &["shared.djvi".to_string()]);
+        let dirm_payload = DirmPayload::build_bundled(1, &[0x00], &["shared.djvi".to_string()]);
         let dirm = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -972,7 +971,10 @@ mod tests {
         use crate::dirm::DirmPayload;
         use crate::iff::{self as iff_djvm, Chunk as IffChunk, EmitPart as IffEmitPart};
         let dirm_payload = DirmPayload::build_bundled(1, &[0u8], &["shared".to_string()]).encode();
-        let dirm_chunk = IffChunk::Leaf { id: *b"DIRM", data: dirm_payload };
+        let dirm_chunk = IffChunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_payload,
+        };
         let bytes = iff_djvm::partial_emit(*b"DJVM", &[IffEmitPart::Chunk(&dirm_chunk)]).unwrap();
         let cursor = std::io::Cursor::new(bytes);
         let result = from_async_reader_lazy(cursor).await;
@@ -992,7 +994,10 @@ mod tests {
         // Valid AT&T FORM:DJVM but first inner chunk is INFO (not DIRM)
         // → triggers lines 293-294 in index_bundled_djvm
         use crate::iff::{self as iff_nodirm, Chunk as IffChunkNd, EmitPart as IffEmitPartNd};
-        let info = IffChunkNd::Leaf { id: *b"INFO", data: vec![] };
+        let info = IffChunkNd::Leaf {
+            id: *b"INFO",
+            data: vec![],
+        };
         let bytes = iff_nodirm::partial_emit(*b"DJVM", &[IffEmitPartNd::Chunk(&info)]).unwrap();
         let cursor = std::io::Cursor::new(bytes);
         let result = from_async_reader_lazy(cursor).await;

@@ -1665,6 +1665,35 @@ mod tests {
             .expect("fits within u32")
     }
 
+    /// Sub-FORM with < 4 bytes of data: parse_sub_form returns Malformed (line 1225).
+    #[test]
+    fn parse_bundled_djvm_with_short_sub_form_returns_malformed() {
+        use crate::dirm::DirmPayload;
+        // Bundled DIRM with 1 Page entry (flags=0x80 = bundled, flag=0x01=Page)
+        let dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p0001.djvu".to_string()]);
+        let dirm = crate::iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_payload.encode(),
+        };
+        // Short sub-FORM: FORM ID (4 bytes) + length=2 (4 bytes) + 2 data bytes
+        // When the IFF parser reads this, data.len() = 2 < 4 → parse_sub_form Err
+        let short_form_bytes: &[u8] = b"FORM\x00\x00\x00\x02AB";
+        let djvm = crate::iff::partial_emit(
+            *b"DJVM",
+            &[
+                crate::iff::EmitPart::Chunk(&dirm),
+                crate::iff::EmitPart::Verbatim(short_form_bytes),
+            ],
+        )
+        .expect("fits within u32");
+
+        let err = DjVuDocument::parse(&djvm).expect_err("short sub-form must error");
+        assert!(
+            matches!(err, DocError::Malformed(_)),
+            "expected Malformed, got {err:?}"
+        );
+    }
+
     // ── raw chunk API (Issue #43) ────────────────────────────────────────────
 
     /// `DjVuPage::raw_chunk` returns bytes for known chunk types.
@@ -1888,8 +1917,13 @@ mod tests {
         let th44_pos = carte.windows(4).position(|w| w == b"TH44");
         if let Some(pos) = th44_pos {
             if pos + 8 <= carte.len() {
-                let chunk_len = u32::from_be_bytes([carte[pos+4], carte[pos+5], carte[pos+6], carte[pos+7]]) as usize;
-                let chunk_data = carte.get(pos+8..pos+8+chunk_len).unwrap_or(&[]);
+                let chunk_len = u32::from_be_bytes([
+                    carte[pos + 4],
+                    carte[pos + 5],
+                    carte[pos + 6],
+                    carte[pos + 7],
+                ]) as usize;
+                let chunk_data = carte.get(pos + 8..pos + 8 + chunk_len).unwrap_or(&[]);
                 if !chunk_data.is_empty() {
                     let page = page_with_chunks(&[(b"TH44", chunk_data)]);
                     // This should decode successfully (covers lines 298-303)
@@ -2062,9 +2096,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mmap")]
+    fn mmap_document_method_and_deref_are_reachable() {
+        let path = assets_path().join("chicken.djvu");
+        let mmap_doc = MmapDocument::open(&path).expect("mmap open should succeed");
+        // document() accessor (line 1128-1129)
+        assert!(mmap_doc.document().page_count() > 0);
+        // Deref to &DjVuDocument (lines 1146-1147)
+        let inner: &DjVuDocument = &*mmap_doc;
+        assert!(inner.page_count() > 0);
+    }
+
+    #[test]
     fn metadata_returns_some_for_doc_with_meta_chunk() {
         // Build a synthetic FORM:DJVU containing an INFO chunk and a METa chunk.
-        use crate::iff::{emit, DjvuFile, Chunk};
+        use crate::iff::{Chunk, DjvuFile, emit};
         use crate::metadata::{DjVuMetadata, encode_metadata};
 
         let info = make_info(100, 100);
@@ -2080,15 +2126,24 @@ mod tests {
                 secondary_id: *b"DJVU",
                 length: 0, // emit recalculates
                 children: vec![
-                    Chunk::Leaf { id: *b"INFO", data: info },
-                    Chunk::Leaf { id: *b"METa", data: meta_bytes },
+                    Chunk::Leaf {
+                        id: *b"INFO",
+                        data: info,
+                    },
+                    Chunk::Leaf {
+                        id: *b"METa",
+                        data: meta_bytes,
+                    },
                 ],
             },
         };
         let bytes = emit(&file);
         let doc = DjVuDocument::parse(&bytes).expect("parse should succeed");
         let m = doc.metadata().expect("metadata() should not error");
-        assert!(m.is_some(), "metadata should be Some for a doc with METa chunk");
+        assert!(
+            m.is_some(),
+            "metadata should be Some for a doc with METa chunk"
+        );
         assert_eq!(m.unwrap().author.as_deref(), Some("TestAuthor"));
     }
 
@@ -2096,7 +2151,9 @@ mod tests {
     fn extract_mask_uses_inline_djbz_when_present() {
         // Build a page with both Sjbz (using shared shapes) and an inline Djbz.
         // This hits the `find_chunk(b"Djbz")` branch in extract_mask (lines 535-537).
-        use crate::jb2_encode::{cluster_shared_symbols, encode_jb2_djbz, encode_jb2_dict_with_shared};
+        use crate::jb2_encode::{
+            cluster_shared_symbols, encode_jb2_dict_with_shared, encode_jb2_djbz,
+        };
 
         let mut shape = crate::bitmap::Bitmap::new(8, 8);
         shape.set_black(2, 2);
@@ -2110,13 +2167,18 @@ mod tests {
 
         let page = page_with_chunks(&[(b"Djbz", &djbz_data), (b"Sjbz", &sjbz_data)]);
         let result = page.extract_mask();
-        assert!(result.is_ok(), "extract_mask with inline Djbz should succeed");
+        assert!(
+            result.is_ok(),
+            "extract_mask with inline Djbz should succeed"
+        );
     }
 
     #[test]
     fn extract_mask_indexed_uses_inline_djbz_when_present() {
         // Same as above but for extract_mask_indexed (lines 561-563).
-        use crate::jb2_encode::{cluster_shared_symbols, encode_jb2_djbz, encode_jb2_dict_with_shared};
+        use crate::jb2_encode::{
+            cluster_shared_symbols, encode_jb2_dict_with_shared, encode_jb2_djbz,
+        };
 
         let mut shape = crate::bitmap::Bitmap::new(8, 8);
         shape.set_black(2, 2);
@@ -2130,7 +2192,10 @@ mod tests {
 
         let page = page_with_chunks(&[(b"Djbz", &djbz_data), (b"Sjbz", &sjbz_data)]);
         let result = page.extract_mask_indexed();
-        assert!(result.is_ok(), "extract_mask_indexed with inline Djbz should succeed");
+        assert!(
+            result.is_ok(),
+            "extract_mask_indexed with inline Djbz should succeed"
+        );
     }
 
     /// NAVM with BZZ-decoded payload shorter than 2 bytes returns Ok([]).
@@ -2139,9 +2204,15 @@ mod tests {
         use crate::bzz_encode::bzz_encode;
         // Encode a single byte — decoded is 1 byte < 2 → line 1248
         let bzz = bzz_encode(b"x");
-        let chunk = crate::iff::IffChunk { id: *b"NAVM", data: &bzz };
+        let chunk = crate::iff::IffChunk {
+            id: *b"NAVM",
+            data: &bzz,
+        };
         let result = parse_navm_bookmarks(&[chunk]).unwrap();
-        assert!(result.is_empty(), "NAVM with decoded < 2 bytes must yield empty bookmarks");
+        assert!(
+            result.is_empty(),
+            "NAVM with decoded < 2 bytes must yield empty bookmarks"
+        );
     }
 
     /// NAVM with total_count > 0 but no actual entries → truncated entry error.
@@ -2151,8 +2222,158 @@ mod tests {
         // Declare total_count = 1 (2 bytes) but no bookmark data follows → line 1281
         let payload = vec![0x00, 0x01]; // total_count = 1
         let bzz = bzz_encode(&payload);
-        let chunk = crate::iff::IffChunk { id: *b"NAVM", data: &bzz };
+        let chunk = crate::iff::IffChunk {
+            id: *b"NAVM",
+            data: &bzz,
+        };
         let result = parse_navm_bookmarks(&[chunk]);
-        assert!(result.is_err(), "NAVM with declared count > 0 but no entry data must error");
+        assert!(
+            result.is_err(),
+            "NAVM with declared count > 0 but no entry data must error"
+        );
+    }
+
+    /// NAVM entry whose n_children byte is present but the title string's 3-byte
+    /// length prefix is cut off → read_navm_str returns Malformed (line 1313).
+    #[test]
+    fn parse_navm_bookmarks_string_length_truncated_returns_error() {
+        use crate::bzz_encode::bzz_encode;
+        // Decoded layout: [total_count u16 = 1][n_children u8 = 0]
+        // After reading n_children (pos=3), read_navm_str needs 3 more bytes
+        // for the length prefix but data.len()=3 → 3+3>3 → Malformed (line 1313).
+        let payload = vec![0x00, 0x01, 0x00]; // total_count=1, n_children=0
+        let bzz = bzz_encode(&payload);
+        let chunk = crate::iff::IffChunk {
+            id: *b"NAVM",
+            data: &bzz,
+        };
+        let result = parse_navm_bookmarks(&[chunk]);
+        assert!(
+            result.is_err(),
+            "NAVM with truncated string length must error"
+        );
+    }
+
+    /// Indirect DJVM with a shared DJVI component entry: the shared entry must
+    /// be skipped (line 876 `continue`) and the page resolved via the resolver.
+    #[test]
+    fn indirect_djvm_with_shared_djvi_entry_skips_to_page() {
+        use crate::dirm::DirmPayload;
+        let chicken_data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+
+        // Build DIRM: entry 0 = Shared (flag=0x00), entry 1 = Page (flag=0x01)
+        let dirm_payload = DirmPayload::build_indirect(
+            2,
+            &[0x00, 0x01],
+            &["shared.djvi".to_string(), "page.djvu".to_string()],
+        );
+        let dirm_data = dirm_payload.encode();
+        let djvm_data = build_djvm_with_dirm(&dirm_data);
+
+        let resolver = |name: &str| -> Result<Vec<u8>, DocError> {
+            if name == "page.djvu" {
+                Ok(chicken_data.clone())
+            } else {
+                Err(DocError::IndirectResolve(name.to_string()))
+            }
+        };
+
+        let doc = DjVuDocument::parse_with_resolver(&djvm_data, Some(resolver))
+            .expect("indirect DJVM with shared entry must parse");
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.width(), 181);
+    }
+
+    /// parse_from_dir with a DIRM component named as an absolute path (line 1040).
+    #[test]
+    fn parse_from_dir_resolves_absolute_component_path() {
+        use crate::dirm::DirmPayload;
+        use crate::iff::{self as iff_mod, Chunk, EmitPart};
+
+        // Write a single-page DJVU to a temp file at an absolute path.
+        let chicken =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+        let tmp_dir = std::env::temp_dir();
+        let abs_name = tmp_dir.join("djvu_rs_test_abs_component.djvu");
+        std::fs::write(&abs_name, &chicken).expect("write tmp component");
+        let abs_name_str = abs_name.to_str().unwrap().to_string();
+
+        let dirm_payload = DirmPayload::build_indirect(1, &[0x01], &[abs_name_str.clone()]);
+        let dirm = Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_payload.encode(),
+        };
+        let djvm =
+            iff_mod::partial_emit(*b"DJVM", &[EmitPart::Chunk(&dirm)]).expect("fits within u32");
+
+        let doc = DjVuDocument::parse_from_dir(&djvm, &tmp_dir)
+            .expect("absolute-path component must resolve");
+        assert_eq!(doc.page_count(), 1);
+        let _ = std::fs::remove_file(&abs_name);
+    }
+
+    /// parse_single_page_with_shared: form type is not DJVU → NotDjVu error (line 908).
+    #[cfg(all(feature = "std", feature = "async"))]
+    #[test]
+    fn parse_single_page_with_shared_wrong_form_type_returns_not_djvu() {
+        use crate::iff::{self as iff_mod, Chunk, DjvuFile};
+
+        let bytes = iff_mod::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVI",
+                length: 0,
+                children: vec![],
+            },
+        });
+        let err = DjVuDocument::parse_single_page_with_shared(&bytes, 0, None)
+            .expect_err("FORM:DJVI must not be accepted as a page");
+        assert!(
+            matches!(err, DocError::NotDjVu(_)),
+            "expected NotDjVu, got {err:?}"
+        );
+    }
+
+    /// DIRM offset points outside the file bytes, so the byte-range lookup
+    /// for the page fails and `page_byte_ranges.clear()` (line 859) fires.
+    /// The document still parses successfully (the IFF tree is intact); the
+    /// page is accessible but `page_byte_range` returns None.
+    #[test]
+    fn bundled_djvm_out_of_bounds_dirm_offset_clears_page_byte_ranges() {
+        use crate::dirm::DirmPayload;
+        use crate::iff::{self as iff_mod, Chunk, EmitPart};
+
+        let chicken =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
+
+        // Build a bundled DIRM with one Page entry but set its offset to a value
+        // far beyond the end of the file so the byte-range lookup fails.
+        let mut dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p.djvu".to_string()]);
+        dirm_payload.offsets[0] = 0xFFFF_FFFF; // points well outside the file
+        let dirm_data = dirm_payload.encode();
+
+        let dirm = Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm_data,
+        };
+        // Strip the 4-byte AT&T magic from chicken.djvu to get the bare FORM bytes.
+        let form_bytes = chicken
+            .strip_prefix(b"AT&T")
+            .expect("chicken.djvu must start with AT&T");
+
+        let djvm = iff_mod::partial_emit(
+            *b"DJVM",
+            &[EmitPart::Chunk(&dirm), EmitPart::Verbatim(form_bytes)],
+        )
+        .expect("fits within u32");
+
+        let doc = DjVuDocument::parse(&djvm).expect("DJVM with bad offset must still parse");
+        assert_eq!(doc.page_count(), 1, "page must still be accessible");
+        // page_byte_range is cleared because the offset was out of bounds.
+        assert!(
+            doc.page_byte_range(0).is_none(),
+            "page_byte_range must be None when DIRM offset is out of bounds"
+        );
     }
 }

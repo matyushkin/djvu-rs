@@ -1268,7 +1268,10 @@ mod tests {
         assert!(!pdf.is_empty(), "PDF must not be empty");
         // The text content stream dict contains /Font when text is present.
         let has_font = pdf.windows(5).any(|w| w == b"/Font");
-        assert!(has_font, "PDF with text layer must reference a /Font resource");
+        assert!(
+            has_font,
+            "PDF with text layer must reference a /Font resource"
+        );
     }
 
     /// `build_text_content` returns empty when the page has no text layer.
@@ -1277,7 +1280,10 @@ mod tests {
         let doc = load_doc("chicken.djvu"); // no TXTz
         let page = doc.page(0).unwrap();
         let result = build_text_content(page, 100.0, 720.0);
-        assert!(result.is_empty(), "page without text layer must produce empty text content");
+        assert!(
+            result.is_empty(),
+            "page without text layer must produce empty text content"
+        );
     }
 
     /// `build_text_content` returns non-empty when the page has a text layer.
@@ -1309,7 +1315,10 @@ mod tests {
         let doc = load_doc("links.djvu"); // has NAVM
         let pdf = djvu_to_pdf(&doc).unwrap();
         let has_outlines = pdf.windows(8).any(|w| w == b"Outlines");
-        assert!(has_outlines, "PDF with NAVM bookmarks must contain /Outlines");
+        assert!(
+            has_outlines,
+            "PDF with NAVM bookmarks must contain /Outlines"
+        );
     }
 
     /// A document without bookmarks must NOT produce /Outlines.
@@ -1318,7 +1327,10 @@ mod tests {
         let doc = load_doc("chicken.djvu"); // no NAVM
         let pdf = djvu_to_pdf(&doc).unwrap();
         let has_outlines = pdf.windows(8).any(|w| w == b"Outlines");
-        assert!(!has_outlines, "PDF without bookmarks must not contain /Outlines");
+        assert!(
+            !has_outlines,
+            "PDF without bookmarks must not contain /Outlines"
+        );
     }
 
     /// `resolve_bookmark_dest` resolves `#page_N` to a /Dest reference.
@@ -1332,14 +1344,20 @@ mod tests {
         assert!(dest.contains("10 0 R"), "must reference page id 10: {dest}");
         // #page_2 → index 1 → page_ids[1] = 20
         let dest2 = resolve_bookmark_dest("#page_2", &page_ids);
-        assert!(dest2.contains("20 0 R"), "must reference page id 20: {dest2}");
+        assert!(
+            dest2.contains("20 0 R"),
+            "must reference page id 20: {dest2}"
+        );
     }
 
     /// `resolve_bookmark_dest` falls back to /A /URI for external URLs.
     #[test]
     fn resolve_bookmark_dest_external_url() {
         let dest = resolve_bookmark_dest("https://example.com", &[10, 20]);
-        assert!(dest.contains("/URI"), "external URL must produce URI action: {dest}");
+        assert!(
+            dest.contains("/URI"),
+            "external URL must produce URI action: {dest}"
+        );
     }
 
     /// `resolve_bookmark_dest` returns empty string for empty URL.
@@ -1374,7 +1392,12 @@ mod tests {
 
         // Build a synthetic Rect-shaped hyperlink
         let link = MapArea {
-            shape: Shape::Rect(ARect { x: 10, y: 20, width: 100, height: 50 }),
+            shape: Shape::Rect(ARect {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 50,
+            }),
             url: "https://example.com".to_string(),
             description: String::new(),
             border: None,
@@ -1420,7 +1443,10 @@ mod tests {
         let has_im0 = pdf.windows(4).any(|w| w == b"Im0 ");
         let has_mask0 = pdf.windows(5).any(|w| w == b"Mask0");
         assert!(has_im0, "mixed page must reference /Im0 background");
-        assert!(has_mask0, "mixed page must reference /Mask0 foreground mask");
+        assert!(
+            has_mask0,
+            "mixed page must reference /Mask0 foreground mask"
+        );
     }
 
     // ── render_dims / output_dpi ──────────────────────────────────────────────
@@ -1431,12 +1457,18 @@ mod tests {
         let doc = load_doc("chicken.djvu");
         let native = djvu_to_pdf_with_options(
             &doc,
-            &PdfOptions { jpeg_quality: None, output_dpi: 0 },
+            &PdfOptions {
+                jpeg_quality: None,
+                output_dpi: 0,
+            },
         )
         .unwrap();
         let downscaled = djvu_to_pdf_with_options(
             &doc,
-            &PdfOptions { jpeg_quality: None, output_dpi: 50 },
+            &PdfOptions {
+                jpeg_quality: None,
+                output_dpi: 50,
+            },
         )
         .unwrap();
         assert!(
@@ -1454,7 +1486,10 @@ mod tests {
         let doc = load_doc("chicken.djvu");
         let pdf = djvu_to_pdf_with_options(&doc, &PdfOptions::archival()).unwrap();
         assert!(!pdf.is_empty());
-        assert!(pdf.starts_with(b"%PDF-"), "archival PDF must start with %PDF-");
+        assert!(
+            pdf.starts_with(b"%PDF-"),
+            "archival PDF must start with %PDF-"
+        );
     }
 
     #[test]
@@ -1542,7 +1577,10 @@ mod tests {
         let doc = load_doc("chicken.djvu"); // no Sjbz
         let page = doc.page(0).unwrap();
         let result = collect_mask_stream(page);
-        assert!(result.is_none(), "page without Sjbz must return None from collect_mask_stream");
+        assert!(
+            result.is_none(),
+            "page without Sjbz must return None from collect_mask_stream"
+        );
     }
 
     #[test]
@@ -1550,7 +1588,10 @@ mod tests {
         let doc = load_doc("boy_jb2.djvu"); // has Sjbz
         let page = doc.page(0).unwrap();
         let result = collect_mask_stream(page);
-        assert!(result.is_some(), "page with Sjbz must return Some from collect_mask_stream");
+        assert!(
+            result.is_some(),
+            "page with Sjbz must return Some from collect_mask_stream"
+        );
         let body = result.unwrap();
         // Must contain /ImageMask keyword
         assert!(
@@ -1564,7 +1605,12 @@ mod tests {
     #[test]
     fn shape_to_pdf_rect_converts_rect_shape() {
         use crate::annotation::{Rect as ARect, Shape};
-        let shape = Shape::Rect(ARect { x: 0, y: 0, width: 100, height: 50 });
+        let shape = Shape::Rect(ARect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 50,
+        });
         let rect = shape_to_pdf_rect(&shape, 100.0, 360.0);
         assert!(rect.is_some(), "valid rect shape must produce a PDF rect");
         let (x1, y1, x2, y2) = rect.unwrap();
@@ -1592,7 +1638,12 @@ mod tests {
     #[test]
     fn emit_word_span_zero_width_produces_no_ops() {
         use crate::text::Rect;
-        let rect = Rect { x: 0, y: 0, width: 0, height: 20 };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 20,
+        };
         let mut ops = String::new();
         emit_word_span(&mut ops, &rect, "hello", 72.0, 720.0);
         assert!(ops.is_empty(), "zero-width rect must produce no output");
@@ -1602,7 +1653,12 @@ mod tests {
     fn emit_word_span_tiny_height_produces_no_ops() {
         use crate::text::Rect;
         // height=1px at 300dpi → h = 1*72/300 = 0.24pt < 0.5 → skip
-        let rect = Rect { x: 0, y: 0, width: 50, height: 1 };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 1,
+        };
         let mut ops = String::new();
         emit_word_span(&mut ops, &rect, "hi", 300.0, 720.0);
         assert!(ops.is_empty(), "sub-0.5pt font size must produce no output");
@@ -1632,13 +1688,25 @@ mod tests {
         let page_ids = [10usize, 20, 30];
         let mut w = PdfWriter::new();
         let outline_id = build_outline(&mut w, &bookmarks, &page_ids);
-        assert!(outline_id.is_some(), "nested bookmarks must produce an outline");
+        assert!(
+            outline_id.is_some(),
+            "nested bookmarks must produce an outline"
+        );
         // Serialize and check that /First and /Last are present
         let pdf = w.serialize();
         let s = String::from_utf8_lossy(&pdf);
-        assert!(s.contains("/First"), "outline item with children must set /First");
-        assert!(s.contains("/Last"), "outline item with children must set /Last");
-        assert!(s.contains("/Count"), "outline item with children must set /Count");
+        assert!(
+            s.contains("/First"),
+            "outline item with children must set /First"
+        );
+        assert!(
+            s.contains("/Last"),
+            "outline item with children must set /Last"
+        );
+        assert!(
+            s.contains("/Count"),
+            "outline item with children must set /Count"
+        );
     }
 
     // Lines 411-415: hyperlink annotation block (/Annots [...]).
@@ -1651,7 +1719,12 @@ mod tests {
         let maparea = MapArea {
             url: "https://example.com".to_string(),
             description: String::new(),
-            shape: ann::Shape::Rect(ann::Rect { x: 0, y: 0, width: 100, height: 50 }),
+            shape: ann::Shape::Rect(ann::Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 50,
+            }),
             border: None,
             highlight: None,
         };
@@ -1665,8 +1738,14 @@ mod tests {
                 secondary_id: *b"DJVU",
                 length: 0,
                 children: vec![
-                    Chunk::Leaf { id: *b"INFO", data: info },
-                    Chunk::Leaf { id: *b"ANTz", data: ant_data },
+                    Chunk::Leaf {
+                        id: *b"INFO",
+                        data: info,
+                    },
+                    Chunk::Leaf {
+                        id: *b"ANTz",
+                        data: ant_data,
+                    },
                 ],
             },
         });
@@ -1676,6 +1755,75 @@ mod tests {
         assert!(
             s.contains("/Annots"),
             "PDF from hyperlink page must contain /Annots"
+        );
+    }
+
+    /// Page with corrupted ANTz (invalid BZZ): `hyperlinks()` errors, so
+    /// `collect_link_annot_bodies` returns empty (line 332 `Err(_) => Vec::new()`).
+    #[test]
+    fn djvu_to_pdf_with_corrupted_antz_skips_annotations() {
+        use crate::djvu_document::DjVuDocument;
+        use crate::iff::{self as iff_mod, Chunk, DjvuFile};
+
+        let mut info = vec![0u8; 10];
+        info[1] = 100; // width
+        info[3] = 100; // height
+        // Garbage bytes that are not valid BZZ — decoding will fail
+        let bad_antz: Vec<u8> = vec![0xFF, 0xFE, 0xAB, 0xCD, 0x12, 0x34];
+        let bytes = iff_mod::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0,
+                children: vec![
+                    Chunk::Leaf {
+                        id: *b"INFO",
+                        data: info,
+                    },
+                    Chunk::Leaf {
+                        id: *b"ANTz",
+                        data: bad_antz,
+                    },
+                ],
+            },
+        });
+        let doc = DjVuDocument::parse(&bytes).expect("synthetic doc must parse");
+        let pdf = djvu_to_pdf(&doc).expect("corrupted ANTz must not abort PDF export");
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(
+            !s.contains("/Annots"),
+            "corrupted ANTz should produce no /Annots block"
+        );
+    }
+
+    /// Page whose render fails (0×0 dimensions, no image data) triggers the blank
+    /// page fallback at lines 840-850: `rendered_pages[i]` is None so a blank
+    /// /Page object is emitted with the native MediaBox dimensions.
+    #[test]
+    fn djvu_to_pdf_zero_dim_page_emits_blank_page_object() {
+        use crate::djvu_document::DjVuDocument;
+        use crate::iff::{self as iff_mod, Chunk, DjvuFile};
+
+        // INFO chunk: width=0, height=0, dpi=0 (all zeros). No Sjbz or BG44 so
+        // is_bilevel_only=false, and render_dims returns (0,0), which makes
+        // render_pixmap return InvalidDimensions → render_page_data returns Err
+        // → .ok() yields None → blank page fallback fires.
+        let info = vec![0u8; 10];
+        let bytes = iff_mod::emit(&DjvuFile {
+            root: Chunk::Form {
+                secondary_id: *b"DJVU",
+                length: 0,
+                children: vec![Chunk::Leaf {
+                    id: *b"INFO",
+                    data: info,
+                }],
+            },
+        });
+        let doc = DjVuDocument::parse(&bytes).expect("zero-dim doc must parse");
+        let pdf = djvu_to_pdf(&doc).expect("zero-dim page must not crash PDF export");
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(
+            s.contains("/Type /Page"),
+            "PDF must contain at least one Page object"
         );
     }
 }

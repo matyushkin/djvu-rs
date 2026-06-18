@@ -1049,6 +1049,49 @@ mod tests {
     }
 
     #[test]
+    fn non_form_root_chunk_is_truncated_error() {
+        // Line 556: AT&T magic present but root chunk id is not FORM
+        let mut data = Vec::new();
+        data.extend_from_slice(b"AT&T");
+        data.extend_from_slice(b"INFO"); // not FORM
+        data.extend_from_slice(&10u32.to_be_bytes());
+        data.extend_from_slice(&[0u8; 10]);
+        assert_eq!(parse_form(&data).unwrap_err(), IffError::Truncated);
+    }
+
+    #[test]
+    fn form_too_short_for_secondary_id() {
+        // Line 574: FORM length < 4 (not enough bytes for the secondary_id).
+        // parse_form requires >= 16 bytes total, so pad to 16 while keeping length=3.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"AT&T");
+        data.extend_from_slice(b"FORM");
+        data.extend_from_slice(&3u32.to_be_bytes()); // length = 3 < 4
+        data.extend_from_slice(b"XYZ\x00"); // 4 bytes to reach 16 total
+        assert_eq!(parse_form(&data).unwrap_err(), IffError::Truncated);
+    }
+
+    #[test]
+    fn sub_chunk_length_exceeds_body() {
+        // Lines 608-610: a sub-chunk in parse_form_body claims more bytes than available
+        // Build a minimal DJVU FORM: AT&T + FORM(length) + DJVU + INFO(claimed 100, actual 2)
+        let mut body = Vec::new();
+        body.extend_from_slice(b"DJVU"); // form_type
+        body.extend_from_slice(b"INFO");
+        body.extend_from_slice(&100u32.to_be_bytes()); // claimed length: 100
+        body.extend_from_slice(&[0u8; 2]); // only 2 actual bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(b"AT&T");
+        data.extend_from_slice(b"FORM");
+        data.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        data.extend_from_slice(&body);
+        match parse_form(&data).unwrap_err() {
+            IffError::ChunkTooLong { .. } => {}
+            other => panic!("expected ChunkTooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unknown_form_type_allowed() {
         let mut data = minimal_djvu_bytes();
         data[12] = b'X';
@@ -1080,6 +1123,158 @@ mod tests {
 
         assert_eq!(&form.form_type, b"DJVM");
         assert!(!form.chunks.is_empty());
+    }
+
+    // Lines 95-102: LegacyError Display variants
+    #[test]
+    fn legacy_error_display_variants() {
+        assert_eq!(
+            LegacyError::UnexpectedEof.to_string(),
+            "unexpected end of input"
+        );
+        assert_eq!(
+            LegacyError::InvalidMagic.to_string(),
+            "invalid magic number"
+        );
+        assert_eq!(LegacyError::InvalidLength.to_string(), "invalid length");
+        assert_eq!(
+            LegacyError::MissingChunk("INFO").to_string(),
+            "missing required chunk: INFO"
+        );
+        assert_eq!(LegacyError::Unsupported("x").to_string(), "unsupported: x");
+        assert_eq!(
+            LegacyError::FormatError("y".to_string()).to_string(),
+            "format error: y"
+        );
+    }
+
+    // Lines 151, 169-172, 180, 185-190: Chunk accessor methods on Form/Leaf
+    #[test]
+    fn chunk_accessors_form_and_leaf() {
+        let leaf = Chunk::Leaf {
+            id: *b"INFO",
+            data: vec![1, 2, 3],
+        };
+        let form = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 10,
+            children: vec![leaf.clone()],
+        };
+
+        // data(): Form returns empty, Leaf returns data
+        assert_eq!(form.data(), &[] as &[u8]);
+        assert_eq!(leaf.data(), &[1u8, 2, 3]);
+
+        // children(): Form returns children, Leaf returns empty
+        assert_eq!(form.children().len(), 1);
+        assert!(leaf.children().is_empty());
+
+        // payload_length(): Form returns declared length, Leaf returns data.len()
+        assert_eq!(form.payload_length(), 10);
+        assert_eq!(leaf.payload_length(), 3);
+
+        // find_first(): on Leaf returns None (no children)
+        assert!(leaf.find_first(b"INFO").is_none());
+
+        // find_first() on Form with no matching child returns None
+        let form2 = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 0,
+            children: vec![],
+        };
+        assert!(form2.find_first(b"INFO").is_none());
+    }
+
+    #[test]
+    fn find_all_returns_all_matching_leaves() {
+        let leaf1 = Chunk::Leaf {
+            id: *b"INFO",
+            data: vec![1],
+        };
+        let leaf2 = Chunk::Leaf {
+            id: *b"INFO",
+            data: vec![2],
+        };
+        let leaf3 = Chunk::Leaf {
+            id: *b"BG44",
+            data: vec![3],
+        };
+        // A Form child — find_all should skip it (the _ => false branch)
+        let child_form = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 0,
+            children: vec![],
+        };
+        let form = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 0,
+            children: vec![leaf1, leaf2, leaf3, child_form],
+        };
+        let all_info = form.find_all(b"INFO");
+        assert_eq!(all_info.len(), 2);
+        let all_bg44 = form.find_all(b"BG44");
+        assert_eq!(all_bg44.len(), 1);
+        let all_none = form.find_all(b"NONE");
+        assert!(all_none.is_empty());
+    }
+
+    #[test]
+    fn find_first_skips_form_children() {
+        // A Form whose first child is itself a Form — the `_ => false` branch
+        // in find_first skips it and finds the Leaf later.
+        let child_form = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 0,
+            children: vec![],
+        };
+        let leaf = Chunk::Leaf {
+            id: *b"INFO",
+            data: vec![42],
+        };
+        let form = Chunk::Form {
+            secondary_id: *b"DJVU",
+            length: 0,
+            children: vec![child_form, leaf],
+        };
+        let found = form.find_first(b"INFO").expect("should find INFO");
+        assert!(matches!(found, Chunk::Leaf { id, .. } if id == b"INFO"));
+    }
+
+    #[test]
+    fn parse_empty_input_returns_unexpected_eof() {
+        // Line 207: data.len() < 4
+        assert!(matches!(parse(b""), Err(Error::UnexpectedEof)));
+        assert!(matches!(parse(b"AT"), Err(Error::UnexpectedEof)));
+    }
+
+    #[test]
+    fn parse_form_length_too_small_returns_invalid_length() {
+        // Line 255: FORM chunk with length field < 4
+        // AT&T + FORM + length(3) + 3 bytes payload = 15 bytes total
+        let mut data = vec![];
+        data.extend_from_slice(b"AT&T");
+        data.extend_from_slice(b"FORM");
+        data.extend_from_slice(&3u32.to_be_bytes()); // length < 4
+        data.extend_from_slice(b"XYZ");
+        assert!(matches!(parse(&data), Err(Error::InvalidLength)));
+    }
+
+    #[test]
+    fn parse_children_skips_trailing_bytes() {
+        // Line 295: FORM with trailing bytes (pos + 8 > end but pos < end)
+        // Construct a FORM with 4 bytes secondary_id + 5 bytes trailing junk
+        // (5 < 8, so parse_children will break out of its loop)
+        let mut data = vec![];
+        data.extend_from_slice(b"AT&T");
+        data.extend_from_slice(b"FORM");
+        let secondary_plus_junk = b"DJVU\x01\x02\x03\x04\x05"; // 4 + 5 = 9 bytes
+        data.extend_from_slice(&(secondary_plus_junk.len() as u32).to_be_bytes());
+        data.extend_from_slice(secondary_plus_junk);
+        let result = parse(&data);
+        // Should succeed (not error) and produce a Form with 0 children
+        let djvu = result.expect("trailing bytes must not cause an error");
+        assert!(matches!(djvu.root, Chunk::Form { .. }));
+        assert!(djvu.root.children().is_empty());
     }
 
     #[test]

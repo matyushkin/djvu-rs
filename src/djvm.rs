@@ -402,7 +402,10 @@ mod tests {
         }
         let data = std::fs::read(&path).expect("read");
         let result = split(&data, 0, 1).expect("split single-page");
-        assert_eq!(result, data, "splitting a single-page doc must return original bytes");
+        assert_eq!(
+            result, data,
+            "splitting a single-page doc must return original bytes"
+        );
     }
 
     #[test]
@@ -410,7 +413,10 @@ mod tests {
         // A valid AT&T FORM with an unknown form type has 0 pages → always OOB
         let fake = iff::partial_emit(*b"UNKN", &[]).unwrap();
         let result = split(&fake, 0, 1);
-        assert!(result.is_err(), "unknown form type must yield PageRangeOutOfBounds");
+        assert!(
+            result.is_err(),
+            "unknown form type must yield PageRangeOutOfBounds"
+        );
     }
 
     #[test]

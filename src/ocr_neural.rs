@@ -45,3 +45,27 @@ impl OcrBackend for CandleBackend {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ocr::{OcrBackend, OcrOptions};
+    use crate::pixmap::Pixmap;
+
+    #[test]
+    fn load_always_returns_init_failed() {
+        let err = CandleBackend::load("/some/model/dir").unwrap_err();
+        assert!(matches!(err, OcrError::InitFailed(_)));
+    }
+
+    #[test]
+    fn recognize_always_returns_recognition_failed() {
+        // Construct via the private field directly — load() always errors,
+        // so bypass it to reach recognize().
+        let backend = CandleBackend { _private: () };
+        let pm = Pixmap::white(1, 1);
+        let opts = OcrOptions::default();
+        let err = backend.recognize(&pm, &opts).unwrap_err();
+        assert!(matches!(err, OcrError::RecognitionFailed(_)));
+    }
+}

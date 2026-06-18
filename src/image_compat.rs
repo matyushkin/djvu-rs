@@ -212,10 +212,9 @@ mod tests {
     }
 
     fn load_page(name: &str) -> crate::djvu_document::DjVuDocument {
-        let data = std::fs::read(assets_path().join(name))
-            .unwrap_or_else(|_| panic!("{name} must exist"));
-        crate::djvu_document::DjVuDocument::parse(&data)
-            .unwrap_or_else(|e| panic!("parse: {e}"))
+        let data =
+            std::fs::read(assets_path().join(name)).unwrap_or_else(|_| panic!("{name} must exist"));
+        crate::djvu_document::DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse: {e}"))
     }
 
     #[test]
@@ -254,7 +253,10 @@ mod tests {
         let mut buf = vec![0u8; n];
         decoder.read_image(&mut buf).unwrap();
         // At least some pixels must be non-zero for a real page
-        assert!(buf.iter().any(|&b| b != 0), "rendered image must have non-zero pixels");
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "rendered image must have non-zero pixels"
+        );
     }
 
     #[test]
@@ -292,9 +294,14 @@ mod tests {
 
         let mut rect_buf = vec![0u8; n];
         let mut decoder3 = DjVuDecoder::new(page).unwrap().with_size(32, 24);
-        decoder3.read_rect(0, 0, w, h, &mut rect_buf, w as usize * 4).unwrap();
+        decoder3
+            .read_rect(0, 0, w, h, &mut rect_buf, w as usize * 4)
+            .unwrap();
 
-        assert_eq!(full, rect_buf, "full read_image and read_rect(full page) must match");
+        assert_eq!(
+            full, rect_buf,
+            "full read_image and read_rect(full page) must match"
+        );
     }
 
     #[test]
