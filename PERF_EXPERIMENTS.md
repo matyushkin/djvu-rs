@@ -2399,3 +2399,20 @@ Cumulative improvement from session baseline (before all experiments):
 
 **Reason.** The clamp was a no-op as proven by the arithmetic invariant. Removing
 it allows LLVM to better schedule and vectorize the lerp arithmetic.
+
+### C1_SIMD — wide::u32x4 SIMD for bilinear lerp (all 3 channels at once) — **Reverted** (2026-06-18)
+
+**Issue.** Replace 3 separate scalar lerp calls (12 multiply-adds) with a
+single `wide::u32x4` vector operation processing R, G, B + padding in parallel.
+
+**Approach.** In `bilinear_from_rows`, pack `[r00, g00, b00, 0]` etc. into
+`u32x4` vectors and do the 2D bilinear lerp as 4-wide SIMD.
+
+**Numbers:** `compositor_only/color_native_cached` +61% (p=0.00).
+
+**Decision.** Reverted immediately.
+
+**Reason.** Scalar→vector transfer for 4 individual u8 values (from separate
+`get()` calls) has higher overhead than the scalar multiply-adds it replaces.
+LLVM already auto-vectorizes the scalar loop after LERP_NO_CLAMP removed the
+`min(255)` guard; explicit `u32x4` fights against the optimizer.
