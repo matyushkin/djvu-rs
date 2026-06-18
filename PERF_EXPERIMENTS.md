@@ -2520,3 +2520,19 @@ the 4th byte (alpha) is harmlessly ignored by the caller.
 Cumulative improvement from session baseline:
 - `render_corpus_color`: 70.9 ms → 44.8 ms = **−36.8%**
 - `render_corpus_bilevel`: 73.3 ms → 45.2 ms = **−38.3%**
+
+### F3b — 4-byte BG pixel read in A2 tight 1:1 loop — **Kept** (2026-06-18)
+
+**Issue.** The A2 has-mask and no-mask tight 1:1 loops still read BG pixels as
+3-byte slices (`off..off+3`), the same issue F3 fixed in `bilinear_from_rows`.
+
+**Approach.** Apply the same F3 change: `bg_row.get(off..off+3)` →
+`bg_row.get(off..off+4)`. `px ≤ bg.width−1` guarantees `px*4+4 ≤ bg.width*4 ≤ bg_row.len()`.
+
+**Numbers:** Neutral — within noise on all benchmarks (±0.3 ms / ±0.7%).
+
+**Decision.** Kept (no regression, strictly correct improvement by eliminating
+3-byte load).
+
+**Reason.** A2 tight-path BG reads are not the bottleneck (the write to row_buf
+dominates). The change is kept for correctness and consistency with F3.
