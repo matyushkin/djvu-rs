@@ -1790,7 +1790,7 @@ fn composite_rows_bilinear_one(
                         mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
 
                     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min(bg.width as usize - 1);
+                        let px = ox.min((bg.width as usize).saturating_sub(1));
                         let is_fg = px < mask.width as usize
                             && (mask_row.get(ox >> 3).copied().unwrap_or(0)
                                 >> (7 - (ox & 7)))
@@ -1813,7 +1813,7 @@ fn composite_rows_bilinear_one(
                 } else {
                     // No mask: pure background copy with gamma correction.
                     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min(bg.width as usize - 1);
+                        let px = ox.min((bg.width as usize).saturating_sub(1));
                         let off = px * 4;
                         if let Some(q) = bg_row.get(off..off + 3) {
                             pixel[0] = lut[q[0] as usize];
