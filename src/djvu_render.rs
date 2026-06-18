@@ -1430,6 +1430,8 @@ struct CompositeContext<'a> {
     fg_x_q24: u64,
     fg_y_q24: u64,
     gamma_lut: &'a [u8; 256],
+    /// True when gamma_lut is the identity mapping (lut[i] == i for all i).
+    gamma_is_identity: bool,
     /// X offset within the full render (for region renders; 0 for full page).
     offset_x: u32,
     /// Y offset within the full render (for region renders; 0 for full page).
@@ -1487,6 +1489,7 @@ impl<'a> CompositeContext<'a> {
             fg_x_q24,
             fg_y_q24,
             gamma_lut,
+            gamma_is_identity: gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8),
             offset_x: offset.0,
             offset_y: offset.1,
             out_w: out.0,
@@ -1846,41 +1849,74 @@ fn composite_rows_bilinear_one(
                     let bg_max_px = (bg.width as usize).saturating_sub(1);
                     let mask_limit = mask.width as usize;
                     let out_w = row_buf.len() / 4;
-                    for mb_idx in 0..(out_w + 7) / 8 {
-                        let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
-                        let exp = &MASK_EXPAND[mb as usize];
-                        for j in 0..8usize {
-                            let ox = mb_idx * 8 + j;
-                            if ox >= out_w {
-                                break;
+                    // D1: hoist gamma identity check outside the pixel loop.
+                    macro_rules! a2_has_mask_loop {
+                        ($write:expr) => {
+                            for mb_idx in 0..(out_w + 7) / 8 {
+                                let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
+                                let exp = &MASK_EXPAND[mb as usize];
+                                for j in 0..8usize {
+                                    let ox = mb_idx * 8 + j;
+                                    if ox >= out_w {
+                                        break;
+                                    }
+                                    let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
+                                    let px = ox.min(bg_max_px);
+                                    let off = px * 4;
+                                    let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
+                                    let (r, g, b) = if let Some(q) = bg_row.get(off..off + 3) {
+                                        (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
+                                    } else {
+                                        (!fg_m, !fg_m, !fg_m)
+                                    };
+                                    $write(pixel, r, g, b);
+                                }
                             }
-                            let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
-                            let px = ox.min(bg_max_px);
-                            let off = px * 4;
-                            let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
-                            let (r, g, b) = if let Some(q) = bg_row.get(off..off + 3) {
-                                (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
-                            } else {
-                                (!fg_m, !fg_m, !fg_m)
-                            };
+                        };
+                    }
+                    if ctx.gamma_is_identity {
+                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                            pixel[0] = r;
+                            pixel[1] = g;
+                            pixel[2] = b;
+                        });
+                    } else {
+                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
                             pixel[0] = lut[r as usize];
                             pixel[1] = lut[g as usize];
                             pixel[2] = lut[b as usize];
-                        }
+                        });
                     }
                 } else {
                     // No mask: pure background copy with gamma correction.
-                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                        let px = ox.min((bg.width as usize).saturating_sub(1));
-                        let off = px * 4;
-                        if let Some(q) = bg_row.get(off..off + 3) {
-                            pixel[0] = lut[q[0] as usize];
-                            pixel[1] = lut[q[1] as usize];
-                            pixel[2] = lut[q[2] as usize];
-                        } else {
-                            pixel[0] = 255;
-                            pixel[1] = 255;
-                            pixel[2] = 255;
+                    // D1: hoist gamma identity check outside the pixel loop.
+                    if ctx.gamma_is_identity {
+                        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                            let px = ox.min((bg.width as usize).saturating_sub(1));
+                            let off = px * 4;
+                            if let Some(q) = bg_row.get(off..off + 3) {
+                                pixel[0] = q[0];
+                                pixel[1] = q[1];
+                                pixel[2] = q[2];
+                            } else {
+                                pixel[0] = 255;
+                                pixel[1] = 255;
+                                pixel[2] = 255;
+                            }
+                        }
+                    } else {
+                        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                            let px = ox.min((bg.width as usize).saturating_sub(1));
+                            let off = px * 4;
+                            if let Some(q) = bg_row.get(off..off + 3) {
+                                pixel[0] = lut[q[0] as usize];
+                                pixel[1] = lut[q[1] as usize];
+                                pixel[2] = lut[q[2] as usize];
+                            } else {
+                                pixel[0] = 255;
+                                pixel[1] = 255;
+                                pixel[2] = 255;
+                            }
                         }
                     }
                 }
@@ -1916,9 +1952,15 @@ fn composite_rows_bilinear_one(
                 (255, 255, 255)
             };
 
-            pixel[0] = ctx.gamma_lut[r as usize];
-            pixel[1] = ctx.gamma_lut[g as usize];
-            pixel[2] = ctx.gamma_lut[b as usize];
+            if ctx.gamma_is_identity {
+                pixel[0] = r;
+                pixel[1] = g;
+                pixel[2] = b;
+            } else {
+                pixel[0] = ctx.gamma_lut[r as usize];
+                pixel[1] = ctx.gamma_lut[g as usize];
+                pixel[2] = ctx.gamma_lut[b as usize];
+            }
         }
         return;
     }
@@ -1982,10 +2024,16 @@ fn composite_rows_bilinear_one(
             (255, 255, 255)
         };
 
-        pixel[0] = ctx.gamma_lut[r as usize];
-        pixel[1] = ctx.gamma_lut[g as usize];
-        pixel[2] = ctx.gamma_lut[b as usize];
-        // alpha written by fill_alpha_255 in composite_rows
+        // D1: skip LUT scatter reads when gamma is the identity mapping.
+        if ctx.gamma_is_identity {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        } else {
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
         bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
     }
 }
@@ -2038,9 +2086,15 @@ fn composite_rows_area_avg_one(
             (255, 255, 255)
         };
 
-        pixel[0] = ctx.gamma_lut[r as usize];
-        pixel[1] = ctx.gamma_lut[g as usize];
-        pixel[2] = ctx.gamma_lut[b as usize];
+        if ctx.gamma_is_identity {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        } else {
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
         // alpha written by fill_alpha_255 in composite_rows
     }
 }

@@ -2416,3 +2416,40 @@ single `wide::u32x4` vector operation processing R, G, B + padding in parallel.
 `get()` calls) has higher overhead than the scalar multiply-adds it replaces.
 LLVM already auto-vectorizes the scalar loop after LERP_NO_CLAMP removed the
 `min(255)` guard; explicit `u32x4` fights against the optimizer.
+
+### D1 — gamma identity fast-path (skip LUT reads when gamma = identity) — **Kept** (2026-06-18)
+
+**Issue.** Every rendered pixel does 3 table-scatter reads into `gamma_lut[256]`
+even when the LUT is the identity mapping (i.e. DjVu gamma = DISPLAY_GAMMA = 2.2,
+the most common case). The scatter reads defeat LLVM's auto-vectorizer because
+it cannot prove the LUT is identity at compile time.
+
+**Approach.** Added a `gamma_is_identity: bool` field to `CompositeContext`,
+computed once per frame from `gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8)`.
+Hoisted the check outside the pixel loop in all four compositor paths:
+— A2 tight 1:1 has-mask (macro to duplicate loop body)
+— A2 tight 1:1 no-mask (duplicate loop body)
+— general 1:1 nearest-neighbour path (per-pixel branch acceptable, path is not
+  the hot corpus path)
+— general bilinear path (already applied in first pass)
+— area-average downscale path
+
+**Numbers (absolute times, post-LERP_NO_CLAMP baseline ~48 ms):**
+
+| Benchmark | Before D1 | After D1 (all paths) | Δ |
+|-------|--------|-------|--------|
+| `compositor_only/color_native_cached` | 47.5 ms | 44.6 ms | −6.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 48.6 ms | 45.0 ms | −7.4% (p=0.00) |
+| `render_corpus_color` | ~48 ms | 46.2 ms | −3.7% (p=0.00) |
+| `render_corpus_bilevel` | ~48 ms | 45.2 ms | −5.8% (p=0.00) |
+
+Cumulative improvement from session baseline (before all experiments):
+- `render_corpus_color`: 70.9 ms → 46.2 ms = **−35%**
+- `render_corpus_bilevel`: 73.3 ms → 45.2 ms = **−38%**
+
+**Decision.** Kept.
+
+**Reason.** Removing the indirect LUT reads when they are provably identity lets
+LLVM vectorize the write loop. The `gamma_is_identity` flag costs one boolean
+comparison per row (negligible) and correctly falls back to full LUT for
+non-standard gamma values.
