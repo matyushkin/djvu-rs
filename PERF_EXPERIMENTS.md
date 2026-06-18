@@ -2536,3 +2536,36 @@ Cumulative improvement from session baseline:
 
 **Reason.** A2 tight-path BG reads are not the bottleneck (the write to row_buf
 dominates). The change is kept for correctness and consistency with F3.
+
+### G1 — 4-byte write (RGBA) in A2 tight 1:1 gamma-identity loop — **Reverted** (2026-06-18)
+
+**Issue.** The A2 gamma-identity inner loop writes `pixel[0]=r; pixel[1]=g; pixel[2]=b`
+(3 separate byte stores). A single 32-bit store would be more efficient.
+
+**Approach.** Replace with `pixel.copy_from_slice(&[r, g, b, 0])` so LLVM can
+emit a 32-bit store. The alpha byte (0) is corrected by `fill_alpha_255`
+afterwards.
+
+**Numbers:** Neutral — corpus_bilevel ±0.2 ms.
+
+**Decision.** Reverted.
+
+**Reason.** The A2 loop is already auto-vectorized by LLVM; the 3-byte stores in
+SIMD context are merged into wider vector stores. Writing an extra 0 byte adds
+a small initialisation cost that cancels the benefit.
+
+### A3 — mb==0 bulk-copy fast path in A2 has-mask loop — **Reverted** (2026-06-18)
+
+**Issue.** When a mask byte is 0x00 (all background), the A2 inner j-loop
+applies `& !fg_m = & 0xFF` — a no-op — to each of the 8 pixels. A bulk 32-byte
+copy would be faster.
+
+**Approach.** Add a branch before the j-loop: when `mb == 0 && group_end < out_w && group_end <= bg_max_px`, bulk-copy 32 bytes from `bg_row` to `row_buf` (all 4 bytes per pixel; `fill_alpha_255` fixes alpha). Continue to next mask byte.
+
+**Numbers:** Neutral — corpus_bilevel ±0.1 ms.
+
+**Decision.** Reverted.
+
+**Reason.** LLVM already auto-vectorizes the j-loop for mb=0, optimizing away
+the `& 0xFF` no-op and emitting equivalent SIMD copy instructions. The extra
+branch overhead of the fast path matched the cost it avoided.
