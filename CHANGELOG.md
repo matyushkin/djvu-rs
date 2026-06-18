@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3](https://github.com/matyushkin/djvu-rs/compare/v0.20.2...v0.20.3) (2026-06-18)
+
+
+### Bug Fixes
+
+* **render:** replace to_ne_bytes() with per-byte writes in bilevel compositor ([2ee62d4](https://github.com/matyushkin/djvu-rs/commit/2ee62d4f7d909e45821336ef04ba5c179d0a758e))
+* **render:** use saturating_sub to avoid usize underflow in bilinear 1:1 path ([14de98c](https://github.com/matyushkin/djvu-rs/commit/14de98c0ce29a263658535f25e43433d87cebb82))
+* resolve clippy warnings in WIP test additions ([a173164](https://github.com/matyushkin/djvu-rs/commit/a1731646671243b925455d6ef5398bd2e0ae5226))
+* route raw IFF framing through iff::partial_emit in tests ([e718bd8](https://github.com/matyushkin/djvu-rs/commit/e718bd823c14f6f447e596a66738f89503239629))
+* **text:** restore alloc String/ToString imports in no-std path ([1384ce4](https://github.com/matyushkin/djvu-rs/commit/1384ce4e9b04a5b587041a0d1ac4f07601b47dd5))
+
+
+### Performance Improvements
+
+* **render:** close 1.2–2.1× DjVuLibre gap (issue [#408](https://github.com/matyushkin/djvu-rs/issues/408)) ([ef7a676](https://github.com/matyushkin/djvu-rs/commit/ef7a6766ed5986bc8f19aa95c4635ba44b39396d))
+* **render:** close 1.2–2.1× DjVuLibre gap (issue [#408](https://github.com/matyushkin/djvu-rs/issues/408)) ([5daf560](https://github.com/matyushkin/djvu-rs/commit/5daf56037126a00fe0e52aba43b11c4614534539))
+* **render:** fix area-avg box bounds — −52% colorbook, −10% corpus color ([db84134](https://github.com/matyushkin/djvu-rs/commit/db841345542e736bf076a490cbe099e2085949e1))
+* **render:** fix area-avg box bounds (inclusive→exclusive) + pow2 shift ([db84134](https://github.com/matyushkin/djvu-rs/commit/db841345542e736bf076a490cbe099e2085949e1))
+* **render:** fix area-avg box bounds (inclusive→exclusive) + pow2 shift ([2e6e24d](https://github.com/matyushkin/djvu-rs/commit/2e6e24d3f181bb8cde29339eeeb70d74f89f17de))
+
 ## [0.20.2](https://github.com/matyushkin/djvu-rs/compare/v0.20.1...v0.20.2) (2026-06-17)
 
 
