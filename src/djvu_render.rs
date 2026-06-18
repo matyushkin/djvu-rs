@@ -599,8 +599,8 @@ fn sample_bilinear(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
         let top = a as u32 * (FRAC - tx) + b as u32 * tx;
         let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
         let numerator = top * (FRAC - ty) + bot * ty;
-        let v = (numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS);
-        v.min(255) as u8
+        // v ≤ (255*FRAC*FRAC + round) >> (2*FRACBITS) = 255 — no clamp needed.
+        ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
     };
 
     (
@@ -637,8 +637,8 @@ fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) ->
         let top = a as u32 * (FRAC - tx) + b as u32 * tx;
         let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
         let numerator = top * (FRAC - ty) + bot * ty;
-        let v = (numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS);
-        v.min(255) as u8
+        // v ≤ (255*FRAC*FRAC + round) >> (2*FRACBITS) = 255 — no clamp needed.
+        ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
     };
     (
         lerp(r00, r10, r01, r11),

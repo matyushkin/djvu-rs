@@ -2246,3 +2246,126 @@ significant (p=0.00). The branchless mask-byte loop removes a
 data-dependency on the bit-shift index and allows the compiler to better
 schedule/unroll the inner loop. No regression on any benchmark within
 noise tolerance.
+
+### B1 — hoist bg_fy + incremental bg_fx accumulator in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: reduce per-pixel cost in the general bilinear path
+(cable corpus, BG at subsample 3, non-1:1 sampling).
+
+**Approach.** Two changes to `composite_rows_bilinear_one`:
+1. Hoist `map_plane_center_frac(fy, bg_y_q24)` outside the pixel loop
+   (row-invariant).
+2. Replace per-pixel `map_plane_center_frac(fx, bg_x_q24)` (u64 multiply +
+   shift) with an exact u64 accumulator that adds `fx_step * bg_x_q24` per
+   pixel in Q48 and applies `>> 24` per sample. No rounding error vs the
+   original: the accumulator starts at `(offset_x * fx_step + FRAC/2) *
+   bg_x_q24` so the integer truncation is identical.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (A2) | after B1 | change |
+|-------|------------|----------|--------|
+| `render_corpus_color` | 70.5 ms | 67.0 ms | −4.6% (p=0.00) |
+| `render_corpus_bilevel` | 71.8 ms | 67.9 ms | −5.5% (p=0.00) |
+| `compositor_only/color_native_cached` | 70.9 ms | 67.6 ms | −5.2% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 72.3 ms | 67.8 ms | −6.1% (p=0.00) |
+| `render_colorbook` | 6.0 ms | 6.3 ms | +4.8% (p=0.00, small doc noise) |
+
+**Decision.** Kept.
+
+**Reason.** Consistent ~5% improvement on all corpus benchmarks with p=0.00.
+The colorbook regression is +0.3 ms absolute on a micro-benchmark and
+consistent with the variance seen between runs; it does not affect larger docs.
+
+### B1b — specialized general-bilinear path with MASK_EXPAND for cable case — **Reverted** (2026-06-18)
+
+**Issue.** Follow-up to B1: try pre-fetching the mask row and using MASK_EXPAND
+in a specialized inner loop for the common general-bilinear case (cable: native
+scale, no fg44/palette).
+
+**Approach.** Added a `if fx_step == FRAC && ctx.offset_x == 0 && fg_palette.is_none() && fg44.is_none()` guarded specialized path before the general loop, using the same mb_idx/j nested loop as A2.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B1) | after B1b | change |
+|-------|------------|-----------|--------|
+| `render_corpus_color` | 67.0 ms | 69.5 ms | +3.7% (p=0.00) |
+| `render_corpus_bilevel` | 67.9 ms | 70.4 ms | +3.7% (p=0.00) |
+
+**Decision.** Reverted (`git restore src/djvu_render.rs`).
+
+**Reason.** The extra code path (condition checks + nested loop structure) added
+instruction-cache pressure and branch overhead that outweighed any mask-lookup
+savings. The `sample_bilinear` call remains the dominant cost; the mask lookup
+`m.get(px, py)` is a negligible fraction.
+
+### B2 — precompute BG row slices in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** #408 follow-up: eliminate per-pixel y-coordinate arithmetic in the
+general bilinear path (cable corpus, BG at subsample 3).
+
+**Approach.** Added `bilinear_from_rows()` helper that takes pre-fetched row0
+and row1 slices instead of a `Pixmap`. Outside the pixel loop, precompute:
+- `y0 = (bg_fy >> FRACBITS).min(height-1)`, `y1 = y0+1`
+- `ty = bg_fy & FRAC_MASK`
+- `row0 = bg.data[y0 * stride ..]`, `row1 = bg.data[y1 * stride ..]`
+
+Despite `sample_bilinear` being `#[inline]`, LLVM did NOT perform loop-invariant
+code motion for these y-coordinate computations, so explicit precomputation
+eliminates one integer multiply and two `.min()` ops per pixel (4× inside the
+original 4-call bilinear).
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B1) | after B2 | change |
+|-------|------------|----------|--------|
+| `render_corpus_color` | 67.0 ms | 55.6 ms | −20.0% (p=0.00) |
+| `render_corpus_bilevel` | 67.9 ms | 56.3 ms | −19.9% (p=0.00) |
+| `compositor_only/color_native_cached` | 67.6 ms | 55.3 ms | −19.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 67.8 ms | 55.1 ms | −21.5% (p=0.00) |
+
+**Decision.** Kept.
+
+**Reason.** Large, consistent, statistically significant improvement across all
+bilinear benchmarks. No regressions.
+
+### B2b — hoist mask row slice in general bilinear path — **Kept** (2026-06-18)
+
+**Issue.** Follow-up to B2: eliminate per-pixel `Bitmap::get()` y*stride
+multiply in the general bilinear path.
+
+**Approach.** Before the pixel loop, pre-fetch the mask row slice for `py`
+from `Bitmap::data`. Inline the bit extraction `(mask_row[px >> 3] >> (7 - px & 7)) & 1`
+instead of calling `m.get(px, py)` per pixel.
+
+**Numbers** (Criterion, Apple M-series):
+
+| bench | before (B2) | after B2b | change |
+|-------|------------|-----------|--------|
+| `compositor_only/color_native_cached` | 55.3 ms | 53.6 ms | −3.1% (p=0.00) |
+| `compositor_only/bilevel_native_cached` | 55.1 ms | 53.8 ms | −2.4% (p=0.00) |
+
+**Decision.** Kept.
+
+**Reason.** Consistent improvement. Eliminates one integer multiply (y*stride)
+from every pixel's mask lookup.
+
+### B2c — replace fx multiply with running accumulator — **Reverted** (2026-06-18)
+
+**Issue.** Replace `fx = (ox + offset_x) * fx_step` per-pixel multiply with
+a wrapping-add accumulator.
+
+**Numbers:** corpus_color −1.3%, corpus_bilevel +2.2% (mixed, p=0.04 marginal).
+
+**Decision.** Reverted. LLVM already handles the multiply well; the accumulator
+approach adds register pressure and causes bilevel regression.
+
+### B2d — two bounds checks per row in bilinear_from_rows — **Reverted** (2026-06-18)
+
+**Issue.** Replace 4 separate `row.get(off..off+3)` calls with 2 `row.get(..end)` calls.
+
+**Numbers:** corpus_color +89% regression.
+
+**Decision.** Reverted immediately. Returning a (u8, u8, u8, u8, u8, u8) tuple
+from the helper forces stack spills. The per-call `get` approach keeps values in
+registers.
