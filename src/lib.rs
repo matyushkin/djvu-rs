@@ -591,6 +591,18 @@ impl<'a> Page<'a> {
     }
 }
 
+// Compile-time assertions: Document is Send + Sync.
+#[cfg(feature = "std")]
+#[allow(dead_code)]
+const _: () = {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    fn assertions() {
+        assert_send::<Document>();
+        assert_sync::<Document>();
+    }
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,15 +740,3 @@ mod tests {
         assert!(doc.page_count() > 0);
     }
 }
-
-// Compile-time assertions: Document is Send + Sync.
-#[cfg(feature = "std")]
-#[allow(dead_code)]
-const _: () = {
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-    fn assertions() {
-        assert_send::<Document>();
-        assert_sync::<Document>();
-    }
-};

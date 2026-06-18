@@ -70,18 +70,6 @@ impl Default for OcrOptions {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ocr_options_default_values() {
-        let opts = OcrOptions::default();
-        assert_eq!(opts.languages, "eng");
-        assert_eq!(opts.dpi, 300);
-    }
-}
-
 /// Trait for pluggable OCR backends.
 ///
 /// Implementations receive a rendered page pixmap and return a structured
@@ -100,4 +88,16 @@ pub trait OcrBackend {
     /// may emit a coarser tree or none at all. Consumers that need word-level
     /// rects (e.g. the hOCR/ALTO exporters) must tolerate a flatter layer.
     fn recognize(&self, pixmap: &Pixmap, options: &OcrOptions) -> Result<TextLayer, OcrError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_options_default_values() {
+        let opts = OcrOptions::default();
+        assert_eq!(opts.languages, "eng");
+        assert_eq!(opts.dpi, 300);
+    }
 }
