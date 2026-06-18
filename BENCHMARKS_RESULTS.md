@@ -238,7 +238,7 @@ The benchmark workflow keeps this comparison active:
 machine as Criterion and formats the result with `scripts/djvulibre_compare.py`.
 The benchmark dashboard workflow also publishes a DjVuLibre overlay.
 
-Current local run (2026-05-17):
+Current local run (2026-06-18, macOS arm64, Apple M1 Max, Rust stable):
 
 - `boy.djvu`: small color IW44 downscale
 - `colorbook.djvu`: large color IW44 downscale
@@ -250,13 +250,13 @@ Current local run (2026-05-17):
 
 | Benchmark | djvu-rs | libdjvulibre C API | ddjvu CLI | Ratio |
 |-----------|--------:|-------------------:|----------:|------:|
-| `boy.djvu` @ 72 dpi, small color IW44 | **246 µs** | **159 µs** | **30.6 ms** | djvu-rs **1.5x slower** |
-| `colorbook.djvu` @ 150 dpi, color IW44 | **7.22 ms** | **5.96 ms** | **67.3 ms** | djvu-rs **1.2x slower** |
-| `watchmaker.djvu` @ 300 dpi, native color corpus | **71.2 ms** | **36.44 ms** | **79.8 ms** | djvu-rs **2.0x slower** |
-| `cable_1973_100133.djvu` @ 300 dpi, native bilevel JB2 corpus | **75.45 ms** | **35.25 ms** | **73.8 ms** | djvu-rs **2.1x slower** |
+| `boy.djvu` @ 72 dpi, small color IW44 | **211 µs** | **147 µs** | **31.1 ms** | djvu-rs **1.4x slower** |
+| `colorbook.djvu` @ 150 dpi, color IW44 | **7.11 ms** | **5.90 ms** | **66.3 ms** | djvu-rs **1.2x slower** |
+| `watchmaker.djvu` @ 300 dpi, native color corpus | **73.1 ms** | **36.0 ms** | **78.6 ms** | djvu-rs **2.0x slower** |
+| `cable_1973_100133.djvu` @ 300 dpi, native bilevel JB2 corpus | **73.8 ms** | **35.2 ms** | **75.1 ms** | djvu-rs **2.1x slower** |
 
 For the closest cold-path djvu-rs Criterion comparison,
-`render_colorbook_cold` is **18.8 ms**. That benchmark includes document
+`render_colorbook_cold` is **18.0 ms**. That benchmark includes document
 parsing and first render work, but it is not identical to libdjvulibre's
 open+decode measurement. The libdjvulibre C API harness intentionally avoids
 upscale cases because `ddjvu_page_render` can return a zero buffer when the
@@ -266,10 +266,10 @@ requested output rectangle is larger than the native page.
 
 | Scenario | Winner | Margin |
 |----------|--------|--------|
-| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2-1.5x faster in this matrix |
+| Downscaled render (< native DPI), warm | **DjVuLibre** | 1.2-1.4x faster in this matrix |
 | Native-resolution corpus render | **DjVuLibre** | 2.0-2.1x faster |
-| `ddjvu` CLI subprocess baseline | comparable to slower than djvu-rs render-only | 30.6-79.8 ms across measured cases |
-| djvu-rs cold colorbook render | — | 18.8 ms; not directly equivalent to libdjvulibre open+decode |
+| `ddjvu` CLI subprocess baseline | comparable to slower than djvu-rs render-only | 31.1-78.6 ms across measured cases |
+| djvu-rs cold colorbook render | — | 18.0 ms; not directly equivalent to libdjvulibre open+decode |
 | Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.29 ms |
 
 ---
