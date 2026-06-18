@@ -1705,8 +1705,11 @@ fn composite_rows_bilevel_one(
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
             let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
-            let rgba = 0xFF00_0000_u32 | (is_fg.wrapping_sub(1) & 0x00FF_FFFF);
-            pixel.copy_from_slice(&rgba.to_ne_bytes());
+            let ch = (is_fg.wrapping_sub(1) & 0xFF) as u8; // 0 when fg, 255 when bg
+            pixel[0] = ch;
+            pixel[1] = ch;
+            pixel[2] = ch;
+            pixel[3] = 255;
         }
         return;
     }
