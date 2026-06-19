@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4](https://github.com/matyushkin/djvu-rs/compare/v0.20.3...v0.20.4) (2026-06-19)
+
+
+### Bug Fixes
+
+* assign unique DPI names to djvulibre bench series on dashboard ([b258616](https://github.com/matyushkin/djvu-rs/commit/b2586161cac85a8029afad12fc6715d907357566))
+
+
+### Performance Improvements
+
+* bilinear compositor −32% via row-slice precomputation and scalar micro-opts ([#411](https://github.com/matyushkin/djvu-rs/issues/411)) ([e3c1a75](https://github.com/matyushkin/djvu-rs/commit/e3c1a7572f7c9e17eb1ce124115ab3bdb3cf9e90))
+* F3b apply 4-byte pixel read to A2 tight 1:1 bg_row reads ([#413](https://github.com/matyushkin/djvu-rs/issues/413)) ([5e6fa27](https://github.com/matyushkin/djvu-rs/commit/5e6fa27fe0d2c81392657fd9039d8ac4f7aa73c5))
+* **render:** precompute 4 bilinear weights in bilinear_from_rows ([e910ce3](https://github.com/matyushkin/djvu-rs/commit/e910ce387913ef32e0cbbb4a1dcf56e90cb51f01))
+
 ## [0.20.3](https://github.com/matyushkin/djvu-rs/compare/v0.20.2...v0.20.3) (2026-06-18)
 
 
