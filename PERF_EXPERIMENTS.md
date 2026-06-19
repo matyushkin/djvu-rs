@@ -2596,3 +2596,38 @@ regression because LLVM can no longer hoist the `if downscale` dispatch out of
 the per-row loop. B1 worked because its additions were in `bilinear_from_rows`
 (called from the hot path) and directly reduced per-pixel work; area-avg
 additions add dead code to the hot path's code layout.
+
+### H1 — 4-weight bilinear lerp (precompute w00..w11 once per pixel) — **Kept** (2026-06-19)
+
+**Issue.** Profiling (`samply`) pinpointed the inner loop of `composite_rows_bilinear_one` as the only hot spot. Disassembly revealed `ty` was spilled to the stack (`ldr w21, [sp, #0x5c]`) on the multiply critical path, and that `(FRAC - tx)` / `(FRAC - ty)` were recomputed inside each of the 3 per-channel `lerp()` calls — 12 redundant subtractions per pixel.
+
+**Approach.** Replace the two-level bilinear lerp inside `bilinear_from_rows`:
+```rust
+// old — tx/ty subtracted 3× each inside lerp closure
+let top = a * (FRAC-tx) + b * tx;
+let bot = c * (FRAC-tx) + d * tx;
+(top * (FRAC-ty) + bot * ty + round) >> (2*FRACBITS)
+```
+with a 4-weight dot-product:
+```rust
+// new — weights computed once, all captured by value in registers
+let (itx, ity) = (FRAC-tx, FRAC-ty);
+let (w00, w10, w01, w11) = (itx*ity, tx*ity, itx*ty, tx*ty);
+// sum w_ij = FRAC² = 256, so >> 8 normalises
+(a*w00 + b*w10 + c*w01 + d*w11 + 128) >> 8
+```
+
+**Numbers:**
+
+| Benchmark | Before | After | Δ |
+|---|---|---|---|
+| render_colorbook | 12.3 ms | 5.77 ms | **−53%** |
+| render_corpus_color | 70.9 ms | 46.0 ms | **−35%** |
+| render_corpus_bilevel | 73.3 ms | 46.0 ms | **−37%** |
+| compositor color_native_cached | 75.1 ms | 45.8 ms | **−39%** |
+| compositor bilevel_native_cached | 70.9 ms | 45.8 ms | **−35%** |
+| compositor color_downscale_cached | 12.2 ms | 5.73 ms | **−53%** |
+
+**Decision.** Kept.
+
+**Reason.** Precomputing weights eliminates redundant arithmetic and removes `ty` from the per-channel critical path (no more stack reload inside the multiply chain). LLVM can better vectorise three independent `blend()` calls that share only constant weights, yielding ~35–53% wall-clock improvement across all bilinear-heavy paths.
