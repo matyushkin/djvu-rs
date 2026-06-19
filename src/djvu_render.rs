@@ -634,17 +634,23 @@ fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) ->
     let (r01, g01, b01) = get(row1, x0);
     let (r11, g11, b11) = get(row1, x1);
 
-    let lerp = |a: u8, b: u8, c: u8, d: u8| -> u8 {
-        let top = a as u32 * (FRAC - tx) + b as u32 * tx;
-        let bot = c as u32 * (FRAC - tx) + d as u32 * tx;
-        let numerator = top * (FRAC - ty) + bot * ty;
-        // v ≤ (255*FRAC*FRAC + round) >> (2*FRACBITS) = 255 — no clamp needed.
-        ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
+    // Precompute bilinear weights so ty/ity are absorbed into w01/w11 and never
+    // need to be reloaded from the stack during per-channel accumulation.
+    // Weights sum to FRAC*FRAC = 256, so result = dot/256 (>> 8).
+    let itx = FRAC - tx;
+    let ity = FRAC - ty;
+    let w00 = itx * ity;
+    let w10 = tx * ity;
+    let w01 = itx * ty;
+    let w11 = tx * ty;
+    // max dot = 255 * 256 = 65280 + 128 ≤ u32 range; no clamp needed.
+    let blend = |a: u8, b: u8, c: u8, d: u8| -> u8 {
+        ((a as u32 * w00 + b as u32 * w10 + c as u32 * w01 + d as u32 * w11 + 128) >> 8) as u8
     };
     (
-        lerp(r00, r10, r01, r11),
-        lerp(g00, g10, g01, g11),
-        lerp(b00, b10, b01, b11),
+        blend(r00, r10, r01, r11),
+        blend(g00, g10, g01, g11),
+        blend(b00, b10, b01, b11),
     )
 }
 
