@@ -2631,3 +2631,41 @@ let (w00, w10, w01, w11) = (itx*ity, tx*ity, itx*ty, tx*ty);
 **Decision.** Kept.
 
 **Reason.** Precomputing weights eliminates redundant arithmetic and removes `ty` from the per-channel critical path (no more stack reload inside the multiply chain). LLVM can better vectorise three independent `blend()` calls that share only constant weights, yielding ~35–53% wall-clock improvement across all bilinear-heavy paths.
+
+### H2 — slice-trim to exact stride to let LLVM elide bilinear bounds checks — **Reverted** (2026-06-19)
+
+**Issue.** Profile shows `b.hs` (bounds check branch) inside `bilinear_from_rows` at
+10.4% of samples. Callers guarantee `row.len() ≥ width*4`, so the fallback
+`(0, 0, 0)` path is dead code.
+
+**Approach.** Trim row slices to exactly `width*4` bytes at the top of
+`bilinear_from_rows` (`let row0 = &row0[..stride]`) so LLVM's range analysis
+can prove `x0/x1 * 4 + 4 ≤ row.len()` and eliminate the inner bounds checks.
+(`unsafe` rejected by `#![deny(unsafe_code)]`.)
+
+**Numbers.** Neutral — corpus_color ±0.2 ms.
+
+**Decision.** Reverted.
+
+**Reason.** The `b.hs` branches are well-predicted (always not taken) and
+execute in parallel with downstream work in the OOO pipeline. The trim itself
+adds a bounds-check at entry, cancelling any gain. The sample count at `b.hs`
+reflects pipeline retirement rather than actual branch overhead.
+
+### H3 — FG44 x-coordinate accumulator (B1 pattern for FG layer) — **Reverted** (2026-06-19)
+
+**Issue.** Profile (after H1) shows 11.7%+7.3% = 19% in `map_plane_center_frac`
++ UBFX for the FG44 layer x-coordinate (`mul x8, x8, fg_x_q24` per pixel).
+
+**Approach.** Apply the same B1 accumulator to FG44: hoist `fg_fy` per row and
+maintain `fg_fx_q += fx_step * fg_x_q24` per pixel instead of computing the
+full multiply. Accumulator advances every pixel; read only when `is_fg`.
+
+**Numbers.** render_colorbook −1.5% (FG-heavy), render_corpus_color +3% (BG-heavy).
+
+**Decision.** Reverted.
+
+**Reason.** The accumulator add runs for every pixel (BG or FG), while the
+original multiply only runs for FG pixels. For typical DjVu content where
+most pixels are background, the per-pixel overhead of the accumulator outweighs
+the saving from replacing the conditional multiply.
