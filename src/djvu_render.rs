@@ -956,6 +956,11 @@ pub(crate) struct PageLayers {
     mask: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
     mask_sub4: std::sync::OnceLock<Option<crate::bitmap::Bitmap>>,
     fg44: std::sync::OnceLock<Option<Pixmap>>,
+    // Full-resolution (subsample=1) RGB Pixmap derived from bg44. Cached so
+    // repeated renders of the same page skip the 2–3 ms IW44 IDWT + YCbCr→RGB
+    // conversion. Populated on first full-resolution render; left empty on
+    // pages that are never rendered at sub=1 (e.g. thumbnails only).
+    bg_rgb_s1: std::sync::OnceLock<Option<Pixmap>>,
 }
 
 #[cfg(feature = "std")]
@@ -1036,6 +1041,23 @@ impl PageLayers {
             .get_or_init(|| page.extract_foreground().ok().flatten())
             .as_ref()
     }
+
+    /// Full-resolution (sub=1) RGB Pixmap from BG44, cached after first call.
+    ///
+    /// Builds on the already-cached [`bg44`](Self::bg44) wavelet image so the
+    /// ZP arithmetic decode is paid at most once per page. The IDWT + YCbCr→RGB
+    /// conversion (≈2–3 ms for a typical A4 scan) is cached here so that
+    /// repeated renders at native resolution skip it entirely.
+    ///
+    /// `None` when the page has no BG44 layer or the conversion fails.
+    pub(crate) fn bg_rgb_s1(&self, page: &DjVuPage) -> Option<&Pixmap> {
+        self.bg_rgb_s1
+            .get_or_init(|| {
+                let img = self.bg44(page)?;
+                img.to_rgb_subsample(1).ok()
+            })
+            .as_ref()
+    }
 }
 
 /// Max-pool 4× downsample of a bilevel mask.
@@ -1093,9 +1115,19 @@ fn decode_background_chunks(
     // For sub >= 4 we use the partial cache (first chunk only) — the high-frequency
     // refinement in later chunks is imperceptible at quarter-scale output, and skipping
     // them reduces cold ZP decode cost by ~4×.
+    // For sub=1 (the most common case — full-resolution render) we also cache the
+    // decoded RGB Pixmap, saving the 2–3 ms IDWT + YCbCr→RGB conversion per call.
     if max_chunks == usize::MAX {
         let bg44_chunks = page.bg44_chunks();
         if !bg44_chunks.is_empty() {
+            if subsample == 1 {
+                // Strict-mode error propagation: if BG44 failed to decode,
+                // decoded_bg44() returns None; treat that as a hard error.
+                let _ = page
+                    .decoded_bg44()
+                    .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+                return Ok(page.decoded_bg_rgb_s1().cloned());
+            }
             let img = if subsample >= 4 {
                 page.decoded_bg44_partial()
             } else {
@@ -1137,6 +1169,11 @@ fn decode_background_chunks_permissive(
 ) -> Option<Pixmap> {
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
+        // For the all-chunks, sub=1 case reuse the same RGB Pixmap cache as the
+        // strict path so repeated permissive renders don't re-run the conversion.
+        if max_chunks == usize::MAX && subsample == 1 {
+            return page.decoded_bg_rgb_s1().cloned();
+        }
         let mut img = Iw44Image::new();
         for chunk_data in bg44_chunks.iter().take(max_chunks) {
             if img.decode_chunk(chunk_data).is_err() {

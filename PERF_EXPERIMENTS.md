@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### BG44 decoded RGB Pixmap cache (`PageLayers::bg_rgb_s1`) — **Kept** (2026-06-21)
+
+**Issue.** Every warm render of a colour DjVu page called `Iw44Image::to_rgb_subsample(1)` even
+though the decoded `Iw44Image` was already cached. The conversion (parallel IDWT + YCbCr→RGBA +
+33.6 MB allocation) took 2.8–2.9 ms per render call, accounting for ≈6% of total render time.
+
+**Approach.** Added `bg_rgb_s1: OnceLock<Option<Pixmap>>` to `PageLayers`. The new accessor
+`PageLayers::bg_rgb_s1()` calls the existing `bg44()` cache then runs `to_rgb_subsample(1)` once
+and stores the result. `decode_background_chunks` and its permissive variant use this cache for the
+`max_chunks == usize::MAX, subsample == 1` path (the common full-resolution render case). Strict
+mode still propagates BG44 decode errors via `decoded_bg44().ok_or(...)`.
+
+The saved Pixmap is cloned on each warm render (~0.34 ms memcpy of 33.6 MB) instead of
+recomputed (2.8 ms). Net saving ≈ 2.5 ms per warm render.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians, 100-sample runs for regression gates, 10-sample for stage breakdown.
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` | 45.1 ms | 42.8 ms | −5.1% |
+| `render_corpus_bilevel` | 44.9 ms | 43.0 ms | −4.2% |
+| `render_streaming_discard/watchmaker_color` | 44.1 ms | 42.2 ms | −4.3% |
+| `render_streaming_discard/cable_bilevel` | ~48 ms | 42.4 ms | −11.7% |
+| `render_compositor_only/color_native_cached` | 44.8 ms | 42.3 ms | −5.6% |
+
+**Decision. Kept.**
+
+**Reason.** Consistent 4–12% improvement across all color and mixed-layer benchmarks at the cost
+of ~33.6 MB additional memory per page that has ever been rendered at sub=1. Acceptable trade-off
+for the common interactive use case (viewer renders the same page repeatedly). Strict-mode error
+semantics preserved via explicit `decoded_bg44()` guard before returning the cached value.
+
+---
+
 ### Bilevel NEON expander (`composite_rows_bilevel_one`) — **Rejected** (2026-06-21)
 
 **Issue.** Accelerate the bilevel 1:1 fast path in `composite_rows_bilevel_one` with AArch64 NEON

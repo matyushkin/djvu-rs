@@ -400,9 +400,9 @@ impl DjVuPage {
     /// The result is computed once (all ZP arithmetic decode + block assembly) and
     /// then cached in the page's render-tier layer cache.  Subsequent
     /// calls return the cached value immediately.  The wavelet inverse-transform
-    /// and YCbCr→RGB conversion are **not** cached; they are applied at each
-    /// render at the appropriate subsample level via
-    /// [`Iw44Image::to_rgb_subsample`].
+    /// and YCbCr→RGB conversion are also cached for subsample=1 (the common
+    /// full-resolution case) via [`decoded_bg_rgb_s1`](Self::decoded_bg_rgb_s1);
+    /// other subsample levels recompute the conversion each call.
     #[cfg(feature = "std")]
     pub fn decoded_bg44(&self) -> Option<&Iw44Image> {
         self.render_layers().bg44(self)
@@ -625,6 +625,24 @@ impl DjVuPage {
 
     #[cfg(not(feature = "std"))]
     pub fn decoded_fg44(&self) -> Option<&Pixmap> {
+        None
+    }
+
+    /// Return the full-resolution (subsample=1) RGB `Pixmap` derived from the
+    /// BG44 wavelet background, decoding and caching on first call.
+    ///
+    /// This caches both the ZP arithmetic decode (via [`decoded_bg44`](Self::decoded_bg44))
+    /// and the IW44 inverse-transform + YCbCr→RGB conversion, so repeated
+    /// renders at native resolution pay neither cost after the first call.
+    ///
+    /// Returns `None` if the page has no BG44 layer or if decoding fails.
+    #[cfg(feature = "std")]
+    pub(crate) fn decoded_bg_rgb_s1(&self) -> Option<&Pixmap> {
+        self.render_layers().bg_rgb_s1(self)
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn decoded_bg_rgb_s1(&self) -> Option<&Pixmap> {
         None
     }
 
