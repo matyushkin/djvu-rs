@@ -2669,3 +2669,221 @@ full multiply. Accumulator advances every pixel; read only when `is_fg`.
 original multiply only runs for FG pixels. For typical DjVu content where
 most pixels are background, the per-pixel overhead of the accumulator outweighs
 the saving from replacing the conditional multiply.
+
+### #416 H1 — precompute horizontal bilinear coordinate table — **Reverted** (2026-06-19)
+
+**Issue.** #416 hypothesis 1: the post-H1 profiler still showed native
+color/bilevel samples around `composite_rows_bilinear_one` x-coordinate mapping
+and `bilinear_from_rows` (`src/djvu_render.rs:2015` / `2036`). The experiment
+tested whether a per-render horizontal table could amortize `fx`, `px`, and
+`bg_fx` computation across all rows.
+
+**Approach.** Added a `BilinearX { fx, px, bg_fx }` table built once in
+`composite_into` / `composite_rows` for the non-downscale path and passed it to
+`composite_rows_bilinear_one`. The hot loop used table entries instead of
+recomputing `(ox + offset_x) * fx_step`, `px`, and `bg_fx`; a fallback preserved
+the original computation if no table entry was present.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | With table | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 45.31 ms | 44.95 ms | -0.8% |
+| `render_compositor_only/bilevel_native_cached` | 45.10 ms | 45.39 ms | +0.7% |
+| `render_compositor_only/color_downscale_cached` | 5.67 ms | 5.70 ms | +0.6% |
+
+**Decision.** Reverted.
+
+**Reason.** The table did not produce a meaningful win. The best target moved
+less than 1%, while bilevel/downscale moved slightly worse, likely from the extra
+allocation, code layout, and fallback shape. This does not meet #416's keep bar
+of roughly >=3% improvement with no material regression.
+
+### #416 H2 — dispatch-level black-mask identity specialization — **Reverted** (2026-06-19)
+
+**Issue.** #416 hypothesis 2: split the common native corpus shape
+(`bg + mask + black foreground + identity gamma`) into a separate row function
+selected before the hot loop. The intent was to remove per-pixel `Option`,
+palette/FG44, and gamma dispatch from `composite_rows_bilinear_one` without
+adding another inner-loop branch.
+
+**Approach.** Added `composite_rows_bilinear_black_mask_identity`, called when
+`gamma_is_identity && fg_palette.is_none() && fg44.is_none()` and both BG and
+mask layers were present. The helper hoisted BG rows and mask row exactly like
+the generic path, wrote black foreground pixels directly, and wrote background
+pixels from `bilinear_from_rows` without the generic RGB/gamma branch.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | Specialized | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 45.31 ms | 45.01 ms | -0.7% |
+| `render_compositor_only/bilevel_native_cached` | 45.10 ms | 45.27 ms | +0.4% |
+| `render_compositor_only/color_downscale_cached` | 5.67 ms | 5.69 ms | +0.4% |
+
+**Decision.** Reverted.
+
+**Reason.** The split row function did not clear the keep threshold. Removing
+generic dispatch from the loop was offset by the added function body/code layout,
+and the only improved target moved less than 1%. The result is not materially
+different from the generic path after H1's bilinear arithmetic cleanup.
+
+### #416 H3 — byte-run mask traversal for native bilinear rows — **Reverted** (2026-06-19)
+
+**Issue.** #416 hypothesis 3: process background/foreground mask spans without
+per-pixel `is_fg` extraction. The profiler showed native corpus time still
+clustered around the mask lookup and `bilinear_from_rows` in
+`composite_rows_bilinear_one`.
+
+**Approach.** Added a narrow native-path helper for `fx_step == fy_step == FRAC`,
+zero horizontal offset, identity gamma, black foreground, and BG+mask layers.
+It walked the mask row byte-by-byte: `0x00` bytes ran eight background
+bilinear samples with no bit test, `0xFF` bytes wrote eight black pixels with no
+bilinear sample, and mixed bytes fell back to per-bit handling.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | Byte-run helper | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 45.31 ms | 45.08 ms | -0.5% |
+| `render_compositor_only/bilevel_native_cached` | 45.10 ms | 45.00 ms | -0.2% |
+| `render_compositor_only/color_downscale_cached` | 5.67 ms | 5.66 ms | -0.2% |
+
+**Decision.** Reverted.
+
+**Reason.** The byte-run traversal was only noise-level better and did not meet
+the #416 keep bar. The mask bit extraction is no longer a large enough fraction
+of the post-H1 hot loop to justify a second native row body.
+
+### #416 H4 — precompute area-average BG x/y bounds — **Kept** (2026-06-19)
+
+**Issue.** #416 hypothesis 4: the downscale profile was dominated by
+`sample_area_avg` setup and accumulation (`src/djvu_render.rs:671-724`) plus
+caller work in `composite_rows_area_avg_one`. The existing path recomputed BG
+x/y box bounds for every output pixel even though x bounds are row-invariant and
+y bounds are column-invariant within a row.
+
+**Approach.** Added an `AreaAvgX` table computed once per downscale render. Each
+entry stores the output pixel's page-space `fx`, BG-space `bg_fx`, and BG x
+exclusive bounds. `composite_rows_area_avg_one` now computes the BG y exclusive
+bounds once per row and calls `sample_area_avg_bounds` for background pixels.
+The original `sample_area_avg` remains as the general helper and now delegates
+through the same bounds-based sampler.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | With area bounds | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 45.31 ms | 44.89 ms | -0.9% |
+| `render_compositor_only/bilevel_native_cached` | 45.10 ms | 45.08 ms | flat |
+| `render_compositor_only/color_downscale_cached` | 5.67 ms | 3.63 ms | -36.0% |
+
+First run measured `color_downscale_cached` at 3.60 ms; repeat after refactoring
+`sample_area_avg` through `sample_area_avg_bounds` measured 3.63 ms.
+
+**Decision.** Kept.
+
+**Reason.** This is a large, targeted downscale win with no material regression
+on the native controls. It removes repeated fixed-point bound setup from the
+inner area-average loop while preserving the existing box-filter accumulation
+and rounding behavior.
+
+### #416 H5 — integral-image BG downscale sampling — **Reverted** (2026-06-19)
+
+**Issue.** #416 hypothesis 5: after H4 removed repeated x/y bound setup, test
+whether a per-render summed-area table can replace the remaining BG box
+accumulation in `sample_area_avg_bounds` with O(1) rectangle sums.
+
+**Approach.** Added an `IntegralRgb` table for the decoded BG pixmap in downscale
+renders. The table stored per-channel `u64` prefix sums and
+`composite_rows_area_avg_one` used it for BG pixels when H4's precomputed bounds
+were available. The benchmark includes the cost of building the prefix table
+inside each render iteration.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | H4 baseline | Integral image | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 44.89 ms | 44.65 ms | -0.5% |
+| `render_compositor_only/bilevel_native_cached` | 45.08 ms | 45.69 ms | +1.4% |
+| `render_compositor_only/color_downscale_cached` | 3.63 ms | 3.59 ms | -1.0% |
+
+**Decision.** Reverted.
+
+**Reason.** The O(1) sample lookup did not repay the per-render prefix-table
+build and memory traffic. H4 already reduced the downscale target enough that
+the remaining box accumulation is too small to justify a full summed-area image
+for this benchmark.
+
+### #416 H6 — fuse alpha write into downscale area-average rows — **Kept** (2026-06-19)
+
+**Issue.** #416 hypothesis 6: test whether the final `fill_alpha_255` pass can
+be fused or removed without worsening the hot RGB loop. After H4, the downscale
+path still wrote RGB in `composite_rows_area_avg_one` and then performed a
+separate alpha-fill pass over the full output buffer.
+
+**Approach.** For the area-average path only, write `pixel[3] = 255` inside
+`composite_rows_area_avg_one` and skip the final `fill_alpha_255` pass when
+`downscale` is true. Native bilinear paths still use the existing final alpha
+pass, avoiding a repeat of the earlier neutral/regressive 4-byte-write native
+experiments.
+
+**Platform / command.** Apple M1 Max, macOS 26.5.1 / Darwin 25.5.0,
+Rust 1.92.0 (`aarch64-apple-darwin`), default features, `RUSTFLAGS` unset:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/color_native_cached|render_compositor_only/bilevel_native_cached|render_compositor_only/color_downscale_cached' --output-format bencher
+cargo bench --bench render -- render_compositor_only/color_downscale_cached --output-format bencher
+```
+
+**Numbers:**
+
+| Benchmark | H4 baseline | Alpha fused | Delta |
+|---|---:|---:|---:|
+| `render_compositor_only/color_native_cached` | 44.89 ms | 44.46 ms | -1.0% |
+| `render_compositor_only/bilevel_native_cached` | 45.08 ms | 44.93 ms | -0.3% |
+| `render_compositor_only/color_downscale_cached` | 3.63 ms | 3.52 ms | -2.9% |
+
+Repeat targeted downscale run: 3.515 ms.
+
+**Decision.** Kept.
+
+**Reason.** This is a small but consistent downscale win with no native-control
+regression. It removes a full-buffer alpha pass from the downscale render while
+keeping native RGB loops on the existing post-pass strategy that previously
+benchmarked better than explicit 4-byte writes.
