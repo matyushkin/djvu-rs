@@ -44,6 +44,37 @@ overhead.
 
 ---
 
+### Color compositor 1:1 fast path NEON (`a2_has_mask_loop!`) — **Rejected** (2026-06-21)
+
+**Issue.** The color bilinear compositor (`composite_rows_bilinear_one`) spends ~45ms on a
+2550×3301 colour page. Inner loop (`a2_has_mask_loop!`) expands mask bytes via `MASK_EXPAND` LUT
+and blends BG → output. Hypothesis: NEON `vld4_u8/vst4_u8` plus bitwise ops per 8 pixels would
+beat the scalar LUT path.
+
+**Approach.** Added a `gamma_is_identity` fast path in `composite_rows_bilinear_one` bypassing the
+macro: when the full row fits in BG pixmap and mask, reads RGBA using `vld4_u8`, computes
+`not_fg = vceq_u8(vand_u8(vdup_n_u8(mb), bit_pos), zero)`, ANDs R/G/B channels, writes with
+`vst4_u8`. Scalar fallback for non-AArch64. Tail pixels handled separately.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians, `render_native_stages/render_streaming_discard/watchmaker_color`.
+
+| Variant | Time |
+|---------|------|
+| Baseline | 45.1 ms |
+| F1 scalar fast path | 45.9 ms (+0.9 ms) |
+| F1 NEON fast path | 46.4 ms (+1.3 ms) |
+
+**Decision. Rejected.**
+
+**Reason.** No improvement — slight regression. The inner loop is not the bottleneck. LLVM already
+vectorises the scalar code efficiently on AArch64. The compositor time (~42–46 ms for 8.4 M pixels)
+is dominated by something else (memory bandwidth, `fill_alpha_255`, or `to_rgb_subsample`), not
+the per-pixel blend arithmetic.
+
+---
+
 ### #420 — SIMD `sample_area_avg_bounds` (NEON/SSSE3 accumulation) — **Rejected** (2026-06-21)
 
 **Issue.** #420: accelerate the `sample_area_avg_bounds` inner loop with SIMD
