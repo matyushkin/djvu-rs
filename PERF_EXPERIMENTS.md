@@ -5,6 +5,45 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Bilevel NEON expander (`composite_rows_bilevel_one`) — **Rejected** (2026-06-21)
+
+**Issue.** Accelerate the bilevel 1:1 fast path in `composite_rows_bilevel_one` with AArch64 NEON
+by expanding 1 mask byte → 8 RGBA pixels per iteration via `vst4_u8`.
+
+**Approach.** Three variants tried against commit after `819f4a3`:
+
+1. **Separate `#[target_feature(enable = "neon")] unsafe fn bilevel_neon_1to1`** called once per row:
+   scalar head + NEON body (`vdup_n_u8` / `vand_u8` / `vceq_u8` / `vst4_u8`) + scalar tail.
+   Inner loop had two branch conditions (`px_start + 8 > page_w`, `byte_idx >= mask_row.len()`).
+
+2. **Same code inlined** directly inside the `#[cfg(target_arch = "aarch64")]` block in
+   `composite_rows_bilevel_one` (no separate function, avoids call overhead).
+
+3. **Branch-free inner loop**: hoisted both bounds checks out of the NEON body, computing
+   `neon_end = (page_w - start_px) & !7` once before the loop.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians, `--bench render render_corpus_bilevel`.
+
+| Variant | `render_corpus_bilevel` |
+|---------|------------------------|
+| Baseline (scalar) | 44.9 ms |
+| Variant 1 (separate `#[target_feature]` fn) | 52.2 ms (+16%) |
+| Variant 2 (inlined, branches in loop) | 50.3 ms (+12%) |
+| Variant 3 (inlined, branch-free inner loop) | 45.7 ms (+1.8%) |
+
+**Decision. Rejected.**
+
+**Reason.** Even with the branch-free inner loop, the NEON expansion breaks even with scalar at
+best (+1.8%, within noise). Root cause: LLVM already generates efficient NEON for the scalar
+`is_fg.wrapping_sub(1) & 0xFF` pattern on aarch64-apple-darwin (NEON is always enabled). Manual
+`vst4_u8` adds complexity without measurable gain. The separate `#[target_feature]` function
+cannot use `#[inline(always)]` in stable Rust (see issue #145574), so it incurs per-row call
+overhead.
+
+---
+
 ### #420 — SIMD `sample_area_avg_bounds` (NEON/SSSE3 accumulation) — **Rejected** (2026-06-21)
 
 **Issue.** #420: accelerate the `sample_area_avg_bounds` inner loop with SIMD
