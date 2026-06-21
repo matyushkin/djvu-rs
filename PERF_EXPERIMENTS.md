@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Eliminate BG44 Pixmap clone via `Cow<'a, Pixmap>` — **Kept** (2026-06-21)
+
+**Issue.** After the `bg_rgb_s1` cache (previous experiment), the warm render path still cloned the
+33.6 MB cached `Pixmap` via `.cloned()` at the `decode_background_chunks` / `decode_background_chunks_permissive`
+call site. This incurred a ~0.67 ms memcopy per warm render regardless of whether the compositor
+actually mutated the background.
+
+**Approach.** Changed `decode_background_chunks` and `decode_background_chunks_permissive` to return
+`Option<Cow<'a, Pixmap>>` (lifetime tied to `&'a DjVuPage`). For the cached `subsample == 1,
+max_chunks == usize::MAX` path: return `Cow::Borrowed(page.decoded_bg_rgb_s1()?)`. For all other
+paths (fresh decode, subsample != 1, progressive): return `Cow::Owned(pixmap)`. Updated
+`DecodedLayers<'a>` and `decode_layers<'a>` with the same lifetime. Changed all four
+`CompositeContext::from_layers(... bg.as_ref() ...)` call sites to `bg.as_deref()`.
+
+`Cow` resolves via `Deref<Target = Pixmap>` to `&Pixmap` transparently, so `CompositeContext`
+sees the same `Option<&Pixmap>` as before. No change to non-cached paths.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs state after inline-alpha experiment.
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` (sequential) | 41.8 ms | 41.3 ms | −1.2% |
+| `render_corpus_color` (parallel, `--features parallel`) | 8.3 ms | 7.7 ms | −7.2% |
+
+**Decision. Kept.**
+
+**Reason.** Eliminates a 33.6 MB memcopy on the hot warm-render path with zero semantic change —
+callers already only read the background. The improvement is larger in the parallel path because
+the sequential compositor dominates less; the 0.67 ms clone is a proportionally bigger fraction
+of 8.3 ms than 41.8 ms. `Cow::Borrowed` has zero overhead (it's a pointer, no heap allocation).
+All 775 tests pass; no_std build unaffected (the non-cached path falls through to `Cow::Owned`).
+
+---
+
 ### Inline alpha in bilinear compositor, remove `fill_alpha_255` — **Kept** (2026-06-21)
 
 **Issue.** The non-downscale bilinear compositor (`composite_rows_bilinear_one`) wrote only R, G,

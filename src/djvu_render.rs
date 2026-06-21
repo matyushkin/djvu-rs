@@ -36,7 +36,9 @@
 //! progressively higher-quality images.
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 use crate::djvu_document::DjVuPage;
 use crate::iw44_new::Iw44Image;
@@ -395,7 +397,6 @@ const MASK_EXPAND: [[u8; 8]; 256] = {
 };
 
 // ── SIMD helpers ──────────────────────────────────────────────────────────────
-
 
 /// Convert packed RGB bytes to packed RGBA with alpha = 255.
 ///
@@ -1058,11 +1059,11 @@ fn page_mask_sub4(page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
 ///
 /// Returns `None` if there are no BG44 chunks.
 /// `max_chunks = usize::MAX` means decode all chunks.
-fn decode_background_chunks(
-    page: &DjVuPage,
+fn decode_background_chunks<'a>(
+    page: &'a DjVuPage,
     max_chunks: usize,
     subsample: u32,
-) -> Result<Option<Pixmap>, RenderError> {
+) -> Result<Option<Cow<'a, Pixmap>>, RenderError> {
     // Fast path: use a cached Iw44Image when all chunks are wanted.
     // For sub >= 4 we use the partial cache (first chunk only) — the high-frequency
     // refinement in later chunks is imperceptible at quarter-scale output, and skipping
@@ -1078,7 +1079,7 @@ fn decode_background_chunks(
                 let _ = page
                     .decoded_bg44()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-                return Ok(page.decoded_bg_rgb_s1().cloned());
+                return Ok(page.decoded_bg_rgb_s1().map(Cow::Borrowed));
             }
             let img = if subsample >= 4 {
                 page.decoded_bg44_partial()
@@ -1086,7 +1087,7 @@ fn decode_background_chunks(
                 page.decoded_bg44()
             };
             let img = img.ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-            return Ok(Some(img.to_rgb_subsample(subsample)?));
+            return Ok(Some(Cow::Owned(img.to_rgb_subsample(subsample)?)));
         }
         // No BG44 chunks — fall through to the JPEG fallback below.
     } else {
@@ -1096,14 +1097,14 @@ fn decode_background_chunks(
             for chunk_data in bg44_chunks.iter().take(max_chunks) {
                 img.decode_chunk(chunk_data)?;
             }
-            return Ok(Some(img.to_rgb_subsample(subsample)?));
+            return Ok(Some(Cow::Owned(img.to_rgb_subsample(subsample)?)));
         }
     }
 
     // Fall back to JPEG-encoded background if present.
     #[cfg(feature = "std")]
     if let Some(pm) = decode_bgjp(page)? {
-        return Ok(Some(pm));
+        return Ok(Some(Cow::Owned(pm)));
     }
 
     Ok(None)
@@ -1114,17 +1115,17 @@ fn decode_background_chunks(
 /// Returns whatever was decoded so far (may be blurry / incomplete).
 /// Returns `None` only when there are no BG44 chunks at all or even the
 /// first chunk fails to produce a valid image.
-fn decode_background_chunks_permissive(
-    page: &DjVuPage,
+fn decode_background_chunks_permissive<'a>(
+    page: &'a DjVuPage,
     max_chunks: usize,
     subsample: u32,
-) -> Option<Pixmap> {
+) -> Option<Cow<'a, Pixmap>> {
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
         // For the all-chunks, sub=1 case reuse the same RGB Pixmap cache as the
         // strict path so repeated permissive renders don't re-run the conversion.
         if max_chunks == usize::MAX && subsample == 1 {
-            return page.decoded_bg_rgb_s1().cloned();
+            return page.decoded_bg_rgb_s1().map(Cow::Borrowed);
         }
         let mut img = Iw44Image::new();
         for chunk_data in bg44_chunks.iter().take(max_chunks) {
@@ -1132,13 +1133,13 @@ fn decode_background_chunks_permissive(
                 break; // stop on first error, use what we have
             }
         }
-        return img.to_rgb_subsample(subsample).ok();
+        return img.to_rgb_subsample(subsample).ok().map(Cow::Owned);
     }
 
     // Fall back to JPEG-encoded background if present.
     #[cfg(feature = "std")]
     {
-        decode_bgjp(page).ok().flatten()
+        decode_bgjp(page).ok().flatten().map(Cow::Owned)
     }
     #[cfg(not(feature = "std"))]
     None
@@ -1208,8 +1209,8 @@ fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
 /// The page layers decoded for a full (non-progressive) composite: background,
 /// foreground palette, mask, optional indexed blit map, and the FG44/FGjp
 /// foreground pixmap.
-struct DecodedLayers {
-    bg: Option<Pixmap>,
+struct DecodedLayers<'a> {
+    bg: Option<Cow<'a, Pixmap>>,
     fg_palette: Option<FgbzPalette>,
     mask: Option<crate::bitmap::Bitmap>,
     blit_map: Option<Vec<i32>>,
@@ -1229,12 +1230,12 @@ struct DecodedLayers {
 /// from this, keeping their decode logic identical. The progressive path
 /// decodes differently (partial background up to `chunk_n`) and is not routed
 /// through here.
-fn decode_layers(
-    page: &DjVuPage,
+fn decode_layers<'a>(
+    page: &'a DjVuPage,
     opts: &RenderOptions,
     bg_subsample: u32,
     bg_chunk_limit: usize,
-) -> Result<DecodedLayers, RenderError> {
+) -> Result<DecodedLayers<'a>, RenderError> {
     let bg;
     let fg_palette;
     let mask;
@@ -2223,7 +2224,7 @@ where
     let ctx = CompositeContext::from_layers(
         page,
         opts,
-        bg.as_ref(),
+        bg.as_deref(),
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -2295,7 +2296,7 @@ pub fn render_into(
     let ctx = CompositeContext::from_layers(
         page,
         opts,
-        bg.as_ref(),
+        bg.as_deref(),
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -2547,7 +2548,7 @@ pub fn render_region(
     let ctx = CompositeContext::from_layers(
         page,
         &region_opts,
-        bg.as_ref(),
+        bg.as_deref(),
         mask.as_ref(),
         0,
         fg_palette.as_ref(),
@@ -2721,7 +2722,7 @@ pub fn render_progressive(
         let ctx = CompositeContext::from_layers(
             page,
             opts,
-            bg.as_ref(),
+            bg.as_deref(),
             mask.as_ref(),
             0,
             fg_palette.as_ref(),
