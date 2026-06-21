@@ -5,6 +5,103 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #420 — SIMD `sample_area_avg_bounds` (NEON/SSSE3 accumulation) — **Rejected** (2026-06-21)
+
+**Issue.** #420: accelerate the `sample_area_avg_bounds` inner loop with SIMD
+to speed up the area-average downscale path in `composite_rows_area_avg_one`.
+
+**Approach.** Two variants tried on commit `819f4a3`:
+
+1. **Per-row SIMD dispatch** (`rgba_row_rgb_sums`): added helper functions
+   `rgba_row_rgb_sums_neon` (AArch64: `vld4_u8` + `vaddlv_u8`, threshold 32 B)
+   and `rgba_row_rgb_sums_ssse3` (x86_64: `_mm_shuffle_epi8` + `_mm_sad_epu8`,
+   threshold 16 B).  The outer loop over rows called these per row.
+
+2. **Inline 2×2 fast path**: special-cased `cols == 2 && rows == 2` with two
+   direct 8-byte slice reads and 12 scalar additions, bypassing the loop entirely.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.5.0
+- CPU: Apple M1 Max, aarch64
+- Rust: stable 1.92+, RUSTFLAGS: unset
+
+**Numbers.** All times are Criterion medians, `--bench render`, single-thread (no `parallel` feature).
+
+| Benchmark | Baseline | Variant 1 (NEON/SSSE3) | Variant 2 (2×2 inline) |
+|-----------|----------|------------------------|------------------------|
+| `render_colorbook` | 3.558 ms | 4.264 ms (+19.9%) | 5.183 ms (+45.7%) |
+| `render_corpus_color` | 45.863 ms | 45.582 ms (−0.6%, noise) | 45.587 ms (−0.6%, noise) |
+
+**Decision.** Rejected. Both variants regressed `render_colorbook`, which is the
+primary area_avg benchmark (colorbook renders at 150 dpi from a 300 dpi source,
+producing a 2× downscale through the bg plane).
+
+**Reason.**
+- **Variant 1**: The NEON fast path requires ≥ 32 bytes (8 RGBA pixels) per row.
+  At 2× downscale the box is 2×2 — each row is 2 pixels = 8 bytes, below the
+  threshold.  Every call falls through to the scalar tail, adding function-call
+  overhead with zero NEON benefit.
+- **Variant 2**: The `if cols == 2 && rows == 2` branch and the tuple
+  `if let (Some(a), Some(b))` pattern introduce control-flow that disrupts LLVM's
+  optimization of the surrounding inlined composite loop.  The constant `col == 2`
+  check prevents the compiler from treating the loop uniformly, increasing
+  register pressure and harming branch prediction for other branches.
+- In both cases `render_corpus_color` (4× downscale at 300 dpi) showed no
+  measurable change, confirming that `sample_area_avg_bounds` is not the
+  bottleneck — memory bandwidth and the mask check dominate.
+
+### #419 — Compositor row-level parallelism — **Kept** (2026-06-18, documented here 2026-06-21)
+
+**Issue.** #419 (created 2026-06-21 after audit) — intra-page row parallelism
+in `composite_into`.
+
+**Status.** Already implemented and recorded under entry `PARALLEL_COMPOSITOR`
+(2026-06-18) as part of the #408 umbrella.  Issue #419 closed as duplicate.
+
+Recorded numbers (from `PARALLEL_COMPOSITOR`, `--features parallel` vs single-thread):
+
+| Benchmark | Single-thread | With `parallel` | Speedup |
+|-----------|--------------|-----------------|---------|
+| `render_colorbook` | 3.558 ms | 940 µs | 3.8× |
+| `render_corpus_color` | 45.86 ms | 12.15 ms | 3.8× |
+| `render_corpus_bilevel` | ~45 ms | 13.99 ms | ~3.2× |
+
+(Numbers re-measured 2026-06-21 on commit `819f4a3` reflect further optimizations
+since the original PARALLEL_COMPOSITOR recording.)
+
+### #418 — IW44 Y/Cb/Cr IDWT 3-plane parallelism — **Kept** (2026-06-21)
+
+**Issue.** #418: parallelize the three independent `reconstruct()` calls
+(inverse wavelet transform per plane) in `Iw44Image::to_rgb()` using `rayon::join`.
+
+**Status.** Already implemented in `crates/djvu-iw44/src/lib.rs` lines 3238–3256
+under `#[cfg(feature = "parallel")]`.  Benchmarked here for the first time.
+
+**Approach.** `rayon::join(|| y.reconstruct(sub), || rayon::join(|| cb.reconstruct(sub_c), || cr.reconstruct(sub_c)))` — three independent IDWT passes run on separate threads.  Single-thread path preserved under `#[cfg(not(feature = "parallel"))]`.
+
+**Platform.**
+- OS: macOS 26.3.1 / Darwin 25.5.0
+- CPU: Apple M1 Max, aarch64
+- Rust: stable 1.92+, RUSTFLAGS: unset
+- Commit: `819f4a3`
+
+**Numbers.** `cargo bench --bench codecs -- iw44_to_rgb_colorbook`
+
+| Benchmark | Single-thread | `--features parallel` | Speedup |
+|-----------|--------------|----------------------|---------|
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 5.622 ms | 2.556 ms | **2.2×** |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 1.325 ms | 603 µs | **2.2×** |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 344 µs | 212 µs | **1.6×** |
+
+**Decision.** Kept. The code was already merged; benchmarks confirm the win.
+
+**Reason.** Y, Cb, Cr planes share no mutable state after ZP decoding (which is
+sequential per-stream). The IDWT step on each plane is independent. On the 10-core
+M1 Max, three concurrent IDWT passes achieve ~2.2× wall-time reduction for sub1
+(Y dominates; Cb + Cr run in parallel with Y's tail). sub4 gains less (1.6×)
+because the compact-plane IDWT is shorter. The `parallel` feature is opt-in, so
+builds without rayon are unaffected.
+
 ### #408 — area-avg exclusive-box bounds + power-of-2 shift — **Kept** (2026-06-18)
 
 **Issue.** #408 umbrella: close the 2× compositor gap vs DjVuLibre.
