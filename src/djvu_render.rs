@@ -669,18 +669,17 @@ fn sample_nearest(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
 /// `fx_step`, `fy_step` are the output pixel size in source coordinates.
 #[inline]
 fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> (u8, u8, u8) {
-    let x0 = (fx >> FRACBITS).min(pm.width.saturating_sub(1));
-    let y0 = (fy >> FRACBITS).min(pm.height.saturating_sub(1));
-    // Exclusive upper bounds: the output pixel covers source [x0, x1) × [y0, y1).
-    // The old inclusive formula gave a 3×3 box at 2× downscale because x1 landed
-    // on the first pixel of the next output cell; exclusive gives the correct 2×2.
-    let x1 = ((fx + fx_step) >> FRACBITS).min(pm.width);
-    let y1 = ((fy + fy_step) >> FRACBITS).min(pm.height);
+    let (x0, x1) = area_range(pm.width, fx, fx_step);
+    let (y0, y1) = area_range(pm.height, fy, fy_step);
+    sample_area_avg_bounds(pm, x0, x1, y0, y1)
+}
 
+#[inline]
+fn sample_area_avg_bounds(pm: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> (u8, u8, u8) {
     let cols = (x1 - x0) as usize;
     let rows = (y1 - y0) as usize;
 
-    // Fast path: 1×1 box → direct read.
+    // Fast path: 1x1 box -> direct read.
     if cols <= 1 && rows <= 1 {
         return pm.get_rgb(x0, y0);
     }
@@ -707,7 +706,7 @@ fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) ->
         return (255, 255, 255);
     }
 
-    // Power-of-2 counts (count=4 at 2× downscale): replace UDIV with shifts.
+    // Power-of-2 counts (count=4 at 2x downscale): replace UDIV with shifts.
     let half = count >> 1;
     if count.is_power_of_two() {
         let shift = count.trailing_zeros();
@@ -1449,6 +1448,45 @@ struct CompositeContext<'a> {
     out_h: u32,
 }
 
+#[derive(Clone, Copy)]
+struct AreaAvgX {
+    fx: u32,
+    bg_fx: u32,
+    bg_x0: u32,
+    bg_x1: u32,
+}
+
+// Exclusive upper bounds: the output pixel covers source [x0, x1) x [y0, y1).
+// The old inclusive formula gave a 3x3 box at 2x downscale because x1 landed on
+// the first pixel of the next output cell; exclusive gives the correct 2x2.
+fn area_range(limit: u32, f: u32, step: u32) -> (u32, u32) {
+    (
+        (f >> FRACBITS).min(limit.saturating_sub(1)),
+        ((f + step) >> FRACBITS).min(limit),
+    )
+}
+
+fn precompute_area_avg_x(
+    ctx: &CompositeContext<'_>,
+    fx_step: u32,
+    bg_fx_step: u32,
+) -> Vec<AreaAvgX> {
+    let mut xs = Vec::with_capacity(ctx.out_w as usize);
+    let bg_w = ctx.bg.map_or(0, |bg| bg.width);
+    for ox in 0..ctx.out_w {
+        let fx = (ox + ctx.offset_x) * fx_step;
+        let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
+        let (bg_x0, bg_x1) = area_range(bg_w, bg_fx, bg_fx_step);
+        xs.push(AreaAvgX {
+            fx,
+            bg_fx,
+            bg_x0,
+            bg_x1,
+        });
+    }
+    xs
+}
+
 impl<'a> CompositeContext<'a> {
     /// Build a composite context from already-decoded layers.
     ///
@@ -1630,6 +1668,7 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     // Precompute bg-space step for the area-average path (avoids per-pixel multiply).
     let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
     let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
+    let area_avg_x = downscale.then(|| precompute_area_avg_x(ctx, fx_step, bg_fx_step));
 
     #[cfg(feature = "parallel")]
     {
@@ -1648,6 +1687,7 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
                         bg_fx_step,
                         bg_fy_step,
                         row,
+                        area_avg_x.as_deref(),
                     );
                 } else {
                     composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
@@ -1661,17 +1701,24 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     {
         if downscale {
             composite_rows_area_avg_one(
-                ctx, oy as u32, fx_step, fy_step, bg_fx_step, bg_fy_step, row,
+                ctx,
+                oy as u32,
+                fx_step,
+                fy_step,
+                bg_fx_step,
+                bg_fy_step,
+                row,
+                area_avg_x.as_deref(),
             );
         } else {
             composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
         }
     }
 
-    // Set alpha = 255 for all output pixels in a single SIMD pass.
-    // This covers both Pixmap::white() pre-initialised buffers and externally
-    // supplied buffers (render_into) that may not have alpha pre-set.
-    fill_alpha_255(buf);
+    // Area-average rows write alpha inline; other paths set alpha in a final pass.
+    if !downscale {
+        fill_alpha_255(buf);
+    }
 
     Ok(())
 }
@@ -1715,6 +1762,7 @@ where
     // Precompute bg-space step for area-average path (avoids per-pixel multiply).
     let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
     let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
+    let area_avg_x = downscale.then(|| precompute_area_avg_x(ctx, fx_step, bg_fx_step));
 
     for oy in 0..ctx.out_h {
         if downscale {
@@ -1726,11 +1774,14 @@ where
                 bg_fx_step,
                 bg_fy_step,
                 &mut row_buf,
+                area_avg_x.as_deref(),
             );
         } else {
             composite_rows_bilinear_one(ctx, oy, fx_step, fy_step, &mut row_buf);
         }
-        fill_alpha_255(&mut row_buf);
+        if !downscale {
+            fill_alpha_255(&mut row_buf);
+        }
         sink(oy as usize, &row_buf);
     }
 
@@ -2062,12 +2113,31 @@ fn composite_rows_area_avg_one(
     bg_fx_step: u32,
     bg_fy_step: u32,
     row_buf: &mut [u8],
+    area_avg_x: Option<&[AreaAvgX]>,
 ) {
     let fy = (oy + ctx.offset_y) * fy_step;
     let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
+    let bg_y = ctx
+        .bg
+        .map(|bg| area_range(bg.height, bg_fy, bg_fy_step));
 
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-        let fx = (ox as u32 + ctx.offset_x) * fx_step;
+        let fallback;
+        let ax = if let Some(ax) = area_avg_x.and_then(|xs| xs.get(ox)) {
+            *ax
+        } else {
+            let fx = (ox as u32 + ctx.offset_x) * fx_step;
+            let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
+            let (bg_x0, bg_x1) = area_range(ctx.bg.map_or(0, |bg| bg.width), bg_fx, bg_fx_step);
+            fallback = AreaAvgX {
+                fx,
+                bg_fx,
+                bg_x0,
+                bg_x1,
+            };
+            fallback
+        };
+        let fx = ax.fx;
 
         let is_fg = ctx.mask.is_some_and(|m| {
             if ctx.mask_shift > 0 {
@@ -2094,8 +2164,11 @@ fn composite_rows_area_avg_one(
                 (0, 0, 0)
             }
         } else if let Some(bg) = ctx.bg {
-            let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
-            sample_area_avg(bg, bg_fx, bg_fy, bg_fx_step, bg_fy_step)
+            if let Some((bg_y0, bg_y1)) = bg_y {
+                sample_area_avg_bounds(bg, ax.bg_x0, ax.bg_x1, bg_y0, bg_y1)
+            } else {
+                sample_area_avg(bg, ax.bg_fx, bg_fy, bg_fx_step, bg_fy_step)
+            }
         } else {
             (255, 255, 255)
         };
@@ -2109,7 +2182,7 @@ fn composite_rows_area_avg_one(
             pixel[1] = ctx.gamma_lut[g as usize];
             pixel[2] = ctx.gamma_lut[b as usize];
         }
-        // alpha written by fill_alpha_255 in composite_rows
+        pixel[3] = 255;
     }
 }
 
