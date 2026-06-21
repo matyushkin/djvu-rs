@@ -382,7 +382,11 @@ const MASK_EXPAND: [[u8; 8]; 256] = {
     while b < 256 {
         let mut bit = 0usize;
         while bit < 8 {
-            lut[b][bit] = if (b >> (7 - bit)) & 1 != 0 { 0xFF } else { 0x00 };
+            lut[b][bit] = if (b >> (7 - bit)) & 1 != 0 {
+                0xFF
+            } else {
+                0x00
+            };
             bit += 1;
         }
         b += 1;
@@ -1879,8 +1883,7 @@ fn composite_rows_bilinear_one(
     // bilinear interpolation degrades to nearest-neighbour. Guard on the bg
     // plane ratio too: if bg is at subsample > 1, the bg coordinates are not
     // integer-aligned even at native scale and bilinear blending is needed.
-    if fx_step == FRAC && fy_step == FRAC
-        && ctx.bg_x_q24 == (1 << 24) && ctx.bg_y_q24 == (1 << 24)
+    if fx_step == FRAC && fy_step == FRAC && ctx.bg_x_q24 == (1 << 24) && ctx.bg_y_q24 == (1 << 24)
     {
         // Extra-tight path for the common corpus case: bg present, mask
         // present, no palette, no FG44, zero horizontal offset. Precompute
@@ -1889,94 +1892,78 @@ fn composite_rows_bilinear_one(
         if ctx.offset_x == 0
             && ctx.fg_palette.is_none()
             && ctx.fg44.is_none()
+            && let Some(bg) = ctx.bg
         {
-            if let Some(bg) = ctx.bg {
-                let bg_py = py.min(bg.height.saturating_sub(1)) as usize;
-                let bg_stride = bg.width as usize * 4;
-                let bg_row = bg.data.get(bg_py * bg_stride..).unwrap_or(&[]);
-                let lut = &ctx.gamma_lut;
+            let bg_py = py.min(bg.height.saturating_sub(1)) as usize;
+            let bg_stride = bg.width as usize * 4;
+            let bg_row = bg.data.get(bg_py * bg_stride..).unwrap_or(&[]);
+            let lut = &ctx.gamma_lut;
 
-                if let Some(mask) = ctx.mask {
-                    // Has mask: check each pixel for foreground (black).
-                    let mask_stride = mask.row_stride();
-                    let mask_py = py.min(mask.height.saturating_sub(1)) as usize;
-                    let mask_row =
-                        mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
+            if let Some(mask) = ctx.mask {
+                // Has mask: check each pixel for foreground (black).
+                let mask_stride = mask.row_stride();
+                let mask_py = py.min(mask.height.saturating_sub(1)) as usize;
+                let mask_row = mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
 
-                    // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
-                    let bg_max_px = (bg.width as usize).saturating_sub(1);
-                    let mask_limit = mask.width as usize;
-                    let out_w = row_buf.len() / 4;
-                    // D1: hoist gamma identity check outside the pixel loop.
-                    macro_rules! a2_has_mask_loop {
-                        ($write:expr) => {
-                            for mb_idx in 0..(out_w + 7) / 8 {
-                                let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
-                                let exp = &MASK_EXPAND[mb as usize];
-                                for j in 0..8usize {
-                                    let ox = mb_idx * 8 + j;
-                                    if ox >= out_w {
-                                        break;
-                                    }
-                                    let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
-                                    let px = ox.min(bg_max_px);
-                                    let off = px * 4;
-                                    let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
-                                    let (r, g, b) = if let Some(q) = bg_row.get(off..off + 4) {
-                                        (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
-                                    } else {
-                                        (!fg_m, !fg_m, !fg_m)
-                                    };
-                                    $write(pixel, r, g, b);
+                // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
+                let bg_max_px = (bg.width as usize).saturating_sub(1);
+                let mask_limit = mask.width as usize;
+                let out_w = row_buf.len() / 4;
+                // D1: hoist gamma identity check outside the pixel loop.
+                macro_rules! a2_has_mask_loop {
+                    ($write:expr) => {
+                        for mb_idx in 0..out_w.div_ceil(8) {
+                            let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
+                            let exp = &MASK_EXPAND[mb as usize];
+                            for j in 0..8usize {
+                                let ox = mb_idx * 8 + j;
+                                if ox >= out_w {
+                                    break;
                                 }
-                            }
-                        };
-                    }
-                    if ctx.gamma_is_identity {
-                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
-                            pixel[0] = r;
-                            pixel[1] = g;
-                            pixel[2] = b;
-                        });
-                    } else {
-                        a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
-                            pixel[0] = lut[r as usize];
-                            pixel[1] = lut[g as usize];
-                            pixel[2] = lut[b as usize];
-                        });
-                    }
-                } else {
-                    // No mask: pure background copy with gamma correction.
-                    // D1: hoist gamma identity check outside the pixel loop.
-                    if ctx.gamma_is_identity {
-                        let out_w = row_buf.len() / 4;
-                        // E1: when bg covers the full output width, bulk-copy the row
-                        // via memcpy (fill_alpha_255 fixes the alpha channel afterwards).
-                        if bg.width as usize >= out_w {
-                            row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
-                        } else {
-                            for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
-                                let px = ox.min((bg.width as usize).saturating_sub(1));
+                                let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
+                                let px = ox.min(bg_max_px);
                                 let off = px * 4;
-                                if let Some(q) = bg_row.get(off..off + 4) {
-                                    pixel[0] = q[0];
-                                    pixel[1] = q[1];
-                                    pixel[2] = q[2];
+                                let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
+                                let (r, g, b) = if let Some(q) = bg_row.get(off..off + 4) {
+                                    (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
                                 } else {
-                                    pixel[0] = 255;
-                                    pixel[1] = 255;
-                                    pixel[2] = 255;
-                                }
+                                    (!fg_m, !fg_m, !fg_m)
+                                };
+                                $write(pixel, r, g, b);
                             }
                         }
+                    };
+                }
+                if ctx.gamma_is_identity {
+                    a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                        pixel[0] = r;
+                        pixel[1] = g;
+                        pixel[2] = b;
+                    });
+                } else {
+                    a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                        pixel[0] = lut[r as usize];
+                        pixel[1] = lut[g as usize];
+                        pixel[2] = lut[b as usize];
+                    });
+                }
+            } else {
+                // No mask: pure background copy with gamma correction.
+                // D1: hoist gamma identity check outside the pixel loop.
+                if ctx.gamma_is_identity {
+                    let out_w = row_buf.len() / 4;
+                    // E1: when bg covers the full output width, bulk-copy the row
+                    // via memcpy (fill_alpha_255 fixes the alpha channel afterwards).
+                    if bg.width as usize >= out_w {
+                        row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
                     } else {
                         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
                             let px = ox.min((bg.width as usize).saturating_sub(1));
                             let off = px * 4;
                             if let Some(q) = bg_row.get(off..off + 4) {
-                                pixel[0] = lut[q[0] as usize];
-                                pixel[1] = lut[q[1] as usize];
-                                pixel[2] = lut[q[2] as usize];
+                                pixel[0] = q[0];
+                                pixel[1] = q[1];
+                                pixel[2] = q[2];
                             } else {
                                 pixel[0] = 255;
                                 pixel[1] = 255;
@@ -1984,9 +1971,23 @@ fn composite_rows_bilinear_one(
                             }
                         }
                     }
+                } else {
+                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                        let px = ox.min((bg.width as usize).saturating_sub(1));
+                        let off = px * 4;
+                        if let Some(q) = bg_row.get(off..off + 4) {
+                            pixel[0] = lut[q[0] as usize];
+                            pixel[1] = lut[q[1] as usize];
+                            pixel[2] = lut[q[2] as usize];
+                        } else {
+                            pixel[0] = 255;
+                            pixel[1] = 255;
+                            pixel[2] = 255;
+                        }
+                    }
                 }
-                return;
             }
+            return;
         }
 
         // General 1:1 nearest-neighbour path (offset, palette, or FG44 present).
@@ -2036,8 +2037,7 @@ fn composite_rows_bilinear_one(
     // FRAC-fixed-point coordinate; subtract FRAC/2 to get the centered sample pos.
     let bg_fy_hoist = ctx.bg.map(|_| map_plane_center_frac(fy, ctx.bg_y_q24));
     let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
-    let mut bg_fx_q: u64 =
-        (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+    let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
 
     // B2b: pre-hoist mask row slice for py (eliminates y*stride multiply per pixel).
     let mask_hoist = ctx.mask.and_then(|m| {
@@ -2105,6 +2105,7 @@ fn composite_rows_bilinear_one(
 
 /// Write one area-average row into `row_buf` (downscale).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn composite_rows_area_avg_one(
     ctx: &CompositeContext<'_>,
     oy: u32,
@@ -2117,9 +2118,7 @@ fn composite_rows_area_avg_one(
 ) {
     let fy = (oy + ctx.offset_y) * fy_step;
     let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
-    let bg_y = ctx
-        .bg
-        .map(|bg| area_range(bg.height, bg_fy, bg_fy_step));
+    let bg_y = ctx.bg.map(|bg| area_range(bg.height, bg_fy, bg_fy_step));
 
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fallback;
