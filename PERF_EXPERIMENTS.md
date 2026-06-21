@@ -5,6 +5,40 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Inline alpha in bilinear compositor, remove `fill_alpha_255` — **Kept** (2026-06-21)
+
+**Issue.** The non-downscale bilinear compositor (`composite_rows_bilinear_one`) wrote only R, G,
+B channels per pixel (not alpha). Alpha was set in a separate post-pass: `fill_alpha_255(buf)` over
+the full 33.6 MB buffer. In `composite_into` (the parallel path) this post-pass ran sequentially
+after `par_chunks_exact_mut`, serialising ~33.6 MB of memory I/O. In `composite_rows` (streaming)
+it ran per-row but still touched each row twice.
+
+**Approach.** Added `pixel[3] = 255` in every pixel-write site inside
+`composite_rows_bilinear_one` (A2 macro, no-mask loops, general 1:1 path, general bilinear path).
+The E1 full-width `copy_from_slice` path already copies alpha=255 from the bg Pixmap (whose
+YCbCr-decode functions always set alpha=255). Removed `fill_alpha_255` calls from `composite_into`
+and `composite_rows`, then deleted the now-dead `fill_alpha_255` / `fill_alpha_255_sse2` helpers.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs state after BG44 RGB Pixmap cache (previous experiment).
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` (sequential) | 42.8 ms | 41.8 ms | −2.3% |
+| `render_corpus_bilevel` (sequential) | 43.0 ms | 42.1 ms | −2.1% |
+| `render_streaming_discard/watchmaker` (seq) | 42.2 ms | 41.0 ms | −2.8% |
+| `render_corpus_color` (parallel, --features parallel) | 9.5 ms | 8.3 ms | −12.6% |
+
+**Decision. Kept.**
+
+**Reason.** Writing 4 bytes per pixel in one pass is faster than 3 + a separate alpha post-pass
+in either mode. The gain is especially large in the parallel path where the sequential 33.6 MB
+post-pass was a bottleneck (0.34 ms at memory bandwidth) relative to the 4 ms parallel compositor.
+Also removes ~50 lines of SSE2 code that is no longer needed.
+
+---
+
 ### BG44 decoded RGB Pixmap cache (`PageLayers::bg_rgb_s1`) — **Kept** (2026-06-21)
 
 **Issue.** Every warm render of a colour DjVu page called `Iw44Image::to_rgb_subsample(1)` even

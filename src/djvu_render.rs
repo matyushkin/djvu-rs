@@ -396,54 +396,6 @@ const MASK_EXPAND: [[u8; 8]; 256] = {
 
 // ── SIMD helpers ──────────────────────────────────────────────────────────────
 
-/// Set alpha = 255 on every RGBA pixel in `buf`.
-///
-/// On x86_64 with SSE2 (universally available since 2003): processes 4 pixels
-/// (16 bytes) per instruction via `_mm_or_si128`.  Falls back to a scalar loop
-/// on other targets.
-#[allow(unsafe_code)]
-#[inline]
-fn fill_alpha_255(buf: &mut [u8]) {
-    debug_assert_eq!(buf.len() % 4, 0);
-
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: SSE2 is required by the x86_64 ABI — always available.
-    unsafe {
-        fill_alpha_255_sse2(buf);
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    for pixel in buf.chunks_exact_mut(4) {
-        pixel[3] = 255;
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
-#[target_feature(enable = "sse2")]
-// SAFETY: caller guarantees SSE2 is available (ABI requirement on x86_64);
-// buf is valid for its entire length; i * 16 is in-bounds by construction.
-unsafe fn fill_alpha_255_sse2(buf: &mut [u8]) {
-    use core::arch::x86_64::*;
-
-    // Each 32-bit pixel: OR with 0xFF000000 to set the high byte (alpha) to 255.
-    let alpha_mask = _mm_set1_epi32(0xFF000000u32 as i32);
-    let ptr = buf.as_mut_ptr();
-    let chunks = buf.len() / 16; // 4 RGBA pixels per 128-bit register
-
-    for i in 0..chunks {
-        let p = ptr.add(i * 16) as *mut __m128i;
-        _mm_storeu_si128(
-            p,
-            _mm_or_si128(_mm_loadu_si128(p as *const __m128i), alpha_mask),
-        );
-    }
-
-    // Scalar tail (0–3 remaining pixels)
-    for i in (chunks * 4)..(buf.len() / 4) {
-        buf[i * 4 + 3] = 255;
-    }
-}
 
 /// Convert packed RGB bytes to packed RGBA with alpha = 255.
 ///
@@ -1682,7 +1634,7 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
 
     // Bilevel fast path: JB2-only page (no IW44 bg, no FG44, no palette).
     // Skips bilinear sampling and gamma LUT — just white fill + black mask writes.
-    // The bilevel body writes alpha itself, so no fill_alpha_255 pass is needed.
+    // Writes alpha=255 inline; returns early before the general compositor loop.
     if ctx.bg.is_none() && ctx.fg44.is_none() && ctx.fg_palette.is_none() {
         #[cfg(feature = "parallel")]
         {
@@ -1756,10 +1708,8 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
         }
     }
 
-    // Area-average rows write alpha inline; other paths set alpha in a final pass.
-    if !downscale {
-        fill_alpha_255(buf);
-    }
+    // All render paths (bilevel, bilinear, area-average) write alpha=255 inline;
+    // no separate fill_alpha_255 post-pass is needed.
 
     Ok(())
 }
@@ -1819,9 +1769,6 @@ where
             );
         } else {
             composite_rows_bilinear_one(ctx, oy, fx_step, fy_step, &mut row_buf);
-        }
-        if !downscale {
-            fill_alpha_255(&mut row_buf);
         }
         sink(oy as usize, &row_buf);
     }
@@ -1976,12 +1923,14 @@ fn composite_rows_bilinear_one(
                         pixel[0] = r;
                         pixel[1] = g;
                         pixel[2] = b;
+                        pixel[3] = 255;
                     });
                 } else {
                     a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
                         pixel[0] = lut[r as usize];
                         pixel[1] = lut[g as usize];
                         pixel[2] = lut[b as usize];
+                        pixel[3] = 255;
                     });
                 }
             } else {
@@ -1990,7 +1939,7 @@ fn composite_rows_bilinear_one(
                 if ctx.gamma_is_identity {
                     let out_w = row_buf.len() / 4;
                     // E1: when bg covers the full output width, bulk-copy the row
-                    // via memcpy (fill_alpha_255 fixes the alpha channel afterwards).
+                    // via memcpy — bg Pixmap always has alpha=255 from YCbCr decode.
                     if bg.width as usize >= out_w {
                         row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
                     } else {
@@ -2006,6 +1955,7 @@ fn composite_rows_bilinear_one(
                                 pixel[1] = 255;
                                 pixel[2] = 255;
                             }
+                            pixel[3] = 255;
                         }
                     }
                 } else {
@@ -2021,6 +1971,7 @@ fn composite_rows_bilinear_one(
                             pixel[1] = 255;
                             pixel[2] = 255;
                         }
+                        pixel[3] = 255;
                     }
                 }
             }
@@ -2064,6 +2015,7 @@ fn composite_rows_bilinear_one(
                 pixel[1] = ctx.gamma_lut[g as usize];
                 pixel[2] = ctx.gamma_lut[b as usize];
             }
+            pixel[3] = 255;
         }
         return;
     }
@@ -2136,6 +2088,7 @@ fn composite_rows_bilinear_one(
             pixel[1] = ctx.gamma_lut[g as usize];
             pixel[2] = ctx.gamma_lut[b as usize];
         }
+        pixel[3] = 255;
         bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
     }
 }
