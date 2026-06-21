@@ -1149,14 +1149,18 @@ fn decode_background_chunks_permissive<'a>(
 ///
 /// Uses the page-level cache (`decoded_mask`) so that repeated renders of the
 /// same page (e.g. at different DPI levels) skip the ZP arithmetic decode.
-/// The cached `Bitmap` is cloned cheaply (1 MB memcopy) rather than re-running
-/// the full 8+ ms JB2 decode.
-fn decode_mask(page: &DjVuPage) -> Result<Option<crate::bitmap::Bitmap>, RenderError> {
+/// Returns `Cow::Borrowed` pointing into the page cache (zero-copy) on a cache
+/// hit; `Cow::Owned` on a cold decode or when no Sjbz chunk is present.
+fn decode_mask<'a>(
+    page: &'a DjVuPage,
+) -> Result<Option<Cow<'a, crate::bitmap::Bitmap>>, RenderError> {
     match page.decoded_mask() {
-        Some(bm) => Ok(Some(bm.clone())),
+        Some(bm) => Ok(Some(Cow::Borrowed(bm))),
         None if page.find_chunk(b"Sjbz").is_some() => {
             // Cache miss means decode failed; propagate via fresh decode for the error.
-            page.extract_mask().map_err(RenderError::from)
+            page.extract_mask()
+                .map_err(RenderError::from)
+                .map(|opt| opt.map(Cow::Owned))
         }
         None => Ok(None),
     }
@@ -1191,16 +1195,16 @@ fn decode_fg_palette_full(page: &DjVuPage) -> Result<Option<FgbzPalette>, Render
 ///
 /// Uses the page-level cache (`decoded_fg44`) so that repeated renders skip
 /// the IW44 ZP decode. Falls back to FGjp (JPEG) when no FG44 chunks are present.
-fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
+fn decode_fg44<'a>(page: &'a DjVuPage) -> Result<Option<Cow<'a, Pixmap>>, RenderError> {
     let fg44_chunks = page.fg44_chunks();
     if !fg44_chunks.is_empty() {
-        return Ok(page.decoded_fg44().cloned());
+        return Ok(page.decoded_fg44().map(Cow::Borrowed));
     }
 
     // Fall back to JPEG-encoded foreground if present.
     #[cfg(feature = "std")]
     if let Some(pm) = decode_fgjp(page)? {
-        return Ok(Some(pm));
+        return Ok(Some(Cow::Owned(pm)));
     }
 
     Ok(None)
@@ -1212,9 +1216,9 @@ fn decode_fg44(page: &DjVuPage) -> Result<Option<Pixmap>, RenderError> {
 struct DecodedLayers<'a> {
     bg: Option<Cow<'a, Pixmap>>,
     fg_palette: Option<FgbzPalette>,
-    mask: Option<crate::bitmap::Bitmap>,
+    mask: Option<Cow<'a, crate::bitmap::Bitmap>>,
     blit_map: Option<Vec<i32>>,
-    fg44: Option<Pixmap>,
+    fg44: Option<Cow<'a, Pixmap>>,
 }
 
 /// Decode every layer needed for a full composite at `bg_subsample` — the one
@@ -1251,7 +1255,7 @@ fn decode_layers<'a>(
             None
         };
         if let Some((bm, bm_map)) = indexed {
-            mask = Some(bm);
+            mask = Some(Cow::Owned(bm));
             blit_map = Some(bm_map);
         } else {
             mask = decode_mask(page).ok().flatten();
@@ -1268,7 +1272,7 @@ fn decode_layers<'a>(
     }
 
     let mask = if opts.bold > 0 {
-        mask.map(|m| m.dilate_n(opts.bold as u32))
+        mask.map(|m| Cow::Owned(m.into_owned().dilate_n(opts.bold as u32)))
     } else {
         mask
     };
@@ -1284,11 +1288,11 @@ fn decode_layers<'a>(
 
 /// The foreground layers (mask + blit map, FGbz palette, FG44 colour) decoded in
 /// strict mode, *before* any bold dilation.
-struct ForegroundLayers {
+struct ForegroundLayers<'a> {
     fg_palette: Option<FgbzPalette>,
-    mask: Option<crate::bitmap::Bitmap>,
+    mask: Option<Cow<'a, crate::bitmap::Bitmap>>,
     blit_map: Option<Vec<i32>>,
-    fg44: Option<Pixmap>,
+    fg44: Option<Cow<'a, Pixmap>>,
 }
 
 /// Strict-mode decode of a page's foreground layers, shared by the full
@@ -1299,11 +1303,11 @@ struct ForegroundLayers {
 /// otherwise" decision so the two callers cannot drift apart. Bold dilation is
 /// applied by the caller, since `decode_layers` shares one dilation step across
 /// its permissive and strict branches.
-fn decode_foreground_strict(page: &DjVuPage) -> Result<ForegroundLayers, RenderError> {
+fn decode_foreground_strict<'a>(page: &'a DjVuPage) -> Result<ForegroundLayers<'a>, RenderError> {
     let fg_palette = decode_fg_palette_full(page)?;
     let (mask, blit_map) = if fg_palette.is_some() {
         match decode_mask_indexed(page)? {
-            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
+            Some((bm, bm_map)) => (Some(Cow::Owned(bm)), Some(bm_map)),
             None => (None, None),
         }
     } else {
@@ -2219,8 +2223,13 @@ where
         fg44,
     } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
 
-    let (ctx_mask, mask_shift) =
-        resolve_sub4_mask(page, bg_subsample, opts, mask.as_ref(), fg_palette.as_ref());
+    let (ctx_mask, mask_shift) = resolve_sub4_mask(
+        page,
+        bg_subsample,
+        opts,
+        mask.as_deref(),
+        fg_palette.as_ref(),
+    );
     let ctx = CompositeContext::from_layers(
         page,
         opts,
@@ -2229,7 +2238,7 @@ where
         mask_shift,
         fg_palette.as_ref(),
         blit_map.as_deref(),
-        fg44.as_ref(),
+        fg44.as_deref(),
         &gamma_lut,
         (0, 0),
         (w, h),
@@ -2291,8 +2300,13 @@ pub fn render_into(
 
     // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
     // 4-9 lookups per pixel in the full-res mask).
-    let (ctx_mask, mask_shift) =
-        resolve_sub4_mask(page, bg_subsample, opts, mask.as_ref(), fg_palette.as_ref());
+    let (ctx_mask, mask_shift) = resolve_sub4_mask(
+        page,
+        bg_subsample,
+        opts,
+        mask.as_deref(),
+        fg_palette.as_ref(),
+    );
     let ctx = CompositeContext::from_layers(
         page,
         opts,
@@ -2301,7 +2315,7 @@ pub fn render_into(
         mask_shift,
         fg_palette.as_ref(),
         blit_map.as_deref(),
-        fg44.as_ref(),
+        fg44.as_deref(),
         &gamma_lut,
         (0, 0),
         (w, h),
@@ -2549,11 +2563,11 @@ pub fn render_region(
         page,
         &region_opts,
         bg.as_deref(),
-        mask.as_ref(),
+        mask.as_deref(),
         0,
         fg_palette.as_ref(),
         blit_map.as_deref(),
-        fg44.as_ref(),
+        fg44.as_deref(),
         &gamma_lut,
         (region.x, region.y),
         (out_w, out_h),
@@ -2723,11 +2737,11 @@ pub fn render_progressive(
             page,
             opts,
             bg.as_deref(),
-            mask.as_ref(),
+            mask.as_deref(),
             0,
             fg_palette.as_ref(),
             blit_map.as_deref(),
-            fg44.as_ref(),
+            fg44.as_deref(),
             &gamma_lut,
             (0, 0),
             (w, h),

@@ -5,6 +5,93 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Eliminate FG44 + Mask clones via `Cow` — **Kept** (2026-06-21)
+
+**Issue.** After the BG44 Cow optimization, two smaller clones remained per warm render:
+
+- `decode_fg44`: `page.decoded_fg44().cloned()` — clones the cached 3.7 MB FG44 Pixmap
+  (subsample 3, ~850×1100 pixels × 4 bytes for a typical A4 scan at 300 DPI).
+- `decode_mask`: `bm.clone()` — clones the cached 1.05 MB JB2 mask Bitmap (packed bits,
+  ~2550×3300/8 bytes). Documented as "cloned cheaply (1 MB memcopy)" in the source.
+
+Together: ~4.75 MB of unnecessary allocations and memcopy per warm render.
+
+**Approach.** Same `Cow<'a, …>` pattern as the BG44 optimization:
+
+- `decode_mask<'a>(page: &'a DjVuPage)` → `Result<Option<Cow<'a, Bitmap>>, …>`:
+  cache hit → `Cow::Borrowed(bm)`, cold decode → `Cow::Owned`.
+- `decode_fg44<'a>(page: &'a DjVuPage)` → `Result<Option<Cow<'a, Pixmap>>, …>`:
+  FG44 cache hit → `Cow::Borrowed`, JPEG fallback → `Cow::Owned`.
+- `ForegroundLayers<'a>` and `DecodedLayers<'a>` updated to hold `Option<Cow<'a, …>>`.
+- `decode_foreground_strict<'a>` gains a lifetime.
+- Bold dilation (`opts.bold > 0`): `mask.into_owned().dilate_n(n)` — clones only when
+  actually needed (bold=0 is the common case in all benchmarks).
+- Four `mask.as_ref()` and four `fg44.as_ref()` call sites → `as_deref()`.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs state after BG44 Cow experiment.
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` (sequential) | 42.65 ms | 41.93 ms | −1.7% |
+| `render_corpus_bilevel` (sequential) | 42.52 ms | 41.92 ms | −1.4% |
+| `render_corpus_color` (parallel, `--features parallel`) | 7.7 ms | 7.23 ms | −6.1% |
+
+**Decision. Kept.**
+
+**Reason.** Eliminates 4.75 MB of memcopy (FG44 3.7 MB + mask 1.05 MB) on every warm
+render at the cost of two `Cow<'a, …>` wrappers and a lifetime parameter. The parallel
+improvement is proportionally larger because the absolute compositor time is shorter, so
+the clone is a bigger fraction of total work. All 775 tests pass; no_std unaffected (the
+non-cached path stays `Cow::Owned`).
+
+---
+
+### Fill+overlay compositor paths — **Rejected** (2026-06-21)
+
+**Issue.** The bilinear compositor (`composite_rows_bilinear_one`) for a warm color page
+writes the output in a single pass but still performs per-pixel blend arithmetic. Hypothesis:
+pre-filling the output buffer with the background (one 33.6 MB `copy_from_slice`) and then
+overlaying only foreground pixels (sparse writes) would reduce total work for pages where
+most pixels are background.
+
+**Approach.** Three variants after the BG44 Cow commit:
+
+1. **Bilevel fill+overlay**: In `composite_rows_bilevel_one`, before the main loop: fill
+   the full output row from the background (`copy_from_slice` of 4 bytes × width), then
+   overwrite only the foreground pixels (mask bits that are 1). Intended to remove the
+   per-pixel `ch = (is_fg.wrapping_sub(1) & 0xFF)` branch-free blend.
+2. **A3 (FG44 copy+overlay)**: For the A2 path (bg+mask, FG44 present, no palette): copy
+   the background slice into the output row, then overwrite foreground pixels from the FG44
+   plane. Variant of the "fill then sparse overwrite" idea for the color case.
+3. **A4 (palette copy+overlay)**: Same as A3 but for the FGbz palette path: copy background,
+   then overwrite foreground pixels from the palette table.
+
+A micro-benchmark (`rustc -O` standalone binary) was written to measure the pure inner loop
+in isolation: it completes in ~2 ms, confirming the 42 ms benchmark cost is not the tight
+pixel loop itself.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians, `render_corpus_color` after all three variants applied together.
+
+| Variant | `render_corpus_color` | Δ |
+|---------|-----------------------|---|
+| Baseline (BG44 Cow, no fill+overlay) | 41.3 ms | — |
+| Fill+overlay (all three variants) | 42.65 ms | +3.3% |
+
+**Decision. Rejected.**
+
+**Reason.** All three variants regressed. Root cause: the fill+overlay approach writes 33.6 MB
+twice — once for the background copy, once for the foreground overlay reads — vs the original
+single-pass write. The working set already exceeds L3 cache capacity (33.6 MB bg read +
+33.6 MB output write); doubling the output writes adds a third pass over main memory. The
+micro-benchmark confirmed the inner loop is fast; the bottleneck is memory bandwidth, not
+arithmetic.
+
+---
+
 ### Eliminate BG44 Pixmap clone via `Cow<'a, Pixmap>` — **Kept** (2026-06-21)
 
 **Issue.** After the `bg_rgb_s1` cache (previous experiment), the warm render path still cloned the
