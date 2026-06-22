@@ -48,6 +48,46 @@ non-cached path stays `Cow::Owned`).
 
 ---
 
+### Skip `Pixmap::white` pre-fill via zero-initialized buffer — **Rejected** (2026-06-22)
+
+**Issue.** `render_pixmap` (and `render_region`, `render_progressive`) allocates the output buffer
+via `Pixmap::white(w, h)` = `vec![255u8; w*h*4]`, a 33.6 MB write of 0xFF. Every compositor
+path (bilevel, bilinear A2, general 1:1, area-avg) then overwrites every pixel before return, so
+the initial 255-fill is redundant and doubles the write bandwidth to the output buffer.
+
+**Approach.** Added `Pixmap::zeroed(w, h)` to djvu-pixmap (calls `Pixmap::new(0,0,0,0)` →
+`vec![0u8; n]`). Changed all 8 output-buffer allocation sites in djvu_render.rs from
+`Pixmap::white(...)` to `Pixmap::zeroed(...)` (render_pixmap, render_region, render_progressive,
+render_coarse, plus aa_downscale and rotate_pixmap variants).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs state after FG44+mask Cow experiment.
+
+| Benchmark | Before | After |
+|-----------|--------|-------|
+| `render_corpus_color` (sequential) | 41.93 ms | 41.53 ms (−1.0%) |
+| `render_corpus_color` (parallel, `--features parallel`) | 7.23 ms | **8.77 ms (+21%)** |
+| `render_corpus_bilevel` (parallel) | 7.30 ms | **11.82 ms (+62%)** |
+
+**Decision. Rejected.**
+
+**Reason.** On macOS, `vec![0u8; n]` for a large allocation returns lazy-zero VM pages (`mmap(MAP_ANONYMOUS)`
+via the system allocator). The page-faults are deferred to first write. In the sequential compositor,
+page faults happen in order and are handled cheaply. In the parallel compositor (`par_chunks_exact_mut`),
+multiple rayon threads simultaneously fault disjoint 4 KB pages of the same large allocation, causing
+contention in the macOS VM subsystem — the parallel render regressed by 21–62%.
+
+By contrast, `Pixmap::white` uses `vec![255u8; n]` which actively writes every page before the
+parallel compositor starts. This "pre-warms" the pages: all page faults are handled sequentially
+during allocation, and the parallel compositor gets clean private pages with no kernel overhead.
+
+The sequential path showed a marginal −1.0% improvement (less work: write 33.6 MB with 0 then
+overwrite vs write 33.6 MB with 255 then overwrite — same total, but zero writes may alias CPU
+zero-write optimizations). Not enough to justify the parallel regression.
+
+---
+
 ### Fill+overlay compositor paths — **Rejected** (2026-06-21)
 
 **Issue.** The bilinear compositor (`composite_rows_bilinear_one`) for a warm color page
