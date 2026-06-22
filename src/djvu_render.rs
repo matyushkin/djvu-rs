@@ -2000,7 +2000,7 @@ fn composite_rows_bilinear_one(
                 } else if let Some(fg) = ctx.fg44 {
                     let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
                     let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
-                    sample_nearest(fg, fg_fx, fg_fy)
+                    sample_bilinear(fg, fg_fx, fg_fy)
                 } else {
                     (0, 0, 0)
                 }
@@ -2072,7 +2072,7 @@ fn composite_rows_bilinear_one(
             } else if let Some(fg) = ctx.fg44 {
                 let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
                 let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
-                sample_nearest(fg, fg_fx, fg_fy)
+                sample_bilinear(fg, fg_fx, fg_fy)
             } else {
                 (0, 0, 0)
             }
