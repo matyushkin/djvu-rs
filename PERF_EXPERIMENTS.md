@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### FG44 color lookup: `sample_nearest` → `sample_bilinear` — **Kept** (2026-06-22)
+
+**Issue.** The 1:1 compositor path used `sample_nearest` to look up FG44 colors for
+foreground (masked) pixels. FG44 is 3× subsampled: each FG44 pixel covers a 3×3 block of
+output pixels. Nearest-neighbor sampling snaps to the nearest FG44 pixel center, producing
+visible blocky 3×3 color tiles at color-text boundaries.
+
+**Approach.** Replace `sample_nearest(fg, fg_fx, fg_fy)` with `sample_bilinear(fg, fg_fx,
+fg_fy)` at both call sites in `djvu_render.rs` (general path ~line 2003 and B-series
+optimized path ~line 2075). `sample_bilinear` has an identical signature and uses
+fixed-point bilinear interpolation between the 4 nearest FG44 pixels, giving smooth color
+transitions at fg44 pixel boundaries.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs Cow-optimization baseline (~43.8 ms criterion-stored).
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` (sequential) | 43.80 ms | 43.99 ms | +0.42% |
+| `render_corpus_bilevel` (sequential) | 42.06 ms | 42.21 ms | +0.37% |
+
+Bilevel pages have no FG44 layer; the +0.37% there is measurement noise. The +0.42% on
+color pages is the overhead of 4 FG44 pixel reads instead of 1 per foreground pixel. Since
+foreground (masked) pixels are a small fraction of the total in typical pages, the cost is
+absorbed in benchmark noise.
+
+**Decision. Kept.**
+
+**Reason.** Genuine quality improvement: smooth bilinear color interpolation at FG44 pixel
+boundaries replaces the visible 3×3 color-block artifact. Performance cost is negligible
+(< 0.5%, within measurement noise). `sample_bilinear` was already implemented and tested;
+this change enables it on the live rendering path. All 957 tests pass.
+
+---
+
 ### Eliminate FG44 + Mask clones via `Cow` — **Kept** (2026-06-21)
 
 **Issue.** After the BG44 Cow optimization, two smaller clones remained per warm render:
