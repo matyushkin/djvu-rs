@@ -2056,14 +2056,24 @@ fn composite_rows_bilinear_one(
             let stride = bg.width as usize * 4;
             bg.data.get(by * stride..).map(|row| (row, bg.width))
         });
+        // C3: Pre-hoist mask row (py is row-invariant; eliminates y*stride multiply per pixel).
+        let mask_row_1x1 = ctx.mask.and_then(|m| {
+            if py >= m.height {
+                return None;
+            }
+            let stride = m.row_stride();
+            m.data.get(py as usize * stride..).map(|row| (row, m.width))
+        });
 
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-            let is_fg = ctx
-                .mask
-                .is_some_and(|m| px < m.width && py < m.height && m.get(px, py));
+            let is_fg = mask_row_1x1.is_some_and(|(row, mask_w)| {
+                let pxu = px as usize;
+                pxu < mask_w as usize
+                    && (row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+            });
 
             let (r, g, b) = if is_fg {
                 if let Some(pal) = ctx.fg_palette {
