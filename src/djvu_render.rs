@@ -728,12 +728,29 @@ fn mask_box_coverage(
     if total == 0 {
         return 0;
     }
+    // Count foreground bits using byte-level popcount instead of individual bit reads.
+    // MSB-first packing: pixel x is at bit (7 - x%8) of byte (x/8).
+    // first_mask keeps pixels [x0, next-byte-boundary); end_mask keeps pixels before x1.
+    let stride = mask.row_stride();
+    let byte_lo = x0 as usize / 8;
+    let byte_hi = (x1 as usize).div_ceil(8); // exclusive
+    let first_mask = 0xFF_u8 >> (x0 % 8);
+    let end_mask = if x1.is_multiple_of(8) { 0xFF_u8 } else { 0xFF_u8 << (8 - x1 % 8) };
     let mut count = 0u32;
-    for sy in y0..y1 {
-        for sx in x0..x1 {
-            if mask.get(sx, sy) {
-                count += 1;
+    if byte_hi == byte_lo + 1 {
+        // Entire x-range fits in one byte.
+        let combined = first_mask & end_mask;
+        for sy in y0..y1 {
+            count += (mask.data[sy as usize * stride + byte_lo] & combined).count_ones();
+        }
+    } else {
+        for sy in y0..y1 {
+            let row = &mask.data[sy as usize * stride..];
+            count += (row[byte_lo] & first_mask).count_ones();
+            for byte in row[(byte_lo + 1)..(byte_hi - 1)].iter() {
+                count += byte.count_ones();
             }
+            count += (row[byte_hi - 1] & end_mask).count_ones();
         }
     }
     ((count * 255 + total / 2) / total) as u8
@@ -1878,12 +1895,10 @@ fn composite_rows_bilevel_one(
                 // Anti-aliased: coverage fraction → gray.
                 255 - mask_box_coverage(mask, fx, fy, fx_step, fy_step)
             }
+        } else if px < mask.width && py < mask.height && mask.get(px, py) {
+            0u8
         } else {
-            if px < mask.width && py < mask.height && mask.get(px, py) {
-                0u8
-            } else {
-                255u8
-            }
+            255u8
         };
         pixel[0] = ch;
         pixel[1] = ch;
