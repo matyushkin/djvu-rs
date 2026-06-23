@@ -5,6 +5,74 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### I3: all-white row fast path in bilevel 1:1 compositor — **Kept** (2026-06-24)
+
+**Issue.** The bilevel 1:1 fast path in `composite_rows_bilevel_one` runs a per-pixel
+bit-extraction + branchless-channel-write loop for every output row, including rows that
+contain no foreground bits (page margins, blank inter-line space). No early exit existed
+for the common all-background case.
+
+**Approach.** Before the inner loop, scan the pre-hoisted mask row with
+`mask_row.iter().any(|&b| b != 0)`. If all bytes are zero → `row_buf.fill(255)` (one
+vectorised fill) and return. Check cost: 319 OR operations, NEON-vectorised to ~20 cycles;
+amortised overhead for 3301 rows ≈ 0.02ms. Mirrors the F2 fast path in the bilinear path.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Intra-session control: `color_native_cached` (unaffected by I3). Ratios:
+
+| Run | bilevel (ms) | color (ms) | bilevel/color |
+|---|---|---|---|
+| G2-revert baseline | 101.9 | 95.4 | 1.068 |
+| I3 | 91.8 | 88.0 | 1.043 |
+
+I3 speedup (thermal-corrected via ratio): (1.068 − 1.043) / 1.068 = **2.3%** on
+bilevel_native_cached (cable_1973, 300 DPI, dense typeset — low whitespace fraction).
+Not statistically significant in isolation (p = 0.33). Effect scales with document
+whitespace; academic or letter-format scans with larger margins would see more benefit.
+
+**Decision. Kept.**
+
+**Reason.** Simple, correct, zero-cost for documents with no blank rows. Analogous to F2.
+776 tests pass.
+
+---
+
+### G2: bg-fill-then-fg-fixup in general 1:1 bilinear path — **Reverted** (2026-06-24)
+
+**Issue.** After G1 reduced the per-pixel mask check, the per-bg-pixel cost is dominated by
+`bg_row.get(off..off+4).map_or(...)` (~6 cycles per bg pixel × 80% of pixels). Hypothesis:
+replacing the per-pixel bg lookup with a one-shot memcpy over the entire row (Pass 1), then
+only overwriting fg pixels with FG44 bilinear (Pass 2), would eliminate 80% of per-pixel
+subslice loads.
+
+**Approach.** When `ctx.gamma_is_identity`, mask present, bg fits (same conditions as F2):
+- Pass 1: `row_buf.copy_from_slice(&bg_row[offset_x*4..(offset_x+out_w)*4])` — one memcpy.
+- Pass 2: iterate `0..out_w` over pre-expanded g1_mask bytes; `continue` for bg pixels;
+  compute bilinear and overwrite for fg pixels.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Intra-session control: `bilevel_native_cached` (unaffected by G2). Ratios:
+
+| Run | color (ms) | bilevel (ms) | color/bilevel |
+|---|---|---|---|
+| G1-only (prior session) | 90.6 | 96.4 | 0.940 |
+| G2 | 95.4 | 101.9 | 0.936 |
+
+G2 shows color/bilevel 0.940 → 0.936 — a 0.4% difference, within noise (p = 0.55,
+Criterion "no change"). 776 tests pass.
+
+**Decision. Reverted.**
+
+**Reason.** LLVM already pipelines the g1_mask load and bg_row load in the G1 inner loop
+using out-of-order execution — the two independent loads overlap, making the original
+single-pass pattern effectively as fast as a separate memcpy pass. G2's Pass 2 iteration
+(scanning 2550 g1_mask bytes to find fg pixels) adds a sequential dependency chain that
+prevents the same pipelining. Net result: no measurable improvement.
+
+---
+
 ### G1: pre-expand mask row to bytes in general 1:1 bilinear path — **Kept** (2026-06-24)
 
 **Issue.** In the general 1:1 bilinear path of `composite_rows_bilinear_one` (color pages with
