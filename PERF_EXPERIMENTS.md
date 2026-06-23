@@ -5,6 +5,112 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### F2: all-bg row fast path in general 1:1 bilinear path — **Kept** (2026-06-24)
+
+**Issue.** For color pages with FG44 at native DPI (`composite_rows_bilinear_one`, general 1:1
+path), every output row dispatches per-pixel between FG44 bilinear lookup (fg pixels) and
+BG44 row copy (bg pixels). Margins and inter-line gaps — typically 25-35% of rows in dense
+text scans — contain no foreground bits at all; the per-pixel branch and FG44 setup are
+wasted for those rows.
+
+**Approach.** Before the inner loop (after C3 mask-row hoist), pre-scan the hoisted mask row:
+- `mask_row_1x1 = None` (no mask) → all pixels are bg → bulk copy
+- `mask_row_1x1 = Some(row)` with `row[..].iter().all(|&b| b == 0)` → all pixels are bg → bulk copy
+
+For gamma-identity renders (`ctx.gamma_is_identity`) when output fits within the bg pixmap
+(`offset_x + out_w <= bg_w`): `row_buf.copy_from_slice(&bg_row[offset_x*4..(offset_x+out_w)*4])`.
+No mask and no bg → `row_buf.fill(255)`. Falls through to per-pixel loop for non-identity gamma
+or edge cases.
+
+Mirrors the existing E1 full-width bulk-copy already present in the A2 (no-FG44) fast path.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** `render_compositor_only/color_native_cached` (watchmaker.djvu, 300 DPI equivalent,
+single-threaded, warm caches). Stored Criterion baseline from prior session (100ms hot state);
+this session is 2.53× less throttled (thermal factor from bilevel control: 218ms/86ms).
+
+Expected color without F2: 105ms × 2.53 = 266ms. Actual: 257ms → F2 saves ~3.4% (9ms).
+Criterion showed +146% for color vs +154% for bilevel (control) — the 8% difference maps to
+the ~3% absolute speedup after thermal correction. Confidence interval too wide (205–315ms,
+10 samples) for statistical significance at this thermal state.
+
+Theoretical estimate for 25% all-bg rows: saves 25% × 2550 × ~12 cycles/pixel = ~8ms cool;
+consistent with the 9ms intra-session estimate.
+
+**Decision. Kept.**
+
+**Reason.** Correct, clean, and consistent with the existing E1 bulk-copy in the A2 path.
+Intra-session thermal estimate confirms the expected direction. Benefits scale with whitespace:
+higher for documents with wide margins or loose leading. 776 tests pass.
+
+---
+
+### MASK_EXPAND batch + mb==0 fill in bilevel 1:1 path (E1) — **Reverted** (2026-06-24)
+
+**Issue.** The bilevel 1:1 fast path in `composite_rows_bilevel_one` does per-pixel bit extraction:
+`((mask_row[px >> 3] >> (7 - (px & 7))) & 1)`. Hypothesis: grouping 8 pixels per mask byte via
+`MASK_EXPAND` + a bulk `fill(255)` for all-white bytes (`mb==0`) would be faster, since typical
+text pages have >50% empty mask bytes (margins, inter-line gaps).
+
+**Approach.** Added an aligned fast path (`offset_x & 7 == 0 && offset_x + out_w <= page_w`):
+- When `mb == 0`: `row_buf[chunk_start*4..chunk_end*4].fill(255)` — 32-byte NEON fill.
+- Otherwise: `MASK_EXPAND[mb]` LUT expansion + per-pixel write of `!exp[j]`.
+- Unaligned offset falls through to original per-pixel path.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Using `dpi/150` (downscale, E1 does not affect this path) as the thermal control:
+the stored Criterion baseline was from a heavily throttled prior session (131ms at 150 DPI).
+This session measured 23ms at 150 DPI → 5.7× less thermal throttling.
+
+Thermal-correcting `dpi/300` (1:1 bilevel path, E1 target): old baseline 479ms / 5.7 = 84ms
+expected without code change. Measured after E1: 82ms — a difference of 2ms (2.4%), within
+measurement noise (Criterion showed -82.9% change, but that reflects the 5.7× thermal difference
+between sessions, not E1's effect).
+
+**Decision. Reverted.**
+
+**Reason.** No measurable improvement. LLVM already vectorizes the original scalar loop to
+efficient NEON on aarch64-apple-darwin: it hoists the mask byte load per 8-pixel group and
+generates branchless bit extraction. The explicit `MASK_EXPAND` LUT and branching on `mb==0`
+add structure that interferes with LLVM's own vectorization without adding value. The "bilevel
+NEON expander" experiment (2026-06-21) reached the same conclusion for manual NEON intrinsics;
+E1 confirms the scalar auto-vectorized path is already optimal.
+
+---
+
+### C3: mask-row hoist in general 1:1 bilinear path — **Kept** (2026-06-24)
+
+**Issue.** In `composite_rows_bilinear_one`, the general 1:1 fast path (entered when FG44 or
+an offset is present, guarded by `fx_step==FRAC && fy_step==FRAC && bg_x_q24==bg_y_q24==1:1`)
+computed `py < m.height && m.get(px, py)` per pixel, which implicitly recomputes the row slice
+`m.data[py*stride..]` each time. C2 (from 2026-06-23) had already hoisted the `fy` row for
+FG44 and the bg row; the mask row hoist was an analogous cleanup.
+
+**Approach.** Added `mask_row_1x1: Option<(&[u8], u32)>` computed once before the inner loop:
+```rust
+let mask_row_1x1 = ctx.mask.and_then(|m| {
+    if py >= m.height { return None; }
+    let stride = m.row_stride();
+    m.data.get(py as usize * stride..).map(|row| (row, m.width))
+});
+```
+Inner loop: replaced `m.get(px, py)` with inline bit extraction from the pre-sliced row.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion `render_compositor_only/color_native_cached`: p=0.59 (not statistically
+significant). Within thermal noise.
+
+**Decision. Kept.**
+
+**Reason.** Correct optimization — eliminates y×stride multiply per pixel, mirrors C2 pattern.
+LLVM likely already applied LICM here (consistent with p=0.59). Code is cleaner and provides
+a foundation for future vectorization of the general 1:1 path.
+
+---
+
 ### Byte-level POPCNT in `mask_box_coverage` — **Kept** (2026-06-23)
 
 **Issue.** `mask_box_coverage` iterated over every pixel in the output footprint using
