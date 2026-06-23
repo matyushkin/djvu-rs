@@ -2065,6 +2065,34 @@ fn composite_rows_bilinear_one(
             m.data.get(py as usize * stride..).map(|row| (row, m.width))
         });
 
+        // F2: whole-row background fast path.
+        // If the mask row has no foreground bits (page margins, blank inter-line gaps — typically
+        // 30-40% of rows in text documents), bulk-copy from bg_row instead of dispatching
+        // per-pixel between FG44 bilinear and BG44 lookup.
+        {
+            let row_is_all_bg = match mask_row_1x1 {
+                None => true,
+                Some((mask_row, mask_w)) => {
+                    let check_bytes = (mask_w as usize).div_ceil(8).min(mask_row.len());
+                    mask_row[..check_bytes].iter().all(|&b| b == 0)
+                }
+            };
+            if row_is_all_bg && ctx.gamma_is_identity {
+                let out_w = row_buf.len() / 4;
+                let offset_x = ctx.offset_x as usize;
+                if let Some((bg_row, bg_w)) = bg_row_1x1 {
+                    if offset_x + out_w <= bg_w as usize {
+                        row_buf.copy_from_slice(&bg_row[offset_x * 4..(offset_x + out_w) * 4]);
+                        return;
+                    }
+                    // Edge case (out_w clamped beyond bg_w): fall through to per-pixel loop.
+                } else {
+                    row_buf.fill(255);
+                    return;
+                }
+            }
+        }
+
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
