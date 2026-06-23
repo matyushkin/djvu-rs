@@ -5,6 +5,53 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### G1: pre-expand mask row to bytes in general 1:1 bilinear path — **Kept** (2026-06-24)
+
+**Issue.** In the general 1:1 bilinear path of `composite_rows_bilinear_one` (color pages with
+FG44 at native DPI), the per-pixel mask check involves 7 operations: `Option::is_some_and`,
+bounds-check `pxu < mask_w`, shift `pxu >> 3`, bounds-checked load `row.get(...)`, bit-position
+shift `>> (7 - (pxu & 7))`, AND, and compare. This costs ~4 cycles per pixel on M1 Max
+(load-latency dominated). For a 2550-wide page with 75% non-bg rows, this accounts for a
+large fraction of total compositor time.
+
+**Approach.** Before the inner loop, iterate over the bit-packed mask row once (319 iterations
+for 2550px wide) and expand each mask byte to 8 per-pixel bytes via `MASK_EXPAND` LUT into a
+4096-byte stack buffer (`g1_buf`). Then in the inner loop:
+```rust
+let is_fg = g1_mask.get(px as usize).copied().unwrap_or(0) != 0;
+```
+One bounds-checked byte load + compare, replacing the 7-op extraction.
+
+Pages wider than `G1_MAX = 4096` px fall through to the original bit-extraction. No-mask
+pages get `&g1_buf[..0]` → `get(px) = None → is_fg = false`. Applied after F2 (all-bg rows
+are already returned early and never reach the G1 pre-expansion).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Intra-session thermal control: `bilevel_native_cached` (bilevel compositor,
+G1 does not affect this path). Two Criterion runs in the same session:
+
+| Run | color_native_cached | bilevel_native_cached | color/bilevel ratio |
+|---|---|---|---|
+| F2 only (prior run) | 257ms | 218ms | 1.179 |
+| F2 + G1 (this run) | 90.6ms | 96.4ms | 0.940 |
+
+G1 speedup: 1.179 / 0.940 = **1.254 → 25.4% faster** on color_native_cached
+(watchmaker.djvu, 300 DPI, warm caches, single-threaded).
+
+Criterion showed -64.8% for color vs -55.8% for bilevel — the 9% gap (in log space) is the
+G1 contribution; the remaining 55.8% is the thermal improvement between runs.
+
+**Decision. Kept.**
+
+**Reason.** 25% improvement, strong intra-session thermal correction, 776 tests pass. Cost
+is 319 MASK_EXPAND iterations per mixed row (amortized: 319/2550 = 0.125 iterations per
+pixel), paying ~638 cycles to save ~2550 × 4 = 10200 cycles in the inner loop. Stack
+allocation (4096 bytes, zero-initialized once) is negligible; LLVM may omit zeroing for the
+bytes beyond `mask_w` that are never read.
+
+---
+
 ### F2: all-bg row fast path in general 1:1 bilinear path — **Kept** (2026-06-24)
 
 **Issue.** For color pages with FG44 at native DPI (`composite_rows_bilinear_one`, general 1:1
