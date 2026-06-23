@@ -19,7 +19,9 @@ it already encodes one-bit coverage. The 1:1 fast path is completely untouched.
 
 **Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
 
-**Numbers.** Criterion medians vs bilinear-fg44 baseline.
+**Numbers.** Criterion medians.
+
+*Indirect proxies (color page, bilevel compositor not involved):*
 
 | Benchmark | Before | After | Δ |
 |-----------|--------|-------|---|
@@ -27,10 +29,25 @@ it already encodes one-bit coverage. The 1:1 fast path is completely untouched.
 | `render_page/dpi/144` | 485 µs | 497 µs | +2.5% (noise) |
 | `render_corpus_bilevel` (1:1) | ~42 ms | ~44 ms | ±noise only |
 
-The 72-DPI improvement is likely from accumulated cumulative improvements (criterion baseline
-was stale). The 1:1 bilevel corpus path is unchanged. `render_page/dpi/72` uses a color page
-through the bilinear compositor, not the bilevel path; the bilevel anti-aliasing activates
-only at downscale DPIs on mask-only pages.
+*Dedicated bilevel downscale benchmark (`render_corpus_bilevel_dpi`, cable_1973_100133.djvu,
+native 300 DPI; added in the same commit). Both runs below were made in a thermally hot state
+so numbers are internally consistent but higher than ideal. The 300 DPI column (1:1, neither
+function called) acts as a thermal control — any ratio deviation from 1:1 between 72/300 or
+150/300 isolates the bilevel downscale overhead.*
+
+| DPI | mask_box_any (binary) | mask_box_coverage (AA) | Ratio AA/binary | 1:1 thermal control |
+|-----|-----------------------|------------------------|-----------------|---------------------|
+| 72  | 17–25 ms | 7.3–11 ms | ~0.5× | ÷(463 ms / 263 ms) ≈ 0.5× thermal |
+| 150 | 148–196 ms | 61–81 ms | ~0.5× | same factor |
+| 300 (1:1) | 463–542 ms | 229–299 ms | ~0.5× thermal only | control |
+
+The ratio at all DPIs is the same ~0.5×, including the 1:1 control where no coverage function
+runs. Conclusion: the bilevel downscale overhead of `mask_box_coverage` vs `mask_box_any` is
+indistinguishable from noise on M1 Max due to thermal variance between the two measurement
+runs (~2× CPU frequency drift). The 1:1 bilevel corpus path is unchanged.
+
+*Stable reference (mask_box_coverage, hot state): dpi/72 median ≈ 9 ms, dpi/150 ≈ 71 ms,
+dpi/300 (1:1) ≈ 263 ms. Use these for future regression comparisons.*
 
 **Decision. Kept.**
 
