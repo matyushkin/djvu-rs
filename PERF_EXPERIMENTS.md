@@ -5,6 +5,86 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Anti-aliased bilevel text at downscale (`mask_box_coverage`) — **Kept** (2026-06-23)
+
+**Issue.** `composite_rows_bilevel_one` called `mask_box_any` in the downscale branch —
+early-exit as soon as any mask bit in the output pixel's footprint was set. This produced
+binary black/white output at reduced DPIs (72–150), giving jagged aliased text edges.
+
+**Approach.** Added `mask_box_coverage`: counts the fraction of foreground bits in the
+footprint and returns a proportional gray value (0 = all white, 255 = all black). The
+downscale branch now computes `ch = 255 - mask_box_coverage(...)` and writes the same gray
+value to R/G/B/A. The `mask_shift > 0` sub-path (subsampled max-pool mask) remains binary —
+it already encodes one-bit coverage. The 1:1 fast path is completely untouched.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians vs bilinear-fg44 baseline.
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_page/dpi/72` | 89.9 µs | 83.3 µs | −7.3% |
+| `render_page/dpi/144` | 485 µs | 497 µs | +2.5% (noise) |
+| `render_corpus_bilevel` (1:1) | ~42 ms | ~44 ms | ±noise only |
+
+The 72-DPI improvement is likely from accumulated cumulative improvements (criterion baseline
+was stale). The 1:1 bilevel corpus path is unchanged. `render_page/dpi/72` uses a color page
+through the bilinear compositor, not the bilevel path; the bilevel anti-aliasing activates
+only at downscale DPIs on mask-only pages.
+
+**Decision. Kept.**
+
+**Reason.** Clear quality improvement for the common screen-viewing use case (72–150 DPI):
+anti-aliased text edges replace binary aliasing. No measurable cost on the hot 1:1 path.
+Downscale path overhead is bounded — counting `fx_step * fy_step` bits per output pixel,
+same order as `sample_area_avg` already does for background. All 958 tests pass, including
+a new unit test for `mask_box_coverage`. Closes #421.
+
+---
+
+### Pre-hoist FG44 y-rows and bg row in general 1:1 path (C2) — **Kept** (2026-06-23)
+
+**Issue.** In `composite_rows_bilinear_one`, the general 1:1 path (entered when FG44 or an
+offset is present) recomputed `map_plane_center_frac(fy, ctx.fg_y_q24)` per fg pixel and
+`map_plane_center_frac(fx, ctx.bg_x_q24)` per bg pixel. `fy` is row-invariant; `bg_x_q24`
+is guaranteed to be `1<<24` by the outer branch condition (`map_plane_center_frac(fx, 1<<24)
+== fx`, a no-op multiply). The B-series path already applied these hoistings (B1 and B2);
+the general 1:1 path was not updated after those optimisations were added.
+
+**Approach.**
+
+- **C2** (FG44 y-row hoisting): compute `fg_fy`, `y0`, `y1`, `ty`, and row slices
+  `(row0, row1)` from `fg.data` once per row, before the inner loop. Replace
+  `sample_bilinear(fg, fg_fx, fg_fy)` with `bilinear_from_rows(row0, row1, fg_w, fg_fx, fg_ty)`.
+- **C2b** (bg row hoisting): pre-hoist `bg_row = bg.data[py * stride..]` and `bg_w` once
+  per row. Replace `map_plane_center_frac(fx, bg_x_q24) + sample_nearest(bg, ...)` with a
+  direct indexed slice read: `bg_row[px.min(bg_w-1) * 4..]`.
+
+Eliminated per-iteration in the hot pixel loop:
+- fg pixels: 1 × u64 multiply (`map_plane_center_frac(fy)`), y0/y1/ty computation, 2 row
+  pointer lookups inside `sample_bilinear`.
+- bg pixels: 1 × u64 multiply (`map_plane_center_frac(fx, 1<<24)` ≡ identity), row-index
+  multiply inside `get_rgb` (hoisted to per-row stride multiply).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Criterion medians; bilevel corpus shows high variance (53–76ms), likely thermal.
+
+| Benchmark | Before | After | Δ |
+|-----------|--------|-------|---|
+| `render_corpus_color` (sequential) | 43.99 ms | 43.39 ms | −1.4% |
+| `render_corpus_bilevel` | ~42–45 ms | ~43–64 ms | noise (path unchanged for mask-only pages) |
+
+**Decision. Kept.**
+
+**Reason.** −1.4% on the primary color-page benchmark. Change is a pure refactor (identical
+numeric output, verified by 958 passing tests). The C2b bg-row hoisting also removes the
+dead `bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24)` variable that was previously computed
+but then re-derived inside `sample_nearest`. `sample_nearest` is now only used in tests
+(annotated `#[cfg_attr(not(test), allow(dead_code))]`). Closes #424 and #425.
+
+---
+
 ### FG44 color lookup: `sample_nearest` → `sample_bilinear` — **Kept** (2026-06-22)
 
 **Issue.** The 1:1 compositor path used `sample_nearest` to look up FG44 colors for
