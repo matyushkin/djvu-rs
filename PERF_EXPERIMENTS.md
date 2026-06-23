@@ -5,6 +5,47 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Byte-level POPCNT in `mask_box_coverage` — **Kept** (2026-06-23)
+
+**Issue.** `mask_box_coverage` iterated over every pixel in the output footprint using
+`mask.get(sx, sy)` — one conditional branch per bit. At 72 DPI from 300 DPI native the
+footprint is ~4×4 = 16 bit reads per output pixel; at 150 DPI it is 2×2 = 4.
+
+**Approach.** Replaced the nested pixel loop with byte-level popcount:
+
+1. Compute `byte_lo = x0 / 8`, `byte_hi = x1.div_ceil(8)`.
+2. Derive `first_mask` (clears bits for pixels before x0 in byte_lo) and `end_mask`
+   (clears bits for pixels at/after x1 in the last byte), exploiting MSB-first packing.
+3. Single-byte footprint path (`byte_hi == byte_lo + 1`): one AND + one `count_ones()` per
+   row. Multi-byte path: one AND + popcount per boundary byte, full `count_ones()` per
+   middle byte.
+
+Ops per output pixel:
+- Before: 16 `mask.get()` calls (16 branches + 16 byte reads + 16 bit shifts)
+- After: ~4-8 `count_ones()` calls total (~4 byte reads, no branches in inner loop)
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Direct thermal comparison impossible across runs; used dpi/300 (1:1, no
+coverage function called) as thermal control. Thermal factor between before/after runs: 1.82×.
+
+| DPI | Before (bit-by-bit) | After (POPCNT) | After thermal-adj | Δ (adj) |
+|-----|---------------------|----------------|-------------------|---------|
+| 72  | 9.1 ms  (control: 263 ms) | 12.5 ms (control: 479 ms) | 6.9 ms | −24% |
+| 150 | 71 ms   (control: 263 ms) | 131 ms (control: 479 ms)  | 72 ms  | +1% (noise) |
+
+At 72 DPI the footprint spans ~4 pixels per output row, typically a single byte → single-byte
+path, 4 ops per pixel vs 16. At 150 DPI the footprint is 2 pixels → 2 ops vs 4 (smaller
+relative gain, absorbed by other overheads).
+
+**Decision. Kept.**
+
+**Reason.** ~24% thermal-corrected speedup at 72 DPI (thumbnail renders). No regression at
+150 DPI or on the 1:1 path. Code is no more complex than before. Existing unit test
+`mask_box_coverage_values` passed unchanged, confirming correctness of the byte-mask logic.
+
+---
+
 ### Anti-aliased bilevel text at downscale (`mask_box_coverage`) — **Kept** (2026-06-23)
 
 **Issue.** `composite_rows_bilevel_one` called `mask_box_any` in the downscale branch —
