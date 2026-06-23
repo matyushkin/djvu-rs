@@ -612,6 +612,7 @@ fn bilinear_from_rows(row0: &[u8], row1: &[u8], width: u32, fx: u32, ty: u32) ->
 }
 
 #[inline]
+#[cfg_attr(not(test), allow(dead_code))]
 fn sample_nearest(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
     let x = ((fx + FRAC / 2) >> FRACBITS).min(pm.width.saturating_sub(1));
     let y = ((fy + FRAC / 2) >> FRACBITS).min(pm.height.saturating_sub(1));
@@ -705,6 +706,37 @@ fn mask_box_any(
         }
     }
     false
+}
+
+/// Coverage-weighted bilevel downscale: returns the fraction of set mask bits in
+/// the output pixel's footprint as a gray value (0 = all background, 255 = all foreground).
+///
+/// Used by `composite_rows_bilevel_one` for anti-aliased text at downscale DPIs.
+#[inline]
+fn mask_box_coverage(
+    mask: &crate::bitmap::Bitmap,
+    fx: u32,
+    fy: u32,
+    fx_step: u32,
+    fy_step: u32,
+) -> u8 {
+    let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
+    let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
+    let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width);
+    let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height);
+    let total = (x1 - x0) * (y1 - y0);
+    if total == 0 {
+        return 0;
+    }
+    let mut count = 0u32;
+    for sy in y0..y1 {
+        for sx in x0..x1 {
+            if mask.get(sx, sy) {
+                count += 1;
+            }
+        }
+    }
+    ((count * 255 + total / 2) / total) as u8
 }
 
 /// Find the center foreground pixel in a mask box for palette color lookup.
@@ -1829,29 +1861,34 @@ fn composite_rows_bilevel_one(
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(ctx.page_w.saturating_sub(1));
 
-        let is_fg = if downscale {
+        // ch = 0 → black (foreground), 255 → white (background).
+        // At downscale, count the fraction of foreground mask bits in the output pixel's
+        // footprint (anti-aliased). At 1:1, use the exact mask bit (binary).
+        let ch = if downscale {
             if ctx.mask_shift > 0 {
+                // Subsampled max-pool mask: one boolean covers the footprint already.
                 let dpx = fx >> (FRACBITS + ctx.mask_shift);
                 let dpy = fy >> (FRACBITS + ctx.mask_shift);
-                dpx < mask.width && dpy < mask.height && mask.get(dpx, dpy)
+                if dpx < mask.width && dpy < mask.height && mask.get(dpx, dpy) {
+                    0u8
+                } else {
+                    255u8
+                }
             } else {
-                mask_box_any(mask, fx, fy, fx_step, fy_step)
+                // Anti-aliased: coverage fraction → gray.
+                255 - mask_box_coverage(mask, fx, fy, fx_step, fy_step)
             }
         } else {
-            px < mask.width && py < mask.height && mask.get(px, py)
+            if px < mask.width && py < mask.height && mask.get(px, py) {
+                0u8
+            } else {
+                255u8
+            }
         };
-
-        if is_fg {
-            pixel[0] = 0;
-            pixel[1] = 0;
-            pixel[2] = 0;
-            pixel[3] = 255;
-        } else {
-            pixel[0] = 255;
-            pixel[1] = 255;
-            pixel[2] = 255;
-            pixel[3] = 255;
-        }
+        pixel[0] = ch;
+        pixel[1] = ch;
+        pixel[2] = ch;
+        pixel[3] = 255;
     }
 }
 
@@ -1984,7 +2021,27 @@ fn composite_rows_bilinear_one(
         }
 
         // General 1:1 nearest-neighbour path (offset, palette, or FG44 present).
-        let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
+
+        // C2: Pre-hoist FG44 y-rows (row-invariant, analogous to bg_rows in B-series path).
+        // Eliminates per-fg-pixel: map_plane_center_frac(fy), y0/y1/ty computation, row lookups.
+        let fg_rows_1x1 = ctx.fg44.filter(|_| ctx.fg_palette.is_none()).map(|fg| {
+            let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+            let y0 = (fg_fy >> FRACBITS).min(fg.height.saturating_sub(1)) as usize;
+            let y1 = (y0 + 1).min(fg.height.saturating_sub(1) as usize);
+            let ty = fg_fy & FRAC_MASK;
+            let stride = fg.width as usize * 4;
+            let row0 = fg.data.get(y0 * stride..).unwrap_or(&[]);
+            let row1 = fg.data.get(y1 * stride..).unwrap_or(&[]);
+            (row0, row1, fg.width, ty)
+        });
+        // C2b: Pre-hoist bg row slice (bg_x_q24 == bg_y_q24 == 1<<24 guaranteed by outer
+        // condition, so bg_fx == fx and the bg row index == py clamped to bg.height).
+        let bg_row_1x1 = ctx.bg.and_then(|bg| {
+            let by = (py as usize).min(bg.height.saturating_sub(1) as usize);
+            let stride = bg.width as usize * 4;
+            bg.data.get(by * stride..).map(|row| (row, bg.width))
+        });
+
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
@@ -1997,16 +2054,18 @@ fn composite_rows_bilinear_one(
                 if let Some(pal) = ctx.fg_palette {
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     (color.r, color.g, color.b)
-                } else if let Some(fg) = ctx.fg44 {
+                } else if let Some((fg_row0, fg_row1, fg_w, fg_ty)) = fg_rows_1x1 {
                     let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
-                    let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
-                    sample_bilinear(fg, fg_fx, fg_fy)
+                    bilinear_from_rows(fg_row0, fg_row1, fg_w, fg_fx, fg_ty)
                 } else {
                     (0, 0, 0)
                 }
-            } else if let Some(bg) = ctx.bg {
-                let bg_fx = map_plane_center_frac(fx, ctx.bg_x_q24);
-                sample_nearest(bg, bg_fx, bg_fy)
+            } else if let Some((bg_row, bg_w)) = bg_row_1x1 {
+                let bx = (px as usize).min(bg_w.saturating_sub(1) as usize);
+                let off = bx * 4;
+                bg_row
+                    .get(off..off + 4)
+                    .map_or((255, 255, 255), |q| (q[0], q[1], q[2]))
             } else {
                 (255, 255, 255)
             };
@@ -2933,6 +2992,28 @@ mod tests {
 
         assert_eq!(sample_nearest(&pm, FRAC / 2 - 1, 0), (10, 20, 30));
         assert_eq!(sample_nearest(&pm, FRAC / 2, 0), (200, 210, 220));
+    }
+
+    #[test]
+    fn mask_box_coverage_values() {
+        use crate::bitmap::Bitmap;
+        // 4×1 mask: bits [1,0,1,1] → 3 out of 4 → coverage = (3*255+2)/4 = 191
+        let mut bm = Bitmap::new(4, 1);
+        bm.set(0, 0, true);
+        bm.set(2, 0, true);
+        bm.set(3, 0, true);
+        let step = 4 * FRAC;
+        assert_eq!(mask_box_coverage(&bm, 0, 0, step, FRAC), 191);
+        // all foreground → 255
+        let mut bm_full = Bitmap::new(2, 2);
+        bm_full.set(0, 0, true);
+        bm_full.set(1, 0, true);
+        bm_full.set(0, 1, true);
+        bm_full.set(1, 1, true);
+        assert_eq!(mask_box_coverage(&bm_full, 0, 0, 2 * FRAC, 2 * FRAC), 255);
+        // all background → 0
+        let bm_empty = Bitmap::new(2, 2);
+        assert_eq!(mask_box_coverage(&bm_empty, 0, 0, 2 * FRAC, 2 * FRAC), 0);
     }
 
     /// RenderOptions default values.
