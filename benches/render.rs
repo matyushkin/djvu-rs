@@ -783,6 +783,57 @@ fn bench_pdf_export(c: &mut Criterion) {
     });
 }
 
+/// Benchmark bilevel corpus page at multiple DPIs to measure anti-aliased downscale.
+///
+/// Unlike `bench_render_corpus_bilevel` (which renders at 1:1 and never enters the
+/// downscale path), this benchmark covers 72 and 150 DPI where `mask_box_coverage`
+/// is active in `composite_rows_bilevel_one`.
+fn bench_render_corpus_bilevel_dpi(c: &mut Criterion) {
+    let path = corpus_path().join("cable_1973_100133.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_render_corpus_bilevel_dpi: cable_1973_100133.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_render_corpus_bilevel_dpi: parse failed");
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_render_corpus_bilevel_dpi: no page 0");
+            return;
+        }
+    };
+
+    let native_w = page.width() as u32;
+    let native_h = page.height() as u32;
+    let native_dpi = page.dpi() as f32;
+
+    let mut group = c.benchmark_group("render_corpus_bilevel_dpi");
+    group.measurement_time(Duration::from_secs(8));
+
+    for &dpi in &[72u32, 150u32, 300u32] {
+        let scale = dpi as f32 / native_dpi;
+        let w = ((native_w as f32 * scale).round() as u32).max(1);
+        let h = ((native_h as f32 * scale).round() as u32).max(1);
+        let opts = render_opts(w, h, scale);
+        group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {
+            b.iter(|| {
+                let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(opts));
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_render_at_dpi,
@@ -792,6 +843,7 @@ criterion_group!(
     bench_render_colorbook_cold,
     bench_render_corpus_color,
     bench_render_corpus_bilevel,
+    bench_render_corpus_bilevel_dpi,
     bench_render_native_stage_breakdown,
     bench_render_compositor_only,
     bench_render_row_scratch_ab,
