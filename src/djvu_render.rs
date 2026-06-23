@@ -1857,6 +1857,16 @@ fn composite_rows_bilevel_one(
         let stride = mask.row_stride();
         let py = (oy + ctx.offset_y).min(ctx.page_h.saturating_sub(1)) as usize;
         let mask_row = &mask.data[py * stride..(py + 1) * stride];
+
+        // I3: whole-row white fast path. If the mask row has no foreground bits (page
+        // margins, blank inter-line gaps — typically 25-35% of rows in text scans),
+        // fill the output row with white in one NEON-vectorised store instead of running
+        // the per-pixel bit-extraction loop.
+        if !mask_row.iter().any(|&b| b != 0) {
+            row_buf.fill(255);
+            return;
+        }
+
         // Branchless expansion: is_fg=0 → 0xFFFFFFFF (white), is_fg=1 → 0xFF000000 (black).
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
