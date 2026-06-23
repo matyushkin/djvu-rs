@@ -2093,15 +2093,46 @@ fn composite_rows_bilinear_one(
             }
         }
 
+        // G1: Pre-expand the mask row from bit-packed to per-pixel bytes via MASK_EXPAND LUT.
+        // Reduces per-pixel mask check from ~7 ops (shift, bounds-check, bit-extract) to a
+        // single byte load + compare. Buffer covers up to 600 DPI A4/US-letter (≤4096px);
+        // oversized pages fall through to the original bit-extraction path.
+        const G1_MAX: usize = 4096;
+        let mut g1_buf = [0u8; G1_MAX];
+        let g1_mask: &[u8] = if let Some((mask_row, mask_w)) = mask_row_1x1 {
+            let mw = mask_w as usize;
+            if mw <= G1_MAX {
+                let nb = mw.div_ceil(8);
+                for (i, &mb) in mask_row[..nb].iter().enumerate() {
+                    let exp = &MASK_EXPAND[mb as usize];
+                    let base = i * 8;
+                    // Write 8 bytes; g1_mask = &g1_buf[..mw] prevents reads past mask_w.
+                    g1_buf[base..base + 8].copy_from_slice(exp);
+                }
+                &g1_buf[..mw]
+            } else {
+                &g1_buf[..0] // page too wide: use fallback bit-extraction below
+            }
+        } else {
+            &g1_buf[..0] // no mask: all pixels are background
+        };
+
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-            let is_fg = mask_row_1x1.is_some_and(|(row, mask_w)| {
-                let pxu = px as usize;
-                pxu < mask_w as usize
-                    && (row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
-            });
+            // G1 fast path: single byte load. Falls back to bit-extraction when g1_mask
+            // is empty (no mask, or page wider than G1_MAX). LLVM hoists the is_empty()
+            // branch as loop-invariant and generates two loop versions.
+            let is_fg = if g1_mask.is_empty() {
+                mask_row_1x1.is_some_and(|(row, mask_w)| {
+                    let pxu = px as usize;
+                    pxu < mask_w as usize
+                        && (row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+                })
+            } else {
+                g1_mask.get(px as usize).copied().unwrap_or(0) != 0
+            };
 
             let (r, g, b) = if is_fg {
                 if let Some(pal) = ctx.fg_palette {
