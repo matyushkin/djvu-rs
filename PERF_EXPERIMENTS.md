@@ -5,6 +5,47 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #426 — BG44 decoded RGB Pixmap cache at subsample=2 (`PageLayers::bg_rgb_s2`) — **Kept** (2026-06-24)
+
+**Issue.** #426 (from the perf-experiment-swarm). `PageLayers` cached the decoded RGB
+Pixmap only at subsample=1 (`bg_rgb_s1`, the BG_CACHE experiment). At subsample=2 — the
+common 150-from-300-DPI render — `decode_background_chunks` called `img.to_rgb_subsample(2)`
+fresh on every warm render, re-running the IW44 IDWT + YCbCr→RGB conversion (~8.4 MB output)
+even though the underlying `Iw44Image` ZP decode was already cached via `decoded_bg44()`.
+
+**Approach.** Mirror BG_CACHE for sub=2: add `bg_rgb_s2: OnceLock<Option<Pixmap>>` to
+`PageLayers`, a `bg_rgb_s2()` accessor (`self.bg44(page)?.to_rgb_subsample(2)`), a
+`DjVuPage::decoded_bg_rgb_s2()` method, and a `subsample == 2` branch in both the strict
+`decode_background_chunks` and `decode_background_chunks_permissive` `max_chunks == MAX`
+paths returning `Cow::Borrowed`. ~40 lines, no algorithmic change. Cache is ~8.4 MB
+(4× smaller than the sub=1 cache); left empty on pages never rendered at sub=2.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Target `color_downscale_mixed_cached` (watchmaker @150/300, hits the sub=2
+path), control `color_native_cached` (sub=1, unaffected). All runs thermally hot;
+intra-session ratio `downscale_mixed / native` cancels throttling:
+
+| Round | control native (ms) | downscale (ms) | ratio | |
+|---|---|---|---|---|
+| 1 baseline | 236.8 | 60.7 | 0.256 | |
+| 1 with cache | 334.7 | 78.2 | 0.234 | **−8.6%** |
+| 2 baseline | 238.5 | 72.0 | 0.302 | |
+| 2 with cache | 199.0 | 55.8 | 0.280 | **−7.3%** |
+
+Both rounds show the cached ratio below baseline; consistent **~7–9%** speedup on the
+downscale path (above the issue's 4–6% estimate — the conversion is a larger fraction of
+total time in the hot state). 609 lib tests pass.
+
+**Decision. Kept.**
+
+**Reason.** Pure memoization of an identical `to_rgb_subsample(2)` call — output is
+byte-identical by construction, so correctness is guaranteed. Saves the IDWT + YCbCr→RGB
+conversion on every warm 150-DPI color render at the cost of ~8.4 MB per page ever rendered
+at sub=2. Directly extends the proven BG_CACHE pattern (which gave −5.1% at sub=1). Closes #426.
+
+---
+
 ### C2b/C2c: FG44 y-row hoisting for B-series and area-average compositor — **Reverted** (2026-06-24)
 
 **Issue.** `composite_rows_bilinear_one` (B-series/non-1:1 path) and `composite_rows_area_avg_one`

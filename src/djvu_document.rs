@@ -646,6 +646,24 @@ impl DjVuPage {
         None
     }
 
+    /// Return the half-resolution (subsample=2) RGB `Pixmap` derived from the
+    /// BG44 wavelet background, decoding and caching on first call.
+    ///
+    /// Mirrors [`decoded_bg_rgb_s1`](Self::decoded_bg_rgb_s1) for the common
+    /// 150-from-300-DPI render: caches both the ZP arithmetic decode and the
+    /// IW44 inverse-transform + YCbCr→RGB conversion at subsample 2.
+    ///
+    /// Returns `None` if the page has no BG44 layer or if decoding fails.
+    #[cfg(feature = "std")]
+    pub(crate) fn decoded_bg_rgb_s2(&self) -> Option<&Pixmap> {
+        self.render_layers().bg_rgb_s2(self)
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn decoded_bg_rgb_s2(&self) -> Option<&Pixmap> {
+        None
+    }
+
     /// Decode the IW44 background layer (BG44 chunks) if present.
     ///
     /// Returns `Ok(None)` if the page has no BG44 chunks.
