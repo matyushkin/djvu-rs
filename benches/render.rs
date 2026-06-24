@@ -846,8 +846,47 @@ fn bench_render_corpus_bilevel_dpi(c: &mut Criterion) {
     group.finish();
 }
 
+/// Render a byte-aligned bilevel viewport via `render_region`. Exercises the
+/// generalized P2 BILEVEL_RGBA fast path for `offset_x % 8 == 0` (#433).
+fn bench_render_region_bilevel(c: &mut Criterion) {
+    let path = corpus_path().join("cable_1973_100133.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_render_region_bilevel: cable not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let full_w = page.width() as u32;
+    let full_h = page.height() as u32;
+    let opts = render_opts(full_w, full_h, 1.0);
+    // Warm decode caches.
+    let _ = djvu_rs::djvu_render::render_pixmap(page, &opts);
+    // A tall byte-aligned viewport down the middle of the page.
+    let region = djvu_rs::djvu_render::RenderRect {
+        x: 1024,
+        y: 0,
+        width: 512,
+        height: full_h,
+    };
+    c.bench_function("render_region_bilevel", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_region(black_box(page), region, black_box(&opts));
+        });
+    });
+}
+
 criterion_group!(
     benches,
+    bench_render_region_bilevel,
     bench_render_at_dpi,
     bench_render_coarse,
     bench_render_colorbook,

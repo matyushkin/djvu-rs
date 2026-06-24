@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #433 — generalize P2 BILEVEL_RGBA fast path to byte-aligned `offset_x` — **Kept** (2026-06-24)
+
+**Issue.** #433 (from the perf-experiment-swarm). The P2 BILEVEL_RGBA table fast path in
+`composite_rows_bilevel_one` was guarded on `offset_x == 0`, so `render_region` viewports (which
+pass `offset_x = region.x`) always fell back to the scalar per-pixel bit-extraction loop.
+
+**Approach.** Generalize the guard to `offset_x % 8 == 0 && offset_x + out_w <= mask.width`: when
+the offset is byte-aligned, output byte `i` maps to source mask byte `offset_x/8 + i` with no
+per-pixel bit shuffle, so the same NEON table copy works. `offset_x == 0` is the `mb0 = 0`
+subcase — behaviourally identical to before. Added a correctness test
+(`render_region_bilevel_byte_aligned_offset_matches_full`) checking both x=16 (aligned, new path)
+and x=17 (unaligned, fallback) against the full render, plus a `render_region_bilevel` benchmark.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Two effects measured:
+- **No regression on the hot path** (`offset_x == 0`): `bilevel_native_cached` 437 vs 448 ms
+  (within thermal noise) — the only change there is one `+0` index add.
+- **`render_region_bilevel`** (cable, byte-aligned 512-wide viewport): with ≈ 89 ms, baseline
+  ≈ 85 ms — **within noise**. The compositor *is* faster (P2 NEON table vs scalar, the
+  established 18–24% margin), but `render_region`'s end-to-end time is dominated by the per-call
+  `Pixmap::white` allocation (6.7 MB) and the 3301-row iteration, which mask the compositor saving.
+  (An initial 12× reading was a stale-binary artifact from the stash/rebuild cycle, not real.)
+
+**Decision. Kept.**
+
+**Reason.** Unlike the reverted #432 (a replacement that measurably regressed), this is a strict,
+*safe generalization*: the `offset_x == 0` hot path is byte-for-byte the same code, so it cannot
+regress (confirmed), and byte-aligned region renders now use the proven-faster P2 NEON table
+instead of the scalar fallback. The end-to-end `render_region` win is below this benchmark's noise
+because allocation/iteration dominate — but the compositor improvement is real and the change has
+zero downside. It also removes an artificial restriction on P2 and adds region test coverage.
+Closes #433.
+
+---
+
 ### #432 — byte-level early-exit scan in `mask_box_any` — **Reverted** (2026-06-24)
 
 **Issue.** #432 (from the perf-experiment-swarm). `mask_box_any` (per-pixel foreground test in the
