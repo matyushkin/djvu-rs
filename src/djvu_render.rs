@@ -2336,6 +2336,20 @@ fn composite_rows_bilinear_one(
         m.data.get(py as usize * stride..).map(|row| (row, m.width))
     });
 
+    // #435: row-level all-bg fast path (F2 analog for the B-series path). Pre-scan
+    // the hoisted mask row once; if it has no foreground bits (blank margins /
+    // inter-line gaps), `is_fg` is constant-false for the whole row, so the
+    // `!mask_all_bg &&` short-circuit lets LLVM unswitch the loop and drop the
+    // per-pixel bit-extraction. Unlike F2 the bg pixels still need per-pixel
+    // resampling, so this saves only the is_fg check (not the whole bg copy).
+    let mask_all_bg = match mask_hoist {
+        None => true,
+        Some((mask_row, mask_w)) => {
+            let nb = (mask_w as usize).div_ceil(8).min(mask_row.len());
+            !mask_row[..nb].iter().any(|&b| b != 0)
+        }
+    };
+
     // B2: precompute bg row slices (y0/y1 are row-invariant) to avoid repeated
     // y-coordinate arithmetic inside sample_bilinear.
     let bg_rows = ctx.bg.map(|bg| {
@@ -2353,11 +2367,12 @@ fn composite_rows_bilinear_one(
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-        let is_fg = mask_hoist.is_some_and(|(mask_row, mask_w)| {
-            let pxu = px as usize;
-            pxu < mask_w as usize
-                && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
-        });
+        let is_fg = !mask_all_bg
+            && mask_hoist.is_some_and(|(mask_row, mask_w)| {
+                let pxu = px as usize;
+                pxu < mask_w as usize
+                    && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+            });
 
         let (r, g, b) = if is_fg {
             if let Some(pal) = ctx.fg_palette {
