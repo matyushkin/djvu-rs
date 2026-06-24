@@ -984,6 +984,10 @@ pub(crate) struct PageLayers {
     // conversion. Populated on first full-resolution render; left empty on
     // pages that are never rendered at sub=1 (e.g. thumbnails only).
     bg_rgb_s1: std::sync::OnceLock<Option<Pixmap>>,
+    // Half-resolution (subsample=2) RGB Pixmap derived from bg44, for the common
+    // 150-from-300-DPI render. Same memoization as `bg_rgb_s1` but ~4× smaller;
+    // left empty on pages never rendered at sub=2.
+    bg_rgb_s2: std::sync::OnceLock<Option<Pixmap>>,
 }
 
 #[cfg(feature = "std")]
@@ -1081,6 +1085,23 @@ impl PageLayers {
             })
             .as_ref()
     }
+
+    /// Half-resolution (sub=2) RGB Pixmap from BG44, cached after first call.
+    ///
+    /// Mirrors [`bg_rgb_s1`](Self::bg_rgb_s1) for the common 150-from-300-DPI
+    /// render: builds on the already-cached [`bg44`](Self::bg44) wavelet image so
+    /// the ZP decode is paid once, then caches the IDWT + YCbCr→RGB conversion at
+    /// subsample 2 (a ~8 MB Pixmap, 4× smaller than the sub=1 cache).
+    ///
+    /// `None` when the page has no BG44 layer or the conversion fails.
+    pub(crate) fn bg_rgb_s2(&self, page: &DjVuPage) -> Option<&Pixmap> {
+        self.bg_rgb_s2
+            .get_or_init(|| {
+                let img = self.bg44(page)?;
+                img.to_rgb_subsample(2).ok()
+            })
+            .as_ref()
+    }
 }
 
 /// Max-pool 4× downsample of a bilevel mask.
@@ -1151,6 +1172,13 @@ fn decode_background_chunks<'a>(
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
                 return Ok(page.decoded_bg_rgb_s1().map(Cow::Borrowed));
             }
+            if subsample == 2 {
+                // Same memoization as sub=1 for the common 150-from-300-DPI render.
+                let _ = page
+                    .decoded_bg44()
+                    .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+                return Ok(page.decoded_bg_rgb_s2().map(Cow::Borrowed));
+            }
             let img = if subsample >= 4 {
                 page.decoded_bg44_partial()
             } else {
@@ -1196,6 +1224,9 @@ fn decode_background_chunks_permissive<'a>(
         // strict path so repeated permissive renders don't re-run the conversion.
         if max_chunks == usize::MAX && subsample == 1 {
             return page.decoded_bg_rgb_s1().map(Cow::Borrowed);
+        }
+        if max_chunks == usize::MAX && subsample == 2 {
+            return page.decoded_bg_rgb_s2().map(Cow::Borrowed);
         }
         let mut img = Iw44Image::new();
         for chunk_data in bg44_chunks.iter().take(max_chunks) {

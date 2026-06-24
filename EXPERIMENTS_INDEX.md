@@ -1,0 +1,146 @@
+# Experiments Index
+
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-06-24.
+
+## Legend
+
+Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnostic/infra · **F** = Needs follow-up
+
+---
+
+## Experiment Table
+
+| ID | Date | Component | Status | Effect | Notes / Related |
+|----|------|-----------|--------|--------|-----------------|
+| BG_CACHE_S2 (#426) | 2026-06-24 | decode pipeline | **K** | **−7–9% downscale** | Cache decoded BG44 RGB at sub=2; mirror of BG_CACHE for 150 DPI |
+| C2c | 2026-06-24 | area-avg compositor | R | 0% | LLVM LICM already hoists fg_fy. Related: C2b |
+| C2b | 2026-06-24 | B-series bilinear | R | 0% | LLVM LICM already hoists fg_fy. See dead-end §1 |
+| P2 | 2026-06-24 | bilevel 1:1 | **K** | **+18–24% bilevel** | BILEVEL_RGBA 256×32B table; NEON `ldp q0,q1/stp q0,q1`. Replaces E1 |
+| Q1 | 2026-06-24 | bilevel 1:1 | R | 0% | Clamp removal; LLVM still scalar. Superseded by P2 |
+| G1b | 2026-06-24 | B-series bilinear | R | −10% regression | MASK_EXPAND in downscale path; overhead > saving at 72 DPI |
+| I3 | 2026-06-24 | bilevel 1:1 | **K** | **+2.3% bilevel** | All-zero mask row → `row_buf.fill(255)`. Fires before P2 |
+| G2 | 2026-06-24 | color 1:1 bilinear | R | 0% | bg-fill-then-fg-fixup; LLVM already pipelines loads. See dead-end §2 |
+| G1 | 2026-06-24 | color 1:1 bilinear | **K** | **+25% color** | MASK_EXPAND to 4096B stack buf; 1 byte-load replaces 7-op bit-extract |
+| F2 | 2026-06-24 | color 1:1 bilinear | **K** | **+3.4% color** | All-bg mask row → bulk `copy_from_slice`. Mirrors I3 |
+| E1 | 2026-06-24 | bilevel 1:1 | R | 0% | MASK_EXPAND+fill in bilevel path; LLVM auto-vec already optimal |
+| C3 | 2026-06-24 | color 1:1 bilinear | **K** | ~0% (cleanup) | Mask-row hoist; LLVM did LICM; kept for code clarity |
+| POPCNT | 2026-06-23 | bilevel downscale | **K** | **−24% @72DPI** | Byte-level popcount in `mask_box_coverage`; replaces per-pixel bits |
+| AA | 2026-06-23 | bilevel downscale | **K** | quality ↑ | Anti-aliased bilevel via `mask_box_coverage`; was binary `mask_box_any` |
+| C2 | 2026-06-23 | color 1:1 bilinear | **K** | −1.4% color | FG44 y-row + bg-row hoist in general 1:1 path |
+| BILINEAR | 2026-06-22 | color 1:1 bilinear | **K** | ~0% (+0.4% noise) | quality: `sample_nearest` → `sample_bilinear` for FG44 |
+| ZEROED | 2026-06-22 | output allocation | X | −1% seq / **+62% par** | `Pixmap::zeroed` triggers VM page-fault storm in parallel path |
+| COW_FG | 2026-06-21 | decode pipeline | **K** | −1.7% seq / −6.1% par | Cow for FG44+Mask; avoids 4.75 MB clone each warm render |
+| FILL_OVR | 2026-06-21 | color 1:1 bilinear | X | +3.3% regression | Fill+overlay 2-pass; doubles output bandwidth vs 1-pass |
+| COW_BG | 2026-06-21 | decode pipeline | **K** | −1.2% seq / −7.2% par | Cow for BG44; avoids 33.6 MB clone each warm render |
+| ALPHA_INL | 2026-06-21 | color 1:1 bilinear | **K** | −2.3% seq / **−12.6% par** | Inline alpha=255 per pixel; removes 33.6 MB sequential post-pass |
+| BG_CACHE | 2026-06-21 | decode pipeline | **K** | −5.1% color | Cache decoded BG44 RGB Pixmap; avoids 2.8 ms IDWT+YCbCr per call |
+| BILEVEL_NEON | 2026-06-21 | bilevel 1:1 | X | +1.8% regression | Manual NEON `vst4_u8`; LLVM auto-vec already optimal. See dead-end §3 |
+| COLOR_NEON | 2026-06-21 | color 1:1 bilinear | X | +0.9–1.3% regression | Manual NEON for A2 path; inner loop not bottleneck |
+| SIMD_AREA | 2026-06-21 | area-avg downscale | X | +19.9% regression | NEON/SSSE3 accumulate; 2×2 footprint too small for SIMD threshold |
+| PARALLEL | 2026-06-18 | all paths | **K** | **3.8× parallel** | `par_chunks_exact_mut` in `composite_into`; opt-in via `parallel` feature |
+| IW44_PAR | 2026-06-21 | IW44 decode | **K** | **2.2× IDWT** | Parallel Y/Cb/Cr IDWT via `rayon::join`; opt-in |
+| AREA_FIX | 2026-06-18 | area-avg downscale | **K** | **−52% colorbook** | Fix off-by-one exclusive bound; was 3×3 at 2×, now correct 2×2 |
+| JB2_CROSS6 | 2026-06-15 | JB2 encoder | R | +4.37% size | Cross-size record-6; geometric misalign makes context mispredict |
+| IW44_DIAG | 2026-06-15 | IW44 encoder | D | — | Loss localized to fine-band quantization; transform is bit-exact |
+| RENDER_DIRECT | 2026-05-16 | render pipeline | **K** | **−18–20%** | `render_pixmap` direct → `render_into`; removes row-copy adapter |
+| TIFF_STREAM | 2026-05-16 | TIFF export | **K** | −116 MB peak RSS | `render_streaming` feeds TIFF rows; no full RGBA pixmap |
+| ADAPTIVE_SEG | 2026-05-16 | encoder segmentation | **K** | quality ↑ | Sauvola binarization + BG inpainting; opt-in via `SegmentOptions` |
+| DJVM_MULTI | 2026-05-16 | encoder | **K** | — | Layered multi-page DJVM via CLI `--quality` |
+| JB2_QUALITY | 2026-05-17 | JB2 encoder | F | dict=1.356× orig | Round-trip ok; byte cost remains too high vs original |
+| WASM_SIMD | 2026-05-17 | wasm | D | −7% render | Harness: scalar vs simd128; simd128 confirmed win from existing IW44 code |
+| ROW_SCRATCH | 2026-05-17 | render pipeline | X | inconsistent | Noisy A/B; rejected as production heuristic |
+| COMP_BASELINES | 2026-05-17 | infrastructure | D | — | Added `render_compositor_only` bench group |
+
+---
+
+## Render Path Map
+
+```
+render_pixmap (RENDER_DIRECT: kept)
+└── composite_into / composite_rows
+    ├── [parallel] composite_rows via par_chunks_exact_mut   (PARALLEL: kept)
+    ├── composite_rows_bilevel_one                            ← bilevel 1:1 path
+    │   ├── I3: all-zero row → fill(255)                     KEPT
+    │   ├── P2: BILEVEL_RGBA table, offset_x==0             KEPT  ← hot path
+    │   └── scalar fallback (bit-extract per pixel)
+    ├── composite_rows_bilinear_one
+    │   ├── [1:1] general fast path                          ← color 1:1 path
+    │   │   ├── F2: all-bg mask row → copy_from_slice        KEPT
+    │   │   ├── G1: MASK_EXPAND pre-expand to stack buf      KEPT  ← hot path
+    │   │   └── per-pixel bilinear blend
+    │   └── [B-series] non-1:1 path                         ← color downscale
+    │       ├── sample_bilinear(fg, fg_fx, fg_fy)            (C2b: LLVM already LICM)
+    │       └── mask_box_coverage / POPCNT                   KEPT
+    └── composite_rows_area_avg_one                          ← area-avg downscale
+        ├── AREA_FIX: correct 2×2 exclusive bound            KEPT
+        └── sample_area_avg_bounds                           (SIMD: rejected)
+
+Decode pipeline:
+  BG44 → RGB cache (BG_CACHE) → Cow borrow (COW_BG) → compositor
+  FG44 → Cow borrow (COW_FG) → compositor
+  JB2  → Cow borrow (COW_FG) → compositor
+  IW44 IDWT: parallel Y/Cb/Cr (IW44_PAR)
+  Output alpha: inlined per-pixel (ALPHA_INL)
+```
+
+---
+
+## Current Baselines (cool state, M1 Max, aarch64, Rust 1.88)
+
+| Benchmark | Time | Path exercised |
+|-----------|------|----------------|
+| `bilevel_native_cached` | ~37 ms | bilevel 1:1 (P2 + I3 active) |
+| `color_native_cached` | ~47 ms | color 1:1 (G1 + F2 active) |
+| `color_downscale_mixed_cached` | ~15–20 ms | B-series bilinear (watchmaker @150/300) |
+| `render_corpus_bilevel_dpi/72` | ~7 ms | bilevel downscale (POPCNT) |
+| `render_corpus_bilevel_dpi/150` | ~23 ms | bilevel downscale (POPCNT) |
+| `render_colorbook` | ~3.5 ms | area-avg downscale (AREA_FIX) |
+
+Thermal methodology: use intra-session ratio `target / control` to cancel M1 Max throttling.
+Control for bilevel experiments: `color_native_cached`. Control for color: `bilevel_native_cached`.
+
+---
+
+## Known Dead Ends (do not retry without new evidence)
+
+1. **LLVM LICM** covers all y-row hoists in B-series / area-avg paths (C2b, C2c). Confirmed by intra-session ratio showing zero consistent trend. Any explicit hoisting adds Option wrapping that may inhibit other opts.
+2. **LLVM out-of-order pipelining** covers independent bg_row + g1_mask loads in the G1 inner loop (G2). A second pass over g1_mask to find fg pixels adds sequential dependency that prevents the same pipelining.
+3. **LLVM auto-vectorization** of the bilevel scalar loop is already optimal on aarch64-apple-darwin (BILEVEL_NEON, E1, Q1). Manual NEON / `#[target_feature]` on stable Rust cannot use `#[inline(always)]` (issue #145574).
+4. **SIMD for small footprints** (SIMD_AREA): at 2×2 downscale, each `sample_area_avg_bounds` row has 2 pixels = 8 bytes, below any SIMD threshold. Falls through to scalar tail every call.
+5. **`Pixmap::zeroed`** (lazy VM pages): causes page-fault storm in parallel compositor on macOS; 21–62% regression in parallel path.
+
+---
+
+## Open Hypotheses (tracked as GitHub issues)
+
+Generated 2026-06-24 by the `perf-experiment-swarm` workflow (14 discovery agents →
+adversarial validation → synthesis). Each survived a skeptical validator that checked
+against all 37 prior experiments and the 5 dead-ends. Pick one, run the experiment,
+record the result in `PERF_EXPERIMENTS.md`, close the issue.
+
+**P1 (highest leverage):**
+- ~~#426 — cache decoded BG44 RGB Pixmap at subsample=2~~ **DONE (Kept, −7–9%)** → BG_CACHE_S2
+- #427 — cache decoded JB2 indexed mask in PageLayers (FGbz palette pages)
+- #428 — all-white band fast path in bilevel downscale compositor (I3 analog)
+- #429 — crop_bitmap aligned byte-copy fast path in JB2 encoder (8× iteration)
+- #430 — 1-bit TIFF output for bilevel pages (quality/size, 8×)
+
+**P2:**
+- #431 LUT byte-expansion in bilevel TIFF · #432 byte-level early-exit in `mask_box_any`
+- #433 extend P2 BILEVEL_RGBA to byte-aligned offset_x · #434 B-series fg_fx Q48 accumulator
+- #435 B-series all-bg row fast path (F2 analog) · #436 MASK_EXPAND in B-series upscale
+- #437 exact-length FG44/BG44 row slices · #438 area-avg all-bg row fast path
+- #439 proportional fg/bg blend in color area-avg (AA quality) · #440 PAR-DEC parallel layer decode
+
+**P3:**
+- #441 hoist NEON splat consts in IDWT · #442 NEON s=2 row pass in IW44 IDWT
+- #443 F2 fast path for non-identity gamma · #444 cache parsed FGbz palette
+- #445 rolling 1-bit register in `decode_ref_row` · #446 O(1) dedup in cluster_shared_symbols
+- #447 cache-tiled transpose in rotate_pixmap · #448 Lanczos3 vertical-pass weight precompute
+- #449 PDF streaming render-and-emit (peak RSS O(pages)→O(1))
+
+**Pre-existing (not from swarm):** #422 bilinear chroma upsampling · #423 Lanczos-3 resampling option
+
+**Still open from prior analysis (no issue yet):** JB2 byte-cost estimator before cross-size emit
+(#301; JB2_CROSS6 was +4% size — need cost model first) · IW44 quantization/slice-budget increase
+for fine bands (IW44_DIAG: starved in 100 slices, quality floor avg_abs=8.72).
