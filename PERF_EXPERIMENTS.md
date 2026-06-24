@@ -5,6 +5,45 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #434 — Q48 accumulator for `fg_fx` in B-series bilinear path — **Reverted** (2026-06-24)
+
+**Issue.** #434 (from the perf-experiment-swarm). The B-series bilinear inner loop
+(`composite_rows_bilinear_one`, non-1:1) computes `fg_fx = map_plane_center_frac(fx, fg_x_q24)`
+(a u64 multiply) for FG44 foreground pixels. The bg path already replaced its equivalent multiply
+with a Q48 add-per-pixel accumulator (B1). Hypothesis: the same accumulator for `fg_fx` would
+save 3–8%.
+
+**Approach.** Add `fg_fx_q` / `fg_fx_step_q` mirroring `bg_fx_q`, replace the per-pixel multiply
+with `(fg_fx_q >> 24).saturating_sub(FRAC/2)`, and advance `fg_fx_q` unconditionally at the bottom
+of the loop (it must stay in sync across the fg/bg branch).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** `color_downscale_mixed_cached` (watchmaker @150/300, B-series FG44) vs
+`color_native_cached` control. Output verified byte-identical (FNV checksum unchanged). Two
+intra-session ratio pairs:
+
+| Round | control (ms) | mixed (ms) | ratio | Δ |
+|---|---|---|---|---|
+| 1 baseline | 305.8 | 61.0 | 0.200 | |
+| 1 with | 333.7 | 75.2 | 0.225 | **+12.9%** |
+| 2 baseline | 229.4 | 53.8 | 0.234 | |
+| 2 with | 225.9 | 67.2 | 0.298 | **+26.9%** |
+
+Both rounds regress (R2's control is nearly equal, so the +25% absolute mixed regression is clean).
+
+**Decision. Reverted.**
+
+**Reason.** The hypothesis missed that the `fg_fx` multiply is **conditional** — it runs only for
+fg pixels (`if is_fg → Some(fg44)`), a minority (~15–30%) of output pixels. The accumulator must
+advance **unconditionally** (every pixel) to stay in sync. So the change trades a multiply on ~20%
+of pixels for an add on 100% of pixels — a net loss. This is the inverse of B1 (kept): the bg
+accumulator wins because bg is the *majority*, so its unconditional advance matches its usage
+frequency. The accumulator pattern only pays when the consumer is the common-case branch. The
+multiply on the minority fg path was already cheaper than the bookkeeping to avoid it.
+
+---
+
 ### #433 — generalize P2 BILEVEL_RGBA fast path to byte-aligned `offset_x` — **Kept** (2026-06-24)
 
 **Issue.** #433 (from the perf-experiment-swarm). The P2 BILEVEL_RGBA table fast path in
