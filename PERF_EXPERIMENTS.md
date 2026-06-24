@@ -5,6 +5,36 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #442 — extend NEON per-row IDWT path to s==2 — **Rejected (incorrect premise)** (2026-06-24)
+
+**Issue.** #442 (from the perf-experiment-swarm). `row_pass_inner`'s AArch64 per-row NEON branch
+fires only at `s == 1`; `s == 2` falls through to the 8-row scatter-gather path. Proposal: extend
+the branch to `s == 1 || s == 2`, reusing `row_pass_neon_s1_row` directly ("no new function
+needed"), on the premise that an s=2 active row has "internal coefficients at consecutive positions
+with stride 1."
+
+**Approach.** Tried exactly the proposed one-line guard change.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers / verification.** The premise is **false**: the in-tree test `simd_row_pass_s2_matches_scalar`
+calls `row_pass_inner` with `s = 2, sd = 1`. At `s == 2` the column subsample shift `sd == 1`, so
+the active coefficients in a row are at **stride 2** (`kmax = (width-1) >> 1`, accesses `k << 1`),
+not stride 1. `row_pass_neon_s1_row` processes `width` *consecutive* coefficients (it is correct for
+`s == 1` precisely because `s == 1 ⇒ sd == 0`). Applying the proposed change makes the s=2 correctness
+test fail immediately: `assertion left == right failed: SIMD row pass (s=2) must produce identical
+output to scalar`.
+
+**Decision. Rejected** (no code committed — the probe was reverted).
+
+**Reason.** Reusing `row_pass_neon_s1_row` for `s == 2` produces an incorrect IDWT (it processes
+stride-1 positions where the s=2 active row is stride-2). The issue's "no new function needed" claim
+does not hold; a correct s=2 NEON kernel would have to handle the `sd == 1` deinterleave (stride-2
+columns) — a genuinely new implementation, out of scope for the "reuse the s1 row" hypothesis the
+issue is built on. The `s == 1` branch is safe only because it implies `sd == 0`.
+
+---
+
 ### #441 — hoist `vdupq_n_s32` splat constants in IDWT NEON row pass — **Reverted** (2026-06-24)
 
 **Issue.** #441 (from the perf-experiment-swarm). `row_pass_neon_s1_row`'s `lift!`/`predict!`

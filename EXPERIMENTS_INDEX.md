@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IDWT_S2_NEON (#442) | 2026-06-24 | IW44 IDWT NEON | X | incorrect premise | Reuse s1_row for s==2 fails correctness: s==2 ⟹ sd==1 (stride-2 cols), s1_row assumes stride-1 |
 | IDWT_SPLAT (#441) | 2026-06-24 | IW44 IDWT NEON | R | unmeasurable | Hoist vdupq_n_s32 splat; movi is free in ALU-bound loop, no benefit. C16/C8 pattern doesn't transfer |
 | F2_GAMMA (#443) | 2026-06-24 | color 1:1 bilinear | **K** | narrow (non-identity gamma) | F2 all-bg fast path for non-identity gamma (LUT pass); free-on-miss, byte-identical. Identity path unchanged |
 | PDF_STREAM (#449) | 2026-06-24 | PDF export | **K** | peak RSS O(pages)→O(1) bodies | Stream render→emit→drop in sequential path; byte-identical, strictly ≤ peak. Unmeasurable on corpus (no many-large-body doc) |
@@ -154,7 +155,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#439 proportional fg/bg blend in color area-avg~~ **DONE (Kept, quality)** → COLOR_AA · ~~#440 PAR-DEC parallel layer decode~~ **DONE (Kept, −22% cold)** → PAR_DEC
 
 **P3:**
-- #441 hoist NEON splat consts in IDWT · #442 NEON s=2 row pass in IW44 IDWT
+- #441 hoist NEON splat consts in IDWT · ~~#442 NEON s=2 row pass in IW44 IDWT~~ **REJECTED (incorrect premise: s==2 implies sd==1)** → IDWT_S2_NEON
 - ~~#443 F2 fast path for non-identity gamma~~ **DONE (Kept, safe ext)** → F2_GAMMA · ~~#444 cache parsed FGbz palette~~ **REVERTED (+1%, 21-byte chunk)** → FGPAL_CACHE
 - #445 rolling 1-bit register in `decode_ref_row` · ~~#446 O(1) dedup in cluster_shared_symbols~~ **DONE (Kept, O(P²)→O(P))** → CLUSTER_DEDUP
 - ~~#447 cache-tiled transpose in rotate_pixmap~~ **DONE (Kept, ~2–6%)** → ROTATE_TILE · ~~#448 Lanczos3 vertical-pass weight precompute~~ **DONE (Kept, −22.5%)** → LANCZOS_HOIST
