@@ -5,6 +5,33 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #441 — hoist `vdupq_n_s32` splat constants in IDWT NEON row pass — **Reverted** (2026-06-24)
+
+**Issue.** #441 (from the perf-experiment-swarm). `row_pass_neon_s1_row`'s `lift!`/`predict!`
+macros call `vdupq_n_s32(16)` / `vdupq_n_s32(8)` inside their bodies (expanded twice per chunk).
+An in-tree comment notes LLVM does not hoist the splat to a loop-invariant `movi.4s`. Hypothesis:
+hoist them to a `let` before each loop, matching the C16/C8 const pattern in the `wide::i32x8` path.
+
+**Approach.** `let c16 = vdupq_n_s32(16i32)` before the even loop, `let c8 = vdupq_n_s32(8i32)`
+before the odd loop; use them in the macros.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical (same constant; 34 iw44 tests pass). `iw44_to_rgb_colorbook/sub1`
+(full IDWT + YCbCr), two rounds: WITH 5.655 / 5.778 ms, base 5.695 / 5.768 ms — −0.7% / +0.2%,
+i.e. indistinguishable from noise.
+
+**Decision. Reverted.**
+
+**Reason.** The premise is correct (LLVM does re-materialise the splat), but the conclusion does not
+hold for *this* loop: `movi.4s` is a 1-cycle, zero-latency-to-issue instruction that dual-issues
+into an otherwise idle slot of this ALU-bound lifting kernel, so re-creating it per chunk costs ~0.
+The C16/C8 const pattern that justified the hoist was for the `wide::i32x8` path (different
+codegen); it does not transfer to the NEON `int32x4_t` kernel. No measurable benefit and no
+structural improvement (unlike the kept #443/#446/#449), so reverted per "keep only what helps."
+
+---
+
 ### #443 — extend F2 all-bg fast path to non-identity gamma — **Kept** (2026-06-24)
 
 **Issue.** #443 (from the perf-experiment-swarm). The F2 all-bg-row fast path
