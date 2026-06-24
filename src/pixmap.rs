@@ -8,6 +8,11 @@
 
 pub use djvu_pixmap::{GrayPixmap, Pixmap};
 
+// `vec!` is not in the no_std prelude; bring it in from `alloc` (the std prelude
+// already provides it). Matches the cfg-gated import pattern used by other modules.
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 /// Lanczos-3 kernel: `sinc(x) * sinc(x/3)` for `|x| < 3`, 0 otherwise.
 ///
 /// Uses the normalised sinc: `sinc(x) = sin(π x) / (π x)`, `sinc(0) = 1`.
