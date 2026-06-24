@@ -5,6 +5,35 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #445 — rolling 1-bit register for `m_r2` in `decode_ref_row` — **Reverted** (2026-06-24)
+
+**Issue.** #445 (from the perf-experiment-swarm). `decode_ref_row` reads `m_r2 = pix_row(mbm_r2,
+col + col_shift)` each column (a signed `col < 0` guard + bounds-checked `get`). Proposal: carry
+`m_r2` in a rolling register, and — exploiting "`col_shift ≥ -1`" — drop the signed guard from the
+in-loop update.
+
+**Approach.** Seed `m_r2 = pix_row(mbm_r2, col_shift)` before the loop, use it in the `idx`
+computation, and update `m_r2 = pix_row(mbm_r2, col + 1 + col_shift)` at the loop bottom.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical (9 + 53 jb2 round-trip/decode tests pass). `jb2_decode_first_chunk`
+(boy_jb2): 436 vs 427 µs — within noise / a slight regression; no benchmark exercises a
+refinement-heavy `decode_ref_row` (the proposed `jb2_decode_corpus_bilevel` target does not exist).
+
+**Decision. Reverted.**
+
+**Reason.** The optimisation's value depended on dropping the signed guard, which is **unsafe**:
+`col_shift = mcol - ccol` (line 867) is unbounded, so `col + col_shift` (and `col + 1 + col_shift`)
+can be negative for any `col` — the guard must stay. With the guard kept, the change merely
+relocates the same `pix_row` read from the top of the loop to the bottom and carries it in a
+register; that is exactly the instruction scheduling LLVM already does, and the one clean
+measurement showed no gain (slight +2% regression from the extra register carry + a wasted final
+read). `decode_ref_row` is also a cold-path (JB2 mask decode is cached after first render). Same
+outcome as #441 — a codec inner-loop micro-op whose premise doesn't hold up.
+
+---
+
 ### #442 — extend NEON per-row IDWT path to s==2 — **Rejected (incorrect premise)** (2026-06-24)
 
 **Issue.** #442 (from the perf-experiment-swarm). `row_pass_inner`'s AArch64 per-row NEON branch
