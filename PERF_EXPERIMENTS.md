@@ -5,6 +5,40 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Encoder size diagnostic: where is the gap vs DjVuLibre? — **Diagnostic** (2026-06-25)
+
+**Goal.** After closing the JB2 mask size gap (#446, #452), locate the remaining archive-size gap
+vs DjVuLibre across chunk types and encoders.
+
+**Chunk-byte breakdown of DjVuLibre-encoded corpus files** (where the bytes actually are — it
+depends heavily on document type):
+
+| Doc | Sjbz (mask) | BG44 | FG44 |
+|---|---|---|---|
+| watchmaker (text) | 67.4% | 11.4% | 1.8% |
+| colorbook (picture book) | 36.2% | 54.8% | 7.2% |
+| conquete_paix (photo) | 3.0% | **93.8%** | 2.0% |
+| chicken (photo) | — | **99.9%** | — |
+
+→ For colour/photo scans the **IW44 layers (BG44 + FG44) dominate**, not the JB2 mask.
+
+**IW44 BG44 size vs DjVuLibre** (`encode_quality_iw44` on conquete_paix, 20 pages): our BG44 is
+**1,830,594 B vs DjVuLibre's 1,601,905 B = 1.143× (≈14% larger)** at PSNR avg 33.7 dB (min 29.6).
+Caveat: measured by re-encoding the *decoded* background (some generation loss) and not at exactly
+matched PSNR, so the precise factor has error bars — but the direction is clear and consistent
+across pages.
+
+**Conclusion.** The mask is at parity (1.04×); the remaining size lever is the **IW44 encoder**
+(~14% larger BG44), which is the *dominant* chunk for real colour scans — so a ~14% BG44 reduction
+is ~7–13% of the whole file. This scopes the next investigation to the IW44 encoder
+(quantization/slice-budget — see IW44_DIAG fine-band starvation — coefficient ZP coding, zone
+ordering), with round-trip + PSNR as a hard validation gate. Encoder *speed* was not cleanly
+comparable in this pass (different image scales/pipelines) and is secondary (batch operation).
+
+`c44`/`cjb2` are installed locally for head-to-head encoder comparison.
+
+---
+
 ### #452 — shared Djbz dictionary for layered (quality/archival) multi-page encode — **Kept (size)** (2026-06-24)
 
 **Issue.** #452. The layered (`--quality quality|archival`) multi-page directory encode emitted each
