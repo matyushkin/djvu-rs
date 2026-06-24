@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| FGPAL_CACHE (#444) | 2026-06-24 | decode pipeline | R | +1% regression | Cache parsed FGbz palette; navm_fgbz chunk is 21 bytes (trivial parse) → cache overhead > saving |
 | PAR_DEC (#440) | 2026-06-24 | decode pipeline | **K** | **−22% cold render** | rayon::join BG/FG layer decode (parallel feature); FG overlaps BG ZP phase. Warm free, cold first-open faster |
 | COLOR_AA (#439) | 2026-06-24 | color area-avg | **K** | quality (68 vs 28 colors) | Proportional fg/bg blend via mask_box_coverage; AA color downscale, removes blocky halos. mask_box_any deleted |
 | AREAAVG_ALLBG (#438) | 2026-06-24 | color area-avg | **K** | ~skip mask_box_any (50–71% fire) | All-bg band short-circuit skips footprint scan; byte-identical, #428 analog for color downscale |
@@ -148,7 +149,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 
 **P3:**
 - #441 hoist NEON splat consts in IDWT · #442 NEON s=2 row pass in IW44 IDWT
-- #443 F2 fast path for non-identity gamma · #444 cache parsed FGbz palette
+- #443 F2 fast path for non-identity gamma · ~~#444 cache parsed FGbz palette~~ **REVERTED (+1%, 21-byte chunk)** → FGPAL_CACHE
 - #445 rolling 1-bit register in `decode_ref_row` · #446 O(1) dedup in cluster_shared_symbols
 - #447 cache-tiled transpose in rotate_pixmap · #448 Lanczos3 vertical-pass weight precompute
 - #449 PDF streaming render-and-emit (peak RSS O(pages)→O(1))
