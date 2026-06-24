@@ -5,6 +5,41 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #447 — 32×32 tiled transpose in `rotate_pixmap` (Cw90/Ccw90) — **Kept** (2026-06-24)
+
+**Issue.** #447 (from the perf-experiment-swarm). The 90° rotation paths transposed the image with
+a per-pixel `get_rgb`/`set_rgb` whose destination write strides by `out.width*4` bytes (~13 KB at
+A4) — a cache miss per pixel, ~8.4 M strided writes for a 2550×3300 page.
+
+**Approach.** Iterate the source in 32×32 tiles and copy each pixel with a direct
+`out.data[di..di+4].copy_from_slice(&src.data[si..si+4])`. Within a tile both the source read and
+destination write stay within a few cache lines, so the hardware prefetcher works. 4-byte copy is
+exact (rendered source pixmaps carry alpha=255 and `Pixmap::white` pre-fills alpha=255).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88 (machine moderately
+loaded, load ~7 — best-of-N used for robustness).
+
+**Numbers.** Output byte-identical — FNV checksums unchanged for Cw90, Ccw90, and Rot180 (the last
+untouched). Full rotated render (watchmaker Cw90, native, best-of-30):
+
+| Round | base (ms) | tiled (ms) | Δ |
+|---|---|---|---|
+| 1 | 52.54 | 51.55 | −1.9% |
+| 2 | 53.02 | 49.70 | −6.3% |
+
+Both rounds faster. The transpose itself is substantially cheaper (strided 8.4 M writes →
+cache-local tiles); the end-to-end delta is diluted because decode + composite (~45 ms, unchanged)
+dominate the ~50 ms rotated render.
+
+**Decision. Kept.**
+
+**Reason.** Byte-identical output, consistent improvement across rounds, and a textbook
+cache-locality win for an image transpose (sequential tile bursts replace per-pixel cache-scatter).
+Rotated rendering is a real use case (viewing rotated scans). Rot180 is left as-is (its writes are
+already row-sequential in reverse, not a transpose). Closes #447.
+
+---
+
 ### #446 — O(1) page-dedup in `cluster_shared_symbols_tunable` — **Kept** (2026-06-24)
 
 **Issue.** #446 (from the perf-experiment-swarm). The shared-Djbz clustering inner loop deduped the
