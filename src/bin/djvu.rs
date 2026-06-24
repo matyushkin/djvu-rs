@@ -1052,36 +1052,28 @@ fn cmd_encode(
             return Ok(());
         }
 
-        if shared_dict_pages != 2 {
-            eprintln!(
-                "note: --shared-dict-pages is ignored for layered directory encode; \
-                 each page keeps its own Sjbz mask"
-            );
-        }
-
-        let mut pages = Vec::with_capacity(entries.len());
+        // #452: layered multi-page now shares a Djbz dictionary across pages,
+        // honoring --shared-dict-pages (was: per-page independent masks).
+        let mut pixmaps = Vec::with_capacity(entries.len());
         for path in &entries {
-            let pixmap = djvu_rs::png_io::decode_png_to_pixmap(path)?;
-            let mut encoder = PageEncoder::from_pixmap(&pixmap)
-                .with_dpi(dpi)
-                .with_quality(q);
-            if let Some(opts) = segment_options {
-                encoder = encoder.with_segment_options(opts);
-            }
-            let page = encoder
-                .encode()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            pages.push(page);
+            pixmaps.push(djvu_rs::png_io::decode_png_to_pixmap(path)?);
         }
-        let page_refs: Vec<&[u8]> = pages.iter().map(Vec::as_slice).collect();
-        let bytes = djvu_rs::djvm::merge(&page_refs)?;
+        let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared(
+            &pixmaps,
+            q,
+            dpi,
+            segment_options,
+            shared_dict_pages,
+        )
+        .map_err(|e| format!("layered encode: {e}"))?;
         std::fs::write(output, &bytes)?;
         eprintln!(
-            "{} pages → {} ({} bytes, layered {:?})",
+            "{} pages → {} ({} bytes, layered {:?}, shared-dict threshold = {})",
             entries.len(),
             output.display(),
             bytes.len(),
             q,
+            shared_dict_pages,
         );
         return Ok(());
     }

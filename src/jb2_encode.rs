@@ -97,6 +97,35 @@ pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -
         comp_form_bodies.push((djvu_body, true, pid));
     }
 
+    assemble_djvm_bundle(comp_form_bodies)
+}
+
+/// Append one IFF chunk (`id` + 32-bit big-endian length + data + pad-to-even)
+/// to `out`. Shared by the DJVM page/dict body builders.
+pub(crate) fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(id);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    if !data.len().is_multiple_of(2) {
+        out.push(0);
+    }
+}
+
+/// Build a component FORM **body**: the 4-byte form type followed by each chunk.
+/// The outer `FORM` wrapper + size is added later by the IFF emission seam.
+pub(crate) fn build_form_body(form_type: &[u8; 4], chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(form_type);
+    for (id, data) in chunks {
+        push_chunk(&mut body, id, data);
+    }
+    body
+}
+
+/// Assemble a bundled DJVM from component FORM bodies (`(body, is_page, id)`):
+/// a leading DIRM directory chunk + one component FORM each. Shared by the
+/// masks-only ([`encode_djvm_bundle_jb2_with_shared`]) and layered bundlers.
+pub(crate) fn assemble_djvm_bundle(comp_form_bodies: Vec<(Vec<u8>, bool, String)>) -> Vec<u8> {
     // ── DIRM metadata table (BZZ-compressed sizes/flags/ids/names/titles) ──
     //
     // Matches the bundled-format layout read by `djvu_document.rs::parse`:
