@@ -260,8 +260,8 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
     // so Deflate shrinks the Gray8 strip by ~20–50× — far past the 8× of a true
     // 1-bit packing, which the `tiff` crate's high-level encoder cannot emit (no
     // 1-bit ColorType). Deflate (tag 8) is universally readable.
-    let mut img = encoder
-        .new_image_with_compression::<colortype::Gray8, _>(w, h, Deflate::default())?;
+    let mut img =
+        encoder.new_image_with_compression::<colortype::Gray8, _>(w, h, Deflate::default())?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
     img.write_data(&gray)?;
     Ok(())

@@ -378,11 +378,15 @@ fn crop_bitmap(src: &Bitmap, x0: u32, y0: u32, w: u32, h: u32) -> Bitmap {
     // row is a contiguous byte-copy from the source row instead of w per-pixel
     // get()+set_black() calls. The trailing bits of the last output byte that lie
     // beyond `w` must stay 0 (the per-pixel path never sets them), so mask them.
-    if x0 % 8 == 0 {
+    if x0.is_multiple_of(8) {
         let src_stride = src.row_stride();
         let out_stride = out.row_stride();
         let src_byte0 = (x0 / 8) as usize;
-        let last_mask: u8 = if w % 8 == 0 { 0xFF } else { 0xFFu8 << (8 - (w % 8)) };
+        let last_mask: u8 = if w.is_multiple_of(8) {
+            0xFF
+        } else {
+            0xFFu8 << (8 - (w % 8))
+        };
         for y in 0..h as usize {
             let s = (y0 as usize + y) * src_stride + src_byte0;
             let d = y * out_stride;
