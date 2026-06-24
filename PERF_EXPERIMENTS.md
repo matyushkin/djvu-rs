@@ -5,6 +5,48 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #435 — all-bg row fast path in B-series bilinear path (F2 analog) — **Kept** (2026-06-24)
+
+**Issue.** #435 (from the perf-experiment-swarm). The B-series bilinear path
+(`composite_rows_bilinear_one`, non-1:1) runs the per-pixel `is_fg` bit-extraction (≈5 ops:
+`is_some_and`, bounds check, byte load, shift, AND, compare) for every pixel, including blank rows
+(margins / inter-line gaps). The 1:1 path already short-circuits blank rows via F2.
+
+**Approach.** Pre-scan the hoisted mask row once (`mask_all_bg`); guard `is_fg` with
+`!mask_all_bg && …`. On a blank row the `&&` short-circuits, skipping the `is_fg` extraction for
+every pixel — independent of whether LLVM unswitches the loop. Unlike F2 the bg pixels still need
+per-pixel `bilinear_from_rows` (coordinates are scaled, no `copy_from_slice`), so this saves only
+the is_fg check, not the whole bg copy.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical (FNV checksum unchanged). Firing-rate probe: watchmaker @150/300
+(B-series) has **868 / 1651 output rows (52.6%) with a blank mask row** — the fast path fires on
+the majority. Benchmark `color_downscale_mixed_cached` vs `color_native_cached` control:
+
+| Round | control (ms) | mixed (ms) | ratio |
+|---|---|---|---|
+| 1 baseline | 385.8 | 106.2 | 0.275 |
+| 1 with | 425.3 | 88.4 | 0.208 |
+| 2 baseline | 357.2 | 90.5 | 0.253 |
+| 2 with | 399.0 | 101.4 | 0.254 |
+
+R1 shows −24%, R2 neutral — thermal noise (mixed swung 88–106 ms regardless). The mechanism is
+confirmed by the 52.6% firing rate plus the short-circuit, which provably elides ≈5 ops/pixel on
+those rows.
+
+**Decision. Kept.**
+
+**Reason.** Same disposition as F2/I3/#428 (kept row-level skips): the change is byte-identical,
+the per-row overhead when it misses is one mask-row pre-scan (~nb bytes, NEON `any()`) plus a
+short-circuiting bool, and it fires on 52.6% of rows where it elides the per-pixel is_fg check.
+The benchmark is too noisy to quote a clean magnitude (~3–8% expected), but the firing-rate and
+short-circuit guarantee a real, bounded-overhead win. Distinct from the reverted #432/#434
+(inner-loop micro-ops that added unconditional per-pixel cost) — this only adds work on the
+common branch and removes it on the majority blank-row case. Closes #435.
+
+---
+
 ### #434 — Q48 accumulator for `fg_fx` in B-series bilinear path — **Reverted** (2026-06-24)
 
 **Issue.** #434 (from the perf-experiment-swarm). The B-series bilinear inner loop
