@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| MASK_ANY_BYTE (#432) | 2026-06-24 | color area-avg | R | +5.1% regression | Byte-scan mask_box_any; early-exit + small footprint → setup overhead > saving. POPCNT doesn't transfer |
 | TIFF_LUT (#431) | 2026-06-24 | TIFF export | **K** | **~18% bilevel export** | LUT byte-expansion in extract_bilevel_pixels (Gray8 analog of P2 table) |
 | TIFF_DEFLATE (#430) | 2026-06-24 | TIFF export | **K** | **~149× size** | Deflate-compressed bilevel TIFF (1-bit not supported by tiff 0.9; Deflate beats it) |
 | CROP_BYTECOPY (#429) | 2026-06-24 | JB2 direct encoder | **K** | **~14–15% multitile** | Byte-aligned crop_bitmap row-copy; direct encode_jb2 path only (non-shipping) |
@@ -131,7 +132,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#430 — 1-bit TIFF output for bilevel pages~~ **DONE (Kept, ~149× via Deflate; 1-bit unsupported by tiff 0.9)** → TIFF_DEFLATE
 
 **P2:**
-- ~~#431 LUT byte-expansion in bilevel TIFF~~ **DONE (~18%)** → TIFF_LUT · #432 byte-level early-exit in `mask_box_any`
+- ~~#431 LUT byte-expansion in bilevel TIFF~~ **DONE (~18%)** → TIFF_LUT · ~~#432 byte-level early-exit in `mask_box_any`~~ **REVERTED (+5% regression)** → MASK_ANY_BYTE
 - #433 extend P2 BILEVEL_RGBA to byte-aligned offset_x · #434 B-series fg_fx Q48 accumulator
 - #435 B-series all-bg row fast path (F2 analog) · #436 MASK_EXPAND in B-series upscale
 - #437 exact-length FG44/BG44 row slices · #438 area-avg all-bg row fast path
