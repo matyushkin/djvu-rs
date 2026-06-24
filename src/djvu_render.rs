@@ -2424,6 +2424,20 @@ fn composite_rows_area_avg_one(
     let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
     let bg_y = ctx.bg.map(|bg| area_range(bg.height, bg_fy, bg_fy_step));
 
+    // #438: row-level all-bg fast path (F2/I3 analog for the area-avg path). The
+    // mask footprint's y-band [y0, y1) is row-invariant; if it has no foreground
+    // bits, `mask_box_any` would return false for every output pixel, so the
+    // `!mask_all_bg &&` short-circuit skips the per-pixel footprint scan entirely.
+    // Only the `mask_shift == 0` (mask_box_any) path is covered — the max-pool
+    // sub-path indexes a coarser mask. The y range matches `mask_box_any`.
+    let mask_all_bg = ctx.mask_shift == 0
+        && ctx.mask.is_none_or(|m| {
+            let stride = m.row_stride();
+            let y0 = (fy >> FRACBITS).min(m.height.saturating_sub(1)) as usize;
+            let y1 = ((fy + fy_step) >> FRACBITS).min(m.height) as usize;
+            y1 <= y0 || !m.data[y0 * stride..y1 * stride].iter().any(|&b| b != 0)
+        });
+
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fallback;
         let ax = if let Some(ax) = area_avg_x.and_then(|xs| xs.get(ox)) {
@@ -2442,15 +2456,16 @@ fn composite_rows_area_avg_one(
         };
         let fx = ax.fx;
 
-        let is_fg = ctx.mask.is_some_and(|m| {
-            if ctx.mask_shift > 0 {
-                let px = fx >> (FRACBITS + ctx.mask_shift);
-                let py = fy >> (FRACBITS + ctx.mask_shift);
-                px < m.width && py < m.height && m.get(px, py)
-            } else {
-                mask_box_any(m, fx, fy, fx_step, fy_step)
-            }
-        });
+        let is_fg = !mask_all_bg
+            && ctx.mask.is_some_and(|m| {
+                if ctx.mask_shift > 0 {
+                    let px = fx >> (FRACBITS + ctx.mask_shift);
+                    let py = fy >> (FRACBITS + ctx.mask_shift);
+                    px < m.width && py < m.height && m.get(px, py)
+                } else {
+                    mask_box_any(m, fx, fy, fx_step, fy_step)
+                }
+            });
 
         let (r, g, b) = if is_fg {
             if let Some(pal) = ctx.fg_palette {
