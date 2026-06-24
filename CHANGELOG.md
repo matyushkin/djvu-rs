@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0](https://github.com/matyushkin/djvu-rs/compare/v0.20.5...v0.21.0) (2026-06-24)
+
+
+### Features
+
+* **render:** [#439](https://github.com/matyushkin/djvu-rs/issues/439) anti-aliased color downscale via proportional fg/bg blend ([3e8c508](https://github.com/matyushkin/djvu-rs/commit/3e8c508f64fc895d9dbb76e3f77fd62e631f7c88))
+
+
+### Bug Fixes
+
+* **pixmap:** import vec! under no_std for scale_lanczos3 ([#448](https://github.com/matyushkin/djvu-rs/issues/448) follow-up) ([b58ae83](https://github.com/matyushkin/djvu-rs/commit/b58ae8341bd5c076f13b153948e728ad058b5ed9))
+
+
+### Performance Improvements
+
+* **jb2:** [#446](https://github.com/matyushkin/djvu-rs/issues/446) O(1) page-dedup in cluster_shared_symbols_tunable (O(P^2)-&gt;O(P)) ([0618bf7](https://github.com/matyushkin/djvu-rs/commit/0618bf7013d5164b79bf4e90dd1b7ac60f734290))
+* **pdf:** [#449](https://github.com/matyushkin/djvu-rs/issues/449) stream page render-&gt;emit-&gt;drop in sequential PDF path ([fdb427b](https://github.com/matyushkin/djvu-rs/commit/fdb427b2f471a5e2145860c6cc6f961370537d4c))
+* **render:** [#435](https://github.com/matyushkin/djvu-rs/issues/435) all-bg row fast path in B-series bilinear path (F2 analog) ([71aea00](https://github.com/matyushkin/djvu-rs/commit/71aea00a7be9ca46d1cbd2737d2cb684d127e24a))
+* **render:** [#438](https://github.com/matyushkin/djvu-rs/issues/438) all-bg row fast path in area-average compositor (F2/I3 analog) ([93ab095](https://github.com/matyushkin/djvu-rs/commit/93ab095ddc21d683588c99ff9e6196cc1453e955))
+* **render:** [#440](https://github.com/matyushkin/djvu-rs/issues/440) parallel BG44/FG44 layer decode via rayon::join (~22% cold) ([9c2d79c](https://github.com/matyushkin/djvu-rs/commit/9c2d79c489d16e9df8546074c72aea04c74ff124))
+* **render:** [#443](https://github.com/matyushkin/djvu-rs/issues/443) extend F2 all-bg fast path to non-identity gamma ([7aa47f2](https://github.com/matyushkin/djvu-rs/commit/7aa47f2cc615f0586a4c21d47066a6175c91f5b4))
+* **render:** [#447](https://github.com/matyushkin/djvu-rs/issues/447) 32x32 tiled transpose in rotate_pixmap Cw90/Ccw90 ([17727b0](https://github.com/matyushkin/djvu-rs/commit/17727b029953dacb3a7f38efe10a97b60878d704))
+* **render:** [#448](https://github.com/matyushkin/djvu-rs/issues/448) hoist Lanczos vertical-pass weights + row-major accumulate (~22%) ([0c2c0c5](https://github.com/matyushkin/djvu-rs/commit/0c2c0c59259a086d28541cc1479b7026bad998f5))
+
 ## [0.20.5](https://github.com/matyushkin/djvu-rs/compare/v0.20.4...v0.20.5) (2026-06-24)
 
 
