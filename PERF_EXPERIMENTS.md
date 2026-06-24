@@ -5,6 +5,54 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #428 — all-white band fast path in bilevel downscale compositor (I3-downscale) — **Kept** (2026-06-24)
+
+**Issue.** #428 (from the perf-experiment-swarm). `composite_rows_bilevel_one`'s anti-aliased
+downscale path (`mask_shift == 0`) called `mask_box_coverage` for every output pixel, and each
+call scans the source mask band `[y0, y1)` with byte popcounts. For a blank band every call
+returns 0 → white, so the whole per-row scan is wasted. The 1:1 path already had I3 (blank-row
+fill) but the downscale path had no analog.
+
+**Approach.** Before the per-pixel loop, scan the row-invariant source band
+`mask.data[y0*stride .. y1*stride]` once (`iter().any(|&b| b != 0)`, NEON-vectorised). If blank
+(or the degenerate `y1 <= y0`), `row_buf.fill(255)` and return. The y range matches
+`mask_box_coverage` exactly. Guarded on `mask_shift == 0` — the max-pool sub-path indexes a
+different mask resolution.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Firing-rate probe on cable_1973 @150 DPI: **1559 / 1651 output rows (94.4%) have a
+fully-blank band** — the fast path fires on almost every row. Cost model: the slow path runs
+~955 `mask_box_coverage` calls per blank row (≈2 byte-reads + 2 popcounts each); 1559 blank rows
+≈ 3 M popcounts ≈ ~3 ms wasted, replaced by 1559 band scans ≈ 33 µs. Theoretical saving ≈ 6.5%
+of the ~46 ms render.
+
+Benchmark `render_corpus_bilevel_dpi/dpi/150` (target) vs `dpi/300` (1:1 control, unaffected),
+intra-session ratio, two rounds:
+
+| Round | dpi/150 (ms) | dpi/300 (ms) | ratio |
+|---|---|---|---|
+| 1 baseline | 47.0 | 149.8 | 0.314 |
+| 1 with | 45.7 | 143.3 | 0.319 |
+| 2 baseline | 54.1 | 156.4 | 0.346 |
+| 2 with | 47.0 | 157.4 | 0.299 |
+
+Rounds disagree (−1.7% vs +13.7%): the ~6.5% signal is swamped by thermal variance (control
+swung 143–157 ms, baseline dpi/150 swung 47–54 ms). 609 lib tests pass.
+
+**Decision. Kept.**
+
+**Reason.** The benchmark is too noisy to resolve the effect, but two independent lines of
+evidence make it a clear win: (1) the fast path fires on 94.4% of rows, and (2) the per-row
+overhead when it does *not* fire is one band scan (~640 bytes, NEON `any()`, ~20 ns) on top of
+the existing 955 coverage calls — bounded at ~0.07% of render time. So the change is essentially
+free when it misses and a real saving when it fires. Same disposition and rationale as I3
+(kept at 2.3%, "zero-cost for documents with no blank rows; effect scales with whitespace").
+Output is byte-identical by construction (fires only when every band pixel is background → white).
+Closes #428.
+
+---
+
 ### #427 — indexed JB2 mask + blit-map cache for FGbz-palette pages (`PageLayers::mask_indexed`) — **Kept** (2026-06-24)
 
 **Issue.** #427 (from the perf-experiment-swarm). `PageLayers` cached the plain JB2 mask

@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| I3_DOWNSCALE (#428) | 2026-06-24 | bilevel downscale | **K** | **~6.5% (94.4% fire)** | Blank-band fill(255) in AA downscale path; benchmark thermal-noisy, evidence from fire rate + cost model |
 | MASK_IDX_CACHE (#427) | 2026-06-24 | decode pipeline | **K** | **~5% palette** | Cache indexed JB2 mask+blit-map; avoids 33.6 MB re-alloc + JB2 re-decode per render |
 | BG_CACHE_S2 (#426) | 2026-06-24 | decode pipeline | **K** | **−7–9% downscale** | Cache decoded BG44 RGB at sub=2; mirror of BG_CACHE for 150 DPI |
 | C2c | 2026-06-24 | area-avg compositor | R | 0% | LLVM LICM already hoists fg_fy. Related: C2b |
@@ -122,7 +123,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 **P1 (highest leverage):**
 - ~~#426 — cache decoded BG44 RGB Pixmap at subsample=2~~ **DONE (Kept, −7–9%)** → BG_CACHE_S2
 - ~~#427 — cache decoded JB2 indexed mask in PageLayers~~ **DONE (Kept, ~5%)** → MASK_IDX_CACHE
-- #428 — all-white band fast path in bilevel downscale compositor (I3 analog)
+- ~~#428 — all-white band fast path in bilevel downscale compositor~~ **DONE (Kept, ~6.5%)** → I3_DOWNSCALE
 - #429 — crop_bitmap aligned byte-copy fast path in JB2 encoder (8× iteration)
 - #430 — 1-bit TIFF output for bilevel pages (quality/size, 8×)
 
