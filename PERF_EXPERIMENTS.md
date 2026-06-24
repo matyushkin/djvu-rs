@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #448 — hoist Lanczos vertical-pass weights + row-major accumulate — **Kept** (2026-06-24)
+
+**Issue.** #448 (from the perf-experiment-swarm). In `scale_lanczos3`'s vertical pass, the weight
+`lanczos3_kernel((sy − cy) / v_scale)` was evaluated inside the per-column `for ox` loop even though
+it depends only on `(oy, sy)`. LLVM cannot LICM the opaque `f32::sin` calls, so the kernel was
+recomputed `dst_w` times per row. The access `mid.get_rgb(ox, sy)` also strided by `dst_w*4` bytes
+per `sy` (column-major against a row-major buffer).
+
+**Approach.** Restructure to iterate `sy` outer / `ox` inner: evaluate the weight once per `sy`,
+read `mid`'s row `sy` sequentially, and accumulate into per-column buffers (`acc_r/g/b`). The
+per-column sum is over the same `sy` values in the same ascending order, so the floating-point
+result is bit-identical.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output bit-identical (FNV unchanged, Lanczos3 downscale). Full Lanczos3 render
+(watchmaker @0.5 — native re-render + `scale_lanczos3`), best-of-20:
+
+| Round | base (ms) | with (ms) | Δ |
+|---|---|---|---|
+| 1 | 594.00 | 460.25 | **−22.5%** |
+| 2 | 594.37 | 460.26 | **−22.5%** |
+
+Near-perfectly reproducible (best-of-20 both rounds within 0.4 ms). The vertical pass was a major
+cost because of the redundant `sin` evaluations; hoisting them saves ~134 ms.
+
+**Decision. Kept.**
+
+**Reason.** −22.5% on the Lanczos render path, bit-identical output, reproducible. The win comes
+from two synergistic fixes: (1) the `f32::sin` calls — which the compiler genuinely cannot hoist —
+move from O(dst_w·support) to O(support) per row, and (2) row-major accumulation replaces
+per-column cache-scatter reads of `mid`. Lanczos resampling is the opt-in high-quality downscale
+(`Resampling::Lanczos3`); this makes it ~1.3× faster at no quality cost. Closes #448.
+
+---
+
 ### #447 — 32×32 tiled transpose in `rotate_pixmap` (Cw90/Ccw90) — **Kept** (2026-06-24)
 
 **Issue.** #447 (from the perf-experiment-swarm). The 90° rotation paths transposed the image with
