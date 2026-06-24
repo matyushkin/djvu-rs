@@ -5,6 +5,34 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### IW44 encoder-size swarm — other candidates assessed — **Reverted / Rejected** (2026-06-25)
+
+After IW44-1 (the one big win, −9.1% BG44), the remaining swarm candidates were assessed and **not**
+taken — recorded so they are not re-explored:
+
+- **#8 rgb_to_ycbcr Y rounding** (`/4` → `(…+2)/4`): **Reverted.** conquete_paix size 1,663,587 →
+  1,663,085 B (−0.03%, negligible) but PSNR 33.72 → 33.65 dB (*worse*). Rounding moves our
+  reconstruction away from the target; our truncation is correct.
+- **#6 / #7 early-termination of trailing slices/chunks**: **Dead end.** Per-chunk sizes on
+  conquete_paix BG grow (chunk 0 = 23 B … chunk 9 = 4551 B) — the trailing chunks are the *finest
+  detail*, not null. All 100 slices are productive; stopping early would cut quality, not waste.
+- **#3 / #4 / #10 per-band/per-fine-band ZP contexts, #12 sign/global-skip recode, #5 QUANT_HI_INIT
+  rebalancing**: **Rejected — interop break.** These change the ZP context assignment or the
+  normative quant table, which the *decoder* in `lib.rs` also uses (`quant_lo: QUANT_LO_INIT`, …).
+  Changing them on both sides would make our decoder unable to read DjVuLibre-encoded IW44 streams
+  (the context model / quant schedule is the de-facto IW44 spec). Non-starter for a library whose
+  primary job is decoding DjVuLibre files.
+- **#2 chroma_delay default 0 → 10**: a real **quality/size knob** (matches c44's `-crcbdelay 10`,
+  ~2–5% smaller) but it *lowers* chroma quality. Left as-is — our default deliberately gives higher
+  chroma quality than c44; the knob exists for callers who want the c44 operating point.
+
+**Net.** The IW44 BG44 gap vs DjVuLibre closed from 14.3% → **3.9%** via the single interop-safe,
+PSNR-neutral coding-efficiency fix (IW44-1). The remaining headroom is either interop-breaking
+(normative tables/contexts) or a quality tradeoff, so the IW44 encoder is now at near-parity for
+lossless-of-the-stream purposes.
+
+---
+
 ### IW44-1 — match the activation-prediction threshold to the real gate (s/2 → 11s/16) — **Kept (size)** (2026-06-25)
 
 **Issue.** From the IW44-encoder-size swarm. The IW44 encoder predicts whether a coefficient will

@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_SWARM_REST | 2026-06-25 | IW44 encoder (size) | R/X | dead-end / interop-break | #8 ycbcr-round (PSNR worse), #6/7 early-term (chunks not null), #3/4/5/10/12 (change normative tables/ctx → break DjVuLibre interop), #2 (quality knob) |
 | IW44_ACT_THRESH (IW44-1) | 2026-06-25 | IW44 encoder (size) | **K** | **−9.1% BG44, PSNR-identical** | Activation prediction s/2→11s/16 matches real gate; removes wasted NEW bits. Encoder-only, interop-safe. Gap 14.3%→3.9% |
 | ENC_SIZE_DIAG | 2026-06-25 | encoder (size) | D | mask=parity, IW44 BG44=1.143× | Chunk breakdown: BG44/FG44 dominate colour/photo docs (94–99.9%); our IW44 is ~14% larger → next size lever |
 | LAYERED_SHARED_DJBZ (#452) | 2026-06-24 | JB2 encoder (size) | **K** | **−34% (spec) / −5.5% (watchmaker)** | Shared Djbz for layered multi-page encode; closes the real DjVuLibre size gap (per-page dict dup). Round-trip verified |
