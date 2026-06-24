@@ -5,6 +5,36 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #437 — exact-length FG44/BG44 row slices for bounds-check elision — **Reverted** (2026-06-24)
+
+**Issue.** #437 (from the perf-experiment-swarm). The 1:1 general bilinear path takes open-ended
+row slices (`fg.data.get(y0*stride..)`); `bilinear_from_rows` and the bg lookup then do
+`row.get(off..off+4)` four/one times per pixel. Hypothesis: exact-length slices
+(`..(y0+1)*stride`) make `row.len() == width*4` visible to LLVM after inlining, letting it elide
+the per-lookup bounds-check branches.
+
+**Approach.** Change the three slice sites (fg row0/row1, bg row) to `..(y+1)*stride`.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical (FNV unchanged). Benchmark inconclusive: by this point in the
+session the machine was thermally saturated — the *control* `bilevel_native_cached` (unaffected by
+this change) swung 56–433 ms across runs (7.6×), so no signal could be extracted from
+`color_native_cached`.
+
+**Decision. Reverted.**
+
+**Reason.** Two problems. (1) Mechanism: the fg slices use `.unwrap_or(&[])`, so `row.len()` is
+either `stride` or `0` from LLVM's view — the length is *not* statically tied to `width`, which
+defeats the bounds-check elision the hypothesis relies on (only the bg path, which uses `.map`,
+could plausibly benefit). (2) Measurement: the thermally-saturated machine made the result
+unverifiable. The change is byte-identical and adds no work, but with no demonstrable benefit and a
+mechanism likely defeated by `unwrap_or`, it is not worth keeping speculatively. Could be revisited
+with assembly verification (look for removed `cbz`/`cbnz` guards) on a cool machine if the bg path
+turns out to matter.
+
+---
+
 ### #436 — MASK_EXPAND pre-expansion in B-series bilinear (upscale) — **Reverted** (2026-06-24)
 
 **Issue.** #436 (from the perf-experiment-swarm). Retry of G1b — pre-expand the mask row to
