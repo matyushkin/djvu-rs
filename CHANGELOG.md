@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.5](https://github.com/matyushkin/djvu-rs/compare/v0.20.4...v0.20.5) (2026-06-24)
+
+
+### Bug Fixes
+
+* **render:** satisfy lint after downscale optimization ([819f4a3](https://github.com/matyushkin/djvu-rs/commit/819f4a3abeae1550c35317d4450df50d3b31f7c0))
+
+
+### Performance Improvements
+
+* **jb2:** [#429](https://github.com/matyushkin/djvu-rs/issues/429) byte-aligned crop_bitmap fast path in direct encoder (~14-15% multitile) ([a9946b0](https://github.com/matyushkin/djvu-rs/commit/a9946b0f8a0d313ab95149b955289c4d0df1dc2e))
+* record F1 NEON color compositor fast path as Rejected ([79e9b6c](https://github.com/matyushkin/djvu-rs/commit/79e9b6c98a06d2b514227b441ced9f42c7f9ff15))
+* **render:** [#426](https://github.com/matyushkin/djvu-rs/issues/426) cache decoded BG44 RGB Pixmap at subsample=2 (~7-9% downscale) ([08fb3e9](https://github.com/matyushkin/djvu-rs/commit/08fb3e99f868d7469b105fa401ab24d7ed3f1ac6))
+* **render:** [#427](https://github.com/matyushkin/djvu-rs/issues/427) cache indexed JB2 mask + blit-map for FGbz-palette pages (~5%) ([2758b67](https://github.com/matyushkin/djvu-rs/commit/2758b671fffcd5a4d38afd4280027c0290b8179d))
+* **render:** [#428](https://github.com/matyushkin/djvu-rs/issues/428) all-white band fast path in bilevel downscale compositor ([ca8c9dd](https://github.com/matyushkin/djvu-rs/commit/ca8c9dd2241470b7897fc909a43d7443eb17a0ed))
+* **render:** [#433](https://github.com/matyushkin/djvu-rs/issues/433) generalize P2 BILEVEL_RGBA fast path to byte-aligned offset_x ([1f6bd49](https://github.com/matyushkin/djvu-rs/commit/1f6bd49e95a480f7cb15f93f0be6d6fdc806dbe2))
+* **render:** byte-level POPCNT in mask_box_coverage (~24% at 72 DPI) ([4f3e902](https://github.com/matyushkin/djvu-rs/commit/4f3e9025865aacf9b6464f2e1fd3accb67a45c01))
+* **render:** C3 mask-row hoist in general 1:1 bilinear path ([b4f77bb](https://github.com/matyushkin/djvu-rs/commit/b4f77bb831cf5c98bb04199a3e56e272fd9d24fd))
+* **render:** cache BG44 decoded RGB Pixmap at sub=1 in PageLayers ([d24d83e](https://github.com/matyushkin/djvu-rs/commit/d24d83eb328df226656de6ec63f3a8eb7b98ad99))
+* **render:** eliminate BG44 Pixmap clone via Cow&lt;'a, Pixmap&gt; ([9eb6c7b](https://github.com/matyushkin/djvu-rs/commit/9eb6c7b3e01f3543a1d694b8ed2e8f5b9fe5f9ad))
+* **render:** eliminate FG44 + mask clones via Cow&lt;'a, …&gt; ([691b14c](https://github.com/matyushkin/djvu-rs/commit/691b14c109b023cbe552e20d3beb8cd557451a64))
+* **render:** F2 all-bg row fast path in general 1:1 bilinear path ([195dfb1](https://github.com/matyushkin/djvu-rs/commit/195dfb103a6ce6ee9b9110780697f5176f04d578))
+* **render:** G1 pre-expand mask row to bytes in general 1:1 bilinear path (~25%) ([84d4c18](https://github.com/matyushkin/djvu-rs/commit/84d4c187847717ac23cfc5ab02d582d2833f68a7))
+* **render:** I3 all-white row fast path in bilevel 1:1 compositor ([53d6189](https://github.com/matyushkin/djvu-rs/commit/53d618980a67cb2e25fe59cf8bb7302c6f2782a2))
+* **render:** inline alpha in bilinear compositor, remove fill_alpha_255 ([24461b3](https://github.com/matyushkin/djvu-rs/commit/24461b3d5e582f60de3b4d0fd09d791bb198e7fa))
+* **render:** P2 BILEVEL_RGBA table for bilevel 1:1 compositor (~24%) ([57c8069](https://github.com/matyushkin/djvu-rs/commit/57c80693ce97b71d13829c3491d3cbded32a4614))
+* **tiff:** [#430](https://github.com/matyushkin/djvu-rs/issues/430) Deflate-compressed bilevel TIFF export (~149x smaller) ([2d05853](https://github.com/matyushkin/djvu-rs/commit/2d058536e2c788c373db4039a1f8cf4aec1334a9))
+* **tiff:** [#431](https://github.com/matyushkin/djvu-rs/issues/431) LUT byte-expansion in extract_bilevel_pixels (~18% bilevel export) ([908c2b5](https://github.com/matyushkin/djvu-rs/commit/908c2b5714edaccaa294b392d7ac3f02c2e14e6c))
+
 ## [0.20.4](https://github.com/matyushkin/djvu-rs/compare/v0.20.3...v0.20.4) (2026-06-21)
 
 
