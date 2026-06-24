@@ -707,32 +707,6 @@ fn sample_area_avg_bounds(pm: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> (u
     }
 }
 
-/// Check whether any pixel in the mask box is set (foreground).
-/// Used for area-averaging downscale to determine if a box has foreground.
-#[inline]
-fn mask_box_any(
-    mask: &crate::bitmap::Bitmap,
-    fx: u32,
-    fy: u32,
-    fx_step: u32,
-    fy_step: u32,
-) -> bool {
-    let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
-    let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
-    // Exclusive upper bounds, consistent with sample_area_avg.
-    let x1 = ((fx + fx_step) >> FRACBITS).min(mask.width);
-    let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height);
-
-    for sy in y0..y1 {
-        for sx in x0..x1 {
-            if mask.get(sx, sy) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Coverage-weighted bilevel downscale: returns the fraction of set mask bits in
 /// the output pixel's footprint as a gray value (0 = all background, 255 = all foreground).
 ///
@@ -2456,18 +2430,42 @@ fn composite_rows_area_avg_one(
         };
         let fx = ax.fx;
 
-        let is_fg = !mask_all_bg
-            && ctx.mask.is_some_and(|m| {
-                if ctx.mask_shift > 0 {
-                    let px = fx >> (FRACBITS + ctx.mask_shift);
-                    let py = fy >> (FRACBITS + ctx.mask_shift);
-                    px < m.width && py < m.height && m.get(px, py)
+        // #439: anti-aliased colour downscale. `coverage` (0..255) is the fraction
+        // of the output pixel's footprint that is foreground; blend fg/bg
+        // proportionally so colour text edges get a smooth gradient instead of the
+        // blocky halos the old binary `mask_box_any` produced (colour analog of the
+        // AA experiment for bilevel). The max-pool sub-path (mask_shift > 0) stays
+        // binary. #438's `mask_all_bg` skips the coverage scan for blank rows.
+        let coverage: u8 = if mask_all_bg {
+            0
+        } else if let Some(m) = ctx.mask {
+            if ctx.mask_shift > 0 {
+                let px = fx >> (FRACBITS + ctx.mask_shift);
+                let pym = fy >> (FRACBITS + ctx.mask_shift);
+                if px < m.width && pym < m.height && m.get(px, pym) {
+                    255
                 } else {
-                    mask_box_any(m, fx, fy, fx_step, fy_step)
+                    0
                 }
-            });
+            } else {
+                mask_box_coverage(m, fx, fy, fx_step, fy_step)
+            }
+        } else {
+            0
+        };
 
-        let (r, g, b) = if is_fg {
+        let bg_sample = || -> (u8, u8, u8) {
+            if let Some(bg) = ctx.bg {
+                if let Some((bg_y0, bg_y1)) = bg_y {
+                    sample_area_avg_bounds(bg, ax.bg_x0, ax.bg_x1, bg_y0, bg_y1)
+                } else {
+                    sample_area_avg(bg, ax.bg_fx, bg_fy, bg_fx_step, bg_fy_step)
+                }
+            } else {
+                (255, 255, 255)
+            }
+        };
+        let fg_sample = || -> (u8, u8, u8) {
             if let Some(pal) = ctx.fg_palette {
                 let (cx, cy) = mask_box_center_fg(ctx.mask.unwrap(), fx, fy, fx_step, fy_step);
                 let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, cx, cy);
@@ -2481,14 +2479,20 @@ fn composite_rows_area_avg_one(
             } else {
                 (0, 0, 0)
             }
-        } else if let Some(bg) = ctx.bg {
-            if let Some((bg_y0, bg_y1)) = bg_y {
-                sample_area_avg_bounds(bg, ax.bg_x0, ax.bg_x1, bg_y0, bg_y1)
-            } else {
-                sample_area_avg(bg, ax.bg_fx, bg_fy, bg_fx_step, bg_fy_step)
-            }
+        };
+
+        let (r, g, b) = if coverage == 0 {
+            bg_sample()
+        } else if coverage == 255 {
+            fg_sample()
         } else {
-            (255, 255, 255)
+            // Partially covered edge pixel: blend fg over bg by coverage.
+            let (fr, fg_, fb) = fg_sample();
+            let (br, bg_, bb) = bg_sample();
+            let c = coverage as u32;
+            let ic = 255 - c;
+            let mix = |f: u8, b: u8| ((c * f as u32 + ic * b as u32 + 127) / 255) as u8;
+            (mix(fr, br), mix(fg_, bg_), mix(fb, bb))
         };
 
         if ctx.gamma_is_identity {
