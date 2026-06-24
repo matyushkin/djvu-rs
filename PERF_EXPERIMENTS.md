@@ -5,6 +5,41 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #439 — anti-aliased colour downscale (proportional fg/bg blend) — **Kept (quality)** (2026-06-24)
+
+**Issue.** #439 (from the perf-experiment-swarm). `composite_rows_area_avg_one` (colour downscale)
+decided each output pixel as 100% fg or 100% bg via the binary `mask_box_any`. At 2× downscale a
+single foreground source pixel in a 2×2 box made the whole output pixel fg-coloured, producing
+blocky colour halos around text. The AA experiment already fixed the analogous artefact for the
+*bilevel* compositor (`mask_box_coverage`); the colour compositor was never updated.
+
+**Approach.** Replace the binary test with `coverage = mask_box_coverage(...)` (0..255 = fraction
+of the footprint that is foreground) and blend: `coverage == 0` → bg only, `coverage == 255` → fg
+only, otherwise `out = (coverage·fg + (255−coverage)·bg + 127) / 255` per channel. The `mask_shift
+> 0` max-pool sub-path stays binary; #438's `mask_all_bg` still skips blank rows (coverage 0). The
+now-unused `mask_box_any` is deleted.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Quality (the deliverable): watchmaker @150 DPI has **68 unique colours with the blend
+vs 28 binary** — the 2.4× increase is the intermediate edge tones of anti-aliased colour text.
+103 render tests + the full integration suite (golden composites) pass with no changes — the colour
+goldens render at native resolution, so the downscale path change does not touch them. Performance:
+`mask_box_coverage` counts the footprint instead of early-exiting like `mask_box_any`, a small cost
+on non-blank rows (the AA experiment found this "indistinguishable from noise" at 150 DPI, and #438
+already removes it on the 50–71% blank rows); the machine was too thermally saturated to quote a
+clean delta, but partial-coverage pixels are a minority (edges only).
+
+**Decision. Kept (quality).**
+
+**Reason.** Genuine quality win — smooth colour gradients at text edges replace blocky halos, the
+colour analog of the kept bilevel AA. Edge pixels now sample both fg and bg and blend; fully-fg
+(coverage 255, stroke interiors) and fully-bg (coverage 0) pixels keep their single-sample cost, so
+the extra work is confined to the minority of partially-covered edge pixels. Output for the
+1:1/native paths is unchanged. Closes #439.
+
+---
+
 ### #438 — all-bg row fast path in area-average compositor (F2/I3 analog) — **Kept** (2026-06-24)
 
 **Issue.** #438 (from the perf-experiment-swarm). `composite_rows_area_avg_one` (colour downscale)
