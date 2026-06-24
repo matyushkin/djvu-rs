@@ -5,6 +5,45 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #444 — cache parsed FGbz palette in `PageLayers` — **Reverted** (2026-06-24)
+
+**Issue.** #444 (from the perf-experiment-swarm). `decode_fg_palette_full` calls `parse_fgbz`
+(BZZ decompression + index-table construction) on every warm render of a palette page. Hypothesis:
+cache the parsed `FgbzPalette` in `PageLayers` like the other layers (COW_FG pattern).
+
+**Approach.** Added `#[derive(Clone)]` to `FgbzPalette`, a `fg_palette` OnceLock + accessor in
+`PageLayers`, a `DjVuPage::decoded_fg_palette()`, and changed `decode_fg_palette_full` to return
+`Cow::Borrowed` on a cache hit (with a re-parse error-fallback). `DecodedLayers`/`ForegroundLayers`
+`fg_palette` fields became `Option<Cow<'a, FgbzPalette>>`.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88. Machine idle (the
+AV1 encode was paused), so the control reproduced cleanly.
+
+**Numbers.** Output byte-identical (FNV unchanged on navm_fgbz). `palette_native_cached` vs
+`color_native_cached` control, two rounds:
+
+| Round | control (ms) | palette (ms) | ratio |
+|---|---|---|---|
+| 1 baseline | 42.68 | 41.11 | 0.963 |
+| 1 with cache | 42.48 | 41.39 | 0.974 |
+| 2 baseline | 42.61 | 40.92 | 0.960 |
+| 2 with cache | 42.45 | 41.43 | 0.976 |
+
+A consistent **~1% regression** (palette ~0.4 ms slower both rounds, on a clean idle machine).
+
+**Decision. Reverted.**
+
+**Reason.** The FGbz chunk in the only palette fixture (navm_fgbz) is **21 bytes** — a trivial
+palette with no real index table, so `parse_fgbz` is essentially free. Caching it saves nothing
+while the cache machinery (OnceLock check, `Cow` wrapping, the error-fallback branch) adds a small
+but consistent overhead. The optimisation is sound *in principle* — it would help pages with large
+palettes (big per-blit index tables) — but no such page exists in the corpus, so there is nothing
+to amortise the cache against, and the measured result is a net regression. Unlike the kept
+BG_CACHE/MASK_IDX_CACHE (which cache multi-millisecond decodes / 33 MB allocations), a 21-byte parse
+is below the cache's own overhead. Reverted.
+
+---
+
 ### #440 — parallel BG44/FG44 layer decode via `rayon::join` — **Kept** (2026-06-24)
 
 **Issue.** #440 (from the perf-experiment-swarm). `decode_layers`'s strict branch ran
