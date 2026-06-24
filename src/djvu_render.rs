@@ -396,6 +396,27 @@ const MASK_EXPAND: [[u8; 8]; 256] = {
     lut
 };
 
+/// Maps each mask byte to 8 RGBA pixels for bilevel rendering (MSB-first, 300 DPI 1:1).
+/// fg bit (1) → [0x00, 0x00, 0x00, 0xFF] (black); bg bit (0) → [0xFF, 0xFF, 0xFF, 0xFF] (white).
+/// Table: 256 × 32 = 8 KiB (128 cache lines); persists in L2 across rows.
+const BILEVEL_RGBA: [[u8; 32]; 256] = {
+    let mut lut = [[0u8; 32]; 256];
+    let mut mb = 0usize;
+    while mb < 256 {
+        let mut bit = 0usize;
+        while bit < 8 {
+            let ch = if (mb >> (7 - bit)) & 1 != 0 { 0u8 } else { 255u8 };
+            lut[mb][bit * 4] = ch;
+            lut[mb][bit * 4 + 1] = ch;
+            lut[mb][bit * 4 + 2] = ch;
+            lut[mb][bit * 4 + 3] = 255;
+            bit += 1;
+        }
+        mb += 1;
+    }
+    lut
+};
+
 // ── SIMD helpers ──────────────────────────────────────────────────────────────
 
 /// Convert packed RGB bytes to packed RGBA with alpha = 255.
@@ -1867,7 +1888,29 @@ fn composite_rows_bilevel_one(
             return;
         }
 
-        // Branchless expansion: is_fg=0 → 0xFFFFFFFF (white), is_fg=1 → 0xFF000000 (black).
+        // P2: BILEVEL_RGBA table fast path for full-width renders starting at x=0.
+        // One table lookup per mask byte produces 8 pre-packed RGBA pixels (32 bytes);
+        // copy_from_slice compiles to 2 NEON vst1 stores, replacing 8×16 scalar instructions.
+        // Guards: offset_x==0 (so px==ox, no clamp needed) and out_w<=mask.width (index safe).
+        let out_w = row_buf.len() / 4;
+        if ctx.offset_x == 0 && out_w <= mask.width as usize {
+            let nb_full = out_w / 8; // number of full mask bytes (8 pixels each)
+            let nb_rem = out_w % 8; // trailing pixels from a partial mask byte
+            for byte_idx in 0..nb_full {
+                let mb = mask_row[byte_idx]; // bounds: byte_idx < nb_full <= out_w/8 <= mask_row.len()
+                let src = &BILEVEL_RGBA[mb as usize];
+                row_buf[byte_idx * 32..(byte_idx + 1) * 32].copy_from_slice(src);
+            }
+            if nb_rem > 0 {
+                let mb = mask_row[nb_full];
+                let src = &BILEVEL_RGBA[mb as usize];
+                let base = nb_full * 32;
+                row_buf[base..base + nb_rem * 4].copy_from_slice(&src[..nb_rem * 4]);
+            }
+            return;
+        }
+
+        // Fallback: branchless per-pixel expansion with .min() clamp for partial/offset views.
         for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
             let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
