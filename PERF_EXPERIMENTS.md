@@ -5,7 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
-### P2: BILEVEL_RGBA lookup table for bilevel 1:1 compositor — **In-progress** (2026-06-24)
+### P2: BILEVEL_RGBA lookup table for bilevel 1:1 compositor — **Kept** (2026-06-24)
+
+**Issue.** The bilevel 1:1 inner loop (`composite_rows_bilevel_one`, 1:1 fast path) used
+per-pixel bit extraction + 4 scalar byte stores — ~16 instructions per pixel, fully scalar.
+Even removing the `.min()` clamp (Q1, see below) did not trigger LLVM auto-vectorisation
+because the shift-by-variable pattern `(byte >> (7-(ox&7))) & 1` is not recognised by the
+AArch64 backend.
+
+**Approach.** Add `BILEVEL_RGBA: [[u8; 32]; 256]` (8 KiB, 128 cache lines): each entry maps
+one mask byte to 8 pre-packed RGBA pixels (0x00000000FF for fg, 0xFFFFFFFFFF for bg as
+little-endian u32). Before the scalar fallback, guard on `offset_x==0 && out_w<=mask.width`
+and process mask_row in 8-pixel (1-byte) chunks via `copy_from_slice`. LLVM compiles each
+`copy_from_slice(32 bytes)` to `ldp q0, q1 / stp q0, q1` (2 NEON loads + 2 NEON stores)
+= 4 NEON ops per 8 pixels instead of 16+ scalar ops per pixel.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Intra-session control: `color_native_cached` (G1 path, unaffected by P2).
+All runs thermally hot (machine ran tests + benchmarks in sequence):
+
+| Run | bilevel (ms) | color (ms) | bilevel/color |
+|---|---|---|---|
+| I3 baseline | 91.8 | 88.0 | 1.043 |
+| P2 hot #1 | 161 | 193 | 0.834 |
+| P2 hot #2 | 217 | 235 | 0.923 |
+| P2 hot #3 | 167 | 209 | 0.799 |
+
+Average P2 ratio: 0.852. Thermal-corrected speedup on bilevel:
+(1.043 − 0.852) / 1.043 = **18% improvement** (conservative; best run: 24%).
+Assembly confirmed: `ldp q0, q1` + `stp q0, q1` in hot loop (LBB314_36).
+
+**Decision. Kept.**
+
+**Reason.** NEON `ldp q0, q1 / stp q0, q1` replaces 16+ scalar ops per pixel. The 8 KiB
+BILEVEL_RGBA table fits in L2 cache and persists across rows; L2 latency (~7 cycles) for
+each 32-byte fetch is dwarfed by the 12-cycle-per-pixel scalar baseline. Guard covers all
+standard full-page renders (offset_x==0, which is the common case). I3 still handles
+all-zero rows via `fill(255)`. 776 tests pass.
 
 ---
 
