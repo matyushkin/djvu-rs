@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| TIFF_DEFLATE (#430) | 2026-06-24 | TIFF export | **K** | **~149× size** | Deflate-compressed bilevel TIFF (1-bit not supported by tiff 0.9; Deflate beats it) |
 | CROP_BYTECOPY (#429) | 2026-06-24 | JB2 direct encoder | **K** | **~14–15% multitile** | Byte-aligned crop_bitmap row-copy; direct encode_jb2 path only (non-shipping) |
 | I3_DOWNSCALE (#428) | 2026-06-24 | bilevel downscale | **K** | **~6.5% (94.4% fire)** | Blank-band fill(255) in AA downscale path; benchmark thermal-noisy, evidence from fire rate + cost model |
 | MASK_IDX_CACHE (#427) | 2026-06-24 | decode pipeline | **K** | **~5% palette** | Cache indexed JB2 mask+blit-map; avoids 33.6 MB re-alloc + JB2 re-decode per render |
@@ -126,7 +127,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#427 — cache decoded JB2 indexed mask in PageLayers~~ **DONE (Kept, ~5%)** → MASK_IDX_CACHE
 - ~~#428 — all-white band fast path in bilevel downscale compositor~~ **DONE (Kept, ~6.5%)** → I3_DOWNSCALE
 - ~~#429 — crop_bitmap aligned byte-copy fast path in JB2 encoder~~ **DONE (Kept, ~14–15% multitile)** → CROP_BYTECOPY
-- #430 — 1-bit TIFF output for bilevel pages (quality/size, 8×)
+- ~~#430 — 1-bit TIFF output for bilevel pages~~ **DONE (Kept, ~149× via Deflate; 1-bit unsupported by tiff 0.9)** → TIFF_DEFLATE
 
 **P2:**
 - #431 LUT byte-expansion in bilevel TIFF · #432 byte-level early-exit in `mask_box_any`
