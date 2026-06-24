@@ -1951,21 +1951,27 @@ fn composite_rows_bilevel_one(
             return;
         }
 
-        // P2: BILEVEL_RGBA table fast path for full-width renders starting at x=0.
-        // One table lookup per mask byte produces 8 pre-packed RGBA pixels (32 bytes);
-        // copy_from_slice compiles to 2 NEON vst1 stores, replacing 8×16 scalar instructions.
-        // Guards: offset_x==0 (so px==ox, no clamp needed) and out_w<=mask.width (index safe).
+        // P2: BILEVEL_RGBA table fast path. One table lookup per mask byte produces
+        // 8 pre-packed RGBA pixels (32 bytes); copy_from_slice compiles to 2 NEON vst1
+        // stores, replacing 8×16 scalar instructions. Works whenever offset_x is
+        // byte-aligned (offset_x % 8 == 0) so output byte `i` maps to source mask byte
+        // `offset_x/8 + i` with no per-pixel bit shuffle — covers full-page renders
+        // (offset_x==0) and byte-aligned `render_region` viewports. Guard
+        // `offset_x + out_w <= mask.width` keeps the source index in bounds and makes
+        // the `.min(page_w-1)` clamp a no-op (mask.width == page_w for the 1:1 mask).
         let out_w = row_buf.len() / 4;
-        if ctx.offset_x == 0 && out_w <= mask.width as usize {
+        let ox0 = ctx.offset_x as usize;
+        if ctx.offset_x % 8 == 0 && ox0 + out_w <= mask.width as usize {
+            let mb0 = ox0 / 8; // first source mask byte (0 for full-page renders)
             let nb_full = out_w / 8; // number of full mask bytes (8 pixels each)
             let nb_rem = out_w % 8; // trailing pixels from a partial mask byte
             for byte_idx in 0..nb_full {
-                let mb = mask_row[byte_idx]; // bounds: byte_idx < nb_full <= out_w/8 <= mask_row.len()
+                let mb = mask_row[mb0 + byte_idx];
                 let src = &BILEVEL_RGBA[mb as usize];
                 row_buf[byte_idx * 32..(byte_idx + 1) * 32].copy_from_slice(src);
             }
             if nb_rem > 0 {
-                let mb = mask_row[nb_full];
+                let mb = mask_row[mb0 + nb_full];
                 let src = &BILEVEL_RGBA[mb as usize];
                 let base = nb_full * 32;
                 row_buf[base..base + nb_rem * 4].copy_from_slice(&src[..nb_rem * 4]);
@@ -4187,6 +4193,44 @@ mod tests {
                     10 + rx,
                     10 + ry
                 );
+            }
+        }
+    }
+
+    /// `render_region` with a byte-aligned x offset on a bilevel page matches the
+    /// full render — exercises the generalized P2 BILEVEL_RGBA fast path (#433),
+    /// which fires when `offset_x % 8 == 0`.
+    #[test]
+    fn render_region_bilevel_byte_aligned_offset_matches_full() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let full_w = page.width() as u32;
+        let full_h = page.height() as u32;
+        let opts = RenderOptions {
+            width: full_w,
+            height: full_h,
+            ..Default::default()
+        };
+        let full = render_pixmap(page, &opts).expect("full render should succeed");
+        // x=16 is byte-aligned (16 % 8 == 0) → generalized P2 path; x=17 below isn't.
+        for &x in &[16u32, 17u32] {
+            let region = RenderRect {
+                x,
+                y: 8,
+                width: 64,
+                height: 32,
+            };
+            let part = render_region(page, region, &opts).expect("region render should succeed");
+            for ry in 0..region.height {
+                for rx in 0..region.width {
+                    let fb = (((region.y + ry) * full_w + (x + rx)) * 4) as usize;
+                    let pb = ((ry * region.width + rx) * 4) as usize;
+                    assert_eq!(
+                        &full.data[fb..fb + 4],
+                        &part.data[pb..pb + 4],
+                        "mismatch at x={x} region ({rx},{ry})"
+                    );
+                }
             }
         }
     }
