@@ -1990,6 +1990,24 @@ fn composite_rows_bilevel_one(
     let fy = (oy + ctx.offset_y) * fy_step;
     let py = (fy >> FRACBITS).min(ctx.page_h.saturating_sub(1));
 
+    // I3-downscale: all-white band fast path for the anti-aliased path. The
+    // source mask band [y0, y1) for this output row is row-invariant (fy is
+    // fixed), so if it has no foreground bits every output pixel's coverage is 0
+    // → white. One NEON-vectorised scan replaces out_w `mask_box_coverage` calls
+    // (each of which itself scans the band). Only `mask_shift == 0` is covered —
+    // the max-pool sub-path indexes the mask at a coarser resolution. The y range
+    // matches `mask_box_coverage` exactly; `y1 <= y0` is the degenerate
+    // zero-coverage case (also white).
+    if downscale && ctx.mask_shift == 0 {
+        let stride = mask.row_stride();
+        let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1)) as usize;
+        let y1 = ((fy + fy_step) >> FRACBITS).min(mask.height) as usize;
+        if y1 <= y0 || !mask.data[y0 * stride..y1 * stride].iter().any(|&b| b != 0) {
+            row_buf.fill(255);
+            return;
+        }
+    }
+
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(ctx.page_w.saturating_sub(1));
