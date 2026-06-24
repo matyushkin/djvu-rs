@@ -5,6 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### IW44-1 — match the activation-prediction threshold to the real gate (s/2 → 11s/16) — **Kept (size)** (2026-06-25)
+
+**Issue.** From the IW44-encoder-size swarm. The IW44 encoder predicts whether a coefficient will
+*activate* in two places — `any_unk_activates` (encode.rs:1009, drives the block-band NEW bit) and
+`bucket_encoding_pass`'s `is_new` (encode.rs:1053, drives the bucket NEW bit) — using the threshold
+`|v| > s/2`. But the activation pass itself (`newly_active_encoding_pass`, encode.rs:1096) activates
+only when `|v| > (s·11/16).max(1)`. Since `s/2 = 8s/16 < 11s/16`, every coefficient in the gap
+`(8s/16, 11s/16]` made the encoder announce a block/bucket NEW (a `1` ZP bit) and then emit all-`0`
+activation bits for it — wasted bits with **zero** reconstruction effect.
+
+**Approach.** Change both predictors to the real gate `|v| > (s·11/16).max(1)`. Encoder-only;
+decoder untouched.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** `encode_quality_iw44` on conquete_paix (20 photo pages):
+
+| | rs BG44 bytes | × orig (DjVuLibre) | PSNR avg / min |
+|---|---|---|---|
+| before | 1,830,594 | 1.143× | 33.72 / 29.57 dB |
+| after | 1,663,587 | **1.039×** | **33.72 / 29.57 dB** |
+
+**−9.1%** BG44 size at **bit-identical PSNR** — the gap vs DjVuLibre's c44 shrinks from 14.3% to
+**3.9%**. 35 djvu-iw44 round-trip tests pass; colorbook BG44 also lands at 1.048×.
+
+**Decision. Kept (size).**
+
+**Reason.** A genuine coding-efficiency fix, not a quality tradeoff: the set of coefficients crossing
+the real activation gate is unchanged, so every `recon[]` value — and thus the decoded image and
+PSNR — is identical; only overhead bits encoding non-events are removed. Encoder-only and
+interop-safe: the decoder reads the (now shorter) stream the same way, and no normative IW44 table
+(quant/band/zigzag) or ZP context assignment is touched, so DjVuLibre-encoded files still decode
+unchanged. Since BG44 dominates colour/photo scans (50–94% of bytes), this ~9% BG44 cut is a real
+whole-file reduction on the most common colour documents. The swarm validators' round-trip + PSNR
+gate held exactly. Closes the activation-prediction half of the IW44 size gap.
+
+---
+
 ### Encoder size diagnostic: where is the gap vs DjVuLibre? — **Diagnostic** (2026-06-25)
 
 **Goal.** After closing the JB2 mask size gap (#446, #452), locate the remaining archive-size gap
