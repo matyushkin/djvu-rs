@@ -5,6 +5,48 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #440 — parallel BG44/FG44 layer decode via `rayon::join` — **Kept** (2026-06-24)
+
+**Issue.** #440 (from the perf-experiment-swarm). `decode_layers`'s strict branch ran
+`decode_background_chunks` (BG44 ZP decode + IDWT + YCbCr→RGB) then `decode_foreground_strict`
+(JB2 mask + FG44) sequentially. They write disjoint `OnceLock` fields, so on a cold render they
+can overlap: the FG decode runs on a second rayon thread while the BG ZP phase (before IW44_PAR's
+IDWT join) leaves the pool idle.
+
+**Approach.** Wrap the two calls in `rayon::join` under `#[cfg(feature = "parallel")]`; the
+non-parallel build keeps the sequential tuple. Warm renders hit the caches and both closures
+return instantly, so the join is effectively free then.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+**Note.** This was measured *after* the user paused a background AV1/ffmpeg video-encode that had
+been saturating all 10 cores (load avg ~590) — the earlier "thermal" noise was actually CPU
+contention. With the machine idle, the single-thread control `bilevel_native_cached` reproduced to
+0.05%, so these numbers are clean.
+
+**Numbers.** Output byte-identical (FNV unchanged, `--features parallel`). Cold-render timing
+(watchmaker native, fresh parse each iteration, best-of-40, `--features parallel`):
+
+| Round | base (ms) | with join (ms) | Δ |
+|---|---|---|---|
+| 1 | 13.35 | 10.26 | **−23.1%** |
+| 2 | 12.97 | 10.14 | **−21.8%** |
+
+Consistent **~22%** faster cold render — the FG side (FG44 IW44 + JB2 mask, ~3 ms) overlaps the BG
+decode rather than running after it. Warm regression check (`color_native_cached`, parallel
+compositor ~6.7 ms): WITH and base within ~1% across rounds (one 7.8 ms outlier aside) — no real
+regression, as expected since the join of two cache-hit closures costs ~tens of ns. 610 lib tests
+pass with `--features parallel`.
+
+**Decision. Kept.**
+
+**Reason.** ~22% lower cold first-render latency — exactly what matters when a viewer opens a page
+— at the cost of a `rayon::join` that is free on warm renders (cache hits return instantly) and
+absent without the `parallel` feature. Disjoint `OnceLock` fields make it data-race-free; output is
+byte-identical. Extends the IW44_PAR / PARALLEL parallelism to a new level (across layers at the
+decode call site). Closes #440.
+
+---
+
 ### #439 — anti-aliased colour downscale (proportional fg/bg blend) — **Kept (quality)** (2026-06-24)
 
 **Issue.** #439 (from the perf-experiment-swarm). `composite_rows_area_avg_one` (colour downscale)

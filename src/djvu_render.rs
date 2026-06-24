@@ -1381,8 +1381,23 @@ fn decode_layers<'a>(
         }
         fg44 = decode_fg44(page).ok().flatten();
     } else {
-        bg = decode_background_chunks(page, bg_chunk_limit, bg_subsample)?;
-        let fg = decode_foreground_strict(page)?;
+        // #440: background (BG44 ZP + IDWT) and foreground (JB2 mask + FG44) decode
+        // touch disjoint OnceLock fields, so on a cold render they can run on two
+        // rayon threads — the FG JB2 decode overlaps the BG ZP phase (when the pool
+        // is otherwise idle, before IW44_PAR's IDWT join kicks in). Warm renders hit
+        // the caches and return immediately, so the join is paid only when cold.
+        #[cfg(feature = "parallel")]
+        let (bg_res, fg_res) = rayon::join(
+            || decode_background_chunks(page, bg_chunk_limit, bg_subsample),
+            || decode_foreground_strict(page),
+        );
+        #[cfg(not(feature = "parallel"))]
+        let (bg_res, fg_res) = (
+            decode_background_chunks(page, bg_chunk_limit, bg_subsample),
+            decode_foreground_strict(page),
+        );
+        bg = bg_res?;
+        let fg = fg_res?;
         fg_palette = fg.fg_palette;
         mask = fg.mask;
         blit_map = fg.blit_map;
