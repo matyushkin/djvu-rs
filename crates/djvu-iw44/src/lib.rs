@@ -320,7 +320,12 @@ fn ycbcr_row_from_i16(y: &[i16], cb: &[i16], cr: &[i16], out: &mut [u8]) {
 /// `y` has length ≥ `w`; `cb_half`/`cr_half` have length ≥ `(w+1)/2`.  Each
 /// chroma sample is nearest-neighbour upsampled to two adjacent output pixels.
 /// Uses `ycbcr_neon_raw_half` on AArch64; two-pass fallback elsewhere.
+///
+/// Superseded by bilinear chroma upsampling (#422): `to_rgb_subsample` now
+/// builds full-resolution chroma rows and uses `ycbcr_row_from_i16`. Retained
+/// (with its SIMD kernels and their tests) for reference and possible reuse.
 #[inline]
+#[allow(dead_code)]
 fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mut [u8], w: usize) {
     debug_assert!(y.len() >= w);
     debug_assert_eq!(out.len(), w * 4);
@@ -381,6 +386,42 @@ fn ycbcr_row_from_i16_half(y: &[i16], cb_half: &[i16], cr_half: &[i16], out: &mu
             cr_norm[col] = normalize(cr_half[col / 2]);
         }
         ycbcr_row_to_rgba(&y_norm, &cb_norm, &cr_norm, out);
+    }
+}
+
+/// #422: bilinearly upsample one full-resolution chroma row (length `out.len()`)
+/// from two adjacent half-resolution rows.
+///
+/// `half0`/`half1` are the chroma rows at `row/2` and `row/2+1`; when `v_blend`
+/// (the luma row is odd) they are averaged for the vertical tap, otherwise
+/// `half0` is used directly. Horizontally, even output columns take chroma
+/// `c/2` and odd columns average `c/2` and `c/2+1` (clamped to `cw-1`). This
+/// replaces the previous 2×2 nearest-neighbour replication, removing the colour
+/// stairstepping at sharp chroma transitions. Works on the raw i16 plane values
+/// (normalisation happens later in `ycbcr_row_from_i16`).
+fn upsample_chroma_row_bilinear(
+    half0: &[i16],
+    half1: &[i16],
+    v_blend: bool,
+    out: &mut [i16],
+    cw: usize,
+) {
+    let vsamp = |hc: usize| -> i32 {
+        if v_blend {
+            (half0[hc] as i32 + half1[hc] as i32 + 1) >> 1
+        } else {
+            half0[hc] as i32
+        }
+    };
+    for (c, o) in out.iter_mut().enumerate() {
+        let hc = c >> 1;
+        let v0 = vsamp(hc);
+        *o = if c & 1 == 0 {
+            v0 as i16
+        } else {
+            let v1 = vsamp((hc + 1).min(cw - 1));
+            ((v0 + v1 + 1) >> 1) as i16
+        };
     }
 }
 
@@ -3263,6 +3304,9 @@ impl Iw44Image {
             // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
             // YCbCr→RGBA formula 8 pixels at a time with SIMD.
             if sub == 1 {
+                // #422: half-resolution chroma dimensions, for bilinear upsampling.
+                let cw = pw.div_ceil(2);
+                let ch = ph.div_ceil(2);
                 #[cfg(feature = "parallel")]
                 {
                     use rayon::prelude::*;
@@ -3274,15 +3318,32 @@ impl Iw44Image {
                             let row = ph - 1 - out_row; // DjVu rows are bottom-to-top
                             let y_off = row * y_plane.stride;
                             if chroma_half {
-                                let c_row = row / 2;
-                                let cb_off = c_row * cb_plane.stride;
-                                let cr_off = c_row * cr_plane.stride;
-                                ycbcr_row_from_i16_half(
+                                let c_row0 = row / 2;
+                                let c_row1 = (c_row0 + 1).min(ch - 1);
+                                let v_blend = row & 1 == 1;
+                                let mut cb_full = vec![0i16; pw];
+                                let mut cr_full = vec![0i16; pw];
+                                let cb_s = cb_plane.stride;
+                                let cr_s = cr_plane.stride;
+                                upsample_chroma_row_bilinear(
+                                    &cb_plane.data[c_row0 * cb_s..],
+                                    &cb_plane.data[c_row1 * cb_s..],
+                                    v_blend,
+                                    &mut cb_full,
+                                    cw,
+                                );
+                                upsample_chroma_row_bilinear(
+                                    &cr_plane.data[c_row0 * cr_s..],
+                                    &cr_plane.data[c_row1 * cr_s..],
+                                    v_blend,
+                                    &mut cr_full,
+                                    cw,
+                                );
+                                ycbcr_row_from_i16(
                                     &y_plane.data[y_off..y_off + pw],
-                                    &cb_plane.data[cb_off..],
-                                    &cr_plane.data[cr_off..],
+                                    &cb_full,
+                                    &cr_full,
                                     row_data,
-                                    pw,
                                 );
                             } else {
                                 let c_off = row * cb_plane.stride;
@@ -3297,21 +3358,39 @@ impl Iw44Image {
                 }
                 #[cfg(not(feature = "parallel"))]
                 {
+                    let mut cb_full = vec![0i16; pw];
+                    let mut cr_full = vec![0i16; pw];
                     for row in 0..ph {
                         let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
                         let y_off = row * y_plane.stride;
                         let row_start = out_row * pw * 4;
 
                         if self.chroma_half {
-                            let c_row = row / 2;
-                            let cb_off = c_row * cb_plane.stride;
-                            let cr_off = c_row * cr_plane.stride;
-                            ycbcr_row_from_i16_half(
+                            // #422: bilinear chroma upsample (vertical + horizontal).
+                            let c_row0 = row / 2;
+                            let c_row1 = (c_row0 + 1).min(ch - 1);
+                            let v_blend = row & 1 == 1;
+                            let cb_s = cb_plane.stride;
+                            let cr_s = cr_plane.stride;
+                            upsample_chroma_row_bilinear(
+                                &cb_plane.data[c_row0 * cb_s..],
+                                &cb_plane.data[c_row1 * cb_s..],
+                                v_blend,
+                                &mut cb_full,
+                                cw,
+                            );
+                            upsample_chroma_row_bilinear(
+                                &cr_plane.data[c_row0 * cr_s..],
+                                &cr_plane.data[c_row1 * cr_s..],
+                                v_blend,
+                                &mut cr_full,
+                                cw,
+                            );
+                            ycbcr_row_from_i16(
                                 &y_plane.data[y_off..y_off + pw],
-                                &cb_plane.data[cb_off..],
-                                &cr_plane.data[cr_off..],
+                                &cb_full,
+                                &cr_full,
                                 &mut pm.data[row_start..row_start + pw * 4],
-                                pw,
                             );
                         } else {
                             let c_off = row * cb_plane.stride;
@@ -3519,6 +3598,28 @@ mod tests {
                 diff_pixels as f64 / total_pixels as f64 * 100.0
             );
         }
+    }
+
+    /// #422: direct correctness check for bilinear chroma row upsampling, with
+    /// hand-computed expected values (independent of any fixture).
+    #[test]
+    fn upsample_chroma_row_bilinear_values() {
+        let half0 = [10i16, 20, 30];
+        // No vertical blend: even cols take half0[c/2], odd cols average
+        // half0[c/2] and half0[c/2+1] (last clamped).
+        let mut out = [0i16; 6];
+        super::upsample_chroma_row_bilinear(&half0, &half0, false, &mut out, 3);
+        assert_eq!(out, [10, 15, 20, 25, 30, 30]);
+
+        // Vertical blend: vsamp(hc) = (half0+half1+1)>>1, then horizontal bilinear.
+        let half1 = [20i16, 40, 60];
+        super::upsample_chroma_row_bilinear(&half0, &half1, true, &mut out, 3);
+        assert_eq!(out, [15, 23, 30, 38, 45, 45]);
+
+        // Endpoints stay at the source samples (no overshoot); a flat row is flat.
+        let flat = [50i16, 50, 50];
+        super::upsample_chroma_row_bilinear(&flat, &flat, false, &mut out, 3);
+        assert_eq!(out, [50, 50, 50, 50, 50, 50]);
     }
 
     // ---- TDD: failing tests first -------------------------------------------
@@ -3856,6 +3957,11 @@ mod tests {
         // early-exit removed in 2026-06; that change only shifts the existing
         // noise. The golden was regenerated from the corrected decoder so this
         // self-consistency check stays green. See PERF_EXPERIMENTS.md.
+        //
+        // Regenerated again for #422: carte is the only chroma_half fixture, so
+        // its decode now reflects bilinear chroma upsampling (was nearest). The
+        // upsampler's correctness is covered directly by
+        // `upsample_chroma_row_bilinear_values`; this remains a determinism check.
         assert_ppm_match(&pm.to_ppm(), "carte_bg.ppm");
     }
 

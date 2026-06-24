@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| CHROMA_BILINEAR (#422) | 2026-06-24 | IW44 YCbCr | **K** | quality (chroma_half) | Bilinear chroma upsampling via per-row pre-upsample + reuse full-res SIMD kernel; only IW44 v2 pages, common path byte-identical |
 | REFROW_REG (#445) | 2026-06-24 | JB2 decode | R | no benefit | Rolling m_r2 register; col_shift unbounded so guard can't drop; safe version just relocates read |
 | IDWT_S2_NEON (#442) | 2026-06-24 | IW44 IDWT NEON | X | incorrect premise | Reuse s1_row for s==2 fails correctness: s==2 ⟹ sd==1 (stride-2 cols), s1_row assumes stride-1 |
 | IDWT_SPLAT (#441) | 2026-06-24 | IW44 IDWT NEON | R | unmeasurable | Hoist vdupq_n_s32 splat; movi is free in ALU-bound loop, no benefit. C16/C8 pattern doesn't transfer |
