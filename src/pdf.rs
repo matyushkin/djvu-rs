@@ -806,52 +806,60 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
 
     let page_count = doc.page_count();
 
-    // Render all pages (expensive: pixel render, encode, deflate).
-    // With the `parallel` feature, pages are rendered concurrently via rayon.
+    // Emit one page's objects (rendered body or a blank-page fallback) and return
+    // its page-object id. Shared by both the parallel and sequential paths.
+    let emit_one =
+        |w: &mut PdfWriter, i: usize, rendered: Option<RenderedPage>| -> Result<usize, PdfError> {
+            Ok(match rendered {
+                Some(data) => emit_page_objects(w, data, pages_id, font_id),
+                None => {
+                    // Fallback: blank page at native dimensions
+                    let page = doc.page(i)?;
+                    let dpi = page.dpi().max(1) as f32;
+                    let pt_w = px_to_pt(page.width() as f32, dpi);
+                    let pt_h = px_to_pt(page.height() as f32, dpi);
+                    w.add(
+                        format!(
+                            "<< /Type /Page /Parent {pages_id} 0 R\n\
+                           /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
+                           /Resources << >> >>"
+                        )
+                        .into_bytes(),
+                    )
+                }
+            })
+        };
+
+    let mut page_obj_ids = Vec::with_capacity(page_count);
+
+    // With the `parallel` feature, render all pages concurrently via rayon, then
+    // emit sequentially (PdfWriter is not Send).
     #[cfg(feature = "parallel")]
-    let rendered_pages: Vec<Option<RenderedPage>> = {
+    {
         use rayon::prelude::*;
-        (0..page_count)
+        let rendered_pages: Vec<Option<RenderedPage>> = (0..page_count)
             .into_par_iter()
             .map(|i| {
                 doc.page(i)
                     .ok()
                     .and_then(|p| render_page_data(p, opts).ok())
             })
-            .collect()
-    };
+            .collect();
+        for (i, rendered) in rendered_pages.into_iter().enumerate() {
+            page_obj_ids.push(emit_one(&mut w, i, rendered)?);
+        }
+    }
 
+    // #449: sequential path renders, emits, and drops one page at a time, holding
+    // O(1) page bodies in memory instead of collecting all `page_count` rendered
+    // bodies first (peak RSS O(pages × body) → O(1 page); mirrors TIFF_STREAM).
     #[cfg(not(feature = "parallel"))]
-    let rendered_pages: Vec<Option<RenderedPage>> = (0..page_count)
-        .map(|i| {
-            doc.page(i)
-                .ok()
-                .and_then(|p| render_page_data(p, opts).ok())
-        })
-        .collect();
-
-    // Emit page objects sequentially (PdfWriter is not Send).
-    let mut page_obj_ids = Vec::with_capacity(page_count);
-    for (i, rendered) in rendered_pages.into_iter().enumerate() {
-        let page_id = match rendered {
-            Some(data) => emit_page_objects(&mut w, data, pages_id, font_id),
-            None => {
-                // Fallback: blank page at native dimensions
-                let page = doc.page(i)?;
-                let dpi = page.dpi().max(1) as f32;
-                let pt_w = px_to_pt(page.width() as f32, dpi);
-                let pt_h = px_to_pt(page.height() as f32, dpi);
-                w.add(
-                    format!(
-                        "<< /Type /Page /Parent {pages_id} 0 R\n\
-                           /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
-                           /Resources << >> >>"
-                    )
-                    .into_bytes(),
-                )
-            }
-        };
-        page_obj_ids.push(page_id);
+    for i in 0..page_count {
+        let rendered = doc
+            .page(i)
+            .ok()
+            .and_then(|p| render_page_data(p, opts).ok());
+        page_obj_ids.push(emit_one(&mut w, i, rendered)?);
     }
 
     // Build outline from bookmarks
