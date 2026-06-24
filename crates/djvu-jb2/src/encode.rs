@@ -1371,7 +1371,12 @@ pub fn cluster_shared_symbols_tunable(
             }
             match best {
                 Some((i, _)) => {
-                    if !bucket[i].pages_seen.contains(&page_idx) {
+                    // #446: pages are visited in strictly non-decreasing `page_idx`
+                    // order, so `pages_seen` is sorted and the current page, if
+                    // already counted, is the last element. An O(1) `last()` check
+                    // replaces the O(K) `contains` scan (O(P²)→O(P) total on a corpus
+                    // where a cluster recurs on many pages).
+                    if bucket[i].pages_seen.last() != Some(&page_idx) {
                         bucket[i].pages_seen.push(page_idx);
                     }
                 }

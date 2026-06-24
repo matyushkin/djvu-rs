@@ -5,6 +5,35 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #446 — O(1) page-dedup in `cluster_shared_symbols_tunable` — **Kept** (2026-06-24)
+
+**Issue.** #446 (from the perf-experiment-swarm). The shared-Djbz clustering inner loop deduped the
+per-cluster `pages_seen: Vec<usize>` with `pages_seen.contains(&page_idx)` — an O(K) linear scan.
+On a corpus where one cluster recurs on all P pages, this is O(P²) total.
+
+**Approach.** Pages are visited in strictly non-decreasing `page_idx` order (the outer
+`pages.iter().enumerate()` loop), so `pages_seen` is sorted and the current page — if already
+counted — is the last element. Replace the scan with `pages_seen.last() != Some(&page_idx)`, O(1).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Clustering output is identical — verified by the existing clustering tests
+(`cluster_promotes_only_repeated_glyphs`, `cluster_tunable_keeps_near_duplicate_large_glyphs_separate`,
+`cluster_shared_symbols_caps_total_pixel_budget`) plus 67 encode + 2 djbz tests, all passing. No
+dedicated multi-page-clustering benchmark was run (the only large fixture is the 517-page
+`pathogenic_bacteria_1896`, whose full re-encode is expensive), but the change is *strictly* ≤ the
+old cost: `last()` is a single comparison vs a scan of up to P entries.
+
+**Decision. Kept.**
+
+**Reason.** Trivially correct under the monotonic page order (verified by the unchanged clustering
+test outputs) and a pure complexity improvement — O(P²)→O(P) on the worst case (a cluster shared
+across an entire corpus), with no possible regression (O(1) ≤ O(K) always). Same disposition as the
+kept #433: a safe, strictly-non-worse change that helps at scale (large multi-page shared-dict
+encodes) even though the small test corpus doesn't make the difference benchmark-visible. Closes #446.
+
+---
+
 ### #444 — cache parsed FGbz palette in `PageLayers` — **Reverted** (2026-06-24)
 
 **Issue.** #444 (from the perf-experiment-swarm). `decode_fg_palette_full` calls `parse_fgbz`
