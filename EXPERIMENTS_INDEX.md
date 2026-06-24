@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IDWT_SPLAT (#441) | 2026-06-24 | IW44 IDWT NEON | R | unmeasurable | Hoist vdupq_n_s32 splat; movi is free in ALU-bound loop, no benefit. C16/C8 pattern doesn't transfer |
 | F2_GAMMA (#443) | 2026-06-24 | color 1:1 bilinear | **K** | narrow (non-identity gamma) | F2 all-bg fast path for non-identity gamma (LUT pass); free-on-miss, byte-identical. Identity path unchanged |
 | PDF_STREAM (#449) | 2026-06-24 | PDF export | **K** | peak RSS O(pages)→O(1) bodies | Stream render→emit→drop in sequential path; byte-identical, strictly ≤ peak. Unmeasurable on corpus (no many-large-body doc) |
 | LANCZOS_HOIST (#448) | 2026-06-24 | Lanczos resample | **K** | **−22.5% Lanczos** | Hoist sin weights + row-major accumulate in vertical pass; bit-identical |
