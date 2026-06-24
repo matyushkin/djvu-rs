@@ -2265,6 +2265,36 @@ fn composite_rows_bilinear_one(
                     row_buf.fill(255);
                     return;
                 }
+            } else if row_is_all_bg {
+                // #443: F2 for non-identity gamma. An all-bg row is just the gamma
+                // LUT applied to the bg row (or to white when there is no bg) — a
+                // sequential LUT pass that skips the G1 pre-expansion + per-pixel
+                // dispatch. Byte-identical to the per-pixel loop for these rows.
+                let out_w = row_buf.len() / 4;
+                let offset_x = ctx.offset_x as usize;
+                let lut = &ctx.gamma_lut;
+                if let Some((bg_row, bg_w)) = bg_row_1x1 {
+                    if offset_x + out_w <= bg_w as usize {
+                        let src = &bg_row[offset_x * 4..(offset_x + out_w) * 4];
+                        for (chunk, s) in row_buf.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                            chunk[0] = lut[s[0] as usize];
+                            chunk[1] = lut[s[1] as usize];
+                            chunk[2] = lut[s[2] as usize];
+                            chunk[3] = 255;
+                        }
+                        return;
+                    }
+                    // Edge case (out_w clamped beyond bg_w): fall through.
+                } else {
+                    let white = lut[255];
+                    for chunk in row_buf.chunks_exact_mut(4) {
+                        chunk[0] = white;
+                        chunk[1] = white;
+                        chunk[2] = white;
+                        chunk[3] = 255;
+                    }
+                    return;
+                }
             }
         }
 
