@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| AREAAVG_ALLBG (#438) | 2026-06-24 | color area-avg | **K** | ~skip mask_box_any (50–71% fire) | All-bg band short-circuit skips footprint scan; byte-identical, #428 analog for color downscale |
 | EXACT_SLICE (#437) | 2026-06-24 | color 1:1 bilinear | R | unmeasurable | Exact-length row slices for bounds-check elision; unwrap_or(&[]) defeats fg length-tracking; machine too hot to verify |
 | BSERIES_MASKEXP (#436) | 2026-06-24 | B-series upscale | R | unmeasurable + overhead | MASK_EXPAND in B-series (G1b retry on upscale); expansion overhead not worth it on resampling-bound path |
 | BSERIES_ALLBG (#435) | 2026-06-24 | B-series bilinear | **K** | ~3–8% (52.6% fire) | All-bg row short-circuit skips is_fg; byte-identical, F2 analog. Benchmark noisy, firing-rate evidence |
@@ -140,7 +141,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#431 LUT byte-expansion in bilevel TIFF~~ **DONE (~18%)** → TIFF_LUT · ~~#432 byte-level early-exit in `mask_box_any`~~ **REVERTED (+5% regression)** → MASK_ANY_BYTE
 - ~~#433 extend P2 to byte-aligned offset_x~~ **DONE (Kept, safe ext)** → P2_REGION · ~~#434 B-series fg_fx Q48 accumulator~~ **REVERTED (+13–27% regression)** → FG_FX_ACCUM
 - ~~#435 B-series all-bg row fast path~~ **DONE (Kept, 52.6% fire)** → BSERIES_ALLBG · ~~#436 MASK_EXPAND in B-series upscale~~ **REVERTED (overhead, unmeasurable)** → BSERIES_MASKEXP
-- ~~#437 exact-length FG44/BG44 row slices~~ **REVERTED (unmeasurable, mechanism defeated)** → EXACT_SLICE · #438 area-avg all-bg row fast path
+- ~~#437 exact-length FG44/BG44 row slices~~ **REVERTED (unmeasurable, mechanism defeated)** → EXACT_SLICE · ~~#438 area-avg all-bg row fast path~~ **DONE (Kept, 50–71% fire)** → AREAAVG_ALLBG
 - #439 proportional fg/bg blend in color area-avg (AA quality) · #440 PAR-DEC parallel layer decode
 
 **P3:**

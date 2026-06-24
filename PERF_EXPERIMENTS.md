@@ -5,6 +5,40 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #438 — all-bg row fast path in area-average compositor (F2/I3 analog) — **Kept** (2026-06-24)
+
+**Issue.** #438 (from the perf-experiment-swarm). `composite_rows_area_avg_one` (colour downscale)
+runs the per-pixel `is_fg` test via `mask_box_any` (for `mask_shift == 0`), which scans the output
+pixel's footprint with byte popcounts. On blank rows (margins / inter-line gaps) this whole scan is
+wasted. The 1:1 and bilevel-downscale paths already short-circuit blank rows (F2, #428).
+
+**Approach.** Pre-scan the row-invariant mask y-band `[y0, y1)` once (`mask_all_bg`, matching
+`mask_box_any`'s range); guard `is_fg` with `!mask_all_bg && …`. On a blank band the `&&`
+short-circuits, skipping `mask_box_any` for every pixel. Guarded on `mask_shift == 0` (the max-pool
+sub-path indexes a coarser mask).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical (FNV checksums unchanged on colorbook @150/400 and watchmaker
+@0.25). Firing-rate probe (the thermal-independent evidence — the machine was thermally saturated
+by this point, so wall-clock ratios were unusable):
+
+| Doc / scale | output rows | blank-band rows | fire rate |
+|---|---|---|---|
+| colorbook @150/400 | 1376 | 972 | **70.6%** |
+| watchmaker @0.25 | 825 | 414 | **50.2%** |
+
+**Decision. Kept.**
+
+**Reason.** Same disposition as #428 (kept, 94.4% fire): byte-identical, fires on 50–71% of rows,
+and on those rows it skips the *expensive* `mask_box_any` footprint scan (not just a cheap bit
+check as in #435), so the per-row saving is larger. Per-row overhead when it misses is one band
+pre-scan (`iter().any()`, NEON) plus a short-circuiting bool — bounded and small. The mechanism is
+a row-level early exit (the proven F2/I3/#428/#435 pattern), not an inner-loop micro-op like the
+reverted #432/#434/#436/#437. Closes #438.
+
+---
+
 ### #437 — exact-length FG44/BG44 row slices for bounds-check elision — **Reverted** (2026-06-24)
 
 **Issue.** #437 (from the perf-experiment-swarm). The 1:1 general bilinear path takes open-ended
