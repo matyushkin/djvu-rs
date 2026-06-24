@@ -5,6 +5,68 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### P2: BILEVEL_RGBA lookup table for bilevel 1:1 compositor — **In-progress** (2026-06-24)
+
+---
+
+### Q1: clamp-free bilevel 1:1 inner loop — **Reverted** (2026-06-24)
+
+**Issue.** The scalar bilevel 1:1 inner loop uses `.min(page_w - 1)` to clamp the pixel
+coordinate, which LLVM cannot prove is a no-op. Hypothesis: removing the clamp (when
+`offset_x == 0 && out_w <= mask.width`) would allow LLVM to auto-vectorise the bit-extract.
+
+**Approach.** Add a guard `if ctx.offset_x == 0 && out_w <= mask.width` and a clamp-free
+inner loop using `mask_row[ox >> 3]` directly.
+
+**Numbers.** Assembly inspection confirmed the resulting inner loop was still **scalar**
+(identical instruction sequence to the original, just without the cmp/csel clamp): LLVM
+cannot auto-vectorise the `(mask_row[ox>>3] >> (7-(ox&7))) & 1` bit-extraction pattern even
+without the clamp. Both hot benchmark runs showed `No change in performance detected`.
+
+**Decision. Reverted** (immediately superseded by P2 which uses BILEVEL_RGBA lookup).
+
+**Reason.** Bit-extraction patterns with non-trivial shift amounts are not auto-vectorised
+by LLVM/AArch64 backend. P2 restructures the loop to use direct table lookup and achieves
+the NEON vectorisation that Q1 could not.
+
+---
+
+### G1b: pre-expand mask row to bytes in B-series (downscale) bilinear path — **Reverted** (2026-06-24)
+
+**Issue.** The B-series bilinear compositor (`composite_rows_bilinear_one` else-branch,
+invoked for non-1:1 scales) had the same 7-op bit-extraction per pixel as the 1:1 path
+before G1. Hypothesis: the same MASK_EXPAND pre-expansion trick would give similar gains.
+
+**Approach.** Add a `g1b_buf`/`g1b_mask` pre-expansion block (identical to G1) before
+the B-series inner loop. The B-series accesses mask at page-space coordinates (`px` jumping
+by `fx_step/FRAC` per output pixel). After expansion, `g1b_mask[px]` replaces the 7-op
+bit extraction.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** `color_native_cached` (1:1, uses G1 path — unaffected) as control.
+No corpus file available for B-series color; used `render_page/dpi/72`
+(watchmaker at 72 DPI — exercises B-series, includes cached codec work).
+
+| Benchmark | Baseline (ms) | G1b (ms) | Change |
+|---|---|---|---|
+| render_page/dpi/72 | cached Criterion | 91.3 | **+10% regression** (p = 0.00) |
+
+Intra-session thermal check: `color_native_cached` showed no change (47ms), confirming the
+regression is from G1b, not thermal variation.
+
+**Decision. Reverted.**
+
+**Reason.** At 72 DPI (638 output pixels/row) the pre-expansion cost (319 MASK_EXPAND
+iterations per row) is 0.5 iterations per output pixel — 4× the amortization ratio of G1
+in the 1:1 path (0.125/pixel). The break-even is ~532 output pixels/row. At 72 DPI (638)
+we are barely above break-even, and the 4096-byte stack buffer zeroing adds ~32 cycles/row
+overhead; the net is a measured 10% regression. At 150 DPI (1274 output pixels) the
+benefit would be positive, but no benchmark corpus file exists to verify. Reverted rather
+than guarding on output width — adds complexity without verified benefit.
+
+---
+
 ### I3: all-white row fast path in bilevel 1:1 compositor — **Kept** (2026-06-24)
 
 **Issue.** The bilevel 1:1 fast path in `composite_rows_bilevel_one` runs a per-pixel
