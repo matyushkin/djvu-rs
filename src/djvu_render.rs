@@ -988,6 +988,11 @@ pub(crate) struct PageLayers {
     // 150-from-300-DPI render. Same memoization as `bg_rgb_s1` but ~4× smaller;
     // left empty on pages never rendered at sub=2.
     bg_rgb_s2: std::sync::OnceLock<Option<Pixmap>>,
+    // Decoded JB2 mask + per-pixel blit-index map for FGbz-palette pages. The
+    // plain `mask` cache does not cover the indexed variant, so without this
+    // every warm render of a palette page re-runs the full JB2 ZP decode and
+    // re-allocates the page-sized blit map. Only populated for palette pages.
+    mask_indexed: std::sync::OnceLock<Option<(crate::bitmap::Bitmap, Vec<i32>)>>,
 }
 
 #[cfg(feature = "std")]
@@ -1100,6 +1105,23 @@ impl PageLayers {
                 let img = self.bg44(page)?;
                 img.to_rgb_subsample(2).ok()
             })
+            .as_ref()
+    }
+
+    /// The decoded JB2 mask + per-pixel blit-index map, decoding on first call.
+    ///
+    /// Used for FGbz-palette pages, where the compositor needs the blit index of
+    /// each foreground pixel to look up its palette colour. Caches the full JB2
+    /// ZP decode and the page-sized `Vec<i32>` blit map so repeated renders of the
+    /// same page skip both. `None` when the page has no Sjbz/Smmr chunk or decode
+    /// fails. The blit map is ~`width*height*4` bytes — only pages actually
+    /// rendered with a palette ever populate this slot.
+    pub(crate) fn mask_indexed(
+        &self,
+        page: &DjVuPage,
+    ) -> Option<&(crate::bitmap::Bitmap, Vec<i32>)> {
+        self.mask_indexed
+            .get_or_init(|| page.extract_mask_indexed().ok().flatten())
             .as_ref()
     }
 }
@@ -1272,10 +1294,20 @@ fn decode_mask<'a>(
 /// Delegates to [`DjVuPage::extract_mask_indexed`] so that the shared DJVI
 /// dictionary (`shared_djbz`) is used as a fallback when there is no inline
 /// Djbz chunk.
-fn decode_mask_indexed(
-    page: &DjVuPage,
-) -> Result<Option<(crate::bitmap::Bitmap, Vec<i32>)>, RenderError> {
-    page.extract_mask_indexed().map_err(RenderError::from)
+fn decode_mask_indexed<'a>(
+    page: &'a DjVuPage,
+) -> Result<Option<(Cow<'a, crate::bitmap::Bitmap>, Cow<'a, [i32]>)>, RenderError> {
+    match page.decoded_mask_indexed() {
+        Some((bm, blit)) => Ok(Some((Cow::Borrowed(bm), Cow::Borrowed(blit.as_slice())))),
+        // Cache miss with a mask chunk present means decode failed; re-run to
+        // surface the error (mirrors `decode_mask`). A genuine no-chunk page
+        // returns Ok(None) without a re-decode.
+        None if page.find_chunk(b"Sjbz").is_some() || page.find_chunk(b"Smmr").is_some() => page
+            .extract_mask_indexed()
+            .map_err(RenderError::from)
+            .map(|opt| opt.map(|(bm, blit)| (Cow::Owned(bm), Cow::Owned(blit)))),
+        None => Ok(None),
+    }
 }
 
 /// Decode the FGbz foreground palette with per-blit color indices.
@@ -1318,7 +1350,7 @@ struct DecodedLayers<'a> {
     bg: Option<Cow<'a, Pixmap>>,
     fg_palette: Option<FgbzPalette>,
     mask: Option<Cow<'a, crate::bitmap::Bitmap>>,
-    blit_map: Option<Vec<i32>>,
+    blit_map: Option<Cow<'a, [i32]>>,
     fg44: Option<Cow<'a, Pixmap>>,
 }
 
@@ -1356,7 +1388,7 @@ fn decode_layers<'a>(
             None
         };
         if let Some((bm, bm_map)) = indexed {
-            mask = Some(Cow::Owned(bm));
+            mask = Some(bm);
             blit_map = Some(bm_map);
         } else {
             mask = decode_mask(page).ok().flatten();
@@ -1392,7 +1424,7 @@ fn decode_layers<'a>(
 struct ForegroundLayers<'a> {
     fg_palette: Option<FgbzPalette>,
     mask: Option<Cow<'a, crate::bitmap::Bitmap>>,
-    blit_map: Option<Vec<i32>>,
+    blit_map: Option<Cow<'a, [i32]>>,
     fg44: Option<Cow<'a, Pixmap>>,
 }
 
@@ -1408,7 +1440,7 @@ fn decode_foreground_strict<'a>(page: &'a DjVuPage) -> Result<ForegroundLayers<'
     let fg_palette = decode_fg_palette_full(page)?;
     let (mask, blit_map) = if fg_palette.is_some() {
         match decode_mask_indexed(page)? {
-            Some((bm, bm_map)) => (Some(Cow::Owned(bm)), Some(bm_map)),
+            Some((bm, bm_map)) => (Some(bm), Some(bm_map)),
             None => (None, None),
         }
     } else {

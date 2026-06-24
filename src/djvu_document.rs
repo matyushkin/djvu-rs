@@ -664,6 +664,22 @@ impl DjVuPage {
         None
     }
 
+    /// Return the decoded JB2 mask + per-pixel blit-index map for FGbz-palette
+    /// pages, decoding and caching on first call.
+    ///
+    /// Caches both the JB2 ZP arithmetic decode and the page-sized blit map so
+    /// that repeated palette renders pay neither cost after the first call.
+    /// Returns `None` if the page has no Sjbz/Smmr chunk or decoding fails.
+    #[cfg(feature = "std")]
+    pub(crate) fn decoded_mask_indexed(&self) -> Option<&(crate::bitmap::Bitmap, Vec<i32>)> {
+        self.render_layers().mask_indexed(self)
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn decoded_mask_indexed(&self) -> Option<&(crate::bitmap::Bitmap, Vec<i32>)> {
+        None
+    }
+
     /// Decode the IW44 background layer (BG44 chunks) if present.
     ///
     /// Returns `Ok(None)` if the page has no BG44 chunks.
