@@ -354,6 +354,11 @@ fn bench_render_compositor_only(c: &mut Criterion) {
             150.0_f32 / 400.0_f32,
         ),
         (
+            "color_downscale_mixed_cached",
+            corpus_path().join("watchmaker.djvu"),
+            150.0_f32 / 300.0_f32,
+        ),
+        (
             "small_color_downscale_cached",
             assets_path().join("boy.djvu"),
             0.5_f32,
