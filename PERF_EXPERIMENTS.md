@@ -5,6 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #430 — Deflate-compressed bilevel TIFF export (size reduction) — **Kept** (2026-06-24)
+
+**Issue.** #430 (from the perf-experiment-swarm) asked for 1-bit TIFF output for bilevel pages
+(target: 8× smaller files). The bilevel path wrote the JB2 mask as an uncompressed 8-bit
+grayscale strip (Gray8, 1 byte/pixel = 8.4 MB for an A4 page).
+
+**Constraint found.** The `tiff` 0.9 crate's high-level encoder has **no 1-bit ColorType** — the
+`ColorType` trait's minimum `BITS_PER_SAMPLE` is 8 and `write_data` takes one sample per element,
+so it cannot pack 8 pixels/byte. True 1-bit output would require hand-writing TIFF tags outside
+the crate (disproportionate risk for the goal).
+
+**Approach.** Achieve the *actual* goal — drastically smaller bilevel TIFFs — via the crate's
+supported `new_image_with_compression::<Gray8, Deflate>`. Bilevel content is just 0x00/0xFF bytes
+with long runs (text on white), which Deflate compresses far better than a 1-bit packing. One-line
+change in `write_bilevel_page`; Deflate (TIFF compression tag 8) is universally readable; output is
+lossless (pixel-identical).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** cable_1973 (2 pages, 2550×3301), `TiffMode::Bilevel`:
+
+| | total bytes | per page |
+|---|---|---|
+| Baseline (uncompressed Gray8) | 16,835,608 | ~8.4 MB |
+| Deflate | 113,029 | ~56 KB |
+
+**≈149× smaller** — far past the 8× a 1-bit packing would give. 625 lib tests (incl. the
+bilevel-TIFF pixel-equality and round-trip tests) pass with `--features tiff`.
+
+**Decision. Kept.**
+
+**Reason.** Delivers the issue's real objective (small bilevel TIFFs) better than the literal
+1-bit request, using only the supported encoder API, losslessly, and readable by any TIFF reader.
+True 1-bit packing is not worth a hand-rolled TIFF encoder when Deflate already gives ~149×. Color
+TIFF export is left unchanged (RGB Deflate is a smaller, separate win). Closes #430.
+
+---
+
 ### #429 — byte-aligned `crop_bitmap` fast path in JB2 direct encoder — **Kept** (2026-06-24)
 
 **Issue.** #429 (from the perf-experiment-swarm). `crop_bitmap` (JB2 direct encoder, used to

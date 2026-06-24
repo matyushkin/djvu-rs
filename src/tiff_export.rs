@@ -30,7 +30,7 @@
 
 use std::io::{Cursor, Seek, Write};
 
-use tiff::encoder::{Rational, TiffEncoder, colortype};
+use tiff::encoder::{Rational, TiffEncoder, colortype, compression::Deflate};
 use tiff::tags::ResolutionUnit;
 
 use crate::{
@@ -256,7 +256,12 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
     // Try to extract the JB2 mask directly from the page chunks.
     let gray = extract_bilevel_pixels(page, w, h)?;
     let dpi = page.dpi() as u32;
-    let mut img = encoder.new_image::<colortype::Gray8>(w, h)?;
+    // Bilevel content is just 0x00 / 0xFF bytes with long runs (text on white),
+    // so Deflate shrinks the Gray8 strip by ~20–50× — far past the 8× of a true
+    // 1-bit packing, which the `tiff` crate's high-level encoder cannot emit (no
+    // 1-bit ColorType). Deflate (tag 8) is universally readable.
+    let mut img = encoder
+        .new_image_with_compression::<colortype::Gray8, _>(w, h, Deflate::default())?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
     img.write_data(&gray)?;
     Ok(())
