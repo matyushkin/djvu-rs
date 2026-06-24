@@ -31,3 +31,4 @@ examples/wasm/pkg/
 # Claude Code local state (user-specific, never shared)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
