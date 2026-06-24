@@ -5,6 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### C2b/C2c: FG44 y-row hoisting for B-series and area-average compositor — **Reverted** (2026-06-24)
+
+**Issue.** `composite_rows_bilinear_one` (B-series/non-1:1 path) and `composite_rows_area_avg_one`
+call `sample_bilinear(fg, fg_fx, fg_fy)` per fg pixel. `fg_fy` (and for area-avg, `fg_fy_step`
+and the y-bounds `(y0, y1)`) are computed from `fy`, which is row-invariant. Hypothesis: explicit
+pre-hoisting (C2b for bilinear, C2c for area-avg) before the inner loop would save ~14 ops/fg-pixel
+in the B-series path and ~6 ops/fg-pixel in the area-avg path.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** New benchmark `color_downscale_mixed_cached` (watchmaker.djvu at 150/300 DPI,
+exercises B-series with FG44). `color_native_cached` as thermal control (unaffected). All runs
+thermally hot (tests ran in parallel, p-values unreliable). Intra-session thermal ratio
+`downscale_mixed / native`:
+
+| Run | native (ms) | downscale_mixed (ms) | ratio |
+|---|---|---|---|
+| WITHOUT C2b | 231 | 54 | 0.234 |
+| WITH C2b #1 | 227 | 58 | 0.256 |
+| WITH C2b #2 | 185 | 59 | 0.319 |
+| WITH C2b #3 | 151 | 59 | 0.391 |
+| WITH C2b #4 | 213 | 43 | 0.202 |
+
+Ratio without C2b: 0.234. With C2b: 0.202–0.391, mean ≈ 0.29. No consistent trend;
+variance overwhelms the expected ~9% signal.
+
+**Decision. Reverted.**
+
+**Reason.** LLVM already applies LICM (Loop Invariant Code Motion) to hoist `fg_fy` and the
+two row-slice computations out of the inline `sample_bilinear` body — the y-coordinate
+arithmetic is recognized as loop-invariant at the call site. C2b adds explicit hoisting but
+does not improve on what the compiler already does; the additional Option wrapping slightly
+changes the generated code and may inhibit some optimizations. This mirrors the G2 finding:
+LLVM's out-of-order/LICM already covers the expected savings. The `color_downscale_mixed_cached`
+benchmark case is kept for future experiments.
+
+---
+
 ### P2: BILEVEL_RGBA lookup table for bilevel 1:1 compositor — **Kept** (2026-06-24)
 
 **Issue.** The bilevel 1:1 inner loop (`composite_rows_bilevel_one`, 1:1 fast path) used
