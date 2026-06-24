@@ -1006,7 +1006,12 @@ impl PlaneEncoder {
                     step_hi
                 };
                 let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                if v > s / 2 {
+                // #iw44-1: predict activation with the SAME threshold the activation
+                // pass actually uses (|V| > 11s/16, line ~1096). The old `s/2` is too
+                // low: coefficients in (s/2, 11s/16] were announced as block/bucket-NEW
+                // but never activated, emitting wasted ZP bits with no reconstruction
+                // change. Matching the gate removes that overhead (PSNR-neutral).
+                if v > (s * 11 / 16).max(1) {
                     return true;
                 }
             }
@@ -1050,7 +1055,7 @@ impl PlaneEncoder {
                     step_hi
                 };
                 let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                v > s / 2
+                v > (s * 11 / 16).max(1) // #iw44-1: match the real activation gate (see any_unk_activates)
             });
             if is_new {
                 self.bucketstate[boff] |= NEW;

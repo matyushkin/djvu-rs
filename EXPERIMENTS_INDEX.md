@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_ACT_THRESH (IW44-1) | 2026-06-25 | IW44 encoder (size) | **K** | **−9.1% BG44, PSNR-identical** | Activation prediction s/2→11s/16 matches real gate; removes wasted NEW bits. Encoder-only, interop-safe. Gap 14.3%→3.9% |
 | ENC_SIZE_DIAG | 2026-06-25 | encoder (size) | D | mask=parity, IW44 BG44=1.143× | Chunk breakdown: BG44/FG44 dominate colour/photo docs (94–99.9%); our IW44 is ~14% larger → next size lever |
 | LAYERED_SHARED_DJBZ (#452) | 2026-06-24 | JB2 encoder (size) | **K** | **−34% (spec) / −5.5% (watchmaker)** | Shared Djbz for layered multi-page encode; closes the real DjVuLibre size gap (per-page dict dup). Round-trip verified |
 | CHROMA_BILINEAR (#422) | 2026-06-24 | IW44 YCbCr | **K** | quality (chroma_half) | Bilinear chroma upsampling via per-row pre-upsample + reuse full-res SIMD kernel; only IW44 v2 pages, common path byte-identical |
