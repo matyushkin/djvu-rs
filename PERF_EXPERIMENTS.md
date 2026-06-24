@@ -5,6 +5,34 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #443 — extend F2 all-bg fast path to non-identity gamma — **Kept** (2026-06-24)
+
+**Issue.** #443 (from the perf-experiment-swarm). The F2 all-bg-row fast path
+(`composite_rows_bilinear_one`, 1:1) only fired when `gamma_is_identity`; an all-bg row with
+non-identity gamma fell through to the full G1 pre-expansion + per-pixel dispatch.
+
+**Approach.** Add an `else if row_is_all_bg` branch for the non-identity case: apply the gamma LUT
+directly to the bg row (`chunk[c] = lut[bg_row[..][c]]`), or to white (`lut[255]`) when there is no
+bg. Sequential LUT pass, no mask expansion. Falls through on the bg-clamp edge case.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Identity-gamma output byte-identical — FNV unchanged on watchmaker native (the new
+branch only fires when `gamma_is_identity == false`, so the common path is untouched, verified).
+103 render + 610 lib tests pass. No non-identity-gamma fixture exists in the corpus, so the new
+branch is not benchmark-exercised; its output is byte-identical to the per-pixel loop by
+construction (`lut[bg]` for all-bg pixels, with the same offset/clamp guard).
+
+**Decision. Kept.**
+
+**Reason.** Free-on-miss, byte-identical safe extension that completes F2 symmetrically: the
+identity path is provably unchanged (FNV), and a non-identity-gamma all-bg row now gets a single
+LUT pass instead of the full G1 dispatch. The benefit is narrow (non-identity gamma is uncommon)
+and not benchmark-visible on the identity-only corpus, but there is no downside — same disposition
+as the other kept fast-path extensions (#433/#438). Closes #443.
+
+---
+
 ### #449 — stream PDF page render→emit→drop in the sequential path — **Kept** (2026-06-24)
 
 **Issue.** #449 (from the perf-experiment-swarm). `djvu_to_pdf_impl` collected *all*
