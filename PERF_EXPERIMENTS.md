@@ -5,6 +5,45 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #429 — byte-aligned `crop_bitmap` fast path in JB2 direct encoder — **Kept** (2026-06-24)
+
+**Issue.** #429 (from the perf-experiment-swarm). `crop_bitmap` (JB2 direct encoder, used to
+split a page into 1024×1024 tiles for record-3 whole-tile symbols) cropped each tile with a
+per-pixel `src.get(x) + out.set_black()` loop — w×h bit-unpack/repack operations per tile.
+
+**Approach.** The tile loop always passes a byte-aligned `x0` (tiles start at multiples of
+TILE=1024, and 1024 % 8 == 0). When `x0 % 8 == 0`, copy each output row as a contiguous
+`copy_from_slice` of `out_stride` bytes from the source row, then mask the trailing bits of the
+last byte beyond `w` (which the per-pixel path never sets). Falls back to the per-pixel loop for
+unaligned `x0` (never produced by the current caller, kept for generality). Mirrors
+`blit_to_bitmap`'s aligned fast path.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** The existing `jb2_encode` bench uses a 192×256 mask — a single tile, so
+`crop_bitmap` is never called (it hits the `bitmap.clone()` single-tile path) and showed no
+change (1.220 vs 1.220 ms — confirming the path isn't exercised). Added `jb2_encode_multitile`
+(cable_1973 mask, 2550×3301 = 3×4 tiles), which does exercise the multi-tile crop:
+
+| Round | baseline (ms) | with (ms) | Δ |
+|---|---|---|---|
+| 1 | 222.8 | 192.5 | **−13.6%** |
+| 2 | 255.0 | 215.8 | **−15.4%** |
+
+Consistent **~14–15%** on full-page direct encode; well-separated medians, 100 samples.
+609 lib tests + 53 djvu-jb2 tests (incl. encode roundtrip) pass.
+
+**Decision. Kept.**
+
+**Reason.** Replaces w×h per-pixel bit operations per tile with `h` byte-aligned `copy_from_slice`
+calls (LLVM vectorises to NEON loads/stores). Output is byte-identical by construction (same bits
+in columns [0,w), padding masked to 0), so the encoded JB2 stream is unchanged — verified by the
+passing encode-roundtrip tests. Note `crop_bitmap` lives in the direct `encode_jb2` path (not the
+shipping dict encoder), so the real-world impact is bounded to that path; the change is free
+(falls back for the unaligned case) and correct, so kept regardless. Closes #429.
+
+---
+
 ### #428 — all-white band fast path in bilevel downscale compositor (I3-downscale) — **Kept** (2026-06-24)
 
 **Issue.** #428 (from the perf-experiment-swarm). `composite_rows_bilevel_one`'s anti-aliased

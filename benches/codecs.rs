@@ -464,6 +464,33 @@ fn bench_jb2_encode(c: &mut Criterion) {
     });
 }
 
+/// Direct JB2 encode of a full-page (>1024 px) bilevel mask. Unlike the small
+/// `jb2_encode` fixture (192×256, single tile), this exercises the multi-tile
+/// path in `encode_jb2` where `crop_bitmap` splits the page into 1024×1024 tiles.
+fn bench_jb2_encode_multitile(c: &mut Criterion) {
+    let path = corpus_path().join("cable_1973_100133.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_jb2_encode_multitile: cable_1973_100133.djvu not found");
+            return;
+        }
+    };
+    let sjbz = match first_sjbz_chunk(&data) {
+        Some(c) => c,
+        None => return,
+    };
+    let bitmap = match djvu_rs::jb2::decode(&sjbz, None) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    c.bench_function("jb2_encode_multitile", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::jb2_encode::encode_jb2(black_box(&bitmap));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -478,5 +505,6 @@ criterion_group!(
     bench_iw44_encode_color,
     bench_iw44_encode_large,
     bench_jb2_encode,
+    bench_jb2_encode_multitile,
 );
 criterion_main!(benches);
