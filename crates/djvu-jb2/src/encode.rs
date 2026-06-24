@@ -373,6 +373,24 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
 /// Crop a tight sub-rectangle out of a bilevel bitmap.
 fn crop_bitmap(src: &Bitmap, x0: u32, y0: u32, w: u32, h: u32) -> Bitmap {
     let mut out = Bitmap::new(w, h);
+    // Byte-aligned fast path: when x0 is on a byte boundary (the only case the
+    // tile loop produces — tiles start at multiples of TILE=1024), each output
+    // row is a contiguous byte-copy from the source row instead of w per-pixel
+    // get()+set_black() calls. The trailing bits of the last output byte that lie
+    // beyond `w` must stay 0 (the per-pixel path never sets them), so mask them.
+    if x0 % 8 == 0 {
+        let src_stride = src.row_stride();
+        let out_stride = out.row_stride();
+        let src_byte0 = (x0 / 8) as usize;
+        let last_mask: u8 = if w % 8 == 0 { 0xFF } else { 0xFFu8 << (8 - (w % 8)) };
+        for y in 0..h as usize {
+            let s = (y0 as usize + y) * src_stride + src_byte0;
+            let d = y * out_stride;
+            out.data[d..d + out_stride].copy_from_slice(&src.data[s..s + out_stride]);
+            out.data[d + out_stride - 1] &= last_mask;
+        }
+        return out;
+    }
     for y in 0..h {
         for x in 0..w {
             if src.get(x0 + x, y0 + y) {
