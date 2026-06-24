@@ -5,6 +5,50 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #427 — indexed JB2 mask + blit-map cache for FGbz-palette pages (`PageLayers::mask_indexed`) — **Kept** (2026-06-24)
+
+**Issue.** #427 (from the perf-experiment-swarm). `PageLayers` cached the plain JB2 mask
+(`mask`) but not the *indexed* variant used by FGbz-palette pages. `decode_mask_indexed`
+called `extract_mask_indexed` → `jb2::decode_indexed` on every warm render, re-running the
+full JB2 ZP arithmetic decode and re-allocating a page-sized `Vec<i32>` blit map
+(2550×3300 = 8.4 M entries = 33.6 MB) each time.
+
+**Approach.** Add `mask_indexed: OnceLock<Option<(Bitmap, Vec<i32>)>>` to `PageLayers` with a
+`mask_indexed()` accessor and a `DjVuPage::decoded_mask_indexed()` method. Rewrite
+`decode_mask_indexed` to return `(Cow<Bitmap>, Cow<[i32]>)` — `Cow::Borrowed` on cache hit,
+with the same error-fallback as `decode_mask` (re-decode when the cache is empty but an
+Sjbz/Smmr chunk is present, to surface decode errors in strict mode). `DecodedLayers` and
+`ForegroundLayers` `blit_map` fields change `Option<Vec<i32>>` → `Option<Cow<'a, [i32]>>`;
+downstream consumers already used `.as_deref()`/`Option<&[i32]>`, so no compositor change.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** New benchmark `palette_native_cached` (navm_fgbz.djvu, 2550×3300, native).
+Control `color_native_cached` (non-palette, unaffected). All runs thermally hot;
+intra-session ratio `palette / color_native`:
+
+| Round | control (ms) | palette (ms) | ratio | Δ |
+|---|---|---|---|---|
+| 1 baseline | 211.2 | 237.1 | 1.123 | |
+| 1 with cache | 176.1 | 194.9 | 1.107 | −1.4% |
+| 2 baseline | 205.4 | 227.0 | 1.105 | |
+| 2 with cache | 254.5 | 258.1 | 1.014 | −8.2% |
+
+All four measurements show the cached ratio below baseline (consistent direction); magnitude
+swamped by thermal variance (control ranged 176–254 ms), mean ≈ **5%**. 609 lib tests +
+`pdf_conversion` (navm_fgbz) pass.
+
+**Decision. Kept.**
+
+**Reason.** Eliminates a full JB2 ZP re-decode and a 33.6 MB `Vec<i32>` allocation on every
+warm render of a palette page; output is byte-identical by construction (memoized
+`extract_mask_indexed`). Beyond the modest CPU win, it removes per-render allocator churn of
+a 33.6 MB buffer. Memory cost: 33.6 MB cached per palette page actually rendered (the same
+buffer that was previously allocated-and-freed each render, now persisted) — paid only on
+FGbz-palette pages, which are uncommon. Mirrors the COW_FG / BG_CACHE caching pattern. Closes #427.
+
+---
+
 ### #426 — BG44 decoded RGB Pixmap cache at subsample=2 (`PageLayers::bg_rgb_s2`) — **Kept** (2026-06-24)
 
 **Issue.** #426 (from the perf-experiment-swarm). `PageLayers` cached the decoded RGB

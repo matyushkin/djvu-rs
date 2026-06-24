@@ -363,6 +363,13 @@ fn bench_render_compositor_only(c: &mut Criterion) {
             assets_path().join("boy.djvu"),
             0.5_f32,
         ),
+        (
+            // FGbz-palette page: exercises the cached indexed-mask + blit-map
+            // path (decoded_mask_indexed). 2550×3300, native resolution.
+            "palette_native_cached",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/navm_fgbz.djvu"),
+            1.0_f32,
+        ),
     ];
 
     let mut group = c.benchmark_group("render_compositor_only");
