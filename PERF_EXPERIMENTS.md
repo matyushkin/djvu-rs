@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #422 — bilinear chroma upsampling for chroma_half IW44 pages — **Kept (quality)** (2026-06-24)
+
+**Issue.** #422. When an IW44 image has `chroma_half = true` (IW44 v2+), the Cb/Cr planes are
+stored at half luma resolution. The sub=1 render path upsampled them nearest-neighbour — `c_row =
+row/2` vertically and `cb_half[col/2]` horizontally — replicating each chroma sample to a 2×2 block,
+which produces visible colour stairstepping at sharp colour transitions.
+
+**Approach.** Rather than rewrite the four nearest-neighbour SIMD half-kernels (NEON/AVX2/WASM/scalar
+— the "HIGH complexity" the issue warns about), add a per-row bilinear upsampler
+(`upsample_chroma_row_bilinear`): for each output row build full-resolution Cb/Cr rows from the two
+vertical-neighbour half-rows (`row/2`, `row/2+1`, weight `row&1`) with horizontal bilinear
+(even col → `c/2`, odd col → average of `c/2`,`c/2+1`), then feed them to the existing, already-SIMD
+full-resolution `ycbcr_row_from_i16`. This gives full two-axis bilinear while reusing the tested
+full-res kernels and touching no intrinsic code. The superseded `ycbcr_row_from_i16_half` and its
+SIMD half-kernels are retained (`#[allow(dead_code)]`, with their tests) for reference.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers / correctness.** Scope is narrow: only `chroma_half` (IW44 v2+) pages are affected, which
+in the corpus is **only carte.djvu** — watchmaker, cable, chicken and colorbook are all IW44 v1
+(`chroma_half = false`) and render **byte-identical** (FNV unchanged), so the common path has zero
+regression and zero added cost. A new unit test `upsample_chroma_row_bilinear_values` pins the
+upsampler against hand-computed values; the carte determinism golden was regenerated to the bilinear
+output; all 35 djvu-iw44 tests + 610 lib tests pass.
+
+**Decision. Kept (quality).**
+
+**Reason.** Genuine quality win for chroma_half pages — smooth colour gradients replace 2×2 nearest
+replication — delivered via a row-level pre-upsample that reuses the existing SIMD YCbCr kernel
+instead of reimplementing four intrinsic paths, so it is correct on every target with no SIMD
+surgery. The non-chroma_half majority is provably unaffected (byte-identical). The per-row chroma
+upsample adds a small cost only on chroma_half pages (the issue's accepted ≤5% tradeoff), with no
+chroma_half render benchmark in the corpus to quantify it. Closes #422.
+
+---
+
 ### #445 — rolling 1-bit register for `m_r2` in `decode_ref_row` — **Reverted** (2026-06-24)
 
 **Issue.** #445 (from the perf-experiment-swarm). `decode_ref_row` reads `m_r2 = pix_row(mbm_r2,
