@@ -284,15 +284,56 @@ fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Result<Vec<u8>, Ti
     let bm = crate::jb2::decode(sjbz, dict.as_ref())
         .map_err(|e| TiffError::Encode(format!("JB2 decode failed: {e}")))?;
 
+    let wq = w as usize;
+    let mut pixels = vec![0u8; wq * h as usize];
+
+    // LUT byte-expansion: when the decoded mask covers the page, expand each
+    // packed mask byte to 8 Gray8 pixels via a 256-entry table instead of one
+    // `bm.get()` (stride mult + bit-extract) per pixel. MSB-first packing: pixel
+    // x is bit (7 - x%8) of byte x/8, matching `BILEVEL_GRAY8`.
+    if bm.width >= w && bm.height >= h {
+        let stride = bm.row_stride();
+        let nb_full = wq / 8;
+        let rem = wq % 8;
+        for y in 0..h as usize {
+            let row = &bm.data[y * stride..];
+            let out = &mut pixels[y * wq..(y + 1) * wq];
+            for bi in 0..nb_full {
+                out[bi * 8..bi * 8 + 8].copy_from_slice(&BILEVEL_GRAY8[row[bi] as usize]);
+            }
+            if rem > 0 {
+                let src = &BILEVEL_GRAY8[row[nb_full] as usize];
+                out[nb_full * 8..nb_full * 8 + rem].copy_from_slice(&src[..rem]);
+            }
+        }
+        return Ok(pixels);
+    }
+
+    // Fallback for the unexpected case where the mask is smaller than the page.
     // Bitmap pixels: true = black foreground, false = white background.
-    let mut pixels = Vec::with_capacity((w * h) as usize);
     for y in 0..h {
         for x in 0..w {
-            pixels.push(if bm.get(x, y) { 255u8 } else { 0u8 });
+            pixels[(y * w + x) as usize] = if bm.get(x, y) { 255u8 } else { 0u8 };
         }
     }
     Ok(pixels)
 }
+
+/// Maps each packed mask byte (MSB-first) to its 8 expanded Gray8 pixels —
+/// bit set (black) → 255, bit clear (white) → 0.
+const BILEVEL_GRAY8: [[u8; 8]; 256] = {
+    let mut lut = [[0u8; 8]; 256];
+    let mut mb = 0usize;
+    while mb < 256 {
+        let mut j = 0usize;
+        while j < 8 {
+            lut[mb][j] = if (mb >> (7 - j)) & 1 != 0 { 255u8 } else { 0u8 };
+            j += 1;
+        }
+        mb += 1;
+    }
+    lut
+};
 
 // ---- Tests ------------------------------------------------------------------
 
