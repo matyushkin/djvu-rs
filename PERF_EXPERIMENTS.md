@@ -5,6 +5,47 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #436 — MASK_EXPAND pre-expansion in B-series bilinear (upscale) — **Reverted** (2026-06-24)
+
+**Issue.** #436 (from the perf-experiment-swarm). Retry of G1b — pre-expand the mask row to
+per-pixel bytes via MASK_EXPAND in `composite_rows_bilinear_one`'s B-series path, replacing the
+per-pixel bit-extraction with a byte load. The validator argued G1b was measured at 72 DPI (which
+routes to `composite_rows_area_avg_one`, a different function) and that the *upscale* bilinear path
+(600/300 DPI) was never actually tested.
+
+**Approach.** Add a 4096-byte `g1b_buf`, expand the hoisted mask row via MASK_EXPAND (skipping
+blank rows, which #435 already short-circuits), and replace the `is_fg` bit-extraction with a
+`g1b_mask[px]` byte lookup (fallback bit-extraction for pages wider than the buffer). New
+`color_upscale_cached` benchmark (watchmaker @2×).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Output byte-identical at both 2× upscale and 0.5 downscale (FNV checksums unchanged).
+`color_upscale_cached` (watchmaker @2× = 5100×6602) vs `color_native_cached` control:
+
+| Round | control (ms) | upscale (ms) | ratio | Δ |
+|---|---|---|---|---|
+| 1 baseline | 175.8 | 652.7 | 3.71 | |
+| 1 with | 216.5 | 877.0 | 4.05 | +9.1% (regress) |
+| 2 baseline | 180.5 | 1713.6 | 9.50 | |
+| 2 with | 140.7 | 1240.5 | 8.82 | −7.2% (improve) |
+
+Contradictory; the upscale render (33.7 M pixels, 134 MB output buffer) swings 650–1700 ms
+between rounds — the measurement is dominated by memory-bandwidth/allocation noise, not the
+is_fg path.
+
+**Decision. Reverted.**
+
+**Reason.** Unlike #435 (a free short-circuit), #436 *adds* real per-row work: a 4 KB stack buffer
+plus a 319-iteration MASK_EXPAND expansion every non-blank row. The benefit it buys — replacing the
+~5-op is_fg extraction with a byte load — is a small fraction of the bilinear-bound per-pixel cost
+(`bilinear_from_rows` dominates), and #435 already removed the is_fg cost on the 52.6% blank rows.
+The benchmark cannot confirm any gain (R1 even regresses), and the upscale path is an uncommon
+real-world case (scans are rarely upscaled). Same outcome as G1b, now confirmed on the actual
+upscale path: the expansion overhead is not worth it where the inner loop is resampling-bound.
+
+---
+
 ### #435 — all-bg row fast path in B-series bilinear path (F2 analog) — **Kept** (2026-06-24)
 
 **Issue.** #435 (from the perf-experiment-swarm). The B-series bilinear path
