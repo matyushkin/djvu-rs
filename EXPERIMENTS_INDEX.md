@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| LANCZOS_HOIST (#448) | 2026-06-24 | Lanczos resample | **K** | **−22.5% Lanczos** | Hoist sin weights + row-major accumulate in vertical pass; bit-identical |
 | ROTATE_TILE (#447) | 2026-06-24 | rotate_pixmap | **K** | ~2–6% rotated (transpose much faster) | 32×32 tiled transpose for Cw90/Ccw90; cache-local vs strided. Byte-identical |
 | CLUSTER_DEDUP (#446) | 2026-06-24 | JB2 encoder | **K** | O(P²)→O(P) | pages_seen.contains→last() under monotonic page order; strictly ≤ cost, helps large multi-page encodes |
 | FGPAL_CACHE (#444) | 2026-06-24 | decode pipeline | R | +1% regression | Cache parsed FGbz palette; navm_fgbz chunk is 21 bytes (trivial parse) → cache overhead > saving |
@@ -153,7 +154,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - #441 hoist NEON splat consts in IDWT · #442 NEON s=2 row pass in IW44 IDWT
 - #443 F2 fast path for non-identity gamma · ~~#444 cache parsed FGbz palette~~ **REVERTED (+1%, 21-byte chunk)** → FGPAL_CACHE
 - #445 rolling 1-bit register in `decode_ref_row` · ~~#446 O(1) dedup in cluster_shared_symbols~~ **DONE (Kept, O(P²)→O(P))** → CLUSTER_DEDUP
-- ~~#447 cache-tiled transpose in rotate_pixmap~~ **DONE (Kept, ~2–6%)** → ROTATE_TILE · #448 Lanczos3 vertical-pass weight precompute
+- ~~#447 cache-tiled transpose in rotate_pixmap~~ **DONE (Kept, ~2–6%)** → ROTATE_TILE · ~~#448 Lanczos3 vertical-pass weight precompute~~ **DONE (Kept, −22.5%)** → LANCZOS_HOIST
 - #449 PDF streaming render-and-emit (peak RSS O(pages)→O(1))
 
 **Pre-existing (not from swarm):** #422 bilinear chroma upsampling · #423 Lanczos-3 resampling option

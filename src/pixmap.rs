@@ -89,34 +89,47 @@ pub(crate) fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
     let v_scale = src_h as f32 / dst_h as f32;
     let v_support = (3.0_f32 * v_scale.max(1.0)).ceil() as i32;
 
+    // #448: the vertical weight depends only on (oy, sy), not ox, so hoist the
+    // `lanczos3_kernel` evaluations out of the per-column loop (LLVM cannot LICM
+    // the opaque `f32::sin` calls). Accumulate row-major into per-column buffers so
+    // `mid` is read sequentially instead of striding by `dst_w*4` per sy. The
+    // per-column sum is over the same `sy` values in the same order, so the result
+    // is bit-identical to the column-major version.
     let mut out = Pixmap::new(dst_w, dst_h, 255, 255, 255, 255);
+    let dw = dst_w as usize;
+    let mut acc_r = vec![0.0_f32; dw];
+    let mut acc_g = vec![0.0_f32; dw];
+    let mut acc_b = vec![0.0_f32; dw];
     for oy in 0..dst_h {
         let cy = (oy as f32 + 0.5) * v_scale - 0.5;
         let y0 = (cy.floor() as i32 - v_support + 1).max(0);
         let y1 = (cy.floor() as i32 + v_support).min(src_h as i32 - 1);
 
-        for ox in 0..dst_w {
-            let mut r = 0.0_f32;
-            let mut g = 0.0_f32;
-            let mut b = 0.0_f32;
-            let mut w_sum = 0.0_f32;
+        acc_r.iter_mut().for_each(|v| *v = 0.0);
+        acc_g.iter_mut().for_each(|v| *v = 0.0);
+        acc_b.iter_mut().for_each(|v| *v = 0.0);
+        let mut w_sum = 0.0_f32;
 
-            for sy in y0..=y1 {
-                let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
-                let (pr, pg, pb) = mid.get_rgb(ox, sy as u32);
-                r += pr as f32 * w;
-                g += pg as f32 * w;
-                b += pb as f32 * w;
-                w_sum += w;
+        for sy in y0..=y1 {
+            let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
+            w_sum += w;
+            let row = &mid.data[sy as usize * dw * 4..];
+            for ox in 0..dw {
+                let base = ox * 4;
+                acc_r[ox] += row[base] as f32 * w;
+                acc_g[ox] += row[base + 1] as f32 * w;
+                acc_b[ox] += row[base + 2] as f32 * w;
             }
+        }
 
-            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+        let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+        for ox in 0..dst_w {
             out.set_rgb(
                 ox,
                 oy,
-                (r * norm).round().clamp(0.0, 255.0) as u8,
-                (g * norm).round().clamp(0.0, 255.0) as u8,
-                (b * norm).round().clamp(0.0, 255.0) as u8,
+                (acc_r[ox as usize] * norm).round().clamp(0.0, 255.0) as u8,
+                (acc_g[ox as usize] * norm).round().clamp(0.0, 255.0) as u8,
+                (acc_b[ox as usize] * norm).round().clamp(0.0, 255.0) as u8,
             );
         }
     }
