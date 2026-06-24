@@ -405,7 +405,11 @@ const BILEVEL_RGBA: [[u8; 32]; 256] = {
     while mb < 256 {
         let mut bit = 0usize;
         while bit < 8 {
-            let ch = if (mb >> (7 - bit)) & 1 != 0 { 0u8 } else { 255u8 };
+            let ch = if (mb >> (7 - bit)) & 1 != 0 {
+                0u8
+            } else {
+                255u8
+            };
             lut[mb][bit * 4] = ch;
             lut[mb][bit * 4 + 1] = ch;
             lut[mb][bit * 4 + 2] = ch;
@@ -756,7 +760,11 @@ fn mask_box_coverage(
     let byte_lo = x0 as usize / 8;
     let byte_hi = (x1 as usize).div_ceil(8); // exclusive
     let first_mask = 0xFF_u8 >> (x0 % 8);
-    let end_mask = if x1.is_multiple_of(8) { 0xFF_u8 } else { 0xFF_u8 << (8 - x1 % 8) };
+    let end_mask = if x1.is_multiple_of(8) {
+        0xFF_u8
+    } else {
+        0xFF_u8 << (8 - x1 % 8)
+    };
     let mut count = 0u32;
     if byte_hi == byte_lo + 1 {
         // Entire x-range fits in one byte.
@@ -1294,9 +1302,12 @@ fn decode_mask<'a>(
 /// Delegates to [`DjVuPage::extract_mask_indexed`] so that the shared DJVI
 /// dictionary (`shared_djbz`) is used as a fallback when there is no inline
 /// Djbz chunk.
-fn decode_mask_indexed<'a>(
-    page: &'a DjVuPage,
-) -> Result<Option<(Cow<'a, crate::bitmap::Bitmap>, Cow<'a, [i32]>)>, RenderError> {
+/// A decoded indexed mask: the JB2 bitmap plus its per-pixel blit-index map,
+/// each borrowed from the page cache (`Cow::Borrowed`) or freshly decoded
+/// (`Cow::Owned`).
+type IndexedMask<'a> = (Cow<'a, crate::bitmap::Bitmap>, Cow<'a, [i32]>);
+
+fn decode_mask_indexed<'a>(page: &'a DjVuPage) -> Result<Option<IndexedMask<'a>>, RenderError> {
     match page.decoded_mask_indexed() {
         Some((bm, blit)) => Ok(Some((Cow::Borrowed(bm), Cow::Borrowed(blit.as_slice())))),
         // Cache miss with a mask chunk present means decode failed; re-run to
@@ -1961,7 +1972,7 @@ fn composite_rows_bilevel_one(
         // the `.min(page_w-1)` clamp a no-op (mask.width == page_w for the 1:1 mask).
         let out_w = row_buf.len() / 4;
         let ox0 = ctx.offset_x as usize;
-        if ctx.offset_x % 8 == 0 && ox0 + out_w <= mask.width as usize {
+        if ctx.offset_x.is_multiple_of(8) && ox0 + out_w <= mask.width as usize {
             let mb0 = ox0 / 8; // first source mask byte (0 for full-page renders)
             let nb_full = out_w / 8; // number of full mask bytes (8 pixels each)
             let nb_rem = out_w % 8; // trailing pixels from a partial mask byte
