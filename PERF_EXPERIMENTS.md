@@ -5,6 +5,39 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #449 — stream PDF page render→emit→drop in the sequential path — **Kept** (2026-06-24)
+
+**Issue.** #449 (from the perf-experiment-swarm). `djvu_to_pdf_impl` collected *all*
+`RenderedPage` bodies into a `Vec` before emitting any, holding O(page_count × body_size) in
+memory. A source comment explicitly deferred a fix to "a separate issue."
+
+**Approach.** Factor the per-page emit (rendered body, or blank-page fallback) into an `emit_one`
+closure. The `parallel` branch keeps the rayon `collect()` (required) + emit loop. The
+`#[cfg(not(feature = "parallel"))]` branch now renders, emits, and drops one page at a time, so at
+most one `RenderedPage` body is live (peak from page bodies O(pages)→O(1); mirrors TIFF_STREAM).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** PDF output **byte-identical** (same length + FNV on navm_fgbz 6 pages / watchmaker
+12 pages) — the emit order and id allocation are unchanged. Peak RSS (`/usr/bin/time -l`) was
+*within noise* on both available multi-page docs: watchmaker 12 pp (75.9 vs 73.2 MB) and
+pathogenic_bacteria 520 pp (72.1 vs 72.4 MB). Neither makes body-accumulation the peak driver —
+watchmaker has only 12 pages (~0.5 MB bodies) and pathogenic's pages deflate to ~2 KB each (1.2 MB
+PDF total); in both, peak is dominated by the per-page 33 MB render pixmap and decode caches.
+
+**Decision. Kept.**
+
+**Reason.** Structurally the streaming path holds ≤ the bodies the collect path does (1 vs N), so
+the page-body contribution to peak RSS can only drop — the watchmaker +2.7 MB is allocator/measurement
+noise (the change cannot increase how many bodies are retained). Byte-identical output, and it
+removes a documented deferred footgun: a real document with *many large-body pages* (e.g. a
+300-page colour scan, ~1 MB deflated/page → ~300 MB of retained bodies) would see a large peak-RSS
+cut. No corpus fixture combines many pages with large bodies, so the win isn't benchmark-visible,
+but the change is strictly-safe and correct — same disposition as #446. The parallel path is
+unchanged. Closes #449.
+
+---
+
 ### #448 — hoist Lanczos vertical-pass weights + row-major accumulate — **Kept** (2026-06-24)
 
 **Issue.** #448 (from the perf-experiment-swarm). In `scale_lanczos3`'s vertical pass, the weight
