@@ -206,7 +206,7 @@ impl<'a> PageEncoder<'a> {
                 // address foreground colors per blitted component.
                 let sjbz = jb2_encode::encode_jb2_dict(&seg.mask);
                 let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
-                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz);
+                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None);
 
                 let mut chunks =
                     Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()));
@@ -240,6 +240,98 @@ impl<'a> PageEncoder<'a> {
             )),
         }
     }
+}
+
+/// Encode a directory of colour pages as a single bundled DJVM with a **shared
+/// Djbz dictionary** across pages (layered Quality/Archival profile).
+///
+/// Connected components that appear on at least `shared_dict_page_threshold`
+/// distinct pages are promoted into one shared `FORM:DJVI` Djbz; each page's
+/// `FORM:DJVU` then carries `INCL` + a `Sjbz` that references the shared
+/// dictionary, alongside its own `BG44`(s) and optional `FGbz`. This avoids the
+/// per-page dictionary duplication of independent layered encoding (#452): on
+/// text-heavy multi-page scans the mask shrinks ~35% (1.6× → ~1.04× of the
+/// DjVuLibre baseline).
+///
+/// `FGbz` is rebuilt from the shared-dictionary `Sjbz` so its per-blit palette
+/// indices match the emitted symbol stream. With fewer than two pages, or a
+/// threshold larger than the page count, no symbols qualify and each page is
+/// encoded with its own dictionary (still a valid bundle).
+pub fn encode_djvm_layered_shared(
+    pixmaps: &[Pixmap],
+    quality: EncodeQuality,
+    dpi: u16,
+    segment_options: Option<SegmentOptions>,
+    shared_dict_page_threshold: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    if !matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
+        return Err(EncodeError::Unsupported(
+            "encode_djvm_layered_shared requires the Quality or Archival profile",
+        ));
+    }
+    let opts = segment_options.unwrap_or_else(|| match quality {
+        EncodeQuality::Archival => SegmentOptions {
+            bg_subsample: 6,
+            ..SegmentOptions::default()
+        },
+        _ => SegmentOptions::default(),
+    });
+
+    // Segment every page once (mask + background), then cluster the masks.
+    let segs: Vec<_> = pixmaps.iter().map(|pm| segment_page(pm, &opts)).collect();
+    let masks: Vec<Bitmap> = segs.iter().map(|s| s.mask.clone()).collect();
+    let shared = jb2_encode::cluster_shared_symbols(&masks, shared_dict_page_threshold);
+    let has_shared = !shared.is_empty();
+
+    let dict_id = "dict0001.djvi";
+    let mut comps: Vec<(Vec<u8>, bool, String)> = Vec::new();
+    // Decoded form of the shared dictionary, needed to resolve the per-page Sjbz
+    // blit maps when rebuilding FGbz (the Sjbz references the dict via INCL).
+    let shared_dict = if has_shared {
+        let djbz = jb2_encode::encode_jb2_djbz(&shared);
+        let dict = crate::jb2::decode_dict(&djbz, None).ok();
+        let djvi_body = jb2_encode::build_form_body(b"DJVI", &[(*b"Djbz", djbz)]);
+        comps.push((djvi_body, false, dict_id.to_string()));
+        dict
+    } else {
+        None
+    };
+
+    for (idx, (pm, seg)) in pixmaps.iter().zip(&segs).enumerate() {
+        let w = u16::try_from(pm.width)
+            .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
+        let h = u16::try_from(pm.height)
+            .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
+
+        let sjbz = if has_shared {
+            jb2_encode::encode_jb2_dict_with_shared(&seg.mask, &shared)
+        } else {
+            jb2_encode::encode_jb2_dict(&seg.mask)
+        };
+        // FGbz is derived from this page's Sjbz blit map, so it must be built
+        // from the shared-dictionary stream (passing the shared dict to resolve it).
+        let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, shared_dict.as_ref());
+        let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
+
+        let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+        chunks.push((*b"INFO", encode_info(w, h, dpi)));
+        if has_shared {
+            chunks.push((*b"INCL", dict_id.as_bytes().to_vec()));
+        }
+        chunks.push((*b"Sjbz", sjbz));
+        for body in bg44_chunks {
+            chunks.push((*b"BG44", body));
+        }
+        if let Some(chunk) = fgbz
+            && let Chunk::Leaf { id, data } = chunk.into_leaf()
+        {
+            chunks.push((id, data));
+        }
+        let body = jb2_encode::build_form_body(b"DJVU", &chunks);
+        comps.push((body, true, format!("p{:04}.djvu", idx + 1)));
+    }
+
+    Ok(jb2_encode::assemble_djvm_bundle(comps))
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -300,8 +392,15 @@ impl ColorAccum {
     }
 }
 
-fn foreground_fgbz(pm: &Pixmap, mask: &Bitmap, sjbz: &[u8]) -> Option<EncodedChunk> {
-    let (decoded_mask, blit_map) = crate::jb2::decode_indexed(sjbz, None).ok()?;
+fn foreground_fgbz(
+    pm: &Pixmap,
+    mask: &Bitmap,
+    sjbz: &[u8],
+    shared_dict: Option<&crate::jb2::Jb2Dict>,
+) -> Option<EncodedChunk> {
+    // The Sjbz may reference an external shared Djbz (layered shared-dict bundle),
+    // so the dictionary must be supplied to decode its blit map.
+    let (decoded_mask, blit_map) = crate::jb2::decode_indexed(sjbz, shared_dict).ok()?;
     if decoded_mask.width != mask.width || decoded_mask.height != mask.height {
         return None;
     }
@@ -627,6 +726,37 @@ mod tests {
         let page = doc.page(0).expect("page");
         assert!(page.raw_chunk(b"Sjbz").is_some());
         assert!(!page.all_chunks(b"BG44").is_empty());
+    }
+
+    #[test]
+    fn layered_shared_djbz_round_trips_with_incl() {
+        // #452: two identical colour pages — their mask CCs are byte-exact across
+        // pages, so they are promoted to one shared Djbz, and each page references
+        // it via INCL while keeping its own BG44/FGbz.
+        let pm = mixed_lighting_fixture();
+        let pages = [pm.clone(), pm.clone()];
+        let bytes = encode_djvm_layered_shared(&pages, EncodeQuality::Quality, 300, None, 2)
+            .expect("layered shared encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            assert!(page.raw_chunk(b"Sjbz").is_some(), "page {i} Sjbz");
+            assert!(!page.all_chunks(b"BG44").is_empty(), "page {i} BG44");
+            assert!(
+                page.raw_chunk(b"INCL").is_some(),
+                "page {i} INCL → shared dict"
+            );
+            // The shared-dictionary Sjbz must still decode to the page mask.
+            page.extract_mask()
+                .expect("mask decode")
+                .expect("mask present");
+        }
+        assert!(
+            bytes.windows(4).any(|w| w == b"Djbz"),
+            "shared Djbz form present"
+        );
     }
 
     #[test]

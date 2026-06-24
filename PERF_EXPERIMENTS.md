@@ -5,6 +5,55 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #452 — shared Djbz dictionary for layered (quality/archival) multi-page encode — **Kept (size)** (2026-06-24)
+
+**Issue.** #452. The layered (`--quality quality|archival`) multi-page directory encode emitted each
+page's JB2 mask with its **own** dictionary (`PageEncoder::from_pixmap` per page + `djvm::merge`),
+re-encoding shared glyphs on every page. The lossless profile already shares a Djbz dictionary;
+layered did not (the CLI even printed "--shared-dict-pages is ignored for layered directory encode").
+#290 had skipped it to avoid the rejected Hamming clustering — but `cluster_shared_symbols` is now
+byte-exact (max_diff = 0), so that rationale is obsolete.
+
+**Root-cause finding.** Per-file measurement showed the encoder size gap vs DjVuLibre is **not** in
+the codec or symbol matching — 99.1% of components are exact dictionary copies (rec-7). The bloat is
+purely the per-page dictionary duplication: on DjVu3Spec the independent dict is 1.627× the original
+bytes, while a shared-Djbz bundle is 1.044× (−35.8%).
+
+**Approach.** New `encode_djvm_layered_shared`: segment every page once (mask + BG), cluster the
+masks (`cluster_shared_symbols`), emit one `FORM:DJVI` Djbz, and build each page's `FORM:DJVU` as
+`INFO + INCL + Sjbz(shared-dict) + BG44… + FGbz`. FGbz is rebuilt from the shared-dictionary Sjbz so
+its per-blit palette indices match — this required threading the decoded shared dict into
+`foreground_fgbz` (its `decode_indexed(sjbz, None)` would otherwise fail on an INCL-referencing Sjbz
+and silently drop the FGbz palette; the CLI directory tests caught it). Factored the DIRM/offset
+assembly out of
+`encode_djvm_bundle_jb2_with_shared` into a shared `assemble_djvm_bundle` + `build_form_body` helper
+(existing shared-dict/djbz tests confirm the refactor is behaviour-preserving). Wired into the CLI
+layered branch (now honours `--shared-dict-pages`).
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Layered Quality encode of rendered pages, shared vs independent bundle:
+
+| Doc | pages | independent | shared Djbz | Δ |
+|---|---|---|---|---|
+| DjVu3Spec_bundled | 71 | 445,940 B | 293,558 B | **−34.2%** |
+| watchmaker | 12 | 140,864 B | 133,076 B | **−5.5%** |
+
+Both shared bundles parse to the correct page count, render every page, and keep FGbz on every page
+that had it (12/12 for watchmaker, 2/71 for the mostly-text spec) — round-trip verified.
+New test `layered_shared_djbz_round_trips_with_incl` checks the DJVI/INCL structure + mask decode;
+610 lib tests pass; std/no_std/wasm/parallel + all-features clippy clean.
+
+**Decision. Kept (size).**
+
+**Reason.** The largest unaddressed gap vs DjVuLibre was archive **size** on multi-page layered
+colour scans, and it was entirely per-page dictionary duplication — fixed by reusing the byte-exact
+clustering the lossless path already had. The win scales with cross-page symbol repetition (−34% on
+a text-dense spec, −9% on a looser document) and is correct (mask + BG44 + FGbz preserved, FGbz
+rebuilt from the shared Sjbz). Single-page and lossless paths are unchanged. Closes #452.
+
+---
+
 ### #422 — bilinear chroma upsampling for chroma_half IW44 pages — **Kept (quality)** (2026-06-24)
 
 **Issue.** #422. When an IW44 image has `chroma_half = true` (IW44 v2+), the Cb/Cr planes are

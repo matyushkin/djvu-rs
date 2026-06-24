@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| LAYERED_SHARED_DJBZ (#452) | 2026-06-24 | JB2 encoder (size) | **K** | **−34% (spec) / −5.5% (watchmaker)** | Shared Djbz for layered multi-page encode; closes the real DjVuLibre size gap (per-page dict dup). Round-trip verified |
 | CHROMA_BILINEAR (#422) | 2026-06-24 | IW44 YCbCr | **K** | quality (chroma_half) | Bilinear chroma upsampling via per-row pre-upsample + reuse full-res SIMD kernel; only IW44 v2 pages, common path byte-identical |
 | REFROW_REG (#445) | 2026-06-24 | JB2 decode | R | no benefit | Rolling m_r2 register; col_shift unbounded so guard can't drop; safe version just relocates read |
 | IDWT_S2_NEON (#442) | 2026-06-24 | IW44 IDWT NEON | X | incorrect premise | Reuse s1_row for s==2 fails correctness: s==2 ⟹ sd==1 (stride-2 cols), s1_row assumes stride-1 |
