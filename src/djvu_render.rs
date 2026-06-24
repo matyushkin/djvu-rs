@@ -861,11 +861,31 @@ fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
             let w = src.height;
             let h = src.width;
             let mut out = Pixmap::white(w, h);
-            for y in 0..src.height {
-                for x in 0..src.width {
-                    let (r, g, b) = src.get_rgb(x, y);
-                    out.set_rgb(src.height - 1 - y, x, r, g, b);
+            // #447: 32×32 tiled transpose. The naïve per-pixel write strides the
+            // destination by `out.width*4` bytes (a cache miss per pixel); tiling
+            // keeps both the source read and destination write within a few cache
+            // lines per tile. 4-byte copy is exact: rendered source pixmaps carry
+            // alpha=255 and `Pixmap::white` pre-fills alpha=255.
+            const TILE: u32 = 32;
+            let (sw, sh, ow) = (src.width as usize, src.height as usize, w as usize);
+            let mut ty = 0;
+            while ty < src.height {
+                let mut tx = 0;
+                while tx < src.width {
+                    let y_end = (ty + TILE).min(src.height);
+                    let x_end = (tx + TILE).min(src.width);
+                    for y in ty..y_end {
+                        let src_row = y as usize * sw * 4;
+                        let dst_col = sh - 1 - y as usize;
+                        for x in tx..x_end {
+                            let si = src_row + x as usize * 4;
+                            let di = (x as usize * ow + dst_col) * 4;
+                            out.data[di..di + 4].copy_from_slice(&src.data[si..si + 4]);
+                        }
+                    }
+                    tx += TILE;
                 }
+                ty += TILE;
             }
             out
         }
@@ -883,11 +903,26 @@ fn rotate_pixmap(src: Pixmap, rotation: crate::info::Rotation) -> Pixmap {
             let w = src.height;
             let h = src.width;
             let mut out = Pixmap::white(w, h);
-            for y in 0..src.height {
-                for x in 0..src.width {
-                    let (r, g, b) = src.get_rgb(x, y);
-                    out.set_rgb(y, src.width - 1 - x, r, g, b);
+            // #447: 32×32 tiled transpose (see Cw90).
+            const TILE: u32 = 32;
+            let (sw, ow) = (src.width as usize, w as usize);
+            let mut ty = 0;
+            while ty < src.height {
+                let mut tx = 0;
+                while tx < src.width {
+                    let y_end = (ty + TILE).min(src.height);
+                    let x_end = (tx + TILE).min(src.width);
+                    for y in ty..y_end {
+                        let src_row = y as usize * sw * 4;
+                        for x in tx..x_end {
+                            let si = src_row + x as usize * 4;
+                            let di = ((sw - 1 - x as usize) * ow + y as usize) * 4;
+                            out.data[di..di + 4].copy_from_slice(&src.data[si..si + 4]);
+                        }
+                    }
+                    tx += TILE;
                 }
+                ty += TILE;
             }
             out
         }
