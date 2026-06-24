@@ -5,6 +5,43 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #432 — byte-level early-exit scan in `mask_box_any` — **Reverted** (2026-06-24)
+
+**Issue.** #432 (from the perf-experiment-swarm). `mask_box_any` (per-pixel foreground test in the
+colour area-average downscale path, `composite_rows_area_avg_one`) scanned the footprint with
+per-pixel `mask.get()` and early-exit. Hypothesis: apply the byte-level boundary-masking from the
+kept POPCNT experiment (`mask_box_coverage`) to test "any bit set" faster.
+
+**Approach.** Replace the per-pixel loop with the same `byte_lo`/`byte_hi`/`first_mask`/`end_mask`
+boundary computation as `mask_box_coverage`, testing `& mask != 0` per byte with early-exit.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** `render_colorbook` (colorbook @150/400, area-avg path), clean alternating runs with
+tight, reproducible CIs:
+
+| Run | render_colorbook |
+|---|---|
+| baseline | 3.620 ms |
+| with change | 3.805 ms |
+| baseline again | 3.616 ms |
+
+Baseline reproduces exactly (3.620 / 3.616 ms); the change is a clean **+5.1% regression** — not
+thermal noise. 102 render tests pass (output correct), but it is slower.
+
+**Decision. Reverted.**
+
+**Reason.** The POPCNT win does **not** transfer. `mask_box_coverage` must scan the *entire*
+footprint (it counts bits), so byte-popcount strictly beats per-pixel. `mask_box_any` has
+**early-exit** — the per-pixel loop returns on the first set bit, which for text-on-white is cheap.
+At colorbook's downscale the footprint is only ~3×3 pixels, so the per-call setup of four boundary
+quantities (`byte_lo`, `byte_hi`, `first_mask`, `end_mask`) plus the single-vs-multi-byte branch
+costs more than the handful of `get()` calls it saves. Byte-scanning only pays when the footprint
+is large (POPCNT's −24% was at 72 DPI / 4×4) *and* there is no early exit. Mirror experiment to G2:
+the simpler code the compiler already handles well wins at small footprints.
+
+---
+
 ### #431 — LUT byte-expansion in bilevel TIFF export (`extract_bilevel_pixels`) — **Kept** (2026-06-24)
 
 **Issue.** #431 (from the perf-experiment-swarm). `extract_bilevel_pixels` expanded the packed JB2
