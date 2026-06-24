@@ -5,6 +5,41 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### #431 — LUT byte-expansion in bilevel TIFF export (`extract_bilevel_pixels`) — **Kept** (2026-06-24)
+
+**Issue.** #431 (from the perf-experiment-swarm). `extract_bilevel_pixels` expanded the packed JB2
+mask to a Gray8 buffer with one `bm.get(x, y)` per pixel (stride multiply + byte read + bit-shift
++ AND + branch), w×h times (8.4 M for an A4 page).
+
+**Approach.** Add `BILEVEL_GRAY8: [[u8; 8]; 256]` mapping each packed mask byte (MSB-first) to its
+8 Gray8 pixels. When the mask covers the page (`bm.width >= w && bm.height >= h`), iterate the
+packed rows byte-by-byte and `copy_from_slice` 8 pixels per byte (trailing partial byte handled),
+replacing 8 per-pixel `bm.get()` calls with one table lookup + vectorised copy. Per-pixel
+`bm.get()` fallback kept for the unexpected smaller-mask case. Same LUT idea as P2/BILEVEL_RGBA
+but Gray8 instead of RGBA.
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max, aarch64, Rust stable 1.88.
+
+**Numbers.** Full `TiffMode::Bilevel` export of cable_1973 (2 pages — JB2 decode + expansion +
+Deflate), best-of-30 timing:
+
+| Round | baseline (ms) | with LUT (ms) | Δ |
+|---|---|---|---|
+| 1 | 60.8 | 49.5 | **−18.7%** |
+| 2 | 59.7 | 48.8 | **−18.2%** |
+
+Consistent **~18%** on the whole bilevel export (the expansion was a large fraction of the
+non-Deflate work). 16 `tiff_export` tests pass (incl. bilevel pixel-equality and black-pixel
+checks).
+
+**Decision. Kept.**
+
+**Reason.** Replaces 8.4 M per-pixel bit-extracts with ~1 M table lookups + vectorised copies;
+output is byte-identical by construction (same MSB-first bit mapping). Stacks with the #430 Deflate
+change in the same path. Closes #431.
+
+---
+
 ### #430 — Deflate-compressed bilevel TIFF export (size reduction) — **Kept** (2026-06-24)
 
 **Issue.** #430 (from the perf-experiment-swarm) asked for 1-bit TIFF output for bilevel pages
