@@ -37,6 +37,12 @@ path = "fuzz_targets/fuzz_full.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_encode"
+path = "fuzz_targets/fuzz_encode.rs"
+test = false
+doc = false
+
 [workspace]
 
 [dependencies]
