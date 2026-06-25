@@ -262,3 +262,48 @@ jobs:
 
       - name: Security audit (cargo audit)
         run: cargo audit
+
+  # ── Code coverage (report-only, non-gating) ─────────────────────────────────
+  # Surfaces the line-coverage trend and an lcov.info artifact. Intentionally not
+  # a required check / no --fail-under gate: it informs review, it does not block.
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Collect once, then render both a human summary and the lcov artifact from
+      # the same profile data (benches/examples/fuzz harnesses excluded).
+      - name: Collect coverage
+        run: cargo llvm-cov --workspace --features cli --no-report
+
+      - name: Coverage summary
+        run: |
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex '(benches|examples|fuzz)/'
+
+      - name: Export lcov
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info \
+            --ignore-filename-regex '(benches|examples|fuzz)/'
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error

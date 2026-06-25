@@ -113,4 +113,47 @@ else
   echo "skipped" > "$OUT/ddjvu_timing.txt"
 fi
 
+# ── 6. cjb2 / c44 encode timing ──────────────────────────────────────────────
+# Encode-speed reference for DjVuLibre (the criterion `jb2_encode` /
+# `iw44_encode_color` benches are the djvu-rs side). ddjvu extracts a raster
+# from a corpus page, then cjb2 (bilevel) / c44 (colour) re-encode it. This is a
+# speed reference only — cjb2/c44 use their own default quality, so it is not a
+# size/quality-matched comparison.
+if command -v cjb2 &>/dev/null && command -v c44 &>/dev/null && command -v ddjvu &>/dev/null; then
+  echo "→ cjb2 / c44 encode timing (5 runs per case)"
+  python3 - <<'PYEOF' | tee "$OUT/encode_timing.txt"
+import subprocess, statistics, time, tempfile, os
+
+def mean_ms(cmd, runs=5):
+    subprocess.run(cmd, capture_output=True)  # warm-up
+    ts = []
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        subprocess.run(cmd, capture_output=True)
+        ts.append((time.perf_counter() - t0) * 1000)
+    return statistics.mean(ts)
+
+tmp = tempfile.mkdtemp()
+# bilevel page -> cjb2
+pbm = os.path.join(tmp, "m.pbm")
+subprocess.run(["ddjvu", "-page=1", "-format=pbm",
+                "tests/corpus/cable_1973_100133.djvu", pbm], capture_output=True)
+if os.path.exists(pbm) and os.path.getsize(pbm) > 0:
+    print(f"cjb2 cable_bilevel: {mean_ms(['cjb2', pbm, os.path.join(tmp, 'm.djvu')]):.1f} ms")
+else:
+    print("cjb2 cable_bilevel: skipped (no PBM)")
+# colour page -> c44
+ppm = os.path.join(tmp, "c.ppm")
+subprocess.run(["ddjvu", "-page=1", "-format=ppm",
+                "tests/corpus/watchmaker.djvu", ppm], capture_output=True)
+if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+    print(f"c44 watchmaker_color: {mean_ms(['c44', ppm, os.path.join(tmp, 'c.djvu')]):.1f} ms")
+else:
+    print("c44 watchmaker_color: skipped (no PPM)")
+PYEOF
+else
+  echo "cjb2/c44 not found — skipping encode timing"
+  echo "skipped" > "$OUT/encode_timing.txt"
+fi
+
 echo "→ Done. Results written to $OUT/"
