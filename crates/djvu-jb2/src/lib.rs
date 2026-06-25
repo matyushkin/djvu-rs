@@ -442,6 +442,14 @@ const ZP_EOF_SLACK_BYTES: usize = 16;
 // blit work is bounded separately below; 64 MP was too low for the
 // `pathogenic_bacteria_1896.djvu` corpus (#258).
 pub(crate) const MAX_TOTAL_SYMBOL_PIXELS: usize = 256 * 1024 * 1024;
+// Per-PAGE cumulative decoded-symbol work (Sjbz). A page mask is at most a few MP
+// of foreground; even dense pages with refinement records stay well under this.
+// The 256 MP ceiling above is needed for the cross-page *shared dictionary* (Djbz,
+// #258) but is far too loose for a single page: a crafted sub-1 KB Sjbz of matched-
+// refinement records can otherwise decode ~48 MP (≈0.6 s native, a libFuzzer
+// timeout under ASAN). Bounding per-page symbol work stops that amplification while
+// leaving the dictionary path on the higher ceiling.
+const MAX_PAGE_SYMBOL_PIXELS: usize = 32 * 1024 * 1024;
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
@@ -1536,6 +1544,9 @@ fn decode_image_with_pool(
             return Err(Jb2Error::TooManyRecords);
         }
         record_count += 1;
+        if total_sym_pixels > MAX_PAGE_SYMBOL_PIXELS {
+            return Err(Jb2Error::ImageTooLarge);
+        }
         let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
 
         match rtype {
@@ -1828,6 +1839,9 @@ fn decode_image_indexed_with_pool(
             return Err(Jb2Error::TooManyRecords);
         }
         record_count += 1;
+        if total_sym_pixels > MAX_PAGE_SYMBOL_PIXELS {
+            return Err(Jb2Error::ImageTooLarge);
+        }
         let rtype = decode_num(&mut zp, &mut record_type_ctx, 0, 11);
 
         match rtype {

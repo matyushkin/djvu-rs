@@ -5,6 +5,36 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### JB2 decode — per-page symbol-pixel cap (fuzz `fuzz_jb2` timeout) — **Kept (robustness)** (2026-06-25)
+
+**Issue.** CI `Fuzz / fuzz_jb2` was intermittently red: `libFuzzer: timeout after 10 s`.
+Pre-existing (JB2 decode core untouched this session), random-seed → intermittent.
+
+**Diagnosis.** Downloaded the CI artifact (a 409-byte input). Locally it decodes in
+~626 ms native (×~16 under ASAN + slower CI CPU ≈ the 10 s timeout). Instrumented
+`decode_image_with_pool`: the input is **23 386 type-5 (matched-refinement) records**
+decoding **47.7 MP** of symbols from ~409 real bytes — a low-entropy stream amplifies
+~116 K px/byte. Decode is linear (~13 ns/px, no quadratic); the cost is simply that the
+existing caps (`MAX_TOTAL_SYMBOL_PIXELS = 256 MP`) permit far more per-page work than any
+real page needs. A larger crafted Sjbz could reach the full 256 MP (~3.3 s native).
+
+**Approach.** Added `MAX_PAGE_SYMBOL_PIXELS = 32 MP`, checked at the top of the two
+*page* decode loops (`decode_image_with_pool`, `decode_image_indexed_with_pool`). The
+256 MP ceiling stays for the cross-page shared **dictionary** path
+(`decode_dictionary_with_pool`), which legitimately needs > 64 MP for
+`pathogenic_bacteria_1896` (#258) — so the caps are split, not lowered globally.
+
+**Numbers.** Slow input: 626 ms → **367 ms** native, now `Err(ImageTooLarge)` (cap fires
+at 32 MP, before the ~48 MP it would otherwise reach). ×~16 ASAN ≈ 5.9 s — comfortably
+under the 10 s fuzz timeout. Worst-case per-page decode is now hard-bounded at 32 MP
+regardless of input size. Full suite green: 53 djvu-jb2 + 611 lib tests, incl. the 517-page
+`pathogenic_bacteria` corpus — no valid page needs > 32 MP.
+
+**Decision: Kept.** Interop-safe (decoder-only reject of an over-budget stream; no valid
+DjVuLibre file affected). Regression-guarded: the exact artifact is added to the
+`fuzz_jb2` seed corpus and to `crates/djvu-jb2/tests/dos_bounds.rs` (asserts
+`Err(ImageTooLarge)`).
+
 ### IW44 encoder-size swarm — other candidates assessed — **Reverted / Rejected** (2026-06-25)
 
 After IW44-1 (the one big win, −9.1% BG44), the remaining swarm candidates were assessed and **not**
