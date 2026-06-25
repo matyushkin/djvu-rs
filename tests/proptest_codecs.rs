@@ -15,6 +15,8 @@ use djvu_rs::annotation::{
 use djvu_rs::bzz_new::bzz_decode;
 use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
+use djvu_rs::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
+use djvu_rs::iw44_new::Iw44Image;
 use djvu_rs::segment::{SegmentOptions, segment_page};
 use djvu_rs::smmr::{decode_smmr, encode_smmr};
 use djvu_rs::{bzz_encode, bzz_new, jb2, jb2_encode};
@@ -385,6 +387,97 @@ fn arb_pixmap(max_w: u32, max_h: u32) -> impl Strategy<Value = Pixmap> {
 
 fn bt601_lum(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) * 306 + (g as u32) * 601 + (b as u32) * 117) >> 10
+}
+
+/// Decode a full IW44 chunk stream (encoder output) back to a `Pixmap`.
+fn decode_iw44(chunks: &[Vec<u8>]) -> Option<Pixmap> {
+    let mut img = Iw44Image::new();
+    for c in chunks {
+        img.decode_chunk(c).ok()?;
+    }
+    img.to_rgb().ok()
+}
+
+proptest! {
+    // IW44 is lossy, so we can't assert bit-exact round-trip. The property under
+    // test is *robustness*: encoding any RGBA pixmap must not panic, must produce
+    // a decodable stream, and that stream must decode back to the same W×H. Few
+    // cases × small dims keeps the wavelet+ZP cost off the CI critical path.
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// IW44 colour encoder: no panic, dimensional round-trip for any pixmap.
+    #[test]
+    fn iw44_encode_robustness(pm in arb_pixmap(48, 48)) {
+        let chunks = encode_iw44_color(&pm, &Iw44EncodeOptions::default());
+        prop_assert!(!chunks.is_empty(), "encoder produced no chunks");
+        let decoded = decode_iw44(&chunks).expect("IW44 re-decode failed");
+        prop_assert_eq!(decoded.width, pm.width);
+        prop_assert_eq!(decoded.height, pm.height);
+    }
+}
+
+/// Degenerate / boundary dimensions exercised explicitly (proptest's random
+/// strategies rarely hit the exact 1-px and odd-vs-even edges). Every encoder
+/// must handle these without panicking; the lossless ones must round-trip.
+#[test]
+fn encoders_survive_degenerate_dimensions() {
+    const DIMS: &[(u32, u32)] = &[
+        (1, 1),
+        (1, 5),
+        (5, 1),
+        (2, 2),
+        (2, 3),
+        (3, 2),
+        (7, 1),
+        (1, 7),
+        (15, 17),
+        (17, 15),
+        (64, 1),
+        (1, 64),
+    ];
+
+    for &(w, h) in DIMS {
+        // ---- bilevel encoders (lossless → must round-trip) ----
+        let mut bm = Bitmap::new(w, h);
+        // a deterministic checkerboard so the bitmap isn't trivially all-white
+        for y in 0..h {
+            for x in 0..w {
+                if (x ^ y) & 1 == 0 {
+                    bm.set_black(x, y);
+                }
+            }
+        }
+        let jb2_direct = jb2_encode::encode_jb2(&bm);
+        let dec = jb2::decode(&jb2_direct, None)
+            .unwrap_or_else(|e| panic!("jb2 direct decode failed at {w}x{h}: {e:?}"));
+        assert_eq!(
+            (dec.width, dec.height),
+            (w, h),
+            "jb2 direct dims at {w}x{h}"
+        );
+
+        let jb2_dict = jb2_encode::encode_jb2_dict(&bm);
+        let dec = jb2::decode(&jb2_dict, None)
+            .unwrap_or_else(|e| panic!("jb2 dict decode failed at {w}x{h}: {e:?}"));
+        assert_eq!((dec.width, dec.height), (w, h), "jb2 dict dims at {w}x{h}");
+
+        let smmr = encode_smmr(&bm);
+        let dec =
+            decode_smmr(&smmr).unwrap_or_else(|e| panic!("smmr decode failed at {w}x{h}: {e:?}"));
+        assert_eq!((dec.width, dec.height), (w, h), "smmr dims at {w}x{h}");
+
+        // ---- IW44 colour encoder (lossy → dimensional round-trip only) ----
+        let mut pm = Pixmap::white(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 37 + y * 91) & 0xff) as u8;
+                pm.set_rgb(x, y, v, v.wrapping_add(40), v.wrapping_add(80));
+            }
+        }
+        let chunks = encode_iw44_color(&pm, &Iw44EncodeOptions::default());
+        let dec = decode_iw44(&chunks).unwrap_or_else(|| panic!("IW44 decode failed at {w}x{h}"));
+        assert_eq!((dec.width, dec.height), (w, h), "iw44 dims at {w}x{h}");
+    }
 }
 
 proptest! {
