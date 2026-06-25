@@ -122,12 +122,15 @@ jobs:
           echo "--- Render benchmarks ---"
           grep "bench:" render_bench.txt || echo "(no render results)"
           echo ""
-          echo "--- vs DjVuLibre ---"
+          echo "--- vs DjVuLibre (decode/render) ---"
           python3 scripts/djvulibre_compare.py \
             --criterion target/criterion \
             --djvulibre-bench djvulibre_bench.txt \
             --ddjvu-timing ddjvu_timing.txt \
             2>/dev/null || echo "(no DjVuLibre results)"
+          echo ""
+          echo "--- DjVuLibre encode timing (cjb2/c44; vs criterion jb2_encode/iw44_encode_color) ---"
+          cat encode_timing.txt 2>/dev/null || echo "(no encode timing)"
 
       # ── Compare against baseline and generate Markdown table (PR only) ──────
       - name: Compare benchmarks
@@ -191,6 +194,7 @@ jobs:
             render_bench.txt
             djvulibre_bench.txt
             ddjvu_timing.txt
+            encode_timing.txt
             target/criterion/
           retention-days: 30
 
