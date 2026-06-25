@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -19,6 +20,7 @@ on:
       - 'v*'
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -53,8 +55,10 @@ jobs:
         with:
           filters: |
             simd:
-              - 'src/iw44_new.rs'
-              - 'src/iw44_encode.rs'
+              # IW44 SIMD lives in the djvu-iw44 crate since the codec extraction
+              # (#344); the old `src/iw44_*.rs` are thin re-export shims now.
+              - 'crates/djvu-iw44/src/lib.rs'
+              - 'crates/djvu-iw44/src/encode.rs'
               - 'benches/codecs.rs'
               - 'benches/render.rs'
               - '.github/workflows/bench.yml'
