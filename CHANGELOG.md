@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/matyushkin/djvu-rs/compare/v0.21.0...v0.22.0) (2026-06-25)
+
+
+### Features
+
+* **encode:** [#452](https://github.com/matyushkin/djvu-rs/issues/452) shared Djbz dictionary for layered multi-page encode ([3466abd](https://github.com/matyushkin/djvu-rs/commit/3466abd1af9150bb0cfd528ce26c666c5e960f2b))
+* **iw44:** [#422](https://github.com/matyushkin/djvu-rs/issues/422) bilinear chroma upsampling for chroma_half pages ([0e96d56](https://github.com/matyushkin/djvu-rs/commit/0e96d56b18cc435fc8f41923d749d934b152ed34))
+
+
+### Bug Fixes
+
+* **jb2:** bound per-page symbol decode to stop fuzz_jb2 timeout (DoS) ([0710594](https://github.com/matyushkin/djvu-rs/commit/0710594deb7ad8a15493c15adac1b5ba8dd621d1))
+
+
+### Performance Improvements
+
+* **iw44:** match activation-prediction threshold to real gate (-9.1% BG44) ([20d1372](https://github.com/matyushkin/djvu-rs/commit/20d1372d97a2c41ab32ba18daa070293669ac59f))
+
 ## [0.21.0](https://github.com/matyushkin/djvu-rs/compare/v0.20.5...v0.21.0) (2026-06-24)
 
 
