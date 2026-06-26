@@ -449,7 +449,13 @@ pub(crate) const MAX_TOTAL_SYMBOL_PIXELS: usize = 256 * 1024 * 1024;
 // refinement records can otherwise decode ~48 MP (≈0.6 s native, a libFuzzer
 // timeout under ASAN). Bounding per-page symbol work stops that amplification while
 // leaving the dictionary path on the higher ceiling.
-const MAX_PAGE_SYMBOL_PIXELS: usize = 32 * 1024 * 1024;
+//
+// 16 MP, not 32: the corpus's densest page needs >8 MP but <16 MP, and at 32 MP the
+// fuzz_jb2 regression seed still decoded ~6 s under ASAN — close enough to the 10 s
+// libFuzzer per-input timeout to flake intermittently on slow CI runners. 16 MP
+// halves that worst case (~3-5 s) for a comfortable margin while still accepting
+// every real page.
+const MAX_PAGE_SYMBOL_PIXELS: usize = 16 * 1024 * 1024;
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
 const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
