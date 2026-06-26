@@ -18,11 +18,17 @@ decoding **47.7 MP** of symbols from ~409 real bytes — a low-entropy stream am
 existing caps (`MAX_TOTAL_SYMBOL_PIXELS = 256 MP`) permit far more per-page work than any
 real page needs. A larger crafted Sjbz could reach the full 256 MP (~3.3 s native).
 
-**Approach.** Added `MAX_PAGE_SYMBOL_PIXELS = 32 MP`, checked at the top of the two
+**Approach.** Added `MAX_PAGE_SYMBOL_PIXELS` (16 MP), checked at the top of the two
 *page* decode loops (`decode_image_with_pool`, `decode_image_indexed_with_pool`). The
 256 MP ceiling stays for the cross-page shared **dictionary** path
 (`decode_dictionary_with_pool`), which legitimately needs > 64 MP for
 `pathogenic_bacteria_1896` (#258) — so the caps are split, not lowered globally.
+
+**Follow-up (margin).** First shipped at 32 MP; the fuzz_jb2 regression seed still
+decoded ~6 s under ASAN there and flaked intermittently against the 10 s libFuzzer
+per-input timeout on slow CI runners. Lowered to 16 MP (corpus densest page is
+>8 MP but <16 MP, so it still accepts every real page) → ~3-5 s worst case,
+comfortable margin. 8 MP was too low (rejected a real corpus page).
 
 **Numbers.** Slow input: 626 ms → **367 ms** native, now `Err(ImageTooLarge)` (cap fires
 at 32 MP, before the ~48 MP it would otherwise reach). ×~16 ASAN ≈ 5.9 s — comfortably
