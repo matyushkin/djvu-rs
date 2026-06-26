@@ -5,6 +5,23 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Encoder speed vs DjVuLibre (cjb2 / c44) — **Diagnostic, no action** (2026-06-26)
+
+First head-to-head of *encode* speed (decode/render were already benchmarked;
+encode never was beyond our own criterion benches). Apples-to-apples on identical
+inputs — the same decoded page fed to both encoders, best-of-5 wall-clock, M1 Max:
+
+| Codec | input | djvu-rs | DjVuLibre | ratio |
+|-------|-------|---------|-----------|-------|
+| IW44 (`encode_iw44_color` vs `c44`) | watchmaker render, 2550×3301 (8.4 MP) | **313 ms** | 458 ms | **0.68× (we're 1.46× faster)** |
+| JB2 (`encode_jb2_dict` vs `cjb2`) | cable mask, 2550×3301 | 27.5 ms | 24.8 ms | 1.11× (near-parity) |
+
+Output sizes were comparable (IW44 694 KB vs 666 KB; JB2 2504 B vs 2248 B — cjb2's
+default is lossier). **Conclusion:** encode speed is competitive — IW44 is ahead,
+JB2 at parity. No inefficiency or hot-spot worth chasing; this axis is healthy, not
+a gap. Recorded so it isn't re-investigated. (DjVuLibre encode timing is now also
+tracked in CI via `scripts/bench_djvulibre.sh` → `encode_timing.txt`.)
+
 ### JB2 decode — per-page symbol-pixel cap (fuzz `fuzz_jb2` timeout) — **Kept (robustness)** (2026-06-25)
 
 **Issue.** CI `Fuzz / fuzz_jb2` was intermittently red: `libFuzzer: timeout after 10 s`.

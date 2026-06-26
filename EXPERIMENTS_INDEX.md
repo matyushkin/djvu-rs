@@ -12,7 +12,8 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
-| JB2_PAGE_SYM_CAP | 2026-06-25 | JB2 decode (robustness) | **K** | fuzz_jb2 timeout fixed; per-page decode bounded 256→32 MP | 409 B input did 23 K refinement records = 47.7 MP (~626 ms→10 s ASAN). Split cap: 32 MP page / 256 MP dict. Regression test + seed corpus added |
+| ENC_SPEED_DIAG | 2026-06-26 | encoder (speed) | D | IW44 1.46× faster than c44; JB2 ~par with cjb2 | Head-to-head on identical inputs. Encode speed competitive — no hot-spot; axis healthy, not a gap |
+| JB2_PAGE_SYM_CAP | 2026-06-25 | JB2 decode (robustness) | **K** | fuzz_jb2 timeout fixed; per-page decode bounded 256→16 MP | 409 B input did 23 K refinement records = 47.7 MP (~626 ms→10 s ASAN). Split cap: 16 MP page / 256 MP dict (32→16 for fuzz margin). Regression test + seed corpus |
 | IW44_SWARM_REST | 2026-06-25 | IW44 encoder (size) | R/X | dead-end / interop-break | #8 ycbcr-round (PSNR worse), #6/7 early-term (chunks not null), #3/4/5/10/12 (change normative tables/ctx → break DjVuLibre interop), #2 (quality knob) |
 | IW44_ACT_THRESH (IW44-1) | 2026-06-25 | IW44 encoder (size) | **K** | **−9.1% BG44, PSNR-identical** | Activation prediction s/2→11s/16 matches real gate; removes wasted NEW bits. Encoder-only, interop-safe. Gap 14.3%→3.9% |
 | ENC_SIZE_DIAG | 2026-06-25 | encoder (size) | D | mask=parity, IW44 BG44=1.143× | Chunk breakdown: BG44/FG44 dominate colour/photo docs (94–99.9%); our IW44 is ~14% larger → next size lever |
