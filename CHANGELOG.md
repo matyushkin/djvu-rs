@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1](https://github.com/matyushkin/djvu-rs/compare/v0.22.0...v0.22.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **jb2:** lower per-page symbol cap 32-&gt;16 MP to stop fuzz_jb2 flake ([c21bf06](https://github.com/matyushkin/djvu-rs/commit/c21bf062ea7ecd88a3a2cdebc10f2f24ae5c2df9))
+
 ## [0.22.0](https://github.com/matyushkin/djvu-rs/compare/v0.21.0...v0.22.0) (2026-06-25)
 
 
