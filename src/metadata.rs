@@ -362,7 +362,7 @@ mod tests {
         let bytes = encode_metadata_bzz(&m);
         assert!(!bytes.is_empty());
         // METz payload decompresses via the shared BZZ path, then the pure parser.
-        let decoded = crate::bzz_new::bzz_decode(&bytes).unwrap();
+        let decoded = crate::bzz::bzz_decode(&bytes).unwrap();
         let parsed = parse_metadata(&decoded).unwrap();
         assert_eq!(parsed, m);
     }

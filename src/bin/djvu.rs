@@ -998,7 +998,7 @@ fn cmd_bzz_encode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::
 
 fn cmd_bzz_decode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(file)?;
-    let decoded = djvu_rs::bzz_new::bzz_decode(&data)?;
+    let decoded = djvu_rs::bzz::bzz_decode(&data)?;
     std::fs::write(output, &decoded)?;
     eprintln!(
         "{}: {} → {} bytes",

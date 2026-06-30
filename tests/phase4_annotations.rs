@@ -153,7 +153,7 @@ fn test_parse_multiple_mapareas() {
 #[test]
 fn test_parse_annotations_bzz() {
     use djvu_rs::annotation::parse_annotations;
-    use djvu_rs::bzz_new::bzz_decode;
+    use djvu_rs::bzz::bzz_decode;
     // Pre-computed BZZ encoding of "(background #aabbcc)"
     // Generated with: printf '(background #aabbcc)' | bzz -e - -
     let encoded: &[u8] = &[
