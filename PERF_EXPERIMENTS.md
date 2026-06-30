@@ -5,6 +5,22 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### JB2 dict encoder — hash-bucket dedup (drop per-CC bitmap clone) — **Kept (small)** (2026-07-01)
+
+Perf swarm's top-vetted candidate. `encode_jb2_dict`'s exact-match dedup was a
+`BTreeMap<(u32,u32,Vec<u8>), usize>` that **cloned the connected-component bitmap
+data on every CC** to build the lookup key. Replaced with `BTreeMap<u64, Vec<usize>>`
+keyed by an FNV-1a `symbol_hash(w,h,data)`; the bucket compares the actual data
+against `dict_entries` only on a hash hit, so dedup stays **byte-identical** while
+the per-CC `Vec<u8>` clone disappears. Measured (best-of-6, M1): DjVu3Spec 36.6→35.8,
+pathogenic 42.8→41.9, cable 27.2→26.4 ms — **~2-3 %**, output byte-identical (sizes
+unchanged; 53 jb2 + proptest + size-gate green).
+
+**Context:** the swarm reviewed 7 modules; iw44-encode/decode, jb2-decode, bzz-decode
+were judged already-tight, and even this best candidate yields only ~2-3 % — the codec
+is well-optimized, returns are small. Kept because it is byte-identical, low-risk, and
+removes allocation churn.
+
 ### Encoder ↔ DjVuLibre interop (encoder-differential) — **Kept (correctness)** (2026-06-30)
 
 Reverse of the decode-differential: encode with djvu-rs, decode the result with
