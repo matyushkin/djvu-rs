@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2](https://github.com/matyushkin/djvu-rs/compare/v0.22.1...v0.22.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* **decoders:** bound IFF/NAVM recursion + IFF length overflow (security review) ([#458](https://github.com/matyushkin/djvu-rs/issues/458)) ([3dc43f3](https://github.com/matyushkin/djvu-rs/commit/3dc43f3e42bf22a003d96ed773eb9eee348d29d9))
+* **decoders:** cap allocations + fix overflow on untrusted input (security review) ([#459](https://github.com/matyushkin/djvu-rs/issues/459)) ([a034890](https://github.com/matyushkin/djvu-rs/commit/a03489051c7b296324ce31c5b422b746fd38dddd))
+* **jb2:** enforce per-page symbol cap before decode (codex review) ([#456](https://github.com/matyushkin/djvu-rs/issues/456)) ([59896a1](https://github.com/matyushkin/djvu-rs/commit/59896a1b964114af6196114c95d98471cf7999c3))
+
 ## [0.22.1](https://github.com/matyushkin/djvu-rs/compare/v0.22.0...v0.22.1) (2026-06-26)
 
 
