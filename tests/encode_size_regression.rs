@@ -19,8 +19,8 @@
 
 use djvu_rs::{
     DjVuDocument, Pixmap,
+    iw44::Iw44Image,
     iw44_encode::{Iw44EncodeOptions, encode_iw44_color},
-    iw44_new::Iw44Image,
     jb2_encode::encode_jb2_dict,
 };
 

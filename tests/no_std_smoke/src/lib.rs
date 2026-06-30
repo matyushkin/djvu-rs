@@ -1,7 +1,7 @@
 //! `#![no_std]` smoke test for the codec entry points called out in #227.
 //!
-//! Goal: prove that `iff::parse_form`, `bzz_new::bzz_decode`, `jb2::decode_dict`,
-//! and `iw44_new::Iw44Image::decode_chunk` are callable from a consumer crate
+//! Goal: prove that `iff::parse_form`, `bzz::bzz_decode`, `jb2::decode_dict`,
+//! and `iw44::Iw44Image::decode_chunk` are callable from a consumer crate
 //! that has `default-features = false` (no `std`). If any of these public
 //! signatures grow a `std::*` type, this crate fails to compile.
 //!
@@ -17,7 +17,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use djvu_rs::{bzz_new, iff, iw44_new, jb2};
+use djvu_rs::{bzz, iff, iw44, jb2};
 
 /// Minimal IFF FORM:DJVU containing one INFO chunk. Hand-crafted to
 /// exercise `iff::parse_form` without pulling a fixture file.
@@ -43,7 +43,7 @@ const TINY_BZZ: &[u8] = include_bytes!("../../golden/bzz/test_short.bzz");
 pub fn smoke() -> Result<(), ()> {
     iff::parse_form(TINY_FORM).map_err(|_| ())?;
 
-    let _decoded: Vec<u8> = bzz_new::bzz_decode(TINY_BZZ).map_err(|_| ())?;
+    let _decoded: Vec<u8> = bzz::bzz_decode(TINY_BZZ).map_err(|_| ())?;
 
     // jb2::decode_dict on an empty buffer returns Err — that still proves
     // the symbol is reachable from a no_std consumer. We don't care about
@@ -52,7 +52,7 @@ pub fn smoke() -> Result<(), ()> {
 
     // Iw44Image::new() + decode_chunk on a 2-byte header returns Err —
     // same rationale: signature reachability, not value correctness.
-    let mut img = iw44_new::Iw44Image::new();
+    let mut img = iw44::Iw44Image::new();
     let _ = img.decode_chunk(&[0u8, 0u8]);
 
     Ok(())

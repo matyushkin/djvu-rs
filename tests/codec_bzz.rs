@@ -1,9 +1,9 @@
-//! Integration tests for the `bzz_new` decompressor.
+//! Integration tests for the `bzz` decompressor.
 //!
 //! Tests use fixture files that contain real BZZ-compressed chunks
 //! extracted from DjVu documents.
 
-use djvu_rs::bzz_new;
+use djvu_rs::bzz;
 use djvu_rs::error::BzzError;
 use djvu_rs::iff::parse_form;
 
@@ -22,7 +22,7 @@ fn bzz_decode_navm_chunk_roundtrip() {
         .find(|c| &c.id == b"NAVM")
         .expect("navm_fgbz.djvu must contain a NAVM chunk");
 
-    let decoded = bzz_new::bzz_decode(navm.data).expect("NAVM chunk must decompress without error");
+    let decoded = bzz::bzz_decode(navm.data).expect("NAVM chunk must decompress without error");
     assert!(!decoded.is_empty(), "decompressed NAVM must be non-empty");
 }
 
@@ -33,8 +33,8 @@ fn bzz_decode_alias_matches() {
     let form = parse_form(&data).unwrap();
     let navm = form.chunks.iter().find(|c| &c.id == b"NAVM").unwrap();
 
-    let a = bzz_new::bzz_decode(navm.data).unwrap();
-    let b = bzz_new::decode(navm.data).unwrap();
+    let a = bzz::bzz_decode(navm.data).unwrap();
+    let b = bzz::decode(navm.data).unwrap();
     assert_eq!(a, b);
 }
 
@@ -52,7 +52,7 @@ fn bzz_decode_antz_chunk() {
             && let Some(antz) = inner.chunks.iter().find(|c| &c.id == b"ANTz")
         {
             let decoded =
-                bzz_new::bzz_decode(antz.data).expect("ANTz chunk must decompress without error");
+                bzz::bzz_decode(antz.data).expect("ANTz chunk must decompress without error");
             assert!(!decoded.is_empty());
             found = true;
             break;
@@ -61,7 +61,7 @@ fn bzz_decode_antz_chunk() {
     if !found {
         // Try at top level (single-page documents)
         if let Some(antz) = form.chunks.iter().find(|c| &c.id == b"ANTz") {
-            let decoded = bzz_new::bzz_decode(antz.data).unwrap();
+            let decoded = bzz::bzz_decode(antz.data).unwrap();
             assert!(!decoded.is_empty());
         }
     }
@@ -72,7 +72,7 @@ fn bzz_decode_antz_chunk() {
 /// Empty input must return an error (no end-of-stream block).
 #[test]
 fn bzz_decode_empty_returns_error() {
-    let result = bzz_new::bzz_decode(&[]);
+    let result = bzz::bzz_decode(&[]);
     assert!(
         result.is_err(),
         "empty input must return Err, got {:?}",
@@ -85,7 +85,7 @@ fn bzz_decode_empty_returns_error() {
 fn bzz_decode_truncated_no_panic() {
     for len in 0..8 {
         let short = vec![0xFFu8; len];
-        let _ = bzz_new::bzz_decode(&short); // must not panic
+        let _ = bzz::bzz_decode(&short); // must not panic
     }
 }
 
@@ -93,7 +93,7 @@ fn bzz_decode_truncated_no_panic() {
 #[test]
 fn bzz_decode_garbage_no_panic() {
     let garbage = b"this is not a BZZ stream at all!!";
-    let _ = bzz_new::bzz_decode(garbage);
+    let _ = bzz::bzz_decode(garbage);
 }
 
 /// A BZZ stream with only an end-of-stream block (block_size == 0) decodes to
@@ -108,7 +108,7 @@ fn bzz_decode_end_of_stream_only() {
     // Since we can't easily hand-craft one here, just verify that the decode
     // of any ANTa chunk (uncompressed text, not BZZ) returns an error gracefully.
     let not_bzz = b"(background \"#FFFFFF\")\n";
-    let _ = bzz_new::bzz_decode(not_bzz); // must not panic
+    let _ = bzz::bzz_decode(not_bzz); // must not panic
 }
 
 // ── BzzError is a proper typed error ─────────────────────────────────────────
