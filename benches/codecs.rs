@@ -80,7 +80,7 @@ fn bench_bzz_decode(c: &mut Criterion) {
 
     c.bench_function("bzz_decode", |b| {
         b.iter(|| {
-            let _ = djvu_rs::bzz_new::bzz_decode(black_box(&bzz_payload));
+            let _ = djvu_rs::bzz::bzz_decode(black_box(&bzz_payload));
         });
     });
 }
@@ -130,7 +130,7 @@ fn bench_iw44_decode(c: &mut Criterion) {
 
     c.bench_function("iw44_decode_first_chunk", |b| {
         b.iter(|| {
-            let mut img = djvu_rs::iw44_new::Iw44Image::new();
+            let mut img = djvu_rs::iw44::Iw44Image::new();
             let _ = img.decode_chunk(black_box(&bg44));
         });
     });
@@ -183,7 +183,7 @@ fn bench_iw44_decode_corpus(c: &mut Criterion) {
     };
     c.bench_function("iw44_decode_corpus_color", |b| {
         b.iter(|| {
-            let mut img = djvu_rs::iw44_new::Iw44Image::new();
+            let mut img = djvu_rs::iw44::Iw44Image::new();
             let _ = img.decode_chunk(black_box(&bg44));
         });
     });
@@ -256,7 +256,7 @@ fn bench_iw44_decode_large_all_chunks(c: &mut Criterion) {
 
     c.bench_function("iw44_decode_large_all_chunks", |b| {
         b.iter(|| {
-            let mut img = djvu_rs::iw44_new::Iw44Image::new();
+            let mut img = djvu_rs::iw44::Iw44Image::new();
             for chunk in &chunks {
                 let _ = img.decode_chunk(black_box(chunk));
             }
@@ -296,7 +296,7 @@ fn bench_iw44_to_rgb_large(c: &mut Criterion) {
     }
 
     // Pre-decode once; benchmark only to_rgb().
-    let mut img = djvu_rs::iw44_new::Iw44Image::new();
+    let mut img = djvu_rs::iw44::Iw44Image::new();
     for chunk in &chunks {
         if img.decode_chunk(chunk).is_err() {
             eprintln!("skipping bench_iw44_to_rgb_large: decode_chunk failed");
@@ -343,13 +343,13 @@ fn bench_iw44_to_rgb_colorbook_sub(c: &mut Criterion) {
     }
 
     // Decode only first chunk to match the partial-decode production path.
-    let mut img_partial = djvu_rs::iw44_new::Iw44Image::new();
+    let mut img_partial = djvu_rs::iw44::Iw44Image::new();
     if img_partial.decode_chunk(&chunks[0]).is_err() {
         return;
     }
 
     // Decode all chunks for the full-resolution reference.
-    let mut img_full = djvu_rs::iw44_new::Iw44Image::new();
+    let mut img_full = djvu_rs::iw44::Iw44Image::new();
     for chunk in &chunks {
         if img_full.decode_chunk(chunk).is_err() {
             break;

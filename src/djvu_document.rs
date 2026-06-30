@@ -32,12 +32,12 @@ use alloc::{
 
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
-    bzz_new::bzz_decode,
+    bzz::bzz_decode,
     dirm::{DirmComponentKind, DirmPayload},
     error::{BzzError, IffError, Iw44Error, Jb2Error},
     iff::{IffChunk, parse_form, parse_form_body},
     info::PageInfo,
-    iw44_new::Iw44Image,
+    iw44::Iw44Image,
     jb2::Jb2Dict,
     metadata::{DjVuMetadata, MetadataError},
     pixmap::Pixmap,

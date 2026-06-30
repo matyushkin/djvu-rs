@@ -22,8 +22,8 @@
 //! may differ byte-for-byte vs. another implementation, since BZZ is
 //! not canonical, but `decode(encode(idx)) == idx`).
 
+use crate::bzz::bzz_decode;
 use crate::bzz_encode::bzz_encode;
-use crate::bzz_new::bzz_decode;
 use crate::chunk_encode::EncodeError;
 use crate::error::DjVuError;
 
