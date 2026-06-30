@@ -23,11 +23,16 @@ encoder against our decoder):
    exhausted. **Fix:** default `chroma_half = false` (full-resolution chroma).
 
 **Result:** 6/6 colour corpus files now decode in ddjvu (were 0/6); our own decoder
-round-trips unchanged (36 IW44 tests green). **Cost:** BG44 ~+8% (119_230 → 128_999 B
-on the 2-page size gate; chroma is a fraction of the data). Correctness > size — our
-colour `.djvu` were previously unusable in DjVuLibre and every other standard reader.
-JB2 (bilevel) encode was already pixel-perfect interop. A DjVuLibre-compatible
-half-chroma (full-size map, band-truncated) could reclaim the ~8% as a follow-up.
+round-trips unchanged (37 IW44 tests green). JB2 (bilevel) encode was already
+pixel-perfect interop. Our colour `.djvu` were previously unusable in DjVuLibre and
+every other standard reader.
+
+**Follow-up (`chroma_delay = 10`).** Full-resolution chroma first cost ~+8% (119_230 →
+128_999 B). Inspecting real c44 output showed its `crcbdelay = 10` (chroma deferred to
+slice 10, never `crcb_half`). Matching that default trims colour BG44 ~10–18 % and
+brings the 2-page gate to 119_636 B — **+0.3 % over the original**, i.e. full DjVuLibre
+colour interop at essentially the pre-fix size, and our stream now matches the standard
+c44 chroma convention exactly (full-res, delay 10). ddjvu reads all 6/6; round-trip green.
 
 ### Encoder speed vs DjVuLibre (cjb2 / c44) — **Diagnostic, no action** (2026-06-26)
 

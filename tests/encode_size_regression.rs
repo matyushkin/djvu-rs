@@ -35,11 +35,12 @@ fn decode_bg44(chunks: &[&[u8]]) -> Option<Pixmap> {
 }
 
 /// IW44 BG44 background: re-encode the first two BG44-bearing pages and assert
-/// the encoder output does not grow. Baseline 128_999 B (pages 2, 3) as of
-/// 2026-06-30, when the default switched to full-resolution chroma
-/// (`chroma_half = false`) for DjVuLibre interop — that raised BG44 ~8% over the
-/// previous 119_230 B but makes our colour output decodable by ddjvu. Two pages
-/// keep the debug-mode test short while exercising the activation/refinement passes.
+/// the encoder output does not grow. Baseline 119_636 B (pages 2, 3) as of
+/// 2026-06-30: the default now matches DjVuLibre's c44 chroma convention —
+/// full-resolution chroma (`chroma_half = false`, for interop) delayed to slice 10
+/// (`chroma_delay = 10`, which trims the full-chroma cost back to ~the original
+/// 119_230 B). Two pages keep the debug-mode test short while exercising the
+/// activation/refinement passes.
 #[test]
 fn iw44_bg44_size_does_not_regress() {
     let data = std::fs::read(CORPUS).expect("corpus fixture present");
@@ -72,10 +73,10 @@ fn iw44_bg44_size_does_not_regress() {
     }
 
     assert_eq!(pages, 2, "expected 2 BG44 pages in the fixture");
-    const CEIL: usize = 131_000; // 128_999 + ~1.5 %
+    const CEIL: usize = 121_500; // 119_636 + ~1.5 %
     assert!(
         total <= CEIL,
-        "IW44 BG44 re-encode grew to {total} B (ceiling {CEIL}, baseline 128_999) \
+        "IW44 BG44 re-encode grew to {total} B (ceiling {CEIL}, baseline 119_636) \
          — encoder size regression. If this is an intentional change, update the ceiling."
     );
 }
