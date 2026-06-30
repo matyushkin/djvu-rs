@@ -164,7 +164,7 @@ impl DirmPayload {
     /// `FORM` sub-type they walk.
     pub fn components(&self) -> Vec<DirmComponent> {
         let n = self.nfiles as usize;
-        let meta = crate::bzz_new::bzz_decode(&self.metadata).unwrap_or_default();
+        let meta = crate::bzz::bzz_decode(&self.metadata).unwrap_or_default();
 
         // Metadata layout: sizes(3b × N), flags(1b × N), then per-component
         // null-terminated id [+ name if flag&0x80] [+ title if flag&0x40].

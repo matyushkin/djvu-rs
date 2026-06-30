@@ -83,7 +83,7 @@ pub(crate) fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, BzzError> {
                 | (data[idx_start + 2] as u32);
 
             let bzz_data = data.get(idx_start + 3..).unwrap_or(&[]);
-            let decoded = crate::bzz_new::bzz_decode(bzz_data)?;
+            let decoded = crate::bzz::bzz_decode(bzz_data)?;
 
             let n = num_indices as usize;
             // `num_indices` is a raw 24-bit field (up to ~16 M → 32 MB reserve).

@@ -95,7 +95,7 @@ fn write_navm_str(buf: &mut Vec<u8>, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bzz_new::bzz_decode;
+    use crate::bzz::bzz_decode;
     use crate::djvu_document::DjVuBookmark;
 
     fn bm(title: &str, url: &str, children: Vec<DjVuBookmark>) -> DjVuBookmark {

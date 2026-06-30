@@ -12,14 +12,14 @@ use djvu_rs::annotation::{
     Annotation, Border, Color, Highlight, MapArea, Rect, Shape, encode_annotations,
     encode_annotations_bzz, parse_annotations,
 };
-use djvu_rs::bzz_new::bzz_decode;
+use djvu_rs::bzz::bzz_decode;
 use djvu_rs::fgbz_encode::{FgbzColor, decode_fgbz, encode_fgbz};
 use djvu_rs::iff::{Chunk, DjvuFile, emit, parse};
+use djvu_rs::iw44::Iw44Image;
 use djvu_rs::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
-use djvu_rs::iw44_new::Iw44Image;
 use djvu_rs::segment::{SegmentOptions, segment_page};
 use djvu_rs::smmr::{decode_smmr, encode_smmr};
-use djvu_rs::{bzz_encode, bzz_new, jb2, jb2_encode};
+use djvu_rs::{bzz, bzz_encode, jb2, jb2_encode};
 use proptest::prelude::*;
 
 /// Strategy for a bilevel `Bitmap` of arbitrary dimensions and content.
@@ -84,7 +84,7 @@ proptest! {
     #[test]
     fn bzz_roundtrip(data in prop::collection::vec(any::<u8>(), 0..4096)) {
         let encoded = bzz_encode::bzz_encode(&data);
-        let decoded = bzz_new::decode(&encoded).expect("BZZ decode failed");
+        let decoded = bzz::decode(&encoded).expect("BZZ decode failed");
         prop_assert_eq!(data, decoded);
     }
 

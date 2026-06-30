@@ -82,12 +82,17 @@ pub(crate) use djvu_zp as zp_impl;
 
 /// BZZ decompressor — clean-room implementation.
 ///
-/// Provides `bzz_new::bzz_decode` for decompressing DjVu BZZ streams
+/// Provides `bzz::bzz_decode` for decompressing DjVu BZZ streams
 /// (DIRM, NAVM, ANTz chunks).
 #[allow(dead_code)]
-pub mod bzz_new;
+pub mod bzz;
 
-/// BZZ compressor — encoding counterpart to `bzz_new`.
+/// Compatibility alias for the former `bzz_new` module name. The `_new` suffix
+/// fossilised the codec-extraction migration (there was a pre-extraction
+/// `bzz.rs`); the module is now simply [`bzz`]. Prefer `bzz` in new code.
+pub use bzz as bzz_new;
+
+/// BZZ compressor — encoding counterpart to `bzz`.
 #[cfg(feature = "std")]
 pub mod bzz_encode;
 
@@ -109,11 +114,15 @@ pub mod jb2;
 
 /// IW44 wavelet image decoder — clean-room implementation (phase 2c).
 ///
-/// Provides `iw44_new::Iw44Image` for decoding BG44/FG44/TH44 chunks.
+/// Provides `iw44::Iw44Image` for decoding BG44/FG44/TH44 chunks.
 /// Uses planar YCbCr storage and a ZP arithmetic coder.
-/// RGB conversion happens only in `iw44_new::Iw44Image::to_rgb`.
-#[path = "iw44_new.rs"]
-pub mod iw44_new;
+/// RGB conversion happens only in `iw44::Iw44Image::to_rgb`.
+pub mod iw44;
+
+/// Compatibility alias for the former `iw44_new` module name. The `_new` suffix
+/// fossilised the codec-extraction migration; the module is now simply
+/// [`iw44`]. Prefer `iw44` in new code.
+pub use iw44 as iw44_new;
 
 /// IW44 wavelet encoder — produces BG44/FG44/TH44 chunk payloads.
 ///

@@ -41,7 +41,7 @@ use alloc::{borrow::Cow, vec, vec::Vec};
 use std::borrow::Cow;
 
 use crate::djvu_document::DjVuPage;
-use crate::iw44_new::Iw44Image;
+use crate::iw44::Iw44Image;
 use crate::pixmap::{GrayPixmap, Pixmap};
 
 // ── Errors ───────────────────────────────────────────────────────────────────

@@ -1616,7 +1616,7 @@ mod tests {
             .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"));
         assert!(antz.is_some(), "ANTz should be inserted");
         let data = antz.unwrap().data();
-        let decoded = crate::bzz_new::bzz_decode(data).expect("ANTz must decompress");
+        let decoded = crate::bzz::bzz_decode(data).expect("ANTz must decompress");
         let (parsed_ann, _areas) =
             crate::annotation::parse_annotations(&decoded).expect("ANTz must round-trip");
         assert_eq!(parsed_ann.mode.as_deref(), Some("color"));
@@ -1649,7 +1649,7 @@ mod tests {
             .iter()
             .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
             .expect("METz should be inserted");
-        let decoded = crate::bzz_new::bzz_decode(metz.data()).unwrap();
+        let decoded = crate::bzz::bzz_decode(metz.data()).unwrap();
         let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed, meta);
     }
@@ -2129,7 +2129,7 @@ mod tests {
             }
         }
         let metz = found.expect("page 1 should have METz after edit");
-        let decoded = crate::bzz_new::bzz_decode(&metz).unwrap();
+        let decoded = crate::bzz::bzz_decode(&metz).unwrap();
         let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("rebundled indirect"));
     }
