@@ -57,6 +57,21 @@ impl Default for SegmentOptions {
     }
 }
 
+impl SegmentOptions {
+    /// Archival-grade profile: a denser background sample grid
+    /// (`bg_subsample = 6` vs the default 12), other knobs at their defaults.
+    ///
+    /// This is the single source of truth for the `Archival` background
+    /// resolution — `EncodeQuality::default_segment_options` and the CLI both
+    /// route through it instead of re-spelling the `bg_subsample: 6` literal.
+    pub fn archival() -> Self {
+        Self {
+            bg_subsample: 6,
+            ..Self::default()
+        }
+    }
+}
+
 /// Result of [`segment_page`].
 pub struct SegmentedPage {
     /// Full-resolution bilevel mask. `true` = foreground/ink.

@@ -1126,7 +1126,7 @@ impl EncodeSegmentArgs {
         quality: djvu_rs::djvu_encode::EncodeQuality,
     ) -> Result<Option<djvu_rs::segment::SegmentOptions>, Box<dyn std::error::Error>> {
         use djvu_rs::djvu_encode::EncodeQuality;
-        use djvu_rs::segment::{Binarization, SegmentOptions};
+        use djvu_rs::segment::Binarization;
 
         let has_segment_flags = self.binarization != BinarizationArg::Fixed || self.bg_inpaint;
         if !has_segment_flags {
@@ -1139,14 +1139,7 @@ impl EncodeSegmentArgs {
             );
         }
 
-        let mut opts = match quality {
-            EncodeQuality::Quality => SegmentOptions::default(),
-            EncodeQuality::Archival => SegmentOptions {
-                bg_subsample: 6,
-                ..SegmentOptions::default()
-            },
-            EncodeQuality::Lossless => unreachable!(),
-        };
+        let mut opts = quality.default_segment_options();
         opts.binarization = match self.binarization {
             BinarizationArg::Fixed => Binarization::Fixed,
             BinarizationArg::Sauvola => Binarization::Sauvola {

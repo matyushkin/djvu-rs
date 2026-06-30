@@ -57,7 +57,7 @@ use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk};
 use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
-use crate::jb2_encode;
+use crate::jb2_encode::{self, Jb2EncodeOptions};
 use crate::pixmap::Pixmap;
 use crate::segment::{SegmentOptions, segment_page};
 
@@ -95,6 +95,22 @@ pub enum EncodeQuality {
     Archival,
 }
 
+impl EncodeQuality {
+    /// The default segmentation knobs for this profile.
+    ///
+    /// `Archival` lowers `bg_subsample` to 6 (see [`SegmentOptions::archival`])
+    /// for a higher-resolution background; every other profile uses the plain
+    /// defaults. This is the canonical `EncodeQuality → SegmentOptions` mapping
+    /// — `PageEncoder::encode`, `encode_djvm_layered_shared`, and the CLI all
+    /// call it instead of re-deriving the mapping inline.
+    pub fn default_segment_options(self) -> SegmentOptions {
+        match self {
+            EncodeQuality::Archival => SegmentOptions::archival(),
+            EncodeQuality::Quality | EncodeQuality::Lossless => SegmentOptions::default(),
+        }
+    }
+}
+
 // ── Encoder ──────────────────────────────────────────────────────────────────
 
 enum Source<'a> {
@@ -121,6 +137,8 @@ pub struct PageEncoder<'a> {
     dpi: u16,
     quality: EncodeQuality,
     segment_options: Option<SegmentOptions>,
+    iw44_options: Option<Iw44EncodeOptions>,
+    jb2_options: Option<Jb2EncodeOptions>,
 }
 
 impl<'a> PageEncoder<'a> {
@@ -131,6 +149,8 @@ impl<'a> PageEncoder<'a> {
             dpi: 300,
             quality: EncodeQuality::Lossless,
             segment_options: None,
+            iw44_options: None,
+            jb2_options: None,
         }
     }
 
@@ -143,6 +163,8 @@ impl<'a> PageEncoder<'a> {
             dpi: 300,
             quality: EncodeQuality::Quality,
             segment_options: None,
+            iw44_options: None,
+            jb2_options: None,
         }
     }
 
@@ -166,6 +188,28 @@ impl<'a> PageEncoder<'a> {
     /// encodes. Defaults remain profile-specific and fixed-threshold.
     pub fn with_segment_options(mut self, opts: SegmentOptions) -> Self {
         self.segment_options = Some(opts);
+        self
+    }
+
+    /// Override the IW44 background-codec knobs (slice schedule, chroma
+    /// resolution/delay) used by the `Quality` / `Archival` color encodes.
+    ///
+    /// Defaults to [`Iw44EncodeOptions::default`] (DjVuLibre `c44`-compatible
+    /// full-resolution chroma, delay 10). Ignored by the bilevel `Lossless`
+    /// path, which writes no `BG44`.
+    pub fn with_iw44_options(mut self, opts: Iw44EncodeOptions) -> Self {
+        self.iw44_options = Some(opts);
+        self
+    }
+
+    /// Override the JB2 mask-codec knobs (lossy connected-component threshold)
+    /// used by the `Quality` / `Archival` color encodes' `Sjbz` dictionary.
+    ///
+    /// Defaults to [`Jb2EncodeOptions::default`] (lossless, byte-exact CC
+    /// matching). The bilevel `Lossless` path emits a single direct-bitmap
+    /// record and is unaffected.
+    pub fn with_jb2_options(mut self, opts: Jb2EncodeOptions) -> Self {
+        self.jb2_options = Some(opts);
         self
     }
 
@@ -193,19 +237,19 @@ impl<'a> PageEncoder<'a> {
                 },
             ])),
             (Source::Pixmap(pm), EncodeQuality::Quality | EncodeQuality::Archival) => {
-                let segment_options = self.segment_options.unwrap_or_else(|| match self.quality {
-                    EncodeQuality::Quality => SegmentOptions::default(),
-                    EncodeQuality::Archival => SegmentOptions {
-                        bg_subsample: 6,
-                        ..SegmentOptions::default()
-                    },
-                    EncodeQuality::Lossless => unreachable!(),
-                });
+                let segment_options = self
+                    .segment_options
+                    .unwrap_or_else(|| self.quality.default_segment_options());
                 let seg = segment_page(pm, &segment_options);
                 // Use the dictionary encoder for color profiles so FGbz can
                 // address foreground colors per blitted component.
-                let sjbz = jb2_encode::encode_jb2_dict(&seg.mask);
-                let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
+                let sjbz = jb2_encode::encode_jb2_dict_with_options(
+                    &seg.mask,
+                    &[],
+                    &self.jb2_options.unwrap_or_default(),
+                );
+                let bg44_chunks =
+                    encode_iw44_color(&seg.bg, &self.iw44_options.clone().unwrap_or_default());
                 let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None);
 
                 let mut chunks =
@@ -269,13 +313,7 @@ pub fn encode_djvm_layered_shared(
             "encode_djvm_layered_shared requires the Quality or Archival profile",
         ));
     }
-    let opts = segment_options.unwrap_or_else(|| match quality {
-        EncodeQuality::Archival => SegmentOptions {
-            bg_subsample: 6,
-            ..SegmentOptions::default()
-        },
-        _ => SegmentOptions::default(),
-    });
+    let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
 
     // Segment every page once (mask + background), then cluster the masks.
     let segs: Vec<_> = pixmaps.iter().map(|pm| segment_page(pm, &opts)).collect();
@@ -475,6 +513,91 @@ mod tests {
             }
         }
         bm
+    }
+
+    #[test]
+    fn default_segment_options_maps_archival_to_dense_background() {
+        // Single source of truth for the quality → segmentation mapping: only
+        // Archival lowers bg_subsample; everything else uses the plain default.
+        assert_eq!(
+            EncodeQuality::Archival
+                .default_segment_options()
+                .bg_subsample,
+            6,
+            "Archival keeps a denser background grid"
+        );
+        assert_eq!(
+            EncodeQuality::Quality
+                .default_segment_options()
+                .bg_subsample,
+            SegmentOptions::default().bg_subsample,
+        );
+        assert_eq!(
+            EncodeQuality::Lossless
+                .default_segment_options()
+                .bg_subsample,
+            SegmentOptions::default().bg_subsample,
+        );
+        // archival() is the literal-free constructor those map onto.
+        let arch = SegmentOptions::archival();
+        assert_eq!(arch.bg_subsample, 6);
+        assert_eq!(arch.threshold, SegmentOptions::default().threshold);
+        assert_eq!(arch.bg_inpaint, SegmentOptions::default().bg_inpaint);
+    }
+
+    #[test]
+    fn with_iw44_options_is_threaded_into_background_codec() {
+        // Reaching the IW44 knobs through the builder must actually change the
+        // emitted BG44 — fewer total slices ⇒ a strictly smaller background.
+        let pm = mixed_lighting_fixture();
+        let default_bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .expect("default encode");
+        let trimmed = Iw44EncodeOptions {
+            total_slices: 20,
+            ..Iw44EncodeOptions::default()
+        };
+        let trimmed_bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_iw44_options(trimmed)
+            .encode()
+            .expect("trimmed encode");
+        assert!(
+            trimmed_bytes.len() < default_bytes.len(),
+            "with_iw44_options(total_slices=20) should shrink output ({} vs {})",
+            trimmed_bytes.len(),
+            default_bytes.len()
+        );
+        // Still a valid, parseable DjVu page.
+        let doc = crate::djvu_document::DjVuDocument::parse(&trimmed_bytes).expect("parse");
+        assert!(!doc.page(0).expect("page").all_chunks(b"BG44").is_empty());
+    }
+
+    #[test]
+    fn with_jb2_options_lossy_threshold_round_trips() {
+        // The JB2 knob is reachable through the builder and still produces a
+        // decodable mask (lossy CC substitution stays within the format).
+        let pm = mixed_lighting_fixture();
+        // Spell every field (cfg-gated like the Default impl) so this compiles
+        // cleanly whether or not the `experimental` feature is active — neither
+        // struct-update nor reassign-after-default triggers a clippy lint.
+        let jb2 = Jb2EncodeOptions {
+            lossy_threshold: 0.04,
+            #[cfg(feature = "experimental")]
+            cross_size_rec6_probe: None,
+        };
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_jb2_options(jb2)
+            .encode()
+            .expect("lossy jb2 encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        assert!(page.raw_chunk(b"Sjbz").is_some());
+        page.extract_mask()
+            .expect("mask decode")
+            .expect("mask present");
     }
 
     #[test]
