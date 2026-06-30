@@ -47,7 +47,16 @@ per-input timeout on slow CI runners. Lowered to 16 MP (corpus densest page is
 >8 MP but <16 MP, so it still accepts every real page) → ~3-5 s worst case,
 comfortable margin. 8 MP was too low (rejected a real corpus page).
 
-**Numbers.** Slow input: 626 ms → **367 ms** native, now `Err(ImageTooLarge)` (cap fires
+**Follow-up (tightness, codex review).** The cap was first enforced only at the
+record-loop top, so a symbol up to `MAX_SYMBOL_PIXELS` (16 MP) could still be decoded
+*after* the running total crossed the cap — effective bound ~32 MP, i.e. the old flaky
+level for a crafted single-large-symbol input. Moved the check into `check_pixel_budget`
+(now takes a `max_total`): page loops pass `MAX_PAGE_SYMBOL_PIXELS`, the dictionary loop
+the 256 MP ceiling, and a symbol that would cross the cap is rejected *before* its bitmap
+is decoded. The bound is now tight — the seed input's decode dropped 367 ms → **177 ms**
+(~4.8 s ASAN worst case).
+
+**Numbers.** Slow input: 626 ms → 367 ms → **177 ms** native, now `Err(ImageTooLarge)`
 at 32 MP, before the ~48 MP it would otherwise reach). ×~16 ASAN ≈ 5.9 s — comfortably
 under the 10 s fuzz timeout. Worst-case per-page decode is now hard-bounded at 32 MP
 regardless of input size. Full suite green: 53 djvu-jb2 + 611 lib tests, incl. the 517-page

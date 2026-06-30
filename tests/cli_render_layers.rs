@@ -58,47 +58,43 @@ fn render_all_layer_mask_writes_directory() {
 }
 
 #[test]
-fn render_layer_background_runs() {
-    // Background may or may not be present per page; either a written PNG or a
-    // clean "no background layer" error is acceptable — both exercise the path.
+fn render_layer_background_writes_png() {
+    // conquete_paix page 3 carries a BG44 background layer.
     let dst = out("layer_bg.png");
-    let assert = djvu()
+    djvu()
         .args([
             "render",
-            corpus("watchmaker.djvu").to_str().unwrap(),
+            corpus("conquete_paix.djvu").to_str().unwrap(),
+            "--page",
+            "3",
             "--layer",
             "background",
             "--output",
             dst.to_str().unwrap(),
         ])
-        .assert();
-    let out = assert.get_output().clone();
-    if !out.status.success() {
-        assert!(!out.stderr.is_empty(), "failure must explain itself");
-    } else {
-        assert!(dst.exists());
-    }
+        .assert()
+        .success();
+    assert!(dst.exists() && dst.metadata().unwrap().len() > 0);
 }
 
 #[test]
-fn render_layer_foreground_runs() {
+fn render_layer_foreground_writes_png() {
+    // conquete_paix page 1 carries an FGbz foreground layer.
     let dst = out("layer_fg.png");
-    let assert = djvu()
+    djvu()
         .args([
             "render",
             corpus("conquete_paix.djvu").to_str().unwrap(),
+            "--page",
+            "1",
             "--layer",
             "foreground",
             "--output",
             dst.to_str().unwrap(),
         ])
-        .assert();
-    let out = assert.get_output().clone();
-    if !out.status.success() {
-        assert!(!out.stderr.is_empty());
-    } else {
-        assert!(dst.exists());
-    }
+        .assert()
+        .success();
+    assert!(dst.exists() && dst.metadata().unwrap().len() > 0);
 }
 
 // ── render --rotate ───────────────────────────────────────────────────────────
