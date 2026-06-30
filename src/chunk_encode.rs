@@ -120,6 +120,47 @@ pub trait ChunkEncoder {
     fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError>;
 }
 
+/// Build the 10-byte `INFO` chunk body — the **canonical** serializer.
+///
+/// Mirrors the layout parsed by `crate::info::PageInfo::parse`: width and
+/// height are big-endian, dpi is little-endian, then the version pair, a gamma
+/// byte (`22` → 2.2), and a flags byte (no rotation). This is the single place
+/// the field values are spelled — both the single-page/layered encoder
+/// ([`crate::djvu_encode`]) and the bundled-mask encoder
+/// ([`crate::jb2_encode`]) route through it instead of hand-rolling the bytes
+/// (which previously diverged: the bundle path hard-coded dpi 100 and gamma
+/// byte 1 ≈ 0.1).
+pub fn encode_info(width: u16, height: u16, dpi: u16) -> Vec<u8> {
+    let mut b = vec![0u8; 10];
+    b[0..2].copy_from_slice(&width.to_be_bytes());
+    b[2..4].copy_from_slice(&height.to_be_bytes());
+    b[4] = 0x18; // minor version
+    b[5] = 0x00; // major version
+    b[6..8].copy_from_slice(&dpi.to_le_bytes()); // dpi: little-endian
+    b[8] = 22; // gamma byte: 22 → 2.2
+    b[9] = 0x00; // flags: no rotation
+    b
+}
+
+/// `INFO` — a page's dimensions, resolution, gamma, and rotation flags.
+pub struct InfoChunk {
+    /// Page width in pixels (wire field is `u16`).
+    pub width: u16,
+    /// Page height in pixels (wire field is `u16`).
+    pub height: u16,
+    /// Resolution in dots per inch.
+    pub dpi: u16,
+}
+
+impl ChunkEncoder for InfoChunk {
+    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+        Ok(EncodedChunk {
+            id: *b"INFO",
+            payload: encode_info(self.width, self.height, self.dpi),
+        })
+    }
+}
+
 /// `NAVM` — a document's bookmark tree.
 pub struct NavmChunk<'a>(pub &'a [DjVuBookmark]);
 
@@ -324,5 +365,39 @@ mod tests {
         mask.set_black(1, 1);
         assert_eq!(&SmmrChunk(&mask).encode_chunk().unwrap().id, b"Smmr");
         assert_eq!(&Jb2Chunk(&mask).encode_chunk().unwrap().id, b"Sjbz");
+    }
+
+    #[test]
+    fn encode_info_has_canonical_layout() {
+        // 181×240, 100 dpi — matches the round-trip fixture in `info.rs`:
+        // width/height big-endian, dpi little-endian, gamma byte 22 (= 2.2).
+        let info = encode_info(181, 240, 100);
+        assert_eq!(
+            info,
+            vec![
+                0x00, 0xB5, // width 181, big-endian
+                0x00, 0xF0, // height 240, big-endian
+                0x18, 0x00, // version (minor, major)
+                0x64, 0x00, // dpi 100, little-endian
+                22,   // gamma → 2.2
+                0x00, // flags: no rotation
+            ]
+        );
+    }
+
+    #[test]
+    fn info_chunk_yields_info_id_and_matches_free_fn() {
+        let chunk = InfoChunk {
+            width: 640,
+            height: 480,
+            dpi: 300,
+        }
+        .encode_chunk()
+        .unwrap();
+        assert_eq!(&chunk.id, b"INFO");
+        assert_eq!(chunk.payload, encode_info(640, 480, 300));
+        // dpi is the only differing field vs. the canonical 100-dpi fixture's
+        // resolution slot: 300 little-endian = 0x2C, 0x01.
+        assert_eq!(&chunk.payload[6..8], &[0x2C, 0x01]);
     }
 }

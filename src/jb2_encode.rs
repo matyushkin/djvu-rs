@@ -11,7 +11,15 @@
 pub use djvu_jb2::encode::*;
 
 use crate::Bitmap;
+use crate::chunk_encode::encode_info;
 use crate::iff;
+
+/// Default resolution stamped into bundled-mask page `INFO` chunks.
+///
+/// The bilevel bundling helpers carry no per-page dpi, so they use the
+/// encoder-wide default (matching [`crate::djvu_encode::PageEncoder`]'s 300)
+/// rather than the historical hard-coded 100.
+const BUNDLE_DEFAULT_DPI: u16 = 300;
 
 /// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
 ///
@@ -64,10 +72,10 @@ pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -
     let shared_ref: &[Bitmap] = shared;
     for (page_idx, page) in pages.iter().enumerate() {
         let sjbz = encode_jb2_dict_with_shared(page, shared_ref);
-        let mut info = Vec::with_capacity(10);
-        info.extend_from_slice(&(page.width as u16).to_be_bytes());
-        info.extend_from_slice(&(page.height as u16).to_be_bytes());
-        info.extend_from_slice(&[24, 0, 100, 0, 1, 0]); // version major, minor, dpi(le16), gamma, rotation
+        // Canonical INFO (see crate::chunk_encode::encode_info). Fixes the prior
+        // hand-rolled bytes that hard-coded dpi 100 and gamma byte 1 (≈ 0.1),
+        // diverging from the single-page/layered encoder's real dpi + gamma 2.2.
+        let info = encode_info(page.width as u16, page.height as u16, BUNDLE_DEFAULT_DPI);
 
         let mut djvu_body = Vec::new();
         djvu_body.extend_from_slice(b"DJVU");
@@ -311,6 +319,26 @@ mod tests {
             shared_jb2_total,
             independent_total
         );
+    }
+
+    #[test]
+    fn bundled_pages_carry_canonical_info_dpi() {
+        // Regression: the bundled-mask path used to hand-roll INFO with a
+        // hard-coded dpi 100 / gamma 0.1, diverging from the single-page
+        // encoder. It now routes through chunk_encode::encode_info, so a bundle
+        // reports the encoder-wide default (300), not 100.
+        let p1 = make_text_page(&[b"AABB", b"BABA"]);
+        let p2 = make_text_page(&[b"ABAB", b"BABA"]);
+        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2);
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            assert_eq!(
+                doc.page(i).expect("page").dpi(),
+                BUNDLE_DEFAULT_DPI,
+                "page {i} should carry the canonical default dpi, not the old 100"
+            );
+        }
     }
 
     #[test]
