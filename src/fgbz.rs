@@ -86,7 +86,10 @@ pub(crate) fn parse_fgbz(data: &[u8]) -> Result<FgbzPalette, BzzError> {
             let decoded = crate::bzz_new::bzz_decode(bzz_data)?;
 
             let n = num_indices as usize;
-            indices.reserve(n);
+            // `num_indices` is a raw 24-bit field (up to ~16 M → 32 MB reserve).
+            // The loop only pushes while `i*2+1 < decoded.len()`, so never more than
+            // decoded.len()/2 entries — cap the reservation to that.
+            indices.reserve(n.min(decoded.len() / 2));
             for i in 0..n {
                 if i * 2 + 1 < decoded.len() {
                     indices.push(i16::from_be_bytes([decoded[i * 2], decoded[i * 2 + 1]]));
