@@ -215,14 +215,23 @@ pub fn parse(data: &[u8]) -> Result<DjvuFile, Error> {
     };
     let _ = magic;
 
-    let (root, _) = parse_chunk(rest, 0)?;
+    let (root, _) = parse_chunk(rest, 0, 0)?;
     Ok(DjvuFile { root })
 }
 
+/// Maximum FORM nesting depth. Real DjVu files nest a handful of levels
+/// (DJVM → DJVU → chunks); a deeper chain is malformed and, without this bound,
+/// drives `parse_chunk`/`parse_children` into unbounded recursion → stack
+/// overflow on crafted input.
+const MAX_IFF_DEPTH: u32 = 64;
+
 /// Parse a single chunk starting at `offset` within `data`.
 /// Returns the parsed chunk and the number of bytes consumed (including padding).
-fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk, usize), Error> {
-    if offset + 8 > data.len() {
+fn parse_chunk(data: &[u8], offset: usize, depth: u32) -> Result<(Chunk, usize), Error> {
+    if depth > MAX_IFF_DEPTH {
+        return Err(Error::InvalidLength);
+    }
+    if offset.checked_add(8).is_none_or(|end| end > data.len()) {
         return Err(Error::UnexpectedEof);
     }
 
@@ -240,15 +249,22 @@ fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk, usize), Error> {
     ]);
 
     let payload_start = offset + 8;
-    let payload_end = payload_start + length as usize;
+    // `length` is attacker-controlled (u32, up to 4 GiB). On 32-bit targets
+    // (wasm32) `payload_start + length` can wrap, defeating the bounds check
+    // below and causing a slice panic or a runaway loop. Use checked math.
+    let payload_end = payload_start
+        .checked_add(length as usize)
+        .ok_or(Error::InvalidLength)?;
 
     if payload_end > data.len() {
         return Err(Error::UnexpectedEof);
     }
 
     // Word-align: next chunk starts at even offset
-    let total = 8 + length as usize;
-    let padded_total = total + (total % 2);
+    let total = 8usize
+        .checked_add(length as usize)
+        .ok_or(Error::InvalidLength)?;
+    let padded_total = total.checked_add(total % 2).ok_or(Error::InvalidLength)?;
 
     if &id == b"FORM" {
         if length < 4 {
@@ -262,7 +278,7 @@ fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk, usize), Error> {
         ];
 
         let children_start = payload_start + 4;
-        let children = parse_children(data, children_start, payload_end)?;
+        let children = parse_children(data, children_start, payload_end, depth + 1)?;
 
         Ok((
             Chunk::Form {
@@ -285,7 +301,7 @@ fn parse_chunk(data: &[u8], offset: usize) -> Result<(Chunk, usize), Error> {
 }
 
 /// Parse sequential chunks within a range of bytes.
-fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk>, Error> {
+fn parse_children(data: &[u8], start: usize, end: usize, depth: u32) -> Result<Vec<Chunk>, Error> {
     let mut chunks = Vec::new();
     let mut pos = start;
 
@@ -294,9 +310,11 @@ fn parse_children(data: &[u8], start: usize, end: usize) -> Result<Vec<Chunk>, E
             // Trailing bytes — some files have junk at end; tolerate it
             break;
         }
-        let (chunk, consumed) = parse_chunk(data, pos)?;
+        let (chunk, consumed) = parse_chunk(data, pos, depth)?;
         chunks.push(chunk);
-        pos += consumed;
+        // `consumed` is padded_total ≥ 8, so this always advances; checked to
+        // stay sound under any future change and on 32-bit targets.
+        pos = pos.checked_add(consumed).ok_or(Error::InvalidLength)?;
     }
 
     Ok(chunks)
@@ -681,6 +699,44 @@ fn dump_chunk(chunk: &Chunk, depth: usize, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chain of FORMs nested far deeper than `MAX_IFF_DEPTH` must be rejected,
+    /// not recurse until the stack overflows (security finding).
+    #[test]
+    fn deeply_nested_forms_are_rejected_not_overflow() {
+        // innermost: FORM + len(4) + secondary "DJVU" (even-length, no padding)
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"FORM");
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        buf.extend_from_slice(b"DJVU");
+        for _ in 0..200 {
+            let inner = buf;
+            let len = 4 + inner.len();
+            let mut outer = Vec::new();
+            outer.extend_from_slice(b"FORM");
+            outer.extend_from_slice(&(len as u32).to_be_bytes());
+            outer.extend_from_slice(b"DJVU");
+            outer.extend_from_slice(&inner);
+            buf = outer;
+        }
+        let mut full = Vec::from(*b"AT&T");
+        full.extend_from_slice(&buf);
+        assert!(
+            parse(&full).is_err(),
+            "deep nesting must error, not overflow"
+        );
+    }
+
+    /// A chunk length that overflows `usize` math must be rejected (32-bit / wasm32
+    /// safety — `payload_start + length` must not wrap).
+    #[test]
+    fn overflowing_chunk_length_is_rejected() {
+        let mut data = Vec::from(*b"AT&T");
+        data.extend_from_slice(b"JUNK");
+        data.extend_from_slice(&u32::MAX.to_be_bytes()); // 4 GiB claimed length
+        data.extend_from_slice(b"\x00\x00");
+        assert!(parse(&data).is_err());
+    }
 
     fn assets_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
