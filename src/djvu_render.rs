@@ -3250,6 +3250,138 @@ mod tests {
         DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"))
     }
 
+    // ── Compositor hot-path unit tests ───────────────────────────────────────
+    //
+    // The three `composite_rows_*_one` functions are the compositor's hot
+    // paths. They were previously exercised only through full-page
+    // `render_pixmap` / `render_into` against decoded fixtures, so a compositor
+    // bug could not be isolated from a decode bug. These tests drive each path
+    // directly off a synthetic `CompositeContext` (built from layers we control,
+    // not decoded from a file), making the compositor an independently-tested
+    // surface. Solid / block-uniform colours keep the assertions exact and free
+    // of sampling-rounding brittleness.
+
+    fn identity_lut() -> [u8; 256] {
+        core::array::from_fn(|i| i as u8)
+    }
+
+    /// Build a `CompositeContext` from synthetic layers, mirroring the q24 /
+    /// gamma wiring that [`CompositeContext::from_layers`] performs, but without
+    /// needing a `DjVuPage`. Foreground palette / blit map are unused here.
+    #[allow(clippy::too_many_arguments)]
+    fn synth_ctx<'a>(
+        opts: &'a RenderOptions,
+        page_w: u32,
+        page_h: u32,
+        bg: Option<&'a Pixmap>,
+        mask: Option<&'a crate::bitmap::Bitmap>,
+        gamma_lut: &'a [u8; 256],
+        out_w: u32,
+        out_h: u32,
+    ) -> CompositeContext<'a> {
+        let (fg_x_q24, fg_y_q24) = fg_q24(None, page_w, page_h);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg, page_w, page_h);
+        CompositeContext {
+            opts,
+            page_w,
+            page_h,
+            bg,
+            bg_x_q24,
+            bg_y_q24,
+            mask,
+            mask_shift: 0,
+            fg_palette: None,
+            blit_map: None,
+            fg44: None,
+            fg_x_q24,
+            fg_y_q24,
+            gamma_lut,
+            gamma_is_identity: true,
+            offset_x: 0,
+            offset_y: 0,
+            out_w,
+            out_h,
+        }
+    }
+
+    #[test]
+    fn composite_bilevel_one_maps_mask_to_black_and_white() {
+        // Foreground bits → opaque black; background → opaque white.
+        let opts = RenderOptions::default();
+        let mut mask = crate::bitmap::Bitmap::new(8, 1);
+        mask.set_black(0, 0);
+        mask.set_black(3, 0);
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 8, 1, None, Some(&mask), &lut, 8, 1);
+
+        let mut row = vec![0u8; 8 * 4];
+        composite_rows_bilevel_one(&ctx, 0, FRAC, FRAC, &mut row);
+
+        for x in 0..8usize {
+            let p = &row[x * 4..x * 4 + 4];
+            if x == 0 || x == 3 {
+                assert_eq!(p, [0, 0, 0, 255], "foreground pixel at x={x}");
+            } else {
+                assert_eq!(p, [255, 255, 255, 255], "background pixel at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn composite_bilinear_one_copies_background_at_1to1() {
+        // At 1:1 with an all-background mask and identity gamma, the bilinear
+        // path must reproduce the background pixels exactly.
+        let opts = RenderOptions::default();
+        let bg = Pixmap::new(4, 2, 10, 20, 30, 255);
+        let mask = crate::bitmap::Bitmap::new(4, 2); // all background
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 4, 2, Some(&bg), Some(&mask), &lut, 4, 2);
+
+        let mut row = vec![0u8; 4 * 4];
+        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row);
+
+        for x in 0..4usize {
+            let p = &row[x * 4..x * 4 + 4];
+            assert_eq!(&p[..3], &[10, 20, 30], "background colour at x={x}");
+            assert_eq!(p[3], 255, "opaque at x={x}");
+        }
+    }
+
+    #[test]
+    fn composite_area_avg_one_averages_uniform_background_on_downscale() {
+        // 2× downscale of a solid background: every 2×2 source block averages to
+        // the same colour, so the output cells equal that colour exactly.
+        let opts = RenderOptions::default();
+        let bg = Pixmap::new(4, 2, 40, 80, 120, 255);
+        let mask = crate::bitmap::Bitmap::new(4, 2); // all background
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 4, 2, Some(&bg), Some(&mask), &lut, 2, 1);
+
+        let fx_step = 2 * FRAC;
+        let fy_step = 2 * FRAC;
+        let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
+        let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
+        let xs = precompute_area_avg_x(&ctx, fx_step, bg_fx_step);
+
+        let mut row = vec![0u8; 2 * 4];
+        composite_rows_area_avg_one(
+            &ctx,
+            0,
+            fx_step,
+            fy_step,
+            bg_fx_step,
+            bg_fy_step,
+            &mut row,
+            Some(&xs),
+        );
+
+        for x in 0..2usize {
+            let p = &row[x * 4..x * 4 + 4];
+            assert_eq!(&p[..3], &[40, 80, 120], "averaged background at x={x}");
+            assert_eq!(p[3], 255, "opaque at x={x}");
+        }
+    }
+
     // ── TDD: failing tests written first ─────────────────────────────────────
 
     /// Issue #199 regression: page-space FRACBITS coords must be scaled into
