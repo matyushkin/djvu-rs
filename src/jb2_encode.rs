@@ -14,12 +14,10 @@ use crate::Bitmap;
 use crate::chunk_encode::encode_info;
 use crate::iff;
 
-/// Default resolution stamped into bundled-mask page `INFO` chunks.
-///
-/// The bilevel bundling helpers carry no per-page dpi, so they use the
-/// encoder-wide default (matching [`crate::djvu_encode::PageEncoder`]'s 300)
-/// rather than the historical hard-coded 100.
-const BUNDLE_DEFAULT_DPI: u16 = 300;
+/// Encoder-wide default page resolution, matching
+/// [`crate::djvu_encode::PageEncoder`]'s 300 dpi. Callers that have no dpi to
+/// supply to the bundling helpers can pass this.
+pub const BUNDLE_DEFAULT_DPI: u16 = 300;
 
 /// Encode a multi-page bilevel document as a bundled DJVM with a shared Djbz.
 ///
@@ -34,17 +32,28 @@ const BUNDLE_DEFAULT_DPI: u16 = 300;
 /// no symbols qualify for sharing and the encoder degrades to per-page
 /// independent encoding (still wrapped in DJVM).
 ///
+/// `dpi` is stamped into every page's `INFO` chunk; pass
+/// [`BUNDLE_DEFAULT_DPI`] when no specific resolution is known.
+///
 /// [`Jb2Dict`]: crate::jb2::Jb2Dict
-pub fn encode_djvm_bundle_jb2(pages: &[Bitmap], shared_dict_page_threshold: usize) -> Vec<u8> {
+pub fn encode_djvm_bundle_jb2(
+    pages: &[Bitmap],
+    shared_dict_page_threshold: usize,
+    dpi: u16,
+) -> Vec<u8> {
     let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
-    encode_djvm_bundle_jb2_with_shared(pages, &shared)
+    encode_djvm_bundle_jb2_with_shared(pages, &shared, dpi)
 }
 
 /// Same as [`encode_djvm_bundle_jb2`] but uses a caller-supplied shared
 /// dictionary instead of running [`cluster_shared_symbols`]. Lets callers
 /// drive cluster selection (e.g. corpus benchmarks measuring different
 /// Hamming thresholds) while reusing the IFF/DIRM emission logic.
-pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -> Vec<u8> {
+pub fn encode_djvm_bundle_jb2_with_shared(
+    pages: &[Bitmap],
+    shared: &[Bitmap],
+    dpi: u16,
+) -> Vec<u8> {
     let djbz_bytes = encode_jb2_djbz(shared);
 
     // ── Build component buffers (each = full FORM body, ready for IFF emit) ──
@@ -75,7 +84,7 @@ pub fn encode_djvm_bundle_jb2_with_shared(pages: &[Bitmap], shared: &[Bitmap]) -
         // Canonical INFO (see crate::chunk_encode::encode_info). Fixes the prior
         // hand-rolled bytes that hard-coded dpi 100 and gamma byte 1 (≈ 0.1),
         // diverging from the single-page/layered encoder's real dpi + gamma 2.2.
-        let info = encode_info(page.width as u16, page.height as u16, BUNDLE_DEFAULT_DPI);
+        let info = encode_info(page.width as u16, page.height as u16, dpi);
 
         let mut djvu_body = Vec::new();
         djvu_body.extend_from_slice(b"DJVU");
@@ -280,7 +289,7 @@ mod tests {
 
         let independent_total = encode_jb2_dict(&p1).len() + encode_jb2_dict(&p2).len();
 
-        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2, BUNDLE_DEFAULT_DPI);
         assert!(!bundle.is_empty());
 
         // Round-trip via the document parser.
@@ -322,21 +331,29 @@ mod tests {
     }
 
     #[test]
-    fn bundled_pages_carry_canonical_info_dpi() {
+    fn bundled_pages_carry_canonical_info_dpi_and_gamma() {
         // Regression: the bundled-mask path used to hand-roll INFO with a
-        // hard-coded dpi 100 / gamma 0.1, diverging from the single-page
-        // encoder. It now routes through chunk_encode::encode_info, so a bundle
-        // reports the encoder-wide default (300), not 100.
+        // hard-coded dpi 100 / gamma byte 1 (≈ 0.1), diverging from the
+        // single-page encoder. It now routes through chunk_encode::encode_info.
+        // A caller-supplied dpi (here a non-default 200) must be honoured —
+        // proving it is threaded, not hard-coded — and gamma must read back as
+        // the canonical 2.2 (the other half of the old divergence).
         let p1 = make_text_page(&[b"AABB", b"BABA"]);
         let p2 = make_text_page(&[b"ABAB", b"BABA"]);
-        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2);
+        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2, 200);
         let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
         assert_eq!(doc.page_count(), 2);
         for i in 0..2 {
+            let page = doc.page(i).expect("page");
             assert_eq!(
-                doc.page(i).expect("page").dpi(),
-                BUNDLE_DEFAULT_DPI,
-                "page {i} should carry the canonical default dpi, not the old 100"
+                page.dpi(),
+                200,
+                "page {i} must carry the caller-supplied dpi (threaded, not the old hard-coded 100)"
+            );
+            assert!(
+                (page.gamma() - 2.2).abs() < 1e-3,
+                "page {i} gamma should be 2.2, was {} (old bug: ≈ 0.1)",
+                page.gamma()
             );
         }
     }
@@ -350,7 +367,7 @@ mod tests {
         let mut p2 = Bitmap::new(20, 10);
         render_glyph(&mut p2, 2, 2, &glyph_b());
 
-        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        let bundle = encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2, BUNDLE_DEFAULT_DPI);
         let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
         assert_eq!(doc.page_count(), 2);
         let d1 = doc
@@ -376,7 +393,7 @@ mod tests {
         // `FORM` tag of its component within the file.
         let p1 = make_text_page(&[b"AABB", b"BABA"]);
         let p2 = make_text_page(&[b"AABB", b"BABA"]);
-        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2);
+        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2, BUNDLE_DEFAULT_DPI);
 
         let form = iff::parse_form(&bundle).expect("parse DJVM");
         let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");

@@ -7,7 +7,7 @@
 //! decodes back to the same dimensions.
 
 use djvu_rs::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
-use djvu_rs::iw44_new::Iw44Image;
+use djvu_rs::iw44::Iw44Image;
 use djvu_rs::smmr::{decode_smmr, encode_smmr};
 use djvu_rs::{Bitmap, Pixmap, jb2, jb2_encode};
 use libfuzzer_sys::fuzz_target;
