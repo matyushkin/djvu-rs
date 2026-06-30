@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.4](https://github.com/matyushkin/djvu-rs/compare/v0.22.3...v0.22.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **iw44:** emit DjVuLibre-compatible IW44 major version (encoder interop) ([#462](https://github.com/matyushkin/djvu-rs/issues/462)) ([901a106](https://github.com/matyushkin/djvu-rs/commit/901a10681902803bbaa5581430e6f7e78ef97412))
+* **iw44:** full-resolution chroma by default for DjVuLibre interop ([#464](https://github.com/matyushkin/djvu-rs/issues/464)) ([ed85953](https://github.com/matyushkin/djvu-rs/commit/ed859530a5839928187e8420dc587a82cfb23872))
+
 ## [0.22.3](https://github.com/matyushkin/djvu-rs/compare/v0.22.2...v0.22.3) (2026-06-30)
 
 
