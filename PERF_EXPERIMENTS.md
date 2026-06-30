@@ -5,6 +5,30 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### Encoder ↔ DjVuLibre interop (encoder-differential) — **Kept (correctness)** (2026-06-30)
+
+Reverse of the decode-differential: encode with djvu-rs, decode the result with
+`ddjvu`, compare. Found our *colour* DjVu output was unreadable by DjVuLibre — two
+distinct bugs (round-trip + our own decoder missed both, since they only test our
+encoder against our decoder):
+
+1. **IW44 major-version byte** (#462): emitted 0, but DjVuLibre needs
+   `(major & 0x7f) == 1` (IWCODEC_MAJOR) → "incompatible IWCodec". Fixed to 0x01
+   (colour) / 0x81 (gray).
+2. **chroma_half** (this entry): our `chroma_half=true` default stores Cb/Cr at half
+   *spatial* resolution, but DjVuLibre's `IWPixmap::decode_chunk` builds
+   full-resolution chroma maps and reads full-resolution chroma slices — so it runs
+   short of bits ("Unexpected End Of File"). Root-caused by reading DjVuLibre's
+   `IW44Image.cpp` after black-box testing (version/skip/padding/slice-count) was
+   exhausted. **Fix:** default `chroma_half = false` (full-resolution chroma).
+
+**Result:** 6/6 colour corpus files now decode in ddjvu (were 0/6); our own decoder
+round-trips unchanged (36 IW44 tests green). **Cost:** BG44 ~+8% (119_230 → 128_999 B
+on the 2-page size gate; chroma is a fraction of the data). Correctness > size — our
+colour `.djvu` were previously unusable in DjVuLibre and every other standard reader.
+JB2 (bilevel) encode was already pixel-perfect interop. A DjVuLibre-compatible
+half-chroma (full-size map, band-truncated) could reclaim the ~8% as a follow-up.
+
 ### Encoder speed vs DjVuLibre (cjb2 / c44) — **Diagnostic, no action** (2026-06-26)
 
 First head-to-head of *encode* speed (decode/render were already benchmarked;
