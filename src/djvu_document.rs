@@ -1285,6 +1285,11 @@ fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
     Ok(chunks)
 }
 
+/// Maximum NAVM bookmark nesting depth (real outlines are a few levels deep).
+/// Bounds `parse_bookmark_entry` recursion so a crafted deep chain can't overflow
+/// the stack.
+const MAX_NAVM_DEPTH: u32 = 256;
+
 /// Parse NAVM bookmarks from the chunk list of a FORM:DJVM.
 ///
 /// Returns an empty Vec if there is no NAVM chunk.
@@ -1313,7 +1318,7 @@ fn parse_navm_bookmarks(chunks: &[IffChunk<'_>]) -> Result<Vec<DjVuBookmark>, Do
     let mut decoded_count = 0usize;
 
     while decoded_count < total_count {
-        let bm = parse_bookmark_entry(&decoded, &mut pos, &mut decoded_count)?;
+        let bm = parse_bookmark_entry(&decoded, &mut pos, &mut decoded_count, 0)?;
         bookmarks.push(bm);
     }
 
@@ -1328,7 +1333,14 @@ fn parse_bookmark_entry(
     data: &[u8],
     pos: &mut usize,
     total_counter: &mut usize,
+    depth: u32,
 ) -> Result<DjVuBookmark, DocError> {
+    // `total_counter` bounds the *number* of nodes but not the *depth*: a crafted
+    // chain of single-child entries recurses as deep as the node count (up to
+    // ~65 535), overflowing the stack. Real bookmark trees are a few levels deep.
+    if depth > MAX_NAVM_DEPTH {
+        return Err(DocError::Malformed("NAVM bookmark nesting too deep"));
+    }
     if *pos >= data.len() {
         return Err(DocError::Malformed("NAVM bookmark entry truncated"));
     }
@@ -1346,7 +1358,7 @@ fn parse_bookmark_entry(
     // Children: fixed count, recurse with the same global total_counter
     let mut children = Vec::with_capacity(n_children);
     for _ in 0..n_children {
-        let child = parse_bookmark_entry(data, pos, total_counter)?;
+        let child = parse_bookmark_entry(data, pos, total_counter, depth + 1)?;
         children.push(child);
     }
 
@@ -1384,6 +1396,30 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A NAVM bookmark chain nested far deeper than `MAX_NAVM_DEPTH` must error,
+    /// not recurse until the stack overflows (security finding). Drives the
+    /// internal entry parser directly with a crafted decoded buffer.
+    #[test]
+    fn deeply_nested_bookmarks_are_rejected_not_overflow() {
+        // [total_count u16 = 1] then one entry that is a 400-deep single-child
+        // chain: each node = [n_children=1][title len3=0][url len3=0]; deepest =
+        // [n_children=0][..][..].
+        let mut decoded = vec![0x00, 0x01];
+        for _ in 0..400 {
+            decoded.push(1); // n_children
+            decoded.extend_from_slice(&[0, 0, 0]); // empty title (3-byte len)
+            decoded.extend_from_slice(&[0, 0, 0]); // empty url
+        }
+        decoded.push(0); // deepest: no children
+        decoded.extend_from_slice(&[0, 0, 0]);
+        decoded.extend_from_slice(&[0, 0, 0]);
+
+        let mut pos = 2usize;
+        let mut counter = 0usize;
+        let r = parse_bookmark_entry(&decoded, &mut pos, &mut counter, 0);
+        assert!(r.is_err(), "deep bookmark chain must error, not overflow");
+    }
 
     fn assets_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
