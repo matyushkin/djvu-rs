@@ -589,6 +589,25 @@ fn packed_bytes_for_pixels(pixels: u64) -> u64 {
     pixels.div_ceil(8)
 }
 
+/// FNV-1a hash of a symbol's `(w, h, packed-data)`, used as the bucket key for
+/// exact-match dedup. Replaces a `BTreeMap` keyed by `(u32, u32, Vec<u8>)`, which
+/// cloned the bitmap data on every connected-component lookup; the hash buckets
+/// (`BTreeMap<u64, Vec<usize>>`) compare the actual data only on a hash hit, so
+/// dedup stays byte-identical while avoiding the per-CC allocation.
+#[inline]
+fn symbol_hash(w: u32, h: u32, data: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            hash = (hash ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(&w.to_le_bytes());
+    mix(&h.to_le_bytes());
+    mix(data);
+    hash
+}
+
 #[cfg(feature = "experimental")]
 fn index_overhead_bytes(dict_len: usize) -> u64 {
     let bits = usize::BITS - dict_len.max(1).leading_zeros();
@@ -1004,10 +1023,11 @@ pub fn encode_jb2_dict_with_options(
     // Layout state — mirrors `LayoutState::new` in jb2.rs:1187.
     let mut layout = EncoderLayout::new(h);
 
-    // Exact-match dedup: (w, h, packed-data) → dict index. Pre-populated from
-    // shared_symbols so cross-page identical glyphs encode as rec-7 (copy)
-    // referencing the shared library.
-    let mut dedup: BTreeMap<(u32, u32, Vec<u8>), usize> = BTreeMap::new();
+    // Exact-match dedup: symbol_hash(w, h, packed-data) → dict indices. Buckets
+    // (compared against `dict_entries` on a hit) keep this byte-identical while
+    // avoiding a bitmap-data clone per connected component. Pre-populated from
+    // shared_symbols so cross-page identical glyphs encode as rec-7 (copy).
+    let mut dedup: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     // Stored dict entries (parallel to the decoder's `dict` vector) — needed
     // so refinement matching can score Hamming distance against historical
     // glyphs.
@@ -1016,7 +1036,10 @@ pub fn encode_jb2_dict_with_options(
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
     for sym in shared_symbols {
         let idx = dict_entries.len();
-        dedup.insert((sym.width, sym.height, sym.data.clone()), idx);
+        dedup
+            .entry(symbol_hash(sym.width, sym.height, &sym.data))
+            .or_default()
+            .push(idx);
         by_size
             .entry((sym.width, sym.height))
             .or_default()
@@ -1032,8 +1055,15 @@ pub fn encode_jb2_dict_with_options(
         let x_jb2 = cc.x as i32;
         let y_jb2 = h - cc.y as i32 - cc_h;
 
-        let key = (cc.bitmap.width, cc.bitmap.height, cc.bitmap.data.clone());
-        let exact_match = dedup.get(&key).copied();
+        let dkey = symbol_hash(cc.bitmap.width, cc.bitmap.height, &cc.bitmap.data);
+        let exact_match = dedup.get(&dkey).and_then(|cands| {
+            cands.iter().copied().find(|&i| {
+                let d = &dict_entries[i];
+                d.width == cc.bitmap.width
+                    && d.height == cc.bitmap.height
+                    && d.data == cc.bitmap.data
+            })
+        });
 
         // Choose record type:
         //   exact match → 7  (matched copy, blit only)
@@ -1179,7 +1209,7 @@ pub fn encode_jb2_dict_with_options(
         // are blit-only and the decoder leaves the dict untouched.
         if matches!(action, Action::New) {
             let next_idx = dict_entries.len();
-            dedup.insert(key, next_idx);
+            dedup.entry(dkey).or_default().push(next_idx);
             by_size
                 .entry((cc.bitmap.width, cc.bitmap.height))
                 .or_default()
