@@ -714,7 +714,11 @@ mod tests {
             }
         }
 
-        let bytes = crate::jb2_encode::encode_djvm_bundle_jb2(&[p1.clone(), p2.clone()], 2);
+        let bytes = crate::jb2_encode::encode_djvm_bundle_jb2(
+            &[p1.clone(), p2.clone()],
+            2,
+            crate::jb2_encode::BUNDLE_DEFAULT_DPI,
+        );
         let sync_doc = DjVuDocument::parse(&bytes).expect("sync parse");
         let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
             .await

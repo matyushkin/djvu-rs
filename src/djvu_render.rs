@@ -3296,7 +3296,10 @@ mod tests {
             fg_x_q24,
             fg_y_q24,
             gamma_lut,
-            gamma_is_identity: true,
+            // Compute from the lut (mirroring CompositeContext::from_layers)
+            // rather than hard-coding, so a future test passing a non-identity
+            // lut is not silently routed down the identity fast path.
+            gamma_is_identity: gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8),
             offset_x: 0,
             offset_y: 0,
             out_w,
@@ -3328,9 +3331,11 @@ mod tests {
     }
 
     #[test]
-    fn composite_bilinear_one_copies_background_at_1to1() {
-        // At 1:1 with an all-background mask and identity gamma, the bilinear
-        // path must reproduce the background pixels exactly.
+    fn composite_bilinear_one_copies_background_1to1_unsubsampled() {
+        // page_w == bg_w ⇒ bg_x_q24 == 1<<24, so this drives the A2 tight
+        // mask-LUT-expand fast path (the common corpus case where the
+        // background is at page resolution). Identity gamma + all-background
+        // mask ⇒ the bg pixels must be reproduced exactly.
         let opts = RenderOptions::default();
         let bg = Pixmap::new(4, 2, 10, 20, 30, 255);
         let mask = crate::bitmap::Bitmap::new(4, 2); // all background
@@ -3343,6 +3348,35 @@ mod tests {
         for x in 0..4usize {
             let p = &row[x * 4..x * 4 + 4];
             assert_eq!(&p[..3], &[10, 20, 30], "background colour at x={x}");
+            assert_eq!(p[3], 255, "opaque at x={x}");
+        }
+    }
+
+    #[test]
+    fn composite_bilinear_one_upsamples_subsampled_background() {
+        // page_w (8) > bg_w (4) ⇒ bg_x_q24 != 1<<24, so the A2 tight path is
+        // skipped and the real bilinear sampler (`bilinear_from_rows`) runs to
+        // upscale the subsampled background. A solid bg interpolates to itself,
+        // so every output pixel must equal the bg colour exactly — proving the
+        // sampler addresses the bg correctly without corrupting it.
+        let opts = RenderOptions::default();
+        let bg = Pixmap::new(4, 2, 70, 90, 110, 255); // half page resolution
+        let mask = crate::bitmap::Bitmap::new(8, 2); // page-res, all background
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 8, 2, Some(&bg), Some(&mask), &lut, 8, 2);
+        // Sanity: this configuration must NOT take the 1:1 tight path.
+        assert_ne!(
+            ctx.bg_x_q24,
+            1 << 24,
+            "test must exercise the subsampled path"
+        );
+
+        let mut row = vec![0u8; 8 * 4];
+        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row);
+
+        for x in 0..8usize {
+            let p = &row[x * 4..x * 4 + 4];
+            assert_eq!(&p[..3], &[70, 90, 110], "upsampled bg colour at x={x}");
             assert_eq!(p[3], 255, "opaque at x={x}");
         }
     }

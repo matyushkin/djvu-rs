@@ -146,7 +146,11 @@ fn process_file(
     // Build the bundle with a tunable cluster Hamming threshold so we can
     // sweep different fractions independently of the shipped default.
     let shared = cluster_shared_symbols_tunable(&pages, threshold, diff_fraction);
-    let bundle = encode_djvm_bundle_jb2_with_shared(&pages, &shared);
+    let bundle = encode_djvm_bundle_jb2_with_shared(
+        &pages,
+        &shared,
+        djvu_rs::jb2_encode::BUNDLE_DEFAULT_DPI,
+    );
     let bundle_total = bundle.len();
 
     // Diagnostic breakdown: how big is the shared dict, vs per-page Sjbz?

@@ -1193,7 +1193,7 @@ impl PlaneEncoder {
 
 #[cfg(feature = "std")]
 /// Options for IW44 encoding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Iw44EncodeOptions {
     /// Number of slices per BG44 chunk (1..=99, default 10).
     pub slices_per_chunk: u8,

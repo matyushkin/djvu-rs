@@ -1040,7 +1040,7 @@ fn cmd_encode(
                 let seg = segment_page(&pixmap, &SegmentOptions::default());
                 masks.push(seg.mask);
             }
-            let bytes = encode_djvm_bundle_jb2(&masks, shared_dict_pages);
+            let bytes = encode_djvm_bundle_jb2(&masks, shared_dict_pages, dpi);
             std::fs::write(output, &bytes)?;
             eprintln!(
                 "{} pages → {} ({} bytes, shared-dict threshold = {})",
