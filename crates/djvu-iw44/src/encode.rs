@@ -1212,7 +1212,14 @@ impl Default for Iw44EncodeOptions {
             slices_per_chunk: 10,
             total_slices: 100,
             chroma_delay: 0,
-            chroma_half: true,
+            // DjVuLibre interop: our `chroma_half` encodes Cb/Cr at half *spatial*
+            // resolution (a smaller plane), but DjVuLibre's IWPixmap decoder always
+            // builds full-resolution chroma maps and reads full-resolution chroma
+            // slices — so a half-resolution stream leaves it short of bits ("Unexpected
+            // End Of File"), making our colour DjVu unreadable in ddjvu/DjVuLibre.
+            // Default to full-resolution chroma for interoperability. (Round-trips
+            // through our own decoder either way.)
+            chroma_half: false,
         }
     }
 }
@@ -1912,6 +1919,19 @@ mod tests {
     use super::*;
     use crate::Iw44Image;
     use djvu_pixmap::{GrayPixmap, Pixmap};
+
+    /// The default must encode full-resolution chroma. Our `chroma_half` stores
+    /// Cb/Cr at half *spatial* resolution, which DjVuLibre's IWPixmap decoder (it
+    /// builds full-resolution chroma maps) reads as too few bits → "Unexpected End
+    /// Of File". Defaulting to half-chroma made our colour DjVu unreadable in
+    /// ddjvu/DjVuLibre, so the interop default is full chroma. Locks that decision.
+    #[test]
+    fn default_chroma_is_full_resolution_for_interop() {
+        assert!(
+            !Iw44EncodeOptions::default().chroma_half,
+            "default must be full-resolution chroma for DjVuLibre interop"
+        );
+    }
 
     /// The IW44 primary-chunk major-version byte must satisfy DjVuLibre's
     /// `(major & 0x7f) == 1` check (IWCODEC_MAJOR), or ddjvu rejects the stream
