@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0](https://github.com/matyushkin/djvu-rs/compare/v0.22.5...v0.23.0) (2026-06-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **encode:** `encode_djvm_bundle_jb2` and `encode_djvm_bundle_jb2_with_shared` gain a trailing `dpi: u16` parameter. Pass `jb2_encode::BUNDLE_DEFAULT_DPI` to preserve prior intent. Bundled-mask DjVu output now carries the supplied dpi and gamma 2.2 (previously a hard-coded dpi 100 / gamma 0.1).
+
+### Bug Fixes
+
+* **encode:** address post-merge review of [#469](https://github.com/matyushkin/djvu-rs/issues/469)-[#472](https://github.com/matyushkin/djvu-rs/issues/472) ([#474](https://github.com/matyushkin/djvu-rs/issues/474)) ([3f510c3](https://github.com/matyushkin/djvu-rs/commit/3f510c3145d9c9845133ec0dd7f3023bab66f588))
+* **encode:** single canonical INFO serializer across encode paths ([#470](https://github.com/matyushkin/djvu-rs/issues/470)) ([0b376cb](https://github.com/matyushkin/djvu-rs/commit/0b376cbe79f29a8e6ef878a553f2453e9f6d4e47))
+
+
+### Performance Improvements
+
+* **jb2:** hash-bucket dedup to drop per-CC bitmap clone (~2-3%, byte-identical) ([#467](https://github.com/matyushkin/djvu-rs/issues/467)) ([95bf134](https://github.com/matyushkin/djvu-rs/commit/95bf1345211c7424797deb3221e475ae8ab7b40e))
+
 ## [0.22.5](https://github.com/matyushkin/djvu-rs/compare/v0.22.4...v0.22.5) (2026-06-30)
 
 
