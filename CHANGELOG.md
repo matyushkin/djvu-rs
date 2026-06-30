@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.5](https://github.com/matyushkin/djvu-rs/compare/v0.22.4...v0.22.5) (2026-06-30)
+
+
+### Performance Improvements
+
+* **iw44:** default chroma_delay=10 (match c44; recover full-chroma cost) ([#465](https://github.com/matyushkin/djvu-rs/issues/465)) ([566e610](https://github.com/matyushkin/djvu-rs/commit/566e610fe45ce7b98c780aac468cf5f5ec5d5a9c))
+
 ## [0.22.4](https://github.com/matyushkin/djvu-rs/compare/v0.22.3...v0.22.4) (2026-06-30)
 
 
