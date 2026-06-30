@@ -756,7 +756,10 @@ fn mask_box_coverage(
             count += (row[byte_hi - 1] & end_mask).count_ones();
         }
     }
-    ((count * 255 + total / 2) / total) as u8
+    // Widen to u64: on a large mask with aggressive downsampling a single box can
+    // cover > 16.8 M foreground bits, where `count * 255` overflows u32 (wrong
+    // value in release, panic in debug).
+    ((count as u64 * 255 + total as u64 / 2) / total as u64) as u8
 }
 
 /// Find the center foreground pixel in a mask box for palette color lookup.
@@ -2810,6 +2813,18 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         });
     }
 
+    // Bound the output allocation. `w`/`h` flow from the (untrusted) INFO chunk on
+    // a default render; w*h*4 of 65535² is ~17 GB, which either OOMs (64-bit) or
+    // wraps `Pixmap::new` to an empty buffer that the permissive copy below then
+    // indexes out of bounds. Reject up front.
+    const MAX_RENDER_PIXELS: usize = 512 * 1024 * 1024;
+    if (w as usize).saturating_mul(h as usize) > MAX_RENDER_PIXELS {
+        return Err(RenderError::InvalidDimensions {
+            width: w,
+            height: h,
+        });
+    }
+
     let mut pm = Pixmap::white(w, h);
 
     if opts.permissive {
@@ -4795,6 +4810,24 @@ mod tests {
         let pm = render_pixmap(page, &opts).expect("permissive render should not error");
         assert_eq!(pm.width, 40);
         assert_eq!(pm.height, 40);
+    }
+
+    /// Oversized render dimensions must be rejected, not OOM / panic on an empty
+    /// overflow pixmap (security finding).
+    #[test]
+    fn oversized_render_dimensions_are_rejected() {
+        let doc = load_doc("czech.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 60_000,
+            height: 60_000, // 3.6 G px > MAX_RENDER_PIXELS
+            permissive: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            render_pixmap(page, &opts),
+            Err(RenderError::InvalidDimensions { .. })
+        ));
     }
 
     /// Permissive render on a BGjp page (no BG44) falls through to decode_bgjp.

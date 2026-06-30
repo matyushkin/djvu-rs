@@ -25,6 +25,7 @@ pub enum SmmrError {
     TooShort,
     BadCode,
     UnexpectedEof,
+    ImageTooLarge,
 }
 
 impl core::fmt::Display for SmmrError {
@@ -33,9 +34,15 @@ impl core::fmt::Display for SmmrError {
             SmmrError::TooShort => write!(f, "Smmr chunk too short"),
             SmmrError::BadCode => write!(f, "invalid G4 MMR code"),
             SmmrError::UnexpectedEof => write!(f, "G4 bitstream truncated"),
+            SmmrError::ImageTooLarge => write!(f, "Smmr declared dimensions exceed the limit"),
         }
     }
 }
+
+/// Maximum Smmr (G4) bitmap area. A 4-byte header can declare up to 65535×65535
+/// (~4.3 G pixels ≈ 537 MB packed) — far beyond any real DjVu page mask. Bound it
+/// so a tiny crafted chunk can't trigger a huge allocation.
+const MAX_SMMR_PIXELS: usize = 256 * 1024 * 1024;
 
 // ---- Huffman tables (ITU-T T.4) --------------------------------------------
 
@@ -499,6 +506,9 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
     }
     let ncols = u16::from_be_bytes([data[0], data[1]]) as usize;
     let nrows = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if ncols.saturating_mul(nrows) > MAX_SMMR_PIXELS {
+        return Err(SmmrError::ImageTooLarge);
+    }
     let mut bm = Bitmap::new(ncols as u32, nrows as u32);
     if ncols == 0 || nrows == 0 {
         return Ok(bm);
@@ -647,6 +657,14 @@ pub fn encode_smmr(bm: &Bitmap) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4-byte Smmr declaring 65535×65535 must be rejected, not allocate ~537 MB
+    /// (security finding).
+    #[test]
+    fn oversized_dimensions_are_rejected() {
+        let data = [0xFF, 0xFF, 0xFF, 0xFF]; // ncols = nrows = 65535
+        assert!(matches!(decode_smmr(&data), Err(SmmrError::ImageTooLarge)));
+    }
 
     fn make_bm(w: u32, h: u32, f: impl Fn(u32, u32) -> bool) -> Bitmap {
         let mut bm = Bitmap::new(w, h);
