@@ -53,7 +53,7 @@
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
 
 use crate::bitmap::Bitmap;
-use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk};
+use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk, encode_info};
 use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
@@ -383,23 +383,6 @@ fn encode_form_djvu(children: Vec<Chunk>) -> Vec<u8> {
         },
     };
     emit(&file)
-}
-
-/// Build the 10-byte `INFO` chunk body.
-///
-/// Mirrors the layout parsed by `crate::info::PageInfo::parse` — note
-/// the mixed endianness: width/height are big-endian, dpi is
-/// little-endian (per DjVu spec).
-fn encode_info(width: u16, height: u16, dpi: u16) -> Vec<u8> {
-    let mut b = vec![0u8; 10];
-    b[0..2].copy_from_slice(&width.to_be_bytes());
-    b[2..4].copy_from_slice(&height.to_be_bytes());
-    b[4] = 0x18; // minor version
-    b[5] = 0x00; // major version
-    b[6..8].copy_from_slice(&dpi.to_le_bytes()); // dpi: little-endian
-    b[8] = 22; // gamma byte: 22 → 2.2
-    b[9] = 0x00; // flags: no rotation
-    b
 }
 
 #[derive(Debug, Clone, Copy, Default)]
