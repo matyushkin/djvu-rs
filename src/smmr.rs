@@ -369,8 +369,12 @@ fn decode_black_run(br: &mut BitReader<'_>) -> Result<usize, SmmrError> {
 /// `prev[-1]` is treated as white (false) by convention.
 fn find_b1(prev: &[bool], a0: usize, a0_color: bool) -> usize {
     let target = !a0_color; // b1 transitions TO the opposite color
-    // Search from position a0 onward (inclusive, to handle position 0 correctly)
-    // We want the FIRST PIXEL at position > a0 that starts a run of `target` color.
+    // Search from position a0 onward (inclusive). NOTE: this is correct for this
+    // implementation's `a0` convention — here `a0` is the next pixel to code (one
+    // past the last changing element), not the T.6 "a0 = last changing element",
+    // so b1 ≥ a0 here is equivalent to the spec's strictly-right-of-a0. (A
+    // correctness review proposed a0+1 here; it breaks the hand-verified VR1
+    // vertical-mode decode — see `decoder_vr1_vertical_mode_produces_correct_output`.)
     let start = if a0 < prev.len() {
         a0
     } else {

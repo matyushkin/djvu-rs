@@ -458,7 +458,6 @@ pub(crate) const MAX_TOTAL_SYMBOL_PIXELS: usize = 256 * 1024 * 1024;
 const MAX_PAGE_SYMBOL_PIXELS: usize = 16 * 1024 * 1024;
 const MAX_TOTAL_BLIT_PIXELS: usize = 256 * 1024 * 1024; // 256 MP total blit work — prevents type-7 DoS
 const MAX_RECORDS: usize = 65_536; // 64 K records per stream — prevents DoS via record-loop spin on exhausted ZP input
-const MAX_COMMENT_BYTES: usize = 4096; // 4 KiB per comment record — prevents DoS via huge comment length
 
 /// Check that decoding a `w × h` symbol won't exceed per-symbol or stream-total pixel budgets.
 #[inline(always)]
@@ -1731,7 +1730,10 @@ fn decode_image_with_pool(
             // 10 — comment: skip bytes
             10 => {
                 let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
-                let length = length.min(MAX_COMMENT_BYTES);
+                // Consume ALL `length` octets: decode_num is ZP-stateful, so
+                // skipping any (e.g. capping the loop) desynchronizes the
+                // arithmetic coder for every following record — silent corruption.
+                // `length` ≤ 262142 (decode_num range) already bounds the loop.
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }
@@ -2066,7 +2068,10 @@ fn decode_image_indexed_with_pool(
             9 => {}
             10 => {
                 let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
-                let length = length.min(MAX_COMMENT_BYTES);
+                // Consume ALL `length` octets: decode_num is ZP-stateful, so
+                // skipping any (e.g. capping the loop) desynchronizes the
+                // arithmetic coder for every following record — silent corruption.
+                // `length` ≤ 262142 (decode_num range) already bounds the loop.
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }
@@ -2210,7 +2215,10 @@ fn decode_dictionary_with_pool(
             // 10 — comment: skip bytes
             10 => {
                 let length = decode_num(&mut zp, &mut comment_length_ctx, 0, 262142) as usize;
-                let length = length.min(MAX_COMMENT_BYTES);
+                // Consume ALL `length` octets: decode_num is ZP-stateful, so
+                // skipping any (e.g. capping the loop) desynchronizes the
+                // arithmetic coder for every following record — silent corruption.
+                // `length` ≤ 262142 (decode_num range) already bounds the loop.
                 for _ in 0..length {
                     decode_num(&mut zp, &mut comment_octet_ctx, 0, 255);
                 }
