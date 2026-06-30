@@ -1433,7 +1433,13 @@ fn encode_chunks(
         if serial == 0 {
             chunk.push(0u8); // serial
             chunk.push(n as u8); // slices
-            let majver: u8 = if !is_color { 0x80 } else { 0x00 };
+            // Major version byte. DjVuLibre's IWPixmap::decode_chunk rejects the
+            // stream with "incompatible IWCodec" unless `(major & 0x7f) == 1`
+            // (IWCODEC_MAJOR). We previously emitted 0 → our colour output was
+            // unreadable by ddjvu/DjVuLibre. Bit 7 carries our grayscale flag (the
+            // decoder reads `is_grayscale = major >> 7`); real DjVuLibre colour BG44
+            // chunks use 0x01, so colour = 0x01, grayscale = 0x81.
+            let majver: u8 = if is_color { 0x01 } else { 0x81 };
             chunk.push(majver);
             chunk.push(0x02); // minor = 2
             chunk.push((width >> 8) as u8);
@@ -1906,6 +1912,29 @@ mod tests {
     use super::*;
     use crate::Iw44Image;
     use djvu_pixmap::{GrayPixmap, Pixmap};
+
+    /// The IW44 primary-chunk major-version byte must satisfy DjVuLibre's
+    /// `(major & 0x7f) == 1` check (IWCODEC_MAJOR), or ddjvu rejects the stream
+    /// with "incompatible IWCodec". Regression for the colour encode-interop bug.
+    #[test]
+    fn bg44_major_version_is_djvulibre_compatible() {
+        let mut pm = Pixmap::white(32, 32);
+        for y in 0..32 {
+            for x in 0..32 {
+                pm.set_rgb(x, y, (x * 8) as u8, (y * 8) as u8, 128);
+            }
+        }
+        let chunks = encode_iw44_color(&pm, &Iw44EncodeOptions::default());
+        // chunk[0] = serial, slices, major, minor, ...
+        let major = chunks[0][2];
+        assert_eq!(
+            major & 0x7f,
+            1,
+            "major version must be 1 (got 0x{major:02x})"
+        );
+        // our colour flag lives in bit 7; a colour image must be decodable as colour
+        assert_eq!(major >> 7, 0, "colour chunk should have bit7 clear (0x01)");
+    }
 
     fn make_pixmap(w: u32, h: u32, f: impl Fn(u32, u32) -> (u8, u8, u8)) -> Pixmap {
         let mut px = Pixmap::white(w, h);
