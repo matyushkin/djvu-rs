@@ -30,7 +30,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut img = djvu_rs::iw44_new::Iw44Image::new();
+    let mut img = djvu_rs::iw44::Iw44Image::new();
     for chunk in &chunks {
         img.decode_chunk(chunk).expect("decode_chunk failed");
     }

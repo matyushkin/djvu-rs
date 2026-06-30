@@ -106,6 +106,10 @@ impl EncodeQuality {
     pub fn default_segment_options(self) -> SegmentOptions {
         match self {
             EncodeQuality::Archival => SegmentOptions::archival(),
+            // `Lossless` never segments (bilevel input has no FG/BG split); it
+            // returns the defaults only so this mapping is total. Callers must
+            // gate on the profile before reaching `segment_page` — both
+            // `PageEncoder::encode` and the CLI reject `Lossless` upstream.
             EncodeQuality::Quality | EncodeQuality::Lossless => SegmentOptions::default(),
         }
     }
@@ -249,7 +253,7 @@ impl<'a> PageEncoder<'a> {
                     &self.jb2_options.unwrap_or_default(),
                 );
                 let bg44_chunks =
-                    encode_iw44_color(&seg.bg, &self.iw44_options.clone().unwrap_or_default());
+                    encode_iw44_color(&seg.bg, &self.iw44_options.unwrap_or_default());
                 let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None);
 
                 let mut chunks =

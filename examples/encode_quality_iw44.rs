@@ -12,8 +12,8 @@ use std::process::ExitCode;
 
 use djvu_rs::{
     DjVuDocument, Pixmap,
+    iw44::Iw44Image,
     iw44_encode::{Iw44EncodeOptions, encode_iw44_color},
-    iw44_new::Iw44Image,
 };
 
 #[derive(Clone, Copy, Debug)]
