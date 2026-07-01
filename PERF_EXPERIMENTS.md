@@ -4978,3 +4978,46 @@ Repeat targeted downscale run: 3.515 ms.
 regression. It removes a full-buffer alpha pass from the downscale render while
 keeping native RGB loops on the existing post-pass strategy that previously
 benchmarked better than explicit 4-byte writes.
+
+### PS1 — BZZ MTF shift via `copy_within` memmove — **Kept** (2026-07-01)
+
+**Issue.** In `decode_mtf_phase` (`crates/djvu-bzz/src/decode.rs`), the
+move-to-front update shifted `mtf_order` up one element-at-a-time in a
+`while insert_at >= FREQ_SLOTS` loop, and every access
+(`mtf_order`/`freq_counts`) went through
+`.get()/.get_mut().ok_or(InvalidBlockSize)?` — a bounds-checked branch + error
+path per shifted element, up to ~250 times per decoded symbol on diverse blocks.
+
+**Approach.** In the `else` (non-marker) branch, `mtf_position < 256` and
+`mtf_order` is a fixed `[u8; 256]`, so every index is provably in bounds — the
+per-element `.ok_or()?` were dead error paths (the real malformed-input guard is
+the earlier `mtf_order.get(mtf_position)?`). The first shift is a pure upward
+move, i.e. a memmove: replaced the scalar loop with
+`mtf_order.copy_within(FREQ_SLOTS-1..insert_at, FREQ_SLOTS)`. The short
+`freq_counts` insertion loop and the final writes switched from
+`.get().ok_or()?` to plain indexing (in-bounds by the same reasoning). No
+`unsafe`.
+
+**Platform / command.** Apple M1 Max, macOS / Darwin 25.5.0, Rust 1.92.0
+(`aarch64-apple-darwin`), default features:
+
+```sh
+cargo bench --bench codecs -- bzz_decode --save-baseline before
+# apply change, then:
+cargo bench --bench codecs -- bzz_decode --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | copy_within | Delta |
+|---|---:|---:|---:|
+| `bzz_decode` | 70.35 ns | 68.62 ns | **-2.2%** (p = 0.00, CI [-3.0%, -1.4%]) |
+
+**Decision.** Kept.
+
+**Reason.** Confirmed improvement (whole CI negative, p < 0.05), byte-identical
+(17 `djvu-bzz` round-trip tests pass). The `bzz_decode` fixture is a small block,
+so the measured gain is modest; larger BZZ blocks (DIRM directories, ANTz/NAVM
+annotation streams) do proportionally more MTF shifting and benefit more than the
+bench shows. The change also removes dead `Result` machinery from the hot loop
+with no loss of malformed-input safety.
