@@ -305,12 +305,58 @@ impl<'a> PageEncoder<'a> {
 /// indices match the emitted symbol stream. With fewer than two pages, or a
 /// threshold larger than the page count, no symbols qualify and each page is
 /// encoded with its own dictionary (still a valid bundle).
+///
+/// When `with_thumbnails` is `true`, each page's `FORM:DJVU` additionally
+/// contains one or more `TH44` chunk(s) encoding a color IW44 thumbnail (long
+/// side ≤ 128 px) of the full page image.  When `false` (the pre-feature
+/// default), no `TH44` chunks are emitted and output is identical to the
+/// previous behaviour.
 pub fn encode_djvm_layered_shared(
     pixmaps: &[Pixmap],
     quality: EncodeQuality,
     dpi: u16,
     segment_options: Option<SegmentOptions>,
     shared_dict_page_threshold: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_djvm_layered_shared_impl(
+        pixmaps,
+        quality,
+        dpi,
+        segment_options,
+        shared_dict_page_threshold,
+        false,
+    )
+}
+
+/// Like [`encode_djvm_layered_shared`] but with explicit thumbnail control.
+///
+/// Pass `with_thumbnails: true` to embed a `TH44` color thumbnail in each
+/// page's `FORM:DJVU`; `false` is identical to [`encode_djvm_layered_shared`].
+pub fn encode_djvm_layered_shared_with_thumbnails(
+    pixmaps: &[Pixmap],
+    quality: EncodeQuality,
+    dpi: u16,
+    segment_options: Option<SegmentOptions>,
+    shared_dict_page_threshold: usize,
+    with_thumbnails: bool,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_djvm_layered_shared_impl(
+        pixmaps,
+        quality,
+        dpi,
+        segment_options,
+        shared_dict_page_threshold,
+        with_thumbnails,
+    )
+}
+
+fn encode_djvm_layered_shared_impl(
+    pixmaps: &[Pixmap],
+    quality: EncodeQuality,
+    dpi: u16,
+    segment_options: Option<SegmentOptions>,
+    shared_dict_page_threshold: usize,
+    with_thumbnails: bool,
 ) -> Result<Vec<u8>, EncodeError> {
     if !matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
         return Err(EncodeError::Unsupported(
@@ -368,6 +414,14 @@ pub fn encode_djvm_layered_shared(
             && let Chunk::Leaf { id, data } = chunk.into_leaf()
         {
             chunks.push((id, data));
+        }
+        // Optionally embed a TH44 color thumbnail.  TH44 chunks sit inside the
+        // page's FORM:DJVU body (after FGbz); the reader collects all of them.
+        if with_thumbnails {
+            let th44_payloads = crate::thumbnail::encode_th44_color(pm);
+            for payload in th44_payloads {
+                chunks.push((*b"TH44", payload));
+            }
         }
         let body = jb2_encode::build_form_body(b"DJVU", &chunks);
         comps.push((body, true, format!("p{:04}.djvu", idx + 1)));
@@ -1033,5 +1087,77 @@ mod tests {
         assert_eq!(page.dpi(), 150);
         assert!(page.raw_chunk(b"Sjbz").is_some());
         assert!(!page.all_chunks(b"BG44").is_empty());
+    }
+
+    // ── TH44 thumbnail tests (layered encoder) ────────────────────────────────
+
+    /// Layered bundle WITH thumbnails: each page FORM:DJVU contains TH44 chunk(s)
+    /// that decode to a valid IW44 image at the expected reduced dimensions.
+    #[test]
+    fn layered_bundle_with_thumbnails_each_page_has_th44() {
+        // Build two distinct colour pages.
+        let mut p1 = Pixmap::white(64, 48);
+        for y in 8..24 {
+            for x in 8..24 {
+                p1.set_rgb(x, y, 180, 20, 20);
+            }
+        }
+        let p2 = Pixmap::white(64, 48);
+
+        let bytes = encode_djvm_layered_shared_with_thumbnails(
+            &[p1.clone(), p2.clone()],
+            EncodeQuality::Quality,
+            300,
+            None,
+            2,
+            true,
+        )
+        .expect("encode layered with thumbnails");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            let thumb = page.thumbnail().expect("thumbnail() should not error");
+            assert!(
+                thumb.is_some(),
+                "page {i} must carry a TH44 thumbnail when with_thumbnails=true"
+            );
+            let thumb = thumb.unwrap();
+            let (tw, th) = crate::thumbnail::thumbnail_dimensions(
+                if i == 0 { p1.width } else { p2.width },
+                if i == 0 { p1.height } else { p2.height },
+            );
+            assert_eq!(
+                thumb.width, tw,
+                "page {i} thumbnail width should be {tw}, got {}",
+                thumb.width
+            );
+            assert_eq!(
+                thumb.height, th,
+                "page {i} thumbnail height should be {th}, got {}",
+                thumb.height
+            );
+        }
+    }
+
+    /// Layered bundle WITHOUT thumbnails: output must NOT contain any TH44 chunks.
+    #[test]
+    fn layered_bundle_without_thumbnails_has_no_th44() {
+        let pm = Pixmap::white(64, 48);
+        let bytes =
+            encode_djvm_layered_shared(&[pm.clone(), pm], EncodeQuality::Quality, 300, None, 2)
+                .expect("encode layered");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            let thumb = page.thumbnail().expect("thumbnail() should not error");
+            assert!(
+                thumb.is_none(),
+                "page {i} must NOT carry a TH44 thumbnail when with_thumbnails=false"
+            );
+        }
     }
 }

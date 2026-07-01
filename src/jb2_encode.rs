@@ -35,6 +35,12 @@ pub const BUNDLE_DEFAULT_DPI: u16 = 300;
 /// `dpi` is stamped into every page's `INFO` chunk; pass
 /// [`BUNDLE_DEFAULT_DPI`] when no specific resolution is known.
 ///
+/// When `with_thumbnails` is `true`, each page's `FORM:DJVU` additionally
+/// contains a `TH44` chunk encoding a grayscale IW44 thumbnail (long side ≤
+/// 128 px) of the bilevel page image.  When `false` (the default-compatible
+/// value), no `TH44` chunks are emitted and output is identical to the
+/// previous behaviour.
+///
 /// [`Jb2Dict`]: crate::jb2::Jb2Dict
 pub fn encode_djvm_bundle_jb2(
     pages: &[Bitmap],
@@ -42,7 +48,22 @@ pub fn encode_djvm_bundle_jb2(
     dpi: u16,
 ) -> Vec<u8> {
     let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
-    encode_djvm_bundle_jb2_with_shared(pages, &shared, dpi)
+    encode_djvm_bundle_jb2_impl(pages, &shared, dpi, false)
+}
+
+/// Like [`encode_djvm_bundle_jb2`] but with explicit thumbnail control.
+///
+/// Pass `with_thumbnails: true` to embed a `TH44` grayscale thumbnail in
+/// each page's `FORM:DJVU`; `false` is identical to
+/// [`encode_djvm_bundle_jb2`].
+pub fn encode_djvm_bundle_jb2_with_thumbnails(
+    pages: &[Bitmap],
+    shared_dict_page_threshold: usize,
+    dpi: u16,
+    with_thumbnails: bool,
+) -> Vec<u8> {
+    let shared = cluster_shared_symbols(pages, shared_dict_page_threshold);
+    encode_djvm_bundle_jb2_impl(pages, &shared, dpi, with_thumbnails)
 }
 
 /// Same as [`encode_djvm_bundle_jb2`] but uses a caller-supplied shared
@@ -54,6 +75,27 @@ pub fn encode_djvm_bundle_jb2_with_shared(
     shared: &[Bitmap],
     dpi: u16,
 ) -> Vec<u8> {
+    encode_djvm_bundle_jb2_impl(pages, shared, dpi, false)
+}
+
+/// Like [`encode_djvm_bundle_jb2_with_shared`] but with explicit thumbnail
+/// control.
+pub fn encode_djvm_bundle_jb2_with_shared_and_thumbnails(
+    pages: &[Bitmap],
+    shared: &[Bitmap],
+    dpi: u16,
+    with_thumbnails: bool,
+) -> Vec<u8> {
+    encode_djvm_bundle_jb2_impl(pages, shared, dpi, with_thumbnails)
+}
+
+/// Internal implementation shared by all bilevel bundle entry-points.
+fn encode_djvm_bundle_jb2_impl(
+    pages: &[Bitmap],
+    shared: &[Bitmap],
+    dpi: u16,
+    with_thumbnails: bool,
+) -> Vec<u8> {
     let djbz_bytes = encode_jb2_djbz(shared);
 
     // ── Build component buffers (each = full FORM body, ready for IFF emit) ──
@@ -61,7 +103,7 @@ pub fn encode_djvm_bundle_jb2_with_shared(
     // DJVI component (only when there is something to share): contains a single
     // INFO chunk (none required by spec) + the Djbz.
     //
-    // DJVU page components: INFO + INCL("dict0001.djvi") + Sjbz.
+    // DJVU page components: INFO + INCL("dict0001.djvi") + Sjbz [+ TH44].
     let mut comp_form_bodies: Vec<(Vec<u8>, /*is_page*/ bool, String)> = Vec::new();
 
     let dict_id = "dict0001.djvi".to_string();
@@ -108,6 +150,16 @@ pub fn encode_djvm_bundle_jb2_with_shared(
         djvu_body.extend_from_slice(&sjbz);
         if !sjbz.len().is_multiple_of(2) {
             djvu_body.push(0);
+        }
+
+        // Optionally embed a TH44 grayscale thumbnail derived from the bilevel
+        // page.  TH44 chunks sit inside the page's FORM:DJVU body after Sjbz;
+        // the reader collects all of them to build the IW44 stream.
+        if with_thumbnails {
+            let th44_payloads = crate::thumbnail::encode_th44_gray_from_bitmap(page);
+            for payload in &th44_payloads {
+                push_chunk(&mut djvu_body, b"TH44", payload);
+            }
         }
 
         let pid = format!("p{:04}.djvu", page_idx + 1);
@@ -487,6 +539,97 @@ mod tests {
             }
         }
         report
+    }
+
+    // ── TH44 thumbnail tests ───────────────────────────────────────────────────
+
+    /// Bilevel bundle WITH thumbnails: each page FORM:DJVU contains TH44 chunk(s)
+    /// that decode to a valid IW44 image at the expected reduced dimensions.
+    #[test]
+    fn bilevel_bundle_with_thumbnails_each_page_has_th44() {
+        let p1 = make_text_page(&[b"AABB", b"BABA"]);
+        let p2 = make_text_page(&[b"ABBA", b"BBAA"]);
+        let bundle = encode_djvm_bundle_jb2_with_thumbnails(
+            &[p1.clone(), p2.clone()],
+            2,
+            BUNDLE_DEFAULT_DPI,
+            true,
+        );
+
+        // Parse and verify each page carries a TH44 thumbnail.
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            let thumb = page.thumbnail().expect("thumbnail() should not error");
+            assert!(
+                thumb.is_some(),
+                "page {i} must carry a TH44 thumbnail when with_thumbnails=true"
+            );
+            let thumb = thumb.unwrap();
+            // Thumbnail dimensions must match thumbnail_dimensions(bw, bh).
+            let (tw, th) = crate::thumbnail::thumbnail_dimensions(
+                if i == 0 { p1.width } else { p2.width },
+                if i == 0 { p1.height } else { p2.height },
+            );
+            assert_eq!(
+                thumb.width, tw,
+                "page {i} thumbnail width should be {tw}, got {}",
+                thumb.width
+            );
+            assert_eq!(
+                thumb.height, th,
+                "page {i} thumbnail height should be {th}, got {}",
+                thumb.height
+            );
+        }
+    }
+
+    /// Bilevel bundle WITHOUT thumbnails: output must NOT contain any TH44 chunks.
+    #[test]
+    fn bilevel_bundle_without_thumbnails_has_no_th44() {
+        let p1 = make_text_page(&[b"AABB", b"BABA"]);
+        let p2 = make_text_page(&[b"ABBA", b"BBAA"]);
+        let bundle = encode_djvm_bundle_jb2(&[p1, p2], 2, BUNDLE_DEFAULT_DPI);
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            let thumb = page.thumbnail().expect("thumbnail() should not error");
+            assert!(
+                thumb.is_none(),
+                "page {i} must NOT carry a TH44 thumbnail when with_thumbnails=false"
+            );
+        }
+    }
+
+    /// encode_djvm_bundle_jb2_with_shared_and_thumbnails: also round-trips masks.
+    #[test]
+    fn bilevel_bundle_with_shared_and_thumbnails_round_trips() {
+        let p1 = make_text_page(&[b"AABB"]);
+        let p2 = make_text_page(&[b"AABB"]);
+        let shared = cluster_shared_symbols(&[p1.clone(), p2.clone()], 2);
+        let bundle = encode_djvm_bundle_jb2_with_shared_and_thumbnails(
+            &[p1.clone(), p2.clone()],
+            &shared,
+            BUNDLE_DEFAULT_DPI,
+            true,
+        );
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        // Masks round-trip.
+        let d1 = doc
+            .page(0)
+            .expect("p0")
+            .extract_mask()
+            .expect("mask")
+            .expect("mask present");
+        assert_decoded_eq(&p1, &d1);
+        // Thumbnails present.
+        let t = doc.page(0).expect("p0").thumbnail().expect("thumb");
+        assert!(t.is_some(), "page 0 must have a thumbnail");
     }
 
     /// Experiment driver for #322. Ignored by default — it re-encodes corpus
