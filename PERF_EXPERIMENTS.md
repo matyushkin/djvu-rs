@@ -5105,3 +5105,56 @@ genuine isolated improvement, not thermal drift. Bit-identical by construction
 The horizontal pass had never received the #448 treatment the vertical pass did;
 this closes that gap. Resampling to a fitted viewer size is a common operation,
 so this materially speeds the Lanczos render path.
+
+### PS-R1 — hoist FG44 row-invariants in `composite_rows_area_avg_one` — **Reverted** (2026-07-01)
+
+**Issue / hypothesis.** The perf-swarm analysis suggested hoisting `fg_fy`,
+`fg_fy_step`, `fg_fx_step` out of the per-pixel `fg_sample` closure in
+`composite_rows_area_avg_one` (they depend only on the row / constants), arguing
+the earlier C2c revert was thermal noise at the wrong site.
+
+**Approach.** Computed the three quantities once per row before the pixel loop.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0, default features:
+
+```sh
+cargo bench --bench render -- 'render_compositor_only/(color_downscale_cached|color_downscale_mixed_cached|small_color_downscale_cached)'
+```
+
+**Numbers (two passes, consistent):**
+
+| Benchmark | Delta |
+|---|---:|
+| `render_compositor_only/color_downscale_cached` | **+3.0 … +3.5%** (regressed) |
+| `render_compositor_only/small_color_downscale_cached` | **+1.9 … +2.2%** (regressed) |
+| `render_compositor_only/color_downscale_mixed_cached` | −1.4% (marginal) |
+
+**Decision.** Reverted.
+
+**Reason.** Net regression. The hoist is **unconditional**, but the FG44 branch
+it feeds only runs for continuous-tone FG44 foreground pages — the corpus
+downscale fixtures are FGbz-palette / no-foreground, so the original closure
+never computed those quantities at all (it took the palette or `(0,0,0)` branch).
+Hoisting adds three `u64` multiplies per row of pure overhead on the common
+non-FG44 path, hence the regression. A *conditional* hoist (only when
+`fg44.is_some()`) would avoid the regression but is neutral on every available
+bench — there is no FG44 downscale fixture to demonstrate a win — so it cannot be
+confirmed. This closes the C2c line of inquiry: the site is not a win without an
+FG44-specific benchmark, and unconditional hoisting is a net loss.
+
+---
+
+## Perf swarm (2026-07-01) — summary
+
+A three-agent read-only hunt (decode / encode / render) surfaced ~14 candidates.
+Vetted and benchmarked serially on M1 Max. **Kept:** PS1 (BZZ MTF memmove,
+−2.2%), PS2 (JB2 byte-unpack, −20…−26%), PS3 (Lanczos horizontal precompute,
+−69%). **Reverted:** PS-R1 (area-avg FG44 hoist). **Considered and rejected
+without landing** (analysis-level, to avoid re-suggestion): area-avg FG44 hoist
+needs an FG44 bench; JB2 `crop_to_content` row-copy only fires on non-tight
+symbols (rare; tight-box fast path dominates the corpus); IW44 `forward_col_pass`
+scratch pre-alloc is below M1 allocator noise; `by_size` `BTreeMap`→`HashMap` and
+the IW44 `curband` branch split have no dedicated benchmark and are LLVM-hoistable;
+IW44 `chroma_half` upsample/parallel vectorisation applies to a page kind the
+corpus does not contain (`carte.djvu` only). The measurable opportunities are
+captured; the remainder is at or below noise on the current bench corpus.
