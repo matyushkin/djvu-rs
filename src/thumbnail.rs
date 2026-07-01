@@ -45,6 +45,7 @@ pub fn encode_th44_color(src: &Pixmap) -> Vec<Vec<u8>> {
         total_slices: 100,
         chroma_delay: 0,
         chroma_half: false,
+        ..Iw44EncodeOptions::default()
     };
     encode_iw44_color(&thumb, &opts)
 }
@@ -75,6 +76,7 @@ pub fn encode_th44_gray_from_bitmap(src: &crate::Bitmap) -> Vec<Vec<u8>> {
         total_slices: 100,
         chroma_delay: 0,
         chroma_half: false,
+        ..Iw44EncodeOptions::default()
     };
     encode_iw44_gray(&scaled, &opts)
 }

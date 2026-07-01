@@ -1192,6 +1192,26 @@ impl PlaneEncoder {
 // ---- Public encoder API (requires std for ZpEncoder) -------------------------
 
 #[cfg(feature = "std")]
+/// Encode-stopping criterion for IW44 background encoding.
+///
+/// - `Slices` — encode exactly `total_slices` slices (the original behaviour).
+/// - `Bpp(f32)` — stop as soon as the cumulative encoded size reaches
+///   `bpp * width * height / 8` bytes. At least one slice is always emitted.
+///   Values ≤ 0 are clamped to emit one slice; the `Slices` ceiling
+///   (`total_slices`) still applies so this never encodes *more* than the
+///   slice budget.
+///
+/// `Default` is `Slices`, preserving byte-identical output to previous versions.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Iw44Target {
+    /// Encode exactly `total_slices` slices (default, legacy behaviour).
+    #[default]
+    Slices,
+    /// Stop once cumulative payload reaches `bpp * w * h / 8` bytes.
+    Bpp(f32),
+}
+
+#[cfg(feature = "std")]
 /// Options for IW44 encoding.
 #[derive(Clone, Copy, Debug)]
 pub struct Iw44EncodeOptions {
@@ -1203,6 +1223,9 @@ pub struct Iw44EncodeOptions {
     pub chroma_delay: u8,
     /// Encode chroma at half resolution (default true).
     pub chroma_half: bool,
+    /// Encode-stopping criterion. Default: [`Iw44Target::Slices`] (encode all
+    /// `total_slices`, byte-identical to pre-target versions).
+    pub target: Iw44Target,
 }
 
 #[cfg(feature = "std")]
@@ -1224,6 +1247,7 @@ impl Default for Iw44EncodeOptions {
             // Default to full-resolution chroma for interoperability. (Round-trips
             // through our own decoder either way.)
             chroma_half: false,
+            target: Iw44Target::Slices,
         }
     }
 }
@@ -1400,10 +1424,29 @@ fn encode_chunks(
     let total = opts.total_slices as usize;
     let delay = opts.chroma_delay as usize;
 
+    // Compute byte budget for Bpp target.  `None` means no budget limit.
+    // Budget = bpp * width * height / 8, clamped to at least 1 byte so we
+    // always emit at least one slice.
+    let byte_budget: Option<usize> = match opts.target {
+        Iw44Target::Slices => None,
+        Iw44Target::Bpp(bpp) => {
+            let pixels = width as f64 * height as f64;
+            // clamp bpp > 0; if ≤ 0 budget = 0 which still emits 1 slice
+            let budget = if bpp > 0.0 {
+                (bpp as f64 * pixels / 8.0).ceil() as usize
+            } else {
+                0
+            };
+            Some(budget)
+        }
+    };
+
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut slice_idx = 0usize;
     let mut serial: u8 = 0;
     let mut cslice = 0usize;
+    // Running count of payload bytes emitted (chunk headers + zp data).
+    let mut bytes_emitted: usize = 0;
 
     while slice_idx < total {
         let n = slices_per_chunk.min(total - slice_idx);
@@ -1470,8 +1513,18 @@ fn encode_chunks(
             chunk.push(n as u8);
         }
         chunk.extend_from_slice(&zp_bytes);
+        bytes_emitted += chunk.len();
         chunks.push(chunk);
         serial = serial.wrapping_add(1);
+
+        // Bpp budget check: stop after emitting at least one chunk (serial > 0
+        // now since we just incremented it conceptually — serial was 0 for the
+        // first chunk, so chunks.len() >= 1 ensures we've emitted at least one).
+        if let Some(budget) = byte_budget
+            && bytes_emitted >= budget
+        {
+            break;
+        }
     }
     chunks
 }
@@ -2143,5 +2196,162 @@ mod tests {
         assert_eq!(chunks[0][8] & 0x80, 0x80, "delay_byte bit 7 must be set");
         let decoded = decode_color(&chunks);
         assert_eq!((decoded.width, decoded.height), (32, 32));
+    }
+
+    // ---- Iw44Target::Bpp tests ------------------------------------------------
+
+    /// Default (Slices) and explicit Slices produce identical bytes — the new
+    /// `target` field must not affect the legacy path.
+    #[test]
+    fn bpp_target_slices_default_is_byte_identical() {
+        let src = make_pixmap(64, 64, |x, y| {
+            ((x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8)
+        });
+        let default_opts = Iw44EncodeOptions::default();
+        let explicit_slices = Iw44EncodeOptions {
+            target: Iw44Target::Slices,
+            ..Default::default()
+        };
+        let a = encode_iw44_color(&src, &default_opts);
+        let b = encode_iw44_color(&src, &explicit_slices);
+        let a_bytes: usize = a.iter().map(|c| c.len()).sum();
+        let b_bytes: usize = b.iter().map(|c| c.len()).sum();
+        assert_eq!(
+            a_bytes, b_bytes,
+            "Slices default and explicit Slices must be byte-identical"
+        );
+        assert_eq!(
+            a, b,
+            "Slices default and explicit Slices must produce identical chunk vectors"
+        );
+    }
+
+    /// A low bpp target produces strictly fewer bytes than the slice-default.
+    #[test]
+    fn bpp_target_low_bpp_yields_fewer_bytes_than_default() {
+        let src = make_pixmap(64, 64, |x, y| {
+            ((x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8)
+        });
+        let default_opts = Iw44EncodeOptions::default();
+        let low_bpp_opts = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.1),
+            ..Default::default()
+        };
+        let default_bytes: usize = encode_iw44_color(&src, &default_opts)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        let low_bytes: usize = encode_iw44_color(&src, &low_bpp_opts)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        assert!(
+            low_bytes < default_bytes,
+            "low bpp target ({low_bytes} B) should yield fewer bytes than slice-default ({default_bytes} B)"
+        );
+    }
+
+    /// A high bpp target yields more bytes than a low bpp target (monotonicity).
+    #[test]
+    fn bpp_target_monotone_size() {
+        let src = make_pixmap(64, 64, |x, y| {
+            ((x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8)
+        });
+        let opts_low = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.05),
+            ..Default::default()
+        };
+        let opts_mid = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.3),
+            ..Default::default()
+        };
+        let opts_high = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(1.0),
+            ..Default::default()
+        };
+        let low: usize = encode_iw44_color(&src, &opts_low)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        let mid: usize = encode_iw44_color(&src, &opts_mid)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        let high: usize = encode_iw44_color(&src, &opts_high)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        assert!(
+            low <= mid,
+            "bpp 0.05 ({low} B) should be <= bpp 0.3 ({mid} B)"
+        );
+        assert!(
+            mid <= high,
+            "bpp 0.3 ({mid} B) should be <= bpp 1.0 ({high} B)"
+        );
+    }
+
+    /// A bpp-targeted stream is valid: it decodes without error and produces
+    /// an image with the correct dimensions.
+    #[test]
+    fn bpp_target_output_is_decodable() {
+        let src = make_pixmap(64, 64, |x, y| {
+            ((x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8)
+        });
+        let opts = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.2),
+            ..Default::default()
+        };
+        let chunks = encode_iw44_color(&src, &opts);
+        assert!(
+            !chunks.is_empty(),
+            "bpp target must emit at least one chunk"
+        );
+        let decoded = decode_color(&chunks);
+        assert_eq!(decoded.width, 64, "decoded width must match source");
+        assert_eq!(decoded.height, 64, "decoded height must match source");
+    }
+
+    /// Even a tiny (near-zero) bpp budget emits at least one chunk (the minimum
+    /// one-slice guarantee).
+    #[test]
+    fn bpp_target_tiny_budget_emits_at_least_one_chunk() {
+        let src = make_pixmap(32, 32, |x, y| ((x * 8) as u8, (y * 8) as u8, 128));
+        let opts = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.0),
+            ..Default::default()
+        };
+        let chunks = encode_iw44_color(&src, &opts);
+        assert!(
+            !chunks.is_empty(),
+            "even bpp=0 must emit at least one chunk"
+        );
+    }
+
+    /// Grayscale bpp target: low bpp yields fewer bytes than default; output decodes.
+    #[test]
+    fn bpp_target_gray_low_bpp_yields_fewer_bytes() {
+        let src = make_gray(64, 64, |x, y| ((x * 2 + y * 2).min(255)) as u8);
+        let default_opts = Iw44EncodeOptions::default();
+        let bpp_opts = Iw44EncodeOptions {
+            target: Iw44Target::Bpp(0.1),
+            ..Default::default()
+        };
+        let default_bytes: usize = encode_iw44_gray(&src, &default_opts)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        let bpp_bytes: usize = encode_iw44_gray(&src, &bpp_opts)
+            .iter()
+            .map(|c| c.len())
+            .sum();
+        assert!(
+            bpp_bytes < default_bytes,
+            "low bpp gray ({bpp_bytes} B) should be fewer bytes than default ({default_bytes} B)"
+        );
+        // Also verify decodability
+        let chunks = encode_iw44_gray(&src, &bpp_opts);
+        let decoded = decode_gray(&chunks);
+        assert_eq!((decoded.width, decoded.height), (64, 64));
     }
 }

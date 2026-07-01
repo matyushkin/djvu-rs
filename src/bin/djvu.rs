@@ -141,6 +141,13 @@ enum Cmd {
         /// Inpaint fully masked background blocks for layered encodes.
         #[arg(long)]
         bg_inpaint: bool,
+        /// IW44 background bits-per-pixel budget (quality/archival only).
+        /// Encode BG44 slices until the cumulative payload reaches this many
+        /// bits per pixel; overrides the default 100-slice schedule. A lower
+        /// value means a smaller file at the cost of quality. Omit to use the
+        /// default slice-based schedule.
+        #[arg(long)]
+        bg_bpp: Option<f32>,
         /// (Multi-page only.) Promote a connected component to the
         /// shared Djbz dictionary if it appears on at least this many
         /// distinct pages. Default: 2.
@@ -300,6 +307,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             sauvola_window,
             sauvola_k,
             bg_inpaint,
+            bg_bpp,
             shared_dict_pages,
         } => cmd_encode(
             &input,
@@ -312,6 +320,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 sauvola_k,
                 bg_inpaint,
             },
+            bg_bpp,
             shared_dict_pages,
         ),
     }
@@ -1017,9 +1026,11 @@ fn cmd_encode(
     dpi: u16,
     quality: EncodeQualityArg,
     segment_args: EncodeSegmentArgs,
+    bg_bpp: Option<f32>,
     shared_dict_pages: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
+    use djvu_rs::iw44_encode::{Iw44EncodeOptions, Iw44Target};
     use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
     use djvu_rs::segment::{SegmentOptions, segment_page};
 
@@ -1094,6 +1105,13 @@ fn cmd_encode(
                 .with_quality(q);
             if let Some(opts) = segment_options {
                 encoder = encoder.with_segment_options(opts);
+            }
+            if let Some(bpp) = bg_bpp {
+                let iw44_opts = Iw44EncodeOptions {
+                    target: Iw44Target::Bpp(bpp),
+                    ..Iw44EncodeOptions::default()
+                };
+                encoder = encoder.with_iw44_options(iw44_opts);
             }
             encoder.encode()
         }
