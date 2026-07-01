@@ -141,9 +141,32 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
     // Mapping: padded_index(bm_y_p2) = bm_y, padded_index(bm_y_p1) = bm_y+1,
     //          padded_index(cur) = bm_y+2.
     let mut pixels = vec![0u8; (h + 2) * pw];
+    // Unpack the MSB-first packed rows one byte → 8 pixels, instead of a
+    // per-pixel `bm.get()` (which recomputes `y*stride + x/8` and `7-(x%8)`
+    // for every pixel). Byte-identical: same bit layout, padding columns
+    // `[w..pw]` stay zero.
+    let stride = bm.row_stride();
+    let full_bytes = w / 8;
     for y in 0..h {
-        for x in 0..w {
-            pixels[(y + 2) * pw + x] = bm.get(x as u32, y as u32) as u8;
+        let src = &bm.data[y * stride..y * stride + stride];
+        let dst = &mut pixels[(y + 2) * pw..(y + 2) * pw + w];
+        let mut chunks = dst.chunks_exact_mut(8);
+        for (&byte, chunk) in src.iter().zip(&mut chunks) {
+            chunk[0] = (byte >> 7) & 1;
+            chunk[1] = (byte >> 6) & 1;
+            chunk[2] = (byte >> 5) & 1;
+            chunk[3] = (byte >> 4) & 1;
+            chunk[4] = (byte >> 3) & 1;
+            chunk[5] = (byte >> 2) & 1;
+            chunk[6] = (byte >> 1) & 1;
+            chunk[7] = byte & 1;
+        }
+        let tail = chunks.into_remainder();
+        if !tail.is_empty() {
+            let byte = src[full_bytes];
+            for (bit, slot) in tail.iter_mut().enumerate() {
+                *slot = (byte >> (7 - bit)) & 1;
+            }
         }
     }
 
