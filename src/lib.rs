@@ -154,6 +154,14 @@ pub mod fgbz_encode;
 #[cfg(feature = "std")]
 pub mod djvu_encode;
 
+/// TH44 thumbnail generation for multi-page bundles.
+///
+/// Provides [`thumbnail::encode_th44_color`] and
+/// [`thumbnail::encode_th44_gray_from_bitmap`] for embedding small IW44
+/// thumbnails as `TH44` chunks inside a page's `FORM:DJVU` component.
+#[cfg(feature = "std")]
+pub mod thumbnail;
+
 /// Photometric foreground/background segmentation — splits an RGBA
 /// page into a bilevel ink mask and a sub-sampled background pixmap.
 ///
