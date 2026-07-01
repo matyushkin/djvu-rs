@@ -406,39 +406,31 @@ fn decode_mtf_phase(
                 combined_freq = combined_freq.saturating_add(freq_counts[mtf_position as usize]);
             }
 
+            // `mtf_position < 256` here (the `== 256` marker case is handled
+            // above) and `mtf_order` is a fixed `[u8; 256]`, so `insert_at` and
+            // every index below are provably in bounds — the former per-element
+            // `.ok_or(InvalidBlockSize)?` checks were dead error paths. The first
+            // shift is a pure upward move of `mtf_order[FREQ_SLOTS-1..insert_at]`
+            // into `[FREQ_SLOTS..]`, i.e. a memmove: `copy_within` replaces the
+            // scalar element-at-a-time loop with a vectorised block move.
             let mut insert_at = mtf_position as usize;
-            while insert_at >= FREQ_SLOTS {
-                *mtf_order
-                    .get_mut(insert_at)
-                    .ok_or(BzzError::InvalidBlockSize)? = *mtf_order
-                    .get(insert_at - 1)
-                    .ok_or(BzzError::InvalidBlockSize)?;
-                insert_at -= 1;
+            if insert_at >= FREQ_SLOTS {
+                mtf_order.copy_within(FREQ_SLOTS - 1..insert_at, FREQ_SLOTS);
+                insert_at = FREQ_SLOTS - 1;
             }
             while insert_at > 0 {
-                let prev_freq = *freq_counts
-                    .get(insert_at - 1)
-                    .ok_or(BzzError::InvalidBlockSize)?;
+                let prev_freq = freq_counts[insert_at - 1];
                 if combined_freq >= prev_freq {
-                    *mtf_order
-                        .get_mut(insert_at)
-                        .ok_or(BzzError::InvalidBlockSize)? = *mtf_order
-                        .get(insert_at - 1)
-                        .ok_or(BzzError::InvalidBlockSize)?;
-                    *freq_counts
-                        .get_mut(insert_at)
-                        .ok_or(BzzError::InvalidBlockSize)? = prev_freq;
+                    mtf_order[insert_at] = mtf_order[insert_at - 1];
+                    freq_counts[insert_at] = prev_freq;
                     insert_at -= 1;
                 } else {
                     break;
                 }
             }
-            *mtf_order
-                .get_mut(insert_at)
-                .ok_or(BzzError::InvalidBlockSize)? = sym;
-            if let Some(fc) = freq_counts.get_mut(insert_at) {
-                *fc = combined_freq;
-            }
+            mtf_order[insert_at] = sym;
+            // `insert_at < FREQ_SLOTS` here, so this is always in bounds.
+            freq_counts[insert_at] = combined_freq;
         }
     }
 
