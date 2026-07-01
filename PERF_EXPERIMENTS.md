@@ -5061,3 +5061,47 @@ its integer divide was ~a quarter of JB2 encode time on multi-tile pages. This
 is the single biggest encode-path win found by the perf swarm — far above the
 2–5% the analysis estimated, because the cost was the call+divide overhead, not
 just the bit math. `encode_size_regression` confirms output bytes are unchanged.
+
+### PS3 — Lanczos horizontal pass: precompute per-column weights — **Kept** (2026-07-01)
+
+**Issue.** `scale_lanczos3` (`src/pixmap.rs`) recomputed the horizontal kernel
+weights `lanczos3_kernel((sx - cx)/h_scale)` and the normaliser for **every
+output pixel** `(oy, ox)`. But those depend only on the output column `ox`
+(through `cx`), never on the row `oy`, so the sin-heavy kernel evaluation was
+redone `src_h` times per column. (An initial attempt that only switched the
+inner reads to row-pointer indexing — leaving the per-pixel kernel eval in place
+— moved the bench < 1%, confirming the kernel eval, not memory access, was the
+cost.)
+
+**Approach.** Precompute once, for each output column, the contributor start
+`x0` + the kernel weight vector + the norm, then make the per-row loop a pure
+weighted sum over the precomputed weights (with row-pointer source/destination
+indexing, no per-pixel `get_rgb`/`set_rgb`). This is the horizontal analogue of
+the #448 vertical-pass hoist. Bit-identical: the identical weights are summed in
+the identical order with the identical norm.
+
+**Platform / command.** Apple M1 Max, macOS / Darwin 25.5.0, Rust 1.92.0
+(`aarch64-apple-darwin`), default features:
+
+```sh
+cargo bench --bench render -- render_scaled_0.5x --save-baseline before
+# apply change, then:
+cargo bench --bench render -- render_scaled_0.5x --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | precompute | Delta |
+|---|---:|---:|---:|
+| `render_scaled_0.5x/lanczos3` (boy.djvu → 0.5×) | 2.384 ms | 0.735 ms | **-69.1%** (p = 0.00, two runs) |
+| `render_scaled_0.5x/bilinear` (control, no Lanczos) | 55.2 µs | 55.2 µs | none (p = 0.06) |
+
+**Decision.** Kept.
+
+**Reason.** Very large, stable win (−69%, confirmed twice, p < 0.05) on the
+Lanczos resample path, with the bilinear control showing no change — so it is a
+genuine isolated improvement, not thermal drift. Bit-identical by construction
+(same weights/order/norm; all `scale_lanczos3` and render-Lanczos tests pass).
+The horizontal pass had never received the #448 treatment the vertical pass did;
+this closes that gap. Resampling to a fitted viewer size is a common operation,
+so this materially speeds the Lanczos render path.

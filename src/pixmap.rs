@@ -8,10 +8,11 @@
 
 pub use djvu_pixmap::{GrayPixmap, Pixmap};
 
-// `vec!` is not in the no_std prelude; bring it in from `alloc` (the std prelude
-// already provides it). Matches the cfg-gated import pattern used by other modules.
+// `vec!` / `Vec` are not in the no_std prelude; bring them in from `alloc` (the
+// std prelude already provides them). Matches the cfg-gated import pattern used
+// by other modules.
 #[cfg(not(feature = "std"))]
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 /// Lanczos-3 kernel: `sinc(x) * sinc(x/3)` for `|x| < 3`, 0 otherwise.
 ///
@@ -57,36 +58,62 @@ pub(crate) fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
     let h_scale = src_w as f32 / dst_w as f32;
     let h_support = (3.0_f32 * h_scale.max(1.0)).ceil() as i32; // kernel half-width in src pixels
 
-    let mut mid = Pixmap::new(dst_w, src_h, 255, 255, 255, 255);
-    for oy in 0..src_h {
-        for ox in 0..dst_w {
-            // Centre of the output pixel in source coordinates.
+    // The horizontal weight `lanczos3_kernel((sx - cx)/h_scale)` and the
+    // normaliser depend only on the output column `ox` (via `cx`), never on the
+    // row `oy`. Precompute, once, the contributor start `x0` + kernel weights +
+    // norm for every output column, then the per-row loop is a pure weighted
+    // sum. This hoists the sin-heavy kernel evaluation out of the `src_h` row
+    // loop — the same idea that made the #448 vertical pass ~22% faster — and
+    // combines it with row-pointer indexing so the source/destination rows are
+    // read without per-pixel `get_rgb`/`set_rgb` bounds checks. Bit-identical:
+    // identical weights summed in identical order with the identical norm.
+    let dw = dst_w as usize;
+    let sw = src_w as usize;
+    struct HCol {
+        x0: usize,
+        weights: Vec<f32>,
+        norm: f32,
+    }
+    let hcols: Vec<HCol> = (0..dst_w)
+        .map(|ox| {
             let cx = (ox as f32 + 0.5) * h_scale - 0.5;
             let x0 = (cx.floor() as i32 - h_support + 1).max(0);
             let x1 = (cx.floor() as i32 + h_support).min(src_w as i32 - 1);
+            let mut weights = Vec::with_capacity((x1 - x0 + 1).max(0) as usize);
+            let mut w_sum = 0.0_f32;
+            for sx in x0..=x1 {
+                let w = lanczos3_kernel((sx as f32 - cx) / h_scale.max(1.0));
+                weights.push(w);
+                w_sum += w;
+            }
+            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+            HCol {
+                x0: x0 as usize,
+                weights,
+                norm,
+            }
+        })
+        .collect();
 
+    let mut mid = Pixmap::new(dst_w, src_h, 255, 255, 255, 255);
+    for oy in 0..src_h as usize {
+        let src_row = &src.data[oy * sw * 4..(oy + 1) * sw * 4];
+        let mid_row = &mut mid.data[oy * dw * 4..(oy + 1) * dw * 4];
+        for (ox, col) in hcols.iter().enumerate() {
             let mut r = 0.0_f32;
             let mut g = 0.0_f32;
             let mut b = 0.0_f32;
-            let mut w_sum = 0.0_f32;
-
-            for sx in x0..=x1 {
-                let w = lanczos3_kernel((sx as f32 - cx) / h_scale.max(1.0));
-                let (pr, pg, pb) = src.get_rgb(sx as u32, oy);
-                r += pr as f32 * w;
-                g += pg as f32 * w;
-                b += pb as f32 * w;
-                w_sum += w;
+            for (i, &w) in col.weights.iter().enumerate() {
+                let base = (col.x0 + i) * 4;
+                r += src_row[base] as f32 * w;
+                g += src_row[base + 1] as f32 * w;
+                b += src_row[base + 2] as f32 * w;
             }
-
-            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
-            mid.set_rgb(
-                ox,
-                oy,
-                (r * norm).round().clamp(0.0, 255.0) as u8,
-                (g * norm).round().clamp(0.0, 255.0) as u8,
-                (b * norm).round().clamp(0.0, 255.0) as u8,
-            );
+            let ob = ox * 4;
+            mid_row[ob] = (r * col.norm).round().clamp(0.0, 255.0) as u8;
+            mid_row[ob + 1] = (g * col.norm).round().clamp(0.0, 255.0) as u8;
+            mid_row[ob + 2] = (b * col.norm).round().clamp(0.0, 255.0) as u8;
+            // mid_row[ob + 3] stays 255 (from Pixmap::new alpha init).
         }
     }
 
@@ -101,7 +128,6 @@ pub(crate) fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
     // per-column sum is over the same `sy` values in the same order, so the result
     // is bit-identical to the column-major version.
     let mut out = Pixmap::new(dst_w, dst_h, 255, 255, 255, 255);
-    let dw = dst_w as usize;
     let mut acc_r = vec![0.0_f32; dw];
     let mut acc_g = vec![0.0_f32; dw];
     let mut acc_b = vec![0.0_f32; dw];
