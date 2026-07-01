@@ -1,8 +1,13 @@
-//! PNG file → [`Pixmap`] decoder.
+//! Image file → [`Pixmap`] decoders.
 //!
-//! Provides [`decode_png_to_pixmap`], a thin wrapper around the `png` crate
-//! that converts any 8-bit PNG color type to the RGBA [`Pixmap`] format used
-//! throughout djvu-rs.
+//! Provides:
+//! - [`decode_png_to_pixmap`] — decode any 8-bit PNG into the RGBA [`Pixmap`]
+//!   format used throughout djvu-rs.
+//! - [`decode_jpeg_file_to_pixmap`] — decode a JPEG file into [`Pixmap`].
+//! - [`decode_image_to_pixmap`] — unified dispatcher: routes by file extension
+//!   (`png`, `jpg`/`jpeg`, `tif`/`tiff`) and falls back to magic-byte sniffing
+//!   for extension-less or ambiguous paths. TIFF support is gated by
+//!   `#[cfg(feature = "tiff")]`.
 
 use std::path::Path;
 
@@ -63,6 +68,181 @@ pub fn decode_png_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::E
         height,
         data,
     })
+}
+
+/// Decode a JPEG file at `path` into a [`Pixmap`] (RGBA, alpha = 255).
+///
+/// Uses the `zune-jpeg` crate (already pulled in by the `std` feature).
+pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let cursor = ZCursor::new(&data);
+    let mut decoder = JpegDecoder::new(cursor);
+    decoder
+        .decode_headers()
+        .map_err(|e| format!("{}: JPEG header error: {e:?}", path.display()))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| format!("{}: missing JPEG image info", path.display()))?;
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let rgb = decoder
+        .decode()
+        .map_err(|e| format!("{}: JPEG decode error: {e:?}", path.display()))?;
+    let pixel_count = w * h;
+    // zune-jpeg returns packed RGB; convert to RGBA with alpha = 255.
+    let rgb = if rgb.len() >= pixel_count * 3 {
+        rgb
+    } else {
+        let mut padded = rgb;
+        padded.resize(pixel_count * 3, 0);
+        padded
+    };
+    let mut data = vec![0u8; pixel_count * 4];
+    for (i, chunk) in rgb[..pixel_count * 3].chunks_exact(3).enumerate() {
+        data[i * 4] = chunk[0];
+        data[i * 4 + 1] = chunk[1];
+        data[i * 4 + 2] = chunk[2];
+        data[i * 4 + 3] = 255;
+    }
+    Ok(Pixmap {
+        width: w as u32,
+        height: h as u32,
+        data,
+    })
+}
+
+/// Decode a TIFF file at `path` into a [`Pixmap`] (RGBA, alpha = 255).
+///
+/// Requires the `tiff` feature.
+#[cfg(feature = "tiff")]
+pub fn decode_tiff_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    use tiff::ColorType;
+    use tiff::decoder::{Decoder, DecodingResult};
+
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut decoder = Decoder::new(std::io::BufReader::new(file))
+        .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+    let (w, h) = decoder
+        .dimensions()
+        .map_err(|e| format!("{}: TIFF dimensions error: {e}", path.display()))?;
+    let color = decoder
+        .colortype()
+        .map_err(|e| format!("{}: TIFF colortype error: {e}", path.display()))?;
+    let result = decoder
+        .read_image()
+        .map_err(|e| format!("{}: TIFF decode error: {e}", path.display()))?;
+    let DecodingResult::U8(pixels) = result else {
+        return Err(format!(
+            "{}: unsupported TIFF sample depth (only 8-bit channels supported)",
+            path.display()
+        )
+        .into());
+    };
+    let pixel_count = w as usize * h as usize;
+    let mut data = Vec::with_capacity(pixel_count * 4);
+    match color {
+        ColorType::RGB(8) => {
+            for chunk in pixels.chunks_exact(3) {
+                data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+        }
+        ColorType::RGBA(8) => {
+            data.extend_from_slice(&pixels);
+        }
+        ColorType::Gray(8) => {
+            for &g in &pixels {
+                data.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        ColorType::GrayA(8) => {
+            for chunk in pixels.chunks_exact(2) {
+                let g = chunk[0];
+                data.extend_from_slice(&[g, g, g, chunk[1]]);
+            }
+        }
+        other => {
+            return Err(format!(
+                "{}: unsupported TIFF color type {other:?} (supported: RGB8, RGBA8, Gray8, GrayA8)",
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(Pixmap {
+        width: w,
+        height: h,
+        data,
+    })
+}
+
+/// Unified image decoder: dispatch by extension, fall back to magic bytes.
+///
+/// Supported extensions: `png`, `jpg`, `jpeg`, `tif`, `tiff` (TIFF requires the
+/// `tiff` feature — returns a clear error when the feature is off).
+///
+/// Magic-byte fallback is used when the extension is absent or unrecognised:
+/// - `\x89PNG` → PNG
+/// - `\xFF\xD8` → JPEG
+/// - `II\x2A` / `MM\x00\x2A` → TIFF (feature-gated)
+pub fn decode_image_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("png") => return decode_png_to_pixmap(path),
+        Some("jpg") | Some("jpeg") => return decode_jpeg_file_to_pixmap(path),
+        Some("tif") | Some("tiff") => {
+            #[cfg(feature = "tiff")]
+            return decode_tiff_file_to_pixmap(path);
+            #[cfg(not(feature = "tiff"))]
+            return Err(format!(
+                "{}: TIFF input requires the 'tiff' feature \
+                 (recompile with `--features tiff`)",
+                path.display()
+            )
+            .into());
+        }
+        _ => {}
+    }
+
+    // Magic-byte sniffing for extension-less / ambiguous paths.
+    let header = {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut buf = [0u8; 4];
+        f.read_exact(&mut buf)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        buf
+    };
+
+    if header.starts_with(b"\x89PNG") {
+        return decode_png_to_pixmap(path);
+    }
+    if header.starts_with(b"\xFF\xD8") {
+        return decode_jpeg_file_to_pixmap(path);
+    }
+    if header.starts_with(b"II\x2A\x00") || header.starts_with(b"MM\x00\x2A") {
+        #[cfg(feature = "tiff")]
+        return decode_tiff_file_to_pixmap(path);
+        #[cfg(not(feature = "tiff"))]
+        return Err(format!(
+            "{}: TIFF input requires the 'tiff' feature \
+             (recompile with `--features tiff`)",
+            path.display()
+        )
+        .into());
+    }
+
+    Err(format!(
+        "{}: unrecognised image format (expected PNG, JPEG, or TIFF)",
+        path.display()
+    )
+    .into())
 }
 
 #[cfg(test)]

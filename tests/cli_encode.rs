@@ -520,7 +520,7 @@ fn encode_empty_directory_fails() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("no PNG"));
+        .stderr(predicates::str::contains("no image files found"));
 }
 
 #[test]
