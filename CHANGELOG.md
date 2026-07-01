@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1](https://github.com/matyushkin/djvu-rs/compare/v0.24.0...v0.24.1) (2026-07-01)
+
+
+### Performance Improvements
+
+* **bzz:** MTF shift via copy_within memmove (~2% bzz_decode) ([#479](https://github.com/matyushkin/djvu-rs/issues/479)) ([b284d6b](https://github.com/matyushkin/djvu-rs/commit/b284d6bf3020d44ee4ad77f0b5121d178f8b16a5))
+* **jb2:** byte-unpack bitmap expansion in encode_bitmap_direct (~20-26%) ([#481](https://github.com/matyushkin/djvu-rs/issues/481)) ([d5ab4ce](https://github.com/matyushkin/djvu-rs/commit/d5ab4ce5bd963d504a0cbc11eceae173d233b6b5))
+
 ## [0.24.0](https://github.com/matyushkin/djvu-rs/compare/v0.23.0...v0.24.0) (2026-07-01)
 
 
