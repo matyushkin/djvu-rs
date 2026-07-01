@@ -1042,12 +1042,12 @@ fn cmd_encode(
     let segment_options = segment_args.to_options(q)?;
 
     if input.is_dir() {
-        let entries = directory_png_entries(input)?;
+        let entries = directory_image_entries(input)?;
 
         if matches!(quality, EncodeQualityArg::Lossless) {
             let mut masks = Vec::with_capacity(entries.len());
             for path in &entries {
-                let pixmap = djvu_rs::png_io::decode_png_to_pixmap(path)?;
+                let pixmap = djvu_rs::png_io::decode_image_to_pixmap(path)?;
                 let seg = segment_page(&pixmap, &SegmentOptions::default());
                 masks.push(seg.mask);
             }
@@ -1067,7 +1067,7 @@ fn cmd_encode(
         // honoring --shared-dict-pages (was: per-page independent masks).
         let mut pixmaps = Vec::with_capacity(entries.len());
         for path in &entries {
-            pixmaps.push(djvu_rs::png_io::decode_png_to_pixmap(path)?);
+            pixmaps.push(djvu_rs::png_io::decode_image_to_pixmap(path)?);
         }
         let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared(
             &pixmaps,
@@ -1089,7 +1089,7 @@ fn cmd_encode(
         return Ok(());
     }
 
-    let pixmap = djvu_rs::png_io::decode_png_to_pixmap(input)?;
+    let pixmap = djvu_rs::png_io::decode_image_to_pixmap(input)?;
 
     let bytes = match q {
         EncodeQuality::Lossless => {
@@ -1170,20 +1170,27 @@ impl EncodeSegmentArgs {
     }
 }
 
-fn directory_png_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn directory_image_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
             p.is_file()
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+                && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    matches!(
+                        e.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "tif" | "tiff"
+                    )
+                })
         })
         .collect();
     entries.sort();
     if entries.is_empty() {
-        return Err(format!("{}: no PNG files found in directory", dir.display()).into());
+        return Err(format!(
+            "{}: no image files found in directory (supported: .png, .jpg, .jpeg, .tif, .tiff)",
+            dir.display()
+        )
+        .into());
     }
     Ok(entries)
 }
