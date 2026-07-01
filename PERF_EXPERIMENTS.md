@@ -5021,3 +5021,43 @@ so the measured gain is modest; larger BZZ blocks (DIRM directories, ANTz/NAVM
 annotation streams) do proportionally more MTF shifting and benefit more than the
 bench shows. The change also removes dead `Result` machinery from the hot loop
 with no loss of malformed-input safety.
+
+### PS2 — JB2 encoder byte-unpack bitmap expansion — **Kept** (2026-07-01)
+
+**Issue.** `encode_bitmap_direct` (`crates/djvu-jb2/src/encode.rs`) first expands
+the packed bitmap to a byte-per-pixel scratch grid before the rolling-context ZP
+scan. The expansion did a per-pixel `bm.get(x, y)` — a (non-inlined) method call
+that recomputes `y*stride + x/8` and `7-(x%8)` for every pixel. On a
+2550×3301 page tile that is ~8.4M calls, each with an integer divide.
+
+**Approach.** Unpack the MSB-first packed rows one byte → 8 pixels using
+`chunks_exact_mut(8)` over the destination row and constant bit shifts, with a
+tail loop for the `< 8` remainder columns. Padding columns `[w..pw]` stay zero.
+The stride/byte-index arithmetic is now per-row, not per-pixel, and the fixed
+8-way body vectorises. Byte-identical: same bit layout, so
+`tests/encode_size_regression.rs` (JB2 mask size) is unchanged.
+
+**Platform / command.** Apple M1 Max, macOS / Darwin 25.5.0, Rust 1.92.0
+(`aarch64-apple-darwin`), default features:
+
+```sh
+cargo bench --bench codecs -- 'jb2_encode$|jb2_encode_multitile' --save-baseline before
+# apply change, then:
+cargo bench --bench codecs -- 'jb2_encode$|jb2_encode_multitile' --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | byte-unpack | Delta |
+|---|---:|---:|---:|
+| `jb2_encode` (192×256) | 171.3 µs | 135.5 µs | **-20.2%** (p = 0.00) |
+| `jb2_encode_multitile` (2550×3301) | 26.01 ms | 19.27 ms | **-25.9%** (p = 0.00) |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable, byte-identical win (both CIs entirely negative,
+p < 0.05; confirmed across two runs). The per-pixel non-inlined `bm.get()` with
+its integer divide was ~a quarter of JB2 encode time on multi-tile pages. This
+is the single biggest encode-path win found by the perf swarm — far above the
+2–5% the analysis estimated, because the cost was the call+divide overhead, not
+just the bit math. `encode_size_regression` confirms output bytes are unchanged.
