@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0](https://github.com/matyushkin/djvu-rs/compare/v0.23.0...v0.24.0) (2026-07-01)
+
+
+### Features
+
+* **encode:** accept JPEG and TIFF inputs in addition to PNG ([#477](https://github.com/matyushkin/djvu-rs/issues/477)) ([9e1af97](https://github.com/matyushkin/djvu-rs/commit/9e1af97913f68fa3abd1a8827481e7c2b6c36d35))
+* **encode:** generate TH44 per-page thumbnails during multi-page bundle encoding ([#476](https://github.com/matyushkin/djvu-rs/issues/476)) ([4b3486a](https://github.com/matyushkin/djvu-rs/commit/4b3486aaf4e1696b1cdbf5720e4ec14a5841de88))
+* **iw44:** add Iw44Target::Bpp byte-budget encode-stopping criterion ([#475](https://github.com/matyushkin/djvu-rs/issues/475)) ([a1e3d54](https://github.com/matyushkin/djvu-rs/commit/a1e3d54b0462344772a115e5f05f20aca4ef48a5))
+
 ## [0.23.0](https://github.com/matyushkin/djvu-rs/compare/v0.22.5...v0.23.0) (2026-06-30)
 
 
