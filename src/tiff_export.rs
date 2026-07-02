@@ -124,8 +124,34 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
     writer: W,
 ) -> Result<(), TiffError> {
     let mut encoder = TiffEncoder::new(writer)?;
+    let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
 
-    for i in crate::export_common::page_indices(doc, None) {
+    // Building a page's pixel buffer (color: render → RGB; bilevel: JB2 decode →
+    // Gray8) is independent and CPU-heavy per page; only appending IFDs to the
+    // single `TiffEncoder` must stay serial. With the `parallel` feature, build
+    // every page's image concurrently via rayon, then write them in index order
+    // — the same shape as the PDF/EPUB parallel exporters. Output is byte-
+    // identical: the materialised RGB matches the streaming path (asserted by
+    // `streamed_color_tiff_matches_render_pixmap*`), and the encoder produces the
+    // same IFDs from the same pixels. This trades the sequential path's
+    // row-streaming O(1)-page memory for wall-time, so it is gated to the feature.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let images: Vec<PageImage> = indices
+            .par_iter()
+            .map(|&i| {
+                let page = doc.page(i)?;
+                build_page_image(page, opts)
+            })
+            .collect::<Result<Vec<_>, TiffError>>()?;
+        for img in &images {
+            write_page_image(&mut encoder, img)?;
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for &i in &indices {
         let page = doc.page(i)?;
         match opts.mode {
             TiffMode::Color => write_color_page(&mut encoder, page, opts.scale)?,
@@ -135,9 +161,96 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
     Ok(())
 }
 
+/// A page's fully-materialised pixel buffer, ready to append as one TIFF IFD.
+/// This is the `Send`-safe unit the parallel exporter builds off-thread; writing
+/// it into the shared `TiffEncoder` is the serial tail.
+#[cfg(feature = "parallel")]
+struct PageImage {
+    w: u32,
+    h: u32,
+    dpi: u32,
+    data: PageImageData,
+}
+
+#[cfg(feature = "parallel")]
+enum PageImageData {
+    /// 24-bit RGB strip (color mode).
+    Rgb(Vec<u8>),
+    /// 8-bit grayscale strip written with Deflate compression (bilevel mode).
+    GrayDeflate(Vec<u8>),
+}
+
+/// Produce one page's pixel buffer without touching the encoder. Mirrors the
+/// sequential per-mode dispatch so the resulting IFD is byte-identical.
+#[cfg(feature = "parallel")]
+fn build_page_image(page: &DjVuPage, opts: &TiffOptions) -> Result<PageImage, TiffError> {
+    match opts.mode {
+        TiffMode::Color => {
+            let (w, h, ropts) = color_render_options(page, opts.scale);
+            let dpi = (page.dpi() as f32 * opts.scale).round() as u32;
+            // Materialise the same RGB the sequential path writes: collect the
+            // streamed rows when streamable (byte-identical to the strip path),
+            // else fall back to the full-pixmap path for non-streamable options.
+            let rgb = if ropts.can_stream(page) {
+                let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
+                djvu_render::render_streaming(page, &ropts, |_, rgba_row| {
+                    crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
+                })?;
+                rgb
+            } else {
+                djvu_render::render_pixmap(page, &ropts)?.to_rgb()
+            };
+            Ok(PageImage {
+                w,
+                h,
+                dpi,
+                data: PageImageData::Rgb(rgb),
+            })
+        }
+        TiffMode::Bilevel => {
+            let w = page.width() as u32;
+            let h = page.height() as u32;
+            let gray = extract_bilevel_pixels(page, w, h)?;
+            let dpi = page.dpi() as u32;
+            Ok(PageImage {
+                w,
+                h,
+                dpi,
+                data: PageImageData::GrayDeflate(gray),
+            })
+        }
+    }
+}
+
+/// Append one pre-built page image to the encoder as a single IFD.
+#[cfg(feature = "parallel")]
+fn write_page_image<W: Write + Seek>(
+    encoder: &mut TiffEncoder<W>,
+    img: &PageImage,
+) -> Result<(), TiffError> {
+    match &img.data {
+        PageImageData::Rgb(rgb) => {
+            let mut image = encoder.new_image::<colortype::RGB8>(img.w, img.h)?;
+            image.resolution(ResolutionUnit::Inch, Rational { n: img.dpi, d: 1 });
+            image.write_data(rgb)?;
+        }
+        PageImageData::GrayDeflate(gray) => {
+            let mut image = encoder.new_image_with_compression::<colortype::Gray8, _>(
+                img.w,
+                img.h,
+                Deflate::default(),
+            )?;
+            image.resolution(ResolutionUnit::Inch, Rational { n: img.dpi, d: 1 });
+            image.write_data(gray)?;
+        }
+    }
+    Ok(())
+}
+
 // ---- Per-page helpers -------------------------------------------------------
 
 /// Render `page` as RGB and append one IFD to `encoder`.
+#[cfg(not(feature = "parallel"))]
 fn write_color_page<W: Write + Seek>(
     encoder: &mut TiffEncoder<W>,
     page: &DjVuPage,
@@ -168,6 +281,7 @@ fn color_render_options(page: &DjVuPage, scale: f32) -> (u32, u32, RenderOptions
     (w, h, opts)
 }
 
+#[cfg(not(feature = "parallel"))]
 fn write_color_page_streaming<W: Write + Seek>(
     encoder: &mut TiffEncoder<W>,
     page: &DjVuPage,
@@ -224,6 +338,7 @@ fn write_color_page_streaming<W: Write + Seek>(
     Ok(())
 }
 
+#[cfg(not(feature = "parallel"))]
 fn write_color_page_pixmap<W: Write + Seek>(
     encoder: &mut TiffEncoder<W>,
     page: &DjVuPage,
@@ -246,6 +361,7 @@ fn write_color_page_pixmap<W: Write + Seek>(
 ///
 /// Black pixels in the mask are written as 255; white background as 0.
 /// Pages without a JB2 mask get a blank white page.
+#[cfg(not(feature = "parallel"))]
 fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
     encoder: &mut TiffEncoder<W>,
     page: &DjVuPage,

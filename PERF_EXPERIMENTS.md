@@ -5,6 +5,63 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### PAR_TIFF — parallel per-page image build in TIFF export — **Kept** (2026-07-02)
+
+**Issue.** `djvu_to_tiff_writer` (`src/tiff_export.rs`) wrote pages in one
+sequential loop; the color path even *interleaved* render and encode (streaming
+RGB rows straight into `TiffEncoder` strips for low memory). The per-page work
+(color: render → RGB; bilevel: JB2 decode → Gray8) is independent and CPU-heavy;
+only appending IFDs to the single `TiffEncoder` must stay serial. Third of the
+three exporters (after PDF/#298 and PAR_EPUB) still to be parallelised; the
+journal's round-3 summary flagged TIFF as the natural next candidate.
+
+**Approach.** Split into a pure `build_page_image(page, opts) -> PageImage`
+(materialises the RGB or Gray8 buffer — the `Send`-safe part) and a serial
+`write_page_image(encoder, &img)` (one `new_image[_with_compression]` + `write_data`
+per page). With `#[cfg(feature = "parallel")]`, build every page's image via
+`indices.par_iter().map(...).collect::<Result<Vec<_>, _>>()`, then write in index
+order. The sequential fallback keeps the existing row-streaming O(1)-page memory
+path. The color builder mirrors the sequential dispatch (collect streamed RGB when
+`can_stream`, else full-pixmap RGB), so pixels are identical.
+
+**Byte-identity verified empirically.** Materialising to `write_data` could in
+principle differ from the streaming `write_strip` loop's TIFF strip layout. A
+throwaway dump (`examples/_tiff_dump.rs`, since removed) exported watchmaker with
+`--features tiff` and `--features tiff,parallel`: both produced **303 036 584 B
+with an identical SHA-256** (`adf72a06…`). So `write_data` emits the same strips
+as the manual loop — the output is byte-identical, not merely pixel-identical.
+
+**Platform / command.** Apple M1 Max (8 perf cores), Rust 1.92.0, `tiff,parallel`
+features, `[profile.bench]` fat LTO. A new `export/tiff` bench (watchmaker, 12
+pages, color) was added to `benches/render.rs`. Baseline = the same bench with
+only `src/tiff_export.rs` reverted (`git stash push -- src/tiff_export.rs`), so
+the sequential streaming path runs under the `parallel` feature:
+
+```sh
+git stash push -- src/tiff_export.rs
+cargo bench --features tiff,parallel --bench render -- export/tiff --save-baseline tiff_before
+git stash pop
+cargo bench --features tiff,parallel --bench render -- export/tiff --baseline tiff_before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Baseline | after | Delta (run 1 / run 2) |
+|---|---:|---:|---:|
+| `export/tiff` (watchmaker, 12 pages, color) | 680.3 ms | 185.2 ms | **−72.8% / −74.2%** |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable win (p < 0.05, two runs) — a ~3.7× speed-up on 12 pages;
+sub-linear vs the 8 cores because each 1275×1651 page's serial IFD write and the
+Amdahl tail are non-trivial, and the pages are large. Byte-identical output
+(verified by SHA-256, above; 16 `tiff_export` tests pass in both feature configs;
+fmt / clippy `-D warnings` pass for `tiff` and `tiff,parallel`). Gated to the
+opt-in `parallel` feature, so the default build keeps its deliberate row-streaming
+low-memory profile; the parallel path trades peak RSS (all page buffers held
+before writing) for wall-time, consistent with the PDF/EPUB exporters. Completes
+the trio — all three multi-page exporters (PDF, EPUB, TIFF) now parallelise.
+
 ### PAR_EPUB — parallel per-page artifact build in EPUB export — **Kept** (2026-07-02)
 
 **Issue.** `djvu_to_epub` (`src/epub.rs`) rendered and wrote pages in a strictly
