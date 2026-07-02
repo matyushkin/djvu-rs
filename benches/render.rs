@@ -884,6 +884,69 @@ fn bench_render_region_bilevel(c: &mut Criterion) {
     });
 }
 
+/// PDF export with lossless FlateDecode (`jpeg_quality: None`) instead of the
+/// default JPEG backgrounds. Isolates the RGBA→RGB conversion + deflate path
+/// (where JPEG CPU no longer dominates), so `export_common::rgba_row_to_rgb` and
+/// the deflate glue become the measurable cost. Multi-page watchmaker.
+fn bench_pdf_export_flatdecode(c: &mut Criterion) {
+    let path = corpus_path().join("watchmaker.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_pdf_export_flatdecode: watchmaker.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let opts = djvu_rs::pdf::PdfOptions {
+        jpeg_quality: None,
+        output_dpi: 150,
+    };
+    let mut group = c.benchmark_group("export");
+    group.sample_size(10);
+    group.bench_function("pdf_flatdecode", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::pdf::djvu_to_pdf_with_options(black_box(&doc), black_box(&opts));
+        });
+    });
+    group.finish();
+}
+
+/// EPUB export (`djvu_to_epub`) — per-page render → PNG encode → ZIP assembly.
+/// Only compiled/run with `--features epub` (the module is feature-gated); the
+/// body is a no-op otherwise so registration stays unconditional. Multi-page
+/// watchmaker.
+#[allow(unused_variables)]
+fn bench_epub_export(c: &mut Criterion) {
+    #[cfg(feature = "epub")]
+    {
+        let path = corpus_path().join("watchmaker.djvu");
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_epub_export: watchmaker.djvu not found");
+                return;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let opts = djvu_rs::epub::EpubOptions::default();
+        let mut group = c.benchmark_group("export");
+        group.sample_size(10);
+        group.bench_function("epub", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::epub::djvu_to_epub(black_box(&doc), black_box(&opts));
+            });
+        });
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_render_region_bilevel,
@@ -900,5 +963,7 @@ criterion_group!(
     bench_render_row_scratch_ab,
     bench_render_scaled,
     bench_pdf_export,
+    bench_pdf_export_flatdecode,
+    bench_epub_export,
 );
 criterion_main!(benches);
