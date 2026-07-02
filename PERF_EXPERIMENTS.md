@@ -5391,3 +5391,55 @@ every-colour-encode path and the fix is zero-risk. The `palette.iter().position`
 O(n²) dedup was left as-is: negligible for real pages (few foreground colours).
 Vindicates adding the workload — the path was unmeasurable before, guessed as
 "5–15%", and is really ~2% of the total.
+
+### PAR_ENCODE — parallel per-page encoding in the multi-page bundlers — **Kept** (2026-07-02)
+
+**Issue.** The decode path has been parallelised for a while (PAR_DEC,
+IW44_PAR), but the **encoder** ran every page strictly sequentially. The two
+multi-page bundlers each loop over pages doing fully-independent per-page work —
+`encode_djvm_bundle_jb2_impl` (`src/jb2_encode.rs`) does one JB2-dict `Sjbz`
+encode per page; `encode_djvm_layered_shared_impl` (`src/djvu_encode.rs`) does
+`segment_page` + JB2-dict + `encode_iw44_color` + `foreground_fgbz` per page.
+JB2/IW44 encoding dominates the multi-page cost, so the per-page loop is the
+single largest untouched lever (called out in the round-3 summary but never
+actioned). The `encode_multipage/*` benches added 2026-07-02 made it measurable.
+
+**Approach.** Extract each per-page body builder into a closure and run the pages
+through `rayon`'s `par_iter().enumerate().map().collect()` behind
+`#[cfg(feature = "parallel")]`, with a byte-identical sequential fallback when the
+feature is off. Order is preserved by the indexed collect; the shared Djbz/DJVI
+component is still built once up front and the page components appended after it.
+In the layered bundler both the `segs` segmentation pass **and** the main page
+loop are parallelised (the `?`-fallible page builder collects into
+`Result<Vec<_>, _>`). Output is byte-identical (same functions, same order).
+
+**Platform / command.** Apple M1 Max (8 perf cores), Rust 1.92.0, `parallel`
+feature. Baseline = the same code built with `--features parallel` **before** the
+change (no parallelism there yet), via `git stash`:
+
+```sh
+cargo bench --features parallel --bench codecs -- encode_multipage --save-baseline before
+# stash pop, then:
+cargo bench --features parallel --bench codecs -- encode_multipage --baseline before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Baseline | parallel | Delta (run 1 / run 2) |
+|---|---:|---:|---:|
+| `encode_djvm_layered_shared` (watchmaker, 3 colour pages) | 21.9 ms | 13.4 ms | **−35% / −43%** |
+| `encode_djvm_bundle_jb2` (conquete_paix, 6 masks) | 881 ms | 537 ms | **−39% / −39%** |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable win (both benches p < 0.05, two runs) on the
+every-multi-page-encode path, gated to the opt-in `parallel` feature so the
+default no_std/single-thread build is unchanged. Byte-identical output verified:
+`encode_size_regression` (both `jb2_mask_size_does_not_regress` and
+`iw44_bg44_size_does_not_regress`) + all `djvm`/`djvu_mut` round-trip tests pass
+with `--features parallel`. Speed-up is sub-linear in page count here (3–6 pages,
+plus the sequential shared-dict clustering + IFF assembly are Amdahl serial
+tails), so many-page documents should approach the core count more closely.
+(The one unrelated `encode_empty_directory_fails` CLI test fails identically on
+clean `main` — a stale "no image files" vs "no PNG files" message assertion, not
+touched by this change.)

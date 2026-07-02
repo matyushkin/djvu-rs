@@ -121,7 +121,11 @@ fn encode_djvm_bundle_jb2_impl(
     }
 
     let shared_ref: &[Bitmap] = shared;
-    for (page_idx, page) in pages.iter().enumerate() {
+    // Per-page bodies are fully independent (each = one JB2-dict Sjbz encode plus a
+    // thumbnail codec). Build one component per page; with the `parallel` feature
+    // the pages are encoded concurrently on rayon, since JB2 encoding dominates the
+    // multi-page cost. Order is preserved by the indexed collect.
+    let build_page = |page_idx: usize, page: &Bitmap| -> (Vec<u8>, bool, String) {
         let sjbz = encode_jb2_dict_with_shared(page, shared_ref);
         // Canonical INFO (see crate::chunk_encode::encode_info). Fixes the prior
         // hand-rolled bytes that hard-coded dpi 100 and gamma byte 1 (≈ 0.1),
@@ -163,8 +167,25 @@ fn encode_djvm_bundle_jb2_impl(
         }
 
         let pid = format!("p{:04}.djvu", page_idx + 1);
-        comp_form_bodies.push((djvu_body, true, pid));
-    }
+        (djvu_body, true, pid)
+    };
+
+    #[cfg(feature = "parallel")]
+    let page_comps: Vec<(Vec<u8>, bool, String)> = {
+        use rayon::prelude::*;
+        pages
+            .par_iter()
+            .enumerate()
+            .map(|(i, p)| build_page(i, p))
+            .collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let page_comps: Vec<(Vec<u8>, bool, String)> = pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| build_page(i, p))
+        .collect();
+    comp_form_bodies.extend(page_comps);
 
     assemble_djvm_bundle(comp_form_bodies)
 }
