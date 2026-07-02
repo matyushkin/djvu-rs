@@ -5,6 +5,58 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### PAR_SEGMENT — parallel BG-cell fill in `segment_page` — **Kept** (2026-07-02)
+
+**Issue.** `segment_page` (`src/segment.rs`) builds the sub-sampled background by
+a nested `for by { for bx { block_mean(…) } }` loop. `block_mean` averages each
+`sub × sub` block's mask-excluded source pixels, so the loop collectively scans
+the whole page and is the bulk of `segment_page`'s cost — but it ran entirely
+sequentially. Each BG cell is independent (cells never read each other, only the
+shared read-only `rgba`/`mask`), so the fill is embarrassingly parallel.
+
+**Approach.** Extract the per-cell colour into a pure `bg_cell_color(…)` helper,
+then under `#[cfg(feature = "parallel")]` split `bg` into disjoint mutable row
+slices (`bg.data.par_chunks_mut(bw*4).enumerate()`) and fill them concurrently;
+byte-identical sequential nested loop otherwise. Same colour per cell, same write
+positions, alpha left at 255 (as `Pixmap::white` + `set_rgb` leave it) → output is
+byte-identical by construction (confirmed by the exact-colour segment tests).
+
+**Nested-rayon safety.** `segment_page` is called inside the multi-page bundler's
+already-parallel per-page loop (PAR_ENCODE parallelises `segs`). Verified the
+inner parallelism does **not** regress the multi-page benches: with the change,
+`encode_djvm_layered_shared` change p = 0.57 (no change) and `encode_djvm_bundle_jb2`
+p = 0.07 (and it's bilevel — never calls `segment_page`). With few pages on 8
+cores the inner split fills otherwise-idle cores; when the outer loop saturates,
+rayon's work-stealing absorbs the nesting.
+
+**Platform / command.** Apple M1 Max (8 perf cores), Rust 1.92.0, `parallel`,
+`[profile.bench]` fat LTO. Baseline = clean tree via `git stash push -- src/segment.rs`:
+
+```sh
+cargo bench --features parallel --bench codecs -- segment_page_color --save-baseline seg_before
+# apply change, then:
+cargo bench --features parallel --bench codecs -- segment_page_color --baseline seg_before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Baseline | after | Delta (run 1 / run 2) |
+|---|---:|---:|---:|
+| `segment_page_color` (colorbook page) | 1.965 ms | 1.195 ms | **−39.7% / −41.2%** |
+| `encode_djvm_layered_shared` (multi-page, nested) | — | — | p = 0.57 (no regression) |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable win (both runs p < 0.05) on `segment_page`, which is a
+mandatory stage of every colour encode and the dominant cost on BG-heavy pages
+(colorbook: 55% BG44). Byte-identical output (exact-colour segment tests pass with
+`--features parallel`; the whole change only reorders independent writes). Gated to
+the opt-in `parallel` feature. Unlike PAR_PAGE_LAYERS (reverted — masked by JB2 on
+the only fixture), this measures cleanly because `segment_page_color` isolates the
+segmentation stage, and the multi-page regression check confirms the nesting is
+free. Directly speeds single-page / CLI colour encodes and the segmentation half
+of `encode_color_page_quality`.
+
 ### PAR_PAGE_LAYERS — `rayon::join` the JB2 mask and IW44 BG in single-page color encode — **Reverted** (2026-07-02)
 
 **Issue.** `PageEncoder::encode` (Quality/Archival, `src/djvu_encode.rs`) encodes
