@@ -495,11 +495,32 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
     }
 
     // Unpack into a mutable byte grid — 1 = black-unvisited, 0 = white-or-visited.
+    // Byte-unpack the MSB-first packed rows (8 pixels per byte, constant shifts)
+    // instead of a per-pixel `bitmap.get()` that recomputes `y*stride + x/8` and
+    // `7-(x%8)` (a hidden divide) for every pixel — the same win as the
+    // `encode_bitmap_direct` byte-unpack (PS2). Byte-identical `pix` output.
     let mut pix = vec![0u8; w * h];
+    let stride = bitmap.row_stride();
+    let full_bytes = w / 8;
     for y in 0..h {
-        for x in 0..w {
-            if bitmap.get(x as u32, y as u32) {
-                pix[y * w + x] = 1;
+        let src = &bitmap.data[y * stride..y * stride + stride];
+        let dst = &mut pix[y * w..y * w + w];
+        let mut chunks = dst.chunks_exact_mut(8);
+        for (&byte, chunk) in src.iter().zip(&mut chunks) {
+            chunk[0] = (byte >> 7) & 1;
+            chunk[1] = (byte >> 6) & 1;
+            chunk[2] = (byte >> 5) & 1;
+            chunk[3] = (byte >> 4) & 1;
+            chunk[4] = (byte >> 3) & 1;
+            chunk[5] = (byte >> 2) & 1;
+            chunk[6] = (byte >> 1) & 1;
+            chunk[7] = byte & 1;
+        }
+        let tail = chunks.into_remainder();
+        if !tail.is_empty() {
+            let byte = src[full_bytes];
+            for (bit, slot) in tail.iter_mut().enumerate() {
+                *slot = (byte >> (7 - bit)) & 1;
             }
         }
     }

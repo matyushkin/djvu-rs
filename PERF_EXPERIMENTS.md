@@ -5158,3 +5158,43 @@ the IW44 `curband` branch split have no dedicated benchmark and are LLVM-hoistab
 IW44 `chroma_half` upsample/parallel vectorisation applies to a page kind the
 corpus does not contain (`carte.djvu` only). The measurable opportunities are
 captured; the remainder is at or below noise on the current bench corpus.
+
+### PS4 — JB2 `extract_ccs` byte-unpack (dict encoder) — **Kept** (2026-07-02)
+
+**Issue.** A second perf swarm (aimed at hot paths **without** a benchmark)
+found the exact PS2 pattern again: `extract_ccs`
+(`crates/djvu-jb2/src/encode.rs`) unpacks the mask to a byte-per-pixel grid via
+a per-pixel `bitmap.get(x, y)`, recomputing `y*stride + x/8` and `7-(x%8)` (a
+hidden divide) for ~8.4M pixels on a full-page mask. `extract_ccs` drives the
+**dictionary encoder** (`encode_jb2_dict`), the colour-page mask path — which had
+no benchmark, so it was never optimised (the existing `jb2_encode*` benches use
+the non-dict `encode_jb2`).
+
+**Approach.** Same fix as PS2: byte-unpack the MSB-first packed rows via
+`chunks_exact_mut(8)` + constant shifts + a tail loop, writing directly into
+`pix[y*w..][..w]`. Added a `jb2_encode_dict` benchmark (cable_1973_100133,
+2550×3300 dense text) to `benches/codecs.rs` — permanent coverage of the dict
+encoder. Byte-identical `pix`.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0, default features:
+
+```sh
+cargo bench --bench codecs -- jb2_encode_dict --save-baseline before
+# apply change, then:
+cargo bench --bench codecs -- jb2_encode_dict --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | byte-unpack | Delta |
+|---|---:|---:|---:|
+| `jb2_encode_dict` (cable 2550×3300) | 26.13 ms | 19.4 ms | **-25.8%** (p = 0.00, two runs) |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable, byte-identical win (both CIs ~−25.5…−26.2%, p < 0.05,
+two runs) matching PS2's magnitude — the same per-pixel-divide cost, on the
+colour-page dictionary encoder that PS2 didn't touch. `encode_size_regression`
+(`jb2_mask_size_does_not_regress`, which calls `encode_jb2_dict`) confirms output
+bytes are unchanged. Vindicates the "unbenched hot paths still hide big wins"
+hypothesis of the second swarm.
