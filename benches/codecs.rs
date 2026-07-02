@@ -491,6 +491,35 @@ fn bench_jb2_encode_multitile(c: &mut Criterion) {
     });
 }
 
+/// Dictionary (connected-component) JB2 encode — the colour-page mask path.
+/// Unlike `jb2_encode`/`jb2_encode_multitile` (which call `encode_jb2`, the
+/// direct/tiled encoder), this exercises `encode_jb2_dict` → `extract_ccs` +
+/// symbol dedup + refinement matching, which had no benchmark. Uses the dense
+/// text mask from cable_1973_100133 (2550×3300, many CCs).
+fn bench_jb2_encode_dict(c: &mut Criterion) {
+    let path = corpus_path().join("cable_1973_100133.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_jb2_encode_dict: cable_1973_100133.djvu not found");
+            return;
+        }
+    };
+    let sjbz = match first_sjbz_chunk(&data) {
+        Some(c) => c,
+        None => return,
+    };
+    let bitmap = match djvu_rs::jb2::decode(&sjbz, None) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    c.bench_function("jb2_encode_dict", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::jb2_encode::encode_jb2_dict(black_box(&bitmap));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -506,5 +535,6 @@ criterion_group!(
     bench_iw44_encode_large,
     bench_jb2_encode,
     bench_jb2_encode_multitile,
+    bench_jb2_encode_dict,
 );
 criterion_main!(benches);
