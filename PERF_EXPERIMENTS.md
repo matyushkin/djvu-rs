@@ -5274,3 +5274,74 @@ write-back on every call outweighs the per-activation divide→shift saving.
 Correctness was fine (all 43 `djvu-iw44` golden-decode tests passed); it is
 simply slower. Confirms the register-hoist pattern is only a win where per-call
 work is large.
+
+### PS-R3 — `encode_iw44_color` RGB→YCbCr row-slice — **Reverted** (2026-07-02)
+
+**Hypothesis.** A third swarm flagged the RGB→YCbCr conversion loop in
+`encode_iw44_color` (`crates/djvu-iw44/src/encode.rs`) as the PS2/PS4 pattern:
+per-pixel `pixmap.get_rgb` (×4 stride multiply + bounds check) over the whole
+page (~8.4M px for a large page).
+
+**Approach.** Row-slice both the `chroma_half` and default branches: walk the
+packed RGBA rows with `chunks_exact(4)` and write into pre-sliced plane rows,
+removing the per-pixel multiply/bounds. Byte-identical.
+
+**Platform / command.** M1 Max, Rust 1.92.0:
+
+```sh
+cargo bench --bench codecs -- 'iw44_encode_large_1024x1024|iw44_encode_color'
+```
+
+**Numbers (no win):**
+
+| Benchmark | Delta |
+|---|---:|
+| `iw44_encode_large_1024x1024` | **no change** (p = 0.18 / 0.19, two runs) |
+| `iw44_encode_color` (192×256) | +1.3% (slightly slower, p = 0.00) |
+
+**Decision.** Reverted.
+
+**Reason.** No measurable win. Unlike JB2 encode — where the byte-unpack was
+~a quarter of the work (PS2/PS4) — the RGB→YCbCr conversion is a **small
+fraction** of `encode_iw44_color`: the three forward wavelet transforms and the
+sequential ZP encoding dominate (~313 ms total). The per-pixel accessor overhead
+is real but < 2% of the total, so removing it is lost in the noise. Correctness
+was fine (43 golden tests + `iw44_bg44_size_does_not_regress` pass). **Lesson:
+the per-pixel-accessor win only materialises where the accessor loop is a large
+fraction of the measured work.**
+
+---
+
+## Perf swarm round 3 (2026-07-02) — summary (no new wins)
+
+A third three-agent hunt (encode pipeline + containers / export paths / SIMD
+gaps + structural double-work) surfaced ~18 candidates, but — after PS-R3 was
+measured and reverted — the remainder were assessed as targeting a **small
+fraction of their benchmark's total**, or needing fixtures the corpus lacks, so
+none were landed. Recorded so future swarms don't re-suggest them:
+
+- **`assemble_djvm_bundle` double-emit** (compute offsets / patch in place vs. a
+  second full IFF emit): correct and clean, but the second emit is a small
+  fraction of `encode_djvm_bundle_jb2`, which is dominated by per-page JB2
+  encoding — sub-1% on any realistic bundle bench.
+- **`foreground_fgbz` / other RGB→YCbCr-style per-pixel loops**: same class as
+  PS-R3 — a small fraction of the colour-encode total (segment + jb2_dict + iw44
+  dominate; those are already PS4/PS5-optimised).
+- **`collect_mask_stream` "re-decode shared dict"** (pdf export): the function
+  uses `find_chunk(b"Djbz")` (per-page *inline* dict), not the shared INCL dict,
+  so the claimed per-page shared-dict redundancy isn't present; switching to
+  `page.extract_mask()` would change output for shared-dict pages (a correctness
+  question, not a byte-identical perf win).
+- **IDWT `use_simd` for s=8/16**, **forward_row/col_pass SIMD at s>1**,
+  **chroma_half NEON upsample**: low-trip-count or corpus-unexercised
+  (`chroma_half` = `carte.djvu` only); not worth the SIMD complexity/risk on the
+  current M1 bench corpus.
+- **`Vec::with_capacity` pre-sizing** in pdf/epub encoders and **`pixmap_to_rgba`
+  → `data.clone()`**: individually tiny (allocation/copy overhead dwarfed by
+  JPEG/PNG/deflate CPU) and mostly CLI-path, not merge-gated hot paths.
+
+**Conclusion.** After three rounds, the measurable perf opportunities on the
+current benchmark corpus are captured (PS1–PS5, five kept wins). Further gains
+would need either new workloads/fixtures (multi-page export, shared-dict
+documents, `chroma_half` pages) to make the small-fraction paths measurable, or
+algorithmic changes with a correctness bar higher than the payoff justifies.
