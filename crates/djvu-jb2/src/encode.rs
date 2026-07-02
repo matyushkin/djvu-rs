@@ -1418,10 +1418,14 @@ pub fn cluster_shared_symbols_tunable(
         first_seen: (usize, usize),
     }
 
-    let mut buckets: BTreeMap<(u32, u32), Vec<Cluster>> = BTreeMap::new();
-
-    for (page_idx, page) in pages.iter().enumerate() {
-        let ccs = extract_ccs(page);
+    // Byte-exact bucketing of one page's connected components, in CC order.
+    // Kept as a local item so the parallel and sequential extract paths share
+    // it; visits CCs in page order to keep `first_seen`/`pages_seen` identical.
+    fn bucket_page_ccs(
+        buckets: &mut BTreeMap<(u32, u32), Vec<Cluster>>,
+        ccs: &[Cc],
+        page_idx: usize,
+    ) {
         for (cc_idx, cc) in ccs.iter().enumerate() {
             let bm = &cc.bitmap;
             // Hamming shared clustering was rejected for #258: it produced
@@ -1460,6 +1464,35 @@ pub fn cluster_shared_symbols_tunable(
                     first_seen: (page_idx, cc_idx),
                 }),
             }
+        }
+    }
+
+    let mut buckets: BTreeMap<(u32, u32), Vec<Cluster>> = BTreeMap::new();
+
+    // Connected-component extraction is independent per page and is the bulk of
+    // the clustering cost; the bucketing that follows is order-dependent (it
+    // must visit CCs in page order to keep `first_seen`/`pages_seen` and the
+    // trim-priority tie-breaks byte-identical). So extract CCs for a bounded
+    // batch of pages in parallel, then bucket that batch sequentially in order.
+    // Batching (rather than one big `par_iter().collect()`) caps the transient
+    // CC memory to `BATCH` pages — important for long bilevel corpora (e.g. the
+    // 517-page `pathogenic_bacteria_1896`) where holding every page's CCs at
+    // once would be a memory regression. Output is byte-identical to the old
+    // strictly-sequential extract-then-bucket loop.
+    const BATCH: usize = 32;
+    let mut page_idx = 0usize;
+    for chunk in pages.chunks(BATCH) {
+        #[cfg(feature = "parallel")]
+        let ccs_batch: Vec<Vec<Cc>> = {
+            use rayon::prelude::*;
+            chunk.par_iter().map(extract_ccs).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let ccs_batch: Vec<Vec<Cc>> = chunk.iter().map(extract_ccs).collect();
+
+        for ccs in &ccs_batch {
+            bucket_page_ccs(&mut buckets, ccs, page_idx);
+            page_idx += 1;
         }
     }
 

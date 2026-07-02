@@ -144,26 +144,71 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
     let bh = h.div_ceil(sub);
     let mut bg = Pixmap::white(bw, bh);
 
-    for by in 0..bh {
-        let y0 = by * sub;
-        let y1 = (y0 + sub).min(h);
-        for bx in 0..bw {
-            let x0 = bx * sub;
-            let x1 = (x0 + sub).min(w);
+    // Each BG cell's colour is an independent block-mean over the (mask-excluded)
+    // source pixels of its `sub × sub` block — cells never read each other, only
+    // the shared read-only `rgba`/`mask`. So the BG-cell fill is embarrassingly
+    // parallel; with the `parallel` feature, split `bg` into disjoint mutable row
+    // slices and fill them concurrently. Same pixels, same colour per cell →
+    // byte-identical to the sequential nested loop. (This is the bulk of
+    // `segment_page`: `block_mean` collectively scans the whole page.)
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let bwu = bw as usize;
+        bg.data
+            .par_chunks_mut(bwu * 4)
+            .enumerate()
+            .for_each(|(by, bg_row)| {
+                let by = by as u32;
+                for bx in 0..bw {
+                    let (r, g, b) = bg_cell_color(rgba, &mask, opts, sub, w, h, bw, bh, bx, by);
+                    let o = bx as usize * 4;
+                    bg_row[o] = r;
+                    bg_row[o + 1] = g;
+                    bg_row[o + 2] = b;
+                }
+            });
+    }
 
-            let color = block_mean(rgba, &mask, x0, x1, y0, y1, true)
-                .or_else(|| {
-                    opts.bg_inpaint
-                        .then(|| inpaint_block_mean(rgba, &mask, bx, by, sub, bw, bh))
-                        .flatten()
-                })
-                .or_else(|| block_mean(rgba, &mask, x0, x1, y0, y1, false))
-                .unwrap_or((255, 255, 255));
-            bg.set_rgb(bx, by, color.0, color.1, color.2);
+    #[cfg(not(feature = "parallel"))]
+    for by in 0..bh {
+        for bx in 0..bw {
+            let (r, g, b) = bg_cell_color(rgba, &mask, opts, sub, w, h, bw, bh, bx, by);
+            bg.set_rgb(bx, by, r, g, b);
         }
     }
 
     SegmentedPage { mask, bg }
+}
+
+/// Colour of a single BG cell `(bx, by)`: the mask-excluded block mean, falling
+/// back to inpainting (when enabled) then the full-block mean then white. Pure
+/// function of the read-only inputs, so it is safe to call from parallel workers.
+#[allow(clippy::too_many_arguments)]
+fn bg_cell_color(
+    rgba: &Pixmap,
+    mask: &Bitmap,
+    opts: &SegmentOptions,
+    sub: u32,
+    w: u32,
+    h: u32,
+    bw: u32,
+    bh: u32,
+    bx: u32,
+    by: u32,
+) -> (u8, u8, u8) {
+    let x0 = bx * sub;
+    let x1 = (x0 + sub).min(w);
+    let y0 = by * sub;
+    let y1 = (y0 + sub).min(h);
+    block_mean(rgba, mask, x0, x1, y0, y1, true)
+        .or_else(|| {
+            opts.bg_inpaint
+                .then(|| inpaint_block_mean(rgba, mask, bx, by, sub, bw, bh))
+                .flatten()
+        })
+        .or_else(|| block_mean(rgba, mask, x0, x1, y0, y1, false))
+        .unwrap_or((255, 255, 255))
 }
 
 fn luminance_plane(rgba: &Pixmap) -> Vec<u8> {

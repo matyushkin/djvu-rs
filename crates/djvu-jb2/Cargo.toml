@@ -13,6 +13,7 @@ publish = true
 
 [dependencies]
 thiserror = "2"
+rayon = { version = "1", optional = true }
 djvu-zp = { version = "0.24.3", path = "../djvu-zp", default-features = false }
 djvu-bitmap = { version = "0.24.3", path = "../djvu-bitmap", default-features = false }
 
@@ -22,6 +23,9 @@ djvu-iff = { version = "0.24.3", path = "../djvu-iff" }
 [features]
 default = ["std"]
 std = ["djvu-zp/std", "djvu-bitmap/std"]
+# Opt-in data parallelism (per-page connected-component extraction in the
+# shared-dictionary clustering pass). Implies `std` since rayon needs it.
+parallel = ["dep:rayon", "std"]
 # Experiment-only encoder surface (#322 cross-size rec-6 refinement probe and
 # its analysis helpers). Off by default; not part of the published API. Implies
 # `std` since the encoder is std-only.

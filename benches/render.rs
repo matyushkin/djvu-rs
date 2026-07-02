@@ -947,6 +947,37 @@ fn bench_epub_export(c: &mut Criterion) {
     }
 }
 
+/// TIFF export (`djvu_to_tiff`) — per-page render → RGB strip → multi-IFD TIFF.
+/// Only compiled/run with `--features tiff`; the body is a no-op otherwise so
+/// registration stays unconditional. Multi-page watchmaker, color mode.
+#[allow(unused_variables)]
+fn bench_tiff_export(c: &mut Criterion) {
+    #[cfg(feature = "tiff")]
+    {
+        let path = corpus_path().join("watchmaker.djvu");
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_tiff_export: watchmaker.djvu not found");
+                return;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let opts = djvu_rs::tiff_export::TiffOptions::default();
+        let mut group = c.benchmark_group("export");
+        group.sample_size(10);
+        group.bench_function("tiff", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::tiff_export::djvu_to_tiff(black_box(&doc), black_box(&opts));
+            });
+        });
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_render_region_bilevel,
@@ -965,5 +996,6 @@ criterion_group!(
     bench_pdf_export,
     bench_pdf_export_flatdecode,
     bench_epub_export,
+    bench_tiff_export,
 );
 criterion_main!(benches);

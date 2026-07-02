@@ -116,11 +116,35 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
     )?;
     zip.write_all(CONTAINER_XML.as_bytes())?;
 
-    // 3. Per-page content
+    // 3. Per-page content. Building a page's artifacts (render → PNG encode →
+    //    text overlay → XHTML) is independent per page and CPU-heavy; only the
+    //    ZIP writing must be serial (a single `ZipWriter`, not `Send`). With the
+    //    `parallel` feature, build every page's artifacts concurrently via rayon,
+    //    then write them in index order — mirrors the PDF parallel exporter
+    //    (#298). Output bytes are identical to the sequential path.
     let page_count = doc.page_count();
-    for i in crate::export_common::page_indices(doc, None) {
+    let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let artifacts: Vec<PageArtifacts> = indices
+            .par_iter()
+            .map(|&i| {
+                let page = doc.page(i)?;
+                build_page_artifacts(page, i, opts)
+            })
+            .collect::<Result<Vec<_>, EpubError>>()?;
+        for art in &artifacts {
+            write_page_artifacts(&mut zip, art)?;
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for &i in &indices {
         let page = doc.page(i)?;
-        write_page(&mut zip, page, i, opts)?;
+        let art = build_page_artifacts(page, i, opts)?;
+        write_page_artifacts(&mut zip, &art)?;
     }
 
     // 4. Navigation document
@@ -145,12 +169,42 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
 
 // ── Per-page writer ───────────────────────────────────────────────────────────
 
-fn write_page(
+/// CPU-built, ZIP-ready artifacts for one page: the two entries a page
+/// contributes (the PNG image and the XHTML document), each with its archive
+/// path. Producing these is the parallelisable, `Send`-safe work; writing them
+/// into the single `ZipWriter` is the serial tail.
+struct PageArtifacts {
+    img_path: String,
+    png_bytes: Vec<u8>,
+    xhtml_path: String,
+    xhtml_bytes: Vec<u8>,
+}
+
+/// Write one page's pre-built artifacts into the ZIP, in the same order and with
+/// the same compression methods the old inline writer used.
+fn write_page_artifacts(
     zip: &mut ZipWriter<std::io::Cursor<Vec<u8>>>,
+    art: &PageArtifacts,
+) -> Result<(), EpubError> {
+    zip.start_file(
+        &art.img_path,
+        SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+    )?;
+    zip.write_all(&art.png_bytes)?;
+
+    zip.start_file(
+        &art.xhtml_path,
+        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+    )?;
+    zip.write_all(&art.xhtml_bytes)?;
+    Ok(())
+}
+
+fn build_page_artifacts(
     page: &DjVuPage,
     index: usize,
     opts: &EpubOptions,
-) -> Result<(), EpubError> {
+) -> Result<PageArtifacts, EpubError> {
     // Native page dimensions in DjVu pixels
     let pw = page.width() as u32;
     let ph = page.height() as u32;
@@ -177,12 +231,6 @@ fn write_page(
     let page_num = index + 1;
     let img_name = format!("page_{page_num:04}.png");
     let img_path = format!("OEBPS/images/{img_name}");
-
-    zip.start_file(
-        &img_path,
-        SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
-    )?;
-    zip.write_all(&png_bytes)?;
 
     // Text overlay (invisible selectable text)
     let text_overlay = build_text_overlay(page, pw, ph);
@@ -220,13 +268,12 @@ fn write_page(
     );
     let xhtml_path = format!("OEBPS/pages/page_{page_num:04}.xhtml");
 
-    zip.start_file(
-        &xhtml_path,
-        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
-    )?;
-    zip.write_all(xhtml.as_bytes())?;
-
-    Ok(())
+    Ok(PageArtifacts {
+        img_path,
+        png_bytes,
+        xhtml_path,
+        xhtml_bytes: xhtml.into_bytes(),
+    })
 }
 
 // ── PNG encoder ───────────────────────────────────────────────────────────────
