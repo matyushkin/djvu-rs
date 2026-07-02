@@ -366,6 +366,17 @@ fn encode_djvm_layered_shared_impl(
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
 
     // Segment every page once (mask + background), then cluster the masks.
+    // Segmentation is per-page independent (Sauvola + IW44 background build); with
+    // the `parallel` feature the pages segment concurrently on rayon.
+    #[cfg(feature = "parallel")]
+    let segs: Vec<_> = {
+        use rayon::prelude::*;
+        pixmaps
+            .par_iter()
+            .map(|pm| segment_page(pm, &opts))
+            .collect()
+    };
+    #[cfg(not(feature = "parallel"))]
     let segs: Vec<_> = pixmaps.iter().map(|pm| segment_page(pm, &opts)).collect();
     let masks: Vec<Bitmap> = segs.iter().map(|s| s.mask.clone()).collect();
     let shared = jb2_encode::cluster_shared_symbols(&masks, shared_dict_page_threshold);
@@ -385,7 +396,14 @@ fn encode_djvm_layered_shared_impl(
         None
     };
 
-    for (idx, (pm, seg)) in pixmaps.iter().zip(&segs).enumerate() {
+    // Each page's DJVU body is independent (JB2-dict Sjbz + IW44 background + FGbz +
+    // optional TH44). Build one component per page; with the `parallel` feature the
+    // pages encode concurrently on rayon, since JB2 + IW44 dominate the per-page cost.
+    // Order is preserved by the indexed collect.
+    let build_page = |idx: usize,
+                      pm: &Pixmap,
+                      seg: &crate::segment::SegmentedPage|
+     -> Result<(Vec<u8>, bool, String), EncodeError> {
         let w = u16::try_from(pm.width)
             .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
         let h = u16::try_from(pm.height)
@@ -424,8 +442,27 @@ fn encode_djvm_layered_shared_impl(
             }
         }
         let body = jb2_encode::build_form_body(b"DJVU", &chunks);
-        comps.push((body, true, format!("p{:04}.djvu", idx + 1)));
-    }
+        Ok((body, true, format!("p{:04}.djvu", idx + 1)))
+    };
+
+    #[cfg(feature = "parallel")]
+    let page_comps: Vec<(Vec<u8>, bool, String)> = {
+        use rayon::prelude::*;
+        pixmaps
+            .par_iter()
+            .zip(&segs)
+            .enumerate()
+            .map(|(idx, (pm, seg))| build_page(idx, pm, seg))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    #[cfg(not(feature = "parallel"))]
+    let page_comps: Vec<(Vec<u8>, bool, String)> = pixmaps
+        .iter()
+        .zip(&segs)
+        .enumerate()
+        .map(|(idx, (pm, seg))| build_page(idx, pm, seg))
+        .collect::<Result<Vec<_>, _>>()?;
+    comps.extend(page_comps);
 
     Ok(jb2_encode::assemble_djvm_bundle(comps))
 }
