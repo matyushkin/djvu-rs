@@ -5,6 +5,57 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### PAR_EPUB — parallel per-page artifact build in EPUB export — **Kept** (2026-07-02)
+
+**Issue.** `djvu_to_epub` (`src/epub.rs`) rendered and wrote pages in a strictly
+sequential loop: for each page it rendered the RGBA raster, PNG-encoded it, built
+the text/hyperlink overlay + XHTML, and streamed both entries into the
+`ZipWriter`. The PDF exporter was parallelised for this exact shape back in #298,
+but EPUB never was — even though the per-page render → PNG-encode → XHTML build is
+independent and CPU-heavy, and only the ZIP writing (single non-`Send`
+`ZipWriter`) needs to stay serial.
+
+**Approach.** Mirror the PDF parallel exporter: split the per-page work into a
+pure `build_page_artifacts(page, i, opts) -> PageArtifacts` (render, PNG encode,
+overlay, XHTML — the `Send`-safe part) and a serial `write_page_artifacts(zip,
+&art)` (the two `start_file` + `write_all` calls, unchanged order/compression).
+With `#[cfg(feature = "parallel")]`, build every page's artifacts via
+`indices.par_iter().map(...).collect::<Result<Vec<_>, _>>()`, then write them in
+index order; the sequential fallback builds-and-writes one page at a time (keeping
+the streaming O(1)-page memory profile when the feature is off). Output bytes are
+identical: same write order, per-page bytes are pure functions of the page, and
+the `zip` options (fixed default timestamp, same compression methods) match.
+
+**Platform / command.** Apple M1 Max (8 perf cores), Rust 1.92.0,
+`epub,parallel` features, `[profile.bench]` fat LTO. Baseline = clean tree
+(sequential build-and-write) with the same features, via `git stash`:
+
+```sh
+cargo bench --features epub,parallel --bench render -- epub --save-baseline epub_before
+# apply change, then:
+cargo bench --features epub,parallel --bench render -- epub --baseline epub_before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Baseline | after | Delta (run 1 / run 2) |
+|---|---:|---:|---:|
+| `export/epub` (watchmaker, 12 pages, 150 dpi) | 310.6 ms | 57.5 ms | **−80.8% / −81.9%** |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable win (p < 0.05, two runs) — a ~5.4× speed-up on 12 pages
+across 8 perf cores, matching the PDF exporter's parallel scaling. Gated to the
+opt-in `parallel` feature; the default single-thread path keeps its streaming
+one-page-at-a-time memory profile. Byte-identical, deterministic output (same
+reasoning the PDF parallel path relies on); all 17 `epub` tests pass with
+`--features epub,parallel`; fmt / clippy `-D warnings` (both `epub` and
+`epub,parallel`) pass. Like PAR_ENCODE/PDF, the parallel path trades peak RSS
+(all page artifacts held before writing) for wall-time — acceptable for the
+opt-in feature and consistent with the existing exporters. Same
+render→encode→collect shape as the TIFF exporter, which is the natural next
+candidate.
+
 ### PAR_CLUSTER — parallel per-page `extract_ccs` in shared-dict clustering — **Kept** (2026-07-02)
 
 **Issue.** PAR_ENCODE (2026-07-02) parallelised the per-page *encode* loop of the
