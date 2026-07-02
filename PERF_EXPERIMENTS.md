@@ -5238,3 +5238,39 @@ also does the `luminance`/`ColorAccum` arithmetic the row-slice doesn't touch,
 but the per-pixel accessor overhead was ~1/7 of it. The two-pass `block_mean`
 fusion (a second candidate) was left out: with `bg_inpaint` off (default) the
 second full-block scan only fires for fully-masked blocks, rare on text pages.
+
+### PS-R2 — register-hoist `newly_active_coefficient_decoding_pass` — **Reverted** (2026-07-02)
+
+**Hypothesis.** Give `newly_active_coefficient_decoding_pass` the same ZP-state
+register-extraction + inlined `decode_bit`/`decode_passthrough_iw44` macros that
+`previously_active_coefficient_decoding_pass` uses, so `(3*a)/8` becomes an
+in-register shift instead of a divide on a struct field (swarm decode #2).
+
+**Approach.** Copied the local-extraction + macro block verbatim from
+`previously_active` into `newly_active`, with write-back at the end.
+
+**Platform / command.** M1 Max, Rust 1.92.0. Measured OLD vs the changed code
+via `--save-baseline`/stash on the colour IW44 decode benches (the suggested
+`iw44_decode_large_all_chunks` bench SKIPS — pathogenic is bilevel, no BG44):
+
+```sh
+cargo bench --bench codecs -- 'iw44_decode_first_chunk|iw44_decode_corpus_color'
+```
+
+**Numbers (change is a regression):**
+
+| Benchmark | Delta (new vs old) |
+|---|---:|
+| `iw44_decode_first_chunk` | **+1.1%** (slower) |
+| `iw44_decode_corpus_color` | **+1.8%** (slower) |
+
+**Decision.** Reverted.
+
+**Reason.** Net regression. Unlike `previously_active` (which does heavy
+refinement work per call, amortising the state extract/write-back),
+`newly_active` is called once per (band, block) per slice and most late-slice
+calls activate few or no coefficients — so the added 7-field extract + 7-field
+write-back on every call outweighs the per-activation divide→shift saving.
+Correctness was fine (all 43 `djvu-iw44` golden-decode tests passed); it is
+simply slower. Confirms the register-hoist pattern is only a win where per-call
+work is large.
