@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.3](https://github.com/matyushkin/djvu-rs/compare/v0.24.2...v0.24.3) (2026-07-02)
+
+
+### Performance Improvements
+
+* **encode:** row-slice foreground_fgbz blit-colour scan (~2% color encode) ([#490](https://github.com/matyushkin/djvu-rs/issues/490)) ([33ee923](https://github.com/matyushkin/djvu-rs/commit/33ee9230c317b0c9ff4ac9fd542f949e5d245a7c))
+
 ## [0.24.2](https://github.com/matyushkin/djvu-rs/compare/v0.24.1...v0.24.2) (2026-07-02)
 
 
