@@ -5443,3 +5443,93 @@ tails), so many-page documents should approach the core count more closely.
 (The one unrelated `encode_empty_directory_fails` CLI test fails identically on
 clean `main` — a stale "no image files" vs "no PNG files" message assertion, not
 touched by this change.)
+
+### LTO_FAT — `lto = "fat"` + `codegen-units = 1` release/bench profile — **Kept** (2026-07-02)
+
+**Issue.** The workspace had **no** `[profile.release]` block at all — it built on
+cargo defaults (`lto = false`, `codegen-units = 16`). The codecs live in separate
+crates (`djvu-jb2`, `djvu-bzz`, `djvu-iw44`, `djvu-zp`), so every cross-crate call
+— crucially the per-symbol ZP arithmetic-coder calls that the JB2 encoder makes
+across the `djvu-jb2` boundary — was an un-inlined function call. No prior
+experiment had ever touched build settings; this is the cheapest possible "free
+speed across all paths" lever.
+
+**Approach.** Add `[profile.release]` and `[profile.bench]` with `lto = "fat"` +
+`codegen-units = 1`. Behaviour-preserving by construction (LTO only changes
+inlining/codegen, not semantics). Benches compile under `[profile.bench]`, so both
+blocks are set for the measured artifact to match the shipped one.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0. Codecs subset measured with a
+`--save-baseline` taken **before** adding the profile block; render measured
+separately with a clean `git stash`-based before/after:
+
+```sh
+cargo bench --bench codecs -- '<subset>' --save-baseline pgo_before   # default profile
+# add the two profile blocks, then:
+cargo bench --bench codecs -- '<subset>' --baseline pgo_before
+```
+
+**Numbers:**
+
+| Benchmark | Delta | Note |
+|---|---:|---|
+| `jb2_encode_dict` | **−65%** | cross-crate ZP encoder now inlines — the headline win |
+| `segment_page_color` | −7.0% | |
+| `bzz_decode` | −7.0% | |
+| `iw44_encode_color` | −3.2% | |
+| `iw44_decode_corpus_color` | −2.1% | |
+| `render_page/*`, `render_colorbook*`, `render_region_bilevel` | ±0…2% (noise, p mixed) | render lives in the main crate — little cross-crate call surface for LTO to fuse |
+
+**Decision.** Kept.
+
+**Reason.** A large, semantics-preserving win concentrated on the codec-crate hot
+paths (all p < 0.05), with the JB2 dictionary encoder — the dominant colour-page
+cost — dropping by nearly two-thirds purely from cross-crate inlining. Render is
+flat within noise (it barely crosses crate boundaries), so nothing regresses. The
+cost is compile time: fat LTO + `codegen-units = 1` serialises codegen and roughly
+doubles a clean release/bench build — an acceptable trade for a shipping library.
+`make check` (fmt, clippy -D, no_std, wasm32, full test suite) passes with the new
+profile. This is the single biggest single-change speed-up recorded so far and it
+compounds with PAR_ENCODE (the parallel bundlers now also LTO their per-page work).
+
+### IW44_MASKED_WAVELET — masked background encoding — **Diagnostic / deferred** (2026-07-02)
+
+**Motive.** The investigation flagged the residual **+3.9 % BG44 size gap** left
+after IW44_ACT_THRESH (which took the gap 14.3 % → 3.9 %) as the largest untouched
+*size* lever. DjVuLibre's `c44` closes it with **masked wavelet encoding**: the
+foreground mask marks pixels the text layer already covers, and the background
+codec is free to pick *any* value for those pixels (it interpolates them to the
+smoothest values that minimise wavelet energy) and to skip refining coefficients
+whose entire support is masked. Our `encode_iw44_color` has **no mask parameter at
+all** — it transforms and codes every pixel, spending bits on background detail
+that is never seen.
+
+**Concrete size baseline (this corpus).** `iw44_bg44_size_does_not_regress`
+re-encodes the first two BG44 pages to **119 636 B** (2 pages). At the recorded
+3.9 % gap, masked encoding has on the order of **~4.6 KB** of headroom on just
+those two pages; it scales with background area on colour/photo documents (BG44
+is 94–99.9 % of colour-doc bytes per ENC_SIZE_DIAG).
+
+**Why deferred (not landed this round).** Masked wavelet is a **normative
+bitstream-generation change** touching the exact area the repo has repeatedly
+found interop-fragile (IW44_SWARM_REST: "change normative tables/ctx → break
+DjVuLibre interop"). A correct implementation needs three non-trivial pieces the
+current encoder lacks: (1) plumb the segmentation mask (already produced by
+`segment_page`) down through `encode_iw44_color` → `PlaneEncoder`; (2) a
+**mask-aware forward transform** that fills masked regions by interpolation before
+the lifting steps (so masked pixels don't inject high-frequency energy), mirroring
+DjVuLibre's `IWTransform::forward(…, mask)`; (3) mask-aware coefficient gathering
+so fully-masked buckets are not coded. Each step must be validated **byte-for-byte
+against `ddjvu`/DjVuLibre**, not just our own round-trip, because a decoder that
+never sees the mask must still reconstruct a valid stream. That validation harness
++ the interop risk put it beyond a safe single-session change; rushing it risks
+shipping a subtly non-interoperable encoder.
+
+**Decision.** Recorded as the priority *size* follow-up with a concrete plan and
+the measured 119 636 B / ~4.6 KB target, so a future dedicated effort (with a
+DjVuLibre interop-diff harness) can pick it up. **Note for interop-safe partial
+win:** the background *inpainting* under the mask lives in `segment_page`
+(`src/segment.rs`, encoder-only, decoder never sees it) — improving that
+inpainting to smoother fills is a lower-risk down-payment on the same gap that
+does **not** touch the normative IW44 stream, and is the recommended first step
+before attempting the full masked transform.
