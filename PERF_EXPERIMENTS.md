@@ -5,6 +5,49 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### PAR_PAGE_LAYERS — `rayon::join` the JB2 mask and IW44 BG in single-page color encode — **Reverted** (2026-07-02)
+
+**Issue.** `PageEncoder::encode` (Quality/Archival, `src/djvu_encode.rs`) encodes
+a page's `Sjbz` (JB2 dict) and `BG44` (IW44) sequentially. Given `seg`, those two
+layers are fully independent (`fgbz` needs `sjbz` and stays after), so they are an
+obvious `rayon::join` candidate — the single-page analogue of the already-parallel
+IW44 3-plane join and the multi-page per-page loop.
+
+**Approach.** `#[cfg(feature = "parallel")] let (sjbz, bg44_chunks) = rayon::join(
+|| jb2…, || iw44…)`, byte-identical sequential fallback otherwise. This path is
+*not* nested inside the multi-page bundler loop (that has its own impl), so there
+is no nested-saturation concern.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0, `parallel`, `[profile.bench]`.
+Baseline = clean tree via `git stash push -- src/djvu_encode.rs`:
+
+```sh
+cargo bench --features parallel --bench codecs -- encode_color_page_quality --save-baseline join_before
+# apply change, then:
+cargo bench --features parallel --bench codecs -- encode_color_page_quality --baseline join_before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Run 1 | Run 2 |
+|---|---:|---:|
+| `encode_color_page_quality` (watchmaker) | −0.9% (p = 0.00) | −0.7% (p = 0.35, CI −2.3…+0.9%) |
+
+**Decision.** Reverted.
+
+**Reason.** No **consistent** measurable win: the change is architecturally correct
+and byte-identical, but the only single-page colour fixture is watchmaker — a
+**text** page where the JB2 mask dominates (67% Sjbz vs 11% BG44 per ENC_SIZE_DIAG)
+and the IW44 background is tiny. Overlapping a small IW44 encode with a large JB2
+encode saves only ≈`min(jb2, iw44)` ≈ the tiny IW44 time, which lands in the noise
+(run 2 CI crosses zero). It would help materially only on a **BG-balanced** page
+(e.g. a colorbook picture page, 55% BG44), for which no single-page bench exists.
+Fails the repo's "both runs p < 0.05" bar, so not landed. The higher-value
+parallel axis — across pages — is already covered by PAR_ENCODE + PAR_CLUSTER.
+**Revisit** only with a BG-heavy single-page colour fixture added to
+`encode_color_page_quality`'s corpus; until then this is unmeasurable, same class
+as the round-3 "small fraction of an unbenched total" deferrals.
+
 ### PAR_TIFF — parallel per-page image build in TIFF export — **Kept** (2026-07-02)
 
 **Issue.** `djvu_to_tiff_writer` (`src/tiff_export.rs`) wrote pages in one
