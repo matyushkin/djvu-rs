@@ -566,6 +566,154 @@ fn bench_segment_page_color(c: &mut Criterion) {
     });
 }
 
+/// Decode up to `max` colour pages of a document to full-resolution Pixmaps
+/// (via each page's BG44 → IW44 → to_rgb). Used by the colour encode workloads.
+fn load_color_pixmaps(path: &std::path::Path, max: usize) -> Vec<djvu_rs::Pixmap> {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for i in 0..doc.page_count().min(max) {
+        let Ok(page) = doc.page(i) else { continue };
+        let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
+        if chunks.is_empty() {
+            continue;
+        }
+        let mut img = djvu_rs::iw44::Iw44Image::new();
+        // Decode progressively; stop at the first chunk that fails (some corpus
+        // pages have a truncated trailing refinement chunk). A partial decode is
+        // a perfectly representative colour source for an *encoder* benchmark.
+        let mut any = false;
+        for ch in &chunks {
+            if img.decode_chunk(ch).is_err() {
+                break;
+            }
+            any = true;
+        }
+        if !any {
+            continue;
+        }
+        if let Ok(pm) = img.to_rgb() {
+            out.push(pm);
+        }
+    }
+    out
+}
+
+/// Full single-page colour encode (`PageEncoder::from_pixmap().encode()`) —
+/// the end-to-end `Quality` path: segment_page + encode_jb2_dict + encode_iw44_color
+/// + foreground_fgbz. Previously only the individual stages were benched.
+fn bench_encode_color_page_quality(c: &mut Criterion) {
+    let pms = load_color_pixmaps(&assets_path().join("colorbook.djvu"), 1);
+    let Some(pm) = pms.into_iter().next() else {
+        eprintln!("skipping bench_encode_color_page_quality: no colour page");
+        return;
+    };
+    c.bench_function("encode_color_page_quality", |b| {
+        b.iter(|| {
+            let _ = black_box(
+                djvu_rs::djvu_encode::PageEncoder::from_pixmap(black_box(&pm))
+                    .with_quality(djvu_rs::djvu_encode::EncodeQuality::Quality)
+                    .encode(),
+            );
+        });
+    });
+}
+
+/// Multi-page layered colour bundle (`encode_djvm_layered_shared`) — segments +
+/// JB2-dict + IW44 + FGbz for every page, then shared-Djbz clustering + DJVM
+/// container assembly. First (≤3) colour pages of watchmaker. No prior bench.
+fn bench_encode_djvm_layered_shared(c: &mut Criterion) {
+    let pms = load_color_pixmaps(&corpus_path().join("watchmaker.djvu"), 3);
+    if pms.len() < 2 {
+        eprintln!("skipping bench_encode_djvm_layered_shared: need ≥2 colour pages");
+        return;
+    }
+    // Heavy multi-page workload: reduce sample count to keep the run bounded.
+    let mut group = c.benchmark_group("encode_multipage");
+    group.sample_size(10);
+    group.bench_function("encode_djvm_layered_shared", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::djvu_encode::encode_djvm_layered_shared(
+                black_box(&pms),
+                djvu_rs::djvu_encode::EncodeQuality::Quality,
+                300,
+                None,
+                2,
+            ));
+        });
+    });
+    group.finish();
+}
+
+/// Multi-page bilevel bundle (`encode_djvm_bundle_jb2`) — per-page JB2-dict encode
+/// plus shared-symbol clustering plus DJVM container assembly (DIRM + IFF emit).
+/// Uses the first six page masks of conquete_paix; exercises the
+/// `assemble_djvm_bundle` two-pass emit and `cluster_shared_symbols`.
+fn bench_encode_djvm_bundle_jb2(c: &mut Criterion) {
+    let data = match std::fs::read(corpus_path().join("conquete_paix.djvu")) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_encode_djvm_bundle_jb2: conquete_paix.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut masks = Vec::new();
+    for i in 0..doc.page_count().min(6) {
+        let Ok(page) = doc.page(i) else { continue };
+        if let Ok(Some(bm)) = page.extract_mask() {
+            masks.push(bm);
+        }
+    }
+    if masks.len() < 2 {
+        eprintln!("skipping bench_encode_djvm_bundle_jb2: need ≥2 masks");
+        return;
+    }
+    // Heavy multi-page workload: reduce sample count to keep the run bounded.
+    let mut group = c.benchmark_group("encode_multipage");
+    group.sample_size(10);
+    group.bench_function("encode_djvm_bundle_jb2", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::jb2_encode::encode_djvm_bundle_jb2(
+                black_box(&masks),
+                2,
+                300,
+            ));
+        });
+    });
+    group.finish();
+}
+
+/// IW44 grayscale encode (`encode_iw44_gray`) — the TH44 thumbnail codec path.
+/// Synthetic 1024×1024 gradient GrayPixmap. Previously no gray-path bench.
+fn bench_iw44_encode_gray(c: &mut Criterion) {
+    let (w, h) = (1024u32, 1024u32);
+    let data: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+    let gray = djvu_rs::GrayPixmap {
+        width: w,
+        height: h,
+        data,
+    };
+    let opts = djvu_rs::iw44_encode::Iw44EncodeOptions::default();
+    c.bench_function("iw44_encode_gray_1024x1024", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::iw44_encode::encode_iw44_gray(
+                black_box(&gray),
+                black_box(&opts),
+            ));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -583,5 +731,9 @@ criterion_group!(
     bench_jb2_encode_multitile,
     bench_jb2_encode_dict,
     bench_segment_page_color,
+    bench_encode_color_page_quality,
+    bench_encode_djvm_layered_shared,
+    bench_encode_djvm_bundle_jb2,
+    bench_iw44_encode_gray,
 );
 criterion_main!(benches);
