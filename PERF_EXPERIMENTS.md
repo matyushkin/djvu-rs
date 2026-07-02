@@ -100,6 +100,38 @@ parallel axis — across pages — is already covered by PAR_ENCODE + PAR_CLUSTE
 `encode_color_page_quality`'s corpus; until then this is unmeasurable, same class
 as the round-3 "small fraction of an unbenched total" deferrals.
 
+## Parallelism sweep round 4 (2026-07-02) — summary
+
+A follow-up sweep after LTO_FAT / PAR_ENCODE, targeting the remaining sequential
+tails on the encode/export side. **Four kept, one reverted:**
+
+- **PAR_CLUSTER** — parallel `extract_ccs` in shared-dict clustering:
+  `encode_djvm_bundle_jb2` **−58%**, `encode_djvm_layered_shared` −17…22%.
+- **PAR_EPUB** — parallel per-page artifact build in EPUB export: **−81%**.
+- **PAR_TIFF** — parallel per-page image build in TIFF export: **−73%** (plus a
+  new `export/tiff` bench; byte-identity SHA-256-verified).
+- **PAR_SEGMENT** — parallel BG-cell fill in `segment_page`: **−41%**
+  (`segment_page_color`), no multi-page regression from nesting.
+- **PAR_PAGE_LAYERS** — `rayon::join` of Sjbz/BG44 in single-page encode:
+  **reverted**, noise-level on the text-only fixture.
+
+**Candidates checked and found already implemented** (do not re-propose):
+IW44 forward-transform 3-plane parallelism (`rayon::join` in `encode_iw44_color`);
+per-page parallel encode incl. thumbnails (PAR_ENCODE); hash-bucket exact dedup +
+`(w,h)` size-bucketed clustering; POPCNT `packed_hamming`; PDF parallel export
+(#298). The `scaled_hamming` cross-size matcher is behind the `experimental`
+feature, not on the default path.
+
+**Deferred (need a fixture or a higher correctness bar), unchanged from round 3:**
+ZP decoder u64 bit-buffer (the hot loops in jb2/iw44/bzz each inline their own
+32-bit `refill!` and depend on the exact `pos` overshoot semantics — a 4-site,
+interop-fragile change for a marginal per-bit saving); CCITT G4 / JBIG2 PDF masks
+(a real size win but needs a G4/JBIG2 encoder); masked IW44 wavelet + the #300
+`conquete_paix` PSNR fix (normative-stream / correctness work per
+IW44_MASKED_WAVELET); linear-light downscale and median-cut FGbz palette (quality
+trade-offs without a clean win metric). A **BG-heavy single-page colour fixture**
+would make PAR_PAGE_LAYERS and further colour-encode micro-parallelism measurable.
+
 ### PAR_TIFF — parallel per-page image build in TIFF export — **Kept** (2026-07-02)
 
 **Issue.** `djvu_to_tiff_writer` (`src/tiff_export.rs`) wrote pages in one
