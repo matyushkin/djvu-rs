@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| PAR_ENCODE | 2026-07-02 | encoder (multi-page) | **K** | **−35…43% layered, −39% bundle_jb2** | Parallel per-page encoding via rayon in both DJVM bundlers (`parallel` feature); byte-identical, seq fallback. Decode was parallel (PAR_DEC) but encode wasn't — largest untouched lever |
 | ENC_SPEED_DIAG | 2026-06-26 | encoder (speed) | D | IW44 1.46× faster than c44; JB2 ~par with cjb2 | Head-to-head on identical inputs. Encode speed competitive — no hot-spot; axis healthy, not a gap |
 | JB2_PAGE_SYM_CAP | 2026-06-25 | JB2 decode (robustness) | **K** | fuzz_jb2 timeout fixed; per-page decode bounded 256→16 MP | 409 B input did 23 K refinement records = 47.7 MP (~626 ms→10 s ASAN). Split cap: 16 MP page / 256 MP dict (32→16 for fuzz margin). Regression test + seed corpus |
 | IW44_SWARM_REST | 2026-06-25 | IW44 encoder (size) | R/X | dead-end / interop-break | #8 ycbcr-round (PSNR worse), #6/7 early-term (chunks not null), #3/4/5/10/12 (change normative tables/ctx → break DjVuLibre interop), #2 (quality knob) |
