@@ -520,6 +520,52 @@ fn bench_jb2_encode_dict(c: &mut Criterion) {
     });
 }
 
+/// Photometric segmentation of a colour page (`segment_page`) — runs on every
+/// colour `Quality`/`Archival` encode (fixed-threshold mask + sub-sampled BG
+/// block means). Had no benchmark. Decodes the colorbook BG44 to a full-res
+/// Pixmap, then times `segment_page`.
+fn bench_segment_page_color(c: &mut Criterion) {
+    let path = assets_path().join("colorbook.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_segment_page_color: colorbook.djvu not found");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
+    if chunks.is_empty() {
+        return;
+    }
+    let mut img = djvu_rs::iw44::Iw44Image::new();
+    for chunk in &chunks {
+        if img.decode_chunk(chunk).is_err() {
+            return;
+        }
+    }
+    let pm = match img.to_rgb() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let opts = djvu_rs::segment::SegmentOptions::default();
+    c.bench_function("segment_page_color", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::segment::segment_page(
+                black_box(&pm),
+                black_box(&opts),
+            ));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_bzz_decode,
@@ -536,5 +582,6 @@ criterion_group!(
     bench_jb2_encode,
     bench_jb2_encode_multitile,
     bench_jb2_encode_dict,
+    bench_segment_page_color,
 );
 criterion_main!(benches);
