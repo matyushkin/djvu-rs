@@ -5,6 +5,227 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### PAR_CLUSTER — parallel per-page `extract_ccs` in shared-dict clustering — **Kept** (2026-07-02)
+
+**Issue.** PAR_ENCODE (2026-07-02) parallelised the per-page *encode* loop of the
+multi-page bundlers but explicitly left the **shared-dictionary clustering pass**
+(`cluster_shared_symbols_tunable`, `crates/djvu-jb2/src/encode.rs`) as a
+sequential Amdahl tail that runs *before* it. That pass does a strictly
+sequential `for page { let ccs = extract_ccs(page); … bucket … }` loop. Connected-
+component extraction (`extract_ccs` — iterative DFS over an unpacked byte grid) is
+the bulk of the clustering cost and is fully independent per page; only the
+bucketing that follows is order-dependent (it must visit CCs in page order to keep
+`first_seen` / `pages_seen` and the pixel-budget trim tie-breaks byte-identical).
+
+**Approach.** Split extract from bucket: extract CCs for a bounded **batch** of
+pages in parallel (`chunk.par_iter().map(extract_ccs)` behind
+`#[cfg(feature = "parallel")]`, with a byte-identical `chunk.iter().map(...)`
+sequential fallback), then bucket that batch sequentially in page order via a
+shared local `bucket_page_ccs` helper. Batching (`BATCH = 32`) rather than one big
+`par_iter().collect()` caps transient CC memory to 32 pages, so long bilevel
+corpora (the 517-page `pathogenic_bacteria_1896`) don't regress peak memory.
+Output is byte-identical to the old extract-then-bucket loop (same CCs, same
+order). New `djvu-jb2` `parallel` feature (optional `rayon`), wired into the main
+crate's `parallel` feature.
+
+**Platform / command.** Apple M1 Max (8 perf cores), Rust 1.92.0, `parallel`
+feature, `[profile.bench]` fat LTO. Baseline = clean tree (sequential clustering)
+built with `--features parallel`, saved before the change:
+
+```sh
+cargo bench --features parallel --bench codecs -- encode_multipage --save-baseline clccs_before
+# apply change, then:
+cargo bench --features parallel --bench codecs -- encode_multipage --baseline clccs_before
+```
+
+**Numbers (two runs):**
+
+| Benchmark | Baseline | after | Delta (run 1 / run 2) |
+|---|---:|---:|---:|
+| `encode_djvm_bundle_jb2` (conquete_paix, 6 large masks) | 214 ms | 89.7 ms | **−58.0% / −58.0%** |
+| `encode_djvm_layered_shared` (watchmaker, 3 colour pages) | 6.73 ms | 5.08 ms | **−21.6% / −17.2%** |
+
+**Decision.** Kept.
+
+**Reason.** Large, stable win (both benches p < 0.05, two runs) on the
+every-multi-page-encode path, gated to the opt-in `parallel` feature (default
+no_std / single-thread build unchanged). The `bundle_jb2` −58% shows the
+sequential clustering `extract_ccs` was, for large-mask documents, a *bigger*
+serial tail than PAR_ENCODE's per-page loop was before it was parallelised — the
+masks there are large 600-dpi bilevel pages where DFS-based CC extraction
+dominates. Byte-identical output verified: all 636 lib tests + `encode_size_regression`
+(`jb2_mask_size_does_not_regress`, `iw44_bg44_size_does_not_regress`) + all
+`djvm` round-trip tests pass with `--features parallel`; fmt / workspace clippy
+`-D warnings` / no_std / wasm32 gates pass. (The lone `encode_empty_directory_fails`
+CLI test fails identically on clean `main` — a stale "no image files" message
+assertion, unrelated.) Compounds with PAR_ENCODE and LTO_FAT: clustering and the
+per-page encode now both parallelise and both LTO their per-page work.
+
+### PGO (profile-guided optimization) over LTO_FAT — **Rejected (regresses encode)** (2026-07-02)
+
+Backlog item #4: measure the *ceiling* PGO adds on top of the already-kept
+`lto="fat"` + `codegen-units=1` profile (LTO_FAT). Hypothesis: the ZP coder is
+all data-dependent branches, so profile-guided block layout / inlining priorities
+might squeeze a further few percent out of the encode/decode hot paths.
+
+**Method (manual PGO — `cargo-pgo` isn't installed, but `llvm-profdata` ships in the
+`llvm-tools` component).**
+1. Instrumented build of the `codecs` bench binary — `RUSTFLAGS=-Cprofile-generate`,
+   with `CARGO_PROFILE_BENCH_LTO=off codegen-units=16` so instrumentation is fast.
+2. Ran it over the `encode|decode` benches to emit 24 `.profraw`; merged with
+   `llvm-profdata merge`.
+3. Two final fat-LTO binaries from identical source: one with
+   `-Cprofile-use=merged.profdata`, one plain (the LTO_FAT control).
+4. Interleaved the two binaries in one thermal session (same A/B method as the
+   allocator experiment) to cancel M1 throttling drift.
+
+**Interleaved medians (4 rounds each):**
+
+| bench | control (LTO_FAT) | PGO + LTO | Δ |
+|-------|-------------------|-----------|---|
+| `jb2_encode_dict` | ~7.27 ms | ~9.34 ms | **+28 % slower** |
+| `iw44_encode_color` | ~2.20 ms | ~2.46 ms | **+12 % slower** |
+| `bzz_decode` | ~68.0 µs | ~68.2 µs | neutral |
+| `jb2_decode` | ~131.7 µs | ~133.0 µs | ~+1 % (noise) |
+
+**Candidate mechanism (not disambiguated).** The path PGO hurts most —
+`jb2_encode_dict` — is exactly the one LTO_FAT sped up **−65 %**, and it won there by
+*cross-crate inlining the tiny ZP coder functions* into the encode loop. One plausible
+reading is that PGO's function-level layout / inline-priority heuristics fight that
+whole-program inlining. But this single A/B run does **not** separate that from a simpler
+confound: the profile was gathered from a **non-LTO, `codegen-units=16` instrumented
+build** and then applied to a fat-LTO final binary, so the recorded block layout the
+profile describes does not match the code it was applied to. That profile/layout mismatch
+alone could account for the regression, independent of any inherent "PGO vs LTO" conflict.
+The two are not distinguished here.
+
+**Decision: Rejected.** As tested, manual PGO regresses the encode hot paths (+28 % / +12 %)
+and helps nothing, so it is not worth the two-phase build-infra cost. What is *not*
+established is why — a follow-up that gathers the profile from a `codegen-units=1` /
+ThinLTO instrumented build (matching the final layout) is the correct next step to tell a
+real PGO-vs-LTO conflict apart from an instrumentation-mismatch artifact; fat-LTO +
+`profile-generate` builds are slow/fragile, which is why this run took the non-LTO
+instrumentation shortcut. Left as the documented reproduction if anyone revisits.
+
+### JB2 singleton pruning — type 3 for page-unique glyphs — **Reverted** (2026-07-02)
+
+Backlog item (#2 in the 2026-07-02 list): the confirmed JB2 size gap vs DjVuLibre
+(dict ≈ 1.356× original) suggested trimming the symbol library. Hypothesis: a
+connected component whose exact bitmap occurs **exactly once** on the page is never
+the target of a later `Copy`, so storing it in the library only inflates `dict_size`
+and widens the `symbol_index` range every subsequent `Copy` record pays for. Emit
+such singletons as **record type 3** ("new symbol, direct, blit only, not added to
+dict") instead of type 1. The direct-bitmap payload is byte-identical, so the change
+is lossless (record type 3 is spec-defined and the decoder already handles it).
+
+**Implementation.** A pre-pass groups CCs by `symbol_hash` and marks the exact-unique
+ones; in the main loop a `Action::New` on a singleton becomes `Action::NewNoDict`
+(type 3, not pushed to the library). Correctly gated to the **lossless** path only —
+a lossy rec-7 copy or the experimental cross-size rec-6 refinement can target an
+exact-unique bitmap, so pruning is disabled whenever `lossy_threshold > 0` or the
+rec-6 probe is set (a first attempt without this gate broke the `lossy_*_rec7` test:
+the base glyph got pruned out of the dict, so its two lossy copies fell back to full
+`New` records). All 53 jb2 round-trip tests stayed green.
+
+**Result (deterministic — integer ZP path, exact bytes; 120 mask pages across 7 docs):**
+
+| | total JB2 bytes |
+|---|---|
+| baseline (type 1) | 2 235 589 |
+| singleton → type 3 | 2 237 144 |
+| **delta** | **+1 555 B (+0.070 %)** |
+
+Every one of the 7 documents grew — a small but **consistent regression**, not noise.
+
+**Why it loses.** The `symbol_index` of a `Copy` is coded with an *adaptive* arithmetic
+context, not `log2(range)`, so the encoder was already paying almost nothing for the
+extra singleton slots — the range widens but the high indices are essentially never
+used, so the adaptive model doesn't spend bits on them. Meanwhile introducing type 3
+adds a **third value** to the `record_type` stream, which was previously just {1, 7}
+(new + copy). Scanned pages carry *many* exact-unique CCs (noise specks, broken glyphs),
+so a large fraction of records flip 1→3, which very likely raises the entropy of the
+adaptive `record_type` context. That cost apparently outweighs the (near-zero) index-range
+saving. (This is the inferred mechanism consistent with the numbers — the deterministic
++0.070 % is the hard result; the bit-level attribution is not separately measured.)
+
+**Decision: Reverted.** The real DjVuLibre size gap is in glyph *matching* (cjb2 shares
+and refines near-identical glyphs; our default path is exact-match only), not in library
+membership of singletons. Next JB2 size levers to try: a byte-cost model before emitting
+cross-size rec-6 (the open #301), or hardening the near-match / lossy-copy matcher —
+both attack the matching axis, where the gap actually lives.
+
+### Partial IW44 decode under scale (#19) — **Diagnostic, already implemented** (2026-07-02)
+
+Backlog item #19 proposed stopping the BG44 ZP decode early at reduced render
+scale (thumbnails / low DPI don't need the fine refinement chunks). Reading the
+render path shows this **already exists**: `decode_background_chunks` uses
+`bg44_partial` (first BG44 chunk only) at `subsample >= 4`, and the coarse-only
+image is cached (`bg44_partial` OnceLock). So the thumbnail / ≤72-DPI case is done.
+
+The one untapped point is `subsample == 2` (the common 150-from-300-DPI downscale),
+which still decodes **all** chunks. Probed whether dropping the last chunk there is
+worth it — per corpus page, PSNR of full-vs-drop-last at the sub=2 output, plus the
+decode-time delta (best-of-25, M1 Max):
+
+| page | BG44 chunks | last chunk | PSNR@sub2 | decode saving |
+|------|-------------|-----------|-----------|---------------|
+| watchmaker (text scan) | 4 | 504 B | **inf** (identical) | ~2 % (noise) |
+| cable_1973 (text scan) | 4 | 174 B | **inf** | ~2 % |
+| conquete_paix (text) | 4 | 721 B | **inf** | ~0 % |
+| colorbook (photo) | 4 | 4643 B | 43.2 dB | **−26 %** |
+| chicken (photo) | 3 | 5260 B | 30.6 dB | **−41 %** |
+| boy | 1 | — | n/a (single chunk) | — |
+
+**Reading.** For text/bilevel-background scans the last chunk is tiny, so dropping
+it is *lossless* at sub=2 (PSNR inf) but saves essentially nothing — the imperceptible
+chunk is also the cheap one. For photo-heavy colour pages the last chunk is large and
+dropping it saves 26–41 % of BG44 decode, but the quality is variable (43 dB safe;
+30.6 dB borderline-visible) and would diverge from how DjVuLibre and every other
+viewer render at 150 DPI (they decode all chunks).
+
+**Decision: no default change.** A blanket "drop last chunk at sub=2" is unsafe
+(chicken's 30.6 dB, plus the interop divergence the repo has repeatedly prioritised —
+see the chroma_half saga). The remaining value is an **opt-in "draft/fast" render
+mode** for photo pages, which is a deliberate public-API feature (a `RenderOptions`
+flag + a quality gate), not an autonomous perf tweak — deferred to a feature PR.
+The scale-aware partial-decode lever itself is considered closed.
+
+### Global allocator swap (mimalloc) — **Rejected** (2026-07-02)
+
+Hypothesis (from the 2026-07-02 experiment backlog, item #3): the macOS system
+allocator was the sensitive point in the parallel path (that is what ZEROED's
+page-fault storm exposed), so a thread-caching allocator with per-thread heaps
+(mimalloc) might cut lock contention on the parallel render/export path and speed
+up the allocation-heavy cold-decode and multi-page-parse paths.
+
+**Method.** Added `mimalloc` as a dev-dependency and built each criterion bench
+binary twice — once with `#[global_allocator] = MiMalloc`, once with the stock
+system allocator — from the *same* source. Then ran the two binaries **interleaved
+in one thermal session** (round-robin, 4–5 rounds each), which cancels the M1 Max
+throttling drift that makes criterion's stored-baseline compare unreliable here.
+
+The stored-baseline compare *looked* like a win at first (`render_large_doc_first_page`
+−25 %, `parse_multipage_520p` −5.5 %) but the near-identical `render_large_doc_mid_page`
+simultaneously showed **+11.7 %** — the tell-tale contradiction of a thermal artifact
+(cool baseline vs. warmed treatment run). Interleaving dissolved it.
+
+**Interleaved medians (mimalloc vs system):**
+
+| Path | system | mimalloc | Δ |
+|------|--------|----------|---|
+| `render_large_doc_first_page` (1-page decode+render) | ~1.63 ms | ~1.65 ms | ~neutral |
+| `parse_multipage_520p` (520-page directory, many small allocs) | ~2.30 ms | ~2.49 ms | **+8.6 % slower** |
+| `pdf_export_parallel` (parallel render+encode — best case for mimalloc) | ~115.1 ms | ~114.0 ms | −1 %, within noise |
+| `render_colorbook_cold` (cold IW44 decode) | ~11.67 ms | ~12.80 ms | **+9.7 % slower** |
+
+**Decision: Rejected.** Even the parallel path — the one case per-thread heaps should
+win — landed inside noise (~1 %, and one of four rounds was slower), while the cold-decode
+and multi-page-parse paths regressed ~9–10 %. macOS's `libmalloc`/nano allocator is already
+well-tuned for this workload's mix (large IW44/mask buffers + churn of small parse structs).
+Independently, a *library* crate should not pin a `#[global_allocator]` anyway — that choice
+belongs to the final binary, and downstream users who want mimalloc/jemalloc can set it
+themselves. Reverted the dev-dependency and both bench edits; tree left clean.
+
 ### JB2 dict encoder — hash-bucket dedup (drop per-CC bitmap clone) — **Kept (small)** (2026-07-01)
 
 Perf swarm's top-vetted candidate. `encode_jb2_dict`'s exact-match dedup was a
