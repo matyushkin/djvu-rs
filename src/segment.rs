@@ -179,11 +179,19 @@ fn luminance_plane(rgba: &Pixmap) -> Vec<u8> {
 
 fn fill_fixed_mask(mask: &mut Bitmap, rgba: &Pixmap, threshold: u8) {
     let threshold = u32::from(threshold);
-    for y in 0..mask.height {
-        for x in 0..mask.width {
-            let (r, g, b) = rgba.get_rgb(x, y);
-            if u32::from(luminance(r, g, b)) < threshold {
-                mask.set(x, y, true);
+    // Row-slice the packed RGBA rows (`chunks_exact(4)`) instead of a per-pixel
+    // `rgba.get_rgb` (bounds check + `(y*width+x)*4` multiply) and set mask bits
+    // directly in the row byte (`|= 0x80 >> (x&7)`) instead of `mask.set` (which
+    // recomputes `y*stride + x/8` per call). `mask` starts cleared, so OR-ing in
+    // only the foreground bits is byte-identical. Same PS2-class win.
+    let w = rgba.width as usize;
+    let mstride = mask.row_stride();
+    for y in 0..mask.height as usize {
+        let src = &rgba.data[y * w * 4..(y + 1) * w * 4];
+        let mrow = &mut mask.data[y * mstride..(y + 1) * mstride];
+        for (x, px) in src.chunks_exact(4).enumerate() {
+            if u32::from(luminance(px[0], px[1], px[2])) < threshold {
+                mrow[x >> 3] |= 0x80 >> (x & 7);
             }
         }
     }
@@ -257,13 +265,29 @@ fn block_mean(
     unmasked_only: bool,
 ) -> Option<(u8, u8, u8)> {
     let mut acc = ColorAccum::default();
+    // Row-slice the RGBA block rows instead of per-pixel `rgba.get_rgb` (index
+    // multiply + bounds check), and read the mask row once per row instead of
+    // per-pixel `mask.get` (which recomputes `y*stride`). Same pixels, same
+    // accumulation order → byte-identical block mean. (PS2 class; block_mean is
+    // called once per BG cell so it collectively scans the whole page.)
+    let w = rgba.width as usize;
+    let mstride = mask.row_stride();
     for y in y0..y1 {
-        for x in x0..x1 {
-            if unmasked_only && mask.get(x, y) {
-                continue;
+        let ry = y as usize;
+        let row = &rgba.data[(ry * w + x0 as usize) * 4..(ry * w + x1 as usize) * 4];
+        if unmasked_only {
+            let mrow = &mask.data[ry * mstride..(ry + 1) * mstride];
+            for (i, px) in row.chunks_exact(4).enumerate() {
+                let x = x0 as usize + i;
+                if (mrow[x >> 3] >> (7 - (x & 7))) & 1 != 0 {
+                    continue;
+                }
+                acc.add(px[0], px[1], px[2]);
             }
-            let (r, g, b) = rgba.get_rgb(x, y);
-            acc.add(r, g, b);
+        } else {
+            for px in row.chunks_exact(4) {
+                acc.add(px[0], px[1], px[2]);
+            }
         }
     }
     acc.color()

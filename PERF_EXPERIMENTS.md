@@ -5198,3 +5198,43 @@ colour-page dictionary encoder that PS2 didn't touch. `encode_size_regression`
 (`jb2_mask_size_does_not_regress`, which calls `encode_jb2_dict`) confirms output
 bytes are unchanged. Vindicates the "unbenched hot paths still hide big wins"
 hypothesis of the second swarm.
+
+### PS5 — `segment_page` row-slice mask + block-mean scan — **Kept** (2026-07-02)
+
+**Issue.** `segment_page` (`src/segment.rs`) runs on every colour
+`Quality`/`Archival` encode and had no benchmark. Two per-pixel PS2-class hot
+loops: `fill_fixed_mask` used `rgba.get_rgb(x,y)` (bounds check + `(y*w+x)*4`
+multiply) then `mask.set(x,y)` (recomputes `y*stride + x/8`) for the whole page
+(~8.4M px); `block_mean` (called once per BG cell, so it collectively rescans
+the whole page at sub-sample) used `rgba.get_rgb` + `mask.get` per pixel.
+
+**Approach.** Row-slice both: iterate the packed RGBA rows with
+`chunks_exact(4)` (one slice offset per row, no per-pixel multiply/bounds), set
+mask bits directly in the pre-sliced row byte (`|= 0x80 >> (x&7)`), and read the
+mask row once per row in `block_mean` (bit-test instead of `mask.get`). Same
+pixels in the same order → byte-identical mask + block means. Added a
+`segment_page_color` benchmark (colorbook BG44 → Pixmap) to `benches/codecs.rs`.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0, default features:
+
+```sh
+cargo bench --bench codecs -- segment_page_color --save-baseline before
+# apply change, then:
+cargo bench --bench codecs -- segment_page_color --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Baseline | row-slice | Delta |
+|---|---:|---:|---:|
+| `segment_page_color` (colorbook) | 2.185 ms | 1.88 ms | **-14.0%** (p = 0.00, two runs) |
+
+**Decision.** Kept.
+
+**Reason.** Stable, byte-identical win (both CIs ~−13.6…−14.4%, p < 0.05, two
+runs) on a path that runs on every colour encode. `encode_size_regression` still
+green (segmentation feeds the encoders). Smaller than PS4 because `segment_page`
+also does the `luminance`/`ColorAccum` arithmetic the row-slice doesn't touch,
+but the per-pixel accessor overhead was ~1/7 of it. The two-pass `block_mean`
+fusion (a second candidate) was left out: with `bg_inpaint` off (default) the
+second full-block scan only fires for fully-masked blocks, rare on text pages.
