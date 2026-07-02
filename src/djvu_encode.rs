@@ -487,16 +487,23 @@ fn foreground_fgbz(
     let max_blit = blit_map.iter().copied().filter(|&i| i >= 0).max()? as usize;
     let mut by_blit = vec![ColorAccum::default(); max_blit + 1];
     let w = mask.width as usize;
-    for y in 0..mask.height {
-        for x in 0..mask.width {
-            if mask.get(x, y) {
-                let idx = y as usize * w + x as usize;
-                let blit_idx = blit_map.get(idx).copied().unwrap_or(-1);
+    // Row-slice the mask (bit-test the pre-sliced row byte), the blit map, and the
+    // packed RGBA pixmap (`x*4` into a row slice) instead of per-pixel `mask.get`
+    // (hidden `/8`) + `pm.get_rgb` (hidden `*4` + bounds). Same pixels, same
+    // accumulation order → byte-identical palette. (PS4/PS5 class.)
+    let mstride = mask.row_stride();
+    for y in 0..mask.height as usize {
+        let mrow = &mask.data[y * mstride..(y + 1) * mstride];
+        let prow = &pm.data[y * w * 4..(y + 1) * w * 4];
+        let brow = &blit_map[y * w..(y + 1) * w];
+        for x in 0..w {
+            if (mrow[x >> 3] >> (7 - (x & 7))) & 1 != 0 {
+                let blit_idx = brow[x];
                 if blit_idx < 0 {
                     continue;
                 }
-                let (pr, pg, pb) = pm.get_rgb(x, y);
-                by_blit[blit_idx as usize].add(pr, pg, pb);
+                let px = &prow[x * 4..x * 4 + 3];
+                by_blit[blit_idx as usize].add(px[0], px[1], px[2]);
             }
         }
     }

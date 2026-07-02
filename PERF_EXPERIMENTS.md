@@ -5345,3 +5345,49 @@ current benchmark corpus are captured (PS1–PS5, five kept wins). Further gains
 would need either new workloads/fixtures (multi-page export, shared-dict
 documents, `chroma_half` pages) to make the small-fraction paths measurable, or
 algorithmic changes with a correctness bar higher than the payoff justifies.
+
+### Bench workloads added (2026-07-02)
+
+To make the round-3 "small fraction of an unbenched total" candidates
+measurable, four encode workloads were added to `benches/codecs.rs`:
+`encode_color_page_quality` (full colour `PageEncoder` encode),
+`encode_multipage/encode_djvm_layered_shared`,
+`encode_multipage/encode_djvm_bundle_jb2`, and `iw44_encode_gray_1024x1024`.
+These give permanent coverage and let the previously-invisible paths be
+measured rather than guessed.
+
+### PS6 — `foreground_fgbz` row-slice (blit-colour averaging) — **Kept** (2026-07-02)
+
+**Issue.** `foreground_fgbz` (`src/djvu_encode.rs`, run on every colour encode)
+scanned the whole page averaging per-blit foreground colours with two per-pixel
+hidden-divide accessors: `mask.get(x,y)` (`/8`) and `pm.get_rgb(x,y)` (`*4` +
+bounds). Newly measurable via the added `encode_color_page_quality` bench.
+
+**Approach.** Row-slice the mask (bit-test a pre-sliced row byte), the blit map,
+and the packed RGBA pixmap (`x*4` into a row slice). Same pixels, same
+accumulation order → byte-identical palette. (PS4/PS5 class.)
+
+**Platform / command.** M1 Max, Rust 1.92.0:
+
+```sh
+cargo bench --bench codecs -- encode_color_page_quality --save-baseline before
+# apply change, then:
+cargo bench --bench codecs -- encode_color_page_quality --baseline before
+```
+
+**Numbers:**
+
+| Benchmark | Delta |
+|---|---:|
+| `encode_color_page_quality` | **-2.2%** (p = 0.00, two runs) |
+
+**Decision.** Kept.
+
+**Reason.** Confirmed byte-identical win (both CIs ~−1.5…−2.8%, p < 0.05, two
+runs; `encode_size_regression` + FGbz round-trip tests pass). Modest because
+`foreground_fgbz` is one of several stages of the colour encode (segment /
+jb2_dict / iw44 — already PS4/PS5-optimised — dominate), but it is on the
+every-colour-encode path and the fix is zero-risk. The `palette.iter().position`
+O(n²) dedup was left as-is: negligible for real pages (few foreground colours).
+Vindicates adding the workload — the path was unmeasurable before, guessed as
+"5–15%", and is really ~2% of the total.
