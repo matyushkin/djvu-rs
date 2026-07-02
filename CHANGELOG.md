@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2](https://github.com/matyushkin/djvu-rs/compare/v0.24.1...v0.24.2) (2026-07-02)
+
+
+### Performance Improvements
+
+* **jb2:** byte-unpack extract_ccs mask expansion (~26% dict encode) ([#484](https://github.com/matyushkin/djvu-rs/issues/484)) ([f8a476f](https://github.com/matyushkin/djvu-rs/commit/f8a476f17a3a5cacae3bddb08e0ed84acd055d44))
+* **segment:** row-slice mask fill + block-mean scan (~14% segment_page) ([#486](https://github.com/matyushkin/djvu-rs/issues/486)) ([b567a59](https://github.com/matyushkin/djvu-rs/commit/b567a5957273871377ed0e0f48629d23cd49d28a))
+
 ## [0.24.1](https://github.com/matyushkin/djvu-rs/compare/v0.24.0...v0.24.1) (2026-07-01)
 
 
