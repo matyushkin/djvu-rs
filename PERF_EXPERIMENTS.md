@@ -5443,3 +5443,51 @@ tails), so many-page documents should approach the core count more closely.
 (The one unrelated `encode_empty_directory_fails` CLI test fails identically on
 clean `main` — a stale "no image files" vs "no PNG files" message assertion, not
 touched by this change.)
+
+### LTO_FAT — `lto = "fat"` + `codegen-units = 1` release/bench profile — **Kept** (2026-07-02)
+
+**Issue.** The workspace had **no** `[profile.release]` block at all — it built on
+cargo defaults (`lto = false`, `codegen-units = 16`). The codecs live in separate
+crates (`djvu-jb2`, `djvu-bzz`, `djvu-iw44`, `djvu-zp`), so every cross-crate call
+— crucially the per-symbol ZP arithmetic-coder calls that the JB2 encoder makes
+across the `djvu-jb2` boundary — was an un-inlined function call. No prior
+experiment had ever touched build settings; this is the cheapest possible "free
+speed across all paths" lever.
+
+**Approach.** Add `[profile.release]` and `[profile.bench]` with `lto = "fat"` +
+`codegen-units = 1`. Behaviour-preserving by construction (LTO only changes
+inlining/codegen, not semantics). Benches compile under `[profile.bench]`, so both
+blocks are set for the measured artifact to match the shipped one.
+
+**Platform / command.** Apple M1 Max, Rust 1.92.0. Codecs subset measured with a
+`--save-baseline` taken **before** adding the profile block; render measured
+separately with a clean `git stash`-based before/after:
+
+```sh
+cargo bench --bench codecs -- '<subset>' --save-baseline pgo_before   # default profile
+# add the two profile blocks, then:
+cargo bench --bench codecs -- '<subset>' --baseline pgo_before
+```
+
+**Numbers:**
+
+| Benchmark | Delta | Note |
+|---|---:|---|
+| `jb2_encode_dict` | **−65%** | cross-crate ZP encoder now inlines — the headline win |
+| `segment_page_color` | −7.0% | |
+| `bzz_decode` | −7.0% | |
+| `iw44_encode_color` | −3.2% | |
+| `iw44_decode_corpus_color` | −2.1% | |
+| `render_page/*`, `render_colorbook*`, `render_region_bilevel` | ±0…2% (noise, p mixed) | render lives in the main crate — little cross-crate call surface for LTO to fuse |
+
+**Decision.** Kept.
+
+**Reason.** A large, semantics-preserving win concentrated on the codec-crate hot
+paths (all p < 0.05), with the JB2 dictionary encoder — the dominant colour-page
+cost — dropping by nearly two-thirds purely from cross-crate inlining. Render is
+flat within noise (it barely crosses crate boundaries), so nothing regresses. The
+cost is compile time: fat LTO + `codegen-units = 1` serialises codegen and roughly
+doubles a clean release/bench build — an acceptable trade for a shipping library.
+`make check` (fmt, clippy -D, no_std, wasm32, full test suite) passes with the new
+profile. This is the single biggest single-change speed-up recorded so far and it
+compounds with PAR_ENCODE (the parallel bundlers now also LTO their per-page work).
