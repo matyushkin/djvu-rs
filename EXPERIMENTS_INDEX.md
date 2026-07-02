@@ -12,6 +12,8 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_MASKED_WAVELET | 2026-07-02 | IW44 encoder (size) | D/F | target ~4.6 KB on 2 BG44 pages (119 636 B, 3.9% gap) | Masked BG encoding (DjVuLibre c44 lever) closes residual IW44_ACT_THRESH gap; deferred — normative bitstream change, needs mask plumbing + DjVuLibre interop-diff. Low-risk first step: better `segment_page` inpaint |
+| LTO_FAT | 2026-07-02 | build profile (all paths) | **K** | **−65% jb2_encode_dict, −7% bzz/segment, −2…3% iw44** | `lto="fat"` + `codegen-units=1` release/bench profile (none existed before). Cross-crate ZP inlining; render flat. Cost: ~2× build time |
 | PAR_ENCODE | 2026-07-02 | encoder (multi-page) | **K** | **−35…43% layered, −39% bundle_jb2** | Parallel per-page encoding via rayon in both DJVM bundlers (`parallel` feature); byte-identical, seq fallback. Decode was parallel (PAR_DEC) but encode wasn't — largest untouched lever |
 | ENC_SPEED_DIAG | 2026-06-26 | encoder (speed) | D | IW44 1.46× faster than c44; JB2 ~par with cjb2 | Head-to-head on identical inputs. Encode speed competitive — no hot-spot; axis healthy, not a gap |
 | JB2_PAGE_SYM_CAP | 2026-06-25 | JB2 decode (robustness) | **K** | fuzz_jb2 timeout fixed; per-page decode bounded 256→16 MP | 409 B input did 23 K refinement records = 47.7 MP (~626 ms→10 s ASAN). Split cap: 16 MP page / 256 MP dict (32→16 for fuzz margin). Regression test + seed corpus |
