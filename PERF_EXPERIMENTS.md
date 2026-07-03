@@ -6760,3 +6760,49 @@ refinement. Corollary: **A3's linear-light *blend*** shares the same physics and
 therefore the same small headroom on real DjVu content — deprioritised by the same
 evidence. D1 converted two guesses into evidence-based decisions this session: **D2
 adopt Lanczos, D4/A3 reject linear-light.**
+
+## Perf round 10 (2026-07-04) — PAR_LANCZOS (acts on the D2 finding)
+
+D2 (round 9) established Lanczos-3 as the quality winner for photographic/mixed
+downscale, with its one caveat being cost (it renders at native resolution then
+resamples). This round removes most of that cost.
+
+### PAR_LANCZOS — row-parallel Lanczos-3 resampler — **Kept** (2026-07-04)
+
+**Issue (backlog A4).** `scale_lanczos3` (src/pixmap.rs) ran both separable passes
+single-threaded. Prior rounds deferred parallelising it because the only named
+fixture (boy.djvu, 96–256 rows) was too small to beat rayon overhead. With a large
+fixture (colorbook native, 2260×3669) the passes do real work.
+
+**Approach.** Both passes are row-independent — the horizontal pass writes each
+`mid` row from its own `src` row + shared precomputed column weights; the vertical
+pass writes each `out` row from a `v_support`-tall window of `mid` using three
+column accumulators. Parallelised over rows behind the existing `parallel` feature
+(the IW44_PAR/PARALLEL gate): horizontal via `par_chunks_mut`, vertical via
+`for_each_init` so each worker keeps its own accumulator scratch (reused across the
+rows it owns, no per-row alloc). The sequential path is unchanged.
+
+**Correctness.** Bit-identical: each output pixel sums the same contributors in the
+same order regardless of thread assignment — thread scheduling never touches the
+per-pixel math. All `scale_lanczos3` golden tests pass in both `std` and
+`std,parallel`; full 1024-test suite green in both configs; `make check` clean.
+
+**Numbers** (`benches/render.rs::render_scaled_large_colorbook`, colorbook 0
+native→½ = 1130×1834, warm decode, M1 Max). Isolated by measuring the **parallel**
+build with vs without this change (both have parallel decode; only the Lanczos pass
+differs), so the decode-parallelism is cancelled out:
+
+| Lanczos render (parallel build) | Time | Change |
+|---------------------------------|------|--------|
+| sequential Lanczos (before) | 100.5 ms | — |
+| row-parallel Lanczos (after) | 31.2 ms | **−69 % (3.2×)** |
+
+End-to-end, a large-page Lanczos render drops from 145 ms (default seq build) to
+31 ms (parallel). The resampling passes alone go ~97 ms → ~28 ms (≈3.5×, matching
+the row-parallel spread across the core cap).
+
+**Decision.** **Kept.** Directly amplifies D2: Lanczos was the quality winner but
+cost ~10× a bilinear downscale; row-parallelism cuts that to ~3×, making a
+"Lanczos-by-default for large downscale ratios" policy far more affordable in
+parallel builds. New `render_scaled_large_colorbook` bench added (the old
+`render_scaled_0.5x` boy fixture was too small to show it).
