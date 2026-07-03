@@ -6452,3 +6452,578 @@ bench added.
 cold-open-latency axis the prior throughput-focused rounds never benchmarked. The
 swarm found it; hand-implementation confirmed the −48 % `from_bytes` win,
 byte-identical, across std/no_std/mmap/async.
+
+## Perf round 7 (2026-07-03) — gray-decode axis (from the round-6 experiment backlog)
+
+Round 6 concluded the well was "mostly dry for byte-identical hot-path wins" but
+that whole **axes** remained unbenchmarked (LAZY_PAGE_CONSTRUCT proved this: −48 %
+lived on the cold-open axis nobody had measured). This round attacks the next such
+axis from the recorded backlog: **grayscale decode** (proposal B2). Every gray
+consumer — `render_gray8`, OCR pre-pass, e-ink viewers, thumbnail grids — currently
+pays for full colour: `render_gray8` is literally `render_pixmap(...).to_gray8()`,
+and the codec's only gray output was `to_rgb_subsample().to_gray8()`, i.e. both
+chroma inverse-wavelet transforms + the YCbCr→RGBA conversion, all thrown away by
+the final luma reduction.
+
+### GRAY_DIRECT — decode only the Y plane for grayscale output — **Kept** (2026-07-03)
+
+**Issue (round-6 backlog B2).** For a colour IW44 image the two chroma planes'
+`reconstruct()` (inverse wavelet) plus the YCbCr→RGBA SIMD conversion are the bulk
+of `to_rgb`'s cost, but a grayscale consumer never needs them. There was no API to
+get luma without paying for chroma.
+
+**Approach.** New additive methods on `Iw44Image` (`crates/djvu-iw44/src/lib.rs`):
+`to_gray8()` / `to_gray8_subsample(sub) -> GrayPixmap`. They reconstruct **only the
+Y plane** (`cb`/`cr` are never touched) and write one byte per pixel:
+- **Grayscale images:** `gray = 127 − normalize(Y)` — identical to the existing
+  gray path's R channel.
+- **Colour images:** `gray = clamp(normalize(Y) + 128, 0, 255)` — the DjVu luma
+  channel (what the colour formula yields when Cb=Cr=0).
+
+Purely additive: no existing byte-exact path is touched. Compact (sub=2/4) and
+full-res indexing mirror `to_rgb_subsample`.
+
+**Fidelity.**
+- Grayscale images: **byte-identical** to `to_rgb_subsample(sub).to_gray8()` (the
+  Rec.601 weights 306+601+117 sum to 1024, so `R=G=B=g` round-trips to `g` exactly).
+  Asserted by `iw44_to_gray8_matches_rgb_luma_boy` for the `!is_color` branch.
+- Colour images: the Y-plane luma is **not** bit-identical to the Rec.601 luma of
+  the reconstructed RGB (which mixes in chroma-derived R/G/B). Measured on boy.djvu:
+  **mean abs diff < 4/255, max ≤ 24** — a few levels, and the Y channel is the more
+  faithful luminance (it *is* the encoder's luma). This is why GRAY_DIRECT is an
+  opt-in method, not a silent replacement of the colour→gray reduction.
+
+**Numbers** (`benches/codecs.rs::bench_iw44_gray_decode_large`, colorbook.djvu
+2260×3669 colour page, pre-decoded; M1 Max). Compares `to_rgb().to_gray8()` vs
+`to_gray8()`:
+
+| Build | rgb_then_gray | gray_direct | Change |
+|-------|---------------|-------------|--------|
+| default (`std`, sequential) | 6.70 ms | 1.92 ms | **−71 % (3.5×)** |
+| `--features parallel` | 3.78 ms | 2.05 ms | **−46 % (1.85×)** |
+
+The colour path benefits from `rayon::join` reconstructing Y/Cb/Cr concurrently, so
+the parallel gap is smaller — but GRAY_DIRECT still wins by nearly 2× there because
+it does ~1/3 the reconstruct work (one plane, not three) and skips the YCbCr math
+entirely. Sequential (the default, and the wasm/no_std reality) sees the full 3.5×.
+
+Downscaled gray previews (the thumbnail-grid case that most motivates this path),
+sequential build, `to_rgb_subsample(s).to_gray8()` vs `to_gray8_subsample(s)`:
+
+| Subsample | rgb_then_gray | gray_direct | Change |
+|-----------|---------------|-------------|--------|
+| sub=2 (1130×1835) | 1.73 ms | 0.69 ms | **−60 % (2.5×)** |
+| sub=4 (565×918)   | 0.42 ms | 0.17 ms | **−60 % (2.5×)** |
+
+The relative win narrows a little at higher subsample (compact-plane reconstruct is
+already cheap) but holds at ~2.5× — a preview grid of colour scans decodes to gray
+in a fraction of the time.
+
+**Decision.** **Kept.** Additive codec API on the previously-unbenchmarked gray
+axis; large win, no risk to existing paths, tests + clippy + no_std + bench all
+green. Reachable today via `page.decoded_bg44()?.to_gray8()`. Follow-up (not landed
+here): a gray compositor so `render_gray8` can use this end-to-end for the common
+background-dominated colour scan — currently `render_gray8` still routes through the
+full RGBA compositor before reducing, so this win is codec-level until that path
+exists. New `bench_iw44_gray_decode_large` added.
+
+## Perf round 8 (2026-07-03) — full breadth triage of the round-7 proposal set
+
+Follow-up to the chat investigation that produced ~25 decode/render proposals
+(axes A–D). Rather than deep-dive one, this round gives **every** idea a verdict:
+some are already implemented (verified by reading the code), one is a measured
+structural opportunity, the rest are classified by what blocks them. Grounded in
+code reading this session, not memory. Categories: **DONE-ALREADY** (the codebase
+already does it), **OPPORTUNITY** (real, quantified, deferred with design),
+**RULED-OUT** (dead-end or covered), **NEEDS-INFRA** (real but blocked on a
+fixture/host/harness), **QUALITY-GATED** (needs the D1 perceptual harness first).
+
+### B3 (early wavelet stop for sub=2/4) — **DONE-ALREADY** (2026-07-03)
+
+`PlaneDecoder::reconstruct` (crates/djvu-iw44/src/lib.rs:1677–1742) already does
+exactly this: for sub∈{2,4,8} it scatters only the low-frequency sub-block
+coefficients into a 4×/16×/64×-smaller compact plane and runs the wavelet from
+`start_scale = 16/sub`, never computing the discarded fine scales. That is
+"decode directly to half/quarter resolution." No work to do. (This is also why
+BG_CACHE_S2/SUB4_RGB_CACHE are cheap.)
+
+### B4 (word-at-a-time JB2 symbol blit) — **DONE-ALREADY** for the hot path (2026-07-03)
+
+The hot bilevel render path `blit_to_bitmap` (crates/djvu-jb2/src/lib.rs:1138–1173)
+already blits byte-at-a-time with shift-align OR: aligned case is `dst[i] |= src[i]`
+over whole bytes (LLVM auto-vectorizes this), unaligned case is a two-shift byte OR.
+The premise "if it's bit-by-bit, use word OR" is already satisfied. The only
+bit-by-bit blitter left is `blit_indexed` (the palette/indexed-mask path,
+lib.rs:1033) — but that path is **decode-once and cached** (MASK_IDX_CACHE #427),
+so its cost is cold-once, not hot. Widening the aligned OR to explicit u64 is the
+LLVM-auto-vec dead-end (see the dead-end list). No worthwhile work.
+
+### B5 (retain decoder state across progressive frames) — **OPPORTUNITY, measured** (2026-07-03)
+
+**Confirmed real and O(N²).** `render_progressive(page, opts, chunk_n)` calls
+`decode_layers(…, chunk_n+1)`, and for the progressive (non-`usize::MAX`) limit
+`decode_background_chunks` (src/djvu_render.rs:1270) allocates a **fresh
+`Iw44Image::new()` and re-decodes BG44 chunks 1..=chunk_n+1 from scratch every
+frame**. Rendering all N frames therefore does 1+2+…+N = O(N²) chunk decodes.
+(The mask/FG layers are *not* redundant — they hit the page's OnceLock caches after
+frame 0; only BG is re-decoded.)
+
+**Measured** (probe, colorbook.djvu page 0, 4 BG44 chunks, warm mask/FG, M1 Max):
+`render_progressive_all` = **216 ms** for 4 frames vs a single full
+`render_pixmap` = **45 ms** → **4.8×**. With incremental decode the 4 frames should
+cost ≈ one full render plus three cheap `to_rgb`+composite snapshots (~1.3–1.5×),
+i.e. a ~3× reduction on the "eagerly render every refinement" workload, and an even
+bigger win for a streaming viewer that drives `render_progressive_step` as chunks
+arrive over the network (there the O(N²) is paid across the whole session).
+
+**Why deferred, not patched now.** The clean fix is a **stateful progressive
+decoder** that persists the incrementally-fed `Iw44Image` across `render_*_step`
+calls (a small new type, or a per-level page cache). The tempting shortcut — make
+`render_progressive_all` drive one `Iw44Image` and re-assemble frames itself — would
+have to replicate the bg+fg+bold+composite assembly that `decode_layers` centralises
+"so no logic can drift between this and the full render" (its own comment). Forking
+that is the wrong trade; the O(N²) is better than a divergent second composite path.
+Design for a future session: a `ProgressiveDecoder { img: Iw44Image, fg: OnceCell }`
+that yields one composited frame per `push_chunk`, with a byte-identical test against
+`render_progressive_step` on chicken.djvu (3 chunks) + colorbook (4 chunks).
+
+**Side note (robustness, not perf):** the probe hit `Iw44(ZpTooShort)` from
+`render_progressive_all` on watchmaker.djvu page 0 — a partial-chunk progressive
+decode erroring on a real corpus file. Worth a separate look; out of scope here.
+
+### C1 (RGB8 output, drop alpha) — **PARTLY DONE / wide-surface deferred** (2026-07-03)
+
+The export paths already avoid carrying alpha into the output format:
+`export_common::rgba_row_to_rgb` (src/export_common.rs:86) strips alpha per row, and
+PDF/TIFF use `render_streaming` so no full RGBA+RGB double buffer is held. The
+residual C1 win (a compositor that *writes* 3-byte RGB directly, saving 25% output
+bandwidth) would touch every fast path — P2's 256×32 B BILEVEL_RGBA table, G1, F2,
+the area-avg and B-series writers — all of which emit RGBA. Wide, byte-layout-
+sensitive surface for a bandwidth-only win on the write side; the SIMD tables assume
+4-byte pixels. Deferred as high-effort/medium-reward; the export consumers that
+actually want RGB already get it via the row converter.
+
+### C2 (fuse rotation into the compositor) — **RULED-OUT (low value / regression risk)** (2026-07-03)
+
+`rotate_pixmap` (src/djvu_render.rs:859) already uses the ROTATE_TILE 32×32 cache-
+tiled transpose (#447, kept, ~2–6%). Writing composited rows *directly* to
+transposed positions would trade that cache-local transpose for **strided scatter
+writes** in the compositor's hot loop — exactly the access pattern ROTATE_TILE was
+added to avoid — while saving one intermediate pixmap alloc. The alloc is cheap
+relative to the bandwidth hit; net-negative risk. Not worth it.
+
+### Remaining axes — classified (no code change this round)
+
+**NEEDS-INFRA** (real, but blocked on a fixture/host/harness that doesn't exist yet):
+- **A1 IDWT_PAR_PLANE** — within-Y-plane wavelet parallelism; cold-only, needs a
+  very-large colour-page fixture to beat the rayon overhead (already in the deferred
+  log). **A4 PAR_LANCZOS** — needs a large-page Lanczos fixture (>3000 rows); the
+  named boy fixture is too small. **A2 AVX2_IDWT** — needs an x86 bench host (M1 can't
+  measure). **B6 madvise / B7 speculative next-page decode** — need a cold-disk /
+  simulated-network harness; no such bench exists. **C3 upscale (zoom>1) path** —
+  genuinely unbenchmarked axis, needs a `zoom 2×/4× region` bench before any fast
+  path can be judged. **C4 tile cache** — an API feature (pan/zoom viewer), needs a
+  panorama-scenario bench. **C5 memory budget / LRU cache eviction** — measurable as
+  a peak-RSS diagnostic on the 520-page book, but the eviction machinery is a large
+  change; worth a *diagnostic* RSS measurement first.
+- **B1 ZP-core micro-opts** — highest-theoretical-leverage but the hot loop is
+  inlined into djvu-jb2/iw44/bzz (three byte-exact copies) and PGO already captured
+  the branch-heavy win (codec kernels flat ±1%); high-risk/low-EV. The u64-bitbuffer
+  idea is concrete but its expected payoff is marginal (refill is already amortized
+  and its branch is well-predicted).
+
+**QUALITY-GATED** (need the perceptual harness D1 = SSIM/PSNR + golden corpus, which
+gates the whole D branch and A3): **A3** linear-light blend + mask-upscale AA,
+**D2** Lanczos-vs-area-avg for photo downscale, **D3** bicubic FG44 upsample,
+**D4** gamma-correct downscale, **D5** TH44-thumbnail preview fast path (also a
+feature: the embedded thumbnail is separately lossy). None of these can be honestly
+decided without D1; building D1 is the unblocking prerequisite and the highest-value
+*infrastructure* task on the list.
+
+**Verdict.** Of the ~25 proposals: **2 were already implemented** (B3, B4-hot),
+**1 already landed this session** (B2 → GRAY_DIRECT), **2 ruled out** (C1-compositor
+wide-surface, C2 regression-risk), **1 is the top measured structural opportunity**
+(B5, ~3× on progressive, deferred pending a stateful-decoder design), and the rest
+split into NEEDS-INFRA and QUALITY-GATED — none blocked on ideas, all blocked on a
+missing bench/host/harness. The two unblocking meta-tasks that would convert the most
+deferred items into runnable experiments are **D1 (perceptual quality harness)** and
+a **cold-open / large-page / zoom fixture set**.
+
+## Perf round 9 (2026-07-03) — D1 perceptual quality harness (unblocks the D branch)
+
+Round 8 flagged the whole D branch (A3, D2–D5) as QUALITY-GATED: undecidable
+without a perceptual metric, because the existing `interop_pixdiff` tool reports
+only the *arithmetic* mean/max per-pixel RGB diff — which cannot say whether a
+change is perceptually better, only that it drifted. This round builds that gate.
+
+### QUALITY_HARNESS_D1 — PSNR + SSIM metrics module + harness — **Kept (infra)** (2026-07-03)
+
+**What.** New `src/quality.rs` (public, std-gated): `psnr`, `ssim`, `compare`,
+`compare_gray`, `psnr_from_mse`, and a `QualityReport { mse, psnr_db, ssim }`.
+SSIM is the standard windowed index (8×8 non-overlapping windows — the common fast
+approximation of the 11×11 Gaussian — with C1=(0.01·255)², C2=(0.03·255)²), computed
+on the Rec.601 luma of RGBA pixmaps so colour and grayscale compare on the same
+perceptual channel. Six unit tests pin the behaviour: identical→(SSIM 1, PSNR ∞,
+MSE 0), `psnr_from_mse(1)=48.13 dB`, flat-shift keeps high SSIM while a pixel
+checkerboard collapses it, sub-window images don't panic, gray/RGBA luma agree.
+
+`examples/quality_harness.rs` drives it against the DjVuLibre `ddjvu` reference
+(the same "quality floor" `interop_pixdiff` uses), size-aligning our render to
+ddjvu's output and reporting SSIM/PSNR — a perceptual upgrade of the old mean-diff
+harness. Falls back to a mode-delta / `--pair` comparison when ddjvu is absent.
+
+**Immediate result — D2 (Lanczos-vs-Bilinear downscale) decided:** running the
+harness on real colour pages vs the ddjvu reference:
+
+| Page | Scale | Bilinear (SSIM / PSNR) | Lanczos3 (SSIM / PSNR) |
+|------|-------|------------------------|------------------------|
+| colorbook (photo) | 1/2 | 0.9594 / 27.25 dB | **0.9928 / 36.94 dB** |
+| watchmaker (text+photo) | 1/3 | 0.8607 / 13.79 dB | **0.9890 / 28.65 dB** |
+
+Lanczos3 downscaling is **decisively** closer to the reference decoder — a large
+SSIM gain and +10…15 dB PSNR, biggest on the text-heavy page where bilinear's edge
+blur hurts most. This answers the long-open #423 / D2 question with numbers:
+**Lanczos-3 should be the default (or strongly recommended) resampling for
+photographic/mixed downscale**, not bilinear. (It costs more — see
+`render_scaled_0.5x` bench — so the follow-up is a speed/quality policy: default
+Lanczos for large downscale ratios, bilinear for near-1:1. PAR_LANCZOS, already in
+the backlog, would close much of the speed gap.)
+
+**Decision.** **Kept** as infrastructure. `djvu_rs::quality` is now the perceptual
+gate every D-branch experiment (A3 linear-light blend, D3 bicubic FG, D4 gamma
+downscale, D5 TH44 preview) can be judged against — each becomes "does it raise
+SSIM-vs-reference (or SSIM-vs-source) without an unacceptable speed cost?". The
+biggest blocker on the quality axis is removed. 1024 tests green (was 1018), clippy
++ no_std + wasm32 clean.
+
+### D5 (TH44 embedded-thumbnail preview fast path) — **Evaluated / opt-in only** (2026-07-03)
+
+Now measurable via the D1 harness. **Two blockers make this niche, not a default.**
+
+**Fixture reality:** swept the corpus — **zero** files embed a decodable `TH44`
+thumbnail (`page.thumbnail()` returns `None` for colorbook/boy/chicken/watchmaker/
+pathogenic/conquete; carte.djvu fails to parse). D5 only helps documents whose
+*encoder* embedded thumbnails; ours can (`thumbnail::encode_th44_color`) but almost
+nothing in the wild does.
+
+**Speed/quality (colorbook page 0, TH44 synthesised from a native render, then the
+preview path = decode TH44 + bilinear resample; vs a cold sub-sampled full render):**
+
+| Preview | Full render (cold Bilinear) | TH44 path | Speedup | SSIM (TH44 vs full) |
+|---------|-----------------------------|-----------|---------|---------------------|
+| 48×77 | 11.5 ms | 0.38 ms | **30.7×** | 0.497 |
+| 64×103 | 11.7 ms | 0.42 ms | **27.7×** | 0.552 |
+| 96×155 | 11.0 ms | 0.48 ms | **23.0×** | 0.642 |
+| 128×207 | 11.2 ms | 0.59 ms | **19.1×** | 0.684 |
+
+(Against a cold *Lanczos* full render the speedup is 187–302×, but Lanczos forces a
+full-native render so that baseline is unfair; Bilinear preview already uses sub≥4
+partial decode, which is the honest fast baseline.)
+
+**Verdict.** The speed win is large and real (20–30×), but the fidelity is **low**
+(SSIM 0.50–0.68 — a TH44 is a ~128 px lossy IW44 encode, visibly softer/different
+from a real render). Acceptable for a dense thumbnail-*grid* where throughput
+dominates; **not** acceptable as a general preview default. Combined with the fixture
+reality (nothing embeds TH44), D5 is worth at most an **explicit opt-in** render flag
+("use embedded thumbnail if present and target ≤ its size"), paired with encoder-side
+thumbnail embedding — not a default fast path. Deferred as low-priority opt-in. The
+value of this round is that D1 turned "maybe TH44 previews are fine" into a measured
+SSIM 0.5–0.68 tradeoff, i.e. an evidence-based *no* for the default case.
+
+### D4 (gamma-correct / linear-light downscale) — **Rejected (low headroom)** (2026-07-03)
+
+Diagnostic via D1 before touching the hot area-average compositor (which carries
+AREA_FIX, COLOR_AA, AREAAVG_ALLBG — all kept). Compared, on real rendered pages,
+our **gamma-space** box downscale (what area-average does — average device values)
+against a physically-correct **linear-light** downscale (gamma-decode → average →
+re-encode, page gamma 2.2):
+
+| Page | 1/2 (SSIM / PSNR) | 1/4 (SSIM / PSNR) |
+|------|-------------------|-------------------|
+| colorbook (photo) | 0.9984 / 41.2 dB | 0.9969 / 37.5 dB |
+| boy (photo) | 0.9967 / 35.4 dB | 0.9937 / 29.8 dB |
+| watchmaker (text+photo) | 0.9932 / 28.8 dB | 0.9790 / 25.1 dB |
+
+The correct-vs-naive gap is **negligible** on photographic content (SSIM ≥ 0.997)
+and only mildly visible on the text-heavy page (SSIM 0.979 worst case). The reason
+is structural: the gamma-incorrect-average artefact is worst on hard black/white
+edges, but in DjVu those edges live in the **bilevel JB2 mask** (composited via
+`mask_box_coverage`, a separate path), not in the smooth IW44 background that the
+area-average downscales. Implementing linear-light in the hot BG-downscale kernel —
+risking the three kept optimisations there, and *diverging* from DjVuLibre (which
+also averages in gamma space) — buys at most ~2% SSIM on the worst case.
+
+**Rejected.** Not worth the compositor risk. And the practical lever for better
+downscaled **text** is already identified and far larger: **D2's Lanczos-3**
+(edge-preserving, SSIM 0.989 vs bilinear 0.861 on watchmaker) dominates any gamma
+refinement. Corollary: **A3's linear-light *blend*** shares the same physics and
+therefore the same small headroom on real DjVu content — deprioritised by the same
+evidence. D1 converted two guesses into evidence-based decisions this session: **D2
+adopt Lanczos, D4/A3 reject linear-light.**
+
+## Perf round 10 (2026-07-04) — PAR_LANCZOS (acts on the D2 finding)
+
+D2 (round 9) established Lanczos-3 as the quality winner for photographic/mixed
+downscale, with its one caveat being cost (it renders at native resolution then
+resamples). This round removes most of that cost.
+
+### PAR_LANCZOS — row-parallel Lanczos-3 resampler — **Kept** (2026-07-04)
+
+**Issue (backlog A4).** `scale_lanczos3` (src/pixmap.rs) ran both separable passes
+single-threaded. Prior rounds deferred parallelising it because the only named
+fixture (boy.djvu, 96–256 rows) was too small to beat rayon overhead. With a large
+fixture (colorbook native, 2260×3669) the passes do real work.
+
+**Approach.** Both passes are row-independent — the horizontal pass writes each
+`mid` row from its own `src` row + shared precomputed column weights; the vertical
+pass writes each `out` row from a `v_support`-tall window of `mid` using three
+column accumulators. Parallelised over rows behind the existing `parallel` feature
+(the IW44_PAR/PARALLEL gate): horizontal via `par_chunks_mut`, vertical via
+`for_each_init` so each worker keeps its own accumulator scratch (reused across the
+rows it owns, no per-row alloc). The sequential path is unchanged.
+
+**Correctness.** Bit-identical: each output pixel sums the same contributors in the
+same order regardless of thread assignment — thread scheduling never touches the
+per-pixel math. All `scale_lanczos3` golden tests pass in both `std` and
+`std,parallel`; full 1024-test suite green in both configs; `make check` clean.
+
+**Numbers** (`benches/render.rs::render_scaled_large_colorbook`, colorbook 0
+native→½ = 1130×1834, warm decode, M1 Max). Isolated by measuring the **parallel**
+build with vs without this change (both have parallel decode; only the Lanczos pass
+differs), so the decode-parallelism is cancelled out:
+
+| Lanczos render (parallel build) | Time | Change |
+|---------------------------------|------|--------|
+| sequential Lanczos (before) | 100.5 ms | — |
+| row-parallel Lanczos (after) | 31.2 ms | **−69 % (3.2×)** |
+
+End-to-end, a large-page Lanczos render drops from 145 ms (default seq build) to
+31 ms (parallel). The resampling passes alone go ~97 ms → ~28 ms (≈3.5×, matching
+the row-parallel spread across the core cap).
+
+**Decision.** **Kept.** Directly amplifies D2: Lanczos was the quality winner but
+cost ~10× a bilinear downscale; row-parallelism cuts that to ~3×, making a
+"Lanczos-by-default for large downscale ratios" policy far more affordable in
+parallel builds. New `render_scaled_large_colorbook` bench added (the old
+`render_scaled_0.5x` boy fixture was too small to show it).
+
+## Perf round 11 (2026-07-04) — B5 incremental progressive decode (implemented; modest)
+
+Round 8 measured `render_progressive_all` at 4.8× a single render on colorbook and
+flagged the O(N²) per-frame BG re-decode as the top structural opportunity. This
+round implements the incremental fix — and finds the **addressable** redundancy is
+much smaller than that 4.8× implied.
+
+### B5_INCREMENTAL_PROGRESSIVE — one accumulating decoder across frames — **Kept (modest)** (2026-07-04)
+
+**What.** `render_progressive_all` no longer calls `render_progressive_step` per
+frame (which rebuilt a fresh `Iw44Image` and re-ran ZP decode of BG44 chunks
+1..=k for every frame k — 1+2+…+N chunk-decodes). It now decodes the foreground
+once (`decode_foreground_strict` + one bold-dilation, mirroring `decode_layers`'
+strict branch), feeds one BG44 chunk per frame into a single accumulating
+`Iw44Image`, and snapshots each frame through the **unchanged** composite path
+(`CompositeContext::from_layers` → `composite_into` → `rotate_pixmap`). Gated to the
+byte-identical-serviceable case (strict mode, Bilinear, multi-chunk BG44); everything
+else falls back to the per-frame loop.
+
+**Correctness.** Byte-identical, proven by the new
+`render_progressive_all_matches_per_frame` test (chicken.djvu, 3 BG44 chunks:
+every incremental frame equals `render_progressive_step` pixel-for-pixel). Feeding
+chunks 0..=k into one decoder produces the same state as a fresh decode of the first
+k+1 chunks (ZP state accumulates identically). 1025 tests green, `make check` clean.
+
+**Numbers** (incremental `render_progressive_all` vs the per-frame loop, M1 Max):
+
+| Page | BG44 chunks / frames | per-frame (old) | incremental (new) | Speedup |
+|------|----------------------|-----------------|-------------------|---------|
+| chicken (181×240) | 3 | 3.44 ms | 2.30 ms | **1.50×** |
+| colorbook (2260×3669) | 4 | 212.9 ms | 205.3 ms | **1.04×** |
+
+**Why modest, not the 4.8× round 8 implied.** BG decode has two parts: (1) ZP
+entropy decode (`decode_chunk`) and (2) IDWT reconstruct + YCbCr→RGB
+(`to_rgb_subsample`). Only (1) is redundant across frames and now incremental;
+(2) is **inherently per-frame** — each frame is a different refinement level, so the
+global wavelet must be re-run in full, and there is no incremental IDWT. The round-8
+"4.8×" was the ratio of *total* progressive work to one render, but almost all of it
+is per-frame reconstruct + composite (8.3 MP × 4 frames on colorbook), not the ZP
+redundancy B5 removes. So the win is large only when ZP decode dominates — small
+pages (chicken 1.5×) and, increasingly, **many-chunk** pages (the saving is the
+N(N−1)/2 skipped chunk-decodes, so a 15-chunk progressive photo gains far more than
+colorbook's 4). Strictly ≤ the old cost by construction; never a regression.
+
+**Decision.** **Kept** — byte-identical, tested, strictly-better, and an honest
+O(N²)→O(N) on the ZP portion that scales with chunk count. But the headline
+progressive win is smaller than hoped, and the **more important** case — a streaming
+viewer driving `render_progressive_step` as chunks arrive over the network, which
+still re-decodes O(N²) across the session — is *not* addressed by this
+`render_progressive_all`-only change. That needs the stateful `ProgressiveDecoder`
+API (persist the accumulating `Iw44Image` across step calls); it remains the real
+deferred structural work, now with corrected expectations (its ceiling is the ZP
+redundancy, not the full per-frame cost).
+
+## Perf round 12 (2026-07-04) — C5 unbounded render-cache memory (found + fixed)
+
+Investigating the last unmeasured axis from round 8: peak memory of a long-lived
+viewer over a large document. It turned out to be a real, unbounded-growth bug.
+
+### C5_RENDER_CACHE_EVICTION — bound per-document render memory — **Kept** (2026-07-04)
+
+**Finding.** `doc.page(i)` returns a `&DjVuPage` stored in the document, and each
+page memoises its decoded layers (`PageLayers`: BG44 image, the full-res BG→RGB
+pixmap at `w×h×4`, mask, mask_sub4, FG44, and the s1/s2/s4 RGB caches) in a
+`OnceLock` that lives for the document's lifetime. So rendering page after page
+**accumulates one full decode cache per page, never evicted** — peak RSS grows
+linearly with pages rendered. Measured on colorbook.djvu (62 colour pages, rendered
+sequentially at native resolution):
+
+| Pages rendered | Peak RSS |
+|----------------|----------|
+| 1 | 58 MB |
+| 5 | 103 MB |
+| 20 | 261 MB |
+| 62 | 714 MB |
+
+≈ 11 MB/page, unbounded — a 500-page colour book would reach multiple GB and can
+OOM a viewer. This axis was never benchmarked (prior rounds optimised throughput,
+not long-run memory), exactly the LAZY_PAGE_CONSTRUCT lesson again.
+
+**Fix.** Additive eviction API (std): `DjVuPage::evict_render_cache(&mut self)`
+resets the `render_layers` `OnceLock` (dropping the whole `PageLayers`);
+`DjVuDocument::evict_render_caches(&mut self)` clears all pages;
+`DjVuDocument::retain_render_caches(&mut self, keep)` clears all but a working set
+(the visible pages + prefetch window). Caches rebuild lazily on the next render, so
+eviction is transparent. No existing behaviour changes (nothing calls it unless the
+consumer opts in).
+
+**Correctness.** Byte-identical across an evict: new
+`evict_render_cache_preserves_output` test renders chicken.djvu, evicts, re-renders,
+and asserts pixel-equality (the cache rebuilds to the same result). 1026 tests green,
+`make check` clean.
+
+**Impact** (render all 62 colorbook pages, keep only the current page's cache):
+
+| Mode | Peak RSS | Output |
+|------|----------|--------|
+| no eviction (before) | 714 MB | checksum 13716 |
+| `retain_render_caches(&[i])` | 103 MB | checksum 13716 |
+
+**−86 % peak RSS**, identical output. A viewer can now bound memory to its working
+set instead of the whole book.
+
+**Decision.** **Kept.** Turns an unbounded per-document memory leak into a
+consumer-controllable working-set bound; additive, byte-identical, low-risk. A full
+automatic global LRU (evict by byte budget without the caller listing pages) is the
+natural follow-up, but the manual API already gives viewers the lever and is enough
+to prevent the OOM.
+
+## Perf round 13 (2026-07-04) — C5 follow-up: automatic LRU cache budget
+
+Round 12's `retain_render_caches(keep)` requires the caller to name exactly which
+pages to keep. This round adds the automatic form: set a byte ceiling, and the
+least-recently-used pages are evicted for you.
+
+### C5_LRU_BUDGET — enforce_cache_budget with per-page LRU — **Kept** (2026-07-04)
+
+**What.** Three additions (std):
+- Per-page LRU tick: `PageLayers` gains an `AtomicU64 access`, stamped from a
+  process-global monotonic counter on every `render_layers()` access (the single
+  funnel all layer accesses already pass through), so each page records when it was
+  last rendered. Read (without touching the cache) via a non-initialising
+  `OnceLock::get()`.
+- `DjVuPage::render_cache_bytes()` / `DjVuDocument::render_cache_bytes()` —
+  observability: approximate resident bytes held (exact for the dominant RGB/mask
+  pixmaps + blit map; BG44 coefficient images estimated from `w·h·2`).
+- `DjVuDocument::enforce_cache_budget(max_bytes, protect) -> freed`: if the total
+  exceeds `max_bytes`, evict unprotected pages **least-recently-used first** until
+  under budget. The automatic form of `retain_render_caches`.
+
+**Correctness.** New `enforce_cache_budget_lru_and_correctness` test: renders 3
+pages, asserts the LRU ticks strictly increase with render order, that a budget of 1
+byte protecting page 2 evicts exactly the two LRU pages and keeps page 2, and that a
+re-render of an evicted page is byte-identical. 1027 tests green, `make check` clean.
+
+**Impact** (render all 62 colorbook pages, calling `enforce_cache_budget(N, &[i])`
+after each; M1 Max):
+
+| Budget | Final cache | Peak RSS | Output |
+|--------|-------------|----------|--------|
+| none | 393 MB | 714 MB | checksum 13716 |
+| 150 MB | 146 MB | 419 MB | checksum 13716 |
+| 60 MB | 57 MB | 255 MB | checksum 13716 |
+
+The accumulated cache is held **precisely** under the ceiling (146 ≤ 150, 57 ≤ 60),
+and peak RSS falls from 714 MB to 255 MB at the 60 MB budget. Peak stays above the
+budget because it also includes the transient full-resolution render buffer of the
+current page plus allocator retention (freed pages aren't immediately returned to
+the OS) — both inherent and outside the cache the budget governs. The point is that
+the previously *unbounded* accumulation is now bounded to a caller-chosen ceiling.
+
+**Decision.** **Kept.** Completes C5: `enforce_cache_budget` gives a long-lived
+viewer automatic, LRU-correct memory bounding with a one-line call per render and no
+need to track page order itself. Additive, byte-identical, low-risk.
+
+## Perf round 14 (2026-07-04) — C3 zoom/upscale axis (diagnostic: already efficient)
+
+The zoom axis — a viewer at >100% rendering a viewport of an upscaled page — was
+never benchmarked. Investigated it directly; it turns out to already be efficient,
+so this is a diagnostic, not a change.
+
+### C3_ZOOM_SCOPE — is the zoom/region render path wasteful? — **Diagnostic / no change** (2026-07-04)
+
+**Setup.** `render_region(page, rect, opts)` with `opts.width/height` = the zoomed
+full-page size (2×/3×/4× native) and a fixed viewport rect — the exact call a
+zooming viewer makes. Measured warm (decode cached), colorbook + cable, M1 Max.
+
+**Finding 1 — flat across zoom.** A 1024×768 viewport costs ~4 ms at **every** zoom
+level 1×–4× (and for both colour and bilevel). Zoom does not blow up cost: the
+compositor writes only the viewport's pixels, sampling the decoded layers at the
+zoom-scaled source position — no full-page work per region. RENDER_REGION_SCOPE
+(round 5) already ensured this; this confirms it holds under upscaling.
+
+**Finding 2 — linear in viewport, no per-call overhead.** Scaling the viewport at
+fixed 2× zoom:
+
+| Viewport | pixels | time | ns/px |
+|----------|--------|------|-------|
+| 128×128 | 16 K | 95 µs | 5.8 |
+| 256×256 | 66 K | 357 µs | 5.4 |
+| 512×512 | 262 K | 1.41 ms | 5.4 |
+| 1024×768 | 786 K | 4.55 ms | 5.8 |
+| 2048×1536 | 3.1 M | 18.8 ms | 6.0 |
+
+Cost is cleanly proportional to output pixels at ~5.5 ns/px with no fixed per-call
+overhead. That rate matches the full-page compositor baselines (color_native_cached
+≈ 5.6 ns/px), so the bilinear-**upscale** B-series path is no more expensive
+per-pixel than a 1:1 render — the compositor's kept optimisations already cover it.
+
+**Verdict.** No low-hanging speed win on the zoom axis: the warm region/zoom render
+is scoped, linear, and at the same per-pixel rate as the tuned full-page compositor.
+The only residual cost is the **cold** first decode of a page (full-page BG ZP +
+IDWT even for a small viewport), which is the already-rejected ROI_IDWT (the ZP
+stream is serial and not spatially subsettable). Axis closed. The remaining zoom
+work is *quality* (mask-upscale AA, QUALITY_AA #13), now judgeable via the D1
+harness, not speed.
+
+### GRAY_DIRECT_E2E — wire to_gray8_subsample through render_gray8 — **Rejected (compositor duplication)** (2026-07-04)
+
+Evaluated whether the round-7 GRAY_DIRECT codec win (−71% BG decode, Y-plane only)
+can be delivered end-to-end through `render_gray8` (today `render_pixmap().to_gray8()`).
+
+Two blockers, both from reading `composite_into`:
+1. **Full gray compositor = mass duplication.** The compositor dispatches to three
+   deeply-tuned RGBA row writers (`composite_rows_bilevel_one` / `_bilinear_one` /
+   `_area_avg_one`) carrying every kept fast path (P2, G1, F2, area-avg, POPCNT…).
+   A 1-byte-output gray variant would fork all three — the most-optimised code in the
+   repo — for a niche entry point. High drift risk, poor ROI.
+2. **Not byte-identical even for the easy case.** A pure-BG colour page (BG44, no
+   mask/FG) could shortcut to `bg.to_gray8_subsample(sub)` with *no* compositor work,
+   but that returns the DjVu **Y** luma while `render_gray8`'s contract is the
+   **Rec.601** luma of the colour render (Y ≠ Rec.601-of-RGB; the GRAID_DIRECT fidelity
+   note). So it would silently change `render_gray8` output — an opt-in, not a
+   transparent optimisation.
+
+**Rejected.** The codec-level `Iw44Image::to_gray8[_subsample]` (kept, round 7)
+remains the interface: consumers that want the fast Y-only gray decode — OCR
+pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
+via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
+not worth duplicating the hot path.

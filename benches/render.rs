@@ -593,6 +593,52 @@ fn bench_render_scaled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark Lanczos-3 downscale on a LARGE colour page (colorbook, 2260×3669).
+///
+/// `render_scaled_0.5x` uses boy.djvu (192×256) — far too small to show the
+/// PAR_LANCZOS row-parallel win. This scales colorbook to half (1130×1834),
+/// where the separable Lanczos passes do real work. `bilinear` is the control
+/// (same decode, no Lanczos post-pass); the `lanczos3 − bilinear` gap is the
+/// resampling cost being parallelised. Run under `--features parallel` to see
+/// the row-parallel speedup vs the default sequential build.
+fn bench_render_scaled_large(c: &mut Criterion) {
+    let doc = match load_doc("colorbook.djvu") {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_render_scaled_large: colorbook.djvu not found");
+            return;
+        }
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let nw = page.width() as u32;
+    let nh = page.height() as u32;
+    let (hw, hh) = ((nw / 2).max(1), (nh / 2).max(1));
+
+    // Warm decode caches so we measure the resampling passes, not cold decode.
+    let _ = djvu_rs::djvu_render::render_pixmap(page, &render_opts(hw, hh, 0.5));
+
+    let mut group = c.benchmark_group("render_scaled_large_colorbook");
+    group.sample_size(20);
+    let mut o_bilin = render_opts(hw, hh, 0.5);
+    o_bilin.resampling = djvu_rs::djvu_render::Resampling::Bilinear;
+    let mut o_lancz = render_opts(hw, hh, 0.5);
+    o_lancz.resampling = djvu_rs::djvu_render::Resampling::Lanczos3;
+    group.bench_function("bilinear", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&o_bilin));
+        });
+    });
+    group.bench_function("lanczos3", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&o_lancz));
+        });
+    });
+    group.finish();
+}
+
 /// Benchmark rendering a large color page available in the references directory.
 ///
 /// Uses `colorbook.djvu` (2260×3669 px, 400 dpi, color IW44), rendered at 150 dpi
@@ -993,6 +1039,7 @@ criterion_group!(
     bench_render_compositor_only,
     bench_render_row_scratch_ab,
     bench_render_scaled,
+    bench_render_scaled_large,
     bench_pdf_export,
     bench_pdf_export_flatdecode,
     bench_epub_export,
