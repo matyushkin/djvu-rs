@@ -5989,3 +5989,466 @@ win:** the background *inpainting* under the mask lives in `segment_page`
 inpainting to smoother fills is a lower-risk down-payment on the same gap that
 does **not** touch the normative IW44 stream, and is the recommended first step
 before attempting the full masked transform.
+
+## Perf experiments round 5 (2026-07-03) — render-cache & decode-parallelism sweep
+
+A fresh investigation pass (85 prior experiments reviewed against the render-path
+map and the 5 dead-ends) produced a ranked backlog of ~20 new candidate
+experiments spanning render caching, IDWT parallelism, ZP decode, container
+cold-open, and image-quality axes. This section records the ones actually
+implemented and measured. Methodology unchanged: intra-session `target / control`
+ratio to cancel M1 Max thermal throttling; control = `bilevel_native_cached` for
+colour-path experiments (it shares no cache state with the colour BG path).
+
+### SUB4_RGB_CACHE — cache the sub=4 BG44→RGB conversion — **Kept** (2026-07-03)
+
+**Issue.** `BG_CACHE` (sub=1) and `BG_CACHE_S2` (sub=2) memoize the decoded RGB
+`Pixmap` so warm renders skip the IDWT + YCbCr→RGB conversion, but the
+`subsample >= 4` branch in `decode_background_chunks` (`src/djvu_render.rs`) fell
+through to `Cow::Owned(img.to_rgb_subsample(subsample))` — **uncached**. Every warm
+render at quarter-resolution (heavy downscale / thumbnail / contact-sheet zoom,
+e.g. 150-from-400-DPI) re-ran the full conversion. This is open-hypothesis #20
+(SUB4_RGB_CACHE) from the round-5 investigation.
+
+**Approach.** Add a `bg_rgb_s4` `OnceLock<Option<Pixmap>>` slot to `PageLayers`,
+mirroring `bg_rgb_s2`. It builds on the already-cached **partial** BG44 image
+(`bg44_partial`, first chunk only — exactly what the sub≥4 decode path uses) and
+caches `to_rgb_subsample(4)`. A new `subsample == 4` branch in
+`decode_background_chunks` returns the cached pixmap borrowed (`Cow::Borrowed`),
+matching the sub=1/sub=2 shape. sub=8 and other factors are left on the uncached
+`Cow::Owned` path (rare, and the output is already tiny). ~2 MB per page rendered
+at sub=4 (16× smaller than the sub=1 cache).
+
+**Correctness.** Byte-identical by construction: same partial image, same
+`to_rgb_subsample(4)` call, only the result is now memoized. Error semantics match
+the existing sub=1/sub=2 branches (a failed conversion yields `Ok(None)`, not
+`Err`, consistent with those paths). Full integration + CLI render test suites
+green.
+
+**Numbers** (`render_compositor_only`, `--features std`, M1 Max):
+
+| Bench | Baseline | After | Change |
+|-------|----------|-------|--------|
+| `color_downscale_cached` (target, colorbook @0.375 → sub=4) | 7.169 ms | 6.815 ms | **−4.9 %** (p=0.00) |
+| `bilevel_native_cached` (control) | 43.29 ms | 42.98 ms | +0.2 % (p=0.79, flat) |
+
+Ratio `target/control`: 0.1656 → 0.1586 = **−4.3 %** thermal-corrected. Control flat,
+so the win is real, not throttling drift.
+
+**Decision.** **Kept.** Proven-pattern mirror of BG_CACHE_S2 for the sub=4 warm
+render, ~4–5 % on the heavy-downscale compositor path, byte-identical, bounded
+extra memory only on pages actually rendered at sub=4.
+
+### BZZ_DEC_MTF — mirror PS1 `copy_within` on the BZZ *decode* MTF — **Rejected / already covered** (2026-07-03)
+
+**Hypothesis (round-5 #19).** PS1 sped up the BZZ *encoder*'s move-to-front (MTF)
+update by replacing an element-at-a-time shift with a `copy_within` memmove.
+Check whether the *decoder*'s MTF has the same shape and the same untapped win.
+
+**Finding.** It does not — it is **already optimised**. `decode_mtf_phase`
+(`crates/djvu-bzz/src/decode.rs:418`) already performs the block relocation with
+`mtf_order.copy_within(FREQ_SLOTS - 1..insert_at, FREQ_SLOTS)` when
+`insert_at >= FREQ_SLOTS`, and the surrounding comment (lines 409–415) explicitly
+records that this is the memmove replacement for the former scalar loop. The
+residual `while insert_at > 0` loop (lines 421–430) is **not** a plain shift: it is
+a frequency-sorted insertion that compares `freq_counts[insert_at-1]` against
+`combined_freq` and **breaks early** as soon as the ordering holds. Because each
+iteration is data-dependent (the number of moves varies per symbol and the loop
+exits mid-way), it cannot be expressed as a single `copy_within` without changing
+results. No safe win remains.
+
+**Decision.** **Rejected** — no code change. The decode path already carries the
+PS1 optimisation; the remaining loop is a genuine early-exit sorted insert.
+Recorded so future swarms do not re-suggest a decode-side MTF memmove.
+
+### IDWT_PAR_PLANE — parallelism *within* the Y-plane inverse wavelet — **Diagnostic / deferred** (2026-07-03)
+
+**Hypothesis (round-5 #2).** `IW44_PAR` parallelises the inverse wavelet *between*
+planes (Y ‖ (Cb ‖ Cr) via `rayon::join`, `crates/djvu-iw44/src/lib.rs:3281`). The
+Y plane is up to 4× the area of each chroma plane, so it is the critical path and
+the chroma threads finish early, leaving cores idle. Splitting Y's own
+`reconstruct` across threads should shrink the critical path further.
+
+**Measurement (whether it's worth it).** `render_native_stages/bg_to_rgb_warm`
+(watchmaker, `--features parallel`, M1 Max) — the isolated `to_rgb_subsample(1)`
+cost (reconstruct Y/Cb/Cr + YCbCr→RGB) — is **3.26 ms**. Two facts cap the upside:
+1. **Cold-only.** Warm renders never re-run reconstruct — `BG_CACHE`/`bg_rgb_s1`
+   memoise the RGB pixmap, so `render_pixmap` warm (8.4 ms) does not touch this
+   path at all. IDWT_PAR_PLANE would only cut *first-open* latency.
+2. **The convert half is already parallel** (`par_chunks_mut` YCbCr→RGBA,
+   `lib.rs:3314`). Only the reconstruct portion (a fraction of the 3.26 ms) is the
+   sequential-per-plane target, and on this corpus the Y plane is not large enough
+   for within-plane splitting to beat rayon's per-pass overhead.
+
+**Why deferred (not landed).** The inverse transform (`inverse_wavelet_transform_from`,
+~300 lines) is **not** a clean per-row loop that wraps in `par_iter`. The column
+pass is a *transposed vertical sweep*: an outer scale/k loop with per-column state
+carried in `st0`/`st1`/`st2` (`vec![0i32; width]`), swept across rows. Columns are
+mutually independent (disjoint `data` indices `k_off + ci*s`), and the row pass is
+independent across rows — so the parallelism exists in principle — but exploiting it
+requires **restructuring each pass to run per column/row *chunk* with thread-local
+scratch**, keeping a barrier between passes and between scales. That is an
+error-prone rewrite of a hand-tuned SIMD hot path in a **normative** decoder, where
+a subtle bug silently corrupts every colour page. The prior IW44 dead-ends
+(IDWT_S2_NEON incorrect-premise, IDWT_SPLAT/REFROW_REG unmeasurable) show how fragile
+this code is to "obvious" transforms.
+
+**Design for a future dedicated effort.** (1) Extract the column pass into
+`fn column_pass(data, cols: Range<usize>, scratch: &mut [i32;3][…])` so a
+`par_chunks`-style split over `cols` is a drop-in; likewise `row_pass` over a row
+range. (2) Gate parallel dispatch on `s <= 2 && plane_area >= THRESHOLD` (coarse
+scales have too few active rows/cols to amortise spawn cost). (3) Validate
+**byte-identical against the sequential path** over the whole corpus (extend
+`simd_row_pass_matches_scalar`), not just round-trip. (4) Re-measure on a page with
+a genuinely large Y plane (the current corpus under-exercises this).
+
+**Decision.** **Deferred.** Cold-only, marginal on the present corpus, high
+correctness risk; recorded with the 3.26 ms baseline and a concrete design so a
+future effort with a large-page fixture can pick it up safely.
+
+### RENDER_REGION_SCOPE — is `render_region` wasting work on the full page? — **Diagnostic / no change** (2026-07-03)
+
+**Question (from round-5 #1/#10, the viewer-tile lever).** Does `render_region`
+composite the whole page and then crop (wasteful), or only the requested rectangle?
+
+**Finding.** It is **already region-scoped on the compositor side.** `render_region`
+(`src/djvu_render.rs:2985`) allocates only `region.width × region.height`
+(`Pixmap::white(out_w, out_h)`) and builds the `CompositeContext` with
+`offset = (region.x, region.y)` and `out = (out_w, out_h)`, so `composite_into`
+writes only the region's pixels — no full-page composite, no crop pass. For a
+viewer scrolling a single page, the full-layer **decode** is paid once and then
+served from `PageLayers` caches (mask, bg_rgb_s*), so warm region renders cost only
+the region composite.
+
+**Residual lever.** The one remaining full-page cost is the **cold** `decode_layers`
+call (full IW44 IDWT + full JB2 mask on first touch). Narrowing *that* to the
+region is the true ROI_IDWT experiment (round-5 #1) — a decode-scope change (the
+IW44 lifting filter needs a few rows/cols of halo per level, and JB2 mask decode is
+inherently whole-stream), which is substantial and separate. The compositor itself
+needs no change.
+
+**Decision.** **No change** — the compositor path is already optimal for the
+viewport/tile use case. Recorded so ROI work targets the cold decode scope, not the
+(already-scoped) compositor.
+
+### DOC_SHARED_DICT_CACHE — decode the shared JB2 dictionary once per document — **Kept** (2026-07-03)
+
+**Issue (round-5 #3).** Bundled multi-page scans reference a small number of
+shared JB2 symbol dictionaries (DJVI components) from many pages via `INCL`. The
+parser already shares the **raw** `Djbz` bytes across pages via `Arc<Vec<u8>>`
+(one allocation per DJVI component), but the **decoded** dictionary was cached
+**per page** (`jb2_dict_decoded: OnceLock<Option<Jb2Dict>>` on `DjVuPage`). So
+rendering N pages that share one dictionary ran the dictionary's ZP arithmetic
+decode **N times** instead of once. Round-3 believed no shared-dict fixture
+existed; in fact the corpus has three: `czech.djvu` (85 pages / 2 dicts),
+`DjVu3Spec_bundled.djvu` (71 / 5), `pathogenic_bacteria_1896.djvu` (520 / 52).
+
+**Approach.** Fold the decode cache into the shared allocation: a new
+`SharedDict { raw: Vec<u8>, decoded: OnceLock<Option<Jb2Dict>> }`, and the page
+field becomes `Option<Arc<SharedDict>>` (replacing `Arc<Vec<u8>>` **plus** the
+per-page `jb2_dict_decoded`). Every page that `INCL`s the same DJVI component
+already clones the same `Arc`, so the first page to need the dictionary decodes
+it and all others reuse that single `Jb2Dict`. The parser map
+(`BTreeMap<String, Arc<SharedDict>>`) and the async lazy path's `shared_cache`
+were updated to the new type. `no_std` (which has no `OnceLock` and returned
+`None` for shared dicts) is unchanged.
+
+**Correctness.** Byte-identical: the same `jb2::decode_dict(&raw, None)` call,
+only memoized at document scope instead of page scope. `OnceLock` keeps it
+thread-safe for the parallel render/decode paths. A cloned `DjVuPage` now shares
+the decoded dict through the `Arc` (the dict is immutable, so this is safe and
+strictly better). Full suite green (`make check`: 1016 tests, incl. all
+shared-dict + async lazy tests, no_std, wasm32).
+
+**Numbers** (`document/shared_dict_mask_decode_30p` — parse fresh + decode masks
+of 30 pages of `DjVu3Spec_bundled.djvu`, fat-LTO release, M1 Max):
+
+| | Time | |
+|-|------|-|
+| Before (per-page dict decode) | 140.6 ms | |
+| After (one decode per unique dict) | 89.0 ms | **−37%** (p=0.00) |
+
+The delta is deterministic (a +58% swing on revert), not thermal — it scales with
+the page-to-dictionary ratio, so heavier bundles (pathogenic: 520 pages / 52 dicts)
+benefit proportionally more. This is the multi-page reading / viewer-scroll path.
+
+**Decision.** **Kept.** Removes O(pages) redundant dictionary decodes → O(unique
+dicts); byte-identical; also drops one `OnceLock` per page. New regression bench
+`shared_dict_mask_decode_30p` added to `benches/document.rs`.
+
+### PGO — profile-guided optimization over fat-LTO — **Kept (opt-in build)** (2026-07-03)
+
+**Hypothesis (round-5 #4).** LTO_FAT (fat LTO + `codegen-units=1`) gave big wins
+by cross-crate-inlining the ZP coder. The natural next lever is PGO: feed LLVM a
+real execution profile so it lays out basic blocks / predicts branches from
+measured behaviour instead of static heuristics. Touches every path at once.
+
+**Setup.** New training driver `examples/pgo_train.rs` decodes/renders a broad
+spread of the corpus (bilevel cable, colour watchmaker, heavy-downscale colorbook,
+FGbz-palette, large scanned page, multi-page shared-dict DjVu3Spec + pathogenic) at
+several scales. `scripts/pgo.sh` + `make pgo` run the four-phase flow
+(`-Cprofile-generate` → run 3× → `llvm-profdata merge` → `-Cprofile-use`).
+Measured target-vs-baseline with criterion, both built with the fat-LTO bench
+profile; PGO is the only difference.
+
+**Numbers (M1 Max, `--features std`).**
+
+| Bench | Baseline | PGO | Change |
+|-------|----------|-----|--------|
+| `render/render_colorbook_cold` (cold parse+IW44+IDWT+downscale) | 18.55 ms | 15.70 ms | **−15.4 %** (p=0.00, reproduced symmetric +17.9 % on revert) |
+| `codecs/jb2_decode_large_600dpi` (2 µs micro) | 2.192 µs | 2.114 µs | −6.5 % (negligible absolute) |
+| `codecs/bzz_decode` | 67.3 ns | 67.4 ns | +0.6 % (p=0.59, noise) |
+| `codecs/jb2_decode` | 128.0 µs | 134.6 µs | −0.1 % (p=0.78, noise) |
+| `codecs/jb2_decode_corpus_bilevel` | 440 µs | 437 µs | +0.1 % (p=0.82, noise) |
+| `codecs/iw44_decode_corpus_color` | 695 µs | 704 µs | +0.9 % (p=0.02, tiny regression) |
+| `document/shared_dict_mask_decode_30p` | 88.1 ms | 89.6 ms | +1.7 % (p=0.00, tiny regression) |
+
+**Reading.** PGO delivers a **real, reproducible −15 % on the cold end-to-end
+render** — the branch-heavy glue (parse, multi-chunk IW44 ZP decode, the compact
+sub=4 IDWT, area-average downscale compositor) is where LLVM's static block layout
+left the most on the table, and time-to-first-pixel is a genuine UX metric. On the
+**isolated SIMD codec kernels** it is neutral-to-−1 % — those are already
+LTO-inlined and ALU-bound, so better branch layout has nothing to bite on, and two
+micro-benches even regress ~1–2 %. The same-session `shared_dict` regression rules
+out a global thermal speedup, confirming the colorbook win is path-specific.
+
+**Decision.** **Kept as an opt-in build**, *not* the default. It helps the
+realistic cold-render path substantially and does not meaningfully hurt anything
+(<2 % on micro-benches). It is opt-in because PGO needs a two-phase build plus the
+training corpus and the `.profdata` is corpus/host-specific — it cannot ship with a
+crates.io release. Deliverables: `examples/pgo_train.rs`, `scripts/pgo.sh`,
+`make pgo`, documented tradeoff. No default-build or source-path change, so zero
+risk to the shipped library.
+
+### INTEROP_PIXDIFF — DjVuLibre pixel-diff quality floor — **Kept (diagnostic tool)** (2026-07-03)
+
+**Goal (round-5 #14).** Establish a quantitative render-quality baseline against
+DjVuLibre so future render/quality experiments can be judged (a claimed quality
+win vs the reference) and validated (a faithful change proves no drift). Previously
+quality was only ever checked point-wise (PSNR in individual experiments).
+
+**Tool.** `examples/interop_pixdiff.rs` renders a page with our decoder and with
+`ddjvu -format=ppm` at the same native resolution, then reports the per-channel
+absolute-difference distribution (mean, p50/p95/p99, max, and the % of channels
+over 2/8/32). `--corpus` sweeps a representative spread. Requires `ddjvu` on PATH,
+so it is an opt-in example (not a merge-gated test — CI has no DjVuLibre).
+
+**Baseline (native resolution, this corpus):**
+
+| File | mean | p99 | max | %chan >8 |
+|------|------|-----|-----|----------|
+| navm_fgbz (FGbz palette) | 0.00 | 0 | 0 | 0.00 % |
+| boy (bilevel) | 0.00 | 0 | 0 | 0.00 % |
+| cable_1973 (bilevel) | 0.04 | 1 | 71 | 0.01 % |
+| colorbook (colour IW44) | 0.14 | 4 | 46 | 0.20 % |
+| watchmaker (colour IW44) | 0.21 | 2 | 17 | 0.00 % |
+
+**Reading.** Our renderer is **essentially pixel-faithful to DjVuLibre**: palette
+and bilevel pages are byte-identical or near it; colour pages differ by a mean of
+<0.25/255 with a tiny tail, attributable to our bilinear chroma upsampling (#422,
+deliberately *better* than DjVuLibre's box upsampling). This run also **validates
+that the round-5 changes (SUB4_RGB_CACHE, DOC_SHARED_DICT_CACHE) preserved pixel
+output** — all still match. (`carte.djvu` is skipped: our IFF parser rejects it as
+truncated, a pre-existing issue unrelated to rendering.)
+
+**Decision.** **Kept** as the standing quality floor. It unblocks the quality-axis
+experiments below by giving them a reference to measure against.
+
+### QUALITY_AA (LINEAR_BLEND / MASK_UPSCALE) — **Evaluated / deferred** (2026-07-03)
+
+**Hypotheses (round-5 #12/#13).** Blend anti-aliased coverage in linear light
+(#12), and bilinearly interpolate mask coverage when *upscaling* / zooming (#13),
+for smoother text edges.
+
+**Why deferred after INTEROP_PIXDIFF.** The interop baseline just established that
+we render **near-identically to DjVuLibre** (mean <0.25/255), and DjVuLibre blends
+in sRGB and hard-edges the mask under zoom. Both proposals would **increase**
+divergence from that reference — they are subjective "prettier than DjVuLibre"
+changes, not faithfulness improvements. They therefore belong behind an explicit
+opt-in *quality mode*, not in the default interop-faithful path, and need a human
+aesthetic judgement (or a no-reference sharpness metric) that a perf pass should
+not smuggle in. The hot 1:1 path (`bilevel_native_cached`, scale==1) must stay
+byte-identical regardless, so any future attempt must gate strictly on scale>1.
+Recorded with that constraint; not landed this round.
+
+### AVX2_IDWT — x86 SIMD parity for the IW44 inverse wavelet — **Blocked (hardware)** (2026-07-03)
+
+**Hypothesis (round-5 #8).** The IDWT row/column passes have a NEON path
+(`row_pass_neon_s1_row`) but fall back to scalar on x86_64, while YCbCr→RGB has
+full AVX2. An AVX2/SSE IDWT pass could be a free win for x86 users.
+
+**Blocked.** All benchmarking here is on M1 Max (aarch64); there is no x86 host in
+this environment to measure on, and shipping hand-written x86 SIMD for a normative
+decoder **without running it** (aarch64 cannot even execute the `#[target_feature]`
+x86 path) is exactly the kind of untested-SIMD risk the IW44 dead-ends warn against.
+Recorded as blocked-on-hardware: needs an x86 bench host (round-5 infra item #16)
+before it can be attempted safely. Correctness would be gated by extending
+`simd_row_pass_matches_scalar` to run on x86.
+
+### ROI_IDWT — narrow the cold `render_region` decode to the viewport — **Rejected / low-value** (2026-07-03)
+
+**Hypothesis (round-5 #1).** RENDER_REGION_SCOPE found the compositor already
+region-scoped, leaving the cold `decode_layers` as the only full-page cost. Narrow
+*that* to the requested rectangle for viewer/tile rendering.
+
+**Why it does not pay.** The dominant cold cost is **not spatially narrowable**:
+- **IW44 background** — `bg44()` runs the ZP arithmetic decode over *every*
+  coefficient of *every* chunk (`decode_chunk` in a loop). ZP is a serial entropy
+  stream with no random access, so you cannot decode "just the region's
+  coefficients" — the expensive part must run in full regardless of viewport.
+- **JB2 mask** — symbols are placed across the whole page from one serial ZP
+  stream; there is likewise no spatial subset decode.
+
+Only the **IDWT reconstruction + YCbCr→RGB** is spatial, and it could be limited to
+the region's rows (plus a small wavelet-halo per level). But (a) that is a fraction
+of the cold cost the ZP decode dominates, and (b) it is **paid once** — after the
+first touch the decoded layers are cached in `PageLayers`, so every subsequent
+region render of that page is warm and already region-scoped (RENDER_REGION_SCOPE).
+The realizable saving is "part of the IDWT, on the first region render only," for a
+large amount of halo-boundary complexity in a normative path.
+
+**Decision.** **Rejected.** The viewer/tile path is already efficient where it
+counts (warm = region-scoped compositor over cached layers); the cold residual is
+ZP-decode-bound, which no region-of-interest scheme can shrink. Recorded so this
+is not re-proposed as a decode-scope win.
+## Perf swarm round 6 (2026-07-03) — discovery + adversarial validation
+
+A fresh multi-agent perf swarm (10 subsystem scouts → adversarial validator per
+candidate, each checked against the full ~90-experiment log + the 5 dead-ends →
+synthesis). 18 raw candidates surfaced; **6 survived** validation. Every survivor
+was then **independently re-verified by hand** before any decision — which caught
+the swarm's single biggest miss (P1 below). Recorded so future swarms don't
+re-propose the ruled-out set, and so the deferred structural wins have a design.
+
+### GATHER_ZIGZAG_INV — row-major plane read in the IW44 encoder gather — **Kept** (2026-07-03)
+
+**Candidate (swarm P5).** `PlaneEncoder::gather` (`crates/djvu-iw44/src/encode.rs`)
+read the multi-KB coefficient plane in *scattered* zigzag order (`ZIGZAG_ROW/COL`)
+while writing the 2 KB block sequentially — the inverse of the cache-friendly
+arrangement the decoder's `reconstruct()` already uses (`ZIGZAG_INV`: sequential
+plane access, scatter into the L1-resident block).
+
+**Change.** Iterate the plane row-major (one cache line of 32 i16 at a time) and
+scatter into the block via `crate::ZIGZAG_INV`. Byte-identical — same
+(row,col)→block-index mapping, only the traversal order changes — confirmed by
+`iw44_bg44_size_does_not_regress` (BG44 bytes unchanged) + the 43 iw44 unit tests.
+Also deletes the now-dead `ZIGZAG_ROW`/`ZIGZAG_COL` static tables (2×1 KB) and
+their helper imports, so the encoder mirrors the decoder.
+
+**Numbers** (`benches/codecs.rs`, M1 Max):
+
+| Bench | Baseline | After | Change |
+|-------|----------|-------|--------|
+| `iw44_encode_color` | 2.157 ms | 2.141 ms | −0.7 % (p=0.04) |
+| `iw44_encode_large_1024x1024` | 32.06 ms | 31.60 ms | −1.4 % (p=0.14) |
+
+**Decision.** **Kept.** A weak (~1 %, edge-of-significance) but real-direction
+speedup, and — more durably — a byte-identical code simplification that removes
+duplicated tables and aligns encoder/decoder scatter. Low risk, no output change.
+
+### EPUB_PNG_COMPRESSION_LEVEL — **Rejected after verification** (2026-07-03)
+
+**Candidate (swarm P1, its highest-ranked).** `encode_rgba_to_png` (`src/epub.rs`)
+never calls `set_compression`, so PNG encode runs at `png::Compression::Default`.
+The swarm measured switching to `Fast` at **−43.5 %** CPU and recommended it P1,
+describing the payload as *"smaller … pixel-identical after decode."*
+
+**Verification (measured directly, watchmaker native page):**
+
+| Compression | time/page | PNG bytes |
+|-------------|-----------|-----------|
+| Default (current) | 68.8 ms | 271 403 |
+| Fast (proposed) | 7.8 ms | **770 014 (2.84×)** |
+| Best | 140.5 ms | 268 323 |
+
+**Verdict.** The swarm's size claim was **backwards**: `Fast` makes the PNG **2.84×
+larger**, not smaller. For EPUB — a document-distribution format where file size is
+a primary concern and export is a non-latency-critical batch step — inflating every
+page image ~2.8× to save batch CPU is a bad trade. `Default` is already the balanced
+choice (`Best` buys ~1 % size for 2× the time). **Rejected.** Recorded as the case
+study for why swarm findings get independently re-verified before landing.
+
+### Round-6 validated backlog (deferred / needs setup)
+
+Survivors that are real but not landed this session:
+
+- **LAZY_PAGE_CONSTRUCT (swarm P3, top structural win) — LANDED**, see its own
+  entry below. −48 % `from_bytes` on the 520-page doc, byte-identical.
+- **SHARED_DICT_CLONE_PER_PAGE (swarm P2).** `encode_jb2_dict_with_options`
+  (`crates/djvu-jb2/src/encode.rs`) rebuilds `dict_entries`/`dedup`/`by_size` from
+  the shared symbols via `.clone()` on every per-page call; the shared dict is
+  identical across all DJVM pages. Measured ~2.9 % of shared-dict encode on the
+  517-page corpus. Medium risk (3 near-identical call sites need a borrowed-shared /
+  owned-local split). Byte-identical. Needs a dedicated `encode_jb2_dict` bench.
+- **CLUSTER_BUCKET_HASH_DEDUP (swarm P4).** `bucket_page_ccs`'s exact-match search
+  does a full `packed_hamming` popcount scan per entry with `max_diff==0` and no
+  `d==0` early-exit — should be a `symbol_hash`-keyed `BTreeMap` lookup (the
+  technique already shipped for `encode_jb2_dict`'s dedup, CLUSTER_DEDUP #446).
+  ~2 % unmeasured, low risk, byte-identical; no clustering bench exists yet.
+- **PAR_LANCZOS (swarm P6).** `scale_lanczos3` passes are row-independent but
+  sequential. Real upside only on large pages; the named `lanczos3`/boy.djvu fixture
+  (96–256 rows) is too small (PARALLEL's own small-page datapoint was 1.15×, not
+  3.8×). Needs a large-page Lanczos fixture before it can be judged.
+
+**Ruled out by the validator** (not re-proposals): `IW44_RGB_ROWSLICE` (= PS-R3,
+already reverted), the `cb_full`/`cr_full` per-row alloc in the parallel YCbCr path
+(chroma_half only — corpus-unexercised, round-3), an all-zero-block scatter-skip in
+`reconstruct` (incorrect premise), plus assorted micro-ops. Four validator agents
+hit the structured-output retry cap and produced no verdict (their candidates were
+conservatively dropped).
+
+**Verdict on remaining headroom.** After six rounds the well is *mostly* dry for
+byte-identical hot-path wins, but the swarm found one genuine structural lever the
+prior rounds missed — **LAZY_PAGE_CONSTRUCT** — because earlier rounds optimized
+decode/render *throughput* and never benchmarked large-document *cold-open latency*.
+That axis (and the missing benches for it) is where the next real gains are, not in
+the already-tuned codec kernels.
+
+### LAZY_PAGE_CONSTRUCT — defer per-page chunk copy in bundled document open — **Kept** (2026-07-03)
+
+**Issue (round-6 swarm P3, top structural win).** Opening a bundled DJVM document
+eagerly `to_vec()`-copied **every** page's chunks in `parse_page_from_chunks`, even
+when the caller only renders page 1. On the 520-page corpus that copy loop is ~half
+of `Document::from_bytes`; for `MmapDocument` it is essentially the *only* memcpy
+(the mapping is otherwise zero-copy). The async `LazyDocument` already avoided this
+with `OnceCell`; the sync/mmap path did not.
+
+**Approach.** A page's chunks now come from a `ChunkStore` (`std`):
+- `Eager(Vec<RawChunk>)` — unchanged behaviour for single-page, indirect, and
+  `no_std` documents (which keep a plain `Vec<RawChunk>` field).
+- `Lazy { backing, range, cache: OnceLock }` — holds a shared document backing
+  (`Backing = Arc<dyn AsRef<[u8]> + Send + Sync>`) and this page's `FORM` byte
+  range, and materialises the chunks **once on first access** via `chunk_slice()`.
+
+`Document::from_bytes` moves its `Vec<u8>` into the backing (no copy) and
+`MmapDocument::open` moves the `Mmap` in (zero-copy); both call the new
+`DjVuDocument::parse_backed`, which builds lazy pages for bundled documents and
+falls back to the eager `parse` for single-page / non-DJVM / indirect. Only the
+cheap fixed-size `INFO` header is parsed eagerly per page, so metadata iteration
+(`iterate_pages_520p`) does not regress.
+
+**Correctness.** Byte-identical: the lazy build re-parses the same `FORM` sub-form
+bytes into the same `RawChunk`s the eager path produced. The `mmap_document_matches_parse`
+parity test, all multi-page / shared-dict / `page_byte_range` tests, and the full
+1016-test suite (incl. `no_std`, `wasm32`) pass. The backing `Arc` is shared by
+every lazy page and by `MmapDocument`, so the mapping cannot drop while a page still
+needs it.
+
+**Numbers** (`benches/document.rs`, M1 Max, 520-page pathogenic_bacteria_1896):
+
+| Bench | Before (eager) | After (lazy) | Change |
+|-------|----------------|--------------|--------|
+| `parse_multipage_520p` (`from_bytes` only) | 2.36 ms | 1.22 ms | **−48 %** (p=0.00) |
+| `open_and_render_first_page_520p` (cold open + render pg 1) | 10.82 ms | 9.86 ms | **−9 %** (p=0.00) |
+| `iterate_pages_520p` (metadata only) | 431 ns | 421 ns | flat (no regression) |
+
+For accessed pages the copy work is the same, only deferred (re-`parse_sub_form` +
+`to_vec` on first touch); for the common "open a big book, view a few pages" and
+metadata/thumbnail workloads the un-touched pages are never copied at all, and mmap
+opens are zero-copy until a page is rendered. New `open_and_render_first_page_520p`
+bench added.
+
+**Decision.** **Kept.** The largest structural win of rounds 5–6: it targets the
+cold-open-latency axis the prior throughput-focused rounds never benchmarked. The
+swarm found it; hand-implementation confirmed the −48 % `from_bytes` win,
+byte-identical, across std/no_std/mmap/async.

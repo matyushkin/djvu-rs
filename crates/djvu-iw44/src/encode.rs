@@ -18,37 +18,13 @@ use djvu_zp::encoder::ZpEncoder;
 
 // Band/quant/state-flag/zigzag spec data is shared with the decoder (one source
 // of truth) rather than re-declared here — see the `pub(crate)` items in `lib.rs`.
-use crate::{
-    ACTIVE, BAND_BUCKETS, NEW, QUANT_HI_INIT, QUANT_LO_INIT, UNK, ZERO, zigzag_col, zigzag_row,
-};
+use crate::{ACTIVE, BAND_BUCKETS, NEW, QUANT_HI_INIT, QUANT_LO_INIT, UNK, ZERO};
 
 // ---- Forward zigzag scatter tables (encoder-only) ----------------------------
 //
 // The encoder scatters block coefficients into the plane in *forward* order, so
 // it needs `i -> (row, col)` lookup tables. The decoder keeps the *inverse*
 // tables (`(row, col) -> i`); both are generated from the shared
-// `zigzag_row`/`zigzag_col` bit-interleave functions.
-
-static ZIGZAG_ROW: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        table[i] = zigzag_row(i);
-        i += 1;
-    }
-    table
-};
-
-static ZIGZAG_COL: [u8; 1024] = {
-    let mut table = [0u8; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        table[i] = zigzag_col(i);
-        i += 1;
-    }
-    table
-};
-
 // ---- Forward wavelet transform -----------------------------------------------
 //
 // IW44 inverse transform (decoder, iw44_new) at each scale s:
@@ -843,25 +819,37 @@ impl PlaneEncoder {
     /// Gather wavelet coefficients from a flat plane into zigzag blocks.
     #[allow(unsafe_code)]
     fn gather(&mut self, plane: &[i16], stride: usize) {
-        // Safety invariant: `stride` = block_cols*32, `plane.len()` = stride * block_rows*32.
-        // For any r < block_rows, c < block_cols, i < 1024:
-        //   row  = ZIGZAG_ROW[i]  (∈ [0,31]) + r*32  ≤ block_rows*32 - 1
-        //   col  = ZIGZAG_COL[i]  (∈ [0,31]) + c*32  ≤ stride - 1
-        //   idx  = row * stride + col ≤ plane.len() - 1
-        // The idx-in-bounds check is therefore always true; use get_unchecked to
-        // eliminate the dead branch from the inner loop.
+        // Read the large plane in row-major (sequential) order and scatter into
+        // the small 2 KB, L1-resident block via `ZIGZAG_INV`, rather than reading
+        // the plane in scattered zigzag order (ZIGZAG_ROW/COL) with a sequential
+        // block write. This mirrors the decoder's `reconstruct()` scatter (see
+        // lib.rs) for the same reason: keep the scattered access on the tiny
+        // L1-resident block, and stream the multi-KB plane one cache line at a
+        // time. Byte-identical — same (row, col) → block-index mapping, only the
+        // iteration order changes.
+        //
+        // Safety invariant: `stride` = block_cols*32, `plane.len()` = stride *
+        // block_rows*32. For any r < block_rows, c < block_cols, row,col < 32:
+        //   src = (r*32 + row) * stride + (c*32 + col) ≤ plane.len() - 1
+        //   i   = ZIGZAG_INV[row*32 + col] ∈ [0, 1024) = block.len()
+        // Both indices are therefore always in bounds; `get_unchecked` drops the
+        // dead branches from the inner loop.
         let block_rows = self.blocks.len() / self.block_cols;
         for r in 0..block_rows {
             for c in 0..self.block_cols {
                 let block = &mut self.blocks[r * self.block_cols + c];
                 let row_base = r << 5;
                 let col_base = c << 5;
-                for (i, dst) in block.iter_mut().enumerate() {
-                    let row = unsafe { *ZIGZAG_ROW.get_unchecked(i) } as usize + row_base;
-                    let col = unsafe { *ZIGZAG_COL.get_unchecked(i) } as usize + col_base;
-                    let idx = row * stride + col;
-                    // SAFETY: see invariant above — idx < plane.len() always holds.
-                    *dst = unsafe { *plane.get_unchecked(idx) };
+                for row in 0..32usize {
+                    let src_base = (row_base + row) * stride + col_base;
+                    let inv_base = row << 5;
+                    for col in 0..32usize {
+                        // SAFETY: see invariant above.
+                        let i =
+                            unsafe { *crate::ZIGZAG_INV.get_unchecked(inv_base + col) } as usize;
+                        *unsafe { block.get_unchecked_mut(i) } =
+                            unsafe { *plane.get_unchecked(src_base + col) };
+                    }
                 }
             }
         }
