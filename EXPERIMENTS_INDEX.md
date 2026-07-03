@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| PGO | 2026-07-03 | build profile (all paths) | **K** (opt-in) | **−15% cold render**; codec kernels flat/±1% | Profile-guided opt over fat-LTO. Big win on branch-heavy cold end-to-end render; neutral on LTO-inlined SIMD decode kernels (2 micro-benches +1–2%). Opt-in only (`make pgo`, corpus/host-specific profdata, can't ship to crates.io). `examples/pgo_train.rs` + `scripts/pgo.sh`. Round-5 #4 |
 | DOC_SHARED_DICT_CACHE | 2026-07-03 | decode pipeline | **K** | **−37% multi-page shared-dict mask decode** | Decode shared JB2 dict once per document, not per page. `SharedDict{raw,OnceLock}` folds decode into the shared `Arc`. Byte-identical; scales with page:dict ratio. Fixtures existed (DjVu3Spec 71/5, czech 85/2, pathogenic 520/52). Round-5 #3 |
 | SUB4_RGB_CACHE | 2026-07-03 | decode pipeline | **K** | **−4.9% color_downscale (sub=4 warm)** | Cache decoded BG44 RGB at sub=4 (from partial image); mirror of BG_CACHE/BG_CACHE_S2 for heavy-downscale/thumbnail. Byte-identical, ~2 MB/page. Round-5 open hypothesis #20 |
 | BZZ_DEC_MTF | 2026-07-03 | BZZ decode | X | already covered | PS1 `copy_within` memmove already present at decode.rs:418; residual loop is a freq-sorted early-exit insert, not a plain shift. Round-5 #19 |

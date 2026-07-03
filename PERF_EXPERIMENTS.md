@@ -6175,3 +6175,47 @@ benefit proportionally more. This is the multi-page reading / viewer-scroll path
 **Decision.** **Kept.** Removes O(pages) redundant dictionary decodes → O(unique
 dicts); byte-identical; also drops one `OnceLock` per page. New regression bench
 `shared_dict_mask_decode_30p` added to `benches/document.rs`.
+
+### PGO — profile-guided optimization over fat-LTO — **Kept (opt-in build)** (2026-07-03)
+
+**Hypothesis (round-5 #4).** LTO_FAT (fat LTO + `codegen-units=1`) gave big wins
+by cross-crate-inlining the ZP coder. The natural next lever is PGO: feed LLVM a
+real execution profile so it lays out basic blocks / predicts branches from
+measured behaviour instead of static heuristics. Touches every path at once.
+
+**Setup.** New training driver `examples/pgo_train.rs` decodes/renders a broad
+spread of the corpus (bilevel cable, colour watchmaker, heavy-downscale colorbook,
+FGbz-palette, large scanned page, multi-page shared-dict DjVu3Spec + pathogenic) at
+several scales. `scripts/pgo.sh` + `make pgo` run the four-phase flow
+(`-Cprofile-generate` → run 3× → `llvm-profdata merge` → `-Cprofile-use`).
+Measured target-vs-baseline with criterion, both built with the fat-LTO bench
+profile; PGO is the only difference.
+
+**Numbers (M1 Max, `--features std`).**
+
+| Bench | Baseline | PGO | Change |
+|-------|----------|-----|--------|
+| `render/render_colorbook_cold` (cold parse+IW44+IDWT+downscale) | 18.55 ms | 15.70 ms | **−15.4 %** (p=0.00, reproduced symmetric +17.9 % on revert) |
+| `codecs/jb2_decode_large_600dpi` (2 µs micro) | 2.192 µs | 2.114 µs | −6.5 % (negligible absolute) |
+| `codecs/bzz_decode` | 67.3 ns | 67.4 ns | +0.6 % (p=0.59, noise) |
+| `codecs/jb2_decode` | 128.0 µs | 134.6 µs | −0.1 % (p=0.78, noise) |
+| `codecs/jb2_decode_corpus_bilevel` | 440 µs | 437 µs | +0.1 % (p=0.82, noise) |
+| `codecs/iw44_decode_corpus_color` | 695 µs | 704 µs | +0.9 % (p=0.02, tiny regression) |
+| `document/shared_dict_mask_decode_30p` | 88.1 ms | 89.6 ms | +1.7 % (p=0.00, tiny regression) |
+
+**Reading.** PGO delivers a **real, reproducible −15 % on the cold end-to-end
+render** — the branch-heavy glue (parse, multi-chunk IW44 ZP decode, the compact
+sub=4 IDWT, area-average downscale compositor) is where LLVM's static block layout
+left the most on the table, and time-to-first-pixel is a genuine UX metric. On the
+**isolated SIMD codec kernels** it is neutral-to-−1 % — those are already
+LTO-inlined and ALU-bound, so better branch layout has nothing to bite on, and two
+micro-benches even regress ~1–2 %. The same-session `shared_dict` regression rules
+out a global thermal speedup, confirming the colorbook win is path-specific.
+
+**Decision.** **Kept as an opt-in build**, *not* the default. It helps the
+realistic cold-render path substantially and does not meaningfully hurt anything
+(<2 % on micro-benches). It is opt-in because PGO needs a two-phase build plus the
+training corpus and the `.profdata` is corpus/host-specific — it cannot ship with a
+crates.io release. Deliverables: `examples/pgo_train.rs`, `scripts/pgo.sh`,
+`make pgo`, documented tradeoff. No default-build or source-path change, so zero
+risk to the shipped library.
