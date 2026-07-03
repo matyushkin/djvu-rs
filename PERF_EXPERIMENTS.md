@@ -6311,3 +6311,104 @@ large amount of halo-boundary complexity in a normative path.
 counts (warm = region-scoped compositor over cached layers); the cold residual is
 ZP-decode-bound, which no region-of-interest scheme can shrink. Recorded so this
 is not re-proposed as a decode-scope win.
+## Perf swarm round 6 (2026-07-03) — discovery + adversarial validation
+
+A fresh multi-agent perf swarm (10 subsystem scouts → adversarial validator per
+candidate, each checked against the full ~90-experiment log + the 5 dead-ends →
+synthesis). 18 raw candidates surfaced; **6 survived** validation. Every survivor
+was then **independently re-verified by hand** before any decision — which caught
+the swarm's single biggest miss (P1 below). Recorded so future swarms don't
+re-propose the ruled-out set, and so the deferred structural wins have a design.
+
+### GATHER_ZIGZAG_INV — row-major plane read in the IW44 encoder gather — **Kept** (2026-07-03)
+
+**Candidate (swarm P5).** `PlaneEncoder::gather` (`crates/djvu-iw44/src/encode.rs`)
+read the multi-KB coefficient plane in *scattered* zigzag order (`ZIGZAG_ROW/COL`)
+while writing the 2 KB block sequentially — the inverse of the cache-friendly
+arrangement the decoder's `reconstruct()` already uses (`ZIGZAG_INV`: sequential
+plane access, scatter into the L1-resident block).
+
+**Change.** Iterate the plane row-major (one cache line of 32 i16 at a time) and
+scatter into the block via `crate::ZIGZAG_INV`. Byte-identical — same
+(row,col)→block-index mapping, only the traversal order changes — confirmed by
+`iw44_bg44_size_does_not_regress` (BG44 bytes unchanged) + the 43 iw44 unit tests.
+Also deletes the now-dead `ZIGZAG_ROW`/`ZIGZAG_COL` static tables (2×1 KB) and
+their helper imports, so the encoder mirrors the decoder.
+
+**Numbers** (`benches/codecs.rs`, M1 Max):
+
+| Bench | Baseline | After | Change |
+|-------|----------|-------|--------|
+| `iw44_encode_color` | 2.157 ms | 2.141 ms | −0.7 % (p=0.04) |
+| `iw44_encode_large_1024x1024` | 32.06 ms | 31.60 ms | −1.4 % (p=0.14) |
+
+**Decision.** **Kept.** A weak (~1 %, edge-of-significance) but real-direction
+speedup, and — more durably — a byte-identical code simplification that removes
+duplicated tables and aligns encoder/decoder scatter. Low risk, no output change.
+
+### EPUB_PNG_COMPRESSION_LEVEL — **Rejected after verification** (2026-07-03)
+
+**Candidate (swarm P1, its highest-ranked).** `encode_rgba_to_png` (`src/epub.rs`)
+never calls `set_compression`, so PNG encode runs at `png::Compression::Default`.
+The swarm measured switching to `Fast` at **−43.5 %** CPU and recommended it P1,
+describing the payload as *"smaller … pixel-identical after decode."*
+
+**Verification (measured directly, watchmaker native page):**
+
+| Compression | time/page | PNG bytes |
+|-------------|-----------|-----------|
+| Default (current) | 68.8 ms | 271 403 |
+| Fast (proposed) | 7.8 ms | **770 014 (2.84×)** |
+| Best | 140.5 ms | 268 323 |
+
+**Verdict.** The swarm's size claim was **backwards**: `Fast` makes the PNG **2.84×
+larger**, not smaller. For EPUB — a document-distribution format where file size is
+a primary concern and export is a non-latency-critical batch step — inflating every
+page image ~2.8× to save batch CPU is a bad trade. `Default` is already the balanced
+choice (`Best` buys ~1 % size for 2× the time). **Rejected.** Recorded as the case
+study for why swarm findings get independently re-verified before landing.
+
+### Round-6 validated backlog (deferred / needs setup)
+
+Survivors that are real but not landed this session:
+
+- **LAZY_PAGE_CONSTRUCT (swarm P3, top structural win).** Sync/`mmap` document
+  open eagerly `to_vec()`-copies every page's chunks in `parse_page_from_chunks`
+  even when only page 1 is rendered; the async `LazyDocument` path already solved
+  this with `OnceCell`. The copy loop is **~52 % of `Document::from_bytes`** on the
+  520-page corpus, and effectively the *entire* memcpy cost for `MmapDocument`
+  (otherwise zero-copy). Design: `DjVuDocument` retains the backing buffer
+  (`Arc<[u8]>` / `Mmap`), keep eager parse of the cheap fixed-size `PageInfo` header
+  (so `iterate_pages_520p` doesn't regress), and move the per-page `RawChunk` copy
+  behind a `Vec<OnceLock<DjVuPage>>`. Medium risk (lifetime/ownership + no_std `Arc`
+  + `Clone` semantics) → deserves its own focused PR with a new cold-open+first-page
+  bench (none exists). **Highest-value open item.**
+- **SHARED_DICT_CLONE_PER_PAGE (swarm P2).** `encode_jb2_dict_with_options`
+  (`crates/djvu-jb2/src/encode.rs`) rebuilds `dict_entries`/`dedup`/`by_size` from
+  the shared symbols via `.clone()` on every per-page call; the shared dict is
+  identical across all DJVM pages. Measured ~2.9 % of shared-dict encode on the
+  517-page corpus. Medium risk (3 near-identical call sites need a borrowed-shared /
+  owned-local split). Byte-identical. Needs a dedicated `encode_jb2_dict` bench.
+- **CLUSTER_BUCKET_HASH_DEDUP (swarm P4).** `bucket_page_ccs`'s exact-match search
+  does a full `packed_hamming` popcount scan per entry with `max_diff==0` and no
+  `d==0` early-exit — should be a `symbol_hash`-keyed `BTreeMap` lookup (the
+  technique already shipped for `encode_jb2_dict`'s dedup, CLUSTER_DEDUP #446).
+  ~2 % unmeasured, low risk, byte-identical; no clustering bench exists yet.
+- **PAR_LANCZOS (swarm P6).** `scale_lanczos3` passes are row-independent but
+  sequential. Real upside only on large pages; the named `lanczos3`/boy.djvu fixture
+  (96–256 rows) is too small (PARALLEL's own small-page datapoint was 1.15×, not
+  3.8×). Needs a large-page Lanczos fixture before it can be judged.
+
+**Ruled out by the validator** (not re-proposals): `IW44_RGB_ROWSLICE` (= PS-R3,
+already reverted), the `cb_full`/`cr_full` per-row alloc in the parallel YCbCr path
+(chroma_half only — corpus-unexercised, round-3), an all-zero-block scatter-skip in
+`reconstruct` (incorrect premise), plus assorted micro-ops. Four validator agents
+hit the structured-output retry cap and produced no verdict (their candidates were
+conservatively dropped).
+
+**Verdict on remaining headroom.** After six rounds the well is *mostly* dry for
+byte-identical hot-path wins, but the swarm found one genuine structural lever the
+prior rounds missed — **LAZY_PAGE_CONSTRUCT** — because earlier rounds optimized
+decode/render *throughput* and never benchmarked large-document *cold-open latency*.
+That axis (and the missing benches for it) is where the next real gains are, not in
+the already-tuned codec kernels.
