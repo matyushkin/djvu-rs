@@ -5989,3 +5989,52 @@ win:** the background *inpainting* under the mask lives in `segment_page`
 inpainting to smoother fills is a lower-risk down-payment on the same gap that
 does **not** touch the normative IW44 stream, and is the recommended first step
 before attempting the full masked transform.
+
+## Perf experiments round 5 (2026-07-03) — render-cache & decode-parallelism sweep
+
+A fresh investigation pass (85 prior experiments reviewed against the render-path
+map and the 5 dead-ends) produced a ranked backlog of ~20 new candidate
+experiments spanning render caching, IDWT parallelism, ZP decode, container
+cold-open, and image-quality axes. This section records the ones actually
+implemented and measured. Methodology unchanged: intra-session `target / control`
+ratio to cancel M1 Max thermal throttling; control = `bilevel_native_cached` for
+colour-path experiments (it shares no cache state with the colour BG path).
+
+### SUB4_RGB_CACHE — cache the sub=4 BG44→RGB conversion — **Kept** (2026-07-03)
+
+**Issue.** `BG_CACHE` (sub=1) and `BG_CACHE_S2` (sub=2) memoize the decoded RGB
+`Pixmap` so warm renders skip the IDWT + YCbCr→RGB conversion, but the
+`subsample >= 4` branch in `decode_background_chunks` (`src/djvu_render.rs`) fell
+through to `Cow::Owned(img.to_rgb_subsample(subsample))` — **uncached**. Every warm
+render at quarter-resolution (heavy downscale / thumbnail / contact-sheet zoom,
+e.g. 150-from-400-DPI) re-ran the full conversion. This is open-hypothesis #20
+(SUB4_RGB_CACHE) from the round-5 investigation.
+
+**Approach.** Add a `bg_rgb_s4` `OnceLock<Option<Pixmap>>` slot to `PageLayers`,
+mirroring `bg_rgb_s2`. It builds on the already-cached **partial** BG44 image
+(`bg44_partial`, first chunk only — exactly what the sub≥4 decode path uses) and
+caches `to_rgb_subsample(4)`. A new `subsample == 4` branch in
+`decode_background_chunks` returns the cached pixmap borrowed (`Cow::Borrowed`),
+matching the sub=1/sub=2 shape. sub=8 and other factors are left on the uncached
+`Cow::Owned` path (rare, and the output is already tiny). ~2 MB per page rendered
+at sub=4 (16× smaller than the sub=1 cache).
+
+**Correctness.** Byte-identical by construction: same partial image, same
+`to_rgb_subsample(4)` call, only the result is now memoized. Error semantics match
+the existing sub=1/sub=2 branches (a failed conversion yields `Ok(None)`, not
+`Err`, consistent with those paths). Full integration + CLI render test suites
+green.
+
+**Numbers** (`render_compositor_only`, `--features std`, M1 Max):
+
+| Bench | Baseline | After | Change |
+|-------|----------|-------|--------|
+| `color_downscale_cached` (target, colorbook @0.375 → sub=4) | 7.169 ms | 6.815 ms | **−4.9 %** (p=0.00) |
+| `bilevel_native_cached` (control) | 43.29 ms | 42.98 ms | +0.2 % (p=0.79, flat) |
+
+Ratio `target/control`: 0.1656 → 0.1586 = **−4.3 %** thermal-corrected. Control flat,
+so the win is real, not throttling drift.
+
+**Decision.** **Kept.** Proven-pattern mirror of BG_CACHE_S2 for the sub=4 warm
+render, ~4–5 % on the heavy-downscale compositor path, byte-identical, bounded
+extra memory only on pages actually rendered at sub=4.

@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| SUB4_RGB_CACHE | 2026-07-03 | decode pipeline | **K** | **−4.9% color_downscale (sub=4 warm)** | Cache decoded BG44 RGB at sub=4 (from partial image); mirror of BG_CACHE/BG_CACHE_S2 for heavy-downscale/thumbnail. Byte-identical, ~2 MB/page. Round-5 open hypothesis #20 |
 | IW44_MASKED_WAVELET | 2026-07-02 | IW44 encoder (size) | D/F | target ~4.6 KB on 2 BG44 pages (119 636 B, 3.9% gap) | Masked BG encoding (DjVuLibre c44 lever) closes residual IW44_ACT_THRESH gap; deferred — normative bitstream change, needs mask plumbing + DjVuLibre interop-diff. Low-risk first step: better `segment_page` inpaint |
 | LTO_FAT | 2026-07-02 | build profile (all paths) | **K** | **−65% jb2_encode_dict, −7% bzz/segment, −2…3% iw44** | `lto="fat"` + `codegen-units=1` release/bench profile (none existed before). Cross-crate ZP inlining; render flat. Cost: ~2× build time |
 | PAR_ENCODE | 2026-07-02 | encoder (multi-page) | **K** | **−35…43% layered, −39% bundle_jb2** | Parallel per-page encoding via rayon in both DJVM bundlers (`parallel` feature); byte-identical, seq fallback. Decode was parallel (PAR_DEC) but encode wasn't — largest untouched lever |
