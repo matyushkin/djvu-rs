@@ -6695,3 +6695,37 @@ downscale, D5 TH44 preview) can be judged against — each becomes "does it rais
 SSIM-vs-reference (or SSIM-vs-source) without an unacceptable speed cost?". The
 biggest blocker on the quality axis is removed. 1024 tests green (was 1018), clippy
 + no_std + wasm32 clean.
+
+### D5 (TH44 embedded-thumbnail preview fast path) — **Evaluated / opt-in only** (2026-07-03)
+
+Now measurable via the D1 harness. **Two blockers make this niche, not a default.**
+
+**Fixture reality:** swept the corpus — **zero** files embed a decodable `TH44`
+thumbnail (`page.thumbnail()` returns `None` for colorbook/boy/chicken/watchmaker/
+pathogenic/conquete; carte.djvu fails to parse). D5 only helps documents whose
+*encoder* embedded thumbnails; ours can (`thumbnail::encode_th44_color`) but almost
+nothing in the wild does.
+
+**Speed/quality (colorbook page 0, TH44 synthesised from a native render, then the
+preview path = decode TH44 + bilinear resample; vs a cold sub-sampled full render):**
+
+| Preview | Full render (cold Bilinear) | TH44 path | Speedup | SSIM (TH44 vs full) |
+|---------|-----------------------------|-----------|---------|---------------------|
+| 48×77 | 11.5 ms | 0.38 ms | **30.7×** | 0.497 |
+| 64×103 | 11.7 ms | 0.42 ms | **27.7×** | 0.552 |
+| 96×155 | 11.0 ms | 0.48 ms | **23.0×** | 0.642 |
+| 128×207 | 11.2 ms | 0.59 ms | **19.1×** | 0.684 |
+
+(Against a cold *Lanczos* full render the speedup is 187–302×, but Lanczos forces a
+full-native render so that baseline is unfair; Bilinear preview already uses sub≥4
+partial decode, which is the honest fast baseline.)
+
+**Verdict.** The speed win is large and real (20–30×), but the fidelity is **low**
+(SSIM 0.50–0.68 — a TH44 is a ~128 px lossy IW44 encode, visibly softer/different
+from a real render). Acceptable for a dense thumbnail-*grid* where throughput
+dominates; **not** acceptable as a general preview default. Combined with the fixture
+reality (nothing embeds TH44), D5 is worth at most an **explicit opt-in** render flag
+("use embedded thumbnail if present and target ≤ its size"), paired with encoder-side
+thumbnail embedding — not a default fast path. Deferred as low-priority opt-in. The
+value of this round is that D1 turned "maybe TH44 previews are fine" into a measured
+SSIM 0.5–0.68 tradeoff, i.e. an evidence-based *no* for the default case.
