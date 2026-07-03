@@ -183,6 +183,45 @@ fn decode_paired_payload(z: Option<&[u8]>, a: Option<&[u8]>) -> Result<Option<Ve
 ///
 /// **`Clone` resets the cache.** A cloned `DjVuPage` starts with empty caches;
 /// the first render on the clone re-runs the full decode.
+/// A shared JB2 symbol dictionary referenced by one or more pages via their
+/// INCL chunk.
+///
+/// The raw `Djbz` bytes and the lazily-decoded [`Jb2Dict`] are wrapped in the
+/// **same** `Arc`, which every page referencing this DJVI component clones. So
+/// when many pages share one dictionary (the common case for bundled scans —
+/// e.g. 85 pages over 2 dictionaries), the ZP arithmetic decode runs **once per
+/// document** rather than once per page. Previously the raw bytes were shared
+/// (via `Arc`) but each page decoded them into its own per-page cache.
+#[cfg(feature = "std")]
+pub(crate) struct SharedDict {
+    raw: Vec<u8>,
+    decoded: std::sync::OnceLock<Option<Jb2Dict>>,
+}
+
+#[cfg(feature = "std")]
+impl SharedDict {
+    /// Wrap raw `Djbz` bytes; the dictionary is decoded lazily on first use.
+    pub(crate) fn new(raw: Vec<u8>) -> Self {
+        Self {
+            raw,
+            decoded: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Decode the dictionary on first call and return it, caching the result so
+    /// every page sharing this `Arc` reuses the single decode.
+    fn get(&self) -> Option<&Jb2Dict> {
+        self.decoded
+            .get_or_init(|| crate::jb2::decode_dict(&self.raw, None).ok())
+            .as_ref()
+    }
+
+    /// Length of the raw `Djbz` bytes (for `Debug`).
+    fn raw_len(&self) -> usize {
+        self.raw.len()
+    }
+}
+
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
     info: PageInfo,
@@ -194,10 +233,11 @@ pub struct DjVuPage {
     /// the page's INCL chunk, if present.  Stored here so that `extract_mask`
     /// can decode it without access to the parent document.
     ///
-    /// Wrapped in `Arc` so that multi-page documents share one allocation
-    /// instead of cloning the bytes per page.
+    /// Wrapped in `Arc` so that multi-page documents share one allocation —
+    /// and, via [`SharedDict`], one *decode* — instead of cloning the bytes and
+    /// re-decoding per page.
     #[cfg(feature = "std")]
-    shared_djbz: Option<Arc<Vec<u8>>>,
+    shared_djbz: Option<Arc<SharedDict>>,
     #[cfg(not(feature = "std"))]
     shared_djbz: Option<Vec<u8>>,
     /// Render-tier cache of this page's decoded layers (background, mask,
@@ -208,11 +248,6 @@ pub struct DjVuPage {
     /// Only available when the `std` feature is enabled (`OnceLock` requires std).
     #[cfg(feature = "std")]
     render_layers: std::sync::OnceLock<crate::djvu_render::PageLayers>,
-    /// Lazily decoded JB2 shared dictionary.  Populated on first use by
-    /// `decoded_shared_dict()` and reused on subsequent renders, avoiding
-    /// repeated multi-megabyte allocations.
-    #[cfg(feature = "std")]
-    jb2_dict_decoded: std::sync::OnceLock<Option<Jb2Dict>>,
 }
 
 impl Clone for DjVuPage {
@@ -222,22 +257,26 @@ impl Clone for DjVuPage {
             chunks: self.chunks.clone(),
             index: self.index,
             shared_djbz: self.shared_djbz.clone(),
-            // Caches are not cloned — they will be lazily recomputed.
+            // The render cache is not cloned — it is lazily recomputed. The
+            // shared-dict decode lives inside the `shared_djbz` Arc, so a cloned
+            // page keeps sharing the single decode (the dict is immutable).
             #[cfg(feature = "std")]
             render_layers: std::sync::OnceLock::new(),
-            #[cfg(feature = "std")]
-            jb2_dict_decoded: std::sync::OnceLock::new(),
         }
     }
 }
 
 impl core::fmt::Debug for DjVuPage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        #[cfg(feature = "std")]
+        let dbz_len = self.shared_djbz.as_ref().map(|v| v.raw_len());
+        #[cfg(not(feature = "std"))]
+        let dbz_len = self.shared_djbz.as_ref().map(|v| v.len());
         f.debug_struct("DjVuPage")
             .field("info", &self.info)
             .field("chunks", &self.chunks)
             .field("index", &self.index)
-            .field("shared_djbz", &self.shared_djbz.as_ref().map(|v| v.len()))
+            .field("shared_djbz", &dbz_len)
             .finish_non_exhaustive()
     }
 }
@@ -437,12 +476,9 @@ impl DjVuPage {
     /// do not re-decode the dictionary each time.
     #[cfg(feature = "std")]
     pub(crate) fn decoded_shared_dict(&self) -> Option<&Jb2Dict> {
-        self.jb2_dict_decoded
-            .get_or_init(|| {
-                let djbz = self.shared_djbz.as_deref()?;
-                crate::jb2::decode_dict(djbz, None).ok()
-            })
-            .as_ref()
+        // The decode is memoized inside the shared `Arc<SharedDict>`, so all
+        // pages that INCL the same DJVI component share one decode per document.
+        self.shared_djbz.as_ref()?.get()
     }
 
     #[cfg(not(feature = "std"))]
@@ -854,7 +890,7 @@ impl DjVuDocument {
                     // Wrap shared dict bytes in Arc (std) so all pages that
                     // reference the same DJVI component share one allocation.
                     #[cfg(feature = "std")]
-                    let djvi_djbz: BTreeMap<String, Arc<Vec<u8>>> = entries
+                    let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
                         .iter()
                         .enumerate()
                         .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
@@ -862,7 +898,10 @@ impl DjVuDocument {
                             let sf = sub_forms.get(comp_idx)?;
                             let chunks = parse_sub_form(sf.data).ok()?;
                             let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
-                            Some((entry.id.clone(), Arc::new(djbz.data.to_vec())))
+                            Some((
+                                entry.id.clone(),
+                                Arc::new(SharedDict::new(djbz.data.to_vec())),
+                            ))
                         })
                         .collect();
                     #[cfg(not(feature = "std"))]
@@ -972,7 +1011,7 @@ impl DjVuDocument {
     pub(crate) fn parse_single_page_with_shared(
         data: &[u8],
         index: usize,
-        shared_djbz: Option<Arc<Vec<u8>>>,
+        shared_djbz: Option<Arc<SharedDict>>,
     ) -> Result<DjVuPage, DocError> {
         let form = parse_form(data)?;
         if form.form_type != *b"DJVU" {
@@ -1230,7 +1269,7 @@ impl core::ops::Deref for MmapDocument {
 fn parse_page_from_chunks(
     chunks: &[IffChunk<'_>],
     index: usize,
-    shared_djbz: Option<Arc<Vec<u8>>>,
+    shared_djbz: Option<Arc<SharedDict>>,
 ) -> Result<DjVuPage, DocError> {
     let info_chunk = chunks
         .iter()
@@ -1254,7 +1293,6 @@ fn parse_page_from_chunks(
         index,
         shared_djbz,
         render_layers: std::sync::OnceLock::new(),
-        jb2_dict_decoded: std::sync::OnceLock::new(),
     })
 }
 

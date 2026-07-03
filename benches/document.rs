@@ -222,6 +222,40 @@ fn bench_text_extraction(c: &mut Criterion) {
     });
 }
 
+/// Decode the JB2 masks of the first 30 pages of a bundled shared-dictionary
+/// document, re-parsing the document fresh each iteration so the shared-dict
+/// caches start cold.
+///
+/// `DjVu3Spec_bundled.djvu` is 71 pages sharing 5 DJVI dictionaries (via INCL).
+/// Exercises DOC_SHARED_DICT_CACHE: each page's mask decode needs the shared
+/// dictionary, so with a per-page decode the same handful of dictionaries were
+/// ZP-decoded ~30 times; the document-level shared decode pays it once per
+/// unique dictionary. This is the multi-page reading / viewer-scroll workload.
+fn bench_shared_dict_mask_decode(c: &mut Criterion) {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DjVu3Spec_bundled.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_shared_dict_mask_decode: DjVu3Spec_bundled.djvu not found");
+            return;
+        }
+    };
+
+    c.bench_function("shared_dict_mask_decode_30p", |b| {
+        b.iter(|| {
+            let doc = djvu_rs::djvu_document::DjVuDocument::parse(black_box(&data))
+                .expect("parse bundled doc");
+            let n = 30.min(doc.page_count());
+            for i in 0..n {
+                if let Ok(page) = doc.page(i) {
+                    let _ = black_box(page.extract_mask());
+                }
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_parse_multipage,
@@ -231,5 +265,6 @@ criterion_group!(
     bench_decode_mask_large,
     bench_decode_mask_mid,
     bench_text_extraction,
+    bench_shared_dict_mask_decode,
 );
 criterion_main!(benches);

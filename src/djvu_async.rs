@@ -46,7 +46,7 @@ use tokio::{
 
 use crate::{
     dirm::{DirmComponentKind, DirmPayload},
-    djvu_document::{DjVuDocument, DjVuPage, DocError},
+    djvu_document::{DjVuDocument, DjVuPage, DocError, SharedDict},
     djvu_render::{self, RenderError, RenderOptions},
     error::IffError,
     iff::{MAGIC, parse_form},
@@ -121,7 +121,7 @@ pub struct LazyDocument<R> {
     pages: Vec<LazyPageIndex>,
     shared: BTreeMap<String, LazyComponentIndex>,
     cache: Vec<OnceCell<Arc<DjVuPage>>>,
-    shared_cache: BTreeMap<String, OnceCell<Arc<Vec<u8>>>>,
+    shared_cache: BTreeMap<String, OnceCell<Arc<SharedDict>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +213,7 @@ where
             .cloned()
     }
 
-    async fn shared_djbz(&self, incl: &[u8]) -> Result<Arc<Vec<u8>>, AsyncLazyError> {
+    async fn shared_djbz(&self, incl: &[u8]) -> Result<Arc<SharedDict>, AsyncLazyError> {
         let name = core::str::from_utf8(incl.trim_ascii_end())
             .map_err(|_| AsyncLazyError::Unsupported("INCL name is not valid UTF-8"))?;
         let cell = self
@@ -234,7 +234,7 @@ where
             let djbz = form.chunks.iter().find(|c| &c.id == b"Djbz").ok_or(
                 AsyncLazyError::Unsupported("DJVI component is missing Djbz"),
             )?;
-            Ok(Arc::new(djbz.data.to_vec()))
+            Ok(Arc::new(SharedDict::new(djbz.data.to_vec())))
         })
         .await
         .cloned()

@@ -6130,3 +6130,48 @@ needs no change.
 **Decision.** **No change** — the compositor path is already optimal for the
 viewport/tile use case. Recorded so ROI work targets the cold decode scope, not the
 (already-scoped) compositor.
+
+### DOC_SHARED_DICT_CACHE — decode the shared JB2 dictionary once per document — **Kept** (2026-07-03)
+
+**Issue (round-5 #3).** Bundled multi-page scans reference a small number of
+shared JB2 symbol dictionaries (DJVI components) from many pages via `INCL`. The
+parser already shares the **raw** `Djbz` bytes across pages via `Arc<Vec<u8>>`
+(one allocation per DJVI component), but the **decoded** dictionary was cached
+**per page** (`jb2_dict_decoded: OnceLock<Option<Jb2Dict>>` on `DjVuPage`). So
+rendering N pages that share one dictionary ran the dictionary's ZP arithmetic
+decode **N times** instead of once. Round-3 believed no shared-dict fixture
+existed; in fact the corpus has three: `czech.djvu` (85 pages / 2 dicts),
+`DjVu3Spec_bundled.djvu` (71 / 5), `pathogenic_bacteria_1896.djvu` (520 / 52).
+
+**Approach.** Fold the decode cache into the shared allocation: a new
+`SharedDict { raw: Vec<u8>, decoded: OnceLock<Option<Jb2Dict>> }`, and the page
+field becomes `Option<Arc<SharedDict>>` (replacing `Arc<Vec<u8>>` **plus** the
+per-page `jb2_dict_decoded`). Every page that `INCL`s the same DJVI component
+already clones the same `Arc`, so the first page to need the dictionary decodes
+it and all others reuse that single `Jb2Dict`. The parser map
+(`BTreeMap<String, Arc<SharedDict>>`) and the async lazy path's `shared_cache`
+were updated to the new type. `no_std` (which has no `OnceLock` and returned
+`None` for shared dicts) is unchanged.
+
+**Correctness.** Byte-identical: the same `jb2::decode_dict(&raw, None)` call,
+only memoized at document scope instead of page scope. `OnceLock` keeps it
+thread-safe for the parallel render/decode paths. A cloned `DjVuPage` now shares
+the decoded dict through the `Arc` (the dict is immutable, so this is safe and
+strictly better). Full suite green (`make check`: 1016 tests, incl. all
+shared-dict + async lazy tests, no_std, wasm32).
+
+**Numbers** (`document/shared_dict_mask_decode_30p` — parse fresh + decode masks
+of 30 pages of `DjVu3Spec_bundled.djvu`, fat-LTO release, M1 Max):
+
+| | Time | |
+|-|------|-|
+| Before (per-page dict decode) | 140.6 ms | |
+| After (one decode per unique dict) | 89.0 ms | **−37%** (p=0.00) |
+
+The delta is deterministic (a +58% swing on revert), not thermal — it scales with
+the page-to-dictionary ratio, so heavier bundles (pathogenic: 520 pages / 52 dicts)
+benefit proportionally more. This is the multi-page reading / viewer-scroll path.
+
+**Decision.** **Kept.** Removes O(pages) redundant dictionary decodes → O(unique
+dicts); byte-identical; also drops one `OnceLock` per page. New regression bench
+`shared_dict_mask_decode_30p` added to `benches/document.rs`.
