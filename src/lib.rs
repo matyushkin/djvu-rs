@@ -445,8 +445,14 @@ impl Document {
     }
 
     /// Parse a DjVu document from owned bytes.
+    ///
+    /// The bytes are moved into a shared backing so bundled multi-page documents
+    /// can construct pages lazily (chunk bytes are materialised on first access
+    /// rather than copied at open time; see `DjVuDocument::parse_backed`).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, Error> {
-        let doc = DjVuDocument::parse(&data).map_err(|e| Error::FormatError(e.to_string()))?;
+        let backing: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = std::sync::Arc::new(data);
+        let doc =
+            DjVuDocument::parse_backed(backing).map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Document { doc })
     }
 

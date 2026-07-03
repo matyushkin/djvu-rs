@@ -222,14 +222,74 @@ fn bench_text_extraction(c: &mut Criterion) {
     });
 }
 
+/// Decode the JB2 masks of the first 30 pages of a bundled shared-dictionary
+/// document, re-parsing the document fresh each iteration so the shared-dict
+/// caches start cold.
+///
+/// `DjVu3Spec_bundled.djvu` is 71 pages sharing 5 DJVI dictionaries (via INCL).
+/// Exercises DOC_SHARED_DICT_CACHE: each page's mask decode needs the shared
+/// dictionary, so with a per-page decode the same handful of dictionaries were
+/// ZP-decoded ~30 times; the document-level shared decode pays it once per
+/// unique dictionary. This is the multi-page reading / viewer-scroll workload.
+fn bench_shared_dict_mask_decode(c: &mut Criterion) {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DjVu3Spec_bundled.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_shared_dict_mask_decode: DjVu3Spec_bundled.djvu not found");
+            return;
+        }
+    };
+
+    c.bench_function("shared_dict_mask_decode_30p", |b| {
+        b.iter(|| {
+            let doc = djvu_rs::djvu_document::DjVuDocument::parse(black_box(&data))
+                .expect("parse bundled doc");
+            let n = 30.min(doc.page_count());
+            for i in 0..n {
+                if let Ok(page) = doc.page(i) {
+                    let _ = black_box(page.extract_mask());
+                }
+            }
+        });
+    });
+}
+
+/// Cold open of a 520-page bundled document + render of page 1 only.
+///
+/// The product-visible win from LAZY_PAGE_CONSTRUCT: a viewer opening a large
+/// book and showing the first page should not pay to copy all 520 pages' chunks.
+/// Re-parses fresh each iteration (via `Document::from_bytes`) so the open cost
+/// is included, then renders page 0.
+fn bench_open_and_render_first(c: &mut Criterion) {
+    let data = match load_large_doc_bytes() {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_open_and_render_first: pathogenic not found");
+            return;
+        }
+    };
+    c.bench_function("open_and_render_first_page_520p", |b| {
+        b.iter(|| {
+            let doc =
+                djvu_rs::Document::from_bytes(black_box(data.clone())).expect("open bundled doc");
+            let page = doc.page(0).expect("page 0");
+            let _ = black_box(page.render());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_parse_multipage,
     bench_iterate_pages,
+    bench_open_and_render_first,
     bench_render_large_doc_first,
     bench_render_large_doc_mid,
     bench_decode_mask_large,
     bench_decode_mask_mid,
     bench_text_extraction,
+    bench_shared_dict_mask_decode,
 );
 criterion_main!(benches);

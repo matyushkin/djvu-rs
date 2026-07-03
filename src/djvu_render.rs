@@ -1008,6 +1008,12 @@ pub(crate) struct PageLayers {
     // 150-from-300-DPI render. Same memoization as `bg_rgb_s1` but ~4× smaller;
     // left empty on pages never rendered at sub=2.
     bg_rgb_s2: std::sync::OnceLock<Option<Pixmap>>,
+    // Quarter-resolution (subsample=4) RGB Pixmap derived from the *partial*
+    // bg44 (first chunk only, matching the sub>=4 decode path). Caches the
+    // IDWT + YCbCr->RGB conversion for the common thumbnail / heavy-downscale
+    // render (e.g. 150-from-400-DPI, contact-sheet zoom); ~16x smaller than the
+    // sub=1 cache. Left empty on pages never rendered at sub=4.
+    bg_rgb_s4: std::sync::OnceLock<Option<Pixmap>>,
     // Decoded JB2 mask + per-pixel blit-index map for FGbz-palette pages. The
     // plain `mask` cache does not cover the indexed variant, so without this
     // every warm render of a palette page re-runs the full JB2 ZP decode and
@@ -1128,6 +1134,25 @@ impl PageLayers {
             .as_ref()
     }
 
+    /// Quarter-resolution (sub=4) RGB Pixmap from the partial BG44, cached after
+    /// first call.
+    ///
+    /// Mirrors [`bg_rgb_s2`](Self::bg_rgb_s2) for the common heavy-downscale /
+    /// thumbnail render (e.g. 150-from-400-DPI). Builds on the already-cached
+    /// [`bg44_partial`](Self::bg44_partial) wavelet image — matching the sub>=4
+    /// decode path, which uses the first chunk only — so the ZP decode is paid
+    /// once, then caches the IDWT + YCbCr->RGB conversion at subsample 4.
+    ///
+    /// `None` when the page has no BG44 layer or the conversion fails.
+    pub(crate) fn bg_rgb_s4(&self, page: &DjVuPage) -> Option<&Pixmap> {
+        self.bg_rgb_s4
+            .get_or_init(|| {
+                let img = self.bg44_partial(page)?;
+                img.to_rgb_subsample(4).ok()
+            })
+            .as_ref()
+    }
+
     /// The decoded JB2 mask + per-pixel blit-index map, decoding on first call.
     ///
     /// Used for FGbz-palette pages, where the compositor needs the blit index of
@@ -1220,6 +1245,15 @@ fn decode_background_chunks<'a>(
                     .decoded_bg44()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
                 return Ok(page.decoded_bg_rgb_s2().map(Cow::Borrowed));
+            }
+            if subsample == 4 {
+                // Cache the sub=4 RGB conversion (built from the partial image,
+                // matching the sub>=4 path) so repeated thumbnail / downscale
+                // renders skip the IDWT + YCbCr->RGB conversion.
+                let _ = page
+                    .decoded_bg44_partial()
+                    .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
+                return Ok(page.decoded_bg_rgb_s4().map(Cow::Borrowed));
             }
             let img = if subsample >= 4 {
                 page.decoded_bg44_partial()
