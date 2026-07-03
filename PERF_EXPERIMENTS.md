@@ -6915,3 +6915,49 @@ consumer-controllable working-set bound; additive, byte-identical, low-risk. A f
 automatic global LRU (evict by byte budget without the caller listing pages) is the
 natural follow-up, but the manual API already gives viewers the lever and is enough
 to prevent the OOM.
+
+## Perf round 13 (2026-07-04) — C5 follow-up: automatic LRU cache budget
+
+Round 12's `retain_render_caches(keep)` requires the caller to name exactly which
+pages to keep. This round adds the automatic form: set a byte ceiling, and the
+least-recently-used pages are evicted for you.
+
+### C5_LRU_BUDGET — enforce_cache_budget with per-page LRU — **Kept** (2026-07-04)
+
+**What.** Three additions (std):
+- Per-page LRU tick: `PageLayers` gains an `AtomicU64 access`, stamped from a
+  process-global monotonic counter on every `render_layers()` access (the single
+  funnel all layer accesses already pass through), so each page records when it was
+  last rendered. Read (without touching the cache) via a non-initialising
+  `OnceLock::get()`.
+- `DjVuPage::render_cache_bytes()` / `DjVuDocument::render_cache_bytes()` —
+  observability: approximate resident bytes held (exact for the dominant RGB/mask
+  pixmaps + blit map; BG44 coefficient images estimated from `w·h·2`).
+- `DjVuDocument::enforce_cache_budget(max_bytes, protect) -> freed`: if the total
+  exceeds `max_bytes`, evict unprotected pages **least-recently-used first** until
+  under budget. The automatic form of `retain_render_caches`.
+
+**Correctness.** New `enforce_cache_budget_lru_and_correctness` test: renders 3
+pages, asserts the LRU ticks strictly increase with render order, that a budget of 1
+byte protecting page 2 evicts exactly the two LRU pages and keeps page 2, and that a
+re-render of an evicted page is byte-identical. 1027 tests green, `make check` clean.
+
+**Impact** (render all 62 colorbook pages, calling `enforce_cache_budget(N, &[i])`
+after each; M1 Max):
+
+| Budget | Final cache | Peak RSS | Output |
+|--------|-------------|----------|--------|
+| none | 393 MB | 714 MB | checksum 13716 |
+| 150 MB | 146 MB | 419 MB | checksum 13716 |
+| 60 MB | 57 MB | 255 MB | checksum 13716 |
+
+The accumulated cache is held **precisely** under the ceiling (146 ≤ 150, 57 ≤ 60),
+and peak RSS falls from 714 MB to 255 MB at the 60 MB budget. Peak stays above the
+budget because it also includes the transient full-resolution render buffer of the
+current page plus allocator retention (freed pages aren't immediately returned to
+the OS) — both inherent and outside the cache the budget governs. The point is that
+the previously *unbounded* accumulation is now bounded to a caller-chosen ceiling.
+
+**Decision.** **Kept.** Completes C5: `enforce_cache_budget` gives a long-lived
+viewer automatic, LRU-correct memory bounding with a one-line call per render and no
+need to track page order itself. Additive, byte-identical, low-risk.

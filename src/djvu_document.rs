@@ -538,8 +538,28 @@ impl DjVuPage {
     /// [`crate::djvu_render::PageLayers`].
     #[cfg(feature = "std")]
     pub(crate) fn render_layers(&self) -> &crate::djvu_render::PageLayers {
-        self.render_layers
-            .get_or_init(crate::djvu_render::PageLayers::new)
+        let layers = self
+            .render_layers
+            .get_or_init(crate::djvu_render::PageLayers::new);
+        // Stamp the LRU access tick so `enforce_cache_budget` can evict the
+        // least-recently-rendered pages first.
+        layers.bump_access();
+        layers
+    }
+
+    /// Approximate resident bytes held by this page's render cache (0 if never
+    /// rendered). See [`evict_render_cache`](Self::evict_render_cache).
+    #[cfg(feature = "std")]
+    pub fn render_cache_bytes(&self) -> usize {
+        self.render_layers.get().map_or(0, |l| l.cached_bytes())
+    }
+
+    /// The page's LRU access tick (higher = more recently rendered), read
+    /// without touching the cache. Used by
+    /// [`DjVuDocument::enforce_cache_budget`].
+    #[cfg(feature = "std")]
+    pub(crate) fn render_cache_access_tick(&self) -> u64 {
+        self.render_layers.get().map_or(0, |l| l.access_tick())
     }
 
     /// Return the fully decoded BG44 wavelet image, decoding and caching on first call.
@@ -1304,6 +1324,54 @@ impl DjVuDocument {
                 p.evict_render_cache();
             }
         }
+    }
+
+    /// Approximate total resident bytes held by all pages' render caches.
+    ///
+    /// Sum of [`DjVuPage::render_cache_bytes`]; use it to decide when to call
+    /// [`enforce_cache_budget`](Self::enforce_cache_budget).
+    #[cfg(feature = "std")]
+    pub fn render_cache_bytes(&self) -> usize {
+        self.pages.iter().map(|p| p.render_cache_bytes()).sum()
+    }
+
+    /// Evict least-recently-rendered pages' caches until the total render-cache
+    /// memory is at most `max_bytes`, never evicting a page whose index is in
+    /// `protect`. Returns the bytes freed.
+    ///
+    /// This is the automatic form of [`retain_render_caches`](Self::retain_render_caches):
+    /// instead of naming exactly which pages to keep, the caller sets a memory
+    /// ceiling and a small protected working set (e.g. the visible pages), and
+    /// the least-recently-used cached pages are dropped first (via the per-page
+    /// LRU access tick stamped on every render). A viewer can call it after each
+    /// page render to hold memory near a fixed budget. No-op (returns 0) when
+    /// already under budget. Evicted caches rebuild lazily and identically.
+    #[cfg(feature = "std")]
+    pub fn enforce_cache_budget(&mut self, max_bytes: usize, protect: &[usize]) -> usize {
+        let mut total = self.render_cache_bytes();
+        if total <= max_bytes {
+            return 0;
+        }
+        // Evictable pages (cached, not protected), least-recently-used first.
+        let mut cands: Vec<(usize, u64, usize)> = self
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !protect.contains(i) && p.render_cache_bytes() > 0)
+            .map(|(i, p)| (i, p.render_cache_access_tick(), p.render_cache_bytes()))
+            .collect();
+        cands.sort_by_key(|&(_, tick, _)| tick);
+
+        let mut freed = 0usize;
+        for (i, _, bytes) in cands {
+            if total <= max_bytes {
+                break;
+            }
+            self.pages[i].evict_render_cache();
+            freed += bytes;
+            total = total.saturating_sub(bytes);
+        }
+        freed
     }
 
     /// The NAVM table of contents, or an empty slice if not present.

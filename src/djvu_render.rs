@@ -1019,13 +1019,67 @@ pub(crate) struct PageLayers {
     // every warm render of a palette page re-runs the full JB2 ZP decode and
     // re-allocates the page-sized blit map. Only populated for palette pages.
     mask_indexed: std::sync::OnceLock<Option<(crate::bitmap::Bitmap, Vec<i32>)>>,
+    /// Monotonic last-access tick for LRU cache-budget eviction. Bumped from a
+    /// process-global counter every time this page's layers are touched; read
+    /// (without touching) by `DjVuDocument::enforce_cache_budget` to evict the
+    /// least-recently-used pages first. Not part of the decoded data.
+    access: std::sync::atomic::AtomicU64,
 }
+
+/// Process-global monotonic source for the per-page LRU access tick.
+#[cfg(feature = "std")]
+static ACCESS_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "std")]
 impl PageLayers {
     /// An empty cache. Layers are decoded on first access.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Record an access, stamping this cache with the next global tick (LRU).
+    pub(crate) fn bump_access(&self) {
+        let t = ACCESS_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.access.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The last-access tick (higher = more recently used).
+    pub(crate) fn access_tick(&self) -> u64 {
+        self.access.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Approximate resident bytes held by this page's decoded caches.
+    ///
+    /// Exact for the RGB/mask pixmaps and blit map (which dominate); the BG44
+    /// coefficient images are estimated from their dimensions (`w·h·2` per
+    /// image). Used only to compare pages for budget eviction, so an estimate is
+    /// sufficient. Reads caches without initialising them.
+    pub(crate) fn cached_bytes(&self) -> usize {
+        let px = |o: &std::sync::OnceLock<Option<Pixmap>>| {
+            o.get().and_then(|x| x.as_ref()).map_or(0, |p| p.data.len())
+        };
+        let bm = |o: &std::sync::OnceLock<Option<crate::bitmap::Bitmap>>| {
+            o.get().and_then(|x| x.as_ref()).map_or(0, |b| b.data.len())
+        };
+        let iw = |o: &std::sync::OnceLock<Option<Iw44Image>>| {
+            o.get()
+                .and_then(|x| x.as_ref())
+                .map_or(0, |i| (i.width as usize) * (i.height as usize) * 2)
+        };
+        let mi = self
+            .mask_indexed
+            .get()
+            .and_then(|x| x.as_ref())
+            .map_or(0, |(b, v)| b.data.len() + v.len() * 4);
+        px(&self.fg44)
+            + px(&self.bg_rgb_s1)
+            + px(&self.bg_rgb_s2)
+            + px(&self.bg_rgb_s4)
+            + bm(&self.mask)
+            + bm(&self.mask_sub4)
+            + iw(&self.bg44)
+            + iw(&self.bg44_partial)
+            + mi
     }
 
     /// The fully decoded BG44 wavelet image (all chunks), decoding on first
@@ -3749,6 +3803,71 @@ mod tests {
             first.data, second.data,
             "output changed after cache eviction"
         );
+    }
+
+    /// `enforce_cache_budget` evicts least-recently-used unprotected pages down
+    /// to the budget, keeps protected pages, and re-renders byte-identically.
+    #[test]
+    fn enforce_cache_budget_lru_and_correctness() {
+        let mut doc = load_doc("colorbook.djvu");
+        if doc.page_count() < 3 {
+            return; // needs a multi-page fixture
+        }
+        // Render pages 0,1,2 in order → LRU order is 0 < 1 < 2 by access tick.
+        let mut first0 = None;
+        for i in 0..3 {
+            let (w, h) = {
+                let p = doc.page(i).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+            let p = doc.page(i).unwrap();
+            let pm = render_pixmap(p, &opts).unwrap();
+            if i == 0 {
+                first0 = Some(pm);
+            }
+        }
+        // LRU ticks strictly increase with render order.
+        let t0 = doc.page(0).unwrap().render_cache_access_tick();
+        let t1 = doc.page(1).unwrap().render_cache_access_tick();
+        let t2 = doc.page(2).unwrap().render_cache_access_tick();
+        assert!(t0 < t1 && t1 < t2, "LRU ticks not ordered: {t0} {t1} {t2}");
+
+        assert!(doc.render_cache_bytes() > 0);
+        // Budget 1 byte, protect page 2 → evict the two LRU unprotected pages.
+        let freed = doc.enforce_cache_budget(1, &[2]);
+        assert!(freed > 0, "expected some bytes freed");
+        assert_eq!(
+            doc.page(0).unwrap().render_cache_bytes(),
+            0,
+            "page 0 not evicted"
+        );
+        assert_eq!(
+            doc.page(1).unwrap().render_cache_bytes(),
+            0,
+            "page 1 not evicted"
+        );
+        assert!(
+            doc.page(2).unwrap().render_cache_bytes() > 0,
+            "protected page 2 was evicted"
+        );
+
+        // Re-rendering an evicted page reproduces the original output exactly.
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let second0 = render_pixmap(doc.page(0).unwrap(), &opts).unwrap();
+        assert_eq!(first0.unwrap().data, second0.data);
     }
 
     /// `fit_to_width` scales correctly, preserving aspect ratio.
