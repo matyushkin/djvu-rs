@@ -6961,3 +6961,45 @@ the previously *unbounded* accumulation is now bounded to a caller-chosen ceilin
 **Decision.** **Kept.** Completes C5: `enforce_cache_budget` gives a long-lived
 viewer automatic, LRU-correct memory bounding with a one-line call per render and no
 need to track page order itself. Additive, byte-identical, low-risk.
+
+## Perf round 14 (2026-07-04) — C3 zoom/upscale axis (diagnostic: already efficient)
+
+The zoom axis — a viewer at >100% rendering a viewport of an upscaled page — was
+never benchmarked. Investigated it directly; it turns out to already be efficient,
+so this is a diagnostic, not a change.
+
+### C3_ZOOM_SCOPE — is the zoom/region render path wasteful? — **Diagnostic / no change** (2026-07-04)
+
+**Setup.** `render_region(page, rect, opts)` with `opts.width/height` = the zoomed
+full-page size (2×/3×/4× native) and a fixed viewport rect — the exact call a
+zooming viewer makes. Measured warm (decode cached), colorbook + cable, M1 Max.
+
+**Finding 1 — flat across zoom.** A 1024×768 viewport costs ~4 ms at **every** zoom
+level 1×–4× (and for both colour and bilevel). Zoom does not blow up cost: the
+compositor writes only the viewport's pixels, sampling the decoded layers at the
+zoom-scaled source position — no full-page work per region. RENDER_REGION_SCOPE
+(round 5) already ensured this; this confirms it holds under upscaling.
+
+**Finding 2 — linear in viewport, no per-call overhead.** Scaling the viewport at
+fixed 2× zoom:
+
+| Viewport | pixels | time | ns/px |
+|----------|--------|------|-------|
+| 128×128 | 16 K | 95 µs | 5.8 |
+| 256×256 | 66 K | 357 µs | 5.4 |
+| 512×512 | 262 K | 1.41 ms | 5.4 |
+| 1024×768 | 786 K | 4.55 ms | 5.8 |
+| 2048×1536 | 3.1 M | 18.8 ms | 6.0 |
+
+Cost is cleanly proportional to output pixels at ~5.5 ns/px with no fixed per-call
+overhead. That rate matches the full-page compositor baselines (color_native_cached
+≈ 5.6 ns/px), so the bilinear-**upscale** B-series path is no more expensive
+per-pixel than a 1:1 render — the compositor's kept optimisations already cover it.
+
+**Verdict.** No low-hanging speed win on the zoom axis: the warm region/zoom render
+is scoped, linear, and at the same per-pixel rate as the tuned full-page compositor.
+The only residual cost is the **cold** first decode of a page (full-page BG ZP +
+IDWT even for a small viewport), which is the already-rejected ROI_IDWT (the ZP
+stream is serial and not spatially subsettable). Axis closed. The remaining zoom
+work is *quality* (mask-upscale AA, QUALITY_AA #13), now judgeable via the D1
+harness, not speed.
