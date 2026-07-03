@@ -6526,3 +6526,125 @@ here): a gray compositor so `render_gray8` can use this end-to-end for the commo
 background-dominated colour scan — currently `render_gray8` still routes through the
 full RGBA compositor before reducing, so this win is codec-level until that path
 exists. New `bench_iw44_gray_decode_large` added.
+
+## Perf round 8 (2026-07-03) — full breadth triage of the round-7 proposal set
+
+Follow-up to the chat investigation that produced ~25 decode/render proposals
+(axes A–D). Rather than deep-dive one, this round gives **every** idea a verdict:
+some are already implemented (verified by reading the code), one is a measured
+structural opportunity, the rest are classified by what blocks them. Grounded in
+code reading this session, not memory. Categories: **DONE-ALREADY** (the codebase
+already does it), **OPPORTUNITY** (real, quantified, deferred with design),
+**RULED-OUT** (dead-end or covered), **NEEDS-INFRA** (real but blocked on a
+fixture/host/harness), **QUALITY-GATED** (needs the D1 perceptual harness first).
+
+### B3 (early wavelet stop for sub=2/4) — **DONE-ALREADY** (2026-07-03)
+
+`PlaneDecoder::reconstruct` (crates/djvu-iw44/src/lib.rs:1677–1742) already does
+exactly this: for sub∈{2,4,8} it scatters only the low-frequency sub-block
+coefficients into a 4×/16×/64×-smaller compact plane and runs the wavelet from
+`start_scale = 16/sub`, never computing the discarded fine scales. That is
+"decode directly to half/quarter resolution." No work to do. (This is also why
+BG_CACHE_S2/SUB4_RGB_CACHE are cheap.)
+
+### B4 (word-at-a-time JB2 symbol blit) — **DONE-ALREADY** for the hot path (2026-07-03)
+
+The hot bilevel render path `blit_to_bitmap` (crates/djvu-jb2/src/lib.rs:1138–1173)
+already blits byte-at-a-time with shift-align OR: aligned case is `dst[i] |= src[i]`
+over whole bytes (LLVM auto-vectorizes this), unaligned case is a two-shift byte OR.
+The premise "if it's bit-by-bit, use word OR" is already satisfied. The only
+bit-by-bit blitter left is `blit_indexed` (the palette/indexed-mask path,
+lib.rs:1033) — but that path is **decode-once and cached** (MASK_IDX_CACHE #427),
+so its cost is cold-once, not hot. Widening the aligned OR to explicit u64 is the
+LLVM-auto-vec dead-end (see the dead-end list). No worthwhile work.
+
+### B5 (retain decoder state across progressive frames) — **OPPORTUNITY, measured** (2026-07-03)
+
+**Confirmed real and O(N²).** `render_progressive(page, opts, chunk_n)` calls
+`decode_layers(…, chunk_n+1)`, and for the progressive (non-`usize::MAX`) limit
+`decode_background_chunks` (src/djvu_render.rs:1270) allocates a **fresh
+`Iw44Image::new()` and re-decodes BG44 chunks 1..=chunk_n+1 from scratch every
+frame**. Rendering all N frames therefore does 1+2+…+N = O(N²) chunk decodes.
+(The mask/FG layers are *not* redundant — they hit the page's OnceLock caches after
+frame 0; only BG is re-decoded.)
+
+**Measured** (probe, colorbook.djvu page 0, 4 BG44 chunks, warm mask/FG, M1 Max):
+`render_progressive_all` = **216 ms** for 4 frames vs a single full
+`render_pixmap` = **45 ms** → **4.8×**. With incremental decode the 4 frames should
+cost ≈ one full render plus three cheap `to_rgb`+composite snapshots (~1.3–1.5×),
+i.e. a ~3× reduction on the "eagerly render every refinement" workload, and an even
+bigger win for a streaming viewer that drives `render_progressive_step` as chunks
+arrive over the network (there the O(N²) is paid across the whole session).
+
+**Why deferred, not patched now.** The clean fix is a **stateful progressive
+decoder** that persists the incrementally-fed `Iw44Image` across `render_*_step`
+calls (a small new type, or a per-level page cache). The tempting shortcut — make
+`render_progressive_all` drive one `Iw44Image` and re-assemble frames itself — would
+have to replicate the bg+fg+bold+composite assembly that `decode_layers` centralises
+"so no logic can drift between this and the full render" (its own comment). Forking
+that is the wrong trade; the O(N²) is better than a divergent second composite path.
+Design for a future session: a `ProgressiveDecoder { img: Iw44Image, fg: OnceCell }`
+that yields one composited frame per `push_chunk`, with a byte-identical test against
+`render_progressive_step` on chicken.djvu (3 chunks) + colorbook (4 chunks).
+
+**Side note (robustness, not perf):** the probe hit `Iw44(ZpTooShort)` from
+`render_progressive_all` on watchmaker.djvu page 0 — a partial-chunk progressive
+decode erroring on a real corpus file. Worth a separate look; out of scope here.
+
+### C1 (RGB8 output, drop alpha) — **PARTLY DONE / wide-surface deferred** (2026-07-03)
+
+The export paths already avoid carrying alpha into the output format:
+`export_common::rgba_row_to_rgb` (src/export_common.rs:86) strips alpha per row, and
+PDF/TIFF use `render_streaming` so no full RGBA+RGB double buffer is held. The
+residual C1 win (a compositor that *writes* 3-byte RGB directly, saving 25% output
+bandwidth) would touch every fast path — P2's 256×32 B BILEVEL_RGBA table, G1, F2,
+the area-avg and B-series writers — all of which emit RGBA. Wide, byte-layout-
+sensitive surface for a bandwidth-only win on the write side; the SIMD tables assume
+4-byte pixels. Deferred as high-effort/medium-reward; the export consumers that
+actually want RGB already get it via the row converter.
+
+### C2 (fuse rotation into the compositor) — **RULED-OUT (low value / regression risk)** (2026-07-03)
+
+`rotate_pixmap` (src/djvu_render.rs:859) already uses the ROTATE_TILE 32×32 cache-
+tiled transpose (#447, kept, ~2–6%). Writing composited rows *directly* to
+transposed positions would trade that cache-local transpose for **strided scatter
+writes** in the compositor's hot loop — exactly the access pattern ROTATE_TILE was
+added to avoid — while saving one intermediate pixmap alloc. The alloc is cheap
+relative to the bandwidth hit; net-negative risk. Not worth it.
+
+### Remaining axes — classified (no code change this round)
+
+**NEEDS-INFRA** (real, but blocked on a fixture/host/harness that doesn't exist yet):
+- **A1 IDWT_PAR_PLANE** — within-Y-plane wavelet parallelism; cold-only, needs a
+  very-large colour-page fixture to beat the rayon overhead (already in the deferred
+  log). **A4 PAR_LANCZOS** — needs a large-page Lanczos fixture (>3000 rows); the
+  named boy fixture is too small. **A2 AVX2_IDWT** — needs an x86 bench host (M1 can't
+  measure). **B6 madvise / B7 speculative next-page decode** — need a cold-disk /
+  simulated-network harness; no such bench exists. **C3 upscale (zoom>1) path** —
+  genuinely unbenchmarked axis, needs a `zoom 2×/4× region` bench before any fast
+  path can be judged. **C4 tile cache** — an API feature (pan/zoom viewer), needs a
+  panorama-scenario bench. **C5 memory budget / LRU cache eviction** — measurable as
+  a peak-RSS diagnostic on the 520-page book, but the eviction machinery is a large
+  change; worth a *diagnostic* RSS measurement first.
+- **B1 ZP-core micro-opts** — highest-theoretical-leverage but the hot loop is
+  inlined into djvu-jb2/iw44/bzz (three byte-exact copies) and PGO already captured
+  the branch-heavy win (codec kernels flat ±1%); high-risk/low-EV. The u64-bitbuffer
+  idea is concrete but its expected payoff is marginal (refill is already amortized
+  and its branch is well-predicted).
+
+**QUALITY-GATED** (need the perceptual harness D1 = SSIM/PSNR + golden corpus, which
+gates the whole D branch and A3): **A3** linear-light blend + mask-upscale AA,
+**D2** Lanczos-vs-area-avg for photo downscale, **D3** bicubic FG44 upsample,
+**D4** gamma-correct downscale, **D5** TH44-thumbnail preview fast path (also a
+feature: the embedded thumbnail is separately lossy). None of these can be honestly
+decided without D1; building D1 is the unblocking prerequisite and the highest-value
+*infrastructure* task on the list.
+
+**Verdict.** Of the ~25 proposals: **2 were already implemented** (B3, B4-hot),
+**1 already landed this session** (B2 → GRAY_DIRECT), **2 ruled out** (C1-compositor
+wide-surface, C2 regression-risk), **1 is the top measured structural opportunity**
+(B5, ~3× on progressive, deferred pending a stateful-decoder design), and the rest
+split into NEEDS-INFRA and QUALITY-GATED — none blocked on ideas, all blocked on a
+missing bench/host/harness. The two unblocking meta-tasks that would convert the most
+deferred items into runnable experiments are **D1 (perceptual quality harness)** and
+a **cold-open / large-page / zoom fixture set**.
