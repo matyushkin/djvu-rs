@@ -7003,3 +7003,27 @@ IDWT even for a small viewport), which is the already-rejected ROI_IDWT (the ZP
 stream is serial and not spatially subsettable). Axis closed. The remaining zoom
 work is *quality* (mask-upscale AA, QUALITY_AA #13), now judgeable via the D1
 harness, not speed.
+
+### GRAY_DIRECT_E2E — wire to_gray8_subsample through render_gray8 — **Rejected (compositor duplication)** (2026-07-04)
+
+Evaluated whether the round-7 GRAY_DIRECT codec win (−71% BG decode, Y-plane only)
+can be delivered end-to-end through `render_gray8` (today `render_pixmap().to_gray8()`).
+
+Two blockers, both from reading `composite_into`:
+1. **Full gray compositor = mass duplication.** The compositor dispatches to three
+   deeply-tuned RGBA row writers (`composite_rows_bilevel_one` / `_bilinear_one` /
+   `_area_avg_one`) carrying every kept fast path (P2, G1, F2, area-avg, POPCNT…).
+   A 1-byte-output gray variant would fork all three — the most-optimised code in the
+   repo — for a niche entry point. High drift risk, poor ROI.
+2. **Not byte-identical even for the easy case.** A pure-BG colour page (BG44, no
+   mask/FG) could shortcut to `bg.to_gray8_subsample(sub)` with *no* compositor work,
+   but that returns the DjVu **Y** luma while `render_gray8`'s contract is the
+   **Rec.601** luma of the colour render (Y ≠ Rec.601-of-RGB; the GRAID_DIRECT fidelity
+   note). So it would silently change `render_gray8` output — an opt-in, not a
+   transparent optimisation.
+
+**Rejected.** The codec-level `Iw44Image::to_gray8[_subsample]` (kept, round 7)
+remains the interface: consumers that want the fast Y-only gray decode — OCR
+pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
+via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
+not worth duplicating the hot path.
