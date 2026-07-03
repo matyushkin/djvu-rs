@@ -311,6 +311,54 @@ fn bench_iw44_to_rgb_large(c: &mut Criterion) {
     });
 }
 
+/// Benchmark: grayscale decode of a large colour page.
+///
+/// Compares the current gray path (`to_rgb().to_gray8()` — full YCbCr
+/// reconstruct + colour conversion, then Rec.601 luma) against the direct
+/// `to_gray8()` (Y-plane only, chroma planes never reconstructed). This is the
+/// GRAY_DIRECT experiment: how much of gray-render decode is chroma work.
+fn bench_iw44_gray_decode_large(c: &mut Criterion) {
+    let path = assets_path().join("colorbook.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_iw44_gray_decode_large: colorbook.djvu missing");
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let page = match doc.page(0) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
+    if chunks.is_empty() {
+        return;
+    }
+    let mut img = djvu_rs::iw44::Iw44Image::new();
+    for chunk in &chunks {
+        if img.decode_chunk(chunk).is_err() {
+            return;
+        }
+    }
+
+    let mut group = c.benchmark_group("iw44_gray_decode_large");
+    group.bench_function("rgb_then_gray", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_rgb().map(|p| p.to_gray8()));
+        });
+    });
+    group.bench_function("gray_direct", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_gray8());
+        });
+    });
+    group.finish();
+}
+
 /// Benchmark: `to_rgb_subsample(sub)` on a pre-decoded colorbook page.
 ///
 /// Isolates wavelet reconstruction + YCbCr→RGBA from ZP decode.
@@ -724,6 +772,7 @@ criterion_group!(
     bench_jb2_decode_large,
     bench_iw44_decode_large_all_chunks,
     bench_iw44_to_rgb_large,
+    bench_iw44_gray_decode_large,
     bench_iw44_to_rgb_colorbook_sub,
     bench_iw44_encode_color,
     bench_iw44_encode_large,

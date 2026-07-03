@@ -6452,3 +6452,65 @@ bench added.
 cold-open-latency axis the prior throughput-focused rounds never benchmarked. The
 swarm found it; hand-implementation confirmed the −48 % `from_bytes` win,
 byte-identical, across std/no_std/mmap/async.
+
+## Perf round 7 (2026-07-03) — gray-decode axis (from the round-6 experiment backlog)
+
+Round 6 concluded the well was "mostly dry for byte-identical hot-path wins" but
+that whole **axes** remained unbenchmarked (LAZY_PAGE_CONSTRUCT proved this: −48 %
+lived on the cold-open axis nobody had measured). This round attacks the next such
+axis from the recorded backlog: **grayscale decode** (proposal B2). Every gray
+consumer — `render_gray8`, OCR pre-pass, e-ink viewers, thumbnail grids — currently
+pays for full colour: `render_gray8` is literally `render_pixmap(...).to_gray8()`,
+and the codec's only gray output was `to_rgb_subsample().to_gray8()`, i.e. both
+chroma inverse-wavelet transforms + the YCbCr→RGBA conversion, all thrown away by
+the final luma reduction.
+
+### GRAY_DIRECT — decode only the Y plane for grayscale output — **Kept** (2026-07-03)
+
+**Issue (round-6 backlog B2).** For a colour IW44 image the two chroma planes'
+`reconstruct()` (inverse wavelet) plus the YCbCr→RGBA SIMD conversion are the bulk
+of `to_rgb`'s cost, but a grayscale consumer never needs them. There was no API to
+get luma without paying for chroma.
+
+**Approach.** New additive methods on `Iw44Image` (`crates/djvu-iw44/src/lib.rs`):
+`to_gray8()` / `to_gray8_subsample(sub) -> GrayPixmap`. They reconstruct **only the
+Y plane** (`cb`/`cr` are never touched) and write one byte per pixel:
+- **Grayscale images:** `gray = 127 − normalize(Y)` — identical to the existing
+  gray path's R channel.
+- **Colour images:** `gray = clamp(normalize(Y) + 128, 0, 255)` — the DjVu luma
+  channel (what the colour formula yields when Cb=Cr=0).
+
+Purely additive: no existing byte-exact path is touched. Compact (sub=2/4) and
+full-res indexing mirror `to_rgb_subsample`.
+
+**Fidelity.**
+- Grayscale images: **byte-identical** to `to_rgb_subsample(sub).to_gray8()` (the
+  Rec.601 weights 306+601+117 sum to 1024, so `R=G=B=g` round-trips to `g` exactly).
+  Asserted by `iw44_to_gray8_matches_rgb_luma_boy` for the `!is_color` branch.
+- Colour images: the Y-plane luma is **not** bit-identical to the Rec.601 luma of
+  the reconstructed RGB (which mixes in chroma-derived R/G/B). Measured on boy.djvu:
+  **mean abs diff < 4/255, max ≤ 24** — a few levels, and the Y channel is the more
+  faithful luminance (it *is* the encoder's luma). This is why GRAY_DIRECT is an
+  opt-in method, not a silent replacement of the colour→gray reduction.
+
+**Numbers** (`benches/codecs.rs::bench_iw44_gray_decode_large`, colorbook.djvu
+2260×3669 colour page, pre-decoded; M1 Max). Compares `to_rgb().to_gray8()` vs
+`to_gray8()`:
+
+| Build | rgb_then_gray | gray_direct | Change |
+|-------|---------------|-------------|--------|
+| default (`std`, sequential) | 6.70 ms | 1.92 ms | **−71 % (3.5×)** |
+| `--features parallel` | 3.78 ms | 2.05 ms | **−46 % (1.85×)** |
+
+The colour path benefits from `rayon::join` reconstructing Y/Cb/Cr concurrently, so
+the parallel gap is smaller — but GRAY_DIRECT still wins by nearly 2× there because
+it does ~1/3 the reconstruct work (one plane, not three) and skips the YCbCr math
+entirely. Sequential (the default, and the wasm/no_std reality) sees the full 3.5×.
+
+**Decision.** **Kept.** Additive codec API on the previously-unbenchmarked gray
+axis; large win, no risk to existing paths, tests + clippy + no_std + bench all
+green. Reachable today via `page.decoded_bg44()?.to_gray8()`. Follow-up (not landed
+here): a gray compositor so `render_gray8` can use this end-to-end for the common
+background-dominated colour scan — currently `render_gray8` still routes through the
+full RGBA compositor before reducing, so this win is codec-level until that path
+exists. New `bench_iw44_gray_decode_large` added.

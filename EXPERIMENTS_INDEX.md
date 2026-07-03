@@ -1,6 +1,6 @@
 # Experiments Index
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-06-24.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-03.
 
 ## Legend
 
@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| GRAY_DIRECT | 2026-07-03 | IW44 decode (gray axis) | **K** | **−71% seq / −46% par** gray decode of colour page | New `Iw44Image::to_gray8[_subsample]`: reconstruct Y plane only, skip both chroma IDWTs + YCbCr math. Grayscale imgs byte-identical to `to_rgb().to_gray8()`; colour = DjVu luma (mean<4/255 vs Rec.601). Additive, no risk. Round-7, backlog B2 |
 | GATHER_ZIGZAG_INV | 2026-07-03 | IW44 encode | **K** | ~1% iw44_encode + cleanup | Row-major plane read + ZIGZAG_INV scatter into L1 block (mirrors decoder); deletes 2 dup zigzag tables. Byte-identical. Round-6 swarm P5 |
 | EPUB_PNG_COMPRESSION | 2026-07-03 | EPUB export | X | rejected on verification | Swarm P1 claimed −43.5% via png Fast, but Fast makes files **2.84× larger** (measured 271KB→770KB) — bad trade for a doc format. Default already balanced. Case study: verify swarm claims |
 | LAZY_PAGE_CONSTRUCT | 2026-07-03 | container cold-open | **K** | **−48% from_bytes(520pp), −9% open+render-first**; mmap zero-copy | Bundled pages defer per-chunk copy: `ChunkStore::Lazy` holds shared backing (`Arc<dyn AsRef<[u8]>>`) + FORM range, materialises on first access. from_bytes/mmap funnel owned backing. Byte-identical (mmap parity test). Swarm P3 |
