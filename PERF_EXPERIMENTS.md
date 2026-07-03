@@ -6038,3 +6038,95 @@ so the win is real, not throttling drift.
 **Decision.** **Kept.** Proven-pattern mirror of BG_CACHE_S2 for the sub=4 warm
 render, ~4–5 % on the heavy-downscale compositor path, byte-identical, bounded
 extra memory only on pages actually rendered at sub=4.
+
+### BZZ_DEC_MTF — mirror PS1 `copy_within` on the BZZ *decode* MTF — **Rejected / already covered** (2026-07-03)
+
+**Hypothesis (round-5 #19).** PS1 sped up the BZZ *encoder*'s move-to-front (MTF)
+update by replacing an element-at-a-time shift with a `copy_within` memmove.
+Check whether the *decoder*'s MTF has the same shape and the same untapped win.
+
+**Finding.** It does not — it is **already optimised**. `decode_mtf_phase`
+(`crates/djvu-bzz/src/decode.rs:418`) already performs the block relocation with
+`mtf_order.copy_within(FREQ_SLOTS - 1..insert_at, FREQ_SLOTS)` when
+`insert_at >= FREQ_SLOTS`, and the surrounding comment (lines 409–415) explicitly
+records that this is the memmove replacement for the former scalar loop. The
+residual `while insert_at > 0` loop (lines 421–430) is **not** a plain shift: it is
+a frequency-sorted insertion that compares `freq_counts[insert_at-1]` against
+`combined_freq` and **breaks early** as soon as the ordering holds. Because each
+iteration is data-dependent (the number of moves varies per symbol and the loop
+exits mid-way), it cannot be expressed as a single `copy_within` without changing
+results. No safe win remains.
+
+**Decision.** **Rejected** — no code change. The decode path already carries the
+PS1 optimisation; the remaining loop is a genuine early-exit sorted insert.
+Recorded so future swarms do not re-suggest a decode-side MTF memmove.
+
+### IDWT_PAR_PLANE — parallelism *within* the Y-plane inverse wavelet — **Diagnostic / deferred** (2026-07-03)
+
+**Hypothesis (round-5 #2).** `IW44_PAR` parallelises the inverse wavelet *between*
+planes (Y ‖ (Cb ‖ Cr) via `rayon::join`, `crates/djvu-iw44/src/lib.rs:3281`). The
+Y plane is up to 4× the area of each chroma plane, so it is the critical path and
+the chroma threads finish early, leaving cores idle. Splitting Y's own
+`reconstruct` across threads should shrink the critical path further.
+
+**Measurement (whether it's worth it).** `render_native_stages/bg_to_rgb_warm`
+(watchmaker, `--features parallel`, M1 Max) — the isolated `to_rgb_subsample(1)`
+cost (reconstruct Y/Cb/Cr + YCbCr→RGB) — is **3.26 ms**. Two facts cap the upside:
+1. **Cold-only.** Warm renders never re-run reconstruct — `BG_CACHE`/`bg_rgb_s1`
+   memoise the RGB pixmap, so `render_pixmap` warm (8.4 ms) does not touch this
+   path at all. IDWT_PAR_PLANE would only cut *first-open* latency.
+2. **The convert half is already parallel** (`par_chunks_mut` YCbCr→RGBA,
+   `lib.rs:3314`). Only the reconstruct portion (a fraction of the 3.26 ms) is the
+   sequential-per-plane target, and on this corpus the Y plane is not large enough
+   for within-plane splitting to beat rayon's per-pass overhead.
+
+**Why deferred (not landed).** The inverse transform (`inverse_wavelet_transform_from`,
+~300 lines) is **not** a clean per-row loop that wraps in `par_iter`. The column
+pass is a *transposed vertical sweep*: an outer scale/k loop with per-column state
+carried in `st0`/`st1`/`st2` (`vec![0i32; width]`), swept across rows. Columns are
+mutually independent (disjoint `data` indices `k_off + ci*s`), and the row pass is
+independent across rows — so the parallelism exists in principle — but exploiting it
+requires **restructuring each pass to run per column/row *chunk* with thread-local
+scratch**, keeping a barrier between passes and between scales. That is an
+error-prone rewrite of a hand-tuned SIMD hot path in a **normative** decoder, where
+a subtle bug silently corrupts every colour page. The prior IW44 dead-ends
+(IDWT_S2_NEON incorrect-premise, IDWT_SPLAT/REFROW_REG unmeasurable) show how fragile
+this code is to "obvious" transforms.
+
+**Design for a future dedicated effort.** (1) Extract the column pass into
+`fn column_pass(data, cols: Range<usize>, scratch: &mut [i32;3][…])` so a
+`par_chunks`-style split over `cols` is a drop-in; likewise `row_pass` over a row
+range. (2) Gate parallel dispatch on `s <= 2 && plane_area >= THRESHOLD` (coarse
+scales have too few active rows/cols to amortise spawn cost). (3) Validate
+**byte-identical against the sequential path** over the whole corpus (extend
+`simd_row_pass_matches_scalar`), not just round-trip. (4) Re-measure on a page with
+a genuinely large Y plane (the current corpus under-exercises this).
+
+**Decision.** **Deferred.** Cold-only, marginal on the present corpus, high
+correctness risk; recorded with the 3.26 ms baseline and a concrete design so a
+future effort with a large-page fixture can pick it up safely.
+
+### RENDER_REGION_SCOPE — is `render_region` wasting work on the full page? — **Diagnostic / no change** (2026-07-03)
+
+**Question (from round-5 #1/#10, the viewer-tile lever).** Does `render_region`
+composite the whole page and then crop (wasteful), or only the requested rectangle?
+
+**Finding.** It is **already region-scoped on the compositor side.** `render_region`
+(`src/djvu_render.rs:2985`) allocates only `region.width × region.height`
+(`Pixmap::white(out_w, out_h)`) and builds the `CompositeContext` with
+`offset = (region.x, region.y)` and `out = (out_w, out_h)`, so `composite_into`
+writes only the region's pixels — no full-page composite, no crop pass. For a
+viewer scrolling a single page, the full-layer **decode** is paid once and then
+served from `PageLayers` caches (mask, bg_rgb_s*), so warm region renders cost only
+the region composite.
+
+**Residual lever.** The one remaining full-page cost is the **cold** `decode_layers`
+call (full IW44 IDWT + full JB2 mask on first touch). Narrowing *that* to the
+region is the true ROI_IDWT experiment (round-5 #1) — a decode-scope change (the
+IW44 lifting filter needs a few rows/cols of halo per level, and JB2 mask decode is
+inherently whole-stream), which is substantial and separate. The compositor itself
+needs no change.
+
+**Decision.** **No change** — the compositor path is already optimal for the
+viewport/tile use case. Recorded so ROI work targets the cold decode scope, not the
+(already-scoped) compositor.
