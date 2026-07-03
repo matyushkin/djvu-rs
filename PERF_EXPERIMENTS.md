@@ -6507,6 +6507,18 @@ the parallel gap is smaller — but GRAY_DIRECT still wins by nearly 2× there b
 it does ~1/3 the reconstruct work (one plane, not three) and skips the YCbCr math
 entirely. Sequential (the default, and the wasm/no_std reality) sees the full 3.5×.
 
+Downscaled gray previews (the thumbnail-grid case that most motivates this path),
+sequential build, `to_rgb_subsample(s).to_gray8()` vs `to_gray8_subsample(s)`:
+
+| Subsample | rgb_then_gray | gray_direct | Change |
+|-----------|---------------|-------------|--------|
+| sub=2 (1130×1835) | 1.73 ms | 0.69 ms | **−60 % (2.5×)** |
+| sub=4 (565×918)   | 0.42 ms | 0.17 ms | **−60 % (2.5×)** |
+
+The relative win narrows a little at higher subsample (compact-plane reconstruct is
+already cheap) but holds at ~2.5× — a preview grid of colour scans decodes to gray
+in a fraction of the time.
+
 **Decision.** **Kept.** Additive codec API on the previously-unbenchmarked gray
 axis; large win, no risk to existing paths, tests + clippy + no_std + bench all
 green. Reachable today via `page.decoded_bg44()?.to_gray8()`. Follow-up (not landed

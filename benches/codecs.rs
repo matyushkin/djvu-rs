@@ -356,6 +356,28 @@ fn bench_iw44_gray_decode_large(c: &mut Criterion) {
             let _ = black_box(img.to_gray8());
         });
     });
+    // Downscaled gray preview (thumbnail-grid case): compare the current
+    // `to_rgb_subsample(s).to_gray8()` against direct `to_gray8_subsample(s)`.
+    group.bench_function("rgb_then_gray_sub2", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_rgb_subsample(2).map(|p| p.to_gray8()));
+        });
+    });
+    group.bench_function("gray_direct_sub2", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_gray8_subsample(2));
+        });
+    });
+    group.bench_function("rgb_then_gray_sub4", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_rgb_subsample(4).map(|p| p.to_gray8()));
+        });
+    });
+    group.bench_function("gray_direct_sub4", |b| {
+        b.iter(|| {
+            let _ = black_box(img.to_gray8_subsample(4));
+        });
+    });
     group.finish();
 }
 
