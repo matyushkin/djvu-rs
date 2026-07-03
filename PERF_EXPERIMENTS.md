@@ -6219,3 +6219,95 @@ training corpus and the `.profdata` is corpus/host-specific — it cannot ship w
 crates.io release. Deliverables: `examples/pgo_train.rs`, `scripts/pgo.sh`,
 `make pgo`, documented tradeoff. No default-build or source-path change, so zero
 risk to the shipped library.
+
+### INTEROP_PIXDIFF — DjVuLibre pixel-diff quality floor — **Kept (diagnostic tool)** (2026-07-03)
+
+**Goal (round-5 #14).** Establish a quantitative render-quality baseline against
+DjVuLibre so future render/quality experiments can be judged (a claimed quality
+win vs the reference) and validated (a faithful change proves no drift). Previously
+quality was only ever checked point-wise (PSNR in individual experiments).
+
+**Tool.** `examples/interop_pixdiff.rs` renders a page with our decoder and with
+`ddjvu -format=ppm` at the same native resolution, then reports the per-channel
+absolute-difference distribution (mean, p50/p95/p99, max, and the % of channels
+over 2/8/32). `--corpus` sweeps a representative spread. Requires `ddjvu` on PATH,
+so it is an opt-in example (not a merge-gated test — CI has no DjVuLibre).
+
+**Baseline (native resolution, this corpus):**
+
+| File | mean | p99 | max | %chan >8 |
+|------|------|-----|-----|----------|
+| navm_fgbz (FGbz palette) | 0.00 | 0 | 0 | 0.00 % |
+| boy (bilevel) | 0.00 | 0 | 0 | 0.00 % |
+| cable_1973 (bilevel) | 0.04 | 1 | 71 | 0.01 % |
+| colorbook (colour IW44) | 0.14 | 4 | 46 | 0.20 % |
+| watchmaker (colour IW44) | 0.21 | 2 | 17 | 0.00 % |
+
+**Reading.** Our renderer is **essentially pixel-faithful to DjVuLibre**: palette
+and bilevel pages are byte-identical or near it; colour pages differ by a mean of
+<0.25/255 with a tiny tail, attributable to our bilinear chroma upsampling (#422,
+deliberately *better* than DjVuLibre's box upsampling). This run also **validates
+that the round-5 changes (SUB4_RGB_CACHE, DOC_SHARED_DICT_CACHE) preserved pixel
+output** — all still match. (`carte.djvu` is skipped: our IFF parser rejects it as
+truncated, a pre-existing issue unrelated to rendering.)
+
+**Decision.** **Kept** as the standing quality floor. It unblocks the quality-axis
+experiments below by giving them a reference to measure against.
+
+### QUALITY_AA (LINEAR_BLEND / MASK_UPSCALE) — **Evaluated / deferred** (2026-07-03)
+
+**Hypotheses (round-5 #12/#13).** Blend anti-aliased coverage in linear light
+(#12), and bilinearly interpolate mask coverage when *upscaling* / zooming (#13),
+for smoother text edges.
+
+**Why deferred after INTEROP_PIXDIFF.** The interop baseline just established that
+we render **near-identically to DjVuLibre** (mean <0.25/255), and DjVuLibre blends
+in sRGB and hard-edges the mask under zoom. Both proposals would **increase**
+divergence from that reference — they are subjective "prettier than DjVuLibre"
+changes, not faithfulness improvements. They therefore belong behind an explicit
+opt-in *quality mode*, not in the default interop-faithful path, and need a human
+aesthetic judgement (or a no-reference sharpness metric) that a perf pass should
+not smuggle in. The hot 1:1 path (`bilevel_native_cached`, scale==1) must stay
+byte-identical regardless, so any future attempt must gate strictly on scale>1.
+Recorded with that constraint; not landed this round.
+
+### AVX2_IDWT — x86 SIMD parity for the IW44 inverse wavelet — **Blocked (hardware)** (2026-07-03)
+
+**Hypothesis (round-5 #8).** The IDWT row/column passes have a NEON path
+(`row_pass_neon_s1_row`) but fall back to scalar on x86_64, while YCbCr→RGB has
+full AVX2. An AVX2/SSE IDWT pass could be a free win for x86 users.
+
+**Blocked.** All benchmarking here is on M1 Max (aarch64); there is no x86 host in
+this environment to measure on, and shipping hand-written x86 SIMD for a normative
+decoder **without running it** (aarch64 cannot even execute the `#[target_feature]`
+x86 path) is exactly the kind of untested-SIMD risk the IW44 dead-ends warn against.
+Recorded as blocked-on-hardware: needs an x86 bench host (round-5 infra item #16)
+before it can be attempted safely. Correctness would be gated by extending
+`simd_row_pass_matches_scalar` to run on x86.
+
+### ROI_IDWT — narrow the cold `render_region` decode to the viewport — **Rejected / low-value** (2026-07-03)
+
+**Hypothesis (round-5 #1).** RENDER_REGION_SCOPE found the compositor already
+region-scoped, leaving the cold `decode_layers` as the only full-page cost. Narrow
+*that* to the requested rectangle for viewer/tile rendering.
+
+**Why it does not pay.** The dominant cold cost is **not spatially narrowable**:
+- **IW44 background** — `bg44()` runs the ZP arithmetic decode over *every*
+  coefficient of *every* chunk (`decode_chunk` in a loop). ZP is a serial entropy
+  stream with no random access, so you cannot decode "just the region's
+  coefficients" — the expensive part must run in full regardless of viewport.
+- **JB2 mask** — symbols are placed across the whole page from one serial ZP
+  stream; there is likewise no spatial subset decode.
+
+Only the **IDWT reconstruction + YCbCr→RGB** is spatial, and it could be limited to
+the region's rows (plus a small wavelet-halo per level). But (a) that is a fraction
+of the cold cost the ZP decode dominates, and (b) it is **paid once** — after the
+first touch the decoded layers are cached in `PageLayers`, so every subsequent
+region render of that page is warm and already region-scoped (RENDER_REGION_SCOPE).
+The realizable saving is "part of the IDWT, on the first region render only," for a
+large amount of halo-boundary complexity in a normative path.
+
+**Decision.** **Rejected.** The viewer/tile path is already efficient where it
+counts (warm = region-scoped compositor over cached layers); the cold residual is
+ZP-decode-bound, which no region-of-interest scheme can shrink. Recorded so this
+is not re-proposed as a decode-scope win.
