@@ -6806,3 +6806,57 @@ cost ~10× a bilinear downscale; row-parallelism cuts that to ~3×, making a
 "Lanczos-by-default for large downscale ratios" policy far more affordable in
 parallel builds. New `render_scaled_large_colorbook` bench added (the old
 `render_scaled_0.5x` boy fixture was too small to show it).
+
+## Perf round 11 (2026-07-04) — B5 incremental progressive decode (implemented; modest)
+
+Round 8 measured `render_progressive_all` at 4.8× a single render on colorbook and
+flagged the O(N²) per-frame BG re-decode as the top structural opportunity. This
+round implements the incremental fix — and finds the **addressable** redundancy is
+much smaller than that 4.8× implied.
+
+### B5_INCREMENTAL_PROGRESSIVE — one accumulating decoder across frames — **Kept (modest)** (2026-07-04)
+
+**What.** `render_progressive_all` no longer calls `render_progressive_step` per
+frame (which rebuilt a fresh `Iw44Image` and re-ran ZP decode of BG44 chunks
+1..=k for every frame k — 1+2+…+N chunk-decodes). It now decodes the foreground
+once (`decode_foreground_strict` + one bold-dilation, mirroring `decode_layers`'
+strict branch), feeds one BG44 chunk per frame into a single accumulating
+`Iw44Image`, and snapshots each frame through the **unchanged** composite path
+(`CompositeContext::from_layers` → `composite_into` → `rotate_pixmap`). Gated to the
+byte-identical-serviceable case (strict mode, Bilinear, multi-chunk BG44); everything
+else falls back to the per-frame loop.
+
+**Correctness.** Byte-identical, proven by the new
+`render_progressive_all_matches_per_frame` test (chicken.djvu, 3 BG44 chunks:
+every incremental frame equals `render_progressive_step` pixel-for-pixel). Feeding
+chunks 0..=k into one decoder produces the same state as a fresh decode of the first
+k+1 chunks (ZP state accumulates identically). 1025 tests green, `make check` clean.
+
+**Numbers** (incremental `render_progressive_all` vs the per-frame loop, M1 Max):
+
+| Page | BG44 chunks / frames | per-frame (old) | incremental (new) | Speedup |
+|------|----------------------|-----------------|-------------------|---------|
+| chicken (181×240) | 3 | 3.44 ms | 2.30 ms | **1.50×** |
+| colorbook (2260×3669) | 4 | 212.9 ms | 205.3 ms | **1.04×** |
+
+**Why modest, not the 4.8× round 8 implied.** BG decode has two parts: (1) ZP
+entropy decode (`decode_chunk`) and (2) IDWT reconstruct + YCbCr→RGB
+(`to_rgb_subsample`). Only (1) is redundant across frames and now incremental;
+(2) is **inherently per-frame** — each frame is a different refinement level, so the
+global wavelet must be re-run in full, and there is no incremental IDWT. The round-8
+"4.8×" was the ratio of *total* progressive work to one render, but almost all of it
+is per-frame reconstruct + composite (8.3 MP × 4 frames on colorbook), not the ZP
+redundancy B5 removes. So the win is large only when ZP decode dominates — small
+pages (chicken 1.5×) and, increasingly, **many-chunk** pages (the saving is the
+N(N−1)/2 skipped chunk-decodes, so a 15-chunk progressive photo gains far more than
+colorbook's 4). Strictly ≤ the old cost by construction; never a regression.
+
+**Decision.** **Kept** — byte-identical, tested, strictly-better, and an honest
+O(N²)→O(N) on the ZP portion that scales with chunk count. But the headline
+progressive win is smaller than hoped, and the **more important** case — a streaming
+viewer driving `render_progressive_step` as chunks arrive over the network, which
+still re-decodes O(N²) across the session — is *not* addressed by this
+`render_progressive_all`-only change. That needs the stateful `ProgressiveDecoder`
+API (persist the accumulating `Iw44Image` across step calls); it remains the real
+deferred structural work, now with corrected expectations (its ceiling is the ZP
+redundancy, not the full per-frame cost).

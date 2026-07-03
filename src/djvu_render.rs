@@ -3258,6 +3258,80 @@ pub fn render_progressive_all(
     opts: &RenderOptions,
 ) -> Result<Vec<Pixmap>, RenderError> {
     let steps = progressive_steps(page);
+    let bg44_chunks = page.bg44_chunks();
+
+    // Incremental fast path (B5): the per-frame `render_progressive_step` decodes
+    // BG44 chunks 1..=k from scratch for every frame k — O(N²) over all frames.
+    // The foreground (mask/FG44/palette) is identical across frames and already
+    // memoised; only the background refines. So decode the foreground once, feed
+    // BG44 chunks into a single accumulating `Iw44Image` one per frame, and
+    // snapshot each frame — O(N) total decode.
+    //
+    // Restricted to the case the fast path can serve byte-identically:
+    //   * strict mode (permissive uses a different, error-tolerant FG decode),
+    //   * Bilinear (Lanczos re-renders at native per frame via the post-pass —
+    //     no shared incremental state to exploit),
+    //   * a real multi-chunk BG44 page (otherwise there is nothing to amortise).
+    // Everything else falls back to the simple per-frame loop below.
+    let can_stream = steps > 1
+        && bg44_chunks.len() == steps
+        && !opts.permissive
+        && opts.resampling == Resampling::Bilinear
+        && opts.width != 0
+        && opts.height != 0;
+
+    if can_stream {
+        let w = opts.width;
+        let h = opts.height;
+        let gamma_lut = build_gamma_lut(page.gamma());
+        let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+
+        // Foreground: decoded once, dilated once — shared by every frame. Mirrors
+        // `decode_layers`' strict branch + bold-dilation step exactly.
+        let ForegroundLayers {
+            fg_palette,
+            mask,
+            blit_map,
+            fg44,
+        } = decode_foreground_strict(page)?;
+        let mask = if opts.bold > 0 {
+            mask.map(|m| Cow::Owned(m.into_owned().dilate_n(opts.bold as u32)))
+        } else {
+            mask
+        };
+
+        let rotation = combine_rotations(page.rotation(), opts.rotation);
+        let mut img = crate::iw44::Iw44Image::new();
+        let mut frames = Vec::with_capacity(steps);
+        for chunk in bg44_chunks.iter().take(steps) {
+            // Feed the next refinement chunk into the shared decoder, then snapshot.
+            img.decode_chunk(chunk).map_err(RenderError::Iw44)?;
+            let bg = img
+                .to_rgb_subsample(bg_subsample)
+                .map_err(RenderError::Iw44)?;
+
+            let mut pm = Pixmap::white(w, h);
+            {
+                let ctx = CompositeContext::from_layers(
+                    page,
+                    opts,
+                    Some(&bg),
+                    mask.as_deref(),
+                    0,
+                    fg_palette.as_ref(),
+                    blit_map.as_deref(),
+                    fg44.as_deref(),
+                    &gamma_lut,
+                    (0, 0),
+                    (w, h),
+                );
+                composite_into(&ctx, &mut pm.data)?;
+            }
+            frames.push(rotate_pixmap(pm, rotation));
+        }
+        return Ok(frames);
+    }
+
     let mut frames = Vec::with_capacity(steps);
     for step in 0..steps {
         frames.push(render_progressive_step(page, opts, step)?);
@@ -3607,6 +3681,44 @@ mod tests {
         assert_eq!(opts.bold, 1);
         assert!(opts.aa);
         assert_eq!(opts.rotation, UserRotation::Cw90);
+    }
+
+    /// The incremental `render_progressive_all` fast path (B5) must be
+    /// byte-identical to the per-frame `render_progressive_step` loop it
+    /// replaces, on a real multi-BG44-chunk page.
+    #[test]
+    fn render_progressive_all_matches_per_frame() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        // chicken.djvu has 3 BG44 chunks → 3 progressive frames, exercising the
+        // incremental streaming path (steps > 1, Bilinear, strict).
+        assert!(
+            page.bg44_chunks().len() >= 2,
+            "need a multi-chunk BG44 page"
+        );
+
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Bilinear,
+            ..Default::default()
+        };
+
+        let all = render_progressive_all(page, &opts).expect("progressive_all");
+        let steps = progressive_steps(page);
+        assert_eq!(all.len(), steps);
+        for (step, frame) in all.iter().enumerate() {
+            let per_frame = render_progressive_step(page, &opts, step).expect("progressive_step");
+            assert_eq!(
+                (frame.width, frame.height),
+                (per_frame.width, per_frame.height),
+                "frame {step} dimensions differ"
+            );
+            assert!(
+                frame.data == per_frame.data,
+                "frame {step} pixels differ between incremental and per-frame paths"
+            );
+        }
     }
 
     /// `fit_to_width` scales correctly, preserving aspect ratio.
