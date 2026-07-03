@@ -1019,13 +1019,67 @@ pub(crate) struct PageLayers {
     // every warm render of a palette page re-runs the full JB2 ZP decode and
     // re-allocates the page-sized blit map. Only populated for palette pages.
     mask_indexed: std::sync::OnceLock<Option<(crate::bitmap::Bitmap, Vec<i32>)>>,
+    /// Monotonic last-access tick for LRU cache-budget eviction. Bumped from a
+    /// process-global counter every time this page's layers are touched; read
+    /// (without touching) by `DjVuDocument::enforce_cache_budget` to evict the
+    /// least-recently-used pages first. Not part of the decoded data.
+    access: std::sync::atomic::AtomicU64,
 }
+
+/// Process-global monotonic source for the per-page LRU access tick.
+#[cfg(feature = "std")]
+static ACCESS_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "std")]
 impl PageLayers {
     /// An empty cache. Layers are decoded on first access.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Record an access, stamping this cache with the next global tick (LRU).
+    pub(crate) fn bump_access(&self) {
+        let t = ACCESS_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.access.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The last-access tick (higher = more recently used).
+    pub(crate) fn access_tick(&self) -> u64 {
+        self.access.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Approximate resident bytes held by this page's decoded caches.
+    ///
+    /// Exact for the RGB/mask pixmaps and blit map (which dominate); the BG44
+    /// coefficient images are estimated from their dimensions (`w·h·2` per
+    /// image). Used only to compare pages for budget eviction, so an estimate is
+    /// sufficient. Reads caches without initialising them.
+    pub(crate) fn cached_bytes(&self) -> usize {
+        let px = |o: &std::sync::OnceLock<Option<Pixmap>>| {
+            o.get().and_then(|x| x.as_ref()).map_or(0, |p| p.data.len())
+        };
+        let bm = |o: &std::sync::OnceLock<Option<crate::bitmap::Bitmap>>| {
+            o.get().and_then(|x| x.as_ref()).map_or(0, |b| b.data.len())
+        };
+        let iw = |o: &std::sync::OnceLock<Option<Iw44Image>>| {
+            o.get()
+                .and_then(|x| x.as_ref())
+                .map_or(0, |i| (i.width as usize) * (i.height as usize) * 2)
+        };
+        let mi = self
+            .mask_indexed
+            .get()
+            .and_then(|x| x.as_ref())
+            .map_or(0, |(b, v)| b.data.len() + v.len() * 4);
+        px(&self.fg44)
+            + px(&self.bg_rgb_s1)
+            + px(&self.bg_rgb_s2)
+            + px(&self.bg_rgb_s4)
+            + bm(&self.mask)
+            + bm(&self.mask_sub4)
+            + iw(&self.bg44)
+            + iw(&self.bg44_partial)
+            + mi
     }
 
     /// The fully decoded BG44 wavelet image (all chunks), decoding on first
@@ -3258,6 +3312,80 @@ pub fn render_progressive_all(
     opts: &RenderOptions,
 ) -> Result<Vec<Pixmap>, RenderError> {
     let steps = progressive_steps(page);
+    let bg44_chunks = page.bg44_chunks();
+
+    // Incremental fast path (B5): the per-frame `render_progressive_step` decodes
+    // BG44 chunks 1..=k from scratch for every frame k — O(N²) over all frames.
+    // The foreground (mask/FG44/palette) is identical across frames and already
+    // memoised; only the background refines. So decode the foreground once, feed
+    // BG44 chunks into a single accumulating `Iw44Image` one per frame, and
+    // snapshot each frame — O(N) total decode.
+    //
+    // Restricted to the case the fast path can serve byte-identically:
+    //   * strict mode (permissive uses a different, error-tolerant FG decode),
+    //   * Bilinear (Lanczos re-renders at native per frame via the post-pass —
+    //     no shared incremental state to exploit),
+    //   * a real multi-chunk BG44 page (otherwise there is nothing to amortise).
+    // Everything else falls back to the simple per-frame loop below.
+    let can_stream = steps > 1
+        && bg44_chunks.len() == steps
+        && !opts.permissive
+        && opts.resampling == Resampling::Bilinear
+        && opts.width != 0
+        && opts.height != 0;
+
+    if can_stream {
+        let w = opts.width;
+        let h = opts.height;
+        let gamma_lut = build_gamma_lut(page.gamma());
+        let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+
+        // Foreground: decoded once, dilated once — shared by every frame. Mirrors
+        // `decode_layers`' strict branch + bold-dilation step exactly.
+        let ForegroundLayers {
+            fg_palette,
+            mask,
+            blit_map,
+            fg44,
+        } = decode_foreground_strict(page)?;
+        let mask = if opts.bold > 0 {
+            mask.map(|m| Cow::Owned(m.into_owned().dilate_n(opts.bold as u32)))
+        } else {
+            mask
+        };
+
+        let rotation = combine_rotations(page.rotation(), opts.rotation);
+        let mut img = crate::iw44::Iw44Image::new();
+        let mut frames = Vec::with_capacity(steps);
+        for chunk in bg44_chunks.iter().take(steps) {
+            // Feed the next refinement chunk into the shared decoder, then snapshot.
+            img.decode_chunk(chunk).map_err(RenderError::Iw44)?;
+            let bg = img
+                .to_rgb_subsample(bg_subsample)
+                .map_err(RenderError::Iw44)?;
+
+            let mut pm = Pixmap::white(w, h);
+            {
+                let ctx = CompositeContext::from_layers(
+                    page,
+                    opts,
+                    Some(&bg),
+                    mask.as_deref(),
+                    0,
+                    fg_palette.as_ref(),
+                    blit_map.as_deref(),
+                    fg44.as_deref(),
+                    &gamma_lut,
+                    (0, 0),
+                    (w, h),
+                );
+                composite_into(&ctx, &mut pm.data)?;
+            }
+            frames.push(rotate_pixmap(pm, rotation));
+        }
+        return Ok(frames);
+    }
+
     let mut frames = Vec::with_capacity(steps);
     for step in 0..steps {
         frames.push(render_progressive_step(page, opts, step)?);
@@ -3607,6 +3735,139 @@ mod tests {
         assert_eq!(opts.bold, 1);
         assert!(opts.aa);
         assert_eq!(opts.rotation, UserRotation::Cw90);
+    }
+
+    /// The incremental `render_progressive_all` fast path (B5) must be
+    /// byte-identical to the per-frame `render_progressive_step` loop it
+    /// replaces, on a real multi-BG44-chunk page.
+    #[test]
+    fn render_progressive_all_matches_per_frame() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        // chicken.djvu has 3 BG44 chunks → 3 progressive frames, exercising the
+        // incremental streaming path (steps > 1, Bilinear, strict).
+        assert!(
+            page.bg44_chunks().len() >= 2,
+            "need a multi-chunk BG44 page"
+        );
+
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Bilinear,
+            ..Default::default()
+        };
+
+        let all = render_progressive_all(page, &opts).expect("progressive_all");
+        let steps = progressive_steps(page);
+        assert_eq!(all.len(), steps);
+        for (step, frame) in all.iter().enumerate() {
+            let per_frame = render_progressive_step(page, &opts, step).expect("progressive_step");
+            assert_eq!(
+                (frame.width, frame.height),
+                (per_frame.width, per_frame.height),
+                "frame {step} dimensions differ"
+            );
+            assert!(
+                frame.data == per_frame.data,
+                "frame {step} pixels differ between incremental and per-frame paths"
+            );
+        }
+    }
+
+    /// Evicting the render cache must not change output: a re-render after
+    /// `evict_render_caches` is byte-identical to the first (the cache rebuilds
+    /// lazily and correctly).
+    #[test]
+    fn evict_render_cache_preserves_output() {
+        let mut doc = load_doc("chicken.djvu");
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let first = {
+            let p = doc.page(0).unwrap();
+            render_pixmap(p, &opts).unwrap()
+        };
+        doc.evict_render_caches();
+        let second = {
+            let p = doc.page(0).unwrap();
+            render_pixmap(p, &opts).unwrap()
+        };
+        assert_eq!(
+            first.data, second.data,
+            "output changed after cache eviction"
+        );
+    }
+
+    /// `enforce_cache_budget` evicts least-recently-used unprotected pages down
+    /// to the budget, keeps protected pages, and re-renders byte-identically.
+    #[test]
+    fn enforce_cache_budget_lru_and_correctness() {
+        let mut doc = load_doc("colorbook.djvu");
+        if doc.page_count() < 3 {
+            return; // needs a multi-page fixture
+        }
+        // Render pages 0,1,2 in order → LRU order is 0 < 1 < 2 by access tick.
+        let mut first0 = None;
+        for i in 0..3 {
+            let (w, h) = {
+                let p = doc.page(i).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+            let p = doc.page(i).unwrap();
+            let pm = render_pixmap(p, &opts).unwrap();
+            if i == 0 {
+                first0 = Some(pm);
+            }
+        }
+        // LRU ticks strictly increase with render order.
+        let t0 = doc.page(0).unwrap().render_cache_access_tick();
+        let t1 = doc.page(1).unwrap().render_cache_access_tick();
+        let t2 = doc.page(2).unwrap().render_cache_access_tick();
+        assert!(t0 < t1 && t1 < t2, "LRU ticks not ordered: {t0} {t1} {t2}");
+
+        assert!(doc.render_cache_bytes() > 0);
+        // Budget 1 byte, protect page 2 → evict the two LRU unprotected pages.
+        let freed = doc.enforce_cache_budget(1, &[2]);
+        assert!(freed > 0, "expected some bytes freed");
+        assert_eq!(
+            doc.page(0).unwrap().render_cache_bytes(),
+            0,
+            "page 0 not evicted"
+        );
+        assert_eq!(
+            doc.page(1).unwrap().render_cache_bytes(),
+            0,
+            "page 1 not evicted"
+        );
+        assert!(
+            doc.page(2).unwrap().render_cache_bytes() > 0,
+            "protected page 2 was evicted"
+        );
+
+        // Re-rendering an evicted page reproduces the original output exactly.
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let second0 = render_pixmap(doc.page(0).unwrap(), &opts).unwrap();
+        assert_eq!(first0.unwrap().data, second0.data);
     }
 
     /// `fit_to_width` scales correctly, preserving aspect ratio.

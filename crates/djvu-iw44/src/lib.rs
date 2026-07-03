@@ -29,7 +29,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::{vec, vec::Vec};
 
-use djvu_pixmap::Pixmap;
+use djvu_pixmap::{GrayPixmap, Pixmap};
 use djvu_zp::ZpDecoder;
 
 /// IW44 wavelet image encoder — produces BG44/FG44/TH44 chunk payloads (std-only).
@@ -3489,6 +3489,78 @@ impl Iw44Image {
             Ok(pm)
         }
     }
+
+    /// Convert to a grayscale [`GrayPixmap`] at full resolution.
+    ///
+    /// See [`to_gray8_subsample`](Self::to_gray8_subsample).
+    pub fn to_gray8(&self) -> Result<GrayPixmap, Iw44Error> {
+        self.to_gray8_subsample(1)
+    }
+
+    /// Convert to a grayscale [`GrayPixmap`], decoding **only the Y (luma)
+    /// plane** and skipping both chroma planes entirely.
+    ///
+    /// For a colour image the two chroma inverse-wavelet transforms and the
+    /// YCbCr→RGBA conversion are the bulk of `to_rgb`'s cost; a grayscale
+    /// consumer (OCR pre-pass, e-ink viewer, thumbnail grid, `render_gray8`)
+    /// never needs them. This path reconstructs Y alone and writes one byte per
+    /// pixel.
+    ///
+    /// # Fidelity
+    ///
+    /// - **Grayscale images:** byte-identical to `to_rgb_subsample(sub).to_gray8()`
+    ///   (the R=G=B channels already equal `127 − Y`, and the Rec.601 weights
+    ///   sum to 1024, so the luma round-trips exactly).
+    /// - **Colour images:** returns the DjVu luma channel `clamp(Y + 128, 0,
+    ///   255)`. This is the encoder's own luminance and is *not* bit-identical
+    ///   to the Rec.601 luma of the reconstructed RGB (`to_gray8`), which mixes
+    ///   in the chroma-derived R/G/B. The two differ by a few levels at most;
+    ///   the Y channel is the more faithful luminance.
+    pub fn to_gray8_subsample(&self, subsample: u32) -> Result<GrayPixmap, Iw44Error> {
+        if subsample == 0 {
+            return Err(Iw44Error::InvalidSubsample);
+        }
+        let y_dec = self.y.as_ref().ok_or(Iw44Error::MissingCodec)?;
+        let sub = subsample as usize;
+        let w = (self.width as usize).div_ceil(sub) as u32;
+        let h = (self.height as usize).div_ceil(sub) as u32;
+
+        // Reconstruct Y only — never touch cb/cr (their reconstruct() + the
+        // YCbCr math are what this path exists to skip).
+        let y_plane = y_dec.reconstruct(sub);
+        let is_compact = (2..=8).contains(&sub) && sub.is_power_of_two();
+        let is_color = self.is_color;
+
+        let pw = w as usize;
+        let ph = h as usize;
+        let mut data = vec![0u8; pw * ph];
+        for row in 0..ph {
+            let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
+            let src_row = if is_compact { row } else { row * sub };
+            let y_off = src_row * y_plane.stride;
+            let dst = &mut data[out_row * pw..out_row * pw + pw];
+            if is_color {
+                // DjVu luma: gray = clamp(Y + 128, 0, 255).
+                for (col, d) in dst.iter_mut().enumerate() {
+                    let src_col = if is_compact { col } else { col * sub };
+                    let val = normalize(y_plane.data[y_off + src_col]);
+                    *d = (val + 128).clamp(0, 255) as u8;
+                }
+            } else {
+                // Grayscale plane: gray = 127 − Y (matches to_rgb's R channel).
+                for (col, d) in dst.iter_mut().enumerate() {
+                    let src_col = if is_compact { col } else { col * sub };
+                    let val = normalize(y_plane.data[y_off + src_col]);
+                    *d = (127 - val) as u8;
+                }
+            }
+        }
+        Ok(GrayPixmap {
+            width: w,
+            height: h,
+            data,
+        })
+    }
 }
 
 // ---- Tests ------------------------------------------------------------------
@@ -3722,6 +3794,66 @@ mod tests {
 
         let pm = img.to_rgb().expect("to_rgb failed");
         assert_ppm_match(&pm.to_ppm(), "chicken_bg.ppm");
+    }
+
+    /// Direct gray decode (`to_gray8`) must match the dimensions of `to_rgb`
+    /// and stay close to its Rec.601 luma, while skipping the chroma planes.
+    #[test]
+    fn iw44_to_gray8_matches_rgb_luma_boy() {
+        let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu not found");
+        let file = djvu_iff::parse(&data).expect("failed to parse boy.djvu");
+        let chunks = extract_bg44_chunks(&file);
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+
+        let rgb = img.to_rgb().expect("to_rgb failed");
+        let rgb_gray = rgb.to_gray8();
+        let direct = img.to_gray8().expect("to_gray8 failed");
+
+        assert_eq!(direct.width, rgb_gray.width);
+        assert_eq!(direct.height, rgb_gray.height);
+        assert_eq!(direct.data.len(), rgb_gray.data.len());
+
+        if img.is_color {
+            // Colour: Y-plane luma vs Rec.601-of-RGB differ by a few levels.
+            let mut sum = 0u64;
+            let mut max = 0u8;
+            for (a, b) in direct.data.iter().zip(rgb_gray.data.iter()) {
+                let d = a.abs_diff(*b);
+                sum += d as u64;
+                max = max.max(d);
+            }
+            let mean = sum as f64 / direct.data.len() as f64;
+            assert!(mean < 4.0, "mean gray diff {mean} too high");
+            assert!(max <= 24, "max gray diff {max} too high");
+        } else {
+            // Grayscale: must be byte-identical to the RGB→luma round-trip.
+            assert_eq!(direct.data, rgb_gray.data, "gray path must be exact");
+        }
+    }
+
+    /// `to_gray8_subsample` dimensions must track `to_rgb_subsample` at sub 2/4.
+    #[test]
+    fn iw44_to_gray8_subsample_dims() {
+        let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu not found");
+        let file = djvu_iff::parse(&data).expect("failed to parse boy.djvu");
+        let chunks = extract_bg44_chunks(&file);
+        let mut img = Iw44Image::new();
+        for c in &chunks {
+            img.decode_chunk(c).expect("decode_chunk failed");
+        }
+        for sub in [2u32, 4u32] {
+            let g = img.to_gray8_subsample(sub).expect("gray sub");
+            let rgb = img.to_rgb_subsample(sub).expect("rgb sub");
+            assert_eq!((g.width, g.height), (rgb.width, rgb.height));
+            assert_eq!(g.data.len(), (g.width * g.height) as usize);
+        }
+        assert!(matches!(
+            img.to_gray8_subsample(0),
+            Err(Iw44Error::InvalidSubsample)
+        ));
     }
 
     /// `to_rgb_subsample(2)` on boy.djvu must produce a pixel-exact result.
