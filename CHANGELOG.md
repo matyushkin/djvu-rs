@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.4](https://github.com/matyushkin/djvu-rs/compare/v0.24.3...v0.24.4) (2026-07-03)
+
+
+### Performance Improvements
+
+* **build:** fat LTO + codegen-units=1 profile (−65% jb2 encode) ([#494](https://github.com/matyushkin/djvu-rs/issues/494)) ([6c6138a](https://github.com/matyushkin/djvu-rs/commit/6c6138a21334b60e29ead46a56cf4c4af40c02b0))
+* **encode:** parallel per-page encoding in DJVM bundlers (−35…43% / −39%) ([#493](https://github.com/matyushkin/djvu-rs/issues/493)) ([a6d252a](https://github.com/matyushkin/djvu-rs/commit/a6d252a44f36abe6c4f1049fb4cd72e12f0dc199))
+* parallelism sweep round 4 — clustering, EPUB/TIFF export, segmentation ([#497](https://github.com/matyushkin/djvu-rs/issues/497)) ([5deb1c2](https://github.com/matyushkin/djvu-rs/commit/5deb1c2ca3aa82cf6e10b7b721d833440b4822dd))
+* rounds 5-6 decode/render/open sweep — lazy open (−48%), shared-dict (−37%), PGO (−15%) ([#498](https://github.com/matyushkin/djvu-rs/issues/498)) ([eb1fed4](https://github.com/matyushkin/djvu-rs/commit/eb1fed4a4e363df72c030df6a911159f4824c7fa))
+
 ## [0.24.3](https://github.com/matyushkin/djvu-rs/compare/v0.24.2...v0.24.3) (2026-07-02)
 
 
