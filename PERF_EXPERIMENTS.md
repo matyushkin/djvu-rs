@@ -6372,17 +6372,8 @@ study for why swarm findings get independently re-verified before landing.
 
 Survivors that are real but not landed this session:
 
-- **LAZY_PAGE_CONSTRUCT (swarm P3, top structural win).** Sync/`mmap` document
-  open eagerly `to_vec()`-copies every page's chunks in `parse_page_from_chunks`
-  even when only page 1 is rendered; the async `LazyDocument` path already solved
-  this with `OnceCell`. The copy loop is **~52 % of `Document::from_bytes`** on the
-  520-page corpus, and effectively the *entire* memcpy cost for `MmapDocument`
-  (otherwise zero-copy). Design: `DjVuDocument` retains the backing buffer
-  (`Arc<[u8]>` / `Mmap`), keep eager parse of the cheap fixed-size `PageInfo` header
-  (so `iterate_pages_520p` doesn't regress), and move the per-page `RawChunk` copy
-  behind a `Vec<OnceLock<DjVuPage>>`. Medium risk (lifetime/ownership + no_std `Arc`
-  + `Clone` semantics) → deserves its own focused PR with a new cold-open+first-page
-  bench (none exists). **Highest-value open item.**
+- **LAZY_PAGE_CONSTRUCT (swarm P3, top structural win) — LANDED**, see its own
+  entry below. −48 % `from_bytes` on the 520-page doc, byte-identical.
 - **SHARED_DICT_CLONE_PER_PAGE (swarm P2).** `encode_jb2_dict_with_options`
   (`crates/djvu-jb2/src/encode.rs`) rebuilds `dict_entries`/`dedup`/`by_size` from
   the shared symbols via `.clone()` on every per-page call; the shared dict is
@@ -6412,3 +6403,52 @@ prior rounds missed — **LAZY_PAGE_CONSTRUCT** — because earlier rounds optim
 decode/render *throughput* and never benchmarked large-document *cold-open latency*.
 That axis (and the missing benches for it) is where the next real gains are, not in
 the already-tuned codec kernels.
+
+### LAZY_PAGE_CONSTRUCT — defer per-page chunk copy in bundled document open — **Kept** (2026-07-03)
+
+**Issue (round-6 swarm P3, top structural win).** Opening a bundled DJVM document
+eagerly `to_vec()`-copied **every** page's chunks in `parse_page_from_chunks`, even
+when the caller only renders page 1. On the 520-page corpus that copy loop is ~half
+of `Document::from_bytes`; for `MmapDocument` it is essentially the *only* memcpy
+(the mapping is otherwise zero-copy). The async `LazyDocument` already avoided this
+with `OnceCell`; the sync/mmap path did not.
+
+**Approach.** A page's chunks now come from a `ChunkStore` (`std`):
+- `Eager(Vec<RawChunk>)` — unchanged behaviour for single-page, indirect, and
+  `no_std` documents (which keep a plain `Vec<RawChunk>` field).
+- `Lazy { backing, range, cache: OnceLock }` — holds a shared document backing
+  (`Backing = Arc<dyn AsRef<[u8]> + Send + Sync>`) and this page's `FORM` byte
+  range, and materialises the chunks **once on first access** via `chunk_slice()`.
+
+`Document::from_bytes` moves its `Vec<u8>` into the backing (no copy) and
+`MmapDocument::open` moves the `Mmap` in (zero-copy); both call the new
+`DjVuDocument::parse_backed`, which builds lazy pages for bundled documents and
+falls back to the eager `parse` for single-page / non-DJVM / indirect. Only the
+cheap fixed-size `INFO` header is parsed eagerly per page, so metadata iteration
+(`iterate_pages_520p`) does not regress.
+
+**Correctness.** Byte-identical: the lazy build re-parses the same `FORM` sub-form
+bytes into the same `RawChunk`s the eager path produced. The `mmap_document_matches_parse`
+parity test, all multi-page / shared-dict / `page_byte_range` tests, and the full
+1016-test suite (incl. `no_std`, `wasm32`) pass. The backing `Arc` is shared by
+every lazy page and by `MmapDocument`, so the mapping cannot drop while a page still
+needs it.
+
+**Numbers** (`benches/document.rs`, M1 Max, 520-page pathogenic_bacteria_1896):
+
+| Bench | Before (eager) | After (lazy) | Change |
+|-------|----------------|--------------|--------|
+| `parse_multipage_520p` (`from_bytes` only) | 2.36 ms | 1.22 ms | **−48 %** (p=0.00) |
+| `open_and_render_first_page_520p` (cold open + render pg 1) | 10.82 ms | 9.86 ms | **−9 %** (p=0.00) |
+| `iterate_pages_520p` (metadata only) | 431 ns | 421 ns | flat (no regression) |
+
+For accessed pages the copy work is the same, only deferred (re-`parse_sub_form` +
+`to_vec` on first touch); for the common "open a big book, view a few pages" and
+metadata/thumbnail workloads the un-touched pages are never copied at all, and mmap
+opens are zero-copy until a page is rendered. New `open_and_render_first_page_520p`
+bench added.
+
+**Decision.** **Kept.** The largest structural win of rounds 5–6: it targets the
+cold-open-latency axis the prior throughput-focused rounds never benchmarked. The
+swarm found it; hand-implementation confirmed the −48 % `from_bytes` win,
+byte-identical, across std/no_std/mmap/async.

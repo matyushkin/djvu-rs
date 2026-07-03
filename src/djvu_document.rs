@@ -141,6 +141,83 @@ struct RawChunk {
     data: Vec<u8>,
 }
 
+/// Shared, owned backing store for a document's bytes (an owned `Vec<u8>` from
+/// [`crate::Document::from_bytes`], or a `memmap2::Mmap`). Lazily-constructed
+/// pages ([`ChunkStore::Lazy`]) hold an `Arc` clone of this so their chunk bytes
+/// can be materialised on first access without copying them at open time.
+#[cfg(feature = "std")]
+pub(crate) type Backing = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+/// The bytes behind a [`Backing`].
+#[cfg(feature = "std")]
+fn backing_bytes(b: &Backing) -> &[u8] {
+    (**b).as_ref()
+}
+
+/// Where a page's chunk list comes from.
+///
+/// `Eager` holds the copied chunks (the historical behaviour, used for
+/// single-page, indirect, and `no_std` documents). `Lazy` defers the per-chunk
+/// `to_vec` copy until first access: it keeps the shared document backing and
+/// this page's `FORM` byte range, and materialises the chunks once on demand.
+/// This is what makes opening a large bundled document O(1) in copies instead of
+/// O(total bytes) when only some pages are ever rendered (LAZY_PAGE_CONSTRUCT).
+#[cfg(feature = "std")]
+enum ChunkStore {
+    Eager(Vec<RawChunk>),
+    Lazy {
+        backing: Backing,
+        range: core::ops::Range<usize>,
+        cache: std::sync::OnceLock<Vec<RawChunk>>,
+    },
+}
+
+#[cfg(feature = "std")]
+impl ChunkStore {
+    /// The page's chunks, materialising them from the backing on first call for
+    /// the `Lazy` variant. A corrupt/out-of-range slice yields an empty list
+    /// (permissive, matching the render path's error handling).
+    fn get(&self) -> &[RawChunk] {
+        match self {
+            ChunkStore::Eager(v) => v,
+            ChunkStore::Lazy {
+                backing,
+                range,
+                cache,
+            } => cache.get_or_init(|| {
+                let Some(sub) = backing_bytes(backing).get(range.clone()) else {
+                    return Vec::new();
+                };
+                match parse_sub_form(sub) {
+                    Ok(chunks) => chunks
+                        .iter()
+                        .map(|c| RawChunk {
+                            id: c.id,
+                            data: c.data.to_vec(),
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl Clone for ChunkStore {
+    fn clone(&self) -> Self {
+        match self {
+            ChunkStore::Eager(v) => ChunkStore::Eager(v.clone()),
+            // A cloned page re-defers: same backing + range, fresh cache.
+            ChunkStore::Lazy { backing, range, .. } => ChunkStore::Lazy {
+                backing: backing.clone(),
+                range: range.clone(),
+                cache: std::sync::OnceLock::new(),
+            },
+        }
+    }
+}
+
 /// Decode the payload of a paired `*z` (BZZ-compressed) / `*a` (raw) chunk.
 ///
 /// DjVu stores most variable-length payloads as a pair of chunk ids: a
@@ -225,7 +302,12 @@ impl SharedDict {
 pub struct DjVuPage {
     /// Page info parsed from the INFO chunk.
     info: PageInfo,
-    /// All raw chunks from this page's FORM:DJVU, in order.
+    /// All raw chunks from this page's FORM:DJVU, in order. In `std` builds this
+    /// may be lazily materialised from the document backing (see [`ChunkStore`]);
+    /// `no_std` always holds the eagerly-copied chunks.
+    #[cfg(feature = "std")]
+    chunks: ChunkStore,
+    #[cfg(not(feature = "std"))]
     chunks: Vec<RawChunk>,
     /// Page index within the document (0-based).
     index: usize,
@@ -274,7 +356,7 @@ impl core::fmt::Debug for DjVuPage {
         let dbz_len = self.shared_djbz.as_ref().map(|v| v.len());
         f.debug_struct("DjVuPage")
             .field("info", &self.info)
-            .field("chunks", &self.chunks)
+            .field("chunks", &self.chunk_slice())
             .field("index", &self.index)
             .field("shared_djbz", &dbz_len)
             .finish_non_exhaustive()
@@ -324,7 +406,7 @@ impl DjVuPage {
     /// Returns `Ok(None)` if the page has no TH44 thumbnail.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, DocError> {
         let th44_chunks: Vec<&[u8]> = self
-            .chunks
+            .chunk_slice()
             .iter()
             .filter(|c| &c.id == b"TH44")
             .map(|c| c.data.as_slice())
@@ -352,8 +434,19 @@ impl DjVuPage {
     /// ```ignore
     /// let sjbz = page.raw_chunk(b"Sjbz").expect("page must have a JB2 chunk");
     /// ```
+    /// This page's raw chunk list, materialising lazily-stored chunks on first
+    /// access (`std`) or returning the eagerly-copied list (`no_std`).
+    #[cfg(feature = "std")]
+    fn chunk_slice(&self) -> &[RawChunk] {
+        self.chunks.get()
+    }
+    #[cfg(not(feature = "std"))]
+    fn chunk_slice(&self) -> &[RawChunk] {
+        &self.chunks
+    }
+
     pub fn raw_chunk(&self, id: &[u8; 4]) -> Option<&[u8]> {
-        self.chunks
+        self.chunk_slice()
             .iter()
             .find(|c| &c.id == id)
             .map(|c| c.data.as_slice())
@@ -370,7 +463,7 @@ impl DjVuPage {
     /// assert!(!bg44_chunks.is_empty(), "colour page must have BG44 data");
     /// ```
     pub fn all_chunks(&self, id: &[u8; 4]) -> Vec<&[u8]> {
-        self.chunks
+        self.chunk_slice()
             .iter()
             .filter(|c| &c.id == id)
             .map(|c| c.data.as_slice())
@@ -381,7 +474,7 @@ impl DjVuPage {
     ///
     /// Duplicate IDs appear multiple times (once per chunk).
     pub fn chunk_ids(&self) -> Vec<[u8; 4]> {
-        self.chunks.iter().map(|c| c.id).collect()
+        self.chunk_slice().iter().map(|c| c.id).collect()
     }
 
     /// Deprecated alias for [`Self::raw_chunk`]; kept for internal callers.
@@ -815,6 +908,117 @@ impl DjVuDocument {
         Self::parse_with_resolver(data, None::<fn(&str) -> Result<Vec<u8>, DocError>>)
     }
 
+    /// Parse from an owned, shared backing store (an owned `Vec<u8>` or an
+    /// `Mmap`), constructing **lazy** pages for bundled DJVM documents.
+    ///
+    /// For a bundled document only the cheap per-page `INFO` header is parsed up
+    /// front; each page's chunk bytes are materialised from `backing` on first
+    /// access instead of being copied at open time (LAZY_PAGE_CONSTRUCT). This
+    /// makes "open a 500-page book, render page 1" O(1) in copies rather than
+    /// O(total document bytes). For `mmap` backings the copy is avoided entirely
+    /// until a page is touched.
+    ///
+    /// Single-page, non-DJVM, and indirect documents fall back to the eager
+    /// [`parse`](Self::parse) path (they are small or need a resolver), so this
+    /// is safe to call for any input. Keep the bundled loop below in sync with
+    /// the eager one in [`parse_with_resolver`](Self::parse_with_resolver).
+    #[cfg(feature = "std")]
+    pub(crate) fn parse_backed(backing: Backing) -> Result<Self, DocError> {
+        let data = backing_bytes(&backing);
+        let form = parse_form(data)?;
+        if &form.form_type != b"DJVM" {
+            return Self::parse(data);
+        }
+        let Some(dirm_chunk) = form.chunks.iter().find(|c| &c.id == b"DIRM") else {
+            return Self::parse(data);
+        };
+        let payload = DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
+        if !payload.is_bundled() {
+            // Indirect: needs a resolver — defer to the eager path (which errors
+            // consistently with the previous behaviour).
+            return Self::parse(data);
+        }
+
+        let entries = payload.components();
+        let comp_offsets = &payload.offsets;
+        let bookmarks = parse_navm_bookmarks(&form.chunks)?;
+        let global_chunks: Vec<RawChunk> = form
+            .chunks
+            .iter()
+            .filter(|c| &c.id != b"FORM")
+            .map(|c| RawChunk {
+                id: c.id,
+                data: c.data.to_vec(),
+            })
+            .collect();
+
+        let sub_forms: Vec<&IffChunk<'_>> =
+            form.chunks.iter().filter(|c| &c.id == b"FORM").collect();
+
+        use std::collections::BTreeMap;
+        let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
+            .filter_map(|(comp_idx, entry)| {
+                let sf = sub_forms.get(comp_idx)?;
+                let chunks = parse_sub_form(sf.data).ok()?;
+                let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
+                Some((
+                    entry.id.clone(),
+                    Arc::new(SharedDict::new(djbz.data.to_vec())),
+                ))
+            })
+            .collect();
+
+        let base = data.as_ptr() as usize;
+        let mut pages = Vec::new();
+        let mut page_byte_ranges = Vec::new();
+        let mut page_idx = 0usize;
+        for (comp_idx, entry) in entries.iter().enumerate() {
+            if entry.kind != DirmComponentKind::Page {
+                continue;
+            }
+            let sub_form = sub_forms.get(comp_idx).ok_or(DocError::Malformed(
+                "DIRM entry count exceeds FORM children",
+            ))?;
+            let sub_chunks = parse_sub_form(sub_form.data)?;
+            let shared_djbz = sub_chunks
+                .iter()
+                .find(|c| &c.id == b"INCL")
+                .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
+                .and_then(|name| djvi_djbz.get(name))
+                .cloned();
+
+            // The page's FORM sub-form is a slice of `data`, which is `backing`'s
+            // bytes — so its offset within `backing` lets the lazy store re-slice
+            // and parse it on demand.
+            let off = sub_form.data.as_ptr() as usize - base;
+            let range = off..off + sub_form.data.len();
+            let page = parse_page_lazy(&sub_chunks, page_idx, shared_djbz, backing.clone(), range)?;
+            pages.push(page);
+
+            if let Some(off2) = comp_offsets.get(comp_idx) {
+                let start = *off2 as usize;
+                if let Some(size_bytes) = data.get(start + 4..start + 8) {
+                    let size_be = [size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
+                    page_byte_ranges.push(crate::dirm::form_byte_range(*off2, size_be));
+                }
+            }
+            page_idx += 1;
+        }
+        if page_byte_ranges.len() != pages.len() {
+            page_byte_ranges.clear();
+        }
+
+        Ok(DjVuDocument {
+            pages,
+            bookmarks,
+            global_chunks,
+            page_byte_ranges,
+        })
+    }
+
     /// Parse a DjVu document with an optional resolver for indirect pages.
     ///
     /// The resolver receives the `name` field from each INCL chunk and must
@@ -1177,10 +1381,13 @@ impl DjVuDocument {
 /// Requires the `mmap` feature flag.
 #[cfg(feature = "mmap")]
 pub struct MmapDocument {
-    /// The memory mapping — kept alive so the parsed document's borrowed data
-    /// (pages, chunks) remain valid.  In practice `DjVuDocument` owns `Vec`
-    /// copies of all chunk data, so the mmap is only needed during `parse`.
-    _mmap: memmap2::Mmap,
+    /// The memory mapping, wrapped in the shared [`Backing`] type and kept alive
+    /// for the document's lifetime. For bundled documents the parsed pages are
+    /// **lazy** and read their chunk bytes directly from this mapping on demand
+    /// (zero-copy open); for single-page / indirect documents the pages own copies
+    /// and this simply outlives the parse. Held via the same `Arc` the pages
+    /// clone, so the mapping cannot be dropped while a lazy page still needs it.
+    _backing: Backing,
     doc: DjVuDocument,
 }
 
@@ -1206,8 +1413,14 @@ impl MmapDocument {
         #[allow(unsafe_code)]
         let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 
-        let doc = DjVuDocument::parse(&mmap)?;
-        Ok(MmapDocument { _mmap: mmap, doc })
+        // Move the mapping into the shared backing; bundled pages read from it
+        // lazily (zero-copy open), and the `Arc` keeps it alive for them.
+        let backing: Backing = Arc::new(mmap);
+        let doc = DjVuDocument::parse_backed(backing.clone())?;
+        Ok(MmapDocument {
+            _backing: backing,
+            doc,
+        })
     }
 
     /// Open a DjVu file with automatic filesystem resolution for indirect pages.
@@ -1230,8 +1443,14 @@ impl MmapDocument {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // Indirect documents resolve external component files, so pages are eager
+        // here; the mapping is still held via the shared backing for uniformity.
         let doc = DjVuDocument::parse_from_dir(&mmap, &base_dir)?;
-        Ok(MmapDocument { _mmap: mmap, doc })
+        let backing: Backing = Arc::new(mmap);
+        Ok(MmapDocument {
+            _backing: backing,
+            doc,
+        })
     }
 
     /// Access the parsed [`DjVuDocument`].
@@ -1265,6 +1484,37 @@ impl core::ops::Deref for MmapDocument {
 /// `shared_djbz` is the raw `Djbz` data from a referenced DJVI component
 /// (resolved from the page's INCL chunk by the caller); pass `None` if no
 /// shared dictionary is available.
+/// Build a page whose chunk bytes are materialised lazily from `backing`.
+///
+/// Only the cheap fixed-size `INFO` header is parsed now; the per-chunk copy is
+/// deferred to first [`DjVuPage::chunk_slice`] access. `range` is the page's
+/// `FORM` sub-form byte range within `backing`.
+#[cfg(feature = "std")]
+fn parse_page_lazy(
+    chunks: &[IffChunk<'_>],
+    index: usize,
+    shared_djbz: Option<Arc<SharedDict>>,
+    backing: Backing,
+    range: core::ops::Range<usize>,
+) -> Result<DjVuPage, DocError> {
+    let info_chunk = chunks
+        .iter()
+        .find(|c| &c.id == b"INFO")
+        .ok_or(DocError::MissingChunk("INFO"))?;
+    let info = PageInfo::parse(info_chunk.data)?;
+    Ok(DjVuPage {
+        info,
+        chunks: ChunkStore::Lazy {
+            backing,
+            range,
+            cache: std::sync::OnceLock::new(),
+        },
+        index,
+        shared_djbz,
+        render_layers: std::sync::OnceLock::new(),
+    })
+}
+
 #[cfg(feature = "std")]
 fn parse_page_from_chunks(
     chunks: &[IffChunk<'_>],
@@ -1289,7 +1539,7 @@ fn parse_page_from_chunks(
 
     Ok(DjVuPage {
         info,
-        chunks: raw_chunks,
+        chunks: ChunkStore::Eager(raw_chunks),
         index,
         shared_djbz,
         render_layers: std::sync::OnceLock::new(),
@@ -1752,8 +2002,9 @@ mod tests {
         let doc = DjVuDocument::parse(&data).expect("parse should succeed");
         let page = doc.page(0).expect("page 0 must exist");
 
-        // page.chunks should be populated but no decoding has happened
-        assert!(!page.chunks.is_empty(), "chunks must be stored (lazy)");
+        // Chunks are available (materialised on access for lazy pages) but no
+        // IW44 decoding has happened yet.
+        assert!(!page.chunk_slice().is_empty(), "chunks must be available");
 
         // thumbnail() triggers decode — but there's no TH44 chunk in boy_jb2.djvu
         let thumb = page.thumbnail().expect("thumbnail() should not error");

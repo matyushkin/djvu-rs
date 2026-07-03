@@ -256,10 +256,35 @@ fn bench_shared_dict_mask_decode(c: &mut Criterion) {
     });
 }
 
+/// Cold open of a 520-page bundled document + render of page 1 only.
+///
+/// The product-visible win from LAZY_PAGE_CONSTRUCT: a viewer opening a large
+/// book and showing the first page should not pay to copy all 520 pages' chunks.
+/// Re-parses fresh each iteration (via `Document::from_bytes`) so the open cost
+/// is included, then renders page 0.
+fn bench_open_and_render_first(c: &mut Criterion) {
+    let data = match load_large_doc_bytes() {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping bench_open_and_render_first: pathogenic not found");
+            return;
+        }
+    };
+    c.bench_function("open_and_render_first_page_520p", |b| {
+        b.iter(|| {
+            let doc =
+                djvu_rs::Document::from_bytes(black_box(data.clone())).expect("open bundled doc");
+            let page = doc.page(0).expect("page 0");
+            let _ = black_box(page.render());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_parse_multipage,
     bench_iterate_pages,
+    bench_open_and_render_first,
     bench_render_large_doc_first,
     bench_render_large_doc_mid,
     bench_decode_mask_large,
