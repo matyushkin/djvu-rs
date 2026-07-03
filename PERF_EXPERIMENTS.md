@@ -6729,3 +6729,34 @@ reality (nothing embeds TH44), D5 is worth at most an **explicit opt-in** render
 thumbnail embedding — not a default fast path. Deferred as low-priority opt-in. The
 value of this round is that D1 turned "maybe TH44 previews are fine" into a measured
 SSIM 0.5–0.68 tradeoff, i.e. an evidence-based *no* for the default case.
+
+### D4 (gamma-correct / linear-light downscale) — **Rejected (low headroom)** (2026-07-03)
+
+Diagnostic via D1 before touching the hot area-average compositor (which carries
+AREA_FIX, COLOR_AA, AREAAVG_ALLBG — all kept). Compared, on real rendered pages,
+our **gamma-space** box downscale (what area-average does — average device values)
+against a physically-correct **linear-light** downscale (gamma-decode → average →
+re-encode, page gamma 2.2):
+
+| Page | 1/2 (SSIM / PSNR) | 1/4 (SSIM / PSNR) |
+|------|-------------------|-------------------|
+| colorbook (photo) | 0.9984 / 41.2 dB | 0.9969 / 37.5 dB |
+| boy (photo) | 0.9967 / 35.4 dB | 0.9937 / 29.8 dB |
+| watchmaker (text+photo) | 0.9932 / 28.8 dB | 0.9790 / 25.1 dB |
+
+The correct-vs-naive gap is **negligible** on photographic content (SSIM ≥ 0.997)
+and only mildly visible on the text-heavy page (SSIM 0.979 worst case). The reason
+is structural: the gamma-incorrect-average artefact is worst on hard black/white
+edges, but in DjVu those edges live in the **bilevel JB2 mask** (composited via
+`mask_box_coverage`, a separate path), not in the smooth IW44 background that the
+area-average downscales. Implementing linear-light in the hot BG-downscale kernel —
+risking the three kept optimisations there, and *diverging* from DjVuLibre (which
+also averages in gamma space) — buys at most ~2% SSIM on the worst case.
+
+**Rejected.** Not worth the compositor risk. And the practical lever for better
+downscaled **text** is already identified and far larger: **D2's Lanczos-3**
+(edge-preserving, SSIM 0.989 vs bilinear 0.861 on watchmaker) dominates any gamma
+refinement. Corollary: **A3's linear-light *blend*** shares the same physics and
+therefore the same small headroom on real DjVu content — deprioritised by the same
+evidence. D1 converted two guesses into evidence-based decisions this session: **D2
+adopt Lanczos, D4/A3 reject linear-light.**
