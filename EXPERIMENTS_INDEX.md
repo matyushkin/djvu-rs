@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| QUALITY_HARNESS_D1 | 2026-07-03 | quality infra (unblocks D branch) | **K** (infra) | perceptual gate + D2 decided | New `src/quality.rs` (PSNR/SSIM/`compare`, 6 tests) + `examples/quality_harness.rs` (vs ddjvu). Immediate finding: Lanczos3 downscale SSIM 0.993/0.989 vs Bilinear 0.959/0.861 → **Lanczos decisively better** (#423/D2 answered). Gates A3/D3/D4/D5. Round-9 |
 | GRAY_DIRECT | 2026-07-03 | IW44 decode (gray axis) | **K** | **−71% seq / −46% par** gray decode of colour page | New `Iw44Image::to_gray8[_subsample]`: reconstruct Y plane only, skip both chroma IDWTs + YCbCr math. Grayscale imgs byte-identical to `to_rgb().to_gray8()`; colour = DjVu luma (mean<4/255 vs Rec.601). Additive, no risk. Round-7, backlog B2 |
 | TRIAGE_ROUND8 | 2026-07-03 | breadth triage (axes A–D) | D | verdicts for ~25 proposals | B3 (early wavelet stop) + B4-hot (word blit) **already implemented**; C1-compositor + C2 **ruled out**; B5 (progressive O(N²) decode) **top opportunity, measured 4.8× on colorbook, deferred → needs stateful decoder**; rest NEEDS-INFRA / QUALITY-GATED (D1 harness unblocks D branch). See PERF round 8 |
 | GATHER_ZIGZAG_INV | 2026-07-03 | IW44 encode | **K** | ~1% iw44_encode + cleanup | Row-major plane read + ZIGZAG_INV scatter into L1 block (mirrors decoder); deletes 2 dup zigzag tables. Byte-identical. Round-6 swarm P5 |

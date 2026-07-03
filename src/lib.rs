@@ -201,6 +201,14 @@ pub mod djvu_mut;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// Perceptual image-quality metrics (PSNR, SSIM) for render experiments.
+///
+/// Judges whether a render change is perceptually better/worse against a
+/// reference, which the arithmetic pixel-diff tooling cannot. See
+/// [`quality::compare`]. Std-only (render-side).
+#[cfg(feature = "std")]
+pub mod quality;
+
 /// FGbz foreground-palette parser — decodes the `FGbz` chunk into a color
 /// palette and per-blit index table so [`djvu_render`] receives already-decoded
 /// data and never calls `bzz_decode` directly.

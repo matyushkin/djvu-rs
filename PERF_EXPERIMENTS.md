@@ -6648,3 +6648,50 @@ split into NEEDS-INFRA and QUALITY-GATED — none blocked on ideas, all blocked 
 missing bench/host/harness. The two unblocking meta-tasks that would convert the most
 deferred items into runnable experiments are **D1 (perceptual quality harness)** and
 a **cold-open / large-page / zoom fixture set**.
+
+## Perf round 9 (2026-07-03) — D1 perceptual quality harness (unblocks the D branch)
+
+Round 8 flagged the whole D branch (A3, D2–D5) as QUALITY-GATED: undecidable
+without a perceptual metric, because the existing `interop_pixdiff` tool reports
+only the *arithmetic* mean/max per-pixel RGB diff — which cannot say whether a
+change is perceptually better, only that it drifted. This round builds that gate.
+
+### QUALITY_HARNESS_D1 — PSNR + SSIM metrics module + harness — **Kept (infra)** (2026-07-03)
+
+**What.** New `src/quality.rs` (public, std-gated): `psnr`, `ssim`, `compare`,
+`compare_gray`, `psnr_from_mse`, and a `QualityReport { mse, psnr_db, ssim }`.
+SSIM is the standard windowed index (8×8 non-overlapping windows — the common fast
+approximation of the 11×11 Gaussian — with C1=(0.01·255)², C2=(0.03·255)²), computed
+on the Rec.601 luma of RGBA pixmaps so colour and grayscale compare on the same
+perceptual channel. Six unit tests pin the behaviour: identical→(SSIM 1, PSNR ∞,
+MSE 0), `psnr_from_mse(1)=48.13 dB`, flat-shift keeps high SSIM while a pixel
+checkerboard collapses it, sub-window images don't panic, gray/RGBA luma agree.
+
+`examples/quality_harness.rs` drives it against the DjVuLibre `ddjvu` reference
+(the same "quality floor" `interop_pixdiff` uses), size-aligning our render to
+ddjvu's output and reporting SSIM/PSNR — a perceptual upgrade of the old mean-diff
+harness. Falls back to a mode-delta / `--pair` comparison when ddjvu is absent.
+
+**Immediate result — D2 (Lanczos-vs-Bilinear downscale) decided:** running the
+harness on real colour pages vs the ddjvu reference:
+
+| Page | Scale | Bilinear (SSIM / PSNR) | Lanczos3 (SSIM / PSNR) |
+|------|-------|------------------------|------------------------|
+| colorbook (photo) | 1/2 | 0.9594 / 27.25 dB | **0.9928 / 36.94 dB** |
+| watchmaker (text+photo) | 1/3 | 0.8607 / 13.79 dB | **0.9890 / 28.65 dB** |
+
+Lanczos3 downscaling is **decisively** closer to the reference decoder — a large
+SSIM gain and +10…15 dB PSNR, biggest on the text-heavy page where bilinear's edge
+blur hurts most. This answers the long-open #423 / D2 question with numbers:
+**Lanczos-3 should be the default (or strongly recommended) resampling for
+photographic/mixed downscale**, not bilinear. (It costs more — see
+`render_scaled_0.5x` bench — so the follow-up is a speed/quality policy: default
+Lanczos for large downscale ratios, bilinear for near-1:1. PAR_LANCZOS, already in
+the backlog, would close much of the speed gap.)
+
+**Decision.** **Kept** as infrastructure. `djvu_rs::quality` is now the perceptual
+gate every D-branch experiment (A3 linear-light blend, D3 bicubic FG, D4 gamma
+downscale, D5 TH44 preview) can be judged against — each becomes "does it raise
+SSIM-vs-reference (or SSIM-vs-source) without an unacceptable speed cost?". The
+biggest blocker on the quality axis is removed. 1024 tests green (was 1018), clippy
++ no_std + wasm32 clean.
