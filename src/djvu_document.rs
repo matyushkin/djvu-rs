@@ -424,6 +424,25 @@ impl DjVuPage {
         Ok(Some(pixmap))
     }
 
+    /// Drop this page's render-tier decode cache, reclaiming its per-page memory.
+    ///
+    /// A rendered page memoises its decoded background (including the full-res
+    /// RGB pixmap — up to `width × height × 4` bytes), mask, and foreground in a
+    /// [`crate::djvu_render::PageLayers`] that lives as long as the owning
+    /// document. Rendering many pages of a large document therefore accumulates
+    /// one such cache per page — the peak RSS grows linearly with pages rendered
+    /// (measured ≈ 11 MB/page on `colorbook.djvu`), which can exhaust memory in a
+    /// long-lived viewer over a big book.
+    ///
+    /// This resets the cache so the memory is reclaimed; it rebuilds lazily on
+    /// the next render of this page. A viewer can call it on pages scrolled
+    /// off-screen (or use [`DjVuDocument::retain_render_caches`]) to bound memory.
+    /// Requires `&mut` since the cache uses interior mutability for shared reads.
+    #[cfg(feature = "std")]
+    pub fn evict_render_cache(&mut self) {
+        self.render_layers = std::sync::OnceLock::new();
+    }
+
     /// Return the raw bytes of the first chunk with the given 4-byte ID.
     ///
     /// Returns `None` if no chunk with that ID exists.  The returned slice
@@ -1260,6 +1279,31 @@ impl DjVuDocument {
             index,
             count: self.pages.len(),
         })
+    }
+
+    /// Drop every page's render-tier decode cache, reclaiming all per-page
+    /// render memory in one call.
+    ///
+    /// See [`DjVuPage::evict_render_cache`]: rendered pages memoise their decoded
+    /// layers for the document's lifetime, so peak RSS grows linearly with pages
+    /// rendered. This frees all of it (each page rebuilds lazily on next render).
+    #[cfg(feature = "std")]
+    pub fn evict_render_caches(&mut self) {
+        for p in &mut self.pages {
+            p.evict_render_cache();
+        }
+    }
+
+    /// Drop the render cache of every page **except** those whose index is in
+    /// `keep`, bounding memory to a working set (e.g. the visible pages plus a
+    /// small prefetch window) in a long-lived viewer.
+    #[cfg(feature = "std")]
+    pub fn retain_render_caches(&mut self, keep: &[usize]) {
+        for (i, p) in self.pages.iter_mut().enumerate() {
+            if !keep.contains(&i) {
+                p.evict_render_cache();
+            }
+        }
     }
 
     /// The NAVM table of contents, or an empty slice if not present.

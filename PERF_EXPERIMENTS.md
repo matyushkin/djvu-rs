@@ -6860,3 +6860,58 @@ still re-decodes O(N²) across the session — is *not* addressed by this
 API (persist the accumulating `Iw44Image` across step calls); it remains the real
 deferred structural work, now with corrected expectations (its ceiling is the ZP
 redundancy, not the full per-frame cost).
+
+## Perf round 12 (2026-07-04) — C5 unbounded render-cache memory (found + fixed)
+
+Investigating the last unmeasured axis from round 8: peak memory of a long-lived
+viewer over a large document. It turned out to be a real, unbounded-growth bug.
+
+### C5_RENDER_CACHE_EVICTION — bound per-document render memory — **Kept** (2026-07-04)
+
+**Finding.** `doc.page(i)` returns a `&DjVuPage` stored in the document, and each
+page memoises its decoded layers (`PageLayers`: BG44 image, the full-res BG→RGB
+pixmap at `w×h×4`, mask, mask_sub4, FG44, and the s1/s2/s4 RGB caches) in a
+`OnceLock` that lives for the document's lifetime. So rendering page after page
+**accumulates one full decode cache per page, never evicted** — peak RSS grows
+linearly with pages rendered. Measured on colorbook.djvu (62 colour pages, rendered
+sequentially at native resolution):
+
+| Pages rendered | Peak RSS |
+|----------------|----------|
+| 1 | 58 MB |
+| 5 | 103 MB |
+| 20 | 261 MB |
+| 62 | 714 MB |
+
+≈ 11 MB/page, unbounded — a 500-page colour book would reach multiple GB and can
+OOM a viewer. This axis was never benchmarked (prior rounds optimised throughput,
+not long-run memory), exactly the LAZY_PAGE_CONSTRUCT lesson again.
+
+**Fix.** Additive eviction API (std): `DjVuPage::evict_render_cache(&mut self)`
+resets the `render_layers` `OnceLock` (dropping the whole `PageLayers`);
+`DjVuDocument::evict_render_caches(&mut self)` clears all pages;
+`DjVuDocument::retain_render_caches(&mut self, keep)` clears all but a working set
+(the visible pages + prefetch window). Caches rebuild lazily on the next render, so
+eviction is transparent. No existing behaviour changes (nothing calls it unless the
+consumer opts in).
+
+**Correctness.** Byte-identical across an evict: new
+`evict_render_cache_preserves_output` test renders chicken.djvu, evicts, re-renders,
+and asserts pixel-equality (the cache rebuilds to the same result). 1026 tests green,
+`make check` clean.
+
+**Impact** (render all 62 colorbook pages, keep only the current page's cache):
+
+| Mode | Peak RSS | Output |
+|------|----------|--------|
+| no eviction (before) | 714 MB | checksum 13716 |
+| `retain_render_caches(&[i])` | 103 MB | checksum 13716 |
+
+**−86 % peak RSS**, identical output. A viewer can now bound memory to its working
+set instead of the whole book.
+
+**Decision.** **Kept.** Turns an unbounded per-document memory leak into a
+consumer-controllable working-set bound; additive, byte-identical, low-risk. A full
+automatic global LRU (evict by byte budget without the caller listing pages) is the
+natural follow-up, but the manual API already gives viewers the lever and is enough
+to prevent the OOM.

@@ -3721,6 +3721,36 @@ mod tests {
         }
     }
 
+    /// Evicting the render cache must not change output: a re-render after
+    /// `evict_render_caches` is byte-identical to the first (the cache rebuilds
+    /// lazily and correctly).
+    #[test]
+    fn evict_render_cache_preserves_output() {
+        let mut doc = load_doc("chicken.djvu");
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let first = {
+            let p = doc.page(0).unwrap();
+            render_pixmap(p, &opts).unwrap()
+        };
+        doc.evict_render_caches();
+        let second = {
+            let p = doc.page(0).unwrap();
+            render_pixmap(p, &opts).unwrap()
+        };
+        assert_eq!(
+            first.data, second.data,
+            "output changed after cache eviction"
+        );
+    }
+
     /// `fit_to_width` scales correctly, preserving aspect ratio.
     #[test]
     fn fit_to_width_preserves_aspect() {
