@@ -7028,7 +7028,7 @@ pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — cal
 via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
 not worth duplicating the hot path.
 
-## Perf round 17 (2026-07-04) — JB2 size gap: same-size rec-6 refinement (docs/jb2-size-gap-plan.md)
+## Perf round 15 (2026-07-04) — JB2 size gap: same-size rec-6 refinement (docs/jb2-size-gap-plan.md)
 
 Acting on the "reduce the JB2 size gap vs DjVuLibre" plan. The mask is at parity
 (1.04×) and cross-size rec-6 (#322) was proven to *lose* bytes; the one untried
@@ -7065,9 +7065,9 @@ the `1-bit/px` payload floor (watchmaker ≤5 % twins ≈ 1.8 KB) is only a scal
 whether a real ZP-coded rec-6 actually beats rec-1 is what A2 must measure. Kept the
 analyzer + example behind `experimental`; default builds and output unchanged.
 
-## Perf round 18 (2026-07-04) — same-size rec-6 emitter (A1) + real-bytes proof (A2)
+## Perf round 16 (2026-07-04) — same-size rec-6 emitter (A1) + real-bytes proof (A2)
 
-A0 (round 17) showed a strong same-size near-twin population on text. This round
+A0 (round 15) showed a strong same-size near-twin population on text. This round
 builds the real emitter and measures actual bytes + round-trip — the #301/#322
 discipline of trusting only emitted bytes.
 
