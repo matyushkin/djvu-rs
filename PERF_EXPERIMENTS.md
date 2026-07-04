@@ -7027,3 +7027,40 @@ remains the interface: consumers that want the fast Y-only gray decode — OCR
 pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
 via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
 not worth duplicating the hot path.
+
+## Perf round 17 (2026-07-04) — JB2 size gap: same-size rec-6 refinement (docs/jb2-size-gap-plan.md)
+
+Acting on the "reduce the JB2 size gap vs DjVuLibre" plan. The mask is at parity
+(1.04×) and cross-size rec-6 (#322) was proven to *lose* bytes; the one untried
+lossless lever is **same-size** record-6 refinement (same bbox → no resampling → no
+context misalignment). This round runs Phase A0 (measure the candidate population
+before touching the encoder).
+
+### SAME_SIZE_REC6 — Phase A0 population measurement — **Gate passed for text; thin for noisy scans** (2026-07-04)
+
+**What.** Added `analyze_jb2_same_size_refinement` (experiment-only, `experimental`
+feature) mirroring the default encoder's exact-dedup dict growth, plus the
+`jb2_same_size_a0` example driver. For every component the default encoder emits as a
+fresh record-1 symbol, it scores the minimum Hamming distance against same-`(w,h)`
+dictionary entries. Measurement only — no encoder output changes.
+
+**Numbers** (per-page independent baseline, `shared = []`):
+
+| Corpus | fresh CCs | same-size candidate | ≤5 % near-twins | median best-Hamming |
+|--------|-----------|---------------------|------------------|---------------------|
+| watchmaker (text, Sjbz = 67 % of file) | 3 475 | 1 774 (51 %) | **1 375 (39.6 % of fresh)** | **0.6 %** |
+| pathogenic_bacteria_1896 (600 dpi scan) | 821 330 | 474 513 (58 %) | 7 339 (0.9 % of fresh) | 12.9 % |
+
+**Reading.** On clean text (**watchmaker**), ~40 % of fresh symbols have a same-size
+twin within 5 % Hamming and the median candidate differs by only 0.6 % — a large,
+tight population (repeated OCR glyphs with scan jitter but identical bbox). This is
+exactly where JB2 is the dominant chunk, so a working refinement path could move the
+whole-file size materially. On the noisy 600 dpi **pathogenic** scan the same-size
+twin population is thin (0.9 % ≤5 %, median 12.9 %): same-size candidates are common
+but far apart, so refinement has little to work with there.
+
+**Decision.** **Proceed to A1** (real emitter) — the text-document population clears
+the go/no-go gate. *Caveat, per the #301 lesson:* A0 proves a population, not bytes —
+the `1-bit/px` payload floor (watchmaker ≤5 % twins ≈ 1.8 KB) is only a scale hint;
+whether a real ZP-coded rec-6 actually beats rec-1 is what A2 must measure. Kept the
+analyzer + example behind `experimental`; default builds and output unchanged.

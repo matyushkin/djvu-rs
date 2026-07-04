@@ -780,6 +780,149 @@ pub fn analyze_jb2_cross_size_refinement(
     stats
 }
 
+/// Summary of an experiment-only **same-size** refinement search (Phase A0 of
+/// `docs/jb2-size-gap-plan.md`).
+///
+/// Measurement only — does not change encoding. It counts, for the components
+/// the default encoder emits as fresh record-1 symbols, how many have a
+/// **same-bounding-box** dictionary twin within a small Hamming distance. Those
+/// are the candidates for a lossless same-size record-6 refinement, the one
+/// untried lever that avoids the resampling misalignment that made cross-size
+/// rec-6 (#322) lose bytes. It proves a *population*, not a byte outcome — the
+/// #301 lesson is that only a real emitter (Phase A1/A2) proves bytes.
+#[cfg(feature = "experimental")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SameSizeRefinementStats {
+    /// Total connected components seen in reading order.
+    pub total_ccs: usize,
+    /// Components with no exact same-`(w, h, data)` dictionary hit (i.e. the
+    /// ones the default encoder emits as a fresh record-1 symbol).
+    pub fresh_ccs: usize,
+    /// Fresh components large enough to consider for refinement
+    /// (`pixels >= REFINEMENT_MIN_PIXELS`).
+    pub eligible_fresh_ccs: usize,
+    /// Eligible fresh components with at least one same-size dictionary entry to
+    /// score against.
+    pub candidate_ccs: usize,
+    /// Candidate components whose best (minimum) same-size Hamming distance is
+    /// within 2 % / 5 % / 10 % of the component's pixel count.
+    pub near_le_2pct: usize,
+    pub near_le_5pct: usize,
+    pub near_le_10pct: usize,
+    /// Sum of component pixels for the ≤5 % near-twins (a proxy for how much
+    /// direct-bitmap payload a refinement path could shrink).
+    pub near_le_5pct_pixels: u64,
+    /// Sum of the raw best Hamming *bytes* (`ceil(hamming/8)`) for ≤5 % near-twins
+    /// — a crude floor on the refinement-bitmap payload if it coded one bit per
+    /// differing pixel (the real ZP cost differs; this is only a scale hint).
+    pub near_le_5pct_hamming_bytes: u64,
+    /// Best Hamming fraction in per-mille (‰) for every candidate component, for
+    /// histogramming the distance distribution.
+    pub best_hamming_permille: Vec<u32>,
+}
+
+/// Measure the same-size refinement candidate population without changing output
+/// (Phase A0). Mirrors the default encoder's exact-dedup dictionary growth
+/// (`encode_jb2_dict_with_shared`: exact record-7 copy or fresh record-1, no
+/// refinement), then for every fresh, eligible component scores its minimum
+/// Hamming distance against same-`(w, h)` dictionary entries.
+#[cfg(feature = "experimental")]
+pub fn analyze_jb2_same_size_refinement(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+) -> SameSizeRefinementStats {
+    let mut stats = SameSizeRefinementStats::default();
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return stats;
+    }
+
+    let ccs = extract_ccs(bitmap);
+    // Same reading-order sort the real encoder uses, so `first_seen` reference
+    // selection matches the shipped path.
+    let mut order: Vec<usize> = (0..ccs.len()).collect();
+    let bucket = (SAME_LINE_BASELINE_TOL.max(1)) as u32;
+    order.sort_by_key(|&i| {
+        let cc = &ccs[i];
+        let bottom = cc.y + cc.bitmap.height;
+        (bottom / bucket, cc.x)
+    });
+
+    // Exact-dedup dictionary, seeded from the shared symbols, exactly as the
+    // encoder builds it (symbol_hash key + by_size index).
+    let mut dedup: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut dict_entries: Vec<&Bitmap> = Vec::new();
+    let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for sym in shared_symbols {
+        let idx = dict_entries.len();
+        dedup
+            .entry(symbol_hash(sym.width, sym.height, &sym.data))
+            .or_default()
+            .push(idx);
+        by_size
+            .entry((sym.width, sym.height))
+            .or_default()
+            .push(idx);
+        dict_entries.push(sym);
+    }
+
+    for &cc_idx in &order {
+        let cc = &ccs[cc_idx];
+        stats.total_ccs += 1;
+        let bm = &cc.bitmap;
+        let dkey = symbol_hash(bm.width, bm.height, &bm.data);
+        let exact = dedup.get(&dkey).is_some_and(|cands| {
+            cands.iter().copied().any(|i| {
+                let d = dict_entries[i];
+                d.width == bm.width && d.height == bm.height && d.data == bm.data
+            })
+        });
+        if exact {
+            // Default encoder: record-7 copy, dict unchanged.
+            continue;
+        }
+
+        stats.fresh_ccs += 1;
+        let pixels = u64::from(bm.width) * u64::from(bm.height);
+        if pixels >= REFINEMENT_MIN_PIXELS {
+            stats.eligible_fresh_ccs += 1;
+            if let Some(indices) = by_size.get(&(bm.width, bm.height)) {
+                let mut best: Option<u32> = None;
+                for &idx in indices {
+                    let d = packed_hamming(&bm.data, &dict_entries[idx].data);
+                    best = Some(best.map_or(d, |b| b.min(d)));
+                }
+                if let Some(best) = best {
+                    stats.candidate_ccs += 1;
+                    let frac_permille = ((u64::from(best) * 1000) / pixels.max(1)) as u32;
+                    stats.best_hamming_permille.push(frac_permille);
+                    if frac_permille <= 20 {
+                        stats.near_le_2pct += 1;
+                    }
+                    if frac_permille <= 50 {
+                        stats.near_le_5pct += 1;
+                        stats.near_le_5pct_pixels += pixels;
+                        stats.near_le_5pct_hamming_bytes += u64::from(best).div_ceil(8);
+                    }
+                    if frac_permille <= 100 {
+                        stats.near_le_10pct += 1;
+                    }
+                }
+            }
+        }
+
+        // Default encoder: fresh record-1, added to the dict.
+        let next_idx = dict_entries.len();
+        dedup.entry(dkey).or_default().push(next_idx);
+        by_size
+            .entry((bm.width, bm.height))
+            .or_default()
+            .push(next_idx);
+        dict_entries.push(bm);
+    }
+
+    stats
+}
+
 /// Find the closest same-size dict entry within a Hamming-distance budget,
 /// for use as a **lossy copy** target (record-7) — the encoder pretends the
 /// near-duplicate is byte-exact, the decoder produces the dict entry's pixels
