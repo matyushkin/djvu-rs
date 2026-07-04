@@ -7294,3 +7294,111 @@ behind the `experimental` flag** — not promoted to the stable `Jb2EncodeOption
 and not enabled by default. The lever is validated and recorded; the shipped default
 output is unchanged. Revisit if/when the stable-API or adaptive-default question is
 reopened.
+
+## Perf round 19 (2026-07-04) — JB2 size gap Branch B (lossy): B0 + B1 measurement
+
+Branch A (same-size rec-6, lossless) landed −11.7 % on text. Branch B is the lossy
+lever — matching DjVuLibre's default operating point, which is lossy. This round
+measures the two sub-levers before committing to the cross-size emitter.
+
+### LOSSY_B0 — existing same-size lossy rec-7 (`lossy_threshold`) size/quality sweep — **Measured; already-shipped lever, off by default** (2026-07-04)
+
+The #224 `lossy_threshold` field already substitutes a same-size near-twin as a rec-7
+copy (lossy). Swept it with the D1 harness (mask decoded, compared as grayscale):
+
+| Corpus | thr 2 % | thr 5 % | thr 8 % | thr 10 % |
+|--------|---------|---------|---------|----------|
+| watchmaker (text) | **−21.96 %, SSIM 0.99928** | −23.39 %, 0.99889 | −23.99 %, 0.99864 | −24.47 %, 0.99852 |
+| pathogenic (600 dpi scan) | −0.01 %, 1.00000 | −0.25 %, 0.99985 | −4.79 %, 0.99557 | −11.23 %, 0.98871 |
+
+**Finding.** On text, `lossy_threshold = 0.02` already gives **−22 % with SSIM 0.9993**
+(flipped 0.018 % of mask pixels) — a large, near-imperceptible win that ships today
+but is **off by default** (`lossy_threshold = 0.0`). Diminishing returns above 2 % (the
+extra size costs disproportionate quality). On the scan, same-size lossy finds almost
+nothing at low thresholds (twins are far apart — the A0 median was 12.9 %); it only
+bites at 8–10 %, where quality starts to drop (SSIM 0.989 at −11 %).
+
+### LOSSY_B1_PROBE — cross-size lossy rec-7 candidate population — **Measured; real incremental headroom** (2026-07-04)
+
+The proposed new lever: substitute a *different-bbox* near-twin as a rec-7 copy (no
+refinement bitmap, unlike the failed cross-size **rec-6** #322). Measured the
+cross-size near-twin population (±2 px bbox, ≤5 % resampled Hamming) that same-size
+misses:
+
+| Corpus | fresh CCs | cross-size near-twins (≤5 %) | share of fresh |
+|--------|-----------|------------------------------|----------------|
+| watchmaker | 3 475 | 563 | **16.2 %** |
+| pathogenic | 821 330 | 21 607 | **2.6 %** (≈3× the same-size ≤5 % population) |
+
+**Finding.** Cross-size adds a distinct 16 % of text CCs and ≈3× the scan population
+same-size lossy reaches — real incremental headroom, largest on scans where the "same"
+glyph is binarised at slightly varying sizes.
+
+**Correctness constraint discovered.** A rec-7 copy blits the *dictionary* symbol at
+*its* size; the decoder (`decode_symbol_coords`, `lib.rs:1706`) uses `dict[index].width/height`
+for both coordinate decode and `last_right`. So a cross-size lossy copy must make the
+**encoder** drive its coordinate coding and layout by the **twin's** dimensions, not the
+original CC's `cc_w/cc_h` — otherwise the encoder/decoder layouts desync and *every
+following glyph* is misplaced (corruption, not just a local substitution). B1
+implementation must handle this and validate round-trip layout + SSIM.
+
+**Decision.** Proceed to implement cross-size lossy rec-7 behind a flag (B1), with
+real-byte + SSIM + layout-correctness validation. B0 is recorded as a key standalone
+finding: the shipped `lossy_threshold` is a −22 %/SSIM-0.999 text lever that is simply
+off by default — a documented "cjb2-like" preset may be higher-value than the
+cross-size machinery for text, which B1's numbers will let us compare.
+
+### LOSSY_B1 — cross-size lossy rec-7 emitter — **Reverted (dominated by same-size lossy)** (2026-07-04)
+
+Implemented the cross-size lossy rec-7 substitution behind an experimental
+`cross_size_lossy` option: a fresh CC with a different-bbox near-twin is emitted as a
+rec-7 *copy* of that twin (no refinement bitmap). The correctness constraint from B1
+was handled — the encoder drives its coordinate coding by the **twin's** `(w, h)` (a
+`copy_override` feeding effective `ew/eh/ex_jb2/ey_jb2` into the layout), matching the
+decoder's `dict[index].width`-based `last_right`.
+
+**Layout correctness: confirmed.** SSIM stays 0.996–1.000 (min ≥ 0.989) across the
+corpus — had the twin-dimension layout desynced, every following glyph would shift and
+SSIM would collapse. It doesn't, so the emitter is correct.
+
+**But it is dominated by simply raising the same-size `lossy_threshold`** (watchmaker):
+
+| Config | Sjbz | SSIM avg / min |
+|--------|------|----------------|
+| same-size lossy 2 % only | −21.96 % | 0.99928 / 0.9985 |
+| same-size 2 % **+ cross-size 2 %** | −23.54 % | 0.99884 / 0.9976 |
+| same-size 2 % **+ cross-size 5 %** | −24.81 % | 0.99639 / 0.9904 |
+| **same-size lossy 5 % only** (B0) | **−23.39 %** | **0.99889 / —** |
+
+Cross-size adds only −1.6…−2.9 % on top of same-size lossy, at *worse* SSIM — and
+same-size lossy **alone** at threshold 5 % reaches the same −23.4 % at equal-or-better
+SSIM (0.9989) with none of the cross-size machinery, no glyph-bbox change, and no
+layout-sync risk. Cross-size lossy standalone is −8.7 % (worse size, worse quality)
+because same-size twins are both more abundant (A0: 39.6 % vs cross-size 16.2 %) and
+cheaper (no bbox change → lower flip rate per substitution).
+
+**Decision. Reverted.** The emitter is correct and measured, but every operating point
+it reaches is matched or beaten by the existing same-size `lossy_threshold` at a
+slightly higher setting. Not worth the added hot-loop complexity (`copy_override` +
+effective-dims). Removed the `cross_size_lossy` option and the effective-dims plumbing;
+default path unchanged. **Branch B conclusion:** the real lossy lever is the
+*already-shipped* same-size `lossy_threshold` (B0: −22…−24 % on text at SSIM ≥ 0.999),
+which merely needs to be exposed as a documented "cjb2-like" preset — cross-size adds
+nothing worthwhile. Recorded so cross-size lossy is not re-attempted.
+
+### LOSSY_B_SHIP — expose the same-size lossy lever as a documented preset — **Kept** (2026-07-04)
+
+Branch B's conclusion was that the real lossy lever already ships (`lossy_threshold`,
+B0: −22 % text at SSIM 0.999) and only needs surfacing. Maintainer chose the
+opt-in-preset route (not enable-by-default — DjVu's archival use makes a silent lossy
+default wrong, and it matches the repo's byte-identical-default culture). Landed:
+
+- **Enriched `lossy_threshold` docs** with the measured operating-point table
+  (0.02 → −22 %/SSIM 0.9993, diminishing above) and the text-only caveat.
+- **`Jb2EncodeOptions::lossy_text()`** — the recommended 0.02 preset (≈ cjb2's lossy
+  operating point), plus **`with_lossy_threshold(f32)`** for custom values.
+- Test `lossy_text_preset_is_lossy_and_smaller` (preset shrinks a near-twin page and
+  still decodes). Default remains lossless/byte-identical; the preset is opt-in.
+
+This closes the JB2 size-gap plan: the biggest practical text-size lever is now a
+one-call, documented opt-in, without changing anyone's default output.
