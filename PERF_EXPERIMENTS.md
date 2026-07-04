@@ -7157,3 +7157,46 @@ internal helpers. Same rationale as CLUSTER_DEDUP (#446) / PDF_STREAM — an
 allocator-pressure reduction that is real (and matters more under contended
 allocators / many concurrent encodes / wasm) even where this M1 + system-allocator
 + parallel workload can't cleanly separate it from thermal noise on wall-clock.
+## PAR_PAGE_LAYERS revisit + large single-page colour-encode bench (2026-07-04)
+
+The round-2 PAR_PAGE_LAYERS revert (overlap Sjbz ∥ BG44 in single-page colour
+encode) left a "revisit with a BG-heavy single-page colour fixture" condition. This
+round added the fixture search and re-measured. Conclusion: still unmeasurable — no
+BG-balanced fixture exists in the corpus, and the machine's thermal noise now exceeds
+the theoretical win.
+
+### PAR_PAGE_LAYERS (2nd attempt) — **Reverted again (below noise floor)** (2026-07-04)
+
+**Fixture search.** Scanned every colour page of every available fixture for the JB2
+(Sjbz) vs IW44 (BG44) encode-time split — the join can save at most `min(jb2, iw44)`:
+
+| Fixture / page | JB2 | IW44 | iw44/jb2 |
+|----------------|-----|------|----------|
+| colorbook pg0–19 | 0.6–6.6 ms | 0.2–0.4 ms | 0.05–0.44 |
+| watchmaker pg0–11 | ~0.6 ms | ~0.2 ms | 0.33–0.36 |
+| big-scanned-page (6780×9148) | 314 ms | 15 ms | 0.05 |
+
+**Every** fixture is JB2-dominated: after Sauvola segmentation the background is
+smooth and IW44 compresses it fast, so BG44 is always a small fraction. No full-bleed
+photograph (BG-balanced) page exists in the corpus. Best-case overlap is `min` = the
+tiny IW44 time: ≤3.5 % of total even on big-scanned-page (15 ms of 400 ms).
+
+**Measurement.** Applied the `rayon::join(|| jb2, || iw44)` (byte-identical) and
+A/B'd. An interleaved best-of-3 wall-clock probe showed a consistent *improvement*
+(big-scanned-page 411.8 → 397.9 ms, −3.4 %; colorbook pg3 15.6 → 14.6 ms, −6.4 %),
+matching the predicted IW44 overlap. But the criterion A/B (baseline-then-compare)
+showed a **+11–13 % "regression" (p = 0.00)** on *both* the small and the large bench
+— physically impossible for a µs-overhead join to add 46 ms to a 400 ms encode, so it
+is thermal contamination: the baseline run heats the machine and the compare run runs
+throttled. The ±13 % run-to-run swing that produces is far larger than the ≤3.5 %
+effect being measured.
+
+**Decision.** **Reverted again.** The theoretical win (≤3.5 %, and only on the one
+heavy fixture) sits below this machine's thermal-noise floor (±13 %), so it cannot be
+resolved reliably, and the repo's "both runs p < 0.05" bar is unmet (criterion shows a
+contaminated regression). Byte-identical either way, so no correctness stake. Kept the
+new **`encode_color_page_quality_large`** bench (big-scanned-page, the largest
+single-page colour encode) as standing infrastructure — it is the missing large-page
+single-encode baseline, and the place to re-judge PAR_PAGE_LAYERS if a true photo /
+BG-balanced fixture is ever added. The higher-value parallel axis (across pages) stays
+covered by PAR_ENCODE + PAR_CLUSTER.
