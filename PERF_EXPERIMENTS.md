@@ -7114,3 +7114,9 @@ user — a product decision. Phase A3 (next): promote `same_size_rec6` from
 need the cross-size `scaled_hamming`), and evaluate an adaptive "enable when the
 same-size near-twin population is dense" auto-policy so text documents get the win
 without risking scans.
+
+**A3 shipping decision (2026-07-04):** maintainer chose to **keep same-size rec-6
+behind the `experimental` flag** — not promoted to the stable `Jb2EncodeOptions` API
+and not enabled by default. The lever is validated and recorded; the shipped default
+output is unchanged. Revisit if/when the stable-API or adaptive-default question is
+reopened.
