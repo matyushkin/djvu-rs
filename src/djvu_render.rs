@@ -3775,6 +3775,43 @@ mod tests {
         }
     }
 
+    /// Same byte-identity guarantee for the incremental progressive path with
+    /// `bold > 0`: the fast path dilates the mask once and reuses it across
+    /// frames, which must match the per-frame path that dilates each frame.
+    #[test]
+    fn render_progressive_all_matches_per_frame_bold() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        assert!(
+            page.bg44_chunks().len() >= 2,
+            "need a multi-chunk BG44 page"
+        );
+
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Bilinear,
+            bold: 2,
+            ..Default::default()
+        };
+
+        let all = render_progressive_all(page, &opts).expect("progressive_all");
+        let steps = progressive_steps(page);
+        assert_eq!(all.len(), steps);
+        for (step, frame) in all.iter().enumerate() {
+            let per_frame = render_progressive_step(page, &opts, step).expect("progressive_step");
+            assert_eq!(
+                (frame.width, frame.height),
+                (per_frame.width, per_frame.height),
+                "frame {step} dimensions differ (bold)"
+            );
+            assert!(
+                frame.data == per_frame.data,
+                "frame {step} pixels differ between incremental and per-frame paths (bold)"
+            );
+        }
+    }
+
     /// Evicting the render cache must not change output: a re-render after
     /// `evict_render_caches` is byte-identical to the first (the cache rebuilds
     /// lazily and correctly).
