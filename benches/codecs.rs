@@ -763,6 +763,50 @@ fn bench_encode_djvm_bundle_jb2(c: &mut Criterion) {
     group.finish();
 }
 
+/// Shared-symbol clustering (`cluster_shared_symbols`) in isolation — the
+/// per-document dictionary builder for layered multi-page bilevel encode. Loads
+/// every page mask of the 517-page `pathogenic_bacteria_1896` (a dense text
+/// scan with large same-size symbol buckets) and times only the clustering. The
+/// bucketing scan had no dedicated bench; the surrounding `encode_djvm_bundle_jb2`
+/// bench amortizes it into the full per-page encode.
+fn bench_cluster_shared_symbols(c: &mut Criterion) {
+    let data = match std::fs::read(corpus_path().join("pathogenic_bacteria_1896.djvu")) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!(
+                "skipping bench_cluster_shared_symbols: pathogenic_bacteria_1896.djvu not found"
+            );
+            return;
+        }
+    };
+    let doc = match djvu_rs::DjVuDocument::parse(&data) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut masks = Vec::new();
+    for i in 0..doc.page_count() {
+        let Ok(page) = doc.page(i) else { continue };
+        if let Ok(Some(bm)) = page.extract_mask() {
+            masks.push(bm);
+        }
+    }
+    if masks.len() < 2 {
+        eprintln!("skipping bench_cluster_shared_symbols: need ≥2 masks");
+        return;
+    }
+    let mut group = c.benchmark_group("encode_multipage");
+    group.sample_size(10);
+    group.bench_function("cluster_shared_symbols_517p", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::jb2_encode::cluster_shared_symbols(
+                black_box(&masks),
+                2,
+            ));
+        });
+    });
+    group.finish();
+}
+
 /// IW44 grayscale encode (`encode_iw44_gray`) — the TH44 thumbnail codec path.
 /// Synthetic 1024×1024 gradient GrayPixmap. Previously no gray-path bench.
 fn bench_iw44_encode_gray(c: &mut Criterion) {
@@ -805,6 +849,7 @@ criterion_group!(
     bench_encode_color_page_quality,
     bench_encode_djvm_layered_shared,
     bench_encode_djvm_bundle_jb2,
+    bench_cluster_shared_symbols,
     bench_iw44_encode_gray,
 );
 criterion_main!(benches);

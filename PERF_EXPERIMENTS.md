@@ -6383,11 +6383,14 @@ Survivors that are real but not landed this session:
   outlive the encode), so *no* public signature changes and *no* call site is
   touched. Byte-identical; wall-clock ~12% faster in isolation but within thermal
   noise (~2.9% predicted); peak RSS flat (clones are transient).
-- **CLUSTER_BUCKET_HASH_DEDUP (swarm P4).** `bucket_page_ccs`'s exact-match search
-  does a full `packed_hamming` popcount scan per entry with `max_diff==0` and no
-  `d==0` early-exit — should be a `symbol_hash`-keyed `BTreeMap` lookup (the
+- **CLUSTER_BUCKET_HASH_DEDUP (swarm P4). — LANDED (round 15, −81%/≈5.2×).**
+  `bucket_page_ccs`'s exact-match search
+  did a full `packed_hamming` popcount scan per entry with `max_diff==0` and no
+  `d==0` early-exit — now a `symbol_hash`-keyed `BTreeMap` lookup (the
   technique already shipped for `encode_jb2_dict`'s dedup, CLUSTER_DEDUP #446).
-  ~2 % unmeasured, low risk, byte-identical; no clustering bench exists yet.
+  Byte-identical; the ~2 % estimate was a fraction of full encode — isolated on
+  the dense 517-page corpus the bucketing scan itself dominated
+  `cluster_shared_symbols` (~17.6 s → ~3.4 s). New `bench_cluster_shared_symbols`.
 - **PAR_LANCZOS (swarm P6).** `scale_lanczos3` passes are row-independent but
   sequential. Real upside only on large pages; the named `lanczos3`/boy.djvu fixture
   (96–256 rows) is too small (PARALLEL's own small-page datapoint was 1.15×, not
@@ -7030,6 +7033,71 @@ remains the interface: consumers that want the fast Y-only gray decode — OCR
 pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
 via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
 not worth duplicating the hot path.
+
+## Perf round 15 (2026-07-04) — CLUSTER_BUCKET_HASH_DEDUP (from the round-6 validated backlog)
+
+Round 6's swarm flagged `bucket_page_ccs` (swarm P4) as a real but unmeasured
+(~2%) win with no clustering bench. This round builds the bench and lands the
+change; the isolated measurement shows the win is an order of magnitude larger
+than the ~2% estimate — the estimate was made as a fraction of full per-page
+encode, but on a dense multi-page corpus the byte-exact bucketing scan is itself
+the dominant cost of `cluster_shared_symbols`, not `extract_ccs` as assumed.
+
+### CLUSTER_BUCKET_HASH_DEDUP — hash-indexed exact match in shared-symbol clustering — **Kept** (2026-07-04)
+
+**Issue (round-6 swarm P4).** `cluster_shared_symbols_tunable`'s inner
+`bucket_page_ccs` deduped one page's connected components into per-`(w,h)` size
+buckets with a *linear scan*: for every CC it ran `packed_hamming` (a full
+popcount over the whole packed bitmap) against **every** cluster already in that
+size bucket, keeping the `max_diff == 0` (byte-exact) best. On a dense text scan
+the common letter-size buckets hold hundreds of distinct reps and are hit by
+thousands of CCs per page, so this is O(K) full-bitmap popcounts per CC =
+O(K²) per size class over the corpus. This is the clustering analog of the
+running-dict dedup that CLUSTER_DEDUP (#446) / `encode_jb2_dict_with_options`
+already fixed with a `symbol_hash` index.
+
+**Approach.** Each size bucket becomes a `SizeBucket { clusters: Vec<Cluster>,
+by_hash: BTreeMap<u64, Vec<usize>> }`. A candidate CC computes
+`symbol_hash(w, h, data)`, looks up the (usually ≤1) cluster indices under that
+hash, and verifies byte equality (`rep.data == bm.data`) to guard against hash
+collisions. Match → the same O(1) `pages_seen.last()` update as before; miss →
+push a new cluster (same CC order) and register its hash. No `packed_hamming`
+call remains in the hot path.
+
+**Correctness — byte-identical.** Clustering is byte-exact for all callers
+(`max_diff` was hardcoded to 0 since #258 disabled Hamming shared clustering), so
+every rep in a bucket is distinct (a new cluster is only created when *no*
+existing rep matched byte-for-byte). Hence at most one cluster can match a
+candidate, and the hash lookup + equality verify returns exactly the rep the old
+full-scan `best` pick returned. Cluster creation order (and thus `first_seen`,
+`pages_seen`, the `promoted` trim priority, and the final `sort_by_key(first_seen)`
+order) is unchanged. Verified: a `DefaultHasher` digest of the full
+`cluster_shared_symbols(&masks, 2)` output over the 517-page
+`pathogenic_bacteria_1896` corpus is **identical** across the change
+(`digest=1d797be493bab1fe`, `shared_syms=5164` both before and after). The
+`djvu-jb2` suite (53 tests incl. `cluster_shared_symbols_caps_total_pixel_budget`)
+and the full `make check` gate pass.
+
+**Numbers** (release + fat-LTO, `parallel` feature, M1 Max, 517-page
+`pathogenic_bacteria_1896`, `cluster_shared_symbols` in isolation via the new
+`bench_cluster_shared_symbols`; before/after captured by `git stash` on the same
+build):
+
+| | Before (linear scan) | After (hash index) | Change |
+|-|----------------------|--------------------|--------|
+| `cluster_shared_symbols_517p` (median of 4) | ~17.6 s | ~3.4 s | **−81% (≈5.2×)** |
+
+The residual ~3.4 s is now `extract_ccs` (parallelised across cores) plus the
+cheap hash bucketing; the old ~14 s of serial popcount scanning is gone. The win
+scales with bucket density × page count, so it is largest exactly on the long
+dense bilevel books that layered multi-page encode targets; small bundles (the
+6-mask `encode_djvm_bundle_jb2` bench) see it as noise.
+
+**Decision.** **Kept.** Byte-identical, strictly ≤ the old cost (a hash lookup +
+one equality check replaces an O(K) popcount scan), and a large isolated win on
+the corpus it matters for. New `bench_cluster_shared_symbols` (517-page,
+`sample_size(10)`) added so the clustering axis is no longer benched only
+indirectly through the full bundle encode.
 
 ## Perf round 16 (2026-07-04) — SHARED_DICT_CLONE_PER_PAGE (from the round-6 validated backlog)
 
