@@ -7543,3 +7543,63 @@ size lever is the ~1.2–1.6× entropy-coding gap vs c44 (measured here on smoot
 a separate, interop-fragile axis — not the masked transform. This is the highest-value
 outcome available: a large, high-risk normative change shown to be *not worth doing*
 before writing it.
+
+## Perf round 22 (2026-07-04) — IW44 entropy gap, characterized (diagnostic)
+
+Round 20 measured our IW44 encoder 1.18–1.62× larger than `c44` on the same
+diffused BG at a matched 100-slice schedule, and attributed it to entropy coding.
+That was at matched *slices*, not matched *quality*. This round measures the true
+rate-distortion parity — sweep the slice count for both encoders, decode **both
+with our decoder** (one consistent SSIM metric), and read size-at-equal-SSIM — to
+find out whether the gap is real coding efficiency or a slice-schedule artifact.
+The answer is "both, split by content".
+
+### IW44_ENTROPY_GAP — is the c44 size gap real at matched quality? — **Diagnostic** (2026-07-04)
+
+**RD curves (diffused BG, our decoder for both, M1 Max + DjVuLibre `c44`):**
+
+colorbook BG 189×306 (textured):
+
+| slices | ours B / SSIM | c44 B / SSIM |
+|--------|---------------|--------------|
+| 50 | 97 / 0.93466 | 55 / 0.93053 |
+| 74 | 345 / 0.95928 | 257 / 0.95920 |
+| 100 | 1917 / 0.97754 | 1445 / 0.98447 |
+
+watchmaker BG 213×276 (smooth):
+
+| slices | ours B / SSIM | c44 B / SSIM |
+|--------|---------------|--------------|
+| 30 | 57 / 0.99789 | 30 / 0.98467 |
+| 50 | 89 / 0.99789 | 50 / 0.99757 |
+| 74 | 131 / 0.99789 | 84 / 0.99756 |
+| 100 | 189 / 0.99797 | 117 / 0.99760 |
+
+**Finding — the gap splits by content:**
+- **Smooth BG: we are competitive-to-better at matched quality.** watchmaker's SSIM
+  saturates at slice 30 (57 B / 0.99789); `c44` needs 74 slices / 84 B to reach a
+  *lower* 0.99756. So at equal quality ours (57 B) beats `c44` (84 B). The raw
+  slice-100 "gap" (189 vs 117 B) is ours **over-coding past its own saturation** —
+  the IW44_SLICE_RD (round 18) effect, amplified because BG_DIFFUSE makes the BG
+  even smoother. This is an interop-safe lever, but a **fixed** `Iw44Target::Bpp`
+  cap cannot capture it: the saturation bitrate is content-dependent and spans 30×
+  (~0.008 bpp for watchmaker vs ~0.265 bpp for colorbook), so any cap that trims
+  the smooth page destroys the textured one. It needs a **content-adaptive quality
+  target** (a `-decibel`-style stop), a new RD-control feature worth only ~100 B on
+  smooth colour pages.
+- **Textured BG: a genuine ~1.3× coding gap at matched quality.** At slice 74 both
+  reach SSIM 0.9592 but ours is 345 B vs `c44` 257 B (1.34×). This is real per-slice
+  coding efficiency — our activation/quantization policy emits more than `c44` for
+  the same reconstruction. It is the IW44_ACT_THRESH residual, in the
+  normative-adjacent activation territory IW44_SWARM_REST showed is interop-fragile
+  (changing quantization/context tables broke `ddjvu` decoding).
+
+**Verdict.** **Diagnostic — no change.** The two remaining IW44 size levers are now
+correctly scoped and both are low-priority: (1) an interop-safe content-adaptive
+quality target to stop the smooth-BG slice over-coding — real feature, ~100 B/page,
+low EV; (2) the ~1.3× textured-content coding gap — interop-fragile normative
+activation work, high risk. Neither is a quick clean win. Recorded so the next
+IW44-size effort starts from the true, content-split picture instead of the
+misleading flat "1.2–1.6× worse than c44". The big interop-safe BG44 win was
+BG_DIFFUSE (round 17); the masked transform was shown unnecessary (round 20); this
+closes the "what's left" question for the IW44 background size axis.
