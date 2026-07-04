@@ -1,6 +1,6 @@
 # Plan: closing the JB2 encoder size gap vs DjVuLibre
 
-Status: **active** — A0 done (gate passed for text); A1 (emitter) next. Owner: perf.
+Status: **active** — A0/A1/A2 done; validated lossless −11.7% Sjbz on text (experimental). A3 (promote to stable opt-in + adaptive policy) next. Owner: perf.
 See `PERF_EXPERIMENTS.md` for the measured history this plan builds on.
 
 ## 1. Where the gap actually is

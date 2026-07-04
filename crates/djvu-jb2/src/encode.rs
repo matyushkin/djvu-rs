@@ -1017,6 +1017,44 @@ fn find_cross_size_refine_ref(
     best.map(|(i, _)| i)
 }
 
+/// Find the closest **same-size** dict entry for a lossless record-6 matched
+/// refinement (Phase A1 of `docs/jb2-size-gap-plan.md`).
+///
+/// Candidates are dict entries of exactly `cand`'s `(w, h)`. Distance is the
+/// direct packed Hamming (no resampling — the reference aligns pixel-for-pixel),
+/// accepted within `pixel_count × max_hamming_fraction` flipped pixels. Returns
+/// the dict index of the nearest accepted candidate. The emitted refinement
+/// bitmap reproduces `cand` exactly, so the result is lossless.
+#[cfg(feature = "experimental")]
+fn find_same_size_refine_ref(
+    cand: &Bitmap,
+    dict_entries: &[Bitmap],
+    same_size_indices: &[usize],
+    max_hamming_fraction: f32,
+) -> Option<usize> {
+    let pixel_count = (cand.width as u64) * (cand.height as u64);
+    if pixel_count < REFINEMENT_MIN_PIXELS {
+        return None;
+    }
+    let max_diff = ((pixel_count as f64) * (max_hamming_fraction as f64)).round() as u32;
+    let mut best: Option<(usize, u32)> = None;
+    for &idx in same_size_indices {
+        let ref_bm = &dict_entries[idx];
+        debug_assert_eq!(ref_bm.width, cand.width);
+        debug_assert_eq!(ref_bm.height, cand.height);
+        let d = packed_hamming(&cand.data, &ref_bm.data);
+        if d > max_diff {
+            continue;
+        }
+        match best {
+            None => best = Some((idx, d)),
+            Some((_, bd)) if d < bd => best = Some((idx, d)),
+            _ => {}
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Experiment-only knobs for the cross-size record-6 refinement emitter (#322).
 ///
 /// When present in [`Jb2EncodeOptions::cross_size_rec6_probe`], fresh
@@ -1067,6 +1105,15 @@ pub struct Jb2EncodeOptions {
     /// described on [`CrossSizeRec6Probe`].
     #[cfg(feature = "experimental")]
     pub cross_size_rec6_probe: Option<CrossSizeRec6Probe>,
+    /// Experiment-only **same-size** record-6 refinement (Phase A1 of
+    /// `docs/jb2-size-gap-plan.md`). `None` (default) keeps the shipped
+    /// behavior. `Some(frac)` diverts a fresh CC that has a **same-bounding-box**
+    /// dictionary twin within `pixel_count × frac` flipped pixels to a lossless
+    /// record-6 refinement (`wdiff = hdiff = 0`) against that twin, instead of a
+    /// fresh record-1. Unlike the cross-size probe, no resampling is involved, so
+    /// the refinement context stays pixel-aligned. Lossless (round-trip exact).
+    #[cfg(feature = "experimental")]
+    pub same_size_rec6: Option<f32>,
 }
 
 impl Default for Jb2EncodeOptions {
@@ -1075,6 +1122,8 @@ impl Default for Jb2EncodeOptions {
             lossy_threshold: 0.0,
             #[cfg(feature = "experimental")]
             cross_size_rec6_probe: None,
+            #[cfg(feature = "experimental")]
+            same_size_rec6: None,
         }
     }
 }
@@ -1259,7 +1308,8 @@ pub fn encode_jb2_dict_with_options(
         enum Action {
             New,
             Copy(usize),
-            /// Cross-size record-6 matched refinement (#322 experiment).
+            /// Record-6 matched refinement — same-size (Phase A1) or cross-size
+            /// (#322) experiment.
             #[cfg(feature = "experimental")]
             Refine(usize),
         }
@@ -1281,12 +1331,19 @@ pub fn encode_jb2_dict_with_options(
             if let Some(idx) = lossy_copy {
                 Action::Copy(idx)
             } else {
-                // #322 experiment: divert fresh components with a near-size
-                // dictionary twin to a lossless cross-size rec-6 refinement.
-                // Behind `experimental`; the default build always emits `New`.
+                // Experiment: divert fresh components with a dictionary twin to a
+                // lossless rec-6 refinement. Same-size (Phase A1) is tried first —
+                // no resampling, so the refinement context stays pixel-aligned —
+                // then the cross-size #322 path. Behind `experimental`; the default
+                // build always emits `New`.
                 #[cfg(feature = "experimental")]
                 {
-                    if let Some(probe) = opts.cross_size_rec6_probe {
+                    let same_size = opts.same_size_rec6.and_then(|frac| {
+                        find_same_size_refine_ref(&cc.bitmap, &dict_entries, candidates, frac)
+                    });
+                    if let Some(idx) = same_size {
+                        Action::Refine(idx)
+                    } else if let Some(probe) = opts.cross_size_rec6_probe {
                         match find_cross_size_refine_ref(
                             &cc.bitmap,
                             &dict_entries,
@@ -2326,6 +2383,64 @@ mod tests {
         );
 
         let decoded = jb2::decode(&probe_bytes, None).expect("probe decode failed");
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    // ── Same-size rec-6 refinement (docs/jb2-size-gap-plan.md Phase A1) ─────────
+
+    #[cfg(feature = "experimental")]
+    fn same_size_opts() -> Jb2EncodeOptions {
+        Jb2EncodeOptions {
+            same_size_rec6: Some(0.05),
+            ..Jb2EncodeOptions::default()
+        }
+    }
+
+    #[test]
+    fn same_size_rec6_off_is_byte_identical() {
+        // With `same_size_rec6` unset (default), the encoder must reproduce the
+        // shipped `encode_jb2_dict` byte stream exactly.
+        let src = make_bitmap(80, 40, |x, y| {
+            let a = (4..16).contains(&x) && (4..28).contains(&y);
+            let b = (40..53).contains(&x) && (4..28).contains(&y);
+            a || b
+        });
+        let shipped = encode_jb2_dict(&src);
+        let opt = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        assert_eq!(shipped, opt, "default options must match shipped output");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn same_size_rec6_roundtrips_near_twins() {
+        // Two same-bounding-box near-twin glyphs: a 14×24 solid block and a copy
+        // with a small 2×2 corner notch (same bbox, a few flipped pixels, well
+        // under 5%). The first is a fresh rec-1; the second has a same-size twin,
+        // so it diverts to a lossless same-size rec-6 refinement (wdiff=hdiff=0).
+        let mut src = Bitmap::new(64, 60);
+        let draw = |bm: &mut Bitmap, ox: u32, oy: u32, notch: bool| {
+            for y in 0..24 {
+                for x in 0..14 {
+                    if notch && x >= 12 && y >= 22 {
+                        continue;
+                    }
+                    bm.set(ox + x, oy + y, true);
+                }
+            }
+        };
+        draw(&mut src, 4, 2, false); // reference
+        draw(&mut src, 4, 30, true); // same-size near twin (2×2 notch)
+
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let same_bytes = encode_jb2_dict_with_options(&src, &[], &same_size_opts());
+
+        // The same-size path must actually fire (different byte stream)…
+        assert_ne!(
+            default_bytes, same_bytes,
+            "same_size_rec6 should emit a rec-6 refinement, changing the stream"
+        );
+        // …and stay lossless (round-trip pixel-exact).
+        let decoded = jb2::decode(&same_bytes, None).expect("same-size decode failed");
         assert_bitmaps_eq(&src, &decoded);
     }
 
