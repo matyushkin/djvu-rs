@@ -789,7 +789,7 @@ pub fn analyze_jb2_cross_size_refinement(
 /// of `find_refinement_ref`, which gated record-6 (lossless refinement).
 fn find_lossy_copy_ref(
     cand: &Bitmap,
-    dict_entries: &[Bitmap],
+    dict_entries: &[&Bitmap],
     same_size_indices: &[usize],
     threshold: f32,
 ) -> Option<usize> {
@@ -804,7 +804,7 @@ fn find_lossy_copy_ref(
     let max_diff = ((pixel_count as f64) * (threshold as f64)).round() as u32;
     let mut best: Option<(usize, u32)> = None;
     for &i in same_size_indices {
-        let ref_bm = &dict_entries[i];
+        let ref_bm = dict_entries[i];
         debug_assert_eq!(ref_bm.width, cand.width);
         debug_assert_eq!(ref_bm.height, cand.height);
         let d = packed_hamming(&cand.data, &ref_bm.data);
@@ -835,7 +835,7 @@ fn find_lossy_copy_ref(
 #[cfg(feature = "experimental")]
 fn find_cross_size_refine_ref(
     cand: &Bitmap,
-    dict_entries: &[Bitmap],
+    dict_entries: &[&Bitmap],
     by_size: &BTreeMap<(u32, u32), Vec<usize>>,
     max_dim_delta: u32,
     max_hamming_fraction: f32,
@@ -859,7 +859,7 @@ fn find_cross_size_refine_ref(
                 continue;
             };
             for &idx in indices {
-                let d = scaled_hamming(cand, &dict_entries[idx]);
+                let d = scaled_hamming(cand, dict_entries[idx]);
                 if d > max_diff {
                     continue;
                 }
@@ -1074,8 +1074,12 @@ pub fn encode_jb2_dict_with_options(
     let mut dedup: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     // Stored dict entries (parallel to the decoder's `dict` vector) — needed
     // so refinement matching can score Hamming distance against historical
-    // glyphs.
-    let mut dict_entries: Vec<Bitmap> = Vec::new();
+    // glyphs. Held by reference: `shared_symbols` and this page's own `ccs`
+    // both outlive the encode, so the dict never needs to own (clone) a bitmap.
+    // Drops the per-page `shared_symbols` deep-copy a bundled multi-page encode
+    // paid on every page for an identical shared dictionary
+    // (SHARED_DICT_CLONE_PER_PAGE / swarm P2).
+    let mut dict_entries: Vec<&Bitmap> = Vec::new();
     // Index of dict entries by (w, h) for O(1) lookup of refinement candidates.
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
     for sym in shared_symbols {
@@ -1088,7 +1092,7 @@ pub fn encode_jb2_dict_with_options(
             .entry((sym.width, sym.height))
             .or_default()
             .push(idx);
-        dict_entries.push(sym.clone());
+        dict_entries.push(sym);
     }
 
     for &cc_idx in &order {
@@ -1102,7 +1106,7 @@ pub fn encode_jb2_dict_with_options(
         let dkey = symbol_hash(cc.bitmap.width, cc.bitmap.height, &cc.bitmap.data);
         let exact_match = dedup.get(&dkey).and_then(|cands| {
             cands.iter().copied().find(|&i| {
-                let d = &dict_entries[i];
+                let d = dict_entries[i];
                 d.width == cc.bitmap.width
                     && d.height == cc.bitmap.height
                     && d.data == cc.bitmap.data
@@ -1189,7 +1193,7 @@ pub fn encode_jb2_dict_with_options(
                 // computes the child size as `dict[idx].dim + diff`, decodes the
                 // refinement bitmap against that reference, then blits — it does
                 // not extend the dict (handled by the `Action::New` guard below).
-                let reference = &dict_entries[*dict_idx];
+                let reference = dict_entries[*dict_idx];
                 let wdiff = cc_w - reference.width as i32;
                 let hdiff = cc_h - reference.height as i32;
                 encode_num(&mut zp, &mut record_type_ctx, 0, 11, 6);
@@ -1258,7 +1262,7 @@ pub fn encode_jb2_dict_with_options(
                 .entry((cc.bitmap.width, cc.bitmap.height))
                 .or_default()
                 .push(next_idx);
-            dict_entries.push(cc.bitmap.clone());
+            dict_entries.push(&cc.bitmap);
         }
     }
 

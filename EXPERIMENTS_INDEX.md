@@ -1,6 +1,6 @@
 # Experiments Index
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-03.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-04.
 
 ## Legend
 
@@ -12,6 +12,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| SHARED_DICT_CLONE_PER_PAGE | 2026-07-04 | JB2 encoder (bundle) | **K** | byte-identical; ~2.67M fewer clones (517p bundle); wall-clock ~12% but within thermal noise | `encode_jb2_dict_with_options` held `dict_entries: Vec<Bitmap>` and deep-copied the shared dict on every page (5164×517≈2.67M clones). Now `Vec<&Bitmap>` borrowing `shared_symbols`+`ccs` (both outlive the encode); helpers take `&[&Bitmap]`, no public sig change. Digest identical (conquete f2e5…, pathogenic f6ec…). Peak RSS flat (clones transient). Kept on strictly-≤-cost grounds like CLUSTER_DEDUP/PDF_STREAM. Round-16, swarm P2 |
 | D4_GAMMA_DOWNSCALE | 2026-07-03 | render downscale (quality) | X (low headroom) | gamma vs linear-light SSIM ≥0.979 | Diagnostic via D1: gamma-space vs correct linear-light downscale differ negligibly on real pages (photo ≥0.997, text 0.979 worst). Hard edges live in the JB2 mask, not the smooth BG. Rejected; also deprioritises A3. Lanczos (D2) is the real text-downscale lever. Round-9 |
 | D5_TH44_PREVIEW | 2026-07-03 | render (preview fast path) | X (opt-in only) | 20–30× faster but SSIM 0.50–0.68 | TH44 thumbnail preview: measured via D1. Big speed win but low fidelity + **no corpus file embeds TH44**. Viable only as explicit opt-in for thumbnail grids, not a default. Round-9 |
 | C3_ZOOM_SCOPE | 2026-07-04 | render zoom/region | D | already efficient (~5.5 ns/px, flat vs zoom) | Diagnostic: region/zoom render is scoped, linear in viewport pixels, no per-call overhead, same per-pixel rate as full-page compositor. No speed win; residual is cold ROI_IDWT (rejected). Remaining zoom work is quality (mask AA). Round-14 |
