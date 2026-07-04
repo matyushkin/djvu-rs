@@ -7485,3 +7485,61 @@ gap with a quality *gain*, not a trade. The remaining, still-deferred piece is t
 normative masked forward-transform + coefficient gathering (mask plumbed through
 `encode_iw44_color` → `PlaneEncoder`), which needs the DjVuLibre interop-diff
 harness before it can be attempted.
+
+## Perf round 21 (2026-07-04) — masked forward-transform: measured unnecessary (BG_DIFFUSE subsumes it)
+
+Round 17 (BG_DIFFUSE) landed the interop-safe "first step" of IW44_MASKED_WAVELET
+— smoothing the invisible masked background before the codec sees it. The deferred
+big piece was the **normative masked forward-transform** (plumb the mask into
+`encode_iw44_color` → `PlaneEncoder`, interpolate masked pixels inside the lifting,
+skip fully-masked coefficient buckets). Before building that — a bitstream change
+the repo has repeatedly found interop-fragile — this round **measures whether it
+can still help** now that BG_DIFFUSE smooths the input. It cannot: DjVuLibre's own
+masked encoder produces the same size as its unmasked encoder fed our diffused BG.
+
+### IW44_MASKED_TRANSFORM — is the normative masked transform worth it after BG_DIFFUSE? — **Rejected / unnecessary** (2026-07-04)
+
+**Method.** For each colour page: segment with `bg_diffuse` → the smoothed
+sub-sampled BG. Encode that BG three ways and compare BG44 bytes at a matched
+100-slice schedule, full chroma:
+1. **ours** — `encode_iw44_color(diffused_bg)` (our current pipeline),
+2. **c44 (diffused)** — DjVuLibre `c44 -slice 100 -crcbfull` on the same diffused BG,
+   *no* mask,
+3. **c44 (-mask, raw)** — `c44 -mask` on the *raw* (ink-fallback) BG with a PBM
+   marking exactly the fully-masked cells — DjVuLibre's masked-wavelet lever.
+
+**Numbers** (M1 Max + DjVuLibre `c44`):
+
+| Page (BG) | ours | c44 (diffused, no mask) | c44 (-mask, raw) | ours SSIM / c44 SSIM |
+|-----------|------|-------------------------|------------------|----------------------|
+| colorbook (189×306) | 1917 B | 1445 B | 1471 B | 0.97754 / 0.98447 |
+| watchmaker (213×276) | 189 B | 117 B | 117 B | 0.99797 / 0.99760 |
+| irish (207×292) | 2434 B | 2063 B | 2063 B | 0.98211 / 0.98050 |
+| conquete_paix (356×572) | 758 B | 644 B | 643 B | 0.99893 / 0.99882 |
+
+**Finding 1 — the masked lever is fully subsumed by BG_DIFFUSE.** c44's *masked*
+encoding of the raw BG (col 3) is within noise of c44's *unmasked* encoding of our
+*diffused* BG (col 2): 1471≈1445, 117=117, 2063=2063, 643≈644. Feeding a diffused
+BG to a mask-blind encoder is equivalent to feeding a raw BG + mask to a masking
+encoder. So implementing the normative masked forward-transform in our codec would
+**not shrink BG44 at all** beyond what round-17 BG_DIFFUSE already delivers — the
+whole benefit of masking is the input smoothing, which we now do explicitly and
+interop-safely at the BG-pixel level.
+
+**Finding 2 — the real residual gap is entropy coding, not masking.** Our IW44 is
+1.18–1.62× larger than c44 on the *identical* diffused input (both mask-blind), so
+the gap is our coder's rate-distortion efficiency, not a missing masked transform.
+It is partly a curve-position difference (watchmaker/irish/conquete: ours is bigger
+but ≥ c44 on SSIM) and partly a genuine loss (colorbook: bigger **and** lower SSIM,
+0.9775 vs 0.9845). This is IW44_ACT_THRESH territory — normative quantization /
+context-table work that IW44_SWARM_REST showed breaks DjVuLibre interop — and is
+untouched by masking.
+
+**Decision.** **Rejected — the normative masked forward-transform is unnecessary.**
+BG_DIFFUSE (round 17) captured the entire masked-encoding size win at zero bitstream
+risk; the c44 mask-vs-diffused equivalence proves there is nothing left for the
+normative transform to gain. **IW44_MASKED_WAVELET is closed.** The remaining IW44
+size lever is the ~1.2–1.6× entropy-coding gap vs c44 (measured here on smooth BG),
+a separate, interop-fragile axis — not the masked transform. This is the highest-value
+outcome available: a large, high-risk normative change shown to be *not worth doing*
+before writing it.
