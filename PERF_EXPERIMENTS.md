@@ -6374,12 +6374,15 @@ Survivors that are real but not landed this session:
 
 - **LAZY_PAGE_CONSTRUCT (swarm P3, top structural win) — LANDED**, see its own
   entry below. −48 % `from_bytes` on the 520-page doc, byte-identical.
-- **SHARED_DICT_CLONE_PER_PAGE (swarm P2).** `encode_jb2_dict_with_options`
-  (`crates/djvu-jb2/src/encode.rs`) rebuilds `dict_entries`/`dedup`/`by_size` from
-  the shared symbols via `.clone()` on every per-page call; the shared dict is
-  identical across all DJVM pages. Measured ~2.9 % of shared-dict encode on the
-  517-page corpus. Medium risk (3 near-identical call sites need a borrowed-shared /
-  owned-local split). Byte-identical. Needs a dedicated `encode_jb2_dict` bench.
+- **SHARED_DICT_CLONE_PER_PAGE (swarm P2). — LANDED (round 16, byte-identical).**
+  `encode_jb2_dict_with_options`
+  (`crates/djvu-jb2/src/encode.rs`) held `dict_entries: Vec<Bitmap>` and deep-copied
+  the shared dict on every per-page call (2.67 M clones on the 517-page corpus).
+  Solved more simply than the swarm's "3-call-site split" plan: `dict_entries`
+  is now `Vec<&Bitmap>` borrowing `shared_symbols` + the page's own `ccs` (both
+  outlive the encode), so *no* public signature changes and *no* call site is
+  touched. Byte-identical; wall-clock ~12% faster in isolation but within thermal
+  noise (~2.9% predicted); peak RSS flat (clones are transient).
 - **CLUSTER_BUCKET_HASH_DEDUP (swarm P4).** `bucket_page_ccs`'s exact-match search
   does a full `packed_hamming` popcount scan per entry with `max_diff==0` and no
   `d==0` early-exit — should be a `symbol_hash`-keyed `BTreeMap` lookup (the
@@ -7027,3 +7030,62 @@ remains the interface: consumers that want the fast Y-only gray decode — OCR
 pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
 via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
 not worth duplicating the hot path.
+
+## Perf round 16 (2026-07-04) — SHARED_DICT_CLONE_PER_PAGE (from the round-6 validated backlog)
+
+Round 6's swarm flagged (P2) that `encode_jb2_dict_with_options` deep-copies the
+shared dictionary on every per-page call of a bundled encode. This round lands
+the change and measures it in isolation on the 517-page corpus.
+
+### SHARED_DICT_CLONE_PER_PAGE — borrow the shared dict instead of cloning per page — **Kept (byte-identical, strictly ≤ work; wall-clock within thermal noise)** (2026-07-04)
+
+**Issue (round-6 swarm P2).** `encode_jb2_dict_with_options` held its running
+dictionary as `dict_entries: Vec<Bitmap>` and pre-populated it from
+`shared_symbols` with `dict_entries.push(sym.clone())` — a full bitmap-data deep
+copy of **every** shared symbol, redone on **every** page. A bundled multi-page
+encode passes the *same* shared dictionary to all pages, so on the 517-page
+`pathogenic_bacteria_1896` (5164 shared symbols) this is 5164 × 517 ≈ **2.67 M
+bitmap-data clones** of an identical, read-only dictionary. Page-local new symbols
+were also cloned (`dict_entries.push(cc.bitmap.clone())`).
+
+**Approach.** `dict_entries` becomes `Vec<&Bitmap>`. Both sources it references —
+`shared_symbols` (the caller's slice) and this page's own `ccs` (extracted once
+at the top of the function) — outlive the encode, so the dictionary never needs
+to own a bitmap: shared entries push `sym`, page-local new entries push
+`&cc.bitmap`. The two internal refinement helpers (`find_lossy_copy_ref`,
+`find_cross_size_refine_ref`) take `&[&Bitmap]`. No public signature changes
+(`shared_symbols: &[Bitmap]` unchanged), so no call site is touched — the whole
+change is internal to the function.
+
+**Correctness — byte-identical.** Pure ownership change; every read
+(`dict_entries[i].data == …`, `packed_hamming`, `scaled_hamming`, refinement
+reference) sees the same bytes, and dict indices are assigned in the same order.
+Verified: a `DefaultHasher` digest of the full `encode_djvm_bundle_jb2_with_shared`
+output is **identical** across the change on both the 22-page `conquete_paix`
+(`digest=f2e5aa7d95ef41c3`, 54 830 B) and the 517-page `pathogenic_bacteria_1896`
+(`digest=f6ec8b10d204f31d`, 33 430 276 B). Both `experimental` and default builds
+compile; `make check` (1028 tests) passes.
+
+**Numbers** (release + fat-LTO, `parallel`, M1 Max; isolated per-page encode via
+`encode_djvm_bundle_jb2_with_shared` with the shared dict clustered *outside* the
+timed region, 517-page corpus, 5164-symbol shared dict):
+
+| | Encode time (per-page path) | Peak RSS |
+|-|-----------------------------|----------|
+| Before (clone per page) | ~4.1 s mean (3.26–5.24 s) | ~1504 MB |
+| After (borrow) | ~3.6 s mean (3.22–4.14 s) | ~1525 MB |
+
+Interleaved A/B (4 pairs) favours the borrow version in 3 of 4 pairs, mean ≈12%
+faster, but the run-to-run thermal variance (old spans 3.26–5.24 s) swamps the
+~0.5 s mean gap — the wall-clock win is **directional but below clean-measurement
+threshold**, exactly the "~2.9%" the swarm predicted. Peak RSS is unchanged: the
+per-page clones are transient (allocated and freed inside each page's encode), so
+they never set the peak, which is fixed by the persistent 517-mask input vector.
+
+**Decision.** **Kept.** Byte-identical and strictly less work: it removes ~2.67 M
+per-page allocations + memcpies and shrinks `dict_entries` from owned `Bitmap`s to
+8-byte pointers, with no runtime downside and only a trivial `&[&Bitmap]` on two
+internal helpers. Same rationale as CLUSTER_DEDUP (#446) / PDF_STREAM — an
+allocator-pressure reduction that is real (and matters more under contended
+allocators / many concurrent encodes / wasm) even where this M1 + system-allocator
++ parallel workload can't cleanly separate it from thermal noise on wall-clock.
