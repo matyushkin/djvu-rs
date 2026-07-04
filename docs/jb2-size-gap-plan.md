@@ -1,6 +1,6 @@
 # Plan: closing the JB2 encoder size gap vs DjVuLibre
 
-Status: **A0–A2 done — validated lossless −11.7% Sjbz on text, kept behind the `experimental` flag by maintainer decision (A3 shipping deferred). Branch B (lossy) not started.** Owner: perf.
+Status: **Branch A A0–A2 done (validated lossless −11.7% Sjbz on text, experimental). Branch B started: B0 measured (existing same-size lossy = −22%/SSIM0.999 on text, off by default); B1 (cross-size lossy rec-7) implementation next.** Owner: perf.
 See `PERF_EXPERIMENTS.md` for the measured history this plan builds on.
 
 ## 1. Where the gap actually is

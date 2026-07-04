@@ -126,6 +126,10 @@ required-features = ["experimental"]
 name = "jb2_same_size_a2"
 required-features = ["experimental"]
 
+[[example]]
+name = "jb2_crosssize_b1probe"
+required-features = ["experimental"]
+
 [[bench]]
 name = "codecs"
 harness = false
