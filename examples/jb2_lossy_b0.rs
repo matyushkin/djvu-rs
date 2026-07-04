@@ -30,10 +30,10 @@ fn run(path: &str, thresholds: &[f32]) {
     };
     let mut masks = Vec::new();
     for i in 0..doc.page_count() {
-        if let Ok(page) = doc.page(i) {
-            if let Ok(Some(m)) = page.extract_mask() {
-                masks.push(m);
-            }
+        if let Ok(page) = doc.page(i)
+            && let Ok(Some(m)) = page.extract_mask()
+        {
+            masks.push(m);
         }
     }
     // Lossless baseline size.
@@ -49,31 +49,37 @@ fn run(path: &str, thresholds: &[f32]) {
         base_total
     );
     for &t in thresholds {
-        let mut opts = Jb2EncodeOptions::default();
-        opts.lossy_threshold = t;
+        // `..default()` is a no-op under default features (only `lossy_threshold`
+        // exists) but sets the experimental fields when they're compiled in.
+        #[allow(clippy::needless_update)]
+        let opts = Jb2EncodeOptions {
+            lossy_threshold: t,
+            ..Jb2EncodeOptions::default()
+        };
         let mut total = 0usize;
         let (mut ssim_sum, mut psnr_sum, mut n) = (0.0f64, 0.0f64, 0usize);
         let (mut flipped, mut tot_px) = (0u64, 0u64);
         for m in &masks {
             let enc = encode_jb2_dict_with_options(m, &[], &opts);
             total += enc.len();
-            if let Ok(dec) = djvu_rs::jb2::decode(&enc, None) {
-                if dec.width == m.width && dec.height == m.height {
-                    for y in 0..m.height {
-                        for x in 0..m.width {
-                            if m.get(x, y) != dec.get(x, y) {
-                                flipped += 1;
-                            }
+            if let Ok(dec) = djvu_rs::jb2::decode(&enc, None)
+                && dec.width == m.width
+                && dec.height == m.height
+            {
+                for y in 0..m.height {
+                    for x in 0..m.width {
+                        if m.get(x, y) != dec.get(x, y) {
+                            flipped += 1;
                         }
                     }
-                    tot_px += (m.width as u64) * (m.height as u64);
-                    let q = djvu_rs::quality::compare_gray(&mask_to_gray(m), &mask_to_gray(&dec));
-                    if q.psnr_db.is_finite() {
-                        psnr_sum += q.psnr_db;
-                    }
-                    ssim_sum += q.ssim;
-                    n += 1;
                 }
+                tot_px += (m.width as u64) * (m.height as u64);
+                let q = djvu_rs::quality::compare_gray(&mask_to_gray(m), &mask_to_gray(&dec));
+                if q.psnr_db.is_finite() {
+                    psnr_sum += q.psnr_db;
+                }
+                ssim_sum += q.ssim;
+                n += 1;
             }
         }
         let delta = total as i64 - base_total as i64;

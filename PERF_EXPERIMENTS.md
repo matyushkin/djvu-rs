@@ -7347,3 +7347,41 @@ real-byte + SSIM + layout-correctness validation. B0 is recorded as a key standa
 finding: the shipped `lossy_threshold` is a −22 %/SSIM-0.999 text lever that is simply
 off by default — a documented "cjb2-like" preset may be higher-value than the
 cross-size machinery for text, which B1's numbers will let us compare.
+
+### LOSSY_B1 — cross-size lossy rec-7 emitter — **Reverted (dominated by same-size lossy)** (2026-07-04)
+
+Implemented the cross-size lossy rec-7 substitution behind an experimental
+`cross_size_lossy` option: a fresh CC with a different-bbox near-twin is emitted as a
+rec-7 *copy* of that twin (no refinement bitmap). The correctness constraint from B1
+was handled — the encoder drives its coordinate coding by the **twin's** `(w, h)` (a
+`copy_override` feeding effective `ew/eh/ex_jb2/ey_jb2` into the layout), matching the
+decoder's `dict[index].width`-based `last_right`.
+
+**Layout correctness: confirmed.** SSIM stays 0.996–1.000 (min ≥ 0.989) across the
+corpus — had the twin-dimension layout desynced, every following glyph would shift and
+SSIM would collapse. It doesn't, so the emitter is correct.
+
+**But it is dominated by simply raising the same-size `lossy_threshold`** (watchmaker):
+
+| Config | Sjbz | SSIM avg / min |
+|--------|------|----------------|
+| same-size lossy 2 % only | −21.96 % | 0.99928 / 0.9985 |
+| same-size 2 % **+ cross-size 2 %** | −23.54 % | 0.99884 / 0.9976 |
+| same-size 2 % **+ cross-size 5 %** | −24.81 % | 0.99639 / 0.9904 |
+| **same-size lossy 5 % only** (B0) | **−23.39 %** | **0.99889 / —** |
+
+Cross-size adds only −1.6…−2.9 % on top of same-size lossy, at *worse* SSIM — and
+same-size lossy **alone** at threshold 5 % reaches the same −23.4 % at equal-or-better
+SSIM (0.9989) with none of the cross-size machinery, no glyph-bbox change, and no
+layout-sync risk. Cross-size lossy standalone is −8.7 % (worse size, worse quality)
+because same-size twins are both more abundant (A0: 39.6 % vs cross-size 16.2 %) and
+cheaper (no bbox change → lower flip rate per substitution).
+
+**Decision. Reverted.** The emitter is correct and measured, but every operating point
+it reaches is matched or beaten by the existing same-size `lossy_threshold` at a
+slightly higher setting. Not worth the added hot-loop complexity (`copy_override` +
+effective-dims). Removed the `cross_size_lossy` option and the effective-dims plumbing;
+default path unchanged. **Branch B conclusion:** the real lossy lever is the
+*already-shipped* same-size `lossy_threshold` (B0: −22…−24 % on text at SSIM ≥ 0.999),
+which merely needs to be exposed as a documented "cjb2-like" preset — cross-size adds
+nothing worthwhile. Recorded so cross-size lossy is not re-attempted.
