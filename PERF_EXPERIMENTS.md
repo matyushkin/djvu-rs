@@ -7385,3 +7385,20 @@ default path unchanged. **Branch B conclusion:** the real lossy lever is the
 *already-shipped* same-size `lossy_threshold` (B0: −22…−24 % on text at SSIM ≥ 0.999),
 which merely needs to be exposed as a documented "cjb2-like" preset — cross-size adds
 nothing worthwhile. Recorded so cross-size lossy is not re-attempted.
+
+### LOSSY_B_SHIP — expose the same-size lossy lever as a documented preset — **Kept** (2026-07-04)
+
+Branch B's conclusion was that the real lossy lever already ships (`lossy_threshold`,
+B0: −22 % text at SSIM 0.999) and only needs surfacing. Maintainer chose the
+opt-in-preset route (not enable-by-default — DjVu's archival use makes a silent lossy
+default wrong, and it matches the repo's byte-identical-default culture). Landed:
+
+- **Enriched `lossy_threshold` docs** with the measured operating-point table
+  (0.02 → −22 %/SSIM 0.9993, diminishing above) and the text-only caveat.
+- **`Jb2EncodeOptions::lossy_text()`** — the recommended 0.02 preset (≈ cjb2's lossy
+  operating point), plus **`with_lossy_threshold(f32)`** for custom values.
+- Test `lossy_text_preset_is_lossy_and_smaller` (preset shrinks a near-twin page and
+  still decodes). Default remains lossless/byte-identical; the preset is opt-in.
+
+This closes the JB2 size-gap plan: the biggest practical text-size lever is now a
+one-call, documented opt-in, without changing anyone's default output.

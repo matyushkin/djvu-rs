@@ -1098,6 +1098,22 @@ pub struct Jb2EncodeOptions {
     ///
     /// `0.0` (default) = lossless: rec-7 fires only on byte-exact matches.
     /// `cjb2 -lossy` ships at roughly the equivalent of 0.04–0.05 here.
+    ///
+    /// **Measured operating points** (Branch B / round 19; `watchmaker`, a text
+    /// scan where the JB2 mask is 67 % of the file; mask quality via the D1
+    /// PSNR/SSIM harness):
+    ///
+    /// | `lossy_threshold` | Sjbz size | SSIM |
+    /// |-------------------|-----------|------|
+    /// | `0.02` | **−22 %** | 0.9993 |
+    /// | `0.05` | −23 % | 0.9989 |
+    /// | `0.08` | −24 % | 0.9986 |
+    ///
+    /// `0.02` is the sweet spot: a large size reduction at near-imperceptible
+    /// loss (≈ 0.02 % of mask pixels flipped). Returns diminish sharply above it.
+    /// See [`Jb2EncodeOptions::lossy_text`] for that preset. **Note:** the win is
+    /// a *text*-document lever — on noisy high-dpi photo scans the same-size
+    /// near-twin population is thin, so low thresholds barely shrink anything.
     pub lossy_threshold: f32,
     /// Experiment-only cross-size record-6 refinement (#322). `None` (default)
     /// keeps the shipped behavior — only record-1 (new) and record-7 (copy)
@@ -1124,6 +1140,35 @@ impl Default for Jb2EncodeOptions {
             cross_size_rec6_probe: None,
             #[cfg(feature = "experimental")]
             same_size_rec6: None,
+        }
+    }
+}
+
+impl Jb2EncodeOptions {
+    /// Recommended **lossy** preset for text documents: `lossy_threshold = 0.02`.
+    ///
+    /// Measured on `watchmaker` (round 19): **≈ −22 % Sjbz** at SSIM 0.9993 —
+    /// a large size reduction at near-imperceptible loss, the sweet spot of the
+    /// [`lossy_threshold`](Self::lossy_threshold) curve and roughly DjVuLibre
+    /// `cjb2`'s default lossy operating point. Opt-in: the encoder stays lossless
+    /// unless you choose this (or set `lossy_threshold` yourself). Best for text
+    /// scans; on noisy photo scans the near-twin population is thin so it saves
+    /// little.
+    #[allow(clippy::needless_update)] // spread sets the experimental fields when compiled in
+    pub fn lossy_text() -> Self {
+        Self {
+            lossy_threshold: 0.02,
+            ..Self::default()
+        }
+    }
+
+    /// Set the [`lossy_threshold`](Self::lossy_threshold) (builder style),
+    /// leaving every other knob at its default. `0.0` keeps lossless behavior.
+    #[allow(clippy::needless_update)] // spread sets the experimental fields when compiled in
+    pub fn with_lossy_threshold(threshold: f32) -> Self {
+        Self {
+            lossy_threshold: threshold,
+            ..Self::default()
         }
     }
 }
@@ -2410,6 +2455,45 @@ mod tests {
             same_size_rec6: Some(0.05),
             ..Jb2EncodeOptions::default()
         }
+    }
+
+    #[test]
+    fn lossy_text_preset_is_lossy_and_smaller() {
+        // The lossy_text() preset sets the 0.02 operating point and, on a page
+        // with same-size near-twin glyphs, must produce a strictly smaller stream
+        // than the lossless default (it substitutes near-twins as rec-7 copies).
+        assert_eq!(Jb2EncodeOptions::lossy_text().lossy_threshold, 0.02);
+        assert_eq!(
+            Jb2EncodeOptions::with_lossy_threshold(0.07).lossy_threshold,
+            0.07
+        );
+
+        // A 14×24 solid block plus a same-size near-twin (2×2 corner notch,
+        // < 2% of pixels) — the twin is within the 0.02 budget.
+        let mut src = Bitmap::new(64, 60);
+        for (oy, notch) in [(2u32, false), (30u32, true)] {
+            for y in 0..24 {
+                for x in 0..14 {
+                    if notch && x >= 12 && y >= 22 {
+                        continue;
+                    }
+                    src.set(4 + x, oy + y, true);
+                }
+            }
+        }
+        let lossless = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let lossy = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::lossy_text());
+        assert!(
+            lossy.len() < lossless.len(),
+            "lossy_text should shrink a near-twin page: {} vs {}",
+            lossy.len(),
+            lossless.len()
+        );
+        // Still a valid, decodable stream.
+        assert!(
+            jb2::decode(&lossy, None).is_ok(),
+            "lossy output must decode"
+        );
     }
 
     #[test]

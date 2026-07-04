@@ -1,6 +1,6 @@
 # Plan: closing the JB2 encoder size gap vs DjVuLibre
 
-Status: **Both branches evaluated. Branch A: validated lossless −11.7% Sjbz on text (same-size rec-6, experimental). Branch B: B0 found the existing same-size `lossy_threshold` is a −22…−24%/SSIM≥0.999 text lever that ships off by default; B1 (cross-size lossy rec-7) implemented + measured + REVERTED (dominated by raising `lossy_threshold`). Remaining lever is a product decision: expose a documented "cjb2-like" `lossy_threshold` preset / enable-by-default policy.** Owner: perf.
+Status: **Both branches evaluated. Branch A: validated lossless −11.7% Sjbz on text (same-size rec-6, experimental). Branch B: B0 found the existing same-size `lossy_threshold` is a −22…−24%/SSIM≥0.999 text lever that ships off by default; B1 (cross-size lossy rec-7) implemented + measured + REVERTED (dominated by raising `lossy_threshold`). Shipped `Jb2EncodeOptions::lossy_text()` (opt-in 0.02 preset, ≈−22% text at SSIM 0.999) + enriched docs; NOT enabled by default (archival-safe). Plan complete.** Owner: perf.
 See `PERF_EXPERIMENTS.md` for the measured history this plan builds on.
 
 ## 1. Where the gap actually is
