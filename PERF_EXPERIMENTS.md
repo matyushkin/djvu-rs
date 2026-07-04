@@ -7402,3 +7402,86 @@ default wrong, and it matches the repo's byte-identical-default culture). Landed
 
 This closes the JB2 size-gap plan: the biggest practical text-size lever is now a
 one-call, documented opt-in, without changing anyone's default output.
+
+## Perf round 20 (2026-07-04) — IW44_MASKED_WAVELET down-payment: harmonic BG inpaint
+
+Round 8 recorded IW44_MASKED_WAVELET (the ~3.9% residual BG44 size gap vs
+DjVuLibre `c44`) as the priority *size* lever, but the full masked-wavelet
+transform is a normative bitstream change gated on a DjVuLibre interop-diff
+harness — deferred. The same entry flagged the **interop-safe first step**:
+improve the background *inpainting* under the mask in `segment_page`
+(encoder-only, decoder never sees it). This round lands that step and finds it is
+far more than a "down-payment": the production colour encoder was not inpainting
+at all, so this alone captures most of the masked-wavelet size win with **zero**
+bitstream risk — and *improves* decoded quality.
+
+### BG_DIFFUSE — harmonic diffusion of fully-masked background cells — **Kept** (2026-07-04)
+
+**Issue.** `segment_page` builds a sub-sampled BG pixmap where each cell is the
+mean of its block's *unmasked* source pixels. A **fully-masked** cell (its whole
+`sub × sub` block is foreground ink → invisible in the render) fell back, by
+default, to the *full-block mean including the ink* — a near-black cell. Adjacent
+to light background cells that is a large high-frequency step, and the IW44
+background codec spends bits coding it, even though the pixels are never seen. The
+existing `bg_inpaint` (ring-average) fixed the worst of this but was **off by
+default and in every shipping profile** (`default_segment_options` returned plain
+`SegmentOptions::default()` for `Quality` and `SegmentOptions::archival()` for
+`Archival`, both `bg_inpaint = false`). So the colour encoder was paying full
+freight for invisible ink cells.
+
+**Approach.** New `SegmentOptions::bg_diffuse`: after the BG fill, every
+fully-masked cell is overwritten with the **harmonic** (smoothest) interpolation
+of the confident cells — Gauss-Seidel relaxation of Laplace's equation with the
+confident cells as fixed Dirichlet boundary (`diffuse_masked_cells`). Being
+maximally smooth it injects the least wavelet energy, so it codes smaller than
+either the ink fallback or the ring average. Confident (visible) cells are left
+byte-exact, so visible background is untouched; only invisible masked cells
+change. Iterations cap at the grid's larger dimension (16–512) with an early stop
+at Δ < 0.5/255. Wired into the `Quality` and `Archival` profiles'
+`default_segment_options`; the CLI `--bg-inpaint` flag now explicitly selects the
+legacy ring fill (turns diffusion off) so it remains distinguishable.
+
+**Numbers — BG44 chunk bytes** (native-resolution render → `segment_page` →
+`encode_iw44_color`, M1 Max; `default` = current shipping ink-fallback):
+
+| Page | default | ring (`bg_inpaint`) | diffuse (`bg_diffuse`) | diffuse vs default | vs ring |
+|------|---------|---------------------|------------------------|--------------------|---------|
+| colorbook (2260×3669) | 3964 B | 2078 B | **1917 B** | **−51.6%** | −7.7% |
+| watchmaker (2550×3301) | 1736 B | 189 B | 189 B | **−89.1%** | 0% |
+| malliavin (2862×4916) | 267 B | 179 B | 179 B | −33.0% | 0% |
+| irish (2479×3504) | 2473 B | 2434 B | 2434 B | −1.6% | 0% |
+| conquete_paix (4267×6853) | 22 970 B | 768 B | **758 B** | **−96.7%** | −1.3% |
+| chicken / vega / cable | — | — | — | 0% (no masked cells) | 0% |
+
+**Quality — full colour encode, decoded render SSIM/PSNR vs the original render**
+(`PageEncoder::from_pixmap`, `Quality` profile, default segmentation vs
+`bg_diffuse`):
+
+| Page | file default → diffuse | SSIM default → diffuse | PSNR default → diffuse |
+|------|------------------------|------------------------|------------------------|
+| colorbook | 18 092 → 16 044 B (−11.3%) | 0.97598 → 0.97741 | 22.01 → 22.05 dB |
+| watchmaker | 14 070 → 12 518 B (−11.0%) | 0.99868 → 0.99981 | 41.23 → 49.11 dB |
+| malliavin | 1 120 → 1 032 B (−7.9%) | 0.99999 → 1.00000 | 63.2 → ∞ dB |
+| conquete_paix | 28 348 → **6 134 B (−78.4%)** | 0.99526 → 0.99899 | 37.51 → 50.42 dB |
+
+**Strict win on both axes.** Diffusion is never worse than the ink fallback on
+either size or quality: it is smaller (−8% to −78% of the whole colour file, all
+of it BG44) **and** higher SSIM/PSNR on every page — because removing the near-black
+ink-fallback cells also removes the dark halos they bled across mask edges via BG
+upsampling. Pages with no fully-masked cells (chicken, vega, cable) are unchanged
+(0%), so it is safe where it does nothing.
+
+**Correctness.** Encoder-only; the decoder never sees the mask or the BG fill.
+Visible (confident) cells are byte-exact, so the change only touches invisible
+pixels (± the BG-upsampling boundary bleed, which the SSIM table shows *improves*).
+New unit test `bg_diffuse_smooths_masked_cells_and_keeps_confident_cells`; the CLI
+test that asserted `--bg-inpaint` changes the BG became
+`encode_quality_inpaints_masked_background_by_default` (the default now inpaints).
+`make check` (1028+ tests, incl. no_std / wasm32) green.
+
+**Decision.** **Kept**, and enabled in the shipping `Quality`/`Archival` colour
+profiles. It is the interop-safe capture of most of the IW44_MASKED_WAVELET size
+gap with a quality *gain*, not a trade. The remaining, still-deferred piece is the
+normative masked forward-transform + coefficient gathering (mask plumbed through
+`encode_iw44_color` → `PlaneEncoder`), which needs the DjVuLibre interop-diff
+harness before it can be attempted.

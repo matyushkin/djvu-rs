@@ -1166,6 +1166,12 @@ impl EncodeSegmentArgs {
             },
         };
         opts.bg_inpaint = self.bg_inpaint;
+        if self.bg_inpaint {
+            // `--bg-inpaint` explicitly selects the ring-average fill, so turn
+            // off the colour profile's default harmonic diffusion (which would
+            // otherwise take precedence and make the flag a no-op).
+            opts.bg_diffuse = false;
+        }
         Ok(Some(opts))
     }
 }
