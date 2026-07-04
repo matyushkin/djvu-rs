@@ -1154,12 +1154,8 @@ impl Jb2EncodeOptions {
     /// unless you choose this (or set `lossy_threshold` yourself). Best for text
     /// scans; on noisy photo scans the near-twin population is thin so it saves
     /// little.
-    #[allow(clippy::needless_update)] // spread sets the experimental fields when compiled in
     pub fn lossy_text() -> Self {
-        Self {
-            lossy_threshold: 0.02,
-            ..Self::default()
-        }
+        Self::with_lossy_threshold(0.02)
     }
 
     /// Set the [`lossy_threshold`](Self::lossy_threshold) (builder style),
