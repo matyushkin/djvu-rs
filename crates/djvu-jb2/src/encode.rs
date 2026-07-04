@@ -789,7 +789,7 @@ pub fn analyze_jb2_cross_size_refinement(
 /// of `find_refinement_ref`, which gated record-6 (lossless refinement).
 fn find_lossy_copy_ref(
     cand: &Bitmap,
-    dict_entries: &[Bitmap],
+    dict_entries: &[&Bitmap],
     same_size_indices: &[usize],
     threshold: f32,
 ) -> Option<usize> {
@@ -804,7 +804,7 @@ fn find_lossy_copy_ref(
     let max_diff = ((pixel_count as f64) * (threshold as f64)).round() as u32;
     let mut best: Option<(usize, u32)> = None;
     for &i in same_size_indices {
-        let ref_bm = &dict_entries[i];
+        let ref_bm = dict_entries[i];
         debug_assert_eq!(ref_bm.width, cand.width);
         debug_assert_eq!(ref_bm.height, cand.height);
         let d = packed_hamming(&cand.data, &ref_bm.data);
@@ -835,7 +835,7 @@ fn find_lossy_copy_ref(
 #[cfg(feature = "experimental")]
 fn find_cross_size_refine_ref(
     cand: &Bitmap,
-    dict_entries: &[Bitmap],
+    dict_entries: &[&Bitmap],
     by_size: &BTreeMap<(u32, u32), Vec<usize>>,
     max_dim_delta: u32,
     max_hamming_fraction: f32,
@@ -859,7 +859,7 @@ fn find_cross_size_refine_ref(
                 continue;
             };
             for &idx in indices {
-                let d = scaled_hamming(cand, &dict_entries[idx]);
+                let d = scaled_hamming(cand, dict_entries[idx]);
                 if d > max_diff {
                     continue;
                 }
@@ -1074,8 +1074,11 @@ pub fn encode_jb2_dict_with_options(
     let mut dedup: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     // Stored dict entries (parallel to the decoder's `dict` vector) — needed
     // so refinement matching can score Hamming distance against historical
-    // glyphs.
-    let mut dict_entries: Vec<Bitmap> = Vec::new();
+    // glyphs. Borrowed, not cloned: shared-dict entries reference
+    // `shared_symbols` and page-local entries reference `ccs` (both outlive this
+    // function), so a per-page shared-dict encode no longer deep-copies every
+    // shared glyph bitmap (SHARED_DICT_NOCLONE).
+    let mut dict_entries: Vec<&Bitmap> = Vec::new();
     // Index of dict entries by (w, h) for O(1) lookup of refinement candidates.
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
     for sym in shared_symbols {
@@ -1088,7 +1091,7 @@ pub fn encode_jb2_dict_with_options(
             .entry((sym.width, sym.height))
             .or_default()
             .push(idx);
-        dict_entries.push(sym.clone());
+        dict_entries.push(sym);
     }
 
     for &cc_idx in &order {
@@ -1102,7 +1105,7 @@ pub fn encode_jb2_dict_with_options(
         let dkey = symbol_hash(cc.bitmap.width, cc.bitmap.height, &cc.bitmap.data);
         let exact_match = dedup.get(&dkey).and_then(|cands| {
             cands.iter().copied().find(|&i| {
-                let d = &dict_entries[i];
+                let d = dict_entries[i];
                 d.width == cc.bitmap.width
                     && d.height == cc.bitmap.height
                     && d.data == cc.bitmap.data
@@ -1189,7 +1192,7 @@ pub fn encode_jb2_dict_with_options(
                 // computes the child size as `dict[idx].dim + diff`, decodes the
                 // refinement bitmap against that reference, then blits — it does
                 // not extend the dict (handled by the `Action::New` guard below).
-                let reference = &dict_entries[*dict_idx];
+                let reference = dict_entries[*dict_idx];
                 let wdiff = cc_w - reference.width as i32;
                 let hdiff = cc_h - reference.height as i32;
                 encode_num(&mut zp, &mut record_type_ctx, 0, 11, 6);
@@ -1258,7 +1261,7 @@ pub fn encode_jb2_dict_with_options(
                 .entry((cc.bitmap.width, cc.bitmap.height))
                 .or_default()
                 .push(next_idx);
-            dict_entries.push(cc.bitmap.clone());
+            dict_entries.push(&cc.bitmap);
         }
     }
 
@@ -1421,53 +1424,73 @@ pub fn cluster_shared_symbols_tunable(
     // Byte-exact bucketing of one page's connected components, in CC order.
     // Kept as a local item so the parallel and sequential extract paths share
     // it; visits CCs in page order to keep `first_seen`/`pages_seen` identical.
+    //
+    // Clustering is byte-exact (`max_diff == 0`; Hamming shared clustering was
+    // rejected for #258 — invalid page streams on the 517-page corpus, no
+    // measured size win). So at most **one** cluster in a given (w, h) bucket can
+    // match a CC (all reps in a bucket are, by construction, distinct data). The
+    // old code still ran a full `packed_hamming` popcount against every rep in
+    // the bucket per CC — O(CCs × K × bytes). CLUSTER_BUCKET_HASH_DEDUP replaces
+    // that with a `symbol_hash`-keyed lookup (the exact technique already shipped
+    // for the `encode_jb2_dict` dedup, #446): one hash of the CC data, an O(1)
+    // bucket probe, and a single data compare on a hit. Byte-identical — it finds
+    // the same unique exact-match cluster (or none) the scan did.
     fn bucket_page_ccs(
         buckets: &mut BTreeMap<(u32, u32), Vec<Cluster>>,
+        index: &mut BTreeMap<u64, Vec<(u32, u32, usize)>>,
         ccs: &[Cc],
         page_idx: usize,
     ) {
         for (cc_idx, cc) in ccs.iter().enumerate() {
             let bm = &cc.bitmap;
-            // Hamming shared clustering was rejected for #258: it produced
-            // invalid page streams on the 517-page corpus while providing no
-            // measured size win. Keep the public benchmarking knob, but make
-            // clustering byte-exact for all callers.
-            let max_diff: u32 = 0;
-
-            let bucket = buckets.entry((bm.width, bm.height)).or_default();
-            let mut best: Option<(usize, u32)> = None;
-            for (i, c) in bucket.iter().enumerate() {
-                let d = packed_hamming(&bm.data, &c.rep.data);
-                if d > max_diff {
-                    continue;
-                }
-                match best {
-                    None => best = Some((i, d)),
-                    Some((_, bd)) if d < bd => best = Some((i, d)),
-                    _ => {}
+            let key = symbol_hash(bm.width, bm.height, &bm.data);
+            // Unique exact-match cluster for this CC, if any. Candidates share
+            // the hash; confirm size + full data. Insertion appends, so the
+            // candidate list is in increasing bucket-index order — the first data
+            // match is the lowest-index cluster, matching the old scan's tie-break.
+            let mut found: Option<(u32, u32, usize)> = None;
+            if let Some(cands) = index.get(&key) {
+                for &(w, h, i) in cands {
+                    if w == bm.width && h == bm.height && buckets[&(w, h)][i].rep.data == bm.data {
+                        found = Some((w, h, i));
+                        break;
+                    }
                 }
             }
-            match best {
-                Some((i, _)) => {
+            match found {
+                Some((w, h, i)) => {
                     // #446: pages are visited in strictly non-decreasing `page_idx`
                     // order, so `pages_seen` is sorted and the current page, if
                     // already counted, is the last element. An O(1) `last()` check
                     // replaces the O(K) `contains` scan (O(P²)→O(P) total on a corpus
                     // where a cluster recurs on many pages).
-                    if bucket[i].pages_seen.last() != Some(&page_idx) {
-                        bucket[i].pages_seen.push(page_idx);
+                    let c = &mut buckets.get_mut(&(w, h)).unwrap()[i];
+                    if c.pages_seen.last() != Some(&page_idx) {
+                        c.pages_seen.push(page_idx);
                     }
                 }
-                None => bucket.push(Cluster {
-                    rep: bm.clone(),
-                    pages_seen: vec![page_idx],
-                    first_seen: (page_idx, cc_idx),
-                }),
+                None => {
+                    let bucket = buckets.entry((bm.width, bm.height)).or_default();
+                    let idx = bucket.len();
+                    bucket.push(Cluster {
+                        rep: bm.clone(),
+                        pages_seen: vec![page_idx],
+                        first_seen: (page_idx, cc_idx),
+                    });
+                    index
+                        .entry(key)
+                        .or_default()
+                        .push((bm.width, bm.height, idx));
+                }
             }
         }
     }
 
     let mut buckets: BTreeMap<(u32, u32), Vec<Cluster>> = BTreeMap::new();
+    // symbol_hash(w, h, data) → (w, h, index-within-that-(w,h)-bucket) for the
+    // exact-match probe above. Parallel to `buckets`; never trimmed (bucket Vecs
+    // only grow during clustering).
+    let mut index: BTreeMap<u64, Vec<(u32, u32, usize)>> = BTreeMap::new();
 
     // Connected-component extraction is independent per page and is the bulk of
     // the clustering cost; the bucketing that follows is order-dependent (it
@@ -1491,7 +1514,7 @@ pub fn cluster_shared_symbols_tunable(
         let ccs_batch: Vec<Vec<Cc>> = chunk.iter().map(extract_ccs).collect();
 
         for ccs in &ccs_batch {
-            bucket_page_ccs(&mut buckets, ccs, page_idx);
+            bucket_page_ccs(&mut buckets, &mut index, ccs, page_idx);
             page_idx += 1;
         }
     }
