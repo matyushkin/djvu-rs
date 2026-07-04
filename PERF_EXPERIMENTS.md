@@ -7200,3 +7200,97 @@ single-page colour encode) as standing infrastructure — it is the missing larg
 single-encode baseline, and the place to re-judge PAR_PAGE_LAYERS if a true photo /
 BG-balanced fixture is ever added. The higher-value parallel axis (across pages) stays
 covered by PAR_ENCODE + PAR_CLUSTER.
+
+
+## Perf round 17 (2026-07-04) — JB2 size gap: same-size rec-6 refinement (docs/jb2-size-gap-plan.md)
+
+Acting on the "reduce the JB2 size gap vs DjVuLibre" plan. The mask is at parity
+(1.04×) and cross-size rec-6 (#322) was proven to *lose* bytes; the one untried
+lossless lever is **same-size** record-6 refinement (same bbox → no resampling → no
+context misalignment). This round runs Phase A0 (measure the candidate population
+before touching the encoder).
+
+### SAME_SIZE_REC6 — Phase A0 population measurement — **Gate passed for text; thin for noisy scans** (2026-07-04)
+
+**What.** Added `analyze_jb2_same_size_refinement` (experiment-only, `experimental`
+feature) mirroring the default encoder's exact-dedup dict growth, plus the
+`jb2_same_size_a0` example driver. For every component the default encoder emits as a
+fresh record-1 symbol, it scores the minimum Hamming distance against same-`(w,h)`
+dictionary entries. Measurement only — no encoder output changes.
+
+**Numbers** (per-page independent baseline, `shared = []`):
+
+| Corpus | fresh CCs | same-size candidate | ≤5 % near-twins | median best-Hamming |
+|--------|-----------|---------------------|------------------|---------------------|
+| watchmaker (text, Sjbz = 67 % of file) | 3 475 | 1 774 (51 %) | **1 375 (39.6 % of fresh)** | **0.6 %** |
+| pathogenic_bacteria_1896 (600 dpi scan) | 821 330 | 474 513 (58 %) | 7 339 (0.9 % of fresh) | 12.9 % |
+
+**Reading.** On clean text (**watchmaker**), ~40 % of fresh symbols have a same-size
+twin within 5 % Hamming and the median candidate differs by only 0.6 % — a large,
+tight population (repeated OCR glyphs with scan jitter but identical bbox). This is
+exactly where JB2 is the dominant chunk, so a working refinement path could move the
+whole-file size materially. On the noisy 600 dpi **pathogenic** scan the same-size
+twin population is thin (0.9 % ≤5 %, median 12.9 %): same-size candidates are common
+but far apart, so refinement has little to work with there.
+
+**Decision.** **Proceed to A1** (real emitter) — the text-document population clears
+the go/no-go gate. *Caveat, per the #301 lesson:* A0 proves a population, not bytes —
+the `1-bit/px` payload floor (watchmaker ≤5 % twins ≈ 1.8 KB) is only a scale hint;
+whether a real ZP-coded rec-6 actually beats rec-1 is what A2 must measure. Kept the
+analyzer + example behind `experimental`; default builds and output unchanged.
+
+## Perf round 18 (2026-07-04) — same-size rec-6 emitter (A1) + real-bytes proof (A2)
+
+A0 (round 17) showed a strong same-size near-twin population on text. This round
+builds the real emitter and measures actual bytes + round-trip — the #301/#322
+discipline of trusting only emitted bytes.
+
+### SAME_SIZE_REC6 — Phase A1/A2: lossless same-size record-6 refinement — **Validated win on text (experimental)** (2026-07-04)
+
+**What.** Added `Jb2EncodeOptions::same_size_rec6: Option<f32>` (experimental) and
+`find_same_size_refine_ref`. When set, a fresh CC with a **same-bounding-box** dict
+twin within `pixel_count × frac` flipped pixels is emitted as a lossless record-6
+matched refinement (`wdiff = hdiff = 0`) against that twin — reusing the proven
+`encode_bitmap_ref` path — instead of a fresh record-1. Tried before the cross-size
+#322 probe. Default (`None`) is byte-identical to the shipped encoder.
+
+**Numbers** (real emitted Sjbz bytes, per-page independent, all pages round-trip
+**pixel-exact**):
+
+| Corpus | baseline | frac 2 % | frac 5 % | frac 8 % |
+|--------|----------|----------|----------|----------|
+| watchmaker (text, Sjbz 67 % of file) | 130 036 B | **114 861 B (−11.67 %)** | −11.20 % | −10.65 % |
+| pathogenic_bacteria_1896 (600 dpi scan) | 34 254 905 B | +503 B (+0.00 %) | +0.02 % | +0.53 % |
+
+**Round-trip:** all 12 watchmaker + all 517 pathogenic masks decode **pixel-exact**
+at every threshold — the refinement is genuinely lossless.
+
+**Reading.** This is the first lever to *beat* DjVuLibre's glyph-matching losslessly:
+−11.67 % on the Sjbz chunk of a text document (≈ −7.8 % whole-file at Sjbz = 67 %),
+whereas cross-size rec-6 (#322) *lost* +4.37 % on the same corpus. The plan's
+hypothesis holds: same-size needs no resampling, so the refinement context stays
+pixel-aligned and the refinement bitmap costs bits only for the few differing pixels.
+A **tight** threshold wins most (2 % > 5 % > 8 %) — a near-twin at 2 % has a tiny
+refinement bitmap, a borderline 8 % twin's refinement costs more than it saves. On the
+noisy 600 dpi scan the near-twin population is thin (A0: 0.9 % ≤5 %), so it is flat to
+mildly negative — it must **not** be blanket-enabled there.
+
+**Correctness.** Two tests added: `same_size_rec6_off_is_byte_identical` (default ==
+shipped) and `same_size_rec6_roundtrips_near_twins` (fires + lossless). 58 jb2 tests
+green (`experimental` and default).
+
+**Decision.** **Kept behind the `experimental` flag; validated as a real lossless win
+on text.** Not yet a shipping default because (a) it slightly regresses noisy scans,
+so it can't be blanket-on, and (b) enabling it by default changes output for every
+user — a product decision. Phase A3 (next): promote `same_size_rec6` from
+`experimental` to a **stable opt-in** `Jb2EncodeOptions` field (un-gate
+`Action::Refine` + `encode_bitmap_ref` + `find_same_size_refine_ref`, none of which
+need the cross-size `scaled_hamming`), and evaluate an adaptive "enable when the
+same-size near-twin population is dense" auto-policy so text documents get the win
+without risking scans.
+
+**A3 shipping decision (2026-07-04):** maintainer chose to **keep same-size rec-6
+behind the `experimental` flag** — not promoted to the stable `Jb2EncodeOptions` API
+and not enabled by default. The lever is validated and recorded; the shipped default
+output is unchanged. Revisit if/when the stable-API or adaptive-default question is
+reopened.
