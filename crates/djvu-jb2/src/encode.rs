@@ -780,6 +780,149 @@ pub fn analyze_jb2_cross_size_refinement(
     stats
 }
 
+/// Summary of an experiment-only **same-size** refinement search (Phase A0 of
+/// `docs/jb2-size-gap-plan.md`).
+///
+/// Measurement only — does not change encoding. It counts, for the components
+/// the default encoder emits as fresh record-1 symbols, how many have a
+/// **same-bounding-box** dictionary twin within a small Hamming distance. Those
+/// are the candidates for a lossless same-size record-6 refinement, the one
+/// untried lever that avoids the resampling misalignment that made cross-size
+/// rec-6 (#322) lose bytes. It proves a *population*, not a byte outcome — the
+/// #301 lesson is that only a real emitter (Phase A1/A2) proves bytes.
+#[cfg(feature = "experimental")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SameSizeRefinementStats {
+    /// Total connected components seen in reading order.
+    pub total_ccs: usize,
+    /// Components with no exact same-`(w, h, data)` dictionary hit (i.e. the
+    /// ones the default encoder emits as a fresh record-1 symbol).
+    pub fresh_ccs: usize,
+    /// Fresh components large enough to consider for refinement
+    /// (`pixels >= REFINEMENT_MIN_PIXELS`).
+    pub eligible_fresh_ccs: usize,
+    /// Eligible fresh components with at least one same-size dictionary entry to
+    /// score against.
+    pub candidate_ccs: usize,
+    /// Candidate components whose best (minimum) same-size Hamming distance is
+    /// within 2 % / 5 % / 10 % of the component's pixel count.
+    pub near_le_2pct: usize,
+    pub near_le_5pct: usize,
+    pub near_le_10pct: usize,
+    /// Sum of component pixels for the ≤5 % near-twins (a proxy for how much
+    /// direct-bitmap payload a refinement path could shrink).
+    pub near_le_5pct_pixels: u64,
+    /// Sum of the raw best Hamming *bytes* (`ceil(hamming/8)`) for ≤5 % near-twins
+    /// — a crude floor on the refinement-bitmap payload if it coded one bit per
+    /// differing pixel (the real ZP cost differs; this is only a scale hint).
+    pub near_le_5pct_hamming_bytes: u64,
+    /// Best Hamming fraction in per-mille (‰) for every candidate component, for
+    /// histogramming the distance distribution.
+    pub best_hamming_permille: Vec<u32>,
+}
+
+/// Measure the same-size refinement candidate population without changing output
+/// (Phase A0). Mirrors the default encoder's exact-dedup dictionary growth
+/// (`encode_jb2_dict_with_shared`: exact record-7 copy or fresh record-1, no
+/// refinement), then for every fresh, eligible component scores its minimum
+/// Hamming distance against same-`(w, h)` dictionary entries.
+#[cfg(feature = "experimental")]
+pub fn analyze_jb2_same_size_refinement(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+) -> SameSizeRefinementStats {
+    let mut stats = SameSizeRefinementStats::default();
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return stats;
+    }
+
+    let ccs = extract_ccs(bitmap);
+    // Same reading-order sort the real encoder uses, so `first_seen` reference
+    // selection matches the shipped path.
+    let mut order: Vec<usize> = (0..ccs.len()).collect();
+    let bucket = (SAME_LINE_BASELINE_TOL.max(1)) as u32;
+    order.sort_by_key(|&i| {
+        let cc = &ccs[i];
+        let bottom = cc.y + cc.bitmap.height;
+        (bottom / bucket, cc.x)
+    });
+
+    // Exact-dedup dictionary, seeded from the shared symbols, exactly as the
+    // encoder builds it (symbol_hash key + by_size index).
+    let mut dedup: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut dict_entries: Vec<&Bitmap> = Vec::new();
+    let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for sym in shared_symbols {
+        let idx = dict_entries.len();
+        dedup
+            .entry(symbol_hash(sym.width, sym.height, &sym.data))
+            .or_default()
+            .push(idx);
+        by_size
+            .entry((sym.width, sym.height))
+            .or_default()
+            .push(idx);
+        dict_entries.push(sym);
+    }
+
+    for &cc_idx in &order {
+        let cc = &ccs[cc_idx];
+        stats.total_ccs += 1;
+        let bm = &cc.bitmap;
+        let dkey = symbol_hash(bm.width, bm.height, &bm.data);
+        let exact = dedup.get(&dkey).is_some_and(|cands| {
+            cands.iter().copied().any(|i| {
+                let d = dict_entries[i];
+                d.width == bm.width && d.height == bm.height && d.data == bm.data
+            })
+        });
+        if exact {
+            // Default encoder: record-7 copy, dict unchanged.
+            continue;
+        }
+
+        stats.fresh_ccs += 1;
+        let pixels = u64::from(bm.width) * u64::from(bm.height);
+        if pixels >= REFINEMENT_MIN_PIXELS {
+            stats.eligible_fresh_ccs += 1;
+            if let Some(indices) = by_size.get(&(bm.width, bm.height)) {
+                let mut best: Option<u32> = None;
+                for &idx in indices {
+                    let d = packed_hamming(&bm.data, &dict_entries[idx].data);
+                    best = Some(best.map_or(d, |b| b.min(d)));
+                }
+                if let Some(best) = best {
+                    stats.candidate_ccs += 1;
+                    let frac_permille = ((u64::from(best) * 1000) / pixels.max(1)) as u32;
+                    stats.best_hamming_permille.push(frac_permille);
+                    if frac_permille <= 20 {
+                        stats.near_le_2pct += 1;
+                    }
+                    if frac_permille <= 50 {
+                        stats.near_le_5pct += 1;
+                        stats.near_le_5pct_pixels += pixels;
+                        stats.near_le_5pct_hamming_bytes += u64::from(best).div_ceil(8);
+                    }
+                    if frac_permille <= 100 {
+                        stats.near_le_10pct += 1;
+                    }
+                }
+            }
+        }
+
+        // Default encoder: fresh record-1, added to the dict.
+        let next_idx = dict_entries.len();
+        dedup.entry(dkey).or_default().push(next_idx);
+        by_size
+            .entry((bm.width, bm.height))
+            .or_default()
+            .push(next_idx);
+        dict_entries.push(bm);
+    }
+
+    stats
+}
+
 /// Find the closest same-size dict entry within a Hamming-distance budget,
 /// for use as a **lossy copy** target (record-7) — the encoder pretends the
 /// near-duplicate is byte-exact, the decoder produces the dict entry's pixels
@@ -874,6 +1017,44 @@ fn find_cross_size_refine_ref(
     best.map(|(i, _)| i)
 }
 
+/// Find the closest **same-size** dict entry for a lossless record-6 matched
+/// refinement (Phase A1 of `docs/jb2-size-gap-plan.md`).
+///
+/// Candidates are dict entries of exactly `cand`'s `(w, h)`. Distance is the
+/// direct packed Hamming (no resampling — the reference aligns pixel-for-pixel),
+/// accepted within `pixel_count × max_hamming_fraction` flipped pixels. Returns
+/// the dict index of the nearest accepted candidate. The emitted refinement
+/// bitmap reproduces `cand` exactly, so the result is lossless.
+#[cfg(feature = "experimental")]
+fn find_same_size_refine_ref(
+    cand: &Bitmap,
+    dict_entries: &[&Bitmap],
+    same_size_indices: &[usize],
+    max_hamming_fraction: f32,
+) -> Option<usize> {
+    let pixel_count = (cand.width as u64) * (cand.height as u64);
+    if pixel_count < REFINEMENT_MIN_PIXELS {
+        return None;
+    }
+    let max_diff = ((pixel_count as f64) * (max_hamming_fraction as f64)).round() as u32;
+    let mut best: Option<(usize, u32)> = None;
+    for &idx in same_size_indices {
+        let ref_bm = dict_entries[idx];
+        debug_assert_eq!(ref_bm.width, cand.width);
+        debug_assert_eq!(ref_bm.height, cand.height);
+        let d = packed_hamming(&cand.data, &ref_bm.data);
+        if d > max_diff {
+            continue;
+        }
+        match best {
+            None => best = Some((idx, d)),
+            Some((_, bd)) if d < bd => best = Some((idx, d)),
+            _ => {}
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Experiment-only knobs for the cross-size record-6 refinement emitter (#322).
 ///
 /// When present in [`Jb2EncodeOptions::cross_size_rec6_probe`], fresh
@@ -924,6 +1105,15 @@ pub struct Jb2EncodeOptions {
     /// described on [`CrossSizeRec6Probe`].
     #[cfg(feature = "experimental")]
     pub cross_size_rec6_probe: Option<CrossSizeRec6Probe>,
+    /// Experiment-only **same-size** record-6 refinement (Phase A1 of
+    /// `docs/jb2-size-gap-plan.md`). `None` (default) keeps the shipped
+    /// behavior. `Some(frac)` diverts a fresh CC that has a **same-bounding-box**
+    /// dictionary twin within `pixel_count × frac` flipped pixels to a lossless
+    /// record-6 refinement (`wdiff = hdiff = 0`) against that twin, instead of a
+    /// fresh record-1. Unlike the cross-size probe, no resampling is involved, so
+    /// the refinement context stays pixel-aligned. Lossless (round-trip exact).
+    #[cfg(feature = "experimental")]
+    pub same_size_rec6: Option<f32>,
 }
 
 impl Default for Jb2EncodeOptions {
@@ -932,6 +1122,8 @@ impl Default for Jb2EncodeOptions {
             lossy_threshold: 0.0,
             #[cfg(feature = "experimental")]
             cross_size_rec6_probe: None,
+            #[cfg(feature = "experimental")]
+            same_size_rec6: None,
         }
     }
 }
@@ -1120,7 +1312,8 @@ pub fn encode_jb2_dict_with_options(
         enum Action {
             New,
             Copy(usize),
-            /// Cross-size record-6 matched refinement (#322 experiment).
+            /// Record-6 matched refinement — same-size (Phase A1) or cross-size
+            /// (#322) experiment.
             #[cfg(feature = "experimental")]
             Refine(usize),
         }
@@ -1142,12 +1335,19 @@ pub fn encode_jb2_dict_with_options(
             if let Some(idx) = lossy_copy {
                 Action::Copy(idx)
             } else {
-                // #322 experiment: divert fresh components with a near-size
-                // dictionary twin to a lossless cross-size rec-6 refinement.
-                // Behind `experimental`; the default build always emits `New`.
+                // Experiment: divert fresh components with a dictionary twin to a
+                // lossless rec-6 refinement. Same-size (Phase A1) is tried first —
+                // no resampling, so the refinement context stays pixel-aligned —
+                // then the cross-size #322 path. Behind `experimental`; the default
+                // build always emits `New`.
                 #[cfg(feature = "experimental")]
                 {
-                    if let Some(probe) = opts.cross_size_rec6_probe {
+                    let same_size = opts.same_size_rec6.and_then(|frac| {
+                        find_same_size_refine_ref(&cc.bitmap, &dict_entries, candidates, frac)
+                    });
+                    if let Some(idx) = same_size {
+                        Action::Refine(idx)
+                    } else if let Some(probe) = opts.cross_size_rec6_probe {
                         match find_cross_size_refine_ref(
                             &cc.bitmap,
                             &dict_entries,
@@ -2199,6 +2399,64 @@ mod tests {
         );
 
         let decoded = jb2::decode(&probe_bytes, None).expect("probe decode failed");
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    // ── Same-size rec-6 refinement (docs/jb2-size-gap-plan.md Phase A1) ─────────
+
+    #[cfg(feature = "experimental")]
+    fn same_size_opts() -> Jb2EncodeOptions {
+        Jb2EncodeOptions {
+            same_size_rec6: Some(0.05),
+            ..Jb2EncodeOptions::default()
+        }
+    }
+
+    #[test]
+    fn same_size_rec6_off_is_byte_identical() {
+        // With `same_size_rec6` unset (default), the encoder must reproduce the
+        // shipped `encode_jb2_dict` byte stream exactly.
+        let src = make_bitmap(80, 40, |x, y| {
+            let a = (4..16).contains(&x) && (4..28).contains(&y);
+            let b = (40..53).contains(&x) && (4..28).contains(&y);
+            a || b
+        });
+        let shipped = encode_jb2_dict(&src);
+        let opt = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        assert_eq!(shipped, opt, "default options must match shipped output");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn same_size_rec6_roundtrips_near_twins() {
+        // Two same-bounding-box near-twin glyphs: a 14×24 solid block and a copy
+        // with a small 2×2 corner notch (same bbox, a few flipped pixels, well
+        // under 5%). The first is a fresh rec-1; the second has a same-size twin,
+        // so it diverts to a lossless same-size rec-6 refinement (wdiff=hdiff=0).
+        let mut src = Bitmap::new(64, 60);
+        let draw = |bm: &mut Bitmap, ox: u32, oy: u32, notch: bool| {
+            for y in 0..24 {
+                for x in 0..14 {
+                    if notch && x >= 12 && y >= 22 {
+                        continue;
+                    }
+                    bm.set(ox + x, oy + y, true);
+                }
+            }
+        };
+        draw(&mut src, 4, 2, false); // reference
+        draw(&mut src, 4, 30, true); // same-size near twin (2×2 notch)
+
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let same_bytes = encode_jb2_dict_with_options(&src, &[], &same_size_opts());
+
+        // The same-size path must actually fire (different byte stream)…
+        assert_ne!(
+            default_bytes, same_bytes,
+            "same_size_rec6 should emit a rec-6 refinement, changing the stream"
+        );
+        // …and stay lossless (round-trip pixel-exact).
+        let decoded = jb2::decode(&same_bytes, None).expect("same-size decode failed");
         assert_bitmaps_eq(&src, &decoded);
     }
 

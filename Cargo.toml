@@ -118,6 +118,14 @@ required-features = ["tiff"]
 name = "encode_quality_djbz"
 required-features = ["experimental"]
 
+[[example]]
+name = "jb2_same_size_a0"
+required-features = ["experimental"]
+
+[[example]]
+name = "jb2_same_size_a2"
+required-features = ["experimental"]
+
 [[bench]]
 name = "codecs"
 harness = false
