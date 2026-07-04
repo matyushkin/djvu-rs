@@ -102,22 +102,28 @@ pub(crate) fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
     // parallelises over rows with no shared mutable state. Bit-identical either
     // way: the per-pixel weighted sum is over the same contributors in the same
     // order regardless of which thread runs the row.
+    // Accumulate all four RGBA channels of each output pixel into one `[f32; 4]`
+    // read from four contiguous source bytes per tap, so LLVM widens the tap
+    // multiply-add to a single 4-lane FMA instead of three scalar ops on a
+    // stride-4 deinterleave. The alpha lane accumulates the source's constant 255
+    // and is ignored on output. Bit-identical: each RGB channel sums the same taps
+    // in the same order with the same norm.
     let h_row = |oy: usize, mid_row: &mut [u8]| {
         let src_row = &src.data[oy * sw * 4..(oy + 1) * sw * 4];
         for (ox, col) in hcols.iter().enumerate() {
-            let mut r = 0.0_f32;
-            let mut g = 0.0_f32;
-            let mut b = 0.0_f32;
+            let mut acc = [0.0_f32; 4];
             for (i, &w) in col.weights.iter().enumerate() {
                 let base = (col.x0 + i) * 4;
-                r += src_row[base] as f32 * w;
-                g += src_row[base + 1] as f32 * w;
-                b += src_row[base + 2] as f32 * w;
+                let px = &src_row[base..base + 4];
+                acc[0] += px[0] as f32 * w;
+                acc[1] += px[1] as f32 * w;
+                acc[2] += px[2] as f32 * w;
+                acc[3] += px[3] as f32 * w;
             }
             let ob = ox * 4;
-            mid_row[ob] = (r * col.norm).round().clamp(0.0, 255.0) as u8;
-            mid_row[ob + 1] = (g * col.norm).round().clamp(0.0, 255.0) as u8;
-            mid_row[ob + 2] = (b * col.norm).round().clamp(0.0, 255.0) as u8;
+            mid_row[ob] = (acc[0] * col.norm).round().clamp(0.0, 255.0) as u8;
+            mid_row[ob + 1] = (acc[1] * col.norm).round().clamp(0.0, 255.0) as u8;
+            mid_row[ob + 2] = (acc[2] * col.norm).round().clamp(0.0, 255.0) as u8;
             // mid_row[ob + 3] stays 255 (from Pixmap::new alpha init).
         }
     };
@@ -152,57 +158,57 @@ pub(crate) fn scale_lanczos3(src: &Pixmap, dst_w: u32, dst_h: u32) -> Pixmap {
     // accumulators, so each worker keeps its own scratch (reused across the rows
     // it processes). Bit-identical to the sequential version: each output pixel
     // sums the same `sy` contributors in the same order.
-    let v_row =
-        |oy: usize, out_row: &mut [u8], acc_r: &mut [f32], acc_g: &mut [f32], acc_b: &mut [f32]| {
-            let cy = (oy as f32 + 0.5) * v_scale - 0.5;
-            let y0 = (cy.floor() as i32 - v_support + 1).max(0);
-            let y1 = (cy.floor() as i32 + v_support).min(src_h as i32 - 1);
+    // Accumulate into a single **interleaved** RGBA `f32` buffer (`acc[ox*4+c]`)
+    // rather than three separate `acc_r/g/b` column arrays. The inner `sy` loop is
+    // then a contiguous SAXPY `acc[i] += mid_row[i] * w` over `dw*4` elements,
+    // which LLVM auto-vectorises optimally — the previous stride-4 deinterleave
+    // (reading `row[base], row[base+1], row[base+2]` into three arrays) inhibited
+    // it. The alpha lane accumulates `mid`'s constant 255 and is ignored on output.
+    // Bit-identical: each output channel still sums the same `sy` contributors in
+    // the same order with the same norm.
+    let v_row = |oy: usize, out_row: &mut [u8], acc: &mut [f32]| {
+        let cy = (oy as f32 + 0.5) * v_scale - 0.5;
+        let y0 = (cy.floor() as i32 - v_support + 1).max(0);
+        let y1 = (cy.floor() as i32 + v_support).min(src_h as i32 - 1);
 
-            acc_r.iter_mut().for_each(|v| *v = 0.0);
-            acc_g.iter_mut().for_each(|v| *v = 0.0);
-            acc_b.iter_mut().for_each(|v| *v = 0.0);
-            let mut w_sum = 0.0_f32;
+        acc.iter_mut().for_each(|v| *v = 0.0);
+        let mut w_sum = 0.0_f32;
 
-            for sy in y0..=y1 {
-                let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
-                w_sum += w;
-                let row = &mid.data[sy as usize * dw * 4..];
-                for ox in 0..dw {
-                    let base = ox * 4;
-                    acc_r[ox] += row[base] as f32 * w;
-                    acc_g[ox] += row[base + 1] as f32 * w;
-                    acc_b[ox] += row[base + 2] as f32 * w;
-                }
+        for sy in y0..=y1 {
+            let w = lanczos3_kernel((sy as f32 - cy) / v_scale.max(1.0));
+            w_sum += w;
+            let row = &mid.data[sy as usize * dw * 4..(sy as usize + 1) * dw * 4];
+            for (a, &s) in acc.iter_mut().zip(row.iter()) {
+                *a += s as f32 * w;
             }
+        }
 
-            let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
-            for ox in 0..dw {
-                let ob = ox * 4;
-                out_row[ob] = (acc_r[ox] * norm).round().clamp(0.0, 255.0) as u8;
-                out_row[ob + 1] = (acc_g[ox] * norm).round().clamp(0.0, 255.0) as u8;
-                out_row[ob + 2] = (acc_b[ox] * norm).round().clamp(0.0, 255.0) as u8;
-                // out_row[ob + 3] stays 255 (from Pixmap::new alpha init).
-            }
-        };
+        let norm = if w_sum.abs() > 1e-6 { 1.0 / w_sum } else { 1.0 };
+        for ox in 0..dw {
+            let ob = ox * 4;
+            out_row[ob] = (acc[ob] * norm).round().clamp(0.0, 255.0) as u8;
+            out_row[ob + 1] = (acc[ob + 1] * norm).round().clamp(0.0, 255.0) as u8;
+            out_row[ob + 2] = (acc[ob + 2] * norm).round().clamp(0.0, 255.0) as u8;
+            // out_row[ob + 3] stays 255 (from Pixmap::new alpha init).
+        }
+    };
 
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
         out.data.par_chunks_mut(dw * 4).enumerate().for_each_init(
-            || (vec![0.0_f32; dw], vec![0.0_f32; dw], vec![0.0_f32; dw]),
-            |(acc_r, acc_g, acc_b), (oy, out_row)| {
-                v_row(oy, out_row, acc_r, acc_g, acc_b);
+            || vec![0.0_f32; dw * 4],
+            |acc, (oy, out_row)| {
+                v_row(oy, out_row, acc);
             },
         );
     }
     #[cfg(not(feature = "parallel"))]
     {
-        let mut acc_r = vec![0.0_f32; dw];
-        let mut acc_g = vec![0.0_f32; dw];
-        let mut acc_b = vec![0.0_f32; dw];
+        let mut acc = vec![0.0_f32; dw * 4];
         for oy in 0..dst_h as usize {
             let out_row = &mut out.data[oy * dw * 4..(oy + 1) * dw * 4];
-            v_row(oy, out_row, &mut acc_r, &mut acc_g, &mut acc_b);
+            v_row(oy, out_row, &mut acc);
         }
     }
 
