@@ -1422,11 +1422,23 @@ pub fn cluster_shared_symbols_tunable(
         first_seen: (usize, usize),
     }
 
+    // One size class: its clusters (in creation order) plus a `symbol_hash`
+    // index over their reps for O(1) exact-match lookup. Since clustering is
+    // byte-exact (see below), every rep in a bucket is distinct, so at most one
+    // cluster can match a candidate — the hash index replaces the O(K) linear
+    // `packed_hamming` scan the old code ran per CC (CLUSTER_BUCKET_HASH_DEDUP,
+    // the clustering analog of CLUSTER_DEDUP #446 for the running-dict encoder).
+    #[derive(Default)]
+    struct SizeBucket {
+        clusters: Vec<Cluster>,
+        by_hash: BTreeMap<u64, Vec<usize>>,
+    }
+
     // Byte-exact bucketing of one page's connected components, in CC order.
     // Kept as a local item so the parallel and sequential extract paths share
     // it; visits CCs in page order to keep `first_seen`/`pages_seen` identical.
     fn bucket_page_ccs(
-        buckets: &mut BTreeMap<(u32, u32), Vec<Cluster>>,
+        buckets: &mut BTreeMap<(u32, u32), SizeBucket>,
         ccs: &[Cc],
         page_idx: usize,
     ) {
@@ -1434,44 +1446,44 @@ pub fn cluster_shared_symbols_tunable(
             let bm = &cc.bitmap;
             // Hamming shared clustering was rejected for #258: it produced
             // invalid page streams on the 517-page corpus while providing no
-            // measured size win. Keep the public benchmarking knob, but make
-            // clustering byte-exact for all callers.
-            let max_diff: u32 = 0;
-
+            // measured size win. Clustering is byte-exact for all callers, so a
+            // candidate merges only into a rep with identical bytes.
             let bucket = buckets.entry((bm.width, bm.height)).or_default();
-            let mut best: Option<(usize, u32)> = None;
-            for (i, c) in bucket.iter().enumerate() {
-                let d = packed_hamming(&bm.data, &c.rep.data);
-                if d > max_diff {
-                    continue;
-                }
-                match best {
-                    None => best = Some((i, d)),
-                    Some((_, bd)) if d < bd => best = Some((i, d)),
-                    _ => {}
-                }
-            }
-            match best {
-                Some((i, _)) => {
+            let hash = symbol_hash(bm.width, bm.height, &bm.data);
+            // Exact match: the unique rep (if any) whose bytes equal `bm`. The
+            // per-hash verify guards against `symbol_hash` collisions so the
+            // result stays byte-identical to the old full-scan `best` pick.
+            let hit = bucket.by_hash.get(&hash).and_then(|cands| {
+                cands
+                    .iter()
+                    .copied()
+                    .find(|&i| bucket.clusters[i].rep.data == bm.data)
+            });
+            match hit {
+                Some(i) => {
                     // #446: pages are visited in strictly non-decreasing `page_idx`
                     // order, so `pages_seen` is sorted and the current page, if
                     // already counted, is the last element. An O(1) `last()` check
                     // replaces the O(K) `contains` scan (O(P²)→O(P) total on a corpus
                     // where a cluster recurs on many pages).
-                    if bucket[i].pages_seen.last() != Some(&page_idx) {
-                        bucket[i].pages_seen.push(page_idx);
+                    if bucket.clusters[i].pages_seen.last() != Some(&page_idx) {
+                        bucket.clusters[i].pages_seen.push(page_idx);
                     }
                 }
-                None => bucket.push(Cluster {
-                    rep: bm.clone(),
-                    pages_seen: vec![page_idx],
-                    first_seen: (page_idx, cc_idx),
-                }),
+                None => {
+                    let idx = bucket.clusters.len();
+                    bucket.clusters.push(Cluster {
+                        rep: bm.clone(),
+                        pages_seen: vec![page_idx],
+                        first_seen: (page_idx, cc_idx),
+                    });
+                    bucket.by_hash.entry(hash).or_default().push(idx);
+                }
             }
         }
     }
 
-    let mut buckets: BTreeMap<(u32, u32), Vec<Cluster>> = BTreeMap::new();
+    let mut buckets: BTreeMap<(u32, u32), SizeBucket> = BTreeMap::new();
 
     // Connected-component extraction is independent per page and is the bulk of
     // the clustering cost; the bucketing that follows is order-dependent (it
@@ -1502,7 +1514,7 @@ pub fn cluster_shared_symbols_tunable(
 
     let mut promoted: Vec<Cluster> = buckets
         .into_values()
-        .flatten()
+        .flat_map(|b| b.clusters)
         .filter(|c| c.pages_seen.len() >= page_threshold)
         .collect();
 
