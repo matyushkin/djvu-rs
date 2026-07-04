@@ -695,6 +695,31 @@ fn bench_encode_color_page_quality(c: &mut Criterion) {
     });
 }
 
+/// Full single-page colour encode on the largest available page
+/// (`big-scanned-page.djvu`, 6780×9148). Exercises the same Quality path as
+/// `bench_encode_color_page_quality` but with a JB2/IW44 split large enough in
+/// absolute terms for the PAR_PAGE_LAYERS `rayon::join` (Sjbz ∥ BG44) overlap to
+/// clear the noise floor — the BG-heavier fixture the round-2 revert asked for.
+fn bench_encode_color_page_quality_large(c: &mut Criterion) {
+    let pms = load_color_pixmaps(&assets_path().join("big-scanned-page.djvu"), 1);
+    let Some(pm) = pms.into_iter().next() else {
+        eprintln!("skipping bench_encode_color_page_quality_large: no colour page");
+        return;
+    };
+    let mut group = c.benchmark_group("encode_large");
+    group.sample_size(10);
+    group.bench_function("encode_color_page_quality_large", |b| {
+        b.iter(|| {
+            let _ = black_box(
+                djvu_rs::djvu_encode::PageEncoder::from_pixmap(black_box(&pm))
+                    .with_quality(djvu_rs::djvu_encode::EncodeQuality::Quality)
+                    .encode(),
+            );
+        });
+    });
+    group.finish();
+}
+
 /// Multi-page layered colour bundle (`encode_djvm_layered_shared`) — segments +
 /// JB2-dict + IW44 + FGbz for every page, then shared-Djbz clustering + DJVM
 /// container assembly. First (≤3) colour pages of watchmaker. No prior bench.
@@ -847,6 +872,7 @@ criterion_group!(
     bench_jb2_encode_dict,
     bench_segment_page_color,
     bench_encode_color_page_quality,
+    bench_encode_color_page_quality_large,
     bench_encode_djvm_layered_shared,
     bench_encode_djvm_bundle_jb2,
     bench_cluster_shared_symbols,
