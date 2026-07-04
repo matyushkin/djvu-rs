@@ -7027,3 +7027,107 @@ remains the interface: consumers that want the fast Y-only gray decode — OCR
 pre-passes, e-ink pipelines that do their own compositing, pure-BG pages — call it
 via `page.decoded_bg44()?.to_gray8()`. Wiring it into the general RGBA compositor is
 not worth duplicating the hot path.
+
+## Perf round 15 (2026-07-04) — acting on the round-6 validated backlog (JB2 encoder)
+
+Round 6 left a validated backlog of byte-identical encoder wins that "need a
+dedicated bench." This round takes the top two (SHARED_DICT_CLONE_PER_PAGE and
+CLUSTER_BUCKET_HASH_DEDUP), builds the missing measurement, and reports honestly —
+including that the headline "~2.9 %" estimate does not survive isolated measurement.
+
+### SHARED_DICT_NOCLONE — borrow the shared dict instead of cloning it per page — **Kept (allocation; wall-clock neutral)** (2026-07-04)
+
+**Issue (backlog P2, "SHARED_DICT_CLONE_PER_PAGE").** `encode_jb2_dict_with_options`
+(`crates/djvu-jb2/src/encode.rs`) rebuilds its `dict_entries` vector from the
+`shared_symbols` on **every per-page call** via `sym.clone()` — a deep copy of every
+shared glyph bitmap — even though the shared dict is identical across all DJVM pages.
+`encode_jb2_dict_with_shared(page, shared)` is called once per page in the bundlers
+(`encode_djvm_bundle_jb2_impl`, `encode_djvm_layered_shared`) with the same `shared`.
+
+**Approach.** `dict_entries` is now `Vec<&Bitmap>` instead of `Vec<Bitmap>`. The
+shared-dict prefix borrows `shared_symbols`; page-local additions borrow
+`&ccs[i].bitmap` (the `ccs` vector already lives for the whole call). Both outlive
+the function, so no lifetime gymnastics. The two matching helpers
+(`find_lossy_copy_ref`, `find_cross_size_refine_ref`) now take `&[&Bitmap]`. No clone
+remains on the shared-dict setup or the per-symbol `New` append path.
+
+**Correctness.** Byte-identical: `dict_entries[i]` yields the same `&Bitmap` (same
+width/height/data) the clone produced, and every comparison/emit reads it identically.
+All 53 djvu-jb2 tests, the 81 main-crate encode tests, the `encode_size_regression`
+golden, and the full 1028-test `make check` pass.
+
+**Numbers** (M1 Max, `--features parallel`, release). Measured with the real large
+shared dict — 58 masks of `pathogenic_bacteria_1896` (520-page book), clustered to a
+**3248-symbol / 569 KiB** shared dictionary — the closest available fixture to the
+517-page corpus the backlog estimate came from:
+
+| Metric | OLD (clone) | NEW (borrow) | Change |
+|--------|-------------|--------------|--------|
+| per-page `encode_jb2_dict_with_shared` wall-clock | 33.6 ms | 33.9 ms | flat (noise) |
+| bytes allocated per page-encode | 15.38 MiB | 14.36 MiB | **−6.7 %** |
+
+**Wall-clock is flat, not −2.9 %.** Per-page encode is dominated by `extract_ccs` on
+a 4267×6853 mask plus ZP entropy coding of thousands of CCs (~33 ms); the shared-dict
+clone is 569 KiB of `memcpy` + a few thousand small `Vec` allocations — microseconds
+against 33 ms, invisible in wall-clock even at this dict size. The backlog's "~2.9 %
+of shared-dict encode" does not reproduce under isolated measurement. What the change
+*does* remove is real **allocation traffic**: ~1 MiB/page (the cloned dict + its
+per-bitmap `Vec` headers), −6.7 % of the per-page allocation total. On the full
+520-page book that is ~530 MiB of transient allocation avoided, and in the parallel
+bundler (N pages encoding concurrently, each previously holding its own 569 KiB dict
+copy) it lowers peak concurrent memory — aligned with the round 12–13 memory-axis work.
+
+**Decision.** **Kept.** Byte-identical, strictly removes allocations, never adds work,
+and is arguably cleaner (no reason to own what you only read). Wall-clock-neutral, so
+its value is memory-traffic / peak-RSS in the multi-page encode path, not throughput.
+The honest correction to the backlog: this axis is an allocation win, not the ~3 %
+wall-clock win the estimate implied.
+
+### CLUSTER_BUCKET_HASH_DEDUP — hash-probe the exact-match cluster lookup — **Kept (major)** (2026-07-04)
+
+**Issue (backlog P4).** `bucket_page_ccs` inside `cluster_shared_symbols_tunable`
+(`crates/djvu-jb2/src/encode.rs`) placed each connected component into a
+`(w, h)`-keyed bucket, then found its cluster by a **full linear scan** computing
+`packed_hamming` against every rep in that bucket — with `max_diff == 0`, i.e. only an
+exact byte match can hit. Because clustering is byte-exact (Hamming clustering was
+rejected in #258), all reps in a bucket have distinct data, so at most one can match,
+yet the scan ran a whole-bitmap popcount against *every* rep of that size per CC:
+O(CCs × K × bytes), quadratic as a size bucket accumulates many distinct glyphs.
+
+**Approach.** Add a `symbol_hash(w, h, data) → (w, h, index-in-bucket)` map parallel to
+the buckets (the exact `symbol_hash` dedup technique already shipped for the
+`encode_jb2_dict` encoder, #446). Per CC: one hash of its data, an O(1) probe, and a
+single full-data compare on a candidate collision. On a miss, push a new cluster and
+register its index. The bucket `Vec`s and their insertion order are unchanged, so
+`buckets.into_values().flatten()` and the `first_seen` trim tie-breaks are untouched.
+
+**Correctness.** Byte-identical. Candidates share the hash and are probed in
+insertion (increasing-index) order, so the first data match is the same lowest-index
+cluster the old scan selected; a fresh CC still creates a cluster in the same
+`(w, h)` bucket at the same position. Verified end-to-end: clustering all 517 masks of
+`pathogenic_bacteria_1896` produces the **identical** 5164 shared symbols and an
+identical `Djbz` (checksum `3533459288109220718`, 119 435 bytes) before and after.
+53 djvu-jb2 tests, the encode goldens, and the full 1028-test `make check` pass.
+
+**Numbers** (M1 Max, `--features parallel`, release; `cluster_shared_symbols(&all_517_masks, 2)`):
+
+| | OLD (Hamming scan) | NEW (hash probe) | Change |
+|--|--------------------|-------------------|--------|
+| `cluster_shared_symbols` (517 pages) | 20.4 s | 3.4 s | **−83 % (6.0×)** |
+
+Extraction (`extract_ccs`, already rayon-parallel) is shared by both, so the entire
+~17 s delta is the eliminated serial Hamming bucketing. The `extract_ccs` pass is now
+the dominant remaining cost.
+
+**Why so much more than the backlog's "~2 %".** That estimate assumed small buckets.
+On a real long bilevel book the size buckets hold thousands of distinct reps
+(5164 promoted, many more transient singletons), so the per-CC O(K) scan was in fact
+the **dominant** cost of clustering, not a 2 % tail — a 6× win, not 1.02×. The prior
+rounds never measured it because no clustering bench existed; a full-book probe
+exposed it immediately (the LAZY_PAGE_CONSTRUCT / C5 "unmeasured axis" lesson again).
+
+**Decision.** **Kept.** The largest byte-identical encoder win of the recent rounds:
+turns the multi-page shared-Djbz clustering from ~20 s to ~3.4 s on a 517-page book
+with an identical output stream. Directly speeds every layered/bundled multi-page
+encode that clusters a shared dictionary. The remaining clustering cost is the
+parallel `extract_ccs`, which the existing PAR_CLUSTER work already addresses.
