@@ -7953,3 +7953,48 @@ output bytes.
 
 **Decision. Fixed**, small and scoped (one `if` + a 2-byte stack array), with
 regression tests at both the codec and the render-API layer. `make check` green.
+## Perf round 27 (2026-07-04) — B5 streaming ProgressiveDecoder (the deferred stateful API)
+
+Round 8 flagged the streaming-step progressive case as needing a stateful decoder
+API; round 11 (B5_INCREMENTAL_PROGRESSIVE) landed the O(N) *batch* path inside
+`render_progressive_all` but left the streaming API deferred. This round adds it
+and dogfoods it from the batch path.
+
+### B5_STREAMING_DECODER — `ProgressiveDecoder` stateful streaming API — **Kept** (2026-07-04)
+
+**Gap.** The public progressive entry points are `render_progressive(page, opts,
+chunk_n)` — which re-decodes BG44 chunks `1..=chunk_n` from scratch per frame,
+O(N²) over a full progressive sequence — and `render_progressive_all(page, opts)`,
+which is O(N) but requires **every** BG44 chunk up front. Neither serves a viewer
+receiving chunks incrementally over a network, which wants to render after each
+arriving chunk without holding the whole sequence or re-decoding the prefix.
+
+**API.** New `pub struct ProgressiveDecoder<'a>`:
+- `ProgressiveDecoder::new(page, opts)` decodes the foreground (mask / FG44 /
+  palette, plus any `bold` dilation) **once** and sets up the shared render params;
+- `push_bg44_chunk(&mut self, chunk) -> Result<Pixmap>` feeds one refinement chunk
+  into a single accumulating `Iw44Image` and returns the refined frame;
+- `frames_produced()` reports progress.
+
+O(N) total decode across the whole sequence — the foreground is never re-decoded and
+the background accumulates in place, exactly the batch fast path's economy, now
+usable one chunk at a time. It serves the case that path already served
+byte-identically (strict decode, `Bilinear`); `Lanczos3`/`permissive` are rejected
+with `UnsupportedOption` (Lanczos re-renders at native per frame, so there is no
+shared incremental state — those callers use `render_progressive_all`).
+
+**Refactor + correctness.** `render_progressive_all`'s incremental fast path was
+re-pointed at the new type (it now builds a `ProgressiveDecoder` and calls
+`push_bg44_chunk` per chunk) instead of inlining the decode/composite/snapshot loop
+— one implementation, no drift. Byte-identical: the pre-existing
+`render_progressive_all_matches_per_frame` (+ `_bold`) tests still pass (the batch
+output is unchanged), and a new `progressive_decoder_streams_frames_matching_batch`
+test asserts the streamed frames equal `render_progressive_all`'s frame-for-frame,
+pixel-for-pixel, on the 3-chunk `chicken.djvu`. A rejection test covers the
+`Lanczos3` / zero-dimension guards. `make check` green (1030 tests).
+
+**Decision.** **Kept.** Closes the last B5 item: the O(N) streaming progressive
+decode a network/viewer consumer needs, delivered as a small stateful wrapper over
+the already-incremental building blocks, with the batch path refactored to share it.
+No new decode cost (identical work, just re-shaped for incremental delivery); the win
+is the enabled use-case (render-as-you-receive) plus the removed duplication.
