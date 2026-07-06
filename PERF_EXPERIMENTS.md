@@ -9124,3 +9124,111 @@ manual primitive — an automatic "prefetch page N+1 whenever page N finishes
 rendering" viewer-level policy is a natural next step but is a product decision
 (prefetch direction, cancellation on rapid back-and-forth, budget vs C5) out of
 scope here.
+
+## Perf round 41 (2026-07-06) — PY_ZEROCOPY: GIL release + zero-copy buffers in the Python bindings
+
+**Prior-art check.** `djvu-py/src/lib.rs` (the whole crate is one file) had neither
+lever: `Document::open`/`from_bytes`, `Page::render`/`text` ran fully under the
+GIL (no `py.detach` anywhere — note pyo3 0.29, already in use per
+`djvu-py/Cargo.toml`, renamed `Python::allow_threads`→`Python::detach` and
+`Python::with_gil`→`Python::attach`; the task brief's "py.allow_threads" is the
+pre-0.29 name), and every pixel-returning path (`Pixmap::data()`, `to_numpy()`,
+`to_pil()`) copied `self.data: Vec<u8>` into a fresh `PyBytes` on *every call*.
+`gh pr list --search "python OR pyo3 OR zerocopy"` turned up only the original
+bindings PR (#128) and a pyo3-0.24→0.29 RUSTSEC bump (#348, already merged into
+`main` — the local `chore/bump-pyo3-0.29` branch is a stale pre-merge copy, not
+new work). No prior GIL-release or buffer-protocol work existed. Proceeded.
+
+### PY_GIL_DETACH — `py.detach()` around render/open/text — **Kept** (2026-07-06)
+
+**Setup.** Added a `Python<'_>` parameter to `Document::open`, `Document::from_bytes`,
+`Page::render`, and `Page::text`, wrapping the actual file-read/parse/decode/
+compositing/resample work in `py.detach(|| ...)`. Confirmed safe first: the core
+crate asserts `Document: Send + Sync` at compile time (`src/lib.rs:625`), and
+`Page<'a>`/`Pixmap` (`{ width, height, data: Vec<u8> }`) have no interior
+mutability, so the djvu-py wrapper types (which only add `Arc`/`usize`/`u32`/`u16`
+fields) satisfy pyo3's `Ungil` bound with no `unsafe`. `Document::from_bytes`
+copies the input `&[u8]` to an owned `Vec<u8>` *before* detaching (the Python
+buffer's lifetime shouldn't be assumed valid without the GIL); `Document::page()`
+itself stays under the GIL since the core crate confirms it's a cheap
+metadata-only borrow, not worth a detach/reattach round-trip.
+
+Measured with 8 pages of `tests/fixtures/colorbook.djvu`, rendering each page 6×
+(48 renders total), sequential vs `threading.Thread`-sharded across N threads
+(script: scratchpad `bench_gil.py`, not checked in — ad hoc measurement per task
+brief, no existing djvu-py pytest suite to extend):
+
+| threads | wall time | speedup |
+|---------|-----------|---------|
+| 1 (baseline) | 3.35s / 1.99s (two runs, shared noisy host) | 1.00x |
+| 2 | 1.75s / 1.03s | **1.92x / 1.93x** |
+| 4 | 1.02s / 0.51s | **3.29x / 3.91x** |
+
+Consistent ~1.9x at 2 threads and 3.3–3.9x at 4 threads across two independent
+runs (absolute times vary because other agents share this host — the *ratio*
+is what matters, per the task's noise caveat). Confirms the GIL is genuinely
+released for the whole render call, not just released-and-immediately-reacquired.
+
+**Decision.** Kept. `cargo clippy -p djvu-py --all-targets -- -D warnings` and
+`cargo fmt -p djvu-py -- --check` clean; `maturin develop --release` + manual
+Python smoke test pass; full `make check` (1077 tests) unaffected (djvu-py is
+outside the cargo workspace test run, as before).
+
+### PY_ZEROCOPY_BUFFER — buffer-protocol `Pixmap` + zero-copy numpy/PIL views — **Kept** (2026-07-06)
+
+**Setup.** Implemented `__getbuffer__`/`__releasebuffer__` on `Pixmap` (flat
+read-only `uint8` buffer of length `width*height*4`, mirroring pyo3's own
+`tests/test_buffer_protocol.rs` pattern — `Bound<'_, Self>` received by value so
+`slf.into_ptr()` hands one owned reference to `view.obj`, keeping the `Pixmap`
+alive for exactly the buffer's lifetime; CPython's `PyBuffer_Release` calls the
+matching `Py_DECREF`). This alone makes `memoryview(pixmap)`, `bytes(pixmap)`,
+and `numpy.frombuffer(pixmap, ...)` work directly with no new API surface.
+Added two additive convenience methods reusing it: `to_numpy_zerocopy()`
+(`numpy.frombuffer(self, uint8).reshape(h, w, 4)`) and `to_pil_zerocopy()`
+(`PIL.Image.frombuffer("RGBA", size, self, "raw", "RGBA", 0, 1)`) — both zero-copy
+per numpy/Pillow's own documented buffer-protocol fast paths. Existing
+`data()`/`to_numpy()`/`to_pil()` untouched (still copy into `PyBytes`) — old API
+stays exactly as it was, matching the task's backward-compatibility requirement.
+
+Verified correctness (not just speed): `to_numpy_zerocopy()` output byte-equal to
+`to_numpy()`, `to_pil_zerocopy()` `.tobytes()` byte-equal to `to_pil()`'s. Verified
+the lifetime story: `del pm` after taking `memoryview(pm)` leaves the memoryview's
+data intact (backing `Pixmap` kept alive by the buffer's owned reference) until
+the memoryview itself is released, then frees cleanly (no leak, no use-after-free
+under repeated GC + read-back).
+
+Measured on `tests/fixtures/big-scanned-page.djvu` page 0 (6780×9148, 248 MB RGBA),
+50 calls each (scratchpad `bench_zerocopy.py`):
+
+| path | time/call | vs zero-copy |
+|------|-----------|--------------|
+| `data()` (copies to `bytes`) | 23.5–23.7 ms | — |
+| `memoryview(pm)` | ~0.0 ms (<1 µs) | **~140,000x** |
+| `to_numpy()` (copies to `bytes` first) | 23.0–23.3 ms | — |
+| `to_numpy_zerocopy()` | ~0.001 ms | **~23,000–25,700x** |
+| `to_pil()` (copies to `bytes` first) | 50.8–51.2 ms (PIL's own `frombytes` copy is 2x the raw copy) | — |
+| `to_pil_zerocopy()` | ~0.004–0.005 ms | **~10,800–11,300x** |
+
+The absolute ratios are dominated by the fact that the zero-copy paths do
+(almost) no work at all for a 248 MB buffer — the honest takeaway is "the
+248 MB memcpy is eliminated," not a literal 20,000x wall-clock claim for
+real workloads that then go on to do something with the pixels.
+
+**Decision.** Kept. Same verification as PY_GIL_DETACH (clippy/fmt clean,
+`make check` green, manual pytest-equivalent smoke script). No `unsafe` outside
+the two buffer-protocol slot methods, which is inherent to implementing the
+protocol at all (pyo3 doesn't offer a safe derive for it in 0.29) and follows
+pyo3's own tested reference pattern line-for-line.
+
+**Follow-ups**: djvu-py has no pytest suite and no CI job at all (`make check`
+excludes it from the nextest run; there's no `.github/workflows` step that builds
+or tests it) — the ad hoc scratchpad scripts used here aren't checked in. Adding
+a minimal `djvu-py/tests/` + CI job (maturin build + pytest) would be a
+reasonable follow-up so this round's coverage isn't purely tribal knowledge in
+a perf-log entry. Also: the buffer protocol currently exposes a flat 1-D
+`uint8` array (reshape happens numpy-side in the convenience methods) rather
+than a native 3-D `(h, w, 4)` `Py_buffer` with real strides — that would need
+heap-allocated shape/strides arrays threaded through `view.internal` for cleanup,
+which is more `unsafe` surface for a marginal ergonomic win (`np.asarray(pixmap)`
+directly vs. `np.frombuffer(pixmap, ...).reshape(...)`); left as-is on a
+safety/benefit tradeoff.
