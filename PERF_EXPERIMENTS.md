@@ -10333,3 +10333,125 @@ duplicated by building this:
 **Decision.** **Kept, opt-in.** Default encode paths are unchanged (byte-
 identical, tested). One `make check` run (fmt/clippy/no_std/wasm32/tests, all
 1104 tests green) before push.
+## Perf round 52 (2026-07-06) — IW44_ENTROPY_PROBE: localizing the textured-content size gap vs c44
+
+**Scope.** Round 22 (IW44_ENTROPY_GAP) found the size gap vs `c44` splits by
+content — smooth ≈ parity, textured ~1.3× at matched SSIM — and stopped at
+"the gap is entropy coding, not masking" without localizing *where in the
+bitstream* it concentrates. This round instruments the encoder to answer
+that with real emitted bytes, then probes three candidate encoder-only
+levers named in the brief: (a) band-dependent activation threshold, (b)
+coefficient pre-quantization tweaks, (c) chunk/slice boundary placement.
+Round 35 (IW44_SLICE_RD)'s `total_slices=100` was not re-litigated.
+
+**Instrumentation.** Added a diagnostic-only `iw44-probe` cargo feature
+(`djvu-iw44/iw44-probe`, wired through the root crate's own feature of the
+same name) gating a new `djvu_iw44::encode::probe` module: thread-local
+per-band counters (10 IW44 frequency bands, 0=DC/coarsest..9=finest) for
+cumulative ZP-coder output bytes and call/true counts of the four bit
+categories the codec emits per slice (block-band NEW, per-bucket NEW,
+coefficient activation, coefficient refinement). A new
+`ZpEncoder::bytes_written()` read-only accessor (`crates/djvu-zp/src/
+encoder.rs`) gives the byte-attribution hook without touching any
+decode-critical state. Off by default, zero runtime cost when disabled;
+guarded by a dedicated regression test
+(`djvu-iw44/src/encode.rs::probe_does_not_change_output`) asserting
+identical encoder output bit-for-bit with the counters enabled vs disabled.
+New example `examples/iw44_band_probe.rs` runs this on each corpus page's
+*real* BG44 background (the same production workload round 35 measured),
+printing the per-band table plus a coarse(0-3)/mid(4-6)/fine(7-9) byte-share
+summary and the `c44` size for context.
+
+**Finding — the gap concentrates in band 0 (DC/coarsest), and the ours/c44
+ratio *anti-correlates* with page size/complexity, not with "textured vs
+smooth" as originally framed.** Measured on the full `colorbook.djvu` (62
+pages) and `watchmaker.djvu` (12 pages) corpora used by round 22:
+
+- `watchmaker` (round-22's "smooth" example): 98.6–99.4% of bytes land in
+  band 0 on every page; ratio is 1.01–1.05× (near parity), matching round 22.
+- `colorbook` (round-22's "textured" example): band-0 share ranges from
+  ~18–22% on genuinely detail-rich pages (e.g. page 21: 22.5% coarse, 46.7%
+  fine, ratio 1.03×) up to 94.6–96.8% on visually simple pages (e.g. page 61:
+  96.8% coarse, ratio **1.251×** — the single worst page in the corpus; page
+  2: 94.6% coarse, ratio 1.223×).
+- Across all 62 `colorbook` pages: `corr(bytes, ratio) = −0.591` — **small,
+  band-0-dominated pages have the worst gap**, not large/detail-rich ones.
+  The 5 worst-ratio pages (61, 2, 59, 1, 60) are all >79% coarse-band share;
+  the 5 best-ratio pages (35, 36, 25, 21, 54) all have mid+fine share ≥55%.
+
+This reframes round 22's own "textured" label: the real per-page driver of
+the gap is small-page/DC-dominated content, not high-frequency detail — the
+opposite of the original hypothesis. `colorbook` page 61: 2791 B total (2231
+B c44), gap = 560 B, 96.8% of our bytes in band 0.
+
+**Candidate (a) — band-dependent activation threshold — already closed,
+zero slack.** Read `newly_active_encoding_pass`/`bucket_encoding_pass`: both
+already use the exact real decoder gate `(s * 11/16).max(1)` (this is
+exactly what round pre-5's IW44_ACT_THRESH fixed, −9.1%). No remaining
+activation-signalling waste to recover; not implemented.
+
+**Candidate (b) — coefficient pre-quantization tweaks — out of scope for a
+zero-PSNR probe.** The forward wavelet transform is tested/required to be an
+exact, lossless mirror of its own i32 reference (`loss_diagnostics` test
+module); any deadzone/rounding-bias tweak is inherently a quality/size
+tradeoff, not a free encoder-only win, and would need its own D1-gated
+experiment against a PSNR floor. Not attempted here; flagged as a possible
+future direction, not validated.
+
+**Candidate (c) — chunk/slice boundary layout — real but small, below the
+adoption bar.** `djvudump` on a `c44`-encoded file confirms it uses a
+`74+15+10` schedule over 3 BG44 chunks by default, vs our
+`Iw44EncodeOptions::default()` `slices_per_chunk=10` over 10 equal chunks
+for the same 100-slice total — more chunks pay more independent-ZP-stream
+floor/header cost. Tested `slices_per_chunk ∈ {10, 25, 50, 74, 99}` two ways:
+
+1. `examples/iw44_chunking_lever.rs` — full end-to-end re-encode of page 0
+   of 3 corpus files via `PageEncoder`, validated with real `ddjvu`:
+
+   | file | n=10 (B) | n=25 | n=50 | n=74 | n=99 | ddjvu | maxΔpx |
+   |---|---:|---:|---:|---:|---:|---|---:|
+   | colorbook (2260×3669) | 16044 | −0.51% | −0.69% | −0.69% | −0.67% | ok all | 0 |
+   | watchmaker (2550×3301) | 12522 | −0.69% | −0.86% | −0.93% | −0.93% | ok all | 0 |
+   | conquete_paix (4267×6853) | 6144 | −1.40% | −1.69% | −1.69% | −1.63% | ok all | 0 |
+
+2. `examples/iw44_chunking_sweep.rs` — whole-corpus, every real BG44 page
+   (not just page 0), decoded-pixel-identity asserted across every `n`:
+
+   | corpus | pages | n=10 (B) | n=25 | n=50 | n=74 | n=99 | pixel-identity |
+   |---|---:|---:|---:|---:|---:|---:|---|
+   | colorbook | 62 | 1,684,391 | −0.09% | −0.11% | −0.09% | −0.09% | PASS |
+   | watchmaker | 12 | 20,997 | −1.65% | −1.56% | −1.56% | −1.15% | PASS |
+   | conquete_paix | 22 | 1,675,111 | −0.04% | −0.05% | −0.04% | −0.04% | PASS |
+   | all 3 combined | 96 | 3,380,499 | −0.07% | −0.09% | −0.07% | −0.07% | PASS |
+
+Chunking is a pure stream-framing change (each BG44 chunk is an
+independently-flushed `ZpEncoder`; only `PlaneEncoder`'s quantization/context
+state carries across chunk boundaries), so bit-identical decoded pixels
+across every tested value is the expected/required outcome, confirmed both
+via `ddjvu` (candidate lever, full pages) and our own decoder (sweep, 96
+real BG44 pages) — genuinely interop-safe. Savings are real (0.04–1.7%
+depending on content) but non-monotonic per page and well under the round's
+3% "Kept" bar even in the best case (watchmaker, small smooth pages) — not
+adopted as a new default, left as a documented, available option via the
+existing public `Iw44EncodeOptions::slices_per_chunk`.
+
+**Verdict: Diagnostic.** No candidate lever crosses the 3% bar at equal
+PSNR (chunking recovers only ~27 B of colorbook page 61's 560 B gap — a
+small fraction). The probe narrows and reframes round 22's finding with
+real per-band bytes: the residual gap is concentrated in band 0/DC on
+small, simple pages (anti-correlated with page size, not "textured
+content" as originally labeled), candidate (a) is already fully closed by a
+prior round, candidate (b) is inherently quality-coupled and out of scope
+for a zero-PSNR probe, and candidate (c) is a real-but-minor, interop-safe,
+non-default-worthy lever. The likely remaining root cause — genuine
+coefficient-value differences between our Rust forward wavelet transform
+and DjVuLibre's own C++ implementation on band-0-dominated content — could
+not be validated (no DjVuLibre C++ source available locally to diff
+against) and is left as an open hypothesis, not a finding.
+
+**Artifacts.** `crates/djvu-zp/src/encoder.rs` (`ZpEncoder::bytes_written`),
+`crates/djvu-iw44/src/encode.rs` (`probe` module + instrumentation hooks +
+`probe_does_not_change_output` test), `crates/djvu-iw44/Cargo.toml` /
+root `Cargo.toml` (`iw44-probe` feature), `examples/iw44_band_probe.rs`,
+`examples/iw44_chunking_lever.rs`, `examples/iw44_chunking_sweep.rs`. Full
+`make check` green (1099 tests, 0 failures).

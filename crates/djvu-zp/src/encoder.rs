@@ -50,6 +50,19 @@ impl ZpEncoder {
         }
     }
 
+    /// Bytes flushed to the output buffer so far.
+    ///
+    /// Diagnostic accessor only — a read-only snapshot of `output.len()` mid-stream
+    /// (subject to the encoder's ~25-bit initial delay and carry-propagation
+    /// buffering, so it is a monotonic approximation, not an exact per-bit byte
+    /// count). Does not affect encoding state or the emitted bytes in any way, so
+    /// it cannot change what a decoder reads. Used by encoder-side size-attribution
+    /// probes (e.g. per-band byte accounting) that need a running total without
+    /// waiting for `finish()`.
+    pub fn bytes_written(&self) -> usize {
+        self.output.len()
+    }
+
     /// Encode one bit using an adaptive probability context.
     ///
     /// Matches DjVuLibre's inline `encoder(int bit, BitContext &ctx)`:
