@@ -372,7 +372,14 @@ fn our_attempt(mutant: Vec<u8>, page_idx: usize, timeout: Duration) -> OurOutcom
                 }
                 let opts = native_opts(pw, ph);
                 let pm = render_pixmap(page, &opts).map_err(|e| format!("render: {e}"))?;
-                Ok((pw, ph, pm.data))
+                // Report the actual rendered pixmap's dimensions, not the
+                // pre-rotation INFO dims from page.width()/height(): for
+                // 90deg/270deg-rotated pages the two differ (dimensions swap
+                // on render), and comparing the pre-rotation dims against
+                // ddjvu's (correctly rotated) reported dims produces a false
+                // "dim-mismatch" classification (see PERF_EXPERIMENTS.md
+                // round 46).
+                Ok((pm.width, pm.height, pm.data))
             },
         ));
         let _ = tx.send(result);

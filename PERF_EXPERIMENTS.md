@@ -10015,3 +10015,93 @@ reduce retained bytes) — out of scope here, worth a dedicated experiment.
 `bg_rgb_s2`/`bg_rgb_s4`, populated only when a downscaled render already
 happened) — bilevel/JB2-heavy pages get no benefit from this tier; a JB2 mask
 middle tier would need a different, separate design.
+
+## Perf round 49 (2026-07-06) — INFO-chunk version ceiling + gamma clamp (round 45 findings 1 & 3)
+
+**Motivation.** Round 45's DIFF_FUZZ run left two confirmed semantic-divergence
+findings on the table: (1) DjVuLibre enforces a forward-compat version ceiling
+on the INFO chunk that we didn't; (3) some INFO-chunk bit-flips near the
+version byte made both decoders fully render but disagree on pixels/dims,
+root cause unclear. This round root-causes and fixes both.
+
+**Finding 1 — version ceiling.** Fetched DjVuLibre's actual
+`libdjvu/DjVuInfo.h`/`DjVuFile.cpp` sources: `DJVUVERSION_TOO_NEW = 50`, checked
+in `DjVuFile::decode_chunk()` (not in `DjVuInfo::decode()` itself) as `if
+(info->version >= 50) throw "Cannot decode DjVu files with version>= 50"`. The
+"version" DjVuLibre checks is the INFO minor-version byte (offset 4 in the
+chunk), optionally combined with the major-version byte (offset 5) into a
+16-bit value unless the major byte is the sentinel `0xff` (→ minor byte only).
+Implemented the identical ceiling in `PageInfo::parse` (`src/info.rs`): a new
+`IffError::UnsupportedVersion { version }` (`crates/djvu-iff/src/lib.rs`),
+returned when the computed version is `>= 50`. An absent version byte (round
+42's 5-byte short-INFO tolerance) computes to `0`, safely under the ceiling —
+round 42 is unaffected (its tests still pass).
+
+**Finding 3 — reframed.** Byte-level diffing of all 5 saved boy.djvu repros
+(`fuzz/corpus-regressions/diff_fuzz/boy_*`) against the original showed the
+journal's "minor-version byte" framing was imprecise: the minor-version byte
+itself has **zero** effect on pixel rendering in either decoder — DjVuLibre
+only reads `info->version` for the ceiling check above, never for pixel
+logic, and (pre-fix) we didn't even store it. The actual driver in 4 of 5
+repros (`boy_00022/00076/00134/00143_pixel-mismatch`) was the **gamma byte**
+(chunk offset 8, adjacent to the version bytes — hence the "near the version
+field" conflation): DjVuLibre always clamps computed gamma (`0.1 *
+gamma_byte`) to `[0.3, 5.0]`, *including* when the byte is present-but-zero
+(clamped up to 0.3, not defaulted to 2.2 — that default only applies when the
+chunk is short enough that the byte is truly absent). We previously special-
+cased byte==0 to mean "default 2.2" and never clamped the upper end at all, so
+a corrupted `gamma_byte=150` gave us a raw gamma of 15.0 against DjVuLibre's
+clamped 5.0 — a very different gamma-correction LUT, confirmed root cause of
+all 4 pixel-mismatch repros. Fixed by matching DjVuLibre's clamp exactly in
+`PageInfo::parse` (`src/info.rs`).
+
+The 5th repro (`boy_00128_dim-mismatch`) turned out to be a **false positive
+in the diff_fuzz harness itself**, not a product bug: `examples/diff_fuzz.rs`'s
+`our_attempt()` returned `page.width()`/`page.height()` (the pre-rotation INFO
+dims) alongside the rendered pixmap instead of the pixmap's own (post-rotation)
+`pm.width`/`pm.height`. For this rotated mutant the two differ (192×256 vs
+256×192); our actual rendered bytes were confirmed byte-identical to ddjvu's
+output (`examples/_render_native_ppm.rs` cross-check, mean/max abs diff 0).
+Fixed the harness to report `pm.width`/`pm.height`.
+
+**Incidental fixture fix.** `references/djvujs/library/assets/bgjp_test.djvu`
+(a hand-crafted synthetic fixture used by 8 `src/djvu_render.rs` BGjp/JPEG
+tests) had a stray non-zero `major_version` byte (0x64) that combined with the
+minor byte to compute version 25600 — correctly rejected by the new ceiling
+check. Patched the single byte to 0x00 (clearly unintentional; the fixture
+only exists to exercise BGjp/JPEG chunk decoding, not version semantics).
+
+**Before/after DIFF_FUZZ (seed 42, same 2100-mutant corpus as round 45):**
+
+| class | before | after | note |
+|---|---|---|---|
+| both-reject | 1266 | 1266 | unchanged |
+| both-accept-match | 429 | 434 | +5 (4 pixel-mismatch + 1 dim-mismatch converge here) |
+| our-renders-what-they-reject | 310 | 275 | −35 (version≥50 mutants now rejected by us too) |
+| both-render-fail | 63 | 63 | unchanged |
+| our-laxer | 19 | 19 | unchanged |
+| our-render-fail | 4 | 4 | unchanged |
+| our-stricter | 4 | 39 | +35 (the 35 above: we now reject version≥50 *before* djvudump-equivalent structural check would, since DjVuLibre's own djvudump doesn't enforce the ceiling — only `DjVuFile::decode_chunk` at full-decode time does; we have one parser so we catch it earlier) |
+| pixel-mismatch | 4 | 0 | **fixed** (gamma clamp) |
+| dim-mismatch | 1 | 0 | **fixed** (harness bug, not a product bug) |
+
+Total mutants classified: 2100 both times. No new divergence classes
+appeared; both target classes (pixel-mismatch, dim-mismatch) went to zero.
+The `our-stricter` growth is the expected, correct shape of the finding-1 fix:
+DjVuLibre's own renderer (`ddjvu`) would refuse these files too (that's the
+whole premise of the finding), it's only its structural-only `djvudump` tool
+that doesn't check the version field — so "matching DjVuLibre's tolerance" is
+satisfied at the level that matters (rendering), even though the 3-level
+ladder now places us a stage earlier than djvudump on these mutants.
+
+**Decision.** **Fixed.** Tests: `src/info.rs` gained
+`version_50_is_rejected`, `version_49_is_accepted`,
+`high_major_version_byte_is_rejected_via_combined_version`,
+`major_version_0xff_sentinel_uses_minor_byte_only`,
+`short_info_chunk_with_version_over_ceiling_is_rejected`,
+`gamma_byte_present_and_zero_clamps_to_0_3_not_2_2`,
+`gamma_byte_above_50_clamps_to_5_0` (regression test for the confirmed pixel-
+mismatch root cause). Round 42's `CARTE_INFO_TRUNCATED` 5-byte-short-INFO
+tests still pass unmodified. `make check`: 1092 tests passed. `cargo run
+--release --example diff_fuzz -- --seed 42 --mutants 700 --max-seconds 600`
+rerun confirms the table above.

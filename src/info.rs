@@ -22,6 +22,26 @@
 //! ships a 5-byte INFO chunk (width, height, version byte only, no
 //! dpi/gamma/flags), so this parser must accept it too rather than reject the
 //! whole document as truncated.
+//!
+//! Two more pieces of DjVuLibre behavior this parser mirrors (round-46
+//! DIFF_FUZZ follow-up, see `PERF_EXPERIMENTS.md`):
+//!
+//! - **Version ceiling.** DjVuLibre's `DJVUVERSION_TOO_NEW` constant
+//!   (`libdjvu/DjVuInfo.h`) is 50: it refuses to decode any file whose INFO
+//!   version field is `>= 50` (a forward-compatibility guard against future
+//!   format revisions it doesn't understand), throwing "Cannot decode DjVu
+//!   files with version>= 50". `PageInfo::parse` now enforces the same
+//!   ceiling rather than silently decoding those files.
+//! - **Gamma clamp.** DjVuLibre always clamps the decoded gamma into
+//!   `[0.3, 5.0]` *after* reading the byte — including when the byte is
+//!   present but zero (`0.1 * 0 = 0.0`, clamped up to `0.3`, not defaulted to
+//!   `2.2`; verified empirically against `djvudump` on a synthetic 10-byte
+//!   INFO chunk with `gamma_byte = 0`, which reports `gamma=0.3`). The
+//!   `2.2` default only applies when the gamma byte is *absent* (chunk
+//!   shorter than 9 bytes). Previously this parser had no clamp at all, so a
+//!   corrupted/out-of-range gamma byte (e.g. `150` → nominal gamma `15.0`)
+//!   produced a wildly different gamma-correction curve than DjVuLibre's
+//!   clamped `5.0`, a confirmed pixel-mismatch source under mutation fuzzing.
 
 use crate::error::IffError;
 
@@ -66,6 +86,10 @@ impl PageInfo {
     /// gamma, flags) fall back to their DjVuLibre-compatible defaults —
     /// matching real-world short INFO chunks (e.g. `carte.djvu`'s 5-byte
     /// chunk) that DjVuLibre itself accepts.
+    ///
+    /// Returns [`IffError::UnsupportedVersion`] if the (minor/major) version
+    /// field is `>= 50` — DjVuLibre's own forward-compatibility ceiling; see
+    /// the module docs.
     pub fn parse(data: &[u8]) -> Result<Self, IffError> {
         if data.len() < 4 {
             return Err(IffError::Truncated);
@@ -75,18 +99,33 @@ impl PageInfo {
         let width = u16::from_be_bytes(data[0..2].try_into().map_err(|_| IffError::Truncated)?);
         let height = u16::from_be_bytes(data[2..4].try_into().map_err(|_| IffError::Truncated)?);
 
+        // Version: minor byte at offset 4, optionally combined with the
+        // major byte at offset 5 into a 16-bit value (major == 0xff means
+        // "no extended version", matching DjVuLibre's sentinel). Absent
+        // (short chunk) → 0, safely under the ceiling below.
+        let version: u16 = match (data.get(4), data.get(5)) {
+            (Some(&minor), Some(&major)) if major != 0xff => ((major as u16) << 8) | minor as u16,
+            (Some(&minor), _) => minor as u16,
+            (None, _) => 0,
+        };
+        if version >= 50 {
+            return Err(IffError::UnsupportedVersion { version });
+        }
+
         // DPI is little-endian u16 at offset 6; absent (short chunk) → default.
         let dpi = match data.get(6..8) {
             Some(b) => u16::from_le_bytes(b.try_into().map_err(|_| IffError::Truncated)?),
             None => 300,
         };
 
-        // Gamma: byte value / 10.0 (e.g. 22 → 2.2); absent → default.
-        let gamma_byte = data.get(8).copied().unwrap_or(0);
-        let gamma = if gamma_byte == 0 {
-            2.2_f32 // default gamma when not specified
-        } else {
-            gamma_byte as f32 / 10.0
+        // Gamma: byte value / 10.0 (e.g. 22 → 2.2), then always clamped to
+        // DjVuLibre's [0.3, 5.0] range — including when the byte is present
+        // but zero (0.1 * 0 = 0.0, clamped up to 0.3, *not* defaulted to
+        // 2.2). Absent (chunk shorter than 9 bytes) → default 2.2 (already
+        // within the clamp range, so no separate clamp needed there).
+        let gamma = match data.get(8) {
+            Some(&gamma_byte) => (gamma_byte as f32 / 10.0).clamp(0.3, 5.0),
+            None => 2.2_f32,
         };
 
         // Flags byte, bits 0–2: rotation per DjVu spec.
@@ -148,6 +187,70 @@ mod tests {
     #[test]
     fn empty_is_error() {
         assert_eq!(PageInfo::parse(&[]).unwrap_err(), IffError::Truncated);
+    }
+
+    /// DjVuLibre's `DJVUVERSION_TOO_NEW` forward-compat ceiling: version 50
+    /// (and anything higher) must be rejected, matching DjVuLibre's own
+    /// refusal ("Cannot decode DjVu files with version>= 50"). Round-45
+    /// DIFF_FUZZ finding 1: we used to decode these anyway.
+    #[test]
+    fn version_50_is_rejected() {
+        let mut bytes = chicken_info_bytes();
+        bytes[4] = 50; // minor version = 50
+        assert_eq!(
+            PageInfo::parse(&bytes).unwrap_err(),
+            IffError::UnsupportedVersion { version: 50 }
+        );
+    }
+
+    /// One below the ceiling must still decode.
+    #[test]
+    fn version_49_is_accepted() {
+        let mut bytes = chicken_info_bytes();
+        bytes[4] = 49;
+        assert!(PageInfo::parse(&bytes).is_ok());
+    }
+
+    /// A high major-version byte combines with the minor byte into a 16-bit
+    /// version (DjVuLibre: `version = (buffer[5]<<8) + buffer[4]` when
+    /// `buffer[5] != 0xff`) — must also be checked against the ceiling, not
+    /// just the low byte.
+    #[test]
+    fn high_major_version_byte_is_rejected_via_combined_version() {
+        let mut bytes = chicken_info_bytes();
+        bytes[4] = 0; // minor
+        bytes[5] = 1; // major -> version = (1 << 8) | 0 = 256
+        assert_eq!(
+            PageInfo::parse(&bytes).unwrap_err(),
+            IffError::UnsupportedVersion { version: 256 }
+        );
+    }
+
+    /// A major-version byte of `0xff` is DjVuLibre's sentinel for "don't
+    /// combine into a 16-bit version" — the minor byte alone is used, so a
+    /// small minor version with major=0xff must still parse.
+    #[test]
+    fn major_version_0xff_sentinel_uses_minor_byte_only() {
+        let mut bytes = chicken_info_bytes();
+        bytes[4] = 24; // minor
+        bytes[5] = 0xff; // sentinel: ignore extended 2-byte form
+        let info = PageInfo::parse(&bytes).expect("version 24 must parse");
+        assert_eq!(info.width, 181);
+    }
+
+    /// Regression: `fuzz/corpus-regressions/diff_fuzz/watchmaker_*` findings
+    /// (round 45, "our-renders-what-they-reject") were BG44-payload bit-flips,
+    /// not INFO-version ones — but the version-ceiling gap they document
+    /// (DjVuLibre rejects `version>=50`, we didn't) is reproduced directly
+    /// here via `carte.djvu`'s real 5-byte short-INFO shape with the version
+    /// byte pushed over the ceiling.
+    #[test]
+    fn short_info_chunk_with_version_over_ceiling_is_rejected() {
+        let data = [0x10, 0x68, 0x09, 0xFC, 50]; // width=4200, height=2556, version=50
+        assert_eq!(
+            PageInfo::parse(&data).unwrap_err(),
+            IffError::UnsupportedVersion { version: 50 }
+        );
     }
 
     /// Real-world short INFO chunk (`tests/fixtures/carte.djvu`: width, height,
@@ -222,14 +325,38 @@ mod tests {
         assert_eq!(info.rotation, Rotation::Ccw90);
     }
 
+    /// A *present* gamma byte of 0 is NOT the "absent field" default (2.2) —
+    /// DjVuLibre computes `0.1 * 0 = 0.0` and then clamps up to its floor of
+    /// 0.3 (verified against `djvudump` on a synthetic INFO chunk: see the
+    /// module docs). Only a chunk shorter than 9 bytes (gamma byte truly
+    /// absent) defaults to 2.2 — see `carte_style_five_byte_info_parses_with_defaults`.
     #[test]
-    fn gamma_zero_defaults_to_2_2() {
+    fn gamma_byte_present_and_zero_clamps_to_0_3_not_2_2() {
         let mut bytes = chicken_info_bytes();
-        bytes[8] = 0x00; // gamma_byte = 0
+        bytes[8] = 0x00; // gamma_byte = 0, but the byte IS present
         let info = PageInfo::parse(&bytes).unwrap();
         assert!(
-            (info.gamma - 2.2).abs() < 0.01,
-            "default gamma should be 2.2"
+            (info.gamma - 0.3).abs() < 0.01,
+            "present-but-zero gamma byte should clamp to 0.3, got {}",
+            info.gamma
+        );
+    }
+
+    /// DjVuLibre clamps gamma into `[0.3, 5.0]` after the `byte / 10.0`
+    /// conversion — a corrupted/out-of-range gamma byte (e.g. 150, nominally
+    /// 15.0) must clamp to 5.0, not pass through unclamped. This was a
+    /// confirmed pixel-mismatch source under mutation fuzzing (round 45
+    /// DIFF_FUZZ finding 3): an unclamped gamma of 15.0 produces a wildly
+    /// different gamma-correction LUT than DjVuLibre's clamped 5.0.
+    #[test]
+    fn gamma_byte_above_50_clamps_to_5_0() {
+        let mut bytes = chicken_info_bytes();
+        bytes[8] = 150; // 150 / 10.0 = 15.0, must clamp to 5.0
+        let info = PageInfo::parse(&bytes).unwrap();
+        assert!(
+            (info.gamma - 5.0).abs() < 0.01,
+            "gamma byte 150 should clamp to 5.0, got {}",
+            info.gamma
         );
     }
 
