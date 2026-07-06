@@ -10572,3 +10572,158 @@ both directions. Tests: 51 `smmr` unit tests (13 new `g4_roundtrip_*` +
 `ccitt_g4_shrinks_bilevel_corpus_doc`,
 `collect_mask_stream_g4_returns_none_for_no_sjbz`); full
 `cargo test --lib` green (723 tests); `make check` gate green.
+## Perf round 54 (2026-07-06) — AVX2_IDWT: hand-written x86 SIMD for the IW44 IDWT — **Rejected** (2026-07-06)
+
+**Issue.** EXPERIMENTS_INDEX.md's `AVX2_IDWT` row had been deferred since
+round 5 ("x86 SIMD parity for the IDWT row/col passes; can't measure on M1").
+Round 47 (X86_CI_BENCH) unblocked it with real x86 numbers and set
+expectations: plain `-C target-cpu=x86-64-v3` auto-vectorization *regresses*
+`iw44_to_rgb_colorbook/*` (`+2.6%..+14.3%`), so only a genuine hand-written
+AVX2 kernel — not a codegen flag — could plausibly win.
+
+**Investigation.** Read the aarch64 NEON IDWT code
+(`crates/djvu-iw44/src/lib.rs`: `row_pass_inner`, `load8s_neon`/
+`store8s_neon`, the round-5 IDWT_S2_NEON pitfall notes) as the structural
+template. While tracing the x86_64 column-pass dispatch (`load8s`/`store8s`,
+`s == 1` fast path), found that a hand-written AVX2 kernel **already
+exists** — `load8s_s1_avx2`/`store8s_s1_avx2` — added in the #189 Phase-2
+work, but gated by compile-time `cfg(target_feature = "avx2")`. That gate is
+only satisfied when the *crate itself* is compiled with
+`-C target-feature=+avx2` / `target-cpu=x86-64-v3` — i.e. it was **dead code**
+for every ordinary `cargo build --release` on x86_64, never active for
+default-build users regardless of the host CPU's real AVX2 support. This
+matches the exact "hand-written AVX2 kernel, not just a codegen flag" gap
+round 47 identified — except the kernel had already been written and just
+needed a correct runtime-dispatch wire-up, not a fresh implementation.
+
+**Approach.** Rewired `load8s`/`store8s`'s `s == 1` path to call a new
+`avx2_available()` helper — `std::is_x86_feature_detected!("avx2")` cached in
+a `OnceLock`, checked once, not per-pixel (matching the existing
+`ycbcr_avx2_raw`/`prelim_flags_*_avx2` dispatch pattern already used
+elsewhere in this file; `#[target_feature]` can't combine with
+`#[inline(always)]` on stable, so the check stays coarse-grained at the
+`load8s`/`store8s` call site, not inlined per-lane). Added
+`inverse_wavelet_transform_from_ex(..., force_use_simd: Option<bool>)` as a
+test-only entry point so a new exhaustive test
+(`column_pass_simd_matches_scalar_exhaustive`) could force the scalar and
+SIMD/AVX2-dispatching column pass down identical random `i16` data across 10
+`(width, height, subsample, start_scale)` cases — odd widths, width=1,
+sub-8-wide widths, and the `s==2`/`sd==1` stride case (the round-5
+IDWT_S2_NEON pitfall) — and assert bit-exact equality.
+
+Deliberately did **not** attempt a hand-written horizontal row-pass AVX2
+kernel (#307 already measured and rejected that exact shape: full-decode
+benches improved but `iw44_to_rgb_colorbook` partial-decode benches
+regressed `+1.6%..+7.3%`), and ruled out generalizing the column-pass AVX2
+kernel to `s==2`/`4` strides via a packed-gather trick (`FlatPlane`'s backing
+`Vec<i16>` has no padding slack — a strided gather risks a genuine
+one-element out-of-bounds read at the tail).
+
+**Bit-exactness.** `cargo test -p djvu-iw44 --all-features` on the native
+aarch64 host: 50/50 unit tests pass, including the new exhaustive test and
+the pre-existing `load8s_s1_avx2_matches_scalar`/`store8s_s1_avx2_matches_
+scalar`/`ycbcr_avx2_raw_matches_scalar`. `cargo check --target
+x86_64-unknown-linux-gnu` (compile-only; this M1 host can't link/run
+x86_64-linux binaries) passed cleanly at every iteration. CI's `Test
+(stable)` job (ubuntu x86_64) passed — confirms the new equivalence test
+actually executed the real AVX2 code path on x86 hardware, not just aarch64
+scalar fallback. `make check` (fmt, clippy `-D warnings`, no_std, wasm32,
+full workspace tests) green throughout.
+
+**Platform.**
+- OS: Ubuntu GitHub-hosted runner (`ubuntu-latest`)
+- arch: `x86_64`, dev host: Apple M1 Max (aarch64, `cargo check`-only)
+- Rust: stable toolchain (`.github/workflows/bench.yml`)
+- RUSTFLAGS: unset (default) vs `-C target-cpu=x86-64-v3`
+
+**Numbers.**
+
+Sample 1 — PR #541 push, run
+[28792757964](https://github.com/matyushkin/djvu-rs/actions/runs/28792757964),
+`bench-x86-64-v3` job (default RUSTFLAGS vs `+x86-64-v3`, same runner,
+back-to-back — this is *after* the fix, so both arms already dispatch the
+AVX2 kernel; the `+x86-64-v3` arm additionally gets broader compiler
+auto-vectorization elsewhere):
+
+| Bench | default ns | +x86-64-v3 ns | Δ% |
+|---|---:|---:|---:|
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 11,990,247 | 10,590,126 | −11.68% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,947,396 | 2,593,810 | −12.00% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 753,799 | 677,204 | −10.16% |
+
+Sample 2 — repeat `workflow_dispatch` on the same branch, run
+[28794346105](https://github.com/matyushkin/djvu-rs/actions/runs/28794346105),
+same job, ~30 min later (checking sample-1 wasn't a fluke):
+
+| Bench | default ns | +x86-64-v3 ns | Δ% |
+|---|---:|---:|---:|
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 12,088,318 | 10,514,218 | −13.02% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,982,082 | 2,576,587 | −13.60% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 756,655 | 681,288 | −9.96% |
+
+The two post-fix samples agree tightly (both the default-arm and
++x86-64-v3-arm absolute numbers are within ~1% of each other across the two
+runs) — the *fix's own* default-vs-v3 ratio is reproducible.
+
+**The real question isn't default-vs-v3 — it's old-code-vs-new-code at fixed
+default RUSTFLAGS**, since both arms already use the kernel post-fix. Pulled
+the last successful main-branch `bench-x86-64-v3` artifact (pre-fix,
+commit `c524585`, run
+[28787742806](https://github.com/matyushkin/djvu-rs/actions/runs/28787742806),
+same day, ~1.5h before the PR run) to get an old-code default-RUSTFLAGS
+reference point:
+
+| Bench | old-code default ns (pre-fix) | new-code default ns (sample 1) | new-code default ns (sample 2) | Δ% (old→new, sample 1 / 2) |
+|---|---:|---:|---:|---:|
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 9,797,436 | 11,990,247 | 12,088,318 | +22.4% / +23.4% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,393,905 | 2,947,396 | 2,982,082 | +23.1% / +24.6% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 617,507 | 753,799 | 756,655 | +22.1% / +22.5% |
+
+Also ran a direct `scripts/bench_compare.py` (baseline vs current
+`target/criterion`, downloaded artifacts) between an even earlier main
+baseline and the PR run: showed the same direction (`+30..+32%` on these
+three benches) but *also* showed `+16..+31%` regressions on entirely
+unrelated benches (`jb2_encode_dict`, `encode_multipage/*`,
+`iw44_gray_decode_large/*`) not touched by this change at all — a red flag
+for systemic runner noise in that particular comparison, so it was treated
+as corroborating-but-not-load-bearing. Noted in passing: `bench.yml`'s
+"Benchmark" job's baseline-vs-current PR comment is silently broken on every
+PR (`Download baseline` extracts to `baseline/<bench>/...` but
+`bench_compare.py` is invoked with `baseline/target/criterion`, a path that
+never exists — pre-existing infra bug, out of scope for this round, not
+fixed here).
+
+**Decision.** **Rejected.** Reverted the runtime-dispatch fix (commit
+reverted; `crates/djvu-iw44/src/lib.rs` now matches pre-round `origin/main`
+exactly) — the existing `load8s_s1_avx2`/`store8s_s1_avx2` kernels remain in
+place, still compile-time-gated (effectively dead by default), unchanged
+from before this round.
+
+**Reason.** Two independent activation mechanisms for the *same* existing
+AVX2 column-pass kernel — round 47's compile-time `-C target-cpu=x86-64-v3`
+flag, and this round's runtime `is_x86_feature_detected!` dispatch — both
+converge on the same qualitative result: activating this kernel makes
+`iw44_to_rgb_colorbook` measurably *slower*, not faster, by a large and
+reproducible margin (≈10-13% internally reproducible v3-vs-default ratio
+post-fix; ≈22-24% old-code-vs-new-code at fixed default RUSTFLAGS across two
+independent same-branch samples). This is the opposite of the outcome gate
+(`≥5% win`) and fails it by a wide margin in the wrong direction. The
+kernel was written correctly (bit-exact, per the equivalence tests) and is
+now *reachable* for the first time on ordinary builds — but reachable was
+never the bottleneck; the kernel itself is a pessimization for this access
+pattern, consistent with the already-documented "ALU-bound loop pattern
+defeats hand-rolled micro-optimizations" theme from IDWT_SPLAT (round 5) on
+the NEON side. This permanently closes AVX2_IDWT with data: a genuinely
+faster x86 IDWT kernel would need a different algorithmic approach (e.g.
+restructuring the lifting steps to reduce shuffle/permute overhead, or
+targeting a different granularity than one 8-lane `i32x8` chunk per call)
+than what exists today; simply making the existing kernel reachable is not
+sufficient and is actively harmful if shipped by default. Left the existing
+kernels' dead compile-time gate untouched rather than deleting the kernels
+outright — removing them is a larger, separate cleanup call for a future
+round now that this data exists, not required to close this item.
+
+**Test artifacts not kept:** the `column_pass_simd_matches_scalar_exhaustive`
+test and `force_use_simd` test hook were reverted along with the dispatch
+change, since they were written specifically to validate the (rejected)
+runtime-dispatch mechanism.
