@@ -500,6 +500,78 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
     );
 }
 
+// ── INFO/BG44 dimension cross-check (round 46, INTEROP_STREAMS finding 2a) ──
+
+/// Corrupt `boy.djvu`'s INFO chunk so its declared page height (256) becomes
+/// 384 — not a legal 1:1..1:12 reduction ratio away from the BG44 plane's own
+/// encoded 192×256 — while leaving the BG44 payload itself untouched.
+///
+/// This is the exact scenario found by round 45's differential fuzzing vs
+/// `ddjvu`: a single bit-flip in INFO's height field (byte offset 27 in the
+/// file: the low byte of the big-endian `u16` height, XORed with `0x80`)
+/// desyncs INFO from BG44 without touching either chunk's own internal
+/// structure. `djvudump` (and our IFF parser) structurally accept the file —
+/// only a render-time cross-check between INFO's declared canvas and the
+/// decoded BG44 plane's own dimensions can catch it. Confirmed against real
+/// `ddjvu`: it rejects this exact byte pattern with "Cannot decode page 1"
+/// (`DjVuFile.corrupt_BG44` / "Corrupted data (Incorrect size in BG44
+/// chunk)." internally).
+fn make_info_bg44_dimension_mismatch_djvu() -> Vec<u8> {
+    let mut data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
+    let info_pos = data
+        .windows(4)
+        .position(|w| w == b"INFO")
+        .expect("boy.djvu must have an INFO chunk");
+    // INFO content starts right after the 8-byte "INFO"+len chunk header;
+    // content layout is width(u16 BE), height(u16 BE), minor, major, dpi(u16 LE), gamma, flags.
+    let height_lo_byte = info_pos + 8 + 3;
+    data[height_lo_byte] ^= 0x80;
+    data
+}
+
+/// Strict mode must reject a BG44 plane whose dimensions aren't a legal
+/// reduction of INFO's declared page size — mirroring DjVuLibre's
+/// `DjVuFile::get_dpi` cross-check.
+#[test]
+fn dimension_cross_check_rejects_info_bg44_size_mismatch() {
+    let corrupted = make_info_bg44_dimension_mismatch_djvu();
+    let doc = DjVuDocument::parse(&corrupted).unwrap();
+    let page = doc.page(0).unwrap();
+    // INFO now claims 192x384 (post-mutation); confirm the mutation landed
+    // where expected before asserting on render behaviour.
+    assert_eq!(page.width(), 192);
+    assert_eq!(page.height(), 384);
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: false,
+        ..RenderOptions::default()
+    };
+    let result = render_pixmap(page, &opts);
+    assert!(
+        result.is_err(),
+        "strict mode must reject an INFO/BG44 dimension mismatch beyond legal 1:1..1:12 reduction ratios"
+    );
+}
+
+/// A BG44 plane that *is* a legal reduction of INFO's page size (the normal
+/// case, e.g. thumbnails or intentionally subsampled backgrounds) must still
+/// render fine — the cross-check must not reject legitimate ratios.
+#[test]
+fn dimension_cross_check_allows_unmodified_boy_djvu() {
+    let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: false,
+        ..RenderOptions::default()
+    };
+    let pm = render_pixmap(page, &opts).expect("unmodified boy.djvu must still render");
+    assert!(!pm.data.is_empty());
+}
+
 // ── IFF parse_form ──────────────────────────────────────────────────────────
 
 /// find_first returns the first matching chunk.

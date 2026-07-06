@@ -82,6 +82,16 @@ pub enum Iw44Error {
     /// The ZP arithmetic coder stream is too short.
     #[error("IW44 ZP coder stream too short")]
     ZpTooShort,
+
+    /// A chunk's serial number does not match the expected next value
+    /// (0, 1, 2, … in document order). Mirrors DjVuLibre's
+    /// `IW44Image.wrong_serial`/`wrong_serial2` check in
+    /// `IWBitmap::decode_chunk`/`IWPixmap::decode_chunk` — a corrupted or
+    /// desynced chunk sequence (e.g. from a bit-flip landing on the serial
+    /// byte itself, or a dropped/duplicated chunk) is rejected instead of
+    /// silently decoded into the wrong refinement slot.
+    #[error("IW44 chunk does not bear expected serial number")]
+    UnexpectedSerial,
 }
 
 // ---- Band-bucket mapping: 10 bands, each mapped to a range of buckets --------
@@ -3091,6 +3101,11 @@ pub struct Iw44Image {
     cr: Option<PlaneDecoder>,
     /// Total slices decoded so far (used to implement the color-delay counter).
     cslice: usize,
+    /// Expected `serial` value of the next chunk passed to [`decode_chunk`](Self::decode_chunk),
+    /// starting at 0. Mirrors DjVuLibre's `cserial` counter — every chunk must
+    /// arrive in strict document order (0, 1, 2, …); a mismatch means the
+    /// chunk sequence is corrupted or desynced (see [`Iw44Error::UnexpectedSerial`]).
+    next_serial: u32,
 }
 
 impl Default for Iw44Image {
@@ -3112,6 +3127,7 @@ impl Iw44Image {
             cb: None,
             cr: None,
             cslice: 0,
+            next_serial: 0,
         }
     }
 
@@ -3152,6 +3168,25 @@ impl Iw44Image {
         let serial = data[0];
         let slices = data[1];
         let payload_start;
+
+        // Serial-number continuity check, mirroring DjVuLibre's `cserial`
+        // counter in `IWBitmap::decode_chunk`/`IWPixmap::decode_chunk`
+        // (`IW44Image.wrong_serial`/`wrong_serial2`): once a first chunk has
+        // been decoded, every subsequent chunk must arrive with the exact
+        // next serial in sequence (0, 1, 2, …). A mismatch — e.g. a bit-flip
+        // landing on the serial byte itself, a dropped/duplicated chunk, or a
+        // stray `serial == 0` chunk restarting mid-stream — is a corrupted or
+        // desynced chunk sequence and must be rejected rather than silently
+        // decoded into the wrong refinement slot (differential fuzzing
+        // against `ddjvu` found real corpus mutations that trip this exact
+        // check on DjVuLibre's side while we decoded on, unnoticed).
+        //
+        // The very first chunk fed to a fresh decoder (`self.y` still `None`)
+        // is exempted here so `MissingFirstChunk` remains the more specific
+        // diagnostic for "no first chunk decoded yet" when `serial != 0`.
+        if self.y.is_some() && serial as u32 != self.next_serial {
+            return Err(Iw44Error::UnexpectedSerial);
+        }
 
         if serial == 0 {
             // First chunk — parse the 9-byte image header.
@@ -3248,6 +3283,7 @@ impl Iw44Image {
             // See PERF_EXPERIMENTS.md (#182 and the slice-loop follow-up).
         }
 
+        self.next_serial = serial as u32 + 1;
         Ok(())
     }
 
@@ -3779,6 +3815,64 @@ mod tests {
         assert!(img.decode_chunk(&[0x02, 0x04, 0xab]).is_ok());
 
         // The image must still be usable afterwards (no poisoned state).
+        assert!(img.to_rgb().is_ok());
+    }
+
+    /// Round 46 (INTEROP_STREAMS finding 2b): a refinement chunk whose
+    /// `serial` byte skips ahead (or repeats/rewinds) must be rejected rather
+    /// than silently decoded into the wrong refinement slot. Mirrors
+    /// DjVuLibre's `cserial` continuity check
+    /// (`IW44Image.wrong_serial`/`wrong_serial2`) — differential fuzzing
+    /// against `ddjvu` found real corpus mutations (`watchmaker.djvu`
+    /// bit-flips landing on a BG44 chunk's serial byte) that trip this exact
+    /// check on DjVuLibre's side while the pre-fix decoder here decoded on,
+    /// unnoticed (`fuzz/corpus-regressions/diff_fuzz/watchmaker_00001_our-
+    /// renders-what-they-reject.*`).
+    #[test]
+    fn iw44_decode_chunk_rejects_serial_skip() {
+        let mut img = Iw44Image::new();
+        let header = [0x00u8, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00];
+        img.decode_chunk(&header).expect("first chunk must decode");
+
+        // Expected next serial is 1; a chunk claiming serial=3 (skipped 1, 2)
+        // must be rejected.
+        assert!(matches!(
+            img.decode_chunk(&[0x03, 0x04]),
+            Err(Iw44Error::UnexpectedSerial)
+        ));
+    }
+
+    /// Round 46: a refinement chunk that *repeats* an already-consumed
+    /// serial (instead of skipping ahead) must also be rejected — not just
+    /// forward gaps.
+    #[test]
+    fn iw44_decode_chunk_rejects_serial_repeat() {
+        let mut img = Iw44Image::new();
+        let header = [0x00u8, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00];
+        img.decode_chunk(&header).expect("first chunk must decode");
+        img.decode_chunk(&[0x01, 0x04])
+            .expect("serial=1 refinement must decode");
+
+        // Expected next serial is 2; a chunk claiming serial=1 again (a
+        // duplicated/rewound chunk) must be rejected.
+        assert!(matches!(
+            img.decode_chunk(&[0x01, 0x04]),
+            Err(Iw44Error::UnexpectedSerial)
+        ));
+    }
+
+    /// Round 46: the BUG-ZPSHORT tolerance (empty/short refinement payloads)
+    /// must still hold for chunks that *do* arrive in the correct serial
+    /// order — the new continuity check must not regress it.
+    #[test]
+    fn iw44_decode_chunk_serial_check_does_not_regress_zpshort_tolerance() {
+        let mut img = Iw44Image::new();
+        let header = [0x00u8, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00];
+        img.decode_chunk(&header).expect("first chunk must decode");
+        // In-order, empty-payload refinement chunks (serial 1, 2, ...) must
+        // still be tolerated exactly as before.
+        assert!(img.decode_chunk(&[0x01, 0x04]).is_ok());
+        assert!(img.decode_chunk(&[0x02, 0x04]).is_ok());
         assert!(img.to_rgb().is_ok());
     }
 

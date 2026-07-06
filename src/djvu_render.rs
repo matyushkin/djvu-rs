@@ -1303,7 +1303,24 @@ impl PageLayers {
                         break;
                     }
                 }
-                if img.width == 0 { None } else { Some(img) }
+                if img.width == 0 {
+                    return None;
+                }
+                // Dimension cross-check (see `iw44_reduction_is_legal`): a
+                // BG44 plane whose header declares a size that isn't a legal
+                // 1:1..1:12 reduction of the page's INFO dimensions is
+                // corrupted/desynced — DjVuLibre rejects the whole page for
+                // this, so treat it the same as any other BG44 decode
+                // failure rather than stretching it onto the page.
+                if !iw44_reduction_is_legal(
+                    page.width() as u32,
+                    page.height() as u32,
+                    img.width,
+                    img.height,
+                ) {
+                    return None;
+                }
+                Some(img)
             })
             .as_ref()
     }
@@ -1322,7 +1339,19 @@ impl PageLayers {
                 if img.decode_chunk(chunks[0]).is_err() {
                     return None;
                 }
-                if img.width == 0 { None } else { Some(img) }
+                if img.width == 0 {
+                    return None;
+                }
+                // Same dimension cross-check as `bg44` above.
+                if !iw44_reduction_is_legal(
+                    page.width() as u32,
+                    page.height() as u32,
+                    img.width,
+                    img.height,
+                ) {
+                    return None;
+                }
+                Some(img)
             })
             .as_ref()
     }
@@ -1464,6 +1493,29 @@ fn page_mask_sub4(page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
     page.render_layers().mask_sub4(page)
 }
 
+/// Is `(plane_w, plane_h)` a legal BG44/FG44 reduction of the page's own
+/// `(page_w, page_h)` (from the INFO chunk)?
+///
+/// Mirrors DjVuLibre's `DjVuFile::get_dpi` cross-check (message
+/// `DjVuFile.corrupt_BG44`, "Corrupted data (Incorrect size in BG44
+/// chunk)."): the IW44 plane must be an exact `ceil(page_dim / red)`
+/// downsample of the page for a *single* common integer reduction factor
+/// `red` in `1..=12` — i.e. the same `red` must satisfy width *and* height
+/// simultaneously. A BG44 chunk's own header freely declares its width/height
+/// (independent of the page's INFO chunk), so without this check a corrupted
+/// or desynced INFO/BG44 pairing silently maps the plane onto the page using
+/// mismatched per-axis ratios (see `bg_q24`/`fg_q44`, which compute `sx`/`sy`
+/// independently) instead of being rejected — producing a visibly stretched/
+/// distorted composite rather than a clean error, exactly the "no INFO-vs-
+/// BG44-payload dimension cross-check" gap found by differential fuzzing
+/// against `ddjvu` (round 45, PERF_EXPERIMENTS.md finding 2).
+fn iw44_reduction_is_legal(page_w: u32, page_h: u32, plane_w: u32, plane_h: u32) -> bool {
+    if page_w == 0 || page_h == 0 || plane_w == 0 || plane_h == 0 {
+        return false;
+    }
+    (1..=12u32).any(|red| page_w.div_ceil(red) == plane_w && page_h.div_ceil(red) == plane_h)
+}
+
 /// Decode background from BG44 chunks up to `max_chunks`.
 ///
 /// `subsample` controls IW44 decode resolution: 1 = full, 2 = half, 4 = quarter.
@@ -1546,6 +1598,15 @@ fn decode_background_chunks<'a>(
                 #[cfg(test)]
                 count_bg44_chunk_decode();
                 img.decode_chunk(chunk_data)?;
+            }
+            // Same dimension cross-check as the cached path in `PageLayers::bg44`.
+            if !iw44_reduction_is_legal(
+                page.width() as u32,
+                page.height() as u32,
+                img.width,
+                img.height,
+            ) {
+                return Err(RenderError::Iw44(crate::Iw44Error::Invalid));
             }
             return Ok(Some(Cow::Owned(img.to_rgb_subsample(subsample)?)));
         }
