@@ -7732,3 +7732,92 @@ cost) — bounded, backward-compatible (falls back to today's behaviour when off
 and would close exactly the regression case this probe found without touching the
 CCITT/JBIG2-for-bilevel item, which stays out of scope. Not promoting the "quality 85"
 knob — measured strictly worse than the existing 80 default.
+## Perf round 24 (2026-07-06) — JB2_AUTO_REC6: adaptive auto-policy for same-size rec-6
+
+Round 18's A3 decision kept `same_size_rec6` behind `experimental`, explicit opt-in,
+because it wins big on text (−11.67 % Sjbz) but is flat-to-negative on noisy scans, so
+it cannot be blanket-enabled. The A3 follow-up idea recorded there: an adaptive
+"enable when the same-size near-twin population is dense" auto-policy, so text
+documents get the win without risking scans. This round builds and validates that
+policy.
+
+### JB2_AUTO_REC6 — density-probe auto-policy for same-size rec-6 — **Kept (experimental)** (2026-07-06)
+
+**What.** Added, all behind the existing `experimental` feature:
+
+- **`probe_same_size_rec6_density(bitmap, shared_symbols, max_ccs)`** — a cheap,
+  *bounded* density probe. It reuses the A0 analyzer's scan core (now factored into a
+  private `same_size_refinement_scan(bitmap, shared_symbols, fresh_cc_limit)` shared by
+  both `analyze_jb2_same_size_refinement` (`None` = full document) and the probe
+  (`Some(max_ccs)`), so no logic is duplicated), but stops as soon as `max_ccs` *fresh*
+  CCs have been examined. Returns the fraction of sampled fresh CCs with a same-size
+  ≤5 % Hamming twin — the metric round 17/18 already validated as predictive of a real
+  byte win.
+- **`Jb2EncodeOptions::same_size_rec6_auto(bitmap, shared_symbols)`** — probes `bitmap`
+  (default sample cap `SAME_SIZE_REC6_AUTO_SAMPLE_CCS = 1000` fresh CCs) and sets
+  `same_size_rec6 = Some(0.02)` when density ≥ `SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD =
+  0.05`, else leaves it `None`. Intended call pattern: probe **once per document** (its
+  first page) and reuse the returned options for every page, so the probe's one fixed
+  `extract_ccs` pass is amortized over the whole document rather than paid per page.
+
+**Cost.** The probe's only *unavoidable* fixed cost is `extract_ccs` — the same
+connected-component pass the real encoder always runs first regardless of options.
+Its *incremental* cost (the Hamming-distance scoring loop) is capped at `max_ccs`
+fresh CCs, independent of page size: pathogenic_bacteria_1896's largest page has
+821 330 fresh CCs, but the probe stops at 1 000 the same as it would on a small page.
+Called once per document (not per page), the fixed `extract_ccs` cost is one page's
+worth out of the whole document's encode (≈0.2 % overhead on a 517-page corpus) —
+structurally cheap; not wall-clock-benchmarked here (thermal noise on this shared
+machine, per repo convention — the structural bound is the argument).
+
+**Threshold calibration — real emitted-byte deltas, not just population counts** (the
+#301 lesson: a density number is a population hint, only real bytes prove an outcome).
+Measured `analyze_jb2_same_size_refinement` density and the real `same_size_rec6`
+Sjbz delta at frac 2 % on **four** corpora (the two round-17/18 calibration points plus
+this repo's other two `tests/corpus/*.djvu` fixtures as intermediate data):
+
+| Corpus | density (≤5 % near-twins / fresh CCs) | Sjbz delta @ frac 2 % |
+|--------|----------------------------------------|------------------------|
+| watchmaker (text) | 39.6 % | **−11.67 %** |
+| cable_1973_100133 (1-page bilevel cable) | 12.4 % | −0.43 % (small win) |
+| conquete_paix (22-page mixed book) | 1.7 % | **+0.49 % (loss)** |
+| pathogenic_bacteria_1896 (517p, 600 dpi scan) | 0.9 % | +0.00 % (flat) |
+
+The real-byte outcome flips from a loss (conquete_paix, 1.7 %) to a win (cable, 12.4 %)
+as density rises — a decade apart, not a hard bimodal split. `SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD
+= 0.05` sits with ≈2.9× margin above the measured loss and ≈2.5× margin below the
+measured win: it enables on `cable` (tiny extra win) and `watchmaker` (the big win)
+while staying off for `conquete_paix` and `pathogenic` (avoiding their loss/flat
+result). `SAME_SIZE_REC6_AUTO_FRAC = 0.02` reuses round 18's validated sweet spot
+(tighter thresholds win more: 2 % > 5 % > 8 %).
+
+**End-to-end validation** (`examples/jb2_same_size_a3_auto.rs`, one probe decision per
+document reused across all its pages):
+
+| Corpus | auto decision | Sjbz delta | round-trip |
+|--------|----------------|------------|------------|
+| watchmaker (12 masks) | `Some(0.02)` (fires) | **−11.67 %** (matches round 18 exactly) | 12/12 pixel-exact |
+| cable_1973_100133 (2 masks) | `Some(0.02)` (fires) | −0.43 % | 2/2 pixel-exact |
+| conquete_paix (22 masks) | `None` (off) | **+0.00 %, byte-identical to default** | 22/22 pixel-exact |
+| pathogenic_bacteria_1896 (517 masks) | `None` (off) | **+0.00 %, byte-identical to default** | 517/517 pixel-exact |
+
+Text gets the lossless win; both non-text/thin-population corpora are provably
+untouched (byte-identical Sjbz output, not just "flat").
+
+**Correctness.** `same_size_rec6_off_is_byte_identical` / `same_size_rec6_roundtrips_near_twins`
+(round 18) stay green. Added `same_size_rec6_auto_fires_on_dense_near_twins` (dense
+synthetic near-twin input → auto enables, output changes, round-trips lossless),
+`same_size_rec6_auto_stays_off_on_sparse_input` (sparse distinct-size input → auto
+stays off, output byte-identical to default), and `probe_same_size_rec6_density_bounds_the_scan`
+(capping `fresh_cc_limit` actually stops the scan early, `same_size_refinement_scan`
+unit-level). 62 `djvu-jb2` unit tests green with `experimental` (55 without); `make
+check` (fmt, clippy `-D warnings`, no_std, wasm32, full workspace test suite) passes.
+
+**Decision.** **Kept, behind `experimental`.** This closes round 18's A3 follow-up:
+the auto-policy is a real, validated per-document decision procedure — not just a
+population heuristic — with a threshold justified by measured byte outcomes on four
+corpora spanning a 44× density range. It stays an opt-in constructor
+(`Jb2EncodeOptions::same_size_rec6_auto`), not a stable API and not enabled by
+default, per the same A3 shipping decision recorded in round 18 (same-size rec-6 stays
+experimental; enabling any variant of it by default is a product decision for the
+maintainer, not a byte-count argument).

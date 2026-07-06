@@ -831,6 +831,24 @@ pub fn analyze_jb2_same_size_refinement(
     bitmap: &Bitmap,
     shared_symbols: &[Bitmap],
 ) -> SameSizeRefinementStats {
+    same_size_refinement_scan(bitmap, shared_symbols, None)
+}
+
+/// Shared scan core behind [`analyze_jb2_same_size_refinement`] (full
+/// document, `fresh_cc_limit: None`) and [`probe_same_size_rec6_density`]
+/// (bounded, `Some(max_ccs)` — the auto-policy's cheap density probe, JB2_AUTO_REC6).
+/// Mirrors the default encoder's exact-dedup dictionary growth, then for
+/// every fresh, eligible component scores its minimum Hamming distance
+/// against same-`(w, h)` dictionary entries. When `fresh_cc_limit` is set,
+/// scanning stops as soon as that many *fresh* CCs have been examined —
+/// bounding the Hamming-scoring cost independent of page size, since the one
+/// unavoidable fixed cost (`extract_ccs`) is paid by the real encoder anyway.
+#[cfg(feature = "experimental")]
+fn same_size_refinement_scan(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    fresh_cc_limit: Option<usize>,
+) -> SameSizeRefinementStats {
     let mut stats = SameSizeRefinementStats::default();
     if bitmap.width == 0 || bitmap.height == 0 {
         return stats;
@@ -918,9 +936,81 @@ pub fn analyze_jb2_same_size_refinement(
             .or_default()
             .push(next_idx);
         dict_entries.push(bm);
+
+        if let Some(limit) = fresh_cc_limit
+            && stats.fresh_ccs >= limit
+        {
+            break;
+        }
     }
 
     stats
+}
+
+/// Default bounded sample size for [`probe_same_size_rec6_density`] and
+/// [`Jb2EncodeOptions::same_size_rec6_auto`]: the probe stops scanning once
+/// this many *fresh* CCs have been examined. Large enough to be a stable
+/// estimate — watchmaker's whole-page fresh population is 3 475 components,
+/// and 1 000 samples converges well before that — yet small enough that the
+/// probe's Hamming-scoring cost is capped regardless of page size: the
+/// 821 330-fresh-CC `pathogenic_bacteria_1896` page pays the same bounded
+/// scan a small page would.
+#[cfg(feature = "experimental")]
+pub const SAME_SIZE_REC6_AUTO_SAMPLE_CCS: usize = 1000;
+
+/// Density threshold (fraction of sampled fresh CCs with a same-size ≤5 %
+/// Hamming twin) at/above which [`Jb2EncodeOptions::same_size_rec6_auto`]
+/// enables same-size rec-6.
+///
+/// Calibrated against **real emitted-byte deltas** on four corpora (not just
+/// population counts — see the #301 lesson), JB2_AUTO_REC6 in
+/// `PERF_EXPERIMENTS.md`:
+///
+/// | Corpus | density (≤5 % near-twins / fresh) | Sjbz delta at frac 2 % |
+/// |--------|------------------------------------|------------------------|
+/// | watchmaker | 39.6 % | **−11.67 %** |
+/// | cable_1973_100133 | 12.4 % | −0.43 % |
+/// | conquete_paix | 1.7 % | **+0.49 %** (loss) |
+/// | pathogenic_bacteria_1896 | 0.9 % | +0.00 % (flat) |
+///
+/// The real-byte outcome flips from a loss to a win between 1.7 % and
+/// 12.4 % density. `0.05` sits with roughly 2.9× margin above the measured
+/// loss and 2.5× margin below the measured win — enabling on `cable` (a
+/// small extra win) and `watchmaker` (the large win) while staying off for
+/// `conquete_paix` and `pathogenic` (avoiding their losses/flat result).
+#[cfg(feature = "experimental")]
+pub const SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD: f32 = 0.05;
+
+/// Refinement fraction [`Jb2EncodeOptions::same_size_rec6_auto`] applies once
+/// density clears [`SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD`] — the validated
+/// sweet spot from round 18 (a tighter threshold wins more: 2 % > 5 % > 8 %
+/// on watchmaker).
+#[cfg(feature = "experimental")]
+pub const SAME_SIZE_REC6_AUTO_FRAC: f32 = 0.02;
+
+/// Cheap, bounded density probe backing [`Jb2EncodeOptions::same_size_rec6_auto`]
+/// (Phase A3 follow-up of `docs/jb2-size-gap-plan.md`, JB2_AUTO_REC6).
+///
+/// Scans at most `max_ccs` *fresh* connected components (same reading order
+/// the encoder uses) and returns the fraction of them with a same-size
+/// Hamming twin within 5 % — the metric validated in round 17/18 as
+/// predictive of a real byte win (see
+/// [`SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD`]'s table). Capping the scan
+/// keeps the probe's incremental cost independent of page size; the fixed
+/// `extract_ccs` pass is one the real encoder pays regardless of this
+/// option, so the probe's marginal cost over a plain encode is just that
+/// bounded Hamming scan.
+#[cfg(feature = "experimental")]
+pub fn probe_same_size_rec6_density(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    max_ccs: usize,
+) -> f32 {
+    let stats = same_size_refinement_scan(bitmap, shared_symbols, Some(max_ccs.max(1)));
+    if stats.fresh_ccs == 0 {
+        return 0.0;
+    }
+    stats.near_le_5pct as f32 / stats.fresh_ccs as f32
 }
 
 /// Find the closest same-size dict entry within a Hamming-distance budget,
@@ -1164,6 +1254,45 @@ impl Jb2EncodeOptions {
     pub fn with_lossy_threshold(threshold: f32) -> Self {
         Self {
             lossy_threshold: threshold,
+            ..Self::default()
+        }
+    }
+
+    /// Auto-policy preset for [`same_size_rec6`](Self::same_size_rec6)
+    /// (JB2_AUTO_REC6, the Phase A3 follow-up of
+    /// `docs/jb2-size-gap-plan.md`): runs the cheap, bounded
+    /// [`probe_same_size_rec6_density`] against `bitmap` and enables
+    /// same-size rec-6 at [`SAME_SIZE_REC6_AUTO_FRAC`] when the near-twin
+    /// density is at/above [`SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD`], leaving
+    /// it `None` (shipped lossless behavior) otherwise. Every other knob
+    /// stays at its default.
+    ///
+    /// Call this **once per document** — e.g. on its first page, or any
+    /// single representative page — and reuse the returned [`Jb2EncodeOptions`]
+    /// for every page's [`encode_jb2_dict_with_options`] call. That way the
+    /// probe's one fixed `extract_ccs` pass is paid once per document rather
+    /// than once per page, and every page gets a consistent policy (matching
+    /// the validated per-corpus numbers, which were measured with one
+    /// decision applied across all of a document's pages).
+    ///
+    /// **Validated:** on `watchmaker` (text, density 39.6 %) fires and
+    /// reproduces the ≈ −11.67 % Sjbz win, lossless round-trip on every page.
+    /// On `pathogenic_bacteria_1896` (600 dpi scan, density 0.9 %) and
+    /// `conquete_paix` (density 1.7 %) it stays off, so output is
+    /// byte-identical to the default encoder. Opt-in and behind
+    /// `experimental`; not a stable API and not enabled by default — the
+    /// maintainer's A3 decision keeps `same_size_rec6` an experimental,
+    /// explicit-opt-in lever (see `PERF_EXPERIMENTS.md`).
+    #[cfg(feature = "experimental")]
+    pub fn same_size_rec6_auto(bitmap: &Bitmap, shared_symbols: &[Bitmap]) -> Self {
+        let density =
+            probe_same_size_rec6_density(bitmap, shared_symbols, SAME_SIZE_REC6_AUTO_SAMPLE_CCS);
+        Self {
+            same_size_rec6: if density >= SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD {
+                Some(SAME_SIZE_REC6_AUTO_FRAC)
+            } else {
+                None
+            },
             ..Self::default()
         }
     }
@@ -2538,6 +2667,135 @@ mod tests {
         // …and stay lossless (round-trip pixel-exact).
         let decoded = jb2::decode(&same_bytes, None).expect("same-size decode failed");
         assert_bitmaps_eq(&src, &decoded);
+    }
+
+    // ── JB2_AUTO_REC6: adaptive same-size rec-6 auto-policy ─────────────────────
+
+    #[cfg(feature = "experimental")]
+    fn dense_near_twin_bitmap() -> Bitmap {
+        // Ten glyph pairs, each a solid (14+row)x24 block plus a same-size
+        // near-twin with a small 2x2 corner notch (well under the 5% Hamming
+        // budget). The width varies per row so each row's reference is a
+        // distinct fresh symbol (no cross-row exact-match collisions collapsing
+        // repeats into rec-7 copies) while each row's twin only near-matches
+        // its own row's same-size reference. Every pair contributes one fresh
+        // reference (no dict twin yet) and one fresh near-twin, so the
+        // population density is 50% — far above
+        // SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD.
+        let mut src = Bitmap::new(600, 400);
+        let draw = |bm: &mut Bitmap, ox: u32, oy: u32, w: u32, notch: bool| {
+            for y in 0..24 {
+                for x in 0..w {
+                    if notch && x + 2 >= w && y >= 22 {
+                        continue;
+                    }
+                    bm.set(ox + x, oy + y, true);
+                }
+            }
+        };
+        for row in 0..10u32 {
+            let w = 14 + row;
+            draw(&mut src, 4, 2 + row * 28, w, false); // fresh reference
+            draw(&mut src, 4 + w + 6, 2 + row * 28, w, true); // fresh near-twin (same w,h)
+        }
+        src
+    }
+
+    #[cfg(feature = "experimental")]
+    fn sparse_no_twin_bitmap() -> Bitmap {
+        // Ten distinct-size solid blocks, each a different (w, h) so none has
+        // a same-size dictionary twin to score against: density = 0%.
+        let mut src = Bitmap::new(400, 400);
+        for row in 0..10u32 {
+            let w = 8 + row;
+            let h = 10 + row;
+            for y in 0..h {
+                for x in 0..w {
+                    src.set(4 + x, 2 + row * 20 + y, true);
+                }
+            }
+        }
+        src
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn same_size_rec6_auto_fires_on_dense_near_twins() {
+        let src = dense_near_twin_bitmap();
+        let density = probe_same_size_rec6_density(&src, &[], SAME_SIZE_REC6_AUTO_SAMPLE_CCS);
+        assert!(
+            density >= SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD,
+            "dense synthetic input should clear the auto-policy threshold: density={density}"
+        );
+
+        let opts = Jb2EncodeOptions::same_size_rec6_auto(&src, &[]);
+        assert_eq!(
+            opts.same_size_rec6,
+            Some(SAME_SIZE_REC6_AUTO_FRAC),
+            "auto-policy must enable same_size_rec6 on dense near-twin input"
+        );
+
+        // Firing must actually change (shrink or resize) the byte stream
+        // relative to the lossless default and stay round-trip exact.
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let auto_bytes = encode_jb2_dict_with_options(&src, &[], &opts);
+        assert_ne!(
+            default_bytes, auto_bytes,
+            "auto policy should divert near-twins to rec-6, changing the stream"
+        );
+        let decoded = jb2::decode(&auto_bytes, None).expect("auto-policy decode failed");
+        assert_bitmaps_eq(&src, &decoded);
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn same_size_rec6_auto_stays_off_on_sparse_input() {
+        let src = sparse_no_twin_bitmap();
+        let density = probe_same_size_rec6_density(&src, &[], SAME_SIZE_REC6_AUTO_SAMPLE_CCS);
+        assert!(
+            density < SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD,
+            "sparse synthetic input should stay below the auto-policy threshold: density={density}"
+        );
+
+        let opts = Jb2EncodeOptions::same_size_rec6_auto(&src, &[]);
+        assert_eq!(
+            opts.same_size_rec6, None,
+            "auto-policy must leave same_size_rec6 off on sparse input"
+        );
+
+        // Output must be byte-identical to the default encoder.
+        let default_bytes = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let auto_bytes = encode_jb2_dict_with_options(&src, &[], &opts);
+        assert_eq!(
+            default_bytes, auto_bytes,
+            "auto policy must stay off (byte-identical) on sparse input"
+        );
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn probe_same_size_rec6_density_bounds_the_scan() {
+        // Bounding the probe to the first `fresh_cc_limit` fresh CCs must not
+        // change the *decision* on data where the near-twin ratio is uniform
+        // throughout (each pair independently contributes 1 fresh + 1 near
+        // twin): scanning only the first pair already yields the same ~50%
+        // density as scanning all ten.
+        let src = dense_near_twin_bitmap();
+        let full = same_size_refinement_scan(&src, &[], None);
+        let bounded = same_size_refinement_scan(&src, &[], Some(2));
+        assert!(
+            bounded.fresh_ccs <= 2,
+            "bounded scan must stop at the fresh-CC cap: got {}",
+            bounded.fresh_ccs
+        );
+        assert!(
+            full.fresh_ccs > bounded.fresh_ccs,
+            "unbounded scan should see strictly more fresh CCs than the capped one"
+        );
+        // Both scans see a 50% density on this uniform-pair synthetic input.
+        let full_density = full.near_le_5pct as f32 / full.fresh_ccs as f32;
+        let bounded_density = bounded.near_le_5pct as f32 / bounded.fresh_ccs as f32;
+        assert!((full_density - bounded_density).abs() < 1e-6);
     }
 
     // ── #194 multi-page shared Djbz ────────────────────────────────────────────
