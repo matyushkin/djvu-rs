@@ -1,0 +1,9 @@
+class: our-laxer
+source file: watchmaker
+mutant index: 639
+mutation: bitflip-3bits-in-DIRM@24
+target page (0-based): 0
+detail: rendered 2550x3301
+djvudump stderr: *** [1-11705] Corrupted decoder input.
+*** (BSByteStream.cpp:362)
+*** 'unsigned int DJVU::BSByteStream::Decode::decode()'

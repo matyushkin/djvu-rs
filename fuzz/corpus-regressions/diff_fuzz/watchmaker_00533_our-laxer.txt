@@ -1,0 +1,9 @@
+class: our-laxer
+source file: watchmaker
+mutant index: 533
+mutation: bitflip-3bits-in-BG44@13154
+target page (0-based): 0
+detail: rendered 2550x3301
+djvudump stderr: *** Unexpected End Of File.
+*** (ByteStream.cpp:557)
+*** 'unsigned int DJVU::ByteStream::read8()'

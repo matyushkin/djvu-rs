@@ -1,0 +1,7 @@
+class: our-stricter
+source file: cable_1973_100133
+mutant index: 445
+mutation: truncate-start-of-TXTz@12890
+target page (0-based): 1
+detail: parse: IFF error: chunk [70, 79, 82, 77] claims 15474 bytes but only 12878 are available
+djvudump stderr: 
