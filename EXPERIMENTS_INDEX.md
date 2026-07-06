@@ -24,6 +24,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 | D5_TH44_PREVIEW | 2026-07-03 | render (preview fast path) | X (opt-in only) | 20–30× faster but SSIM 0.50–0.68 | TH44 thumbnail preview: measured via D1. Big speed win but low fidelity + **no corpus file embeds TH44**. Viable only as explicit opt-in for thumbnail grids, not a default. Round-9 |
 | C3_ZOOM_SCOPE | 2026-07-04 | render zoom/region | D | already efficient (~5.5 ns/px, flat vs zoom) | Diagnostic: region/zoom render is scoped, linear in viewport pixels, no per-call overhead, same per-pixel rate as full-page compositor. No speed win; residual is cold ROI_IDWT (rejected). Remaining zoom work is quality (mask AA). Round-14 |
 | C5_LRU_BUDGET | 2026-07-04 | memory (auto LRU) | **K** | cache held under ceiling; RSS 714→255 MB | `enforce_cache_budget(max, protect)` + per-page LRU tick + `render_cache_bytes`. Automatic form of retain_render_caches: evicts least-recently-used pages to a byte budget. Byte-identical (test). C5 follow-up, round-13 |
+| D_AA_ZOOM | 2026-07-06 | render mask AA (quality) | **K** (opt-in) | PSNR/MSE favour AA (+0.3–0.7dB, −6…−15% MSE), SSIM favours nearest (known blur-vs-SSIM tradeoff); visibly smoother glyph edges at 4× zoom | Resolves QUALITY_AA's deferred #13: opt-in `RenderOptions::mask_aa` (default false, byte-identical, proven no-op at scale≤1 incl. bg-subsampled-at-1:1 corner case) bilinearly interpolates JB2 mask coverage at genuine upscale only. ~2.2–2.8× slower than nearest when enabled. New `examples/mask_aa_quality.rs` (D1 SSIM harness) + `examples/mask_aa_crops.rs` (`_pr_assets/` PNG evidence). Round-25 |
 | C5_RENDER_CACHE_EVICTION | 2026-07-04 | memory (long-lived viewer) | **K** | **−86% peak RSS** (714→103 MB, 62 pp) | Found: per-page render caches never evict → RSS grows ~11 MB/page unbounded (OOM risk on big books). Fix: additive `evict_render_cache`/`evict_render_caches`/`retain_render_caches`. Byte-identical (test). Backlog C5, round-12 |
 | B5_INCREMENTAL_PROGRESSIVE | 2026-07-04 | progressive decode | **K** (modest) | 1.04–1.50× (grows w/ chunk count) | `render_progressive_all` decodes FG once + accumulates BG chunks in one Iw44Image instead of O(N²) per-frame re-decode. Byte-identical (test). Modest because IDWT reconstruct+composite are inherently per-frame; only ZP redundancy removed. Streaming-step case still needs stateful decoder API. Backlog B5, round-11 |
 | PAR_LANCZOS | 2026-07-04 | Lanczos-3 resampler | **K** | **−69% (3.2×)** large-page Lanczos (parallel) | Row-parallel both separable passes behind `parallel` feature (par_chunks_mut + for_each_init scratch). Bit-identical. Isolated on colorbook native→½: 100.5→31.2ms. Amplifies D2 (Lanczos now ~3× not ~10× a bilinear downscale). Backlog A4, round-10 |
@@ -126,15 +127,17 @@ render_pixmap (RENDER_DIRECT: kept)
     ├── composite_rows_bilevel_one                            ← bilevel 1:1 path
     │   ├── I3: all-zero row → fill(255)                     KEPT
     │   ├── P2: BILEVEL_RGBA table, offset_x==0             KEPT  ← hot path
+    │   ├── mask_bilinear_coverage (opt-in mask_aa, upscale) KEPT (D_AA_ZOOM)
     │   └── scalar fallback (bit-extract per pixel)
     ├── composite_rows_bilinear_one
     │   ├── [1:1] general fast path                          ← color 1:1 path
     │   │   ├── F2: all-bg mask row → copy_from_slice        KEPT
     │   │   ├── G1: MASK_EXPAND pre-expand to stack buf      KEPT  ← hot path
     │   │   └── per-pixel bilinear blend
-    │   └── [B-series] non-1:1 path                         ← color downscale
+    │   └── [B-series] non-1:1 path                         ← color downscale/upscale
     │       ├── sample_bilinear(fg, fg_fx, fg_fy)            (C2b: LLVM already LICM)
-    │       └── mask_box_coverage / POPCNT                   KEPT
+    │       ├── mask_box_coverage / POPCNT                   KEPT (downscale)
+    │       └── mask_bilinear_coverage (opt-in mask_aa)       KEPT (D_AA_ZOOM, upscale)
     └── composite_rows_area_avg_one                          ← area-avg downscale
         ├── AREA_FIX: correct 2×2 exclusive bound            KEPT
         └── sample_area_avg_bounds                           (SIMD: rejected)
