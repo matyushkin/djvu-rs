@@ -7732,6 +7732,7 @@ cost) — bounded, backward-compatible (falls back to today's behaviour when off
 and would close exactly the regression case this probe found without touching the
 CCITT/JBIG2-for-bilevel item, which stays out of scope. Not promoting the "quality 85"
 knob — measured strictly worse than the existing 80 default.
+
 ## Perf round 24 (2026-07-06) — JB2_AUTO_REC6: adaptive auto-policy for same-size rec-6
 
 Round 18's A3 decision kept `same_size_rec6` behind `experimental`, explicit opt-in,
@@ -8062,3 +8063,44 @@ direct structural proof of O(N²)→O(N) chunk decodes (not just an inference fr
 round 11's batch numbers). The streaming API is what an actual network viewer needs
 — render-as-you-receive without holding the whole chunk sequence — which
 `render_progressive_all` alone could not provide.
+
+## Perf round 28 (2026-07-06) — PDF_ADAPTIVE_RASTER: per-page adaptive Deflate-vs-JPEG choice
+
+**Issue.** Follow-up to `PDF_DCT_PROBE` (round 23): the shipped PDF export default
+always emits DCTDecode (JPEG-80) for colour page backgrounds, which loses badly on
+near-flat/text-dominated colour scans — `watchmaker.djvu` p0 came out **3.1× larger**
+under JPEG-80 than plain Deflate, at no SSIM gain. `PdfOptions.jpeg_quality` is a
+single whole-document choice, so no static setting can be optimal for a document with
+mixed page content.
+
+**Approach.** Added `PdfOptions::adaptive_raster: bool` (default `false` — current
+always-JPEG-80 behaviour is unchanged, byte-identical). When `true`, each page's
+rendered RGB is encoded *both* as DCTDecode(JPEG-80) and FlateDecode inside
+`render_page_data` (`src/pdf.rs`), and only the smaller stream is kept; the loser is
+dropped before the function returns, so only one page's pair of encodings is ever
+live at once — doesn't regress the O(1)-per-page streaming memory profile from
+`PDF_STREAM`/#449. The parallel rayon path (#298) renders each page independently and
+runs the same per-page function, so the adaptive choice composes for free; verified
+byte-for-byte identical output between the `parallel` and non-`parallel` build with
+`adaptive_raster: true` on `watchmaker.djvu` (same length, same hash).
+
+**Measured (whole-file PDF, `PdfOptions::default()` vs `adaptive_raster: true`,
+default 150 DPI / JPEG-80):**
+
+| Corpus file | Default (always JPEG-80) | Adaptive (best of both) | Ratio |
+|---|---|---|---|
+| `watchmaker.djvu` (12p, near-flat colour scan — the regression case) | 5,920,319 B | 3,660,142 B | **1.62× smaller** |
+| `colorbook.djvu` (mixed photographic/text colour) | 12,133,358 B | 11,528,809 B | 1.05× smaller |
+| `big-scanned-page.djvu` (photographic scan — JPEG already wins) | 1,462,025 B | 1,462,025 B | 1.00× (identical — no regression) |
+
+Quality is unchanged by construction on every page: when JPEG wins the encoding is
+byte-identical to today's default; when Deflate wins it's lossless (round-trips the
+exact rendered RGB), strictly better than the JPEG-80 alternative it replaced.
+Time cost of the double-encode is roughly +40–60% page-render wall time (extra
+Deflate pass) — acceptable for an opt-in mode, not paid unless requested.
+
+**Decision: Kept.** Ships as `src/pdf.rs` `PdfOptions::adaptive_raster` (opt-in,
+default off). Tests: `adaptive_raster_defaults_to_off`,
+`adaptive_raster_off_is_byte_identical_to_default`,
+`adaptive_raster_shrinks_flat_colour_scan` (asserts >1.3× win on `watchmaker.djvu`),
+`adaptive_raster_never_larger_than_default`. `make check` green (1035 tests).
