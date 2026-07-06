@@ -209,6 +209,19 @@ jobs:
   # `-C target-cpu=x86-64-v3`) on the same runner and posts the delta.
   # Tracks the validation gate added after #251/#252/#253 shipped without
   # baseline numbers — see PERF_EXPERIMENTS.md follow-up for context.
+  #
+  # This is also the only x86 host the repo has (local dev is Apple Silicon —
+  # see PERF_EXPERIMENTS.md "Platform" lines). Two backlog items are gated on
+  # x86 numbers and can only be resolved from this job's output:
+  #   - AVX2_IDWT (round-5 #8): covered by the iw44_decode/iw44_to_rgb benches
+  #     below — `to_rgb`/`to_rgb_subsample` run `inverse_wavelet_transform`,
+  #     which is exactly the IDWT row/col pass this item is about.
+  #   - ZP-U64 (round-3/4 deferred list): the jb2/bzz decode benches added
+  #     below cover the ZP-decoder `refill!` hot loop shared by jb2/iw44/bzz —
+  #     needed to tell whether the 32-bit refill is measurably dearer on x86
+  #     than on the aarch64 numbers already in the journal.
+  # Trigger on demand via `workflow_dispatch` (top of file) on any branch/ref
+  # that already contains this workflow file.
   bench-x86-64-v3:
     name: Benchmark (x86-64-v3 AVX2 validation)
     runs-on: ubuntu-latest
@@ -233,12 +246,15 @@ jobs:
         with:
           key: bench-ubuntu-x86-64-v3
 
-      # Bound scope to AVX2-relevant benches to keep CI time tractable.
-      # Filters target iw44 SIMD hot paths (load8s/store8s, ycbcr_row_from_i16)
-      # plus the renderer benches that exercise the whole IW44 pipeline.
+      # Bound scope to AVX2/ZP-relevant benches to keep CI time tractable.
+      # Filters target iw44 SIMD hot paths (load8s/store8s, ycbcr_row_from_i16,
+      # the IDWT row/col passes exercised via to_rgb) plus jb2_decode/bzz_decode
+      # so the shared ZP-decoder `refill!` loop is measured on x86 too (see the
+      # ZP-U64 note in the job comment above) — those two are cheap to add
+      # since the binary/runner are already built for this job.
       - name: Bench codecs (default RUSTFLAGS — baseline)
         run: |
-          cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode' --output-format bencher 2>&1 \
+          cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode|jb2_decode|bzz_decode' --output-format bencher 2>&1 \
             | tee codec_bench_default.txt
         continue-on-error: true
 
@@ -257,7 +273,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
         run: |
-          cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode' --output-format bencher 2>&1 \
+          cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode|jb2_decode|bzz_decode' --output-format bencher 2>&1 \
             | tee codec_bench_v3.txt
         continue-on-error: true
 
