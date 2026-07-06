@@ -8533,3 +8533,63 @@ and `interop_pixdiff` as the encoder-side complement to the decode-side tools.
 Follow-up: investigate the degenerate-re-encode interop diffs (likely mask-AA
 cosmetic), and extend the harness to also drive `c44`/`cjb2` → our decoder for the
 reverse direction.
+## Perf round 35 (2026-07-04) — IW44 slice rate-distortion (diagnostic: default is well-tuned)
+
+IW44_DIAG (2026-06-15) localised the residual IW44 quality loss to "fine-band
+quantization … starved in 100 slices, quality floor avg_abs=8.72" and flagged a
+slice-budget increase for fine bands as an open size/quality lever. Now that the
+D1 perceptual harness exists (round 9), the RD curve can be measured directly.
+This round does that; the conclusion is that the `total_slices = 100` default sits
+at the knee of the curve and the "starved" hypothesis does not hold.
+
+### IW44_SLICE_RD — is total_slices=100 starving quality? — **Diagnostic / no change** (2026-07-04)
+
+**Setup.** Encode a colour page as IW44 (`encode_iw44_color`) at
+`total_slices ∈ {50, 74, 100, 126, 150, 200}`, decode, and measure size + SSIM /
+PSNR vs the source (D1 `quality::compare`). Two workloads: the **full detailed
+page** (worst case for the codec) and the **sub-sampled segmented background**
+(the real production BG44 input). M1 Max.
+
+**Full page — quality plateaus at ~100 slices, size then explodes:**
+
+| slices | colorbook size / SSIM / PSNR | watchmaker size / SSIM / PSNR |
+|--------|------------------------------|-------------------------------|
+| 50 | 9 675 B / 0.9144 / 20.19 | 32 340 B / 0.9063 / 20.32 |
+| 74 | 81 799 B / 0.9606 / 22.13 | 258 820 B / 0.9730 / 33.41 |
+| **100** | **261 617 B / 0.9757 / 22.41** | **693 929 B / 0.9874 / 38.75** |
+| 126 | 643 900 B / 0.9783 / 22.42 | 1 106 060 B / 0.9890 / 39.03 |
+| 150 | 2 076 207 B / 0.9786 / 22.42 | 1 645 979 B / 0.9891 / 39.03 |
+| 200 | 6 402 802 B / 0.9787 / 22.42 | 2 537 897 B / 0.9891 / 39.03 |
+
+Past 100 slices PSNR is pinned (22.42 / 39.03 dB) and SSIM gains ≤ 0.003 while
+size grows 2–25×. colorbook 100→150 costs **+1.8 MB for +0.0003 SSIM**. The
+avg_abs=8.72 floor is the *inherent* quantization limit of the transform, not slice
+starvation — more slices cannot move the plateau.
+
+**Segmented BG (production BG44 workload):**
+
+| slices | colorbook BG (189×306) | watchmaker BG (213×276) |
+|--------|------------------------|-------------------------|
+| 50 | 94 B / SSIM 0.9332 | 89 B / SSIM 0.99789 |
+| 100 | 2 078 B / SSIM 0.9773 | 189 B / SSIM 0.99797 |
+| 200 | 132 052 B / SSIM 0.9813 | 19 206 B / SSIM 0.99822 |
+
+The knee is **content-dependent**: the textured colorbook BG genuinely needs ~100
+slices (50 is visibly worse, 0.933 vs 0.977), while the smooth watchmaker BG is
+already at plateau by 50 (SSIM 0.99789 at 89 B vs 0.99797 at 189 B — 100 slices
+doubles the bytes for +0.00008 SSIM). A *fixed* 100 slightly over-codes very smooth
+backgrounds, but the absolute waste is tiny (~100 B/page), and at 200 slices even a
+smooth BG blows up (colorbook 132 KB) — so 100 is also a sensible ceiling that
+prevents pathological growth.
+
+**Verdict.** **No change.** `total_slices = 100` sits at the RD knee: enough to
+reach the quality plateau on textured backgrounds, low enough to avoid the
+size explosion beyond it, and only marginally wasteful (hundreds of bytes) on the
+smoothest backgrounds — not worth breaking byte-compatibility (the default is
+`Iw44Target::Slices`, byte-identical to legacy) for. IW44_DIAG's fine-band
+slice-starvation lever is **closed**: the loss it measured is the transform's
+quantization floor, which the slice budget cannot lower. A content-adaptive
+`Iw44Target::Bpp` default could shave the smooth-BG over-coding, but the win is
+sub-KB per page and would change every colour encode's bytes — deferred as
+low-value. (The real BG44 size lever was BG_DIFFUSE, round 17, which shrinks the
+*input* the codec sees rather than the slice schedule.)
