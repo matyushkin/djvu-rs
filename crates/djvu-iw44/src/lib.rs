@@ -4123,14 +4123,18 @@ mod tests {
         assert_eq!(img.height, 852);
 
         let pm = img.to_rgb().expect("to_rgb failed");
-        // NOTE: carte.djvu is a problematic fixture — djvu-rs's document parser
-        // rejects it as truncated IFF, and this crate's standalone decode of its
-        // background produces noise (the committed golden has pinned that noise
-        // since #99). Whatever the root cause (suspected container-parse bug;
-        // ddjvu renders the file cleanly), it is independent of the slice-loop
-        // early-exit removed in 2026-06; that change only shifts the existing
-        // noise. The golden was regenerated from the corrected decoder so this
-        // self-consistency check stays green. See PERF_EXPERIMENTS.md.
+        // NOTE: carte.djvu is a problematic fixture — this crate's standalone
+        // decode of its background produces noise (the committed golden has
+        // pinned that noise since #99). (`DjVuDocument::parse` used to reject
+        // this file outright as truncated IFF too — that was a separate bug,
+        // a too-strict INFO-chunk length check, fixed in `src/info.rs`;
+        // ddjvu has always rendered the file cleanly, confirming the fixture
+        // itself is intact.) Whatever the root cause of the chroma noise
+        // (ddjvu renders the file cleanly), it is independent of the
+        // slice-loop early-exit removed in 2026-06; that change only shifts
+        // the existing noise. The golden was regenerated from the corrected
+        // decoder so this self-consistency check stays green. See
+        // PERF_EXPERIMENTS.md.
         //
         // Regenerated again for #422: carte is the only chroma_half fixture, so
         // its decode now reflects bilinear chroma upsampling (was nearest). The

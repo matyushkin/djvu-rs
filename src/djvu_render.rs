@@ -4710,55 +4710,88 @@ mod tests {
     /// the same N frames decodes each chunk exactly once — O(N). Counted via
     /// the `#[cfg(test)]`-only `BG44_CHUNK_DECODES` counter at the two real
     /// `Iw44Image::decode_chunk` call sites, not wall-clock timing.
+    ///
+    /// Under the `parallel` feature, `decode_layers` runs the naive session's
+    /// background decode through `rayon::join` (see `#440` there). Calling
+    /// `rayon::join` from a plain thread that isn't already a rayon worker —
+    /// such as this test's own thread — makes rayon bridge onto a worker
+    /// thread from its shared *global* pool to execute the join. That breaks
+    /// the `BG44_CHUNK_DECODES` thread-local's implicit assumption that every
+    /// counted decode call lands on the thread that set/reads it: the
+    /// increments happen on a global-pool worker thread this test's thread_local
+    /// handle never sees, so the naive count silently reads back as 0
+    /// (verified: found failing under `--features cli,mmap,parallel`, and in
+    /// isolation under `--features parallel` alone — `mmap` is not implicated).
+    /// Route the whole measurement through a dedicated, single-worker rayon
+    /// pool instead: with exactly one worker, any `rayon::join` bridged into
+    /// it always resolves on that same worker, so setting and reading the
+    /// counter from *inside* the pool keeps everything on one thread
+    /// regardless of the `parallel` feature — and because the pool is freshly
+    /// built here (not rayon's shared global pool), this stays isolated from
+    /// any other test's concurrent decode calls, preserving the isolation the
+    /// original thread-local was there for.
     #[test]
     fn progressive_decoder_chunk_decodes_are_on_not_on_squared() {
-        for filename in ["chicken.djvu", "colorbook.djvu"] {
-            let doc = load_doc(filename);
-            let page = doc.page(0).unwrap();
-            let chunks = page.bg44_chunks();
-            let n = chunks.len();
-            assert!(n >= 3, "{filename}: need >=3 BG44 chunks");
+        let body = || {
+            for filename in ["chicken.djvu", "colorbook.djvu"] {
+                let doc = load_doc(filename);
+                let page = doc.page(0).unwrap();
+                let chunks = page.bg44_chunks();
+                let n = chunks.len();
+                assert!(n >= 3, "{filename}: need >=3 BG44 chunks");
 
-            let opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                resampling: Resampling::Bilinear,
-                ..Default::default()
-            };
+                let opts = RenderOptions {
+                    width: page.width() as u32,
+                    height: page.height() as u32,
+                    resampling: Resampling::Bilinear,
+                    ..Default::default()
+                };
 
-            // Naive per-frame session: render_progressive_step(0..N), each call
-            // re-decoding the chunk prefix from scratch (the pre-B5 behaviour).
-            BG44_CHUNK_DECODES.with(|c| c.set(0));
-            for step in 0..n {
-                render_progressive_step(page, &opts, step).expect("progressive_step");
+                // Naive per-frame session: render_progressive_step(0..N), each call
+                // re-decoding the chunk prefix from scratch (the pre-B5 behaviour).
+                BG44_CHUNK_DECODES.with(|c| c.set(0));
+                for step in 0..n {
+                    render_progressive_step(page, &opts, step).expect("progressive_step");
+                }
+                let naive = BG44_CHUNK_DECODES.with(|c| c.get());
+                let expected_naive: usize = (1..=n).sum(); // 1+2+...+N
+                assert_eq!(
+                    naive, expected_naive,
+                    "{filename}: naive per-frame session should decode chunks \
+                     1+2+...+N = {expected_naive} times, got {naive}"
+                );
+
+                // Stateful streaming session: one decode per chunk, total N.
+                BG44_CHUNK_DECODES.with(|c| c.set(0));
+                let mut dec = ProgressiveDecoder::new(page, &opts).expect("decoder");
+                for chunk in chunks.iter() {
+                    dec.push_bg44_chunk(chunk).expect("push");
+                }
+                let streamed = BG44_CHUNK_DECODES.with(|c| c.get());
+                assert_eq!(
+                    streamed, n,
+                    "{filename}: stateful session should decode each chunk exactly \
+                     once (O(N) = {n}), got {streamed}"
+                );
+
+                assert!(
+                    naive > streamed,
+                    "{filename}: naive session ({naive} decodes) should strictly \
+                     exceed the streamed session ({streamed} decodes)"
+                );
             }
-            let naive = BG44_CHUNK_DECODES.with(|c| c.get());
-            let expected_naive: usize = (1..=n).sum(); // 1+2+...+N
-            assert_eq!(
-                naive, expected_naive,
-                "{filename}: naive per-frame session should decode chunks \
-                 1+2+...+N = {expected_naive} times, got {naive}"
-            );
+        };
 
-            // Stateful streaming session: one decode per chunk, total N.
-            BG44_CHUNK_DECODES.with(|c| c.set(0));
-            let mut dec = ProgressiveDecoder::new(page, &opts).expect("decoder");
-            for chunk in chunks.iter() {
-                dec.push_bg44_chunk(chunk).expect("push");
-            }
-            let streamed = BG44_CHUNK_DECODES.with(|c| c.get());
-            assert_eq!(
-                streamed, n,
-                "{filename}: stateful session should decode each chunk exactly \
-                 once (O(N) = {n}), got {streamed}"
-            );
-
-            assert!(
-                naive > streamed,
-                "{filename}: naive session ({naive} decodes) should strictly \
-                 exceed the streamed session ({streamed} decodes)"
-            );
+        #[cfg(feature = "parallel")]
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("build single-threaded pool for deterministic thread-local counting");
+            pool.install(body);
         }
+        #[cfg(not(feature = "parallel"))]
+        body();
     }
 
     #[test]

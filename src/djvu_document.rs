@@ -2474,6 +2474,27 @@ mod tests {
         assert!(mask.is_some(), "boy_jb2.djvu page must have a JB2 mask");
     }
 
+    /// `carte.djvu` has a 5-byte INFO chunk (width, height, version byte —
+    /// no dpi/gamma/flags) instead of the canonical 10-byte layout. The file
+    /// itself is intact (byte-exact IFF framing; `djvudump`/`ddjvu` from
+    /// DjVuLibre parse and render it without complaint), so `DjVuDocument::parse`
+    /// rejecting it as `Iff(Truncated)` was a parser-strictness bug, not a
+    /// corrupt fixture. Regression test for that bug (see `info.rs`'s
+    /// `carte_style_five_byte_info_parses_with_defaults` for the unit-level
+    /// check).
+    #[test]
+    fn parse_carte_with_short_info_chunk() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/carte.djvu"),
+        )
+        .expect("carte.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("carte.djvu must parse despite short INFO");
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).expect("page 0 must exist");
+        assert_eq!(page.width(), 4200);
+        assert_eq!(page.height(), 2556);
+    }
+
     /// Round-trip: bytes from `raw_chunk` re-parse to the same metadata.
     #[test]
     fn page_raw_chunk_info_roundtrip() {
