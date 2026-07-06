@@ -266,6 +266,7 @@ fn main() {
         .expect("render candidate");
 
         let rep = quality::compare(&source_pm, &rendered);
+        let color_rep = quality::compare_color(&source_pm, &rendered);
         println!(
             "  {label:<24}  bytes {:>9}  FGbz {:>7}B  palette {:>5}  SSIM {:.5}  PSNR {:>7}  MSE {:8.3}",
             bytes.len(),
@@ -278,6 +279,19 @@ fn main() {
                 format!("{:.2}", rep.psnr_db)
             },
             rep.mse
+        );
+        // QUALITY_COLOR: this is exactly the scenario the D1 harness's luma
+        // blindness bit us on (round-31 note) — print the colour-aware companion
+        // so a wash-out in coloured text no longer needs manual crop inspection.
+        println!(
+            "  {:<24}  SSIM Y {:.5}  Cb {:.5}  Cr {:.5}  comb {:.5}   ΔE mean {:6.2}  max {:6.2}",
+            "    ↳ colour",
+            color_rep.ssim_y,
+            color_rep.ssim_cb,
+            color_rep.ssim_cr,
+            color_rep.ssim_combined,
+            color_rep.delta_e_mean,
+            color_rep.delta_e_max
         );
         (bytes, rendered, fgbz_len, palette_len, rep)
     };
