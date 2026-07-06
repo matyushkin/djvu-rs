@@ -20,6 +20,85 @@ use djvu_zp::encoder::ZpEncoder;
 // of truth) rather than re-declared here — see the `pub(crate)` items in `lib.rs`.
 use crate::{ACTIVE, BAND_BUCKETS, NEW, QUANT_HI_INIT, QUANT_LO_INIT, UNK, ZERO};
 
+#[cfg(feature = "iw44-probe")]
+pub mod probe {
+    //! Diagnostic-only encoder-side size attribution (IW44_ENTROPY_PROBE, round 51).
+    //!
+    //! Thread-local per-band counters: cumulative ZP output bytes attributed to
+    //! each of the 10 IW44 frequency bands (band 0 = DC/coarsest .. band 9 =
+    //! finest, see `BAND_BUCKETS`), plus per-band call/true counts for the four
+    //! bit categories the codec emits (block-band NEW, bucket NEW, coefficient
+    //! activation, coefficient refinement). This exists to answer "where do
+    //! textured-content bits concentrate" without guessing.
+    //!
+    //! Purely observational: reading `ZpEncoder::bytes_written()` and
+    //! incrementing a thread-local counter cannot change which bits get
+    //! encoded, so this feature — even enabled — never alters the emitted
+    //! stream (see `probe_does_not_change_output` in the test module below).
+    use std::cell::RefCell;
+
+    /// Call count + true-count for one binary decision category.
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct BitCounter {
+        pub calls: u64,
+        pub true_count: u64,
+    }
+
+    impl BitCounter {
+        fn record(&mut self, bit: bool) {
+            self.calls += 1;
+            if bit {
+                self.true_count += 1;
+            }
+        }
+    }
+
+    /// Per-band accounting: bytes plus the four bit-category counters.
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct BandStats {
+        /// Cumulative ZP output bytes attributed to slices of this band.
+        pub bytes: u64,
+        /// Block-band NEW bit (`block_band_encoding_pass`).
+        pub block_band: BitCounter,
+        /// Per-bucket NEW bit (`bucket_encoding_pass`).
+        pub bucket_new: BitCounter,
+        /// Per-coefficient activation bit (`newly_active_encoding_pass`).
+        pub activate: BitCounter,
+        /// Per-coefficient refinement bit (`previously_active_encoding_pass`).
+        pub refine: BitCounter,
+    }
+
+    thread_local! {
+        static STATS: RefCell<[BandStats; 10]> = RefCell::new([BandStats::default(); 10]);
+    }
+
+    /// Reset all counters to zero. Call before the encode you want to measure.
+    pub fn reset() {
+        STATS.with(|s| *s.borrow_mut() = [BandStats::default(); 10]);
+    }
+
+    /// Snapshot the current per-band counters (index = band 0..=9).
+    pub fn snapshot() -> [BandStats; 10] {
+        STATS.with(|s| *s.borrow())
+    }
+
+    pub(crate) fn add_bytes(band: usize, delta: u64) {
+        STATS.with(|s| s.borrow_mut()[band].bytes += delta);
+    }
+    pub(crate) fn record_block_band(band: usize, bit: bool) {
+        STATS.with(|s| s.borrow_mut()[band].block_band.record(bit));
+    }
+    pub(crate) fn record_bucket_new(band: usize, bit: bool) {
+        STATS.with(|s| s.borrow_mut()[band].bucket_new.record(bit));
+    }
+    pub(crate) fn record_activate(band: usize, bit: bool) {
+        STATS.with(|s| s.borrow_mut()[band].activate.record(bit));
+    }
+    pub(crate) fn record_refine(band: usize, bit: bool) {
+        STATS.with(|s| s.borrow_mut()[band].refine.record(bit));
+    }
+}
+
 // ---- Forward zigzag scatter tables (encoder-only) ----------------------------
 //
 // The encoder scatters block coefficients into the plane in *forward* order, so
@@ -938,6 +1017,8 @@ impl PlaneEncoder {
     }
 
     fn encode_slice(&mut self, zp: &mut ZpEncoder) {
+        #[cfg(feature = "iw44-probe")]
+        let (probe_band, probe_before) = (self.curband, zp.bytes_written());
         if !self.is_null_slice() {
             for block_idx in 0..self.blocks.len() {
                 self.preliminary_flag_computation(block_idx);
@@ -952,6 +1033,8 @@ impl PlaneEncoder {
             }
         }
         self.finish_slice();
+        #[cfg(feature = "iw44-probe")]
+        probe::add_bytes(probe_band, (zp.bytes_written() - probe_before) as u64);
     }
 
     /// Mirrors decoder's `block_band_decoding_pass`.
@@ -969,6 +1052,8 @@ impl PlaneEncoder {
             // Determine if any UNK coefficient in this block-band will become active.
             let any_will_activate = self.any_unk_activates(block_idx, from, to);
             zp.encode_bit(&mut self.ctx_decode_bucket[0], any_will_activate);
+            #[cfg(feature = "iw44-probe")]
+            probe::record_block_band(self.curband, any_will_activate);
             if any_will_activate {
                 self.bbstate |= NEW;
             }
@@ -1049,6 +1134,8 @@ impl PlaneEncoder {
                 self.bucketstate[boff] |= NEW;
             }
             zp.encode_bit(&mut self.ctx_decode_coef[n + self.curband * 8], is_new);
+            #[cfg(feature = "iw44-probe")]
+            probe::record_bucket_new(self.curband, is_new);
         }
     }
 
@@ -1088,6 +1175,8 @@ impl PlaneEncoder {
                     // Threshold for activation: |V| > 11s/16.
                     let is_active = true_val.unsigned_abs() as i32 > (s * 11 / 16).max(1);
                     zp.encode_bit(&mut self.ctx_activate_coef[shift + ip], is_active);
+                    #[cfg(feature = "iw44-probe")]
+                    probe::record_activate(self.curband, is_active);
                     if is_active {
                         let negative = true_val < 0;
                         zp.encode_passthrough_iw44(negative);
@@ -1151,6 +1240,8 @@ impl PlaneEncoder {
                     des = abs_v > abs_d;
                     zp.encode_passthrough_iw44(des);
                 }
+                #[cfg(feature = "iw44-probe")]
+                probe::record_refine(self.curband, des);
                 if des {
                     new_abs_d += s >> 1;
                 } else {
@@ -2341,5 +2432,36 @@ mod tests {
         let chunks = encode_iw44_gray(&src, &bpp_opts);
         let decoded = decode_gray(&chunks);
         assert_eq!((decoded.width, decoded.height), (64, 64));
+    }
+
+    /// IW44_ENTROPY_PROBE (round 51): enabling the `iw44-probe` diagnostic
+    /// counters must be a pure observer — same encoded bytes with or without
+    /// resetting/reading the counters around the encode. Guards the "encoder-only,
+    /// decoder-unchanged" claim in the probe module doc.
+    #[cfg(feature = "iw44-probe")]
+    #[test]
+    fn probe_does_not_change_output() {
+        let src = make_pixmap(96, 96, |x, y| {
+            ((x * 3) as u8, (y * 3) as u8, ((x + y) % 256) as u8)
+        });
+        let opts = Iw44EncodeOptions::default();
+
+        probe::reset();
+        let a = encode_iw44_color(&src, &opts);
+        let snap = probe::snapshot();
+        probe::reset();
+        let b = encode_iw44_color(&src, &opts);
+
+        assert_eq!(
+            a, b,
+            "enabling iw44-probe counters must not change encoder output"
+        );
+        let total_bytes: u64 = snap.iter().map(|s| s.bytes).sum();
+        assert!(total_bytes > 0, "probe should have recorded byte activity");
+        let total_activations: u64 = snap.iter().map(|s| s.activate.true_count).sum();
+        assert!(
+            total_activations > 0,
+            "probe should have recorded coefficient activations"
+        );
     }
 }

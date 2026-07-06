@@ -25,3 +25,7 @@ djvu-iff = { version = "0.24.4", path = "../djvu-iff" }
 default = ["std"]
 std = ["djvu-zp/std", "djvu-pixmap/std"]
 parallel = ["dep:rayon", "std"]
+# Diagnostic-only, encoder-side bit/byte attribution counters (IW44_ENTROPY_PROBE,
+# round 51). Adds thread-local per-band accounting inside `PlaneEncoder`; zero
+# effect on emitted bytes or decoder behavior when disabled (the default).
+iw44-probe = ["std"]

@@ -103,6 +103,10 @@ ocr-neural-candle = ["ocr-neural"]
 # rec-6 refinement probe and its analysis helpers). Off by default; not part of
 # the published API. Implies `std` since the encoders are std-only.
 experimental = ["std", "djvu-jb2/experimental"]
+# Diagnostic-only IW44 encoder bit/byte attribution counters (IW44_ENTROPY_PROBE,
+# round 51). See `djvu_iw44::encode::probe`. Off by default; adds no runtime cost
+# and cannot change emitted bytes when disabled.
+iw44-probe = ["std", "djvu-iw44/iw44-probe"]
 
 [dev-dependencies]
 criterion = "0.5"
@@ -160,6 +164,10 @@ required-features = ["experimental"]
 [[example]]
 name = "jb2_lossy_b0"
 required-features = ["std"]
+
+[[example]]
+name = "iw44_band_probe"
+required-features = ["iw44-probe"]
 
 [[bench]]
 name = "codecs"
