@@ -1,0 +1,8 @@
+class: our-renders-what-they-reject
+source file: watchmaker
+mutant index: 34
+mutation: bitflip-3bits-in-BG44@75886
+target page (0-based): 4
+detail: rendered 2550x3301
+ddjvu stderr: ddjvu: Unexpected End Of File.
+ddjvu: Cannot decode page 5.

@@ -1,0 +1,7 @@
+class: pixel-mismatch
+source file: boy
+mutant index: 143
+mutation: bitflip-1bits-in-INFO@24
+target page (0-based): 0
+detail: rendered 192x256
+ddjvu stderr: 

@@ -1,0 +1,7 @@
+class: our-render-fail
+source file: watchmaker
+mutant index: 628
+mutation: bitflip-3bits-in-FORM@63436
+target page (0-based): 4
+detail: render: document error: JB2 error: JB2: unknown record type
+ddjvu stderr: 
