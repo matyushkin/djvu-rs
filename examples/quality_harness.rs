@@ -132,6 +132,23 @@ fn print_row(label: &str, rep: quality::QualityReport) {
     );
 }
 
+/// Colour-aware companion row (QUALITY_COLOR) — per-channel Y/Cb/Cr SSIM, the
+/// luma-weighted combined score, and mean/max CIE76 ΔE. Printed right under
+/// the luma-only `print_row` for the same pair so a reader can see at a glance
+/// whether a quality delta is structural (luma) or colour (chroma/ΔE).
+fn print_color_row(rep: quality::ColorQualityReport) {
+    println!(
+        "  {:<26}  SSIM Y {:.4}  Cb {:.4}  Cr {:.4}  comb {:.4}   ΔE mean {:6.2}  max {:6.2}",
+        "  ↳ colour",
+        rep.ssim_y,
+        rep.ssim_cb,
+        rep.ssim_cr,
+        rep.ssim_combined,
+        rep.delta_e_mean,
+        rep.delta_e_max
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -164,6 +181,7 @@ fn main() {
         }
         println!("pair: {a}  vs  {b}  (page {page_idx}, {w}×{h})");
         print_row("a vs b", quality::compare(&pa, &pb));
+        print_color_row(quality::compare_color(&pa, &pb));
         return;
     }
 
@@ -204,7 +222,9 @@ fn main() {
         };
         println!("  reference: ddjvu (DjVuLibre) at {rw}×{rh}");
         print_row("Bilinear vs ddjvu", quality::compare(&bilinear, &reference));
+        print_color_row(quality::compare_color(&bilinear, &reference));
         print_row("Lanczos3 vs ddjvu", quality::compare(&lanczos, &reference));
+        print_color_row(quality::compare_color(&lanczos, &reference));
         println!("  → higher SSIM = perceptually closer to the reference decoder");
         return;
     }
@@ -222,4 +242,5 @@ fn main() {
         "Bilinear vs Lanczos3",
         quality::compare(&bilinear, &lanczos),
     );
+    print_color_row(quality::compare_color(&bilinear, &lanczos));
 }

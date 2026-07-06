@@ -8593,3 +8593,95 @@ quantization floor, which the slice budget cannot lower. A content-adaptive
 sub-KB per page and would change every colour encode's bytes — deferred as
 low-value. (The real BG44 size lever was BG_DIFFUSE, round 17, which shrinks the
 *input* the codec sees rather than the slice schedule.)
+
+## Perf round 36 (2026-07-06) — QUALITY_COLOR: colour-aware D1 metric
+
+**Issue.** The D1 perceptual harness (`src/quality.rs`, round 9) scores **luma
+only** — a structural blind spot flagged as an honesty caveat in round 31
+(FGBZ_MEDIANCUT): the median-cut palette experiment had a real, visible
+colour wash-out at aggressive `k` that the harness reported as a negligible
+SSIM change, forcing a fall-back to manual crop inspection. Several future
+levers (palette, chroma, FG colour) need an honest colour metric before they
+can be judged quantitatively.
+
+**Prior-art check.** `EXPERIMENTS_INDEX.md` / `PERF_EXPERIMENTS.md`: no colour
+SSIM/ΔE work exists — every prior mention (`FGBZ_MEDIANCUT`, `CHROMA_BILINEAR`
+#422, `COLOR_AA` #439) explicitly notes the luma-only limitation rather than
+fixing it. `git branch -r` / `gh pr list --search "ssim OR quality"`: no
+in-flight or merged branch touches colour metrics.
+
+**Approach.** Added `quality::compare_color(a, b) -> ColorQualityReport`
+alongside the existing (untouched, byte-identical) `psnr`/`ssim`/`compare` API:
+
+- Converts both images to **YCbCr** (ITU-R BT.601 coefficients — the standard
+  perceptual chroma axes, distinct from DjVu's own lossless `Cb=b−g`/`Cr=r−g`
+  IW44 wire-format shortcut) and reuses the existing windowed-SSIM machinery
+  independently on `Y`, `Cb`, `Cr`.
+- Reports a luma-dominant **weighted combined SSIM** (`0.8·Y + 0.1·Cb + 0.1·Cr`),
+  matching the asymmetry DjVu's own chroma-subsampling/chroma-delay design
+  already assumes (chroma is far less perceptually salient than luminance).
+- Reports mean/max **ΔE76** (Euclidean CIE L\*a\*b\* distance, sRGB→linear→XYZ
+  D65→Lab, standard formulas) as an absolute colour-difference number in the
+  same units colour-reproduction practice uses (`<1` imperceptible, `>10`
+  obviously different colour).
+- No new dependencies — `quality.rs` is declared `#[cfg(feature = "std")]` at
+  the `mod` level in `lib.rs`, so `f64::{powf,cbrt,sqrt}` (unavailable in
+  `core`) are already fair game; confirmed no other no_std/wasm32 build path
+  touches this file.
+- 8 new unit tests (`quality::tests`), including a synthetic same-luma/
+  shifted-chroma fixture solved so `306·r+601·g+117·b` (the module's luma
+  weights) is within 0.07 between `(200,104,255)` "lavender" and `(0,255,3)`
+  "green" — a luma-only metric scores them ≈ identical (SSIM > 0.999) while
+  `compare_color` must not (asserted `ssim_cb`/`ssim_cr < 0.8`, `ΔE > 100`).
+
+**Wired into `examples/quality_harness.rs`**: every luma `print_row` now has a
+`print_color_row` companion (`SSIM Y/Cb/Cr/combined` + `ΔE mean/max`), and into
+`examples/fgbz_mediancut_harness.rs` (the round-31 fixture) for direct
+before/after validation.
+
+**Validation 1 — synthetic isoluminant colour shift (unit test).** Confirms
+luma-SSIM(lavender, green) > 0.999 while `compare_color` reports `ssim_cb`/
+`ssim_cr` < 0.8 and ΔE76 mean > 100 — the metric catches exactly what luma-SSIM
+structurally cannot.
+
+**Validation 2 — real corpus: round-31 FGBZ_MEDIANCUT scenario re-run at
+aggressive `k`** (`fgbz_mediancut_harness --synthetic 0 2,4,6,32`,
+`EncodeQuality::Quality`, vs the source render):
+
+| Palette | Total bytes | SSIM (luma) | **SSIM Cb** | **SSIM Cr** | SSIM combined | ΔE mean | ΔE max |
+|---|---|---|---|---|---|---|---|
+| Exact (baseline) | 9014 | 0.86036 | 0.87911 | 0.87956 | 0.86416 | 12.37 | 77.78 |
+| **MedianCut{2}** | 6824 | 0.85477 | 0.82932 | **0.32563** | 0.79932 | **25.63** | 82.63 |
+| MedianCut{4} | 6834 | 0.85378 | 0.82634 | 0.77821 | 0.84348 | 20.44 | 80.43 |
+| MedianCut{6} | 6840 | 0.85731 | 0.85557 | 0.82555 | 0.85396 | 16.25 | 77.78 |
+| MedianCut{32} | 7186 | 0.86054 | 0.87910 | 0.87938 | 0.86428 | 12.38 | 77.78 |
+
+At `k=2` luma SSIM barely moves (0.86036 → 0.85477, **−0.0056**, would read as
+"no meaningful change") while **`Cr` SSIM collapses 0.87956 → 0.32563
+(−63 %)** and ΔE mean **doubles** (12.37 → 25.63) — the exact failure mode the
+round-31 caveat described, now caught by a single number instead of manual
+crop inspection. At `k≥6` (≥ the fixture's true colour count) the colour
+metric recovers to within measurement noise of the baseline, agreeing with
+round-31's crop-inspection conclusion that `k=6/32` are visually
+indistinguishable. **The colour metric degrades before (and far more sharply
+than) luma SSIM does, exactly as the goal required.**
+
+**Validation 3 — real fixture vs ddjvu reference** (`quality_harness
+tests/fixtures/colorbook.djvu 0 --half`): Lanczos3 (0.9928 luma SSIM, ΔE mean
+0.31) beats Bilinear (0.9594 luma SSIM, ΔE mean 0.97) on **both** luma and
+colour axes — consistent with round-9's D2 finding, and shows the colour
+metric agreeing with luma SSIM (not just contradicting it) when a change is
+genuinely better on every axis. The CHROMA_BILINEAR (#422) chroma_half
+fixture (`tests/fixtures/carte.djvu`) could not be re-run: it fails to parse
+via `DjVuDocument::parse` with a pre-existing `Iff(Truncated)` error unrelated
+to this change (not investigated further — out of scope).
+
+**Correctness.** `make check` (fmt, clippy `-D warnings`, no_std build,
+wasm32 no_std+wasm build, full workspace test suite) passes. 12/12
+`quality::tests` pass (4 pre-existing + 8 new).
+
+**Decision.** **Kept (infra).** Purely additive — `psnr`/`ssim`/`compare`/
+`compare_gray` and their byte-for-byte behaviour are untouched;
+`compare_color` is a new, separate entry point. Unblocks honest quantitative
+judgement of the palette/chroma/FG-colour levers `FGBZ_MEDIANCUT`,
+`CHROMA_BILINEAR`, and future colour-encoder work flagged as needing it.
