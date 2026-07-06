@@ -8422,3 +8422,54 @@ this journal entry and the measurement example. The 12× FG44 subsample ratio is
 already reconstructed by bilinear below the perceptual floor at realistic zoom levels;
 future colour-text quality work should look elsewhere (e.g. encoder-side FG44
 fidelity, not decoder-side interpolation kernel).
+## Perf round 33 (2026-07-04) — Lanczos RGBA-interleaved accumulate (LLVM auto-vec)
+
+The Lanczos-3 resampler was already row-parallel (PAR_LANCZOS, −69%) and
+weight-hoisted (LANCZOS_HOIST, −22.5%), but both separable passes still accumulated
+into **three separate** `r/g/b` scalars/arrays while reading a **stride-4** RGBA
+source. That deinterleave (read `px[base], px[base+1], px[base+2]` into three
+destinations) blocks LLVM's auto-vectoriser. This round restructures both passes to
+accumulate the four RGBA channels **together**, so the hot loops become contiguous
+`f32` FMAs the compiler vectorises — no manual NEON, no `unsafe`.
+
+### LANCZOS_RGBA_ACC — accumulate RGBA together, not deinterleaved — **Kept** (2026-07-04)
+
+**Change.**
+- *Horizontal pass* — each output pixel accumulates into one `[f32; 4]` read from
+  four contiguous source bytes per tap (`acc[c] += px[c] * w`), so LLVM widens the
+  per-tap multiply-add to a 4-lane FMA instead of three scalar ops on a strided read.
+- *Vertical pass* — replace the three `acc_r/acc_g/acc_b` column arrays with a
+  single **interleaved** `acc[dw*4]`; the inner `sy` loop is then a contiguous SAXPY
+  `acc[i] += mid_row[i] * w` over `dw*4` elements, which vectorises optimally (the
+  old stride-4 gather into three arrays did not).
+
+In both passes the extra alpha lane accumulates the pixmaps' constant 255 and is
+ignored on output.
+
+**Correctness — bit-identical.** Each RGB channel still sums the same contributors
+in the same order with the same normaliser, so the rounding is unchanged. Verified:
+a `DefaultHasher` digest of the Lanczos-3 half-scale render of colorbook
+(1130×1834) is **identical** across the change (`digest=1154d165a6a72d7d`), and the
+`scale_lanczos3` / render Lanczos tests pass. `make check` green.
+
+**Numbers** (`render_scaled_large_colorbook`, colorbook 2260×3669 → 1130×1834,
+`parallel`, M1 Max). The board was thermally hot so absolute times drift run-to-run;
+the reported figure is the intra-run **normalised Lanczos cost**
+`(lanczos3 − bilinear) / bilinear` (bilinear = decode + bilinear control, cancels
+the shared decode + thermal state):
+
+| | normalised Lanczos cost | vs old |
+|-|-------------------------|--------|
+| Before | 8.77–11.93 (across pairs) | — |
+| Vertical pass only | 8.30–9.43 | **−21 to −24%** |
+| Both passes | 6.38 | **−27%** |
+
+Consistent ~−22 to −27% reduction of the Lanczos resampling cost across three A/B
+pairs, bit-identical.
+
+**Decision.** **Kept.** A pure source-level restructure that lets LLVM vectorise the
+two separable-filter hot loops it previously could not, on top of the existing
+parallel + hoist wins. Bit-identical, no `unsafe`, no `#[target_feature]` — so it
+holds on every target LLVM auto-vectorises (unlike the manual-NEON dead-ends #3),
+and it needs no runtime feature detection. Lanczos is the recommended text-downscale
+resampler (D2), so this speeds the quality render path directly.
