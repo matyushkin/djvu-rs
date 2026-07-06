@@ -8890,3 +8890,93 @@ no_std/wasm32 builds carry zero extra code), byte-identical by construction and 
 test, and its memory is accounted for and evicted through the existing C5 budget
 machinery rather than a new one. `make check` (fmt, clippy -D warnings, no_std
 build, wasm32 build, full test suite) green.
+## Perf round 39 (2026-07-06) — WASM_THREADS: parallel render in the browser (wasm)
+
+**Prior art check.** `EXPERIMENTS_INDEX.md`'s only wasm row was WASM_SIMD (scalar
+vs simd128, round unrelated to threads). `src/wasm.rs` had no thread-pool
+plumbing. `Cargo.toml` had no `wasm-bindgen-rayon` dependency and no
+`wasm-threads`-shaped feature. `gh pr list --search "wasm thread OR rayon wasm"`
+and `git branch -r` turned up nothing relevant. Not previously attempted —
+proceeded.
+
+### WASM_THREADS — feasibility matrix + opt-in infra — **D-infra** (2026-07-06)
+
+**Goal.** Can `wasm-bindgen-rayon` reuse the existing rayon-parallel paths
+(PARALLEL 3.8× compositor, IW44_PAR 2.2× IDWT, both native-only today) inside a
+browser tab? Feasibility + infra first; a merged runtime win was explicitly
+out of scope unless it fell out naturally.
+
+**1. Feasibility matrix.**
+
+| Requirement | Status |
+|---|---|
+| Toolchain | **Nightly required.** `wasm-bindgen-rayon` needs a wasm32 `std` built with atomics, which stable's prebuilt `std` doesn't have. `cargo check -Z build-std=panic_abort,std --target wasm32-unknown-unknown` — `-Z build-std` is nightly-only cargo. Confirmed: `rustup component add rust-src --toolchain nightly` + local nightly 1.94.0 builds fine; stable 1.92 cannot even parse `-Z`. |
+| Codegen flags | `RUSTFLAGS='-C target-feature=+atomics,+bulk-memory'` — compiles, but the resulting `WebAssembly.Memory` is **not** `shared`, so `postMessage`-ing it to a Worker throws `DataCloneError: #<Memory> could not be cloned` at runtime (only caught by actually running it — a `cargo check`/`cargo build` alone doesn't surface this). |
+| Linker flags | Needed in addition: `-C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory` plus TLS exports (`__wasm_init_tls`, `__tls_size`, `__tls_align`, `__tls_base`). With these, the `Memory` is created `shared: true` and clones into Workers correctly. |
+| Runtime headers | `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` on every response, or `SharedArrayBuffer`/`crossOriginIsolated` is `false` and `initThreadPool` throws. Plain `python3 -m http.server` can't set these — needed a custom handler. |
+| `--target web` (no bundler) gotcha | `wasm-bindgen-rayon`'s generated worker glue does `import('../../..')` — a bare-directory import that only resolves through a bundler's package.json "main" lookup. Plain browser ES-module loading has no such fallback, so the Worker's dynamic import 404s/mis-types silently and `initThreadPool` **hangs forever** (no error surfaces — the awaited `ready` message from the worker just never arrives). Fixed for local testing by copying `djvu_rs.js` to `pkg/index.js` and having the static server serve `index.js` for bare directory URLs lacking `index.html`. This is a `--target web` + no-bundler-specific issue; `--target bundler`/webpack consumers won't hit it. |
+| CI impact | Zero — `wasm-threads` is a new feature, off by default, pulled in by nothing the existing `wasm` feature or `cargo check --target wasm32-unknown-unknown --features wasm` touches. Reverified after wiring: that exact CI command still succeeds unchanged. |
+
+**2. Infra shipped.** `wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]`
+(`Cargo.toml`) layers over the *existing* `wasm` + `parallel` features rather than
+duplicating them, so it inherits PARALLEL's compositor and IW44_PAR's IDWT
+parallelism for free. `src/wasm.rs` re-exports
+`wasm_bindgen_rayon::init_thread_pool` behind `#[cfg(feature = "wasm-threads")]`
+as `initThreadPool(n)` for JS callers (`await init(); await
+initThreadPool(navigator.hardwareConcurrency);`). `scripts/wasm_threads_check.sh`
++ `make wasm-threads-check` wrap the nightly/build-std/RUSTFLAGS incantation
+above (both `check` and `--build` modes); intentionally **not** added to
+`scripts/check.sh` / any required CI gate, per the nightly requirement.
+`examples/wasm/README.md` documents the one-time nightly setup, the full
+`wasm-pack build` invocation, the COOP/COEP + directory-import server caveat,
+and JS usage.
+
+**3. Measurement — real, not simulated.** Built two actual `wasm-pack --target
+web --release` packages (stable single-threaded `wasm`, and nightly
+`wasm-threads` with the flags above), served them locally with a COOP/COEP +
+`index.js`-fallback Python handler, and drove a real Chrome tab (via the
+`claude-in-chrome` browser automation) against `tests/fixtures/colorbook.djvu`
+(2260×3669 @ 400 dpi, the same fixture PAR_LANCZOS/PARALLEL use). 8 reps/config,
+first rep discarded as JIT/cold-cache warmup, median of the rest reported.
+`navigator.hardwareConcurrency` = 10 (M1 Max, matches native benches' machine).
+
+*Full-page IW44 decode, native 400 dpi (no compositor downscale — exercises only IW44_PAR's 3-way `rayon::join`):*
+
+| Config | Run 1 median | Run 2 median |
+|---|---|---|
+| single-threaded (stable `wasm`) | 58.05 ms | 55.78 ms |
+| `wasm-threads`, pool=1 (isolates dispatch overhead) | 56.53 ms | — |
+| `wasm-threads`, pool=10 | 54.75 ms | 56.98 ms |
+
+Run-to-run, pool=10 flips from ~4.5% *faster* to ~2% *slower* than single —
+i.e. **no reliable win**, within measurement noise. IW44_PAR's parallelism is
+capped at 3-way (one `rayon::join` per Y/Cb/Cr plane), too little grain to
+amortize the Worker/`Atomics` dispatch cost that wasm threading adds on top of
+what's free on native OS threads.
+
+*Compositor downscale path, 150 dpi target (exercises PARALLEL's `par_chunks_exact_mut`, many small chunks):*
+
+| Config | Median |
+|---|---|
+| single-threaded (stable `wasm`) | 18.59 ms |
+| `wasm-threads`, pool=1 | 72.88 ms (first 4 reps 126–159 ms warming up, last 4 ≈18–19 ms — matches single once warm) |
+| `wasm-threads`, pool=10 | **167.17 ms — 9× slower**, no improvement across 8 reps (143–182 ms steady-state) |
+
+At 150 dpi the per-chunk work is small; splitting it across 10 Workers makes
+the fixed per-dispatch `Atomics`/postMessage-synchronization cost dominate
+completely. This is the sharpest, most reproducible finding: **more wasm
+threads made the compositor path an order of magnitude slower**, the opposite
+of the native 3.8× PARALLEL win on the same code path.
+
+**Decision.** **D-infra** (feasibility + infra, no runtime win to merge as a
+default). Ship the opt-in `wasm-threads` feature, thread-pool export, and
+manual-test recipe as validated, working infrastructure — it is real and
+buildable, and useful for anyone doing bulk/coarse-grained wasm parallelism
+(e.g. parallel multi-page encode/decode, where PAR_ENCODE/PAR_DEC-style
+per-page granularity would give each Worker enough work to amortize dispatch
+cost). But do **not** claim a render speedup: on this codec's actual per-page
+render workload, wasm-bindgen-rayon's Worker/`Atomics` dispatch overhead either
+erases the native parallel win entirely (full decode) or turns it sharply
+negative (compositor downscale). Revisit only if `wasm.rs` grows a
+coarser-grained parallel entry point (e.g. batch-render N pages), not for
+single-page `render()`.
