@@ -364,22 +364,32 @@ fn decode_black_run(br: &mut BitReader<'_>) -> Result<usize, SmmrError> {
 // ---- G4 reference-row helpers (pixel-based) --------------------------------
 
 /// First changing-element position in `prev` strictly after `a0`,
-/// where the new color equals `target_color`.
+/// where the new color equals the opposite of `a0_color`.
 ///
-/// `prev[-1]` is treated as white (false) by convention.
-fn find_b1(prev: &[bool], a0: usize, a0_color: bool) -> usize {
+/// `prev[-1]` is treated as white (false) by convention. `a0` uses the T.6
+/// sentinel convention: `-1` represents the imaginary position before the
+/// first pixel (so the search is inclusive of position 0 only on the first
+/// call of a row); any real position is searched *strictly* after, per
+/// spec ("b1: the first changing element on the reference line to the right
+/// of a0"). Search start is therefore `a0 + 1`, uniformly.
+///
+/// PREVIOUSLY this used an inclusive-of-`a0` search for all calls (not just
+/// the sentinel one), which is only spec-equivalent on the very first call
+/// of a row (where `a0` stood in for `-1`); on later calls it let `b1`
+/// wrongly land exactly on `a0` whenever the reference line had a changing
+/// element at that same column — common on any row correlated with its
+/// predecessor. Both this decoder and the `encode_g4` encoder shared the
+/// bug, so round-tripping through this crate's own decoder never caught it;
+/// it was only found by validating `encode_g4` output against poppler and
+/// libtiff, which rejected/misdecoded real bitstreams. See `PDF_G4` in
+/// `PERF_EXPERIMENTS.md`.
+fn find_b1(prev: &[bool], a0: i64, a0_color: bool) -> usize {
     let target = !a0_color; // b1 transitions TO the opposite color
-    // Search from position a0 onward (inclusive). NOTE: this is correct for this
-    // implementation's `a0` convention — here `a0` is the next pixel to code (one
-    // past the last changing element), not the T.6 "a0 = last changing element",
-    // so b1 ≥ a0 here is equivalent to the spec's strictly-right-of-a0. (A
-    // correctness review proposed a0+1 here; it breaks the hand-verified VR1
-    // vertical-mode decode — see `decoder_vr1_vertical_mode_produces_correct_output`.)
-    let start = if a0 < prev.len() {
-        a0
-    } else {
+    let start = (a0 + 1).max(0);
+    if start >= prev.len() as i64 {
         return prev.len();
-    };
+    }
+    let start = start as usize;
     prev.iter()
         .enumerate()
         .skip(start)
@@ -410,22 +420,25 @@ fn find_b2(prev: &[bool], b1: usize) -> usize {
 /// Decode one G4/MMR row into a pixel vector.
 ///
 /// `prev` is the previous decoded row (all-false initially).
-/// `a0` starts at 0 (before the first pixel); the G4 spec's virtual "-1"
-/// is handled by making `find_b1` inclusive at position 0.
+/// `a0` starts at the T.6 sentinel `-1` (before the first pixel); real
+/// positions are tracked from there on, and `find_b1`'s search is always
+/// strictly after `a0` (see its doc comment for why the old inclusive-of-`a0`
+/// search was wrong beyond the first element of a row).
 fn decode_row_pixels(
     br: &mut BitReader<'_>,
     prev: &[bool],
     ncols: usize,
 ) -> Result<Vec<bool>, SmmrError> {
     let mut cur = vec![false; ncols];
-    // a0 = number of pixels processed so far (0 = start of line).
+    // a0 = coding position, T.6 sentinel -1 before the first pixel.
     // a0_color = color of the current run (starts white = false).
-    let mut a0: usize = 0;
+    let mut a0: i64 = -1;
     let mut a0_color: bool = false;
 
-    while a0 < ncols {
+    while a0 < ncols as i64 {
+        let idx0 = a0.max(0) as usize; // real fill-start index (0 when a0 == -1)
         let b1 = find_b1(prev, a0, a0_color);
-        let b2 = find_b2(prev, b1.min(ncols - 1));
+        let b2 = find_b2(prev, b1.min(ncols.saturating_sub(1)));
 
         let (bits, avail) = br.peek32();
         if avail == 0 {
@@ -437,8 +450,8 @@ fn decode_row_pixels(
             br.consume(4);
             // Fill cur[a0..b2] with a0_color, advance a0 to b2
             let end = b2.min(ncols);
-            cur[a0..end].fill(a0_color);
-            a0 = end;
+            cur[idx0..end].fill(a0_color);
+            a0 = end as i64;
             // a0_color unchanged
             continue;
         }
@@ -451,11 +464,11 @@ fn decode_row_pixels(
             } else {
                 (decode_black_run(br)?, decode_white_run(br)?)
             };
-            let end1 = (a0 + r1).min(ncols);
-            cur[a0..end1].fill(a0_color);
+            let end1 = (idx0 + r1).min(ncols);
+            cur[idx0..end1].fill(a0_color);
             let end2 = (end1 + r2).min(ncols);
             cur[end1..end2].fill(!a0_color);
-            a0 = end2;
+            a0 = end2 as i64;
             // a0_color unchanged (two runs consumed)
             continue;
         }
@@ -490,13 +503,13 @@ fn decode_row_pixels(
 
         let a1 = ((b1 as i32) + v_offset).clamp(0, ncols as i32) as usize;
         // Fill cur[a0..a1] with a0_color
-        cur[a0..a1.min(ncols)].fill(a0_color);
-        a0 = a1;
+        cur[idx0..a1.min(ncols)].fill(a0_color);
+        a0 = a1 as i64;
         a0_color = !a0_color;
     }
 
     // Fill any remaining pixels with a0_color
-    cur[a0..].fill(a0_color);
+    cur[a0.max(0) as usize..].fill(a0_color);
 
     Ok(cur)
 }
@@ -651,6 +664,172 @@ pub fn encode_smmr(bm: &Bitmap) -> Vec<u8> {
     for (i, &b) in bits.iter().enumerate() {
         if b {
             data[4 + i / 8] |= 0x80 >> (i % 8);
+        }
+    }
+    data
+}
+
+// ---- Full 2D (T.6) encoder — pass/horizontal/vertical modes ----------------
+//
+// `encode_smmr` above is horizontal-mode-only (documented trade-off: simple,
+// but 5-15% larger than a real MMR/G4 encoder, and *much* larger than
+// Deflate-of-raster on typical bilevel scans since it never exploits
+// row-to-row redundancy — see `PDF_G4` in `PERF_EXPERIMENTS.md`). The
+// bit-packed output of `encode_g4` below is decodable by the very same
+// [`decode_smmr`]/[`decode_row_pixels`] used above (which already implements
+// all three T.6 modes), so that decoder is a free, already-tested correctness
+// oracle for this encoder — no separate G4 decoder had to be written.
+
+/// Changing-element positions for one row: `changes[k]` is the pixel index
+/// where the color transitions from `changes[k-1]`'s color to its opposite
+/// (with an implicit all-white run before column 0). By construction,
+/// `changes[k]` transitions *into* black when `k` is even, into white when
+/// `k` is odd (the line always logically starts with a — possibly
+/// zero-length — white run, per T.4/T.6 convention).
+fn row_changes(row: &[bool]) -> Vec<u32> {
+    let mut changes = Vec::new();
+    let mut cur = false; // implicit white before column 0
+    for (i, &px) in row.iter().enumerate() {
+        if px != cur {
+            changes.push(i as u32);
+            cur = px;
+        }
+    }
+    changes
+}
+
+/// Unpack one row of a packed [`Bitmap`] into a `Vec<bool>` (true = black).
+fn unpack_row(bm: &Bitmap, row: u32) -> Vec<bool> {
+    let ncols = bm.width as usize;
+    let stride = bm.row_stride();
+    let start = row as usize * stride;
+    let row_bytes = &bm.data[start..start + stride];
+    let mut out = Vec::with_capacity(ncols);
+    'outer: for &byte in row_bytes {
+        for bit in (0..8).rev() {
+            if out.len() == ncols {
+                break 'outer;
+            }
+            out.push((byte >> bit) & 1 != 0);
+        }
+    }
+    out
+}
+
+/// Find the first changing element in `changes` *strictly after* `a0` whose
+/// transition is *into* `target_black` (true = into black, false = into
+/// white). Returns `(index_into_changes, position_or_ncols)`; `ncols` is
+/// used as the sentinel "no more changing elements on this line" position,
+/// matching `find_b1`/`find_b2`'s convention above.
+///
+/// `a0` uses the T.6 sentinel `-1` (before the first pixel); real positions
+/// are searched strictly after, uniformly — see [`find_b1`]'s doc comment
+/// for why a non-uniform "inclusive of a0" search (this function's previous
+/// behaviour) is a real bug beyond the first changing element of a row.
+fn find_transition(changes: &[u32], a0: i64, target_black: bool, ncols: u32) -> (usize, u32) {
+    let mut idx = changes.partition_point(|&p| p as i64 <= a0);
+    let transitions_to_black = idx % 2 == 0;
+    if transitions_to_black != target_black {
+        idx += 1;
+    }
+    let pos = changes.get(idx).copied().unwrap_or(ncols);
+    (idx, pos)
+}
+
+/// Encode one row using full T.6 2D coding (pass / vertical / horizontal
+/// modes), against the previous row's changing elements (`ref_changes`).
+///
+/// `a0` starts at the T.6 sentinel `-1` (before the first pixel); see
+/// [`find_b1`]'s doc comment for the (now-fixed) subtlety around searching
+/// strictly-after real `a0` positions vs. the sentinel.
+fn encode_row_2d(bits: &mut Vec<bool>, cur_changes: &[u32], ref_changes: &[u32], ncols: u32) {
+    let mut a0: i64 = -1;
+    let mut a0_color = false; // white
+
+    while a0 < ncols as i64 {
+        let idx0 = a0.max(0) as u32; // real run-start position (0 when a0 == -1)
+        let target_black = !a0_color;
+        let (b1_idx, b1) = find_transition(ref_changes, a0, target_black, ncols);
+        let b2 = ref_changes.get(b1_idx + 1).copied().unwrap_or(ncols);
+        let (a1_idx, a1) = find_transition(cur_changes, a0, target_black, ncols);
+
+        if b2 < a1 {
+            // Pass mode: 0001. The current run continues past b2.
+            push_bits(bits, 0b0001, 4);
+            a0 = b2 as i64;
+            continue;
+        }
+
+        let diff = a1 as i64 - b1 as i64;
+        if (-3..=3).contains(&diff) {
+            // Vertical mode.
+            match diff {
+                0 => push_bits(bits, 0b1, 1),
+                1 => push_bits(bits, 0b011, 3),
+                -1 => push_bits(bits, 0b010, 3),
+                2 => push_bits(bits, 0b000011, 6),
+                -2 => push_bits(bits, 0b000010, 6),
+                3 => push_bits(bits, 0b0000011, 7),
+                -3 => push_bits(bits, 0b0000010, 7),
+                _ => unreachable!("diff bounded to -3..=3 above"),
+            }
+            a0 = a1 as i64;
+            a0_color = !a0_color;
+            continue;
+        }
+
+        // Horizontal mode: 001, then two MH run-length codes.
+        let a2 = cur_changes.get(a1_idx + 1).copied().unwrap_or(ncols);
+        push_bits(bits, 0b001, 3);
+        let run1 = (a1 - idx0) as usize;
+        let run2 = (a2 - a1) as usize;
+        if !a0_color {
+            emit_white(bits, run1);
+            emit_black(bits, run2);
+        } else {
+            emit_black(bits, run1);
+            emit_white(bits, run2);
+        }
+        a0 = a2 as i64;
+    }
+}
+
+/// Encode a [`Bitmap`] as a full T.6 (Group 4 / MMR) 2D bitstream — pass,
+/// horizontal, *and* vertical modes, unlike [`encode_smmr`]'s horizontal-only
+/// strategy — terminated with an EOFB (two 12-bit EOL codes). Returns just
+/// the packed bitstream bytes (MSB-first, no per-row byte alignment, **no**
+/// `ncols`/`nrows` header): this is the payload shape PDF's
+/// `CCITTFaxDecode` filter (`K` < 0) expects, with `Columns`/`Rows` carried
+/// in the stream's `/DecodeParms` dict instead of an in-band header.
+///
+/// Decodable by [`decode_smmr`] (prepend the 4-byte `ncols`/`nrows` header
+/// to round-trip through this module's own decoder — see the `pdf_g4_*`
+/// tests below), which is what makes this encoder's correctness verifiable
+/// without a second, independent G4 decoder.
+pub fn encode_g4(bm: &Bitmap) -> Vec<u8> {
+    let ncols = bm.width;
+    let nrows = bm.height;
+    let mut bits: Vec<bool> = Vec::new();
+
+    if ncols > 0 && nrows > 0 {
+        let mut ref_changes: Vec<u32> = Vec::new(); // initial reference: all-white
+        for row in 0..nrows {
+            let cur_row = unpack_row(bm, row);
+            let cur_changes = row_changes(&cur_row);
+            encode_row_2d(&mut bits, &cur_changes, &ref_changes, ncols);
+            ref_changes = cur_changes;
+        }
+    }
+
+    // EOFB: two consecutive 12-bit EOL codes (000000000001).
+    push_bits(&mut bits, 0b000000000001, 12);
+    push_bits(&mut bits, 0b000000000001, 12);
+
+    let nbytes = bits.len().div_ceil(8);
+    let mut data = vec![0u8; nbytes];
+    for (i, &b) in bits.iter().enumerate() {
+        if b {
+            data[i / 8] |= 0x80 >> (i % 8);
         }
     }
     data
@@ -852,30 +1031,51 @@ mod tests {
     }
 
     // Decoder VR1 vertical mode (code 011, v_offset=+1) — lines 466-468.
-    // Row 0: [W,B,W,W,W,W,W,W] encoded as H W1 B1 | H W6 B0 (29 bits).
-    // Row 1: [W,W,B,W,W,W,W,W] encoded as VR1 VR1 V0 against row 0.
-    //   VR1: a1 = b1+1; VR1 VR1 shifts colour from W to B (pos 2) then back to W.
+    // Row 0: [W,B,B,W,W,W,W,W] (2-pixel run at cols 1-2).
+    // Row 1: [W,W,B,B,W,W,W,W] (same run shifted right by one) encodes as
+    // VR1 VR1 V0 against row 0 — both the into-black and back-to-white
+    // transitions land one column to the right of row 0's, and (unlike a
+    // single-pixel run) row 0's *second* changing element (position 3) is
+    // still strictly to the right of the coding position reached after the
+    // first VR1 (position 2), so this exercises VR1 twice without tripping
+    // the a0/b1 boundary case fixed by `find_b1`/`find_transition` (see
+    // their doc comments and `PDF_G4` in `PERF_EXPERIMENTS.md`) — a
+    // single-pixel-run version of this test previously encoded H mode for
+    // the second transition once that bug was fixed, since real b1 there is
+    // the end-of-line sentinel, not another VR1.
+    //
+    // Built via `encode_g4` (proven byte-correct here and independently via
+    // libtiff/poppler for realistic content) rather than hand-crafted bits,
+    // to avoid re-introducing a hand-reasoning error like the one this test
+    // previously encoded.
     #[test]
     fn decoder_vr1_vertical_mode_produces_correct_output() {
-        // Bitstream layout:
-        //   Row0: 001(H) 000111(W1) 010(B1) 001(H) 1110(W6) 0000110111(B0) = 29 bits
-        //   Row1: 011(VR1) 011(VR1) 1(V0) = 7 bits
-        //   EOFB: 000000000001 000000000001 = 24 bits  (total 60 bits → 8 bytes)
-        let data: &[u8] = &[
-            0x00, 0x08, 0x00, 0x02, 0x23, 0xA3, 0xC1, 0xBB, 0x70, 0x01, 0x00, 0x10,
-        ];
-        let bm = decode_smmr(data).expect("VR1 test should decode without error");
-        assert_eq!(bm.width, 8);
-        assert_eq!(bm.height, 2);
-        // Row 0: W B W W W W W W
-        assert!(!bm.get(0, 0));
-        assert!(bm.get(1, 0));
-        assert!(!bm.get(2, 0));
-        // Row 1: W W B W W W W W (B shifted right by one via VR1)
-        assert!(!bm.get(0, 1));
-        assert!(!bm.get(1, 1));
-        assert!(bm.get(2, 1));
-        assert!(!bm.get(3, 1));
+        let row0 = |x: u32, _y: u32| (1..=2).contains(&x);
+        let row1 = |x: u32, _y: u32| (2..=3).contains(&x);
+        let mut bm = Bitmap::new(8, 2);
+        for x in 0..8u32 {
+            if row0(x, 0) {
+                bm.set(x, 0, true);
+            }
+            if row1(x, 1) {
+                bm.set(x, 1, true);
+            }
+        }
+        let decoded = decode_g4_roundtrip(&bm);
+        assert_eq!(decoded.width, 8);
+        assert_eq!(decoded.height, 2);
+        // Row 0: W B B W W W W W
+        assert!(!decoded.get(0, 0));
+        assert!(decoded.get(1, 0));
+        assert!(decoded.get(2, 0));
+        assert!(!decoded.get(3, 0));
+        // Row 1: W W B B W W W W (run shifted right by one via VR1 VR1)
+        assert!(!decoded.get(0, 1));
+        assert!(!decoded.get(1, 1));
+        assert!(decoded.get(2, 1));
+        assert!(decoded.get(3, 1));
+        assert!(!decoded.get(4, 1));
+        assert!(bm_eq(&bm, &decoded));
     }
 
     // Lines 322-323: BadCode error path in decode_white_run.
@@ -1133,5 +1333,154 @@ mod tests {
         let nrows = u16::from_be_bytes([data[2], data[3]]) as u32;
         assert_eq!(ncols, 200);
         assert_eq!(nrows, 3);
+    }
+
+    // ── `encode_g4`: full 2D (pass/horizontal/vertical) encoder ─────────────
+    //
+    // `decode_smmr` already implements all three T.6 modes, so it's used
+    // directly as the round-trip oracle here (prepend the header it expects).
+
+    fn decode_g4_roundtrip(bm: &Bitmap) -> Bitmap {
+        let bits = encode_g4(bm);
+        let mut data = Vec::with_capacity(4 + bits.len());
+        data.push((bm.width >> 8) as u8);
+        data.push(bm.width as u8);
+        data.push((bm.height >> 8) as u8);
+        data.push(bm.height as u8);
+        data.extend_from_slice(&bits);
+        decode_smmr(&data).expect("encode_g4 output must be decodable")
+    }
+
+    #[test]
+    fn g4_roundtrip_all_white() {
+        let bm = make_bm(16, 4, |_, _| false);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_all_black() {
+        let bm = make_bm(8, 8, |_, _| true);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_checkerboard() {
+        let bm = make_bm(8, 8, |x, y| (x + y) % 2 == 0);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_horizontal_stripes() {
+        let bm = make_bm(16, 8, |_, y| y % 2 == 0);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_vertical_stripes() {
+        let bm = make_bm(16, 8, |x, _| x % 2 == 0);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_single_pixel() {
+        let bm = make_bm(1, 1, |_, _| true);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_single_pixel_white() {
+        let bm = make_bm(1, 1, |_, _| false);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_identical_rows_repeated() {
+        // Every row identical to the previous one — should hit vertical/pass
+        // mode heavily and produce a *very* small bitstream vs H-mode-only.
+        let bm = make_bm(200, 100, |x, _| {
+            (20..40).contains(&x) || (150..180).contains(&x)
+        });
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_wide_all_white() {
+        let bm = make_bm(1728, 4, |_, _| false);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_wide_all_black() {
+        let bm = make_bm(1728, 4, |_, _| true);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_wide_run_at_boundary() {
+        let bm = make_bm(128, 3, |x, _| x >= 64);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_512_wide_alternating_runs() {
+        let bm = make_bm(512, 3, |x, _| (x / 64) % 2 == 1);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_diagonal_pattern() {
+        // Diagonal stripes — every row differs from the previous by a
+        // 1-pixel shift, exercising VR1/VL1 heavily.
+        let bm = make_bm(64, 64, |x, y| ((x + y) % 16) < 4);
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_sparse_text_like() {
+        // Sparse, irregular marks resembling glyph strokes on a mostly-white
+        // background — the realistic target workload for PDF masks.
+        let bm = make_bm(300, 200, |x, y| {
+            let cell = ((x / 12) + (y / 20)) % 7;
+            cell == 0 && (x % 12) < 8 && (y % 20) < 14
+        });
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_roundtrip_random_noise() {
+        // Pseudo-random per-pixel noise: no exploitable redundancy, worst
+        // case for mode selection, still must round-trip exactly.
+        let bm = make_bm(97, 61, |x, y| {
+            let h = (x
+                .wrapping_mul(2654435761)
+                .wrapping_add(y.wrapping_mul(40503)))
+                % 5;
+            h == 0
+        });
+        assert!(bm_eq(&bm, &decode_g4_roundtrip(&bm)));
+    }
+
+    #[test]
+    fn g4_zero_width_or_height_produces_only_eofb() {
+        let bm = make_bm(0, 5, |_, _| false);
+        let bits = encode_g4(&bm);
+        // Just the 24-bit (3-byte) EOFB, nothing else.
+        assert_eq!(bits.len(), 3);
+    }
+
+    #[test]
+    fn g4_beats_horizontal_only_on_repetitive_content() {
+        // Real win check: full 2D coding must be smaller than the
+        // horizontal-mode-only `encode_smmr` on content with strong
+        // row-to-row redundancy (the common case for scanned bilevel masks).
+        let bm = make_bm(400, 300, |x, y| {
+            (50..350).contains(&x) && (y % 40) < 20 && (x % 30) < 18
+        });
+        let h_only = encode_smmr(&bm).len() - 4; // strip header
+        let full_2d = encode_g4(&bm).len();
+        assert!(
+            full_2d < h_only,
+            "full 2D encode ({full_2d} B) should beat H-mode-only ({h_only} B) on repetitive content"
+        );
     }
 }
