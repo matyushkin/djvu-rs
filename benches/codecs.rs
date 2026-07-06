@@ -85,6 +85,50 @@ fn bench_bzz_decode(c: &mut Criterion) {
     });
 }
 
+/// Extract the first TXTz-encoded text layer payload from a DjVu file (any
+/// page, recursive search), if present.
+fn first_txtz_payload(data: &[u8]) -> Option<Vec<u8>> {
+    let file = djvu_rs::iff::parse(data).ok()?;
+    find_chunk_legacy(file.root.children(), b"TXTz")
+}
+
+/// BZZ *encoder* benchmark — the counterpart to `bench_bzz_decode`. Encodes
+/// the plaintext of a real TXTz text layer (decoded from the corpus, not
+/// synthetic) so the block size and content statistics match what the BZZ
+/// encoder actually sees in DjVu documents (see BZZ_ENC_DIAG in
+/// PERF_EXPERIMENTS.md: real per-page TXTz plaintext is a few KB, not the
+/// MAXBLOCK-scale (4 MB) inputs the suffix-sort's O(n log n) complexity
+/// class matters most for).
+fn bench_bzz_encode(c: &mut Criterion) {
+    let path = corpus_path().join("cable_1973_100133.djvu");
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping bench_bzz_encode: cable_1973_100133.djvu not found");
+            return;
+        }
+    };
+    let txtz_payload = match first_txtz_payload(&data) {
+        Some(p) => p,
+        None => {
+            eprintln!("skipping bench_bzz_encode: no TXTz payload found");
+            return;
+        }
+    };
+    let plaintext = match djvu_rs::bzz::bzz_decode(&txtz_payload) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skipping bench_bzz_encode: TXTz decode failed");
+            return;
+        }
+    };
+    c.bench_function("bzz_encode", |b| {
+        b.iter(|| {
+            let _ = djvu_rs::bzz_encode::bzz_encode(black_box(&plaintext));
+        });
+    });
+}
+
 fn bench_jb2_decode(c: &mut Criterion) {
     let path = assets_path().join("boy_jb2.djvu");
     let data = match std::fs::read(&path) {
@@ -856,6 +900,7 @@ fn bench_iw44_encode_gray(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_bzz_decode,
+    bench_bzz_encode,
     bench_jb2_decode,
     bench_iw44_decode,
     bench_jb2_decode_corpus,
