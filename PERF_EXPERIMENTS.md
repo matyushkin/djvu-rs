@@ -8685,3 +8685,97 @@ wasm32 no_std+wasm build, full workspace test suite) passes. 12/12
 `compare_color` is a new, separate entry point. Unblocks honest quantitative
 judgement of the palette/chroma/FG-colour levers `FGBZ_MEDIANCUT`,
 `CHROMA_BILINEAR`, and future colour-encoder work flagged as needing it.
+## Perf round 37 (2026-07-06) — IW44_RATE_TARGET: resurrecting `feat/iw44-quality-target` — already shipped
+
+### IW44_RATE_TARGET — byte-budget encode-stopping criterion — **already merged, validation-only round**
+
+**Task.** Resurrect and finish `origin/feat/iw44-quality-target` — a remote
+branch whose last commit ("feat(iw44): add `Iw44Target::Bpp` byte-budget
+encode-stopping criterion", 2026-07-01) had no open PR, framed as abandoned
+work predating rounds 15–35. The brief asked for a working, tested
+`Iw44Target` rate/quality feature wired through `encode_iw44_color`/`gray`,
+ideally with a byte/bpp budget and a PSNR floor.
+
+**Finding — there was nothing to resurrect.** `gh pr list --state all --search
+"iw44 quality OR bpp OR target"` shows **PR #475**, same branch
+(`feat/iw44-quality-target`), same title, state **MERGED** (2026-07-01,
+squash commit `a1e3d54b`). `git merge-base --is-ancestor a1e3d54b origin/main`
+confirms it: the squash commit is in `main`'s history, even though
+`git merge-base --is-ancestor origin/feat/iw44-quality-target origin/main`
+says no — the *branch tip* commit was squashed into a different SHA on merge,
+and the remote branch ref was simply never deleted afterward. Reading only
+`git log <branch>` (as the brief's framing did) makes a squash-merged branch
+look like an abandoned one; `gh pr list` is the source of truth.
+
+The feature is fully live in `crates/djvu-iw44/src/encode.rs`: `Iw44Target::{
+Slices, Bpp(f32) }` on `Iw44EncodeOptions`, computed once as a `byte_budget`
+in `encode_chunks` (the function both `encode_iw44_color` and
+`encode_iw44_gray` funnel through), default `Slices` (byte-identical to
+pre-target versions, enforced by
+`bpp_target_slices_default_is_byte_identical`), a `--bpp` CLI flag in
+`src/bin/djvu.rs`, and 6 unit tests already covering monotonicity,
+decodability, the tiny-budget one-chunk floor, and the gray path.
+
+**PSNR/quality-floor stretch goal — deliberately not built.** The brief's
+"ideally a PSNR floor" is exactly the feature round-22 (`IW44_ENTROPY_GAP`,
+above) already scoped and rejected as a quick win: a *fixed* bpp/byte budget
+cannot capture the smooth-vs-textured saturation divergence — watchmaker
+saturates around 0.008 bpp, textured content (colorbook-class) needs ~0.265
+bpp, a 30× spread — so a genuine quality floor needs a **content-adaptive**
+decibel-style stop, which round-22 valued at "~100 B/page, low EV... not a
+quick clean win." Nothing since then changes that calculus (BG_DIFFUSE,
+round 20, captured the real BG44 size win from a different angle — smaller
+input — not a smarter stop). Building it here would re-litigate a
+still-valid, already-recorded verdict rather than add anything, so it was
+left alone.
+
+**What this round adds — closing the brief's own validation gaps.** New
+`tests/iw44_rate_target.rs` (4 tests, real corpus fixtures — the original
+PR's test module used only synthetic gradient fixtures):
+
+- `bpp_target_is_deterministic` — same input + same `Iw44Target::Bpp` budget
+  ⇒ byte-identical chunk vectors across two independent encode calls.
+- `bpp_target_respects_budget_within_one_slice` — with caller-set
+  `slices_per_chunk = 1` (existing knob, no source change needed), the
+  budget check runs at single-slice granularity; emitted bytes stay within
+  one empirically-measured single-slice chunk size of the requested budget,
+  at 4 budget points on `watchmaker`.
+- `bpp_target_sweep_is_monotone_and_default_unchanged` — sweeps
+  `bpp ∈ {0.05, 0.1, 0.2, 0.5, 1.0}` across `watchmaker` (smooth), `colorbook`
+  (textured), `conquete_paix` (mixed, multi-page); asserts byte size is
+  monotone non-decreasing, PSNR is monotone non-decreasing (0.05 dB slack for
+  quantization plateaus), and that the default `target` is byte-identical to
+  explicit `Iw44Target::Slices`.
+- `bpp_truncated_stream_round_trips_at_every_prefix` — a `colorbook` stream
+  truncated by `Iw44Target::Bpp(0.03)` (fewer chunks than the default
+  10-chunk schedule) decodes successfully with correct dimensions at *every*
+  chunk-count prefix — the progressive chunk format tolerates the early stop
+  the budget introduces, the same way it already tolerates a network reader
+  that stops fetching chunks early.
+
+**Sweep table** (from the new test; PSNR is this run's pre-encode reference
+vs. re-decode, not vs. ddjvu/c44):
+
+| bpp | watchmaker (850×1101, smooth) | colorbook (754×1223, textured) | conquete_paix (1423×2285, mixed) |
+|-----|-------------------------------|----------------------------------|--------------------------------------|
+| 0.05 | 1481 B / 48.45 dB / SSIM 0.9988 | 6542 B / 21.85 dB / SSIM 0.9816 | 3714 B / 56.30 dB / SSIM 0.9997 |
+| 0.10 | 1481 B / 48.45 dB / SSIM 0.9988 | 13090 B / 21.99 dB / SSIM 0.9877 | 3714 B / 56.30 dB / SSIM 0.9997 |
+| 0.20 | 1481 B / 48.45 dB / SSIM 0.9988 | 13090 B / 21.99 dB / SSIM 0.9877 | 3714 B / 56.30 dB / SSIM 0.9997 |
+| 0.50 | 1481 B / 48.45 dB / SSIM 0.9988 | 13090 B / 21.99 dB / SSIM 0.9877 | 3714 B / 56.30 dB / SSIM 0.9997 |
+| 1.00 | 1481 B / 48.45 dB / SSIM 0.9988 | 13090 B / 21.99 dB / SSIM 0.9877 | 3714 B / 56.30 dB / SSIM 0.9997 |
+
+`watchmaker` and `conquete_paix` both saturate at bpp=0.05 already — their
+natural (unbudgeted) size is below every tested budget, so the target never
+truncates them, matching round-22's smooth/mixed-content finding exactly.
+`colorbook` (textured) genuinely truncates at bpp=0.05 (6542 B / 21.8 dB) vs
+its 13090 B / 22.0 dB natural size, and reaches the same plateau by bpp=0.10 —
+also consistent with round-22.
+
+**Verdict.** **No shipped-code change** — the feature and its
+default-preserving contract (`target: Iw44Target::Slices` byte-identical) are
+unchanged; the two levers the brief asked about (byte budget, quality floor)
+were each already correctly resolved by prior rounds (shipped / deliberately
+deferred). This round's contribution is closing the validation gap — proving
+the shipped feature on real corpus content instead of only synthetic
+fixtures — and recording the true fate of the dangling branch ref so it
+isn't proposed again as abandoned work.
