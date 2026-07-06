@@ -72,6 +72,14 @@ pub enum IffError {
     /// The input ended unexpectedly in the middle of a chunk.
     #[error("unexpected end of input (truncated IFF data)")]
     Truncated,
+
+    /// The INFO chunk declares a format version DjVuLibre itself refuses to
+    /// decode. DjVuLibre's `DJVUVERSION_TOO_NEW` forward-compatibility
+    /// ceiling (`libdjvu/DjVuInfo.h`) is 50: `if (info->version >= 50) throw
+    /// "Cannot decode DjVu files with version>= 50"`. We match that ceiling
+    /// rather than silently decoding files DjVuLibre itself refuses.
+    #[error("unsupported DjVu format version {version} (DjVuLibre rejects version >= 50)")]
+    UnsupportedVersion { version: u16 },
 }
 
 /// Original error type used by the legacy implementation.
