@@ -10105,3 +10105,153 @@ mismatch root cause). Round 42's `CARTE_INFO_TRUNCATED` 5-byte-short-INFO
 tests still pass unmodified. `make check`: 1092 tests passed. `cargo run
 --release --example diff_fuzz -- --seed 42 --mutants 700 --max-seconds 600`
 rerun confirms the table above.
+## Perf round 50 (2026-07-06) — INTEROP_STREAMS: BG44/IW44 stream-tolerance and JB2 record-type divergences (round 45 findings 2 & 4)
+
+**Scope.** Follow-ups (1)/(3)/(5) from round 45: the BG44/IW44 dimension
+cross-check, the truncated/desynced wavelet-stream tolerance, and the JB2
+"unknown record type" divergence. Findings 1/3 (INFO version-ceiling,
+INFO-minor-version pixel divergence — `src/info.rs` version logic) are
+explicitly out of scope for this round (parallel INFO_VERSION effort).
+
+**Finding 2a — INFO-vs-BG44 dimension cross-check — FIXED.**
+DjVuLibre's `DjVuFile::get_dpi` requires a *single* common reduction factor
+`red` in `1..=12` that satisfies `ceil(page_w/red) == plane_w` **and**
+`ceil(page_h/red) == plane_h` simultaneously; if none exists it throws
+`DjVuFile.corrupt_BG44` ("Corrupted data (Incorrect size in BG44 chunk).").
+We had no equivalent check — a BG44 chunk's own header freely declares its
+width/height, and nothing cross-validated it against the page's own INFO
+dimensions before mapping the plane onto the page.
+
+Added `iw44_reduction_is_legal(page_w, page_h, plane_w, plane_h)` in
+`src/djvu_render.rs` (tries all 12 legal ratios) and wired it into all three
+BG44-decode call sites that produce a page-mapped image: `PageLayers::bg44`,
+`PageLayers::bg44_partial`, and the non-cached bounded branch inside
+`decode_background_chunks`. A failing check now behaves exactly like any
+other BG44 decode failure (dropped from the cache / `RenderError::Iw44`), not
+a special new error path.
+
+Verified against the *exact* round-45 prose case: flipping bit 0x80 of
+`boy.djvu`'s INFO height low byte (192×256 → 192×384, BG44 payload
+unchanged) — confirmed with real `ddjvu`/`djvudump`:
+```
+djvudump:  INFO [10]  DjVu 192x384, v24, 100 dpi, gamma=2.2
+           BG44 [4761]  IW4 data #1, 100 slices, v1.2 (b&w), 192x256
+ddjvu -format=ppm -page=1 …:  ddjvu: Cannot decode page 1.  (exit 10)
+```
+Pre-fix, our `djvu render` on this exact byte pattern returned exit 0 (silent
+192×384 render, stretched/mismatched against the 192×256 payload); post-fix
+it returns `error: format error: IW44 decode error: IW44 stream contains
+invalid data` (exit 1) — matching ddjvu's rejection. Regression tests:
+`dimension_cross_check_rejects_info_bg44_size_mismatch` (this exact repro)
+and `dimension_cross_check_allows_unmodified_boy_djvu` (legal 1:1 ratio must
+still render) in `tests/document_and_render.rs`.
+
+**Finding 2b — truncated/desynced ZP-stream tolerance — serial-continuity
+check FIXED; swallow-and-continue behavior kept, classified BENIGN.**
+Two independent things were tangled together here:
+
+1. *Chunk serial-number continuity* (the majority of the 310
+   `our-renders-what-they-reject` mutants — bit-flips/truncations that
+   desync which BG44 chunk carries which refinement round). DjVuLibre's
+   `IWBitmap::decode_chunk`/`IWPixmap::decode_chunk` track a `cserial`
+   counter and throw `IW44Image.wrong_serial`/`wrong_serial2` the moment a
+   chunk's declared `serial` isn't the next expected value; we had no such
+   check and would decode a desynced/duplicated/skipped chunk into whatever
+   refinement slot its `serial` claimed, silently. Added the same
+   continuity check to `Iw44Image::decode_chunk` (`crates/djvu-iw44/src/lib.rs`):
+   a `next_serial: u32` counter, exempting only the very first chunk fed to
+   a fresh decoder (so `MissingFirstChunk` stays the more specific
+   diagnostic when appropriate), returning a new `Iw44Error::UnexpectedSerial`
+   on any gap, repeat, or rewind. New tests:
+   `iw44_decode_chunk_rejects_serial_skip`, `iw44_decode_chunk_rejects_serial_repeat`,
+   and `iw44_decode_chunk_serial_check_does_not_regress_zpshort_tolerance`
+   (confirms the round-26 BUG-ZPSHORT empty-payload tolerance for
+   *in-order* chunks is untouched).
+
+2. *What happens when a chunk decode does fail* — `PageLayers::bg44`/
+   `bg44_partial` unconditionally break out of the chunk loop on the first
+   decode error and keep whatever was decoded so far (round-26 design,
+   independent of `RenderOptions::permissive`). This is the actual source of
+   "we render past a truncated/desynced stream." Investigated whether this
+   produces garbage: rendered several `our-renders-what-they-reject` repros
+   and pixel-diffed against clean baselines — max channel diff 5–26/255,
+   well under 0.3% of pixels differing meaningfully in every case checked.
+   The partial decode is a legitimate degraded-but-recognizable render, not
+   corruption presented as success, and per the round's own decision
+   framework ("if garbage, consider permissive-only tolerance; if graceful,
+   keep") this does **not** warrant gating behind strict/permissive — doing
+   so would only turn a fine degraded render into a hard error for no
+   accuracy gain, and (per round 26) real corpus files like `watchmaker.djvu`
+   rely on exactly this tolerance for legitimately short refinement chunks.
+   **Kept as-is, classified benign.** Note the new serial-continuity check
+   from (1) still runs *before* this swallow logic — many previously-silent
+   desyncs are now caught earlier (as `UnexpectedSerial`) and the loop stops
+   one chunk sooner than before, which can only make the kept partial decode
+   *more* accurate, never less.
+
+**Finding 4 — JB2 unknown record type — BENIGN, root cause CONFIRMED (not
+just hypothesized).** Fetched DjVuLibre's `JB2Image.cpp`/`JB2Dict.cpp`
+record-type switch: it decodes the type via the identical `CodeNum(0, 11,
+dist_record_type)` construction (an adaptive binary-tree arithmetic decoder,
+functionally the same algorithm as our `decode_num`) and its `default:` case
+throws `G_THROW(ERR_MSG("JB2Image.bad_type"))` — i.e. DjVuLibre treats an
+out-of-range record type exactly like we do (`Jb2Error::UnknownRecordType`,
+hard error). There is no record-type-handling gap to align; both
+implementations agree on the contract.
+
+What differs is *where* each independent implementation's stateful
+arithmetic-coder walk ends up after a corrupting bit-flip earlier in the
+`Sjbz` stream. Confirmed this is genuine post-corruption chaos, not a
+spec-interpretation difference, by pixel-diffing `ddjvu`'s own render of two
+saved repros against the clean baseline page:
+- `cable_1973_100133_00080_our-render-fail` (`bitflip-1bits-in-Sjbz@176`):
+  ddjvu exits 0 but its own rendered page differs from the clean baseline by
+  up to 255/255 in places, 0.50% of pixels differing >10/255.
+- `watchmaker_00628_our-render-fail` (`bitflip-3bits-in-FORM@63436`): ddjvu
+  exits 0 but differs from clean by up to 255/255, **7.6%** of pixels
+  differing >10/255 — a visibly corrupted page, not a clean render.
+
+So "ddjvu renders" here does not mean "ddjvu decoded correctly" — its
+independent context-tree walk over the same corrupted bits happened to land
+on an in-range record type and kept going (into already-garbled content),
+while ours happened to land out-of-range and stopped. Since both sides
+implement the identical fail-hard contract and the actual divergence is
+downstream chaos from a single corrupted bit propagating through a
+stateful adaptive arithmetic coder, this is **unfixable by alignment** (there
+is nothing to align) and is recorded as benign, matching the round's own
+decision framework for this exact case.
+
+**Fuzz rerun (`examples/diff_fuzz.rs`, seed 42, `--mutants 700`, same 3
+corpus files, 2100 mutants total) — before (clean `main`) vs after (this
+round's fixes):**
+
+| class | before | after | Δ | note |
+|---|---:|---:|---:|---|
+| both-reject | 1266 | 1266 | 0 | |
+| both-accept-match | 429 | 429 | 0 | |
+| our-renders-what-they-reject | 310 | 241 | **−69** | serial-continuity check now catches these upfront |
+| both-render-fail | 63 | 132 | **+69** | same 69 mutants — now correctly fail on both sides (no longer a divergence) |
+| our-laxer | 19 | 19 | 0 | untouched (JB2/BZZ scope, not this round) |
+| our-stricter | 4 | 4 | 0 | untouched (pre-existing, verified not a bug — round 45 finding 5) |
+| our-render-fail | 4 | 4 | 0 | finding 4, confirmed benign — no fix applies |
+| pixel-mismatch | 4 | 4 | 0 | finding 3 territory (INFO minor-version), out of scope |
+| dim-mismatch | 1 | 1 | 0 | finding 3 territory (INFO minor-version/flags byte, not a BG44-vs-INFO header mismatch), out of scope |
+
+The 69-mutant movement (`our-renders-what-they-reject` → `both-render-fail`)
+is entirely attributable to the IW44 serial-continuity check; the dimension
+cross-check's exact repro (the manually-reconstructed `boy.djvu` 192×384/
+192×256 case) isn't part of this seed's generated mutant set — it was
+verified directly (see finding 2a above) rather than via the aggregate table.
+0 new crashes/timeouts introduced.
+
+**Decision.** **Fixed** (2a, 2b-serial-check) / **Kept, benign, documented**
+(2b-swallow-behavior, 4). Tests: 3 new `djvu-iw44` unit tests
+(`iw44_decode_chunk_rejects_serial_skip`/`_repeat`/
+`_serial_check_does_not_regress_zpshort_tolerance`) + 2 new integration tests
+(`dimension_cross_check_rejects_info_bg44_size_mismatch`/
+`_allows_unmodified_boy_djvu`); full workspace `cargo test --workspace` green
+(no regressions); `make check` gate covers fmt/clippy/no_std/wasm32.
+
+**Follow-ups (updated):** round 45's (2) and (5) are now closed by this
+round. Remaining open: (1)/(4) INFO version-ceiling and minor-version pixel
+divergence (findings 1/3 — separate INFO_VERSION effort, `src/info.rs`).
