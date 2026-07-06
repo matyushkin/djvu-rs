@@ -10,6 +10,12 @@ examples/wasm/pkg/
 # macOS Finder metadata
 .DS_Store
 
+# djvu-py local test/dev venv + caches (make -C djvu-py py-test)
+/djvu-py/.venv
+/djvu-py/.pytest_cache
+/djvu-py/tests/__pycache__
+/djvu-py/**/__pycache__
+
 # Local profiling output (samply, perf, custom JSON dumps)
 /profile.json.gz
 /profile_*.json
