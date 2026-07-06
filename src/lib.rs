@@ -482,6 +482,85 @@ impl Document {
             .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Page { page, index })
     }
+
+    /// Build a thumbnail for every page, each scaled to fit within a
+    /// `max_w × max_h` box (aspect-preserving). Uses [`ThumbnailStrategy::Auto`]:
+    /// the page's embedded `TH44` preview when present (20–30× faster than a
+    /// real render, per the `D5_TH44_PREVIEW` experiment), otherwise a
+    /// downscaled real render via [`djvu_render::RenderOptions::fit_to_box`].
+    ///
+    /// # Quality note
+    ///
+    /// A `TH44` thumbnail is the **encoder's own separately-lossy preview**,
+    /// not a faithful downscale of the real page — it is a small (long side ≤
+    /// 128 px) IW44 encode baked in at *encode* time, so its content can
+    /// diverge from what a real render of the same page produces (different
+    /// resampling, different quantisation, sometimes a stale image if the
+    /// page was re-encoded without regenerating the thumbnail). Measured SSIM
+    /// vs. a real render is **0.50–0.68** (`D5_TH44_PREVIEW`); this is a real
+    /// quality trade, not a free 20–30× win — acceptable for a dense
+    /// thumbnail *grid* where throughput dominates and the user can open the
+    /// real page to look closely, but not a substitute for
+    /// [`Page::render`]/[`Page::render_to_size`] as a faithful preview.
+    ///
+    /// With the `parallel` feature, pages are built concurrently on rayon
+    /// (mirrors the PDF/EPUB parallel exporters); each page's `Result` is
+    /// independent so one broken page doesn't fail the whole grid.
+    ///
+    /// Returns `Vec<Result<Pixmap, Error>>` rather than `Vec<Option<Pixmap>>`:
+    /// with the render fallback in place there is no longer a legitimate "no
+    /// thumbnail" case for a valid page, only success or a real decode error,
+    /// and the latter must not be silently swallowed.
+    pub fn thumbnails(&self, max_w: u32, max_h: u32) -> Vec<Result<Pixmap, Error>> {
+        self.thumbnails_with_strategy(max_w, max_h, ThumbnailStrategy::Auto)
+    }
+
+    /// Like [`Document::thumbnails`] but with explicit control over the
+    /// TH44-vs-render policy — see [`ThumbnailStrategy`].
+    pub fn thumbnails_with_strategy(
+        &self,
+        max_w: u32,
+        max_h: u32,
+        strategy: ThumbnailStrategy,
+    ) -> Vec<Result<Pixmap, Error>> {
+        let indices: Vec<usize> = (0..self.page_count()).collect();
+
+        let build = |&i: &usize| -> Result<Pixmap, Error> {
+            let page = self.page(i)?;
+            page.thumbnail_with_strategy(max_w, max_h, strategy)
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            indices.par_iter().map(build).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            indices.iter().map(build).collect()
+        }
+    }
+}
+
+/// Policy for [`Document::thumbnails_with_strategy`]: how to source each
+/// page's thumbnail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThumbnailStrategy {
+    /// Use the page's embedded `TH44` preview when present; otherwise fall
+    /// back to a downscaled real render. Fastest and the default — see the
+    /// quality note on [`Document::thumbnails`].
+    #[default]
+    Auto,
+    /// Always render the full page and downscale, ignoring any `TH44` chunk.
+    /// Slower but faithful; useful for quality comparisons against the
+    /// `TH44` path and for documents where a stale/absent thumbnail must
+    /// never be shown.
+    RenderOnly,
+    /// Require an embedded `TH44` chunk; returns an error for pages that
+    /// lack one instead of falling back to render. Never touches the page's
+    /// BG44/JB2 background decode. Useful to prove a corpus's thumbnail grid
+    /// stays on the fast path, or to fail loudly rather than silently render.
+    Th44Only,
 }
 
 /// A page within a DjVu document.
@@ -607,6 +686,61 @@ impl<'a> Page<'a> {
         self.page
             .thumbnail()
             .map_err(|e| Error::FormatError(e.to_string()))
+    }
+
+    /// Build this page's thumbnail scaled to fit within `max_w × max_h`
+    /// (aspect-preserving), sourced per `strategy`. The single-page building
+    /// block behind [`Document::thumbnails`] / `thumbnails_with_strategy`;
+    /// see those for the TH44-vs-render quality/speed trade.
+    pub fn thumbnail_with_strategy(
+        &self,
+        max_w: u32,
+        max_h: u32,
+        strategy: ThumbnailStrategy,
+    ) -> Result<Pixmap, Error> {
+        match strategy {
+            ThumbnailStrategy::RenderOnly => self.render_fit_to_box(max_w, max_h),
+            ThumbnailStrategy::Th44Only => {
+                let pm = self.thumbnail()?.ok_or_else(|| {
+                    Error::FormatError(format!(
+                        "page {} has no embedded TH44 thumbnail (Th44Only strategy)",
+                        self.index
+                    ))
+                })?;
+                Ok(Self::fit_within(pm, max_w, max_h))
+            }
+            ThumbnailStrategy::Auto => match self.thumbnail()? {
+                Some(pm) => Ok(Self::fit_within(pm, max_w, max_h)),
+                None => self.render_fit_to_box(max_w, max_h),
+            },
+        }
+    }
+
+    /// Render-fallback path: full decode + downscale to fit `max_w × max_h`.
+    /// Never reads a `TH44` chunk.
+    fn render_fit_to_box(&self, max_w: u32, max_h: u32) -> Result<Pixmap, Error> {
+        let opts = djvu_render::RenderOptions::fit_to_box(self.page, max_w, max_h);
+        self.render_with(&opts)
+    }
+
+    /// If `pm` exceeds `max_w × max_h`, Lanczos-3 downscale it to fit
+    /// (preserving aspect); otherwise return it unchanged. A `TH44`
+    /// thumbnail is capped at `THUMBNAIL_MAX_SIDE` (128 px) by the encoder,
+    /// so this is a no-op whenever the caller's box is at least that big —
+    /// the common case for a thumbnail grid. It is never *upscaled* to fill
+    /// a larger box: doing so would add cost without adding real detail.
+    fn fit_within(pm: Pixmap, max_w: u32, max_h: u32) -> Pixmap {
+        let max_w = max_w.max(1);
+        let max_h = max_h.max(1);
+        if pm.width <= max_w && pm.height <= max_h {
+            return pm;
+        }
+        let scale_w = max_w as f64 / pm.width.max(1) as f64;
+        let scale_h = max_h as f64 / pm.height.max(1) as f64;
+        let scale = scale_w.min(scale_h);
+        let tw = ((pm.width as f64 * scale).round() as u32).max(1);
+        let th = ((pm.height as f64 * scale).round() as u32).max(1);
+        crate::pixmap::scale_lanczos3(&pm, tw, th)
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
@@ -769,5 +903,180 @@ mod tests {
         // chicken.djvu is bundled, so open_dir also works
         let doc = Document::open_dir(chicken()).unwrap();
         assert!(doc.page_count() > 0);
+    }
+
+    // ---- TH44 thumbnail-grid API (Document::thumbnails) -----------------
+
+    /// Build a tiny 2-page bilevel bundle with TH44 thumbnails embedded via
+    /// the #476 encoder (`encode_djvm_bundle_jb2_with_thumbnails`).  A high
+    /// `shared_dict_page_threshold` keeps the encoding path simple (no
+    /// DJVI/INCL shared dict) so there is exactly one `Sjbz` chunk per page.
+    fn th44_bundle_bytes() -> Vec<u8> {
+        let mut p1 = Bitmap::new(64, 48);
+        for y in 4..44 {
+            p1.set_black(8, y);
+            p1.set_black(y % 60, 8);
+        }
+        let mut p2 = Bitmap::new(64, 48);
+        for x in 4..60 {
+            p2.set_black(x, 20);
+        }
+        crate::jb2_encode::encode_djvm_bundle_jb2_with_thumbnails(
+            &[p1, p2],
+            100, // threshold higher than page count: no symbol sharing
+            crate::jb2_encode::BUNDLE_DEFAULT_DPI,
+            true,
+        )
+    }
+
+    /// Corrupt every `Sjbz` chunk's payload bytes in place (length field and
+    /// framing untouched, so the IFF container still parses) so JB2 decode
+    /// of the background/mask fails while the container and its `TH44`
+    /// chunks remain intact.
+    fn corrupt_all_sjbz_payloads(bundle: &mut [u8]) {
+        let mut search_from = 0usize;
+        let mut corrupted = 0u32;
+        while let Some(rel) = bundle[search_from..].windows(4).position(|w| w == b"Sjbz") {
+            let pos = search_from + rel;
+            let len_start = pos + 4;
+            let len = u32::from_be_bytes([
+                bundle[len_start],
+                bundle[len_start + 1],
+                bundle[len_start + 2],
+                bundle[len_start + 3],
+            ]) as usize;
+            let payload_start = len_start + 4;
+            for b in &mut bundle[payload_start..payload_start + len] {
+                *b = 0xFF;
+            }
+            corrupted += 1;
+            search_from = payload_start + len;
+        }
+        assert!(corrupted > 0, "test bundle must contain Sjbz chunks");
+    }
+
+    #[test]
+    fn thumbnails_auto_uses_th44_and_matches_th44_only() {
+        let bundle = th44_bundle_bytes();
+        let doc = Document::from_bytes(bundle).unwrap();
+        assert_eq!(doc.page_count(), 2);
+
+        let auto = doc.thumbnails(128, 128);
+        let th44_only = doc.thumbnails_with_strategy(128, 128, ThumbnailStrategy::Th44Only);
+        assert_eq!(auto.len(), 2);
+        assert_eq!(th44_only.len(), 2);
+        for i in 0..2 {
+            let a = auto[i].as_ref().expect("Auto must succeed");
+            let t = th44_only[i].as_ref().expect("Th44Only must succeed");
+            // Auto must have taken the TH44 branch (not render-fallback):
+            // its pixmap is byte-identical to the explicit Th44Only result.
+            assert_eq!(a.width, t.width);
+            assert_eq!(a.height, t.height);
+            assert_eq!(
+                a.data, t.data,
+                "Auto must match Th44Only when TH44 is present"
+            );
+        }
+    }
+
+    /// Structural proof that the TH44 path never touches BG44/JB2 decode:
+    /// corrupt every page's `Sjbz` payload (the JB2-encoded mask/background)
+    /// so any render attempt fails, while leaving the `TH44` chunks intact.
+    /// `RenderOnly` must then fail for every page (proving render really
+    /// depends on the corrupted chunk), while `Th44Only` and `Auto` must
+    /// still succeed — the only way that's possible is if they never
+    /// decoded the corrupted Sjbz chunk at all.
+    #[test]
+    fn thumbnails_th44_path_never_touches_corrupted_jb2_background() {
+        let mut bundle = th44_bundle_bytes();
+        corrupt_all_sjbz_payloads(&mut bundle);
+        let doc = Document::from_bytes(bundle).unwrap();
+        assert_eq!(doc.page_count(), 2);
+
+        let render_only = doc.thumbnails_with_strategy(128, 128, ThumbnailStrategy::RenderOnly);
+        for (i, r) in render_only.iter().enumerate() {
+            assert!(
+                r.is_err(),
+                "page {i}: RenderOnly must fail against a corrupted Sjbz chunk"
+            );
+        }
+
+        let th44_only = doc.thumbnails_with_strategy(128, 128, ThumbnailStrategy::Th44Only);
+        for (i, r) in th44_only.iter().enumerate() {
+            assert!(
+                r.is_ok(),
+                "page {i}: Th44Only must succeed even with a corrupted Sjbz chunk, got {r:?}"
+            );
+        }
+
+        let auto = doc.thumbnails(128, 128);
+        for (i, r) in auto.iter().enumerate() {
+            assert!(
+                r.is_ok(),
+                "page {i}: Auto must take the TH44 fast path and never touch the corrupted background, got {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn thumbnails_th44_only_errors_without_th44() {
+        // chicken.djvu has no embedded TH44 chunks.
+        let doc = Document::open(chicken()).unwrap();
+        let results = doc.thumbnails_with_strategy(128, 128, ThumbnailStrategy::Th44Only);
+        assert_eq!(results.len(), doc.page_count());
+        for r in &results {
+            assert!(r.is_err(), "Th44Only must error when no TH44 chunk exists");
+        }
+    }
+
+    #[test]
+    fn thumbnails_auto_falls_back_to_render_without_th44() {
+        // chicken.djvu has no embedded TH44 chunks, so Auto must render.
+        let doc = Document::open(chicken()).unwrap();
+        let auto = doc.thumbnails(64, 64);
+        let render_only = doc.thumbnails_with_strategy(64, 64, ThumbnailStrategy::RenderOnly);
+        assert_eq!(auto.len(), render_only.len());
+        for (a, r) in auto.iter().zip(render_only.iter()) {
+            let a = a.as_ref().expect("Auto must succeed via render fallback");
+            let r = r.as_ref().expect("RenderOnly must succeed");
+            assert_eq!(a.width, r.width);
+            assert_eq!(a.height, r.height);
+            assert_eq!(
+                a.data, r.data,
+                "Auto fallback must match RenderOnly exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn thumbnails_never_upscale_a_small_th44_thumbnail() {
+        // Request a box bigger than the embedded 128px-cap TH44 thumbnail;
+        // the result must stay at the TH44's native (small) size, not be
+        // upscaled to fill the requested box.
+        let bundle = th44_bundle_bytes();
+        let doc = Document::from_bytes(bundle).unwrap();
+        let page = doc.page(0).unwrap();
+        let native = page.thumbnail().unwrap().expect("page has TH44");
+        let grid = page
+            .thumbnail_with_strategy(4096, 4096, ThumbnailStrategy::Th44Only)
+            .unwrap();
+        assert_eq!(grid.width, native.width);
+        assert_eq!(grid.height, native.height);
+    }
+
+    #[test]
+    fn thumbnails_downscale_an_oversized_th44_thumbnail() {
+        // Request a box smaller than the embedded thumbnail: it must be
+        // downscaled to fit, preserving aspect ratio.
+        let bundle = th44_bundle_bytes();
+        let doc = Document::from_bytes(bundle).unwrap();
+        let page = doc.page(0).unwrap();
+        let native = page.thumbnail().unwrap().expect("page has TH44");
+        assert!(native.width > 16 || native.height > 16);
+        let grid = page
+            .thumbnail_with_strategy(16, 16, ThumbnailStrategy::Th44Only)
+            .unwrap();
+        assert!(grid.width <= 16 && grid.height <= 16);
+        assert!(grid.width >= 1 && grid.height >= 1);
     }
 }
