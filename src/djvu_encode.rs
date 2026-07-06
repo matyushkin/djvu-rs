@@ -73,6 +73,158 @@ pub enum EncodeError {
     Unsupported(&'static str),
 }
 
+// ── FGbz palette construction ─────────────────────────────────────────────────
+
+/// How [`foreground_fgbz`] turns per-blit average colours into a palette.
+///
+/// The historical (and default) behaviour is [`FgbzPaletteOptions::Exact`]:
+/// one palette entry per *distinct* per-blit average colour, so anti-aliased
+/// edges that nudge two otherwise-identical glyphs' averages by a few LSBs
+/// each get their own palette entry. On multicolour foreground pages (colour
+/// text, highlighted scans) this can bloat the palette — and hence the FGbz
+/// chunk — well past the number of colours a human would perceive.
+/// [`FgbzPaletteOptions::MedianCut`] instead clusters the per-blit average
+/// colours down to at most `max_colors` entries via median-cut quantisation
+/// (weighted by each blit's foreground pixel count) and maps every blit to
+/// its nearest resulting entry, trading exact per-blit colour for a smaller,
+/// perceptually-similar palette. See PERF_EXPERIMENTS.md `FGBZ_MEDIANCUT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FgbzPaletteOptions {
+    /// One palette entry per distinct per-blit average colour (current /
+    /// pre-experiment behaviour). Byte-identical to all previous releases.
+    #[default]
+    Exact,
+    /// Median-cut quantisation of the per-blit average colours down to at
+    /// most `max_colors` palette entries (each blit maps to its nearest
+    /// entry by squared RGB distance). `max_colors == 0` is treated as 1.
+    MedianCut {
+        /// Upper bound on palette entries. Wire format caps at 65 535; in
+        /// practice a small number (tens) is the interesting range.
+        max_colors: u16,
+    },
+}
+
+/// A colour together with the pixel weight it represents, for median-cut.
+#[derive(Debug, Clone, Copy)]
+struct WeightedColor {
+    r: u8,
+    g: u8,
+    b: u8,
+    weight: u64,
+}
+
+/// Median-cut quantisation: repeatedly split the box (subset of `colors`)
+/// with the widest weighted-irrelevant channel range, until there are `k`
+/// boxes (or no box can be split further). Each returned colour is the
+/// pixel-weighted average of its box.
+///
+/// Deterministic: box selection breaks ties by lowest box index, and
+/// splitting sorts by channel value then original index, so repeated runs
+/// on the same input produce the same palette (needed for a stable,
+/// reproducible re-encode).
+fn median_cut(colors: &[WeightedColor], k: usize) -> Vec<FgbzColor> {
+    if colors.is_empty() {
+        return Vec::new();
+    }
+    let k = k.max(1);
+
+    // Each box is a list of indices into `colors`.
+    let mut boxes: Vec<Vec<usize>> = vec![(0..colors.len()).collect()];
+
+    while boxes.len() < k {
+        // Find the splittable box (>= 2 distinct colour values) with the
+        // widest channel range; ties broken by lowest box index for
+        // determinism.
+        let mut best: Option<(usize, usize, u16)> = None; // (box_idx, channel, range)
+        for (bi, b) in boxes.iter().enumerate() {
+            if b.len() < 2 {
+                continue;
+            }
+            let (mut rmin, mut rmax) = (255u8, 0u8);
+            let (mut gmin, mut gmax) = (255u8, 0u8);
+            let (mut bmin, mut bmax) = (255u8, 0u8);
+            for &i in b {
+                let c = colors[i];
+                rmin = rmin.min(c.r);
+                rmax = rmax.max(c.r);
+                gmin = gmin.min(c.g);
+                gmax = gmax.max(c.g);
+                bmin = bmin.min(c.b);
+                bmax = bmax.max(c.b);
+            }
+            let ranges = [
+                (0usize, rmax as u16 - rmin as u16),
+                (1usize, gmax as u16 - gmin as u16),
+                (2usize, bmax as u16 - bmin as u16),
+            ];
+            let (channel, range) = ranges.into_iter().max_by_key(|&(_, r)| r).unwrap_or((0, 0));
+            if range == 0 {
+                continue; // box is already a single colour
+            }
+            match best {
+                Some((_, _, best_range)) if best_range >= range => {}
+                _ => best = Some((bi, channel, range)),
+            }
+        }
+
+        let Some((bi, channel, _)) = best else {
+            break; // nothing left worth splitting
+        };
+        let mut b = boxes.remove(bi);
+        b.sort_by_key(|&i| {
+            let c = colors[i];
+            (
+                match channel {
+                    0 => c.r,
+                    1 => c.g,
+                    _ => c.b,
+                },
+                i,
+            )
+        });
+        let mid = b.len() / 2;
+        let right = b.split_off(mid);
+        boxes.push(b);
+        boxes.push(right);
+    }
+
+    boxes
+        .into_iter()
+        .filter(|b| !b.is_empty())
+        .map(|b| {
+            let (mut sr, mut sg, mut sb, mut sw) = (0u64, 0u64, 0u64, 0u64);
+            for i in b {
+                let c = colors[i];
+                let w = c.weight.max(1);
+                sr += u64::from(c.r) * w;
+                sg += u64::from(c.g) * w;
+                sb += u64::from(c.b) * w;
+                sw += w;
+            }
+            let sw = sw.max(1);
+            FgbzColor {
+                r: (sr / sw) as u8,
+                g: (sg / sw) as u8,
+                b: (sb / sw) as u8,
+            }
+        })
+        .collect()
+}
+
+fn nearest_palette_index(palette: &[FgbzColor], c: FgbzColor) -> usize {
+    palette
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, p)| {
+            let dr = i32::from(p.r) - i32::from(c.r);
+            let dg = i32::from(p.g) - i32::from(c.g);
+            let db = i32::from(p.b) - i32::from(c.b);
+            dr * dr + dg * dg + db * db
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
 // ── Quality profile ───────────────────────────────────────────────────────────
 
 /// Encoder quality profile.
@@ -157,6 +309,7 @@ pub struct PageEncoder<'a> {
     segment_options: Option<SegmentOptions>,
     iw44_options: Option<Iw44EncodeOptions>,
     jb2_options: Option<Jb2EncodeOptions>,
+    fgbz_options: FgbzPaletteOptions,
 }
 
 impl<'a> PageEncoder<'a> {
@@ -169,6 +322,7 @@ impl<'a> PageEncoder<'a> {
             segment_options: None,
             iw44_options: None,
             jb2_options: None,
+            fgbz_options: FgbzPaletteOptions::Exact,
         }
     }
 
@@ -183,6 +337,7 @@ impl<'a> PageEncoder<'a> {
             segment_options: None,
             iw44_options: None,
             jb2_options: None,
+            fgbz_options: FgbzPaletteOptions::Exact,
         }
     }
 
@@ -231,6 +386,19 @@ impl<'a> PageEncoder<'a> {
         self
     }
 
+    /// Override how the `FGbz` foreground palette is built from per-blit
+    /// average colours, used by the `Quality` / `Archival` color encodes.
+    ///
+    /// Defaults to [`FgbzPaletteOptions::Exact`] (pre-experiment, byte-exact
+    /// per-distinct-average-colour palette). Opt into
+    /// [`FgbzPaletteOptions::MedianCut`] to cap the palette size via
+    /// median-cut quantisation instead — see PERF_EXPERIMENTS.md
+    /// `FGBZ_MEDIANCUT`. Ignored by the bilevel `Lossless` path (no FGbz).
+    pub fn with_fgbz_options(mut self, opts: FgbzPaletteOptions) -> Self {
+        self.fgbz_options = opts;
+        self
+    }
+
     /// Produce the bytes of a single-page DjVu file (`FORM:DJVU`
     /// wrapped in the `AT&T` IFF container).
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
@@ -268,7 +436,7 @@ impl<'a> PageEncoder<'a> {
                 );
                 let bg44_chunks =
                     encode_iw44_color(&seg.bg, &self.iw44_options.unwrap_or_default());
-                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None);
+                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None, self.fgbz_options);
 
                 let mut chunks =
                     Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()));
@@ -430,7 +598,15 @@ fn encode_djvm_layered_shared_impl(
         };
         // FGbz is derived from this page's Sjbz blit map, so it must be built
         // from the shared-dictionary stream (passing the shared dict to resolve it).
-        let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, shared_dict.as_ref());
+        // `Exact` here (not threaded from a caller option yet): the bundle path
+        // is out of scope for FGBZ_MEDIANCUT and stays byte-identical.
+        let fgbz = foreground_fgbz(
+            pm,
+            &seg.mask,
+            &sjbz,
+            shared_dict.as_ref(),
+            FgbzPaletteOptions::Exact,
+        );
         let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
 
         let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -527,6 +703,7 @@ fn foreground_fgbz(
     mask: &Bitmap,
     sjbz: &[u8],
     shared_dict: Option<&crate::jb2::Jb2Dict>,
+    palette_options: FgbzPaletteOptions,
 ) -> Option<EncodedChunk> {
     // The Sjbz may reference an external shared Djbz (layered shared-dict bundle),
     // so the dictionary must be supplied to decode its blit map.
@@ -559,22 +736,52 @@ fn foreground_fgbz(
         }
     }
 
-    let mut palette: Vec<FgbzColor> = Vec::new();
-    let mut indices: Vec<i16> = Vec::with_capacity(by_blit.len());
-    for accum in by_blit {
-        let color = accum.color().unwrap_or_default();
-        let color_idx = match palette.iter().position(|&c| c == color) {
-            Some(i) => i,
-            None => {
-                if palette.len() >= i16::MAX as usize {
-                    return None;
-                }
-                palette.push(color);
-                palette.len() - 1
+    let (palette, indices): (Vec<FgbzColor>, Vec<i16>) = match palette_options {
+        FgbzPaletteOptions::Exact => {
+            let mut palette: Vec<FgbzColor> = Vec::new();
+            let mut indices: Vec<i16> = Vec::with_capacity(by_blit.len());
+            for accum in by_blit {
+                let color = accum.color().unwrap_or_default();
+                let color_idx = match palette.iter().position(|&c| c == color) {
+                    Some(i) => i,
+                    None => {
+                        if palette.len() >= i16::MAX as usize {
+                            return None;
+                        }
+                        palette.push(color);
+                        palette.len() - 1
+                    }
+                };
+                indices.push(color_idx as i16);
             }
-        };
-        indices.push(color_idx as i16);
-    }
+            (palette, indices)
+        }
+        FgbzPaletteOptions::MedianCut { max_colors } => {
+            let blit_colors: Vec<FgbzColor> = by_blit
+                .iter()
+                .map(|accum| accum.color().unwrap_or_default())
+                .collect();
+            let weighted: Vec<WeightedColor> = by_blit
+                .iter()
+                .zip(&blit_colors)
+                .map(|(accum, &c)| WeightedColor {
+                    r: c.r,
+                    g: c.g,
+                    b: c.b,
+                    weight: accum.n,
+                })
+                .collect();
+            let palette = median_cut(&weighted, usize::from(max_colors.max(1)));
+            if palette.len() > i16::MAX as usize {
+                return None;
+            }
+            let indices: Vec<i16> = blit_colors
+                .iter()
+                .map(|&c| nearest_palette_index(&palette, c) as i16)
+                .collect();
+            (palette, indices)
+        }
+    };
 
     if palette.is_empty() || palette.iter().all(|c| c.r == 0 && c.g == 0 && c.b == 0) {
         return None;
@@ -935,6 +1142,145 @@ mod tests {
             right.2 > right.0,
             "right foreground should render blue-dominant, got {right:?}"
         );
+    }
+
+    #[test]
+    fn median_cut_reduces_many_near_duplicate_colors_to_k() {
+        // 40 colours clustered tightly around red and blue (simulating
+        // anti-aliasing noise across many blits of "the same" ink colour).
+        let mut colors = Vec::new();
+        for i in 0..20u8 {
+            colors.push(WeightedColor {
+                r: 180 + (i % 5),
+                g: 20,
+                b: 20,
+                weight: 10,
+            });
+        }
+        for i in 0..20u8 {
+            colors.push(WeightedColor {
+                r: 20,
+                g: 20,
+                b: 180 + (i % 5),
+                weight: 10,
+            });
+        }
+        let palette = median_cut(&colors, 2);
+        assert_eq!(palette.len(), 2);
+        // One entry should be red-dominant, the other blue-dominant.
+        let (mut reds, mut blues) = (0, 0);
+        for c in &palette {
+            if c.r > c.b {
+                reds += 1;
+            } else {
+                blues += 1;
+            }
+        }
+        assert_eq!((reds, blues), (1, 1));
+    }
+
+    #[test]
+    fn median_cut_never_exceeds_k_even_with_fewer_distinct_colors() {
+        let colors = vec![
+            WeightedColor {
+                r: 10,
+                g: 10,
+                b: 10,
+                weight: 1,
+            },
+            WeightedColor {
+                r: 10,
+                g: 10,
+                b: 10,
+                weight: 1,
+            },
+        ];
+        // Requesting 8 boxes from a single distinct colour must not spin
+        // forever or panic — it should stop once nothing is splittable.
+        let palette = median_cut(&colors, 8);
+        assert_eq!(palette.len(), 1);
+    }
+
+    #[test]
+    fn median_cut_empty_input_is_empty() {
+        assert!(median_cut(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn nearest_palette_index_picks_closest() {
+        let palette = [
+            FgbzColor { r: 255, g: 0, b: 0 },
+            FgbzColor { r: 0, g: 0, b: 255 },
+        ];
+        assert_eq!(
+            nearest_palette_index(
+                &palette,
+                FgbzColor {
+                    r: 200,
+                    g: 10,
+                    b: 10
+                }
+            ),
+            0
+        );
+        assert_eq!(
+            nearest_palette_index(
+                &palette,
+                FgbzColor {
+                    r: 10,
+                    g: 10,
+                    b: 200
+                }
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn fgbz_mediancut_is_opt_in_default_stays_exact() {
+        // Same fixture as quality_color_emits_per_blit_fgbz_indices: two
+        // distinctly-coloured blits. Exact (default) keeps 2 palette
+        // entries; MedianCut capped at 1 must collapse to 1 and still
+        // produce a valid, decodable page.
+        let mut pm = Pixmap::white(80, 40);
+        for y in 8..24 {
+            for x in 8..24 {
+                pm.set_rgb(x, y, 180, 20, 20);
+            }
+            for x in 48..64 {
+                pm.set_rgb(x, y, 20, 40, 180);
+            }
+        }
+
+        let default_bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .expect("default encode");
+        let explicit_exact_bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_fgbz_options(FgbzPaletteOptions::Exact)
+            .encode()
+            .expect("exact encode");
+        assert_eq!(
+            default_bytes, explicit_exact_bytes,
+            "FgbzPaletteOptions::Exact must be byte-identical to the (opt-out) default"
+        );
+
+        let capped_bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_fgbz_options(FgbzPaletteOptions::MedianCut { max_colors: 1 })
+            .encode()
+            .expect("median-cut encode");
+        assert_ne!(
+            default_bytes, capped_bytes,
+            "opting into MedianCut{{max_colors:1}} must change the output"
+        );
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&capped_bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        let fgbz = page.raw_chunk(b"FGbz").expect("FGbz present");
+        let (palette, _indices) = crate::fgbz_encode::decode_fgbz(fgbz).expect("decode FGbz");
+        assert_eq!(palette.len(), 1, "capped at 1 palette entry");
     }
 
     #[test]
