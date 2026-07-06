@@ -438,6 +438,12 @@ struct Cc {
     y: u32,
     /// Cropped bitmap: tight bbox, pixels of this component only.
     bitmap: Bitmap,
+    /// Count of black (foreground) pixels making up this component — the
+    /// true "ink" area, unlike `bitmap.width * bitmap.height` (the bbox
+    /// area, which overcounts for thin diagonal strokes). Used by
+    /// [`Jb2EncodeOptions::despeckle`] to size-filter noise blobs before
+    /// they ever reach clustering/dedup.
+    pixel_count: u32,
 }
 
 /// Summary of an experiment-only cross-size refinement search.
@@ -586,6 +592,7 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
                 x: min_x as u32,
                 y: min_y as u32,
                 bitmap: cc_bm,
+                pixel_count: cc_pixels.len() as u32,
             });
         }
     }
@@ -1205,6 +1212,44 @@ pub struct Jb2EncodeOptions {
     /// a *text*-document lever — on noisy high-dpi photo scans the same-size
     /// near-twin population is thin, so low thresholds barely shrink anything.
     pub lossy_threshold: f32,
+    /// **Despeckle** pre-pass (cjb2's classic noise-removal move). `None`
+    /// (default) keeps every connected component, exactly as extracted.
+    /// `Some(max_px)` drops any component whose **foreground pixel count**
+    /// (not bbox area — a diagonal speck's bbox overcounts) is `<= max_px`
+    /// *before* clustering/dedup: the speck is never emitted as a symbol at
+    /// all, so its dict-entry + coordinate-record cost disappears and it
+    /// also stops diluting the near-twin population that
+    /// [`lossy_threshold`](Self::lossy_threshold) matches against.
+    ///
+    /// This is lossy: the removed pixels are gone from the decoded page —
+    /// there is no dict entry left to reconstruct them from. Intended for
+    /// noisy high-dpi scans (binarization "salt" dust), where isolated
+    /// 1–8 px blobs are overwhelmingly noise rather than content.
+    ///
+    /// **Measured operating points** (JB2_DESPECKLE; `pathogenic_bacteria_1896`,
+    /// a 600 dpi noisy scan where prior levers — same-size and cross-size
+    /// lossy substitution — found almost nothing to substitute; mask quality
+    /// via the D1 SSIM harness):
+    ///
+    /// | `despeckle` | Sjbz size | SSIM |
+    /// |-------------|-----------|------|
+    /// | `2` | −0.94 % | 0.99950 |
+    /// | `4` | −1.59 % | 0.99904 |
+    /// | `8` | **−2.43 %** | 0.99845 |
+    ///
+    /// On clean text (`watchmaker`) despeckle at every tested level is a
+    /// **byte-identical no-op** — real glyphs are all well above 8 px, so
+    /// nothing is removed. Despeckle is a scan-specific lever: it is the
+    /// first lossy lever found to move the noisy-scan corpus at all
+    /// (`lossy_threshold` alone gives ≈ 0 % there — see its docs above)
+    /// and does so at near-invisible cost (≤ 0.02 % of mask pixels flipped
+    /// even at `8`). See [`Jb2EncodeOptions::lossy_scan`] for the combined
+    /// preset and `PERF_EXPERIMENTS.md` (JB2_DESPECKLE) for the full sweep
+    /// and a punctuation/diacritic-survival test.
+    ///
+    /// `None` (default) = lossless: no component is ever dropped,
+    /// byte-identical to the shipped encoder.
+    pub despeckle: Option<u32>,
     /// Experiment-only cross-size record-6 refinement (#322). `None` (default)
     /// keeps the shipped behavior — only record-1 (new) and record-7 (copy)
     /// are emitted. `Some(_)` enables the lossless cross-size refinement path
@@ -1226,6 +1271,7 @@ impl Default for Jb2EncodeOptions {
     fn default() -> Self {
         Self {
             lossy_threshold: 0.0,
+            despeckle: None,
             #[cfg(feature = "experimental")]
             cross_size_rec6_probe: None,
             #[cfg(feature = "experimental")]
@@ -1254,6 +1300,46 @@ impl Jb2EncodeOptions {
     pub fn with_lossy_threshold(threshold: f32) -> Self {
         Self {
             lossy_threshold: threshold,
+            ..Self::default()
+        }
+    }
+
+    /// Set [`despeckle`](Self::despeckle) (builder style), leaving every
+    /// other knob at its default. `max_px` is the largest foreground-pixel
+    /// count a component may have and still be dropped as a speck.
+    #[allow(clippy::needless_update)]
+    pub fn with_despeckle(max_px: u32) -> Self {
+        Self {
+            despeckle: Some(max_px),
+            ..Self::default()
+        }
+    }
+
+    /// Recommended **lossy** preset for noisy high-dpi scans (JB2_DESPECKLE):
+    /// `despeckle = 8` combined with `lossy_threshold = 0.02`.
+    ///
+    /// Measured on `pathogenic_bacteria_1896` (600 dpi scan): despeckle at
+    /// `8` gives **−2.43 % Sjbz at SSIM 0.99845** (≤ 0.02 % of mask pixels
+    /// flipped) — the first lossy lever measured to move this corpus at all
+    /// (same-size and cross-size near-twin substitution both found ≈ 0 %
+    /// headroom there; see [`lossy_threshold`](Self::lossy_threshold)'s
+    /// docs). The stacked `lossy_threshold = 0.02` adds negligible extra
+    /// size on this scan corpus (its near-twin population stays thin
+    /// regardless of despeckling) but costs nothing and helps on any
+    /// mixed/text-like content on the same page. On clean text
+    /// (`watchmaker`) despeckle at every tested level (2/4/8) is a
+    /// byte-identical no-op — real glyphs are all well above 8 px — so this
+    /// preset is safe to try on both, but its win is scan-specific. See
+    /// `PERF_EXPERIMENTS.md` (JB2_DESPECKLE) for the full despeckle x
+    /// lossy_threshold sweep and a punctuation/diacritic-survival test.
+    ///
+    /// Opt-in: the encoder stays lossless unless you choose this (or set
+    /// `despeckle`/`lossy_threshold` yourself).
+    #[allow(clippy::needless_update)]
+    pub fn lossy_scan() -> Self {
+        Self {
+            despeckle: Some(8),
+            lossy_threshold: 0.02,
             ..Self::default()
         }
     }
@@ -1361,7 +1447,18 @@ pub fn encode_jb2_dict_with_options(
         return Vec::new();
     }
 
-    let ccs = extract_ccs(bitmap);
+    let mut ccs = extract_ccs(bitmap);
+
+    // Despeckle pre-pass (JB2_DESPECKLE): drop isolated small components
+    // *before* clustering/dedup so a speck never becomes a dict entry or a
+    // coordinate record, and never dilutes the near-twin population that
+    // `lossy_threshold` matches against. Filtering on `pixel_count` (true
+    // ink area) rather than bbox area avoids over-crediting thin diagonal
+    // strokes as "small". Lossy: the decoder has nothing left to
+    // reconstruct these pixels from.
+    if let Some(max_speck_px) = opts.despeckle {
+        ccs.retain(|cc| cc.pixel_count > max_speck_px);
+    }
 
     // Reading-order sort by baseline-bucket, then left-to-right.
     //
@@ -2803,6 +2900,149 @@ mod tests {
             jb2::decode(&lossy, None).is_ok(),
             "lossy output must decode"
         );
+    }
+
+    // ── Despeckle pre-pass (JB2_DESPECKLE) ───────────────────────────────────
+
+    #[test]
+    fn despeckle_off_is_byte_identical() {
+        // With `despeckle` unset (default: None), the encoder must reproduce
+        // the shipped `encode_jb2_dict` byte stream exactly, even on a page
+        // that contains isolated single-pixel specks (nothing gets filtered).
+        let mut src = make_bitmap(80, 40, |x, y| {
+            let a = (4..16).contains(&x) && (4..28).contains(&y);
+            let b = (40..53).contains(&x) && (4..28).contains(&y);
+            a || b
+        });
+        src.set(70, 5, true); // isolated 1px "speck"
+        src.set(75, 35, true); // another isolated 1px "speck"
+
+        let shipped = encode_jb2_dict(&src);
+        let opt = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        assert_eq!(shipped, opt, "default options must match shipped output");
+
+        let opt_explicit_none = encode_jb2_dict_with_options(
+            &src,
+            &[],
+            &Jb2EncodeOptions {
+                despeckle: None,
+                ..Jb2EncodeOptions::default()
+            },
+        );
+        assert_eq!(shipped, opt_explicit_none);
+    }
+
+    #[test]
+    fn despeckle_removes_isolated_1px_specks_and_shrinks_output() {
+        // A page with one real glyph (14x24 solid block) plus five isolated
+        // 1-pixel "dust" specks scattered around it. `despeckle = 2` must
+        // drop every speck (pixel_count = 1 <= 2) before they ever become
+        // dict entries / coordinate records, shrinking the stream, while the
+        // decoded page keeps the real glyph fully intact.
+        let mut src = Bitmap::new(64, 40);
+        for y in 4..28 {
+            for x in 4..18 {
+                src.set(x, y, true);
+            }
+        }
+        let specks = [(30u32, 2u32), (35, 10), (40, 20), (50, 5), (55, 30)];
+        for &(x, y) in &specks {
+            src.set(x, y, true);
+        }
+
+        let lossless = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
+        let despeckled =
+            encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::with_despeckle(2));
+        assert!(
+            despeckled.len() < lossless.len(),
+            "despeckling 1px dust should shrink the stream: despeckled={} lossless={}",
+            despeckled.len(),
+            lossless.len()
+        );
+
+        let decoded = jb2::decode(&despeckled, None).expect("despeckled decode failed");
+        assert_eq!(decoded.width, src.width);
+        assert_eq!(decoded.height, src.height);
+        // Every speck pixel must be gone.
+        for &(x, y) in &specks {
+            assert!(!decoded.get(x, y), "speck at ({x},{y}) should be removed");
+        }
+        // The real glyph must be pixel-exact.
+        for y in 4..28 {
+            for x in 4..18 {
+                assert!(
+                    decoded.get(x, y),
+                    "glyph pixel ({x},{y}) must survive despeckle"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn despeckle_preserves_punctuation_and_diacritic_dots() {
+        // Regression guard for the failure mode called out in the task: a
+        // despeckle pass that is too aggressive would eat periods, commas,
+        // and dots of i/j along with real dust. Build a page with:
+        //   - an 'i' stem (3x20) plus its dot (4x4, separated by a gap) —
+        //     dots of i/j are small but not dust-sized.
+        //   - an isolated period (4x4 solid block, standing alone).
+        //   - a single 1x1 dust speck far away — the thing that *should* go.
+        // At despeckle=8 (the most aggressive level in the measured sweep,
+        // PERF_EXPERIMENTS.md JB2_DESPECKLE), the dot and period (16 px each)
+        // must survive (16 > 8) while the 1px speck (1 <= 8) is removed.
+        let mut src = Bitmap::new(80, 50);
+        // 'i' stem.
+        for y in 10..30 {
+            for x in 10..13 {
+                src.set(x, y, true);
+            }
+        }
+        // 'i' dot: 4x4 block a few pixels above the stem.
+        let dot_px: Vec<(u32, u32)> = (4..8).flat_map(|y| (9..13).map(move |x| (x, y))).collect();
+        for &(x, y) in &dot_px {
+            src.set(x, y, true);
+        }
+        // Isolated period: 4x4 block, standing alone.
+        let period_px: Vec<(u32, u32)> = (40..44)
+            .flat_map(|y| (40..44).map(move |x| (x, y)))
+            .collect();
+        for &(x, y) in &period_px {
+            src.set(x, y, true);
+        }
+        // True dust: a single isolated pixel.
+        let speck = (70u32, 45u32);
+        src.set(speck.0, speck.1, true);
+
+        for max_px in [2u32, 4, 8] {
+            let opts = Jb2EncodeOptions::with_despeckle(max_px);
+            let enc = encode_jb2_dict_with_options(&src, &[], &opts);
+            let decoded = jb2::decode(&enc, None)
+                .unwrap_or_else(|e| panic!("despeckle={max_px} decode failed: {e:?}"));
+
+            for &(x, y) in &dot_px {
+                assert!(
+                    decoded.get(x, y),
+                    "despeckle={max_px}: i-dot pixel ({x},{y}) must survive"
+                );
+            }
+            for &(x, y) in &period_px {
+                assert!(
+                    decoded.get(x, y),
+                    "despeckle={max_px}: period pixel ({x},{y}) must survive"
+                );
+            }
+            assert!(
+                !decoded.get(speck.0, speck.1),
+                "despeckle={max_px}: 1px dust speck must be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn lossy_scan_preset_values() {
+        let preset = Jb2EncodeOptions::lossy_scan();
+        assert_eq!(preset.despeckle, Some(8));
+        assert_eq!(preset.lossy_threshold, 0.02);
     }
 
     #[test]
