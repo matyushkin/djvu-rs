@@ -44,6 +44,29 @@ use crate::djvu_document::DjVuPage;
 use crate::iw44::Iw44Image;
 use crate::pixmap::{GrayPixmap, Pixmap};
 
+// Test-only counter of BG44 `decode_chunk` calls made through this module's
+// two progressive call sites (the naive per-frame `decode_background_chunks`
+// loop and `ProgressiveDecoder::push_bg44_chunk`).
+//
+// Exists to back the B5 structural claim — O(N²) chunk decodes for a
+// per-frame `render_progressive_step` session vs O(N) for the stateful
+// decoder — with an exact call count instead of noisy wall-clock timing.
+// `#[cfg(test)]`-gated so it costs nothing (not even the branch) outside
+// test builds. Thread-local (not a shared global) so parallel test runners
+// (`cargo test`'s default multi-threaded harness) can't have unrelated
+// tests on other threads pollute the count; the decode call sites this
+// counts are not dispatched to other threads under the `cli`/default
+// feature set `make check` tests with (no `parallel` feature).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BG44_CHUNK_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_bg44_chunk_decode() {
+    BG44_CHUNK_DECODES.with(|c| c.set(c.get() + 1));
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /// Errors that can occur during DjVuPage rendering.
@@ -1376,6 +1399,8 @@ fn decode_background_chunks<'a>(
         if !bg44_chunks.is_empty() {
             let mut img = Iw44Image::new();
             for chunk_data in bg44_chunks.iter().take(max_chunks) {
+                #[cfg(test)]
+                count_bg44_chunk_decode();
                 img.decode_chunk(chunk_data)?;
             }
             return Ok(Some(Cow::Owned(img.to_rgb_subsample(subsample)?)));
@@ -3501,6 +3526,8 @@ impl<'a> ProgressiveDecoder<'a> {
     /// every chunk fed so far. Byte-identical to the corresponding frame of
     /// [`render_progressive_all`].
     pub fn push_bg44_chunk(&mut self, chunk: &[u8]) -> Result<Pixmap, RenderError> {
+        #[cfg(test)]
+        count_bg44_chunk_decode();
         self.img.decode_chunk(chunk).map_err(RenderError::Iw44)?;
         self.chunks_fed += 1;
         let bg = self
@@ -4346,6 +4373,113 @@ mod tests {
         }
     }
 
+    /// The streaming `ProgressiveDecoder`, fed one BG44 chunk at a time, must
+    /// reproduce `render_progressive_step`'s frames byte-for-byte — the
+    /// byte-identical requirement checked directly against the per-frame API
+    /// (not only via the `render_progressive_all` batch path already covered
+    /// above), on both the small 3-chunk `chicken.djvu` and the larger
+    /// 4-chunk `colorbook.djvu` fixtures.
+    fn assert_progressive_decoder_matches_step(filename: &str) {
+        let doc = load_doc(filename);
+        let page = doc.page(0).unwrap();
+        let chunks = page.bg44_chunks();
+        assert!(
+            chunks.len() >= 2,
+            "{filename}: need a multi-chunk BG44 page"
+        );
+
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Bilinear,
+            ..Default::default()
+        };
+
+        let mut dec = ProgressiveDecoder::new(page, &opts).expect("decoder");
+        let steps = progressive_steps(page);
+        for (i, chunk) in chunks.iter().take(steps).enumerate() {
+            let streamed = dec.push_bg44_chunk(chunk).expect("push");
+            let stepped = render_progressive_step(page, &opts, i).expect("progressive_step");
+            assert_eq!(
+                (streamed.width, streamed.height),
+                (stepped.width, stepped.height),
+                "{filename} frame {i} dimensions differ"
+            );
+            assert!(
+                streamed.data == stepped.data,
+                "{filename}: streamed frame {i} pixels differ from render_progressive_step"
+            );
+        }
+    }
+
+    #[test]
+    fn progressive_decoder_matches_render_progressive_step_chicken() {
+        assert_progressive_decoder_matches_step("chicken.djvu");
+    }
+
+    #[test]
+    fn progressive_decoder_matches_render_progressive_step_colorbook() {
+        assert_progressive_decoder_matches_step("colorbook.djvu");
+    }
+
+    /// Structural proof of the B5 claim (primary evidence per the design doc,
+    /// since wall-clock is noisy on a shared machine): a naive session that
+    /// calls `render_progressive_step(0..N)` re-decodes BG44 chunks
+    /// `1+2+...+N` times — O(N²) — while a `ProgressiveDecoder` session over
+    /// the same N frames decodes each chunk exactly once — O(N). Counted via
+    /// the `#[cfg(test)]`-only `BG44_CHUNK_DECODES` counter at the two real
+    /// `Iw44Image::decode_chunk` call sites, not wall-clock timing.
+    #[test]
+    fn progressive_decoder_chunk_decodes_are_on_not_on_squared() {
+        for filename in ["chicken.djvu", "colorbook.djvu"] {
+            let doc = load_doc(filename);
+            let page = doc.page(0).unwrap();
+            let chunks = page.bg44_chunks();
+            let n = chunks.len();
+            assert!(n >= 3, "{filename}: need >=3 BG44 chunks");
+
+            let opts = RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                resampling: Resampling::Bilinear,
+                ..Default::default()
+            };
+
+            // Naive per-frame session: render_progressive_step(0..N), each call
+            // re-decoding the chunk prefix from scratch (the pre-B5 behaviour).
+            BG44_CHUNK_DECODES.with(|c| c.set(0));
+            for step in 0..n {
+                render_progressive_step(page, &opts, step).expect("progressive_step");
+            }
+            let naive = BG44_CHUNK_DECODES.with(|c| c.get());
+            let expected_naive: usize = (1..=n).sum(); // 1+2+...+N
+            assert_eq!(
+                naive, expected_naive,
+                "{filename}: naive per-frame session should decode chunks \
+                 1+2+...+N = {expected_naive} times, got {naive}"
+            );
+
+            // Stateful streaming session: one decode per chunk, total N.
+            BG44_CHUNK_DECODES.with(|c| c.set(0));
+            let mut dec = ProgressiveDecoder::new(page, &opts).expect("decoder");
+            for chunk in chunks.iter() {
+                dec.push_bg44_chunk(chunk).expect("push");
+            }
+            let streamed = BG44_CHUNK_DECODES.with(|c| c.get());
+            assert_eq!(
+                streamed, n,
+                "{filename}: stateful session should decode each chunk exactly \
+                 once (O(N) = {n}), got {streamed}"
+            );
+
+            assert!(
+                naive > streamed,
+                "{filename}: naive session ({naive} decodes) should strictly \
+                 exceed the streamed session ({streamed} decodes)"
+            );
+        }
+    }
+
     #[test]
     fn progressive_decoder_rejects_lanczos_and_zero_dims() {
         let doc = load_doc("chicken.djvu");
@@ -4759,6 +4893,60 @@ mod tests {
                 pm.data.iter().any(|&b| b != 0),
                 "chunk {chunk_n}: rendered frame should not be all-zero"
             );
+        }
+    }
+
+    /// Regression test for BUG-ZPSHORT (found while validating B5): on
+    /// `watchmaker.djvu` page 0, BG44 chunk 2 of 4 is a legitimate two-byte
+    /// `[serial, slices]` header with a **zero-length** ZP payload (the encoder
+    /// had nothing left to encode for that refinement round). The strict
+    /// progressive path (`render_progressive_step` / `ProgressiveDecoder`)
+    /// used to hard-fail on it with `Iw44(ZpTooShort)`, while the permissive
+    /// full-page cache (`PageLayers::bg44`) silently swallowed the error and
+    /// dropped that chunk *and every chunk after it* — so the full render
+    /// "succeeded" but silently used only 2 of 4 refinement chunks. Both are
+    /// now fixed by treating a short/empty payload as valid trailing `0xFF`
+    /// padding at the `djvu-iw44` layer (see `Iw44Image::decode_chunk`),
+    /// matching the padding convention `ZpDecoder::read_byte` already uses at
+    /// a stream's true end. Every step and the full render must now succeed.
+    #[test]
+    fn render_progressive_step_handles_zero_length_bg44_chunk() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus/watchmaker.djvu");
+        let data = std::fs::read(&path).expect("watchmaker.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse failed");
+        let page = doc.page(0).unwrap();
+
+        let chunks = page.bg44_chunks();
+        assert_eq!(
+            chunks.len(),
+            4,
+            "expected 4 BG44 chunks on watchmaker page 0"
+        );
+        assert_eq!(
+            chunks[2].len(),
+            2,
+            "chunk 2 should be the zero-payload [serial, slices] header this regression covers"
+        );
+
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            resampling: Resampling::Bilinear,
+            ..Default::default()
+        };
+
+        for step in 0..progressive_steps(page) {
+            render_progressive_step(page, &opts, step)
+                .unwrap_or_else(|e| panic!("step {step} should succeed, got {e}"));
+        }
+        render_progressive_all(page, &opts).expect("progressive_all should succeed");
+        render_pixmap(page, &opts).expect("render_pixmap should succeed");
+
+        let mut dec = ProgressiveDecoder::new(page, &opts).expect("decoder");
+        for chunk in &chunks {
+            dec.push_bg44_chunk(chunk)
+                .expect("ProgressiveDecoder should also handle the zero-length chunk");
         }
     }
 
