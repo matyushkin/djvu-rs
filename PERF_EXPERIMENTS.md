@@ -6625,8 +6625,12 @@ relative to the bandwidth hit; net-negative risk. Not worth it.
   very-large colour-page fixture to beat the rayon overhead (already in the deferred
   log). **A4 PAR_LANCZOS** — needs a large-page Lanczos fixture (>3000 rows); the
   named boy fixture is too small. **A2 AVX2_IDWT** — needs an x86 bench host (M1 can't
-  measure). **B6 madvise / B7 speculative next-page decode** — need a cold-disk /
-  simulated-network harness; no such bench exists. **C3 upscale (zoom>1) path** —
+  measure). ~~**B6 madvise / B7 speculative next-page decode** — need a cold-disk /
+  simulated-network harness; no such bench exists.~~ **CLOSED by COLD_OPEN
+  (round-38):** harness built (`examples/cold_open_bench.rs`, F_NOCACHE
+  fresh-copy strategy, 4.76x cold/warm gap validated); B6 madvise measured
+  neutral on local NVMe (kept opt-in, D/F pending slower storage), B7 prefetch
+  measured +24–90% and **kept**. **C3 upscale (zoom>1) path** —
   genuinely unbenchmarked axis, needs a `zoom 2×/4× region` bench before any fast
   path can be judged. **C4 tile cache** — an API feature (pan/zoom viewer), needs a
   panorama-scenario bench. **C5 memory budget / LRU cache eviction** — measurable as
@@ -8980,3 +8984,143 @@ erases the native parallel win entirely (full decode) or turns it sharply
 negative (compositor downscale). Revisit only if `wasm.rs` grows a
 coarser-grained parallel entry point (e.g. batch-render N pages), not for
 single-page `render()`.
+## Perf round 40 (2026-07-06) — COLD_OPEN: cold-start harness + madvise/prefetch
+
+Round-8 flagged "B6 madvise / B7 speculative next-page decode — need a cold-disk /
+simulated-network harness; no such bench exists" (see the "Remaining axes —
+classified" NEEDS-INFRA list). LAZY_PAGE_CONSTRUCT (round 4) gave −48% `from_bytes`
+and mmap zero-copy backing but nothing issues `madvise` hints or prefetches ahead
+of the reader. This round builds the harness and measures both levers on it.
+
+### COLD_OPEN_HARNESS — cold vs warm open→render measurement — **Kept (infra)** (2026-07-06)
+
+**Setup.** `examples/cold_open_bench.rs` (`--features mmap,parallel`), three
+`--mode`s against `tests/corpus/pathogenic_bacteria_1896.djvu` (517 pages, 26 MB,
+via SOURCES.md). macOS has no `posix_fadvise(DONTNEED)`/`drop_caches` equivalent
+reachable without a password prompt, so the harness copies the corpus to a fresh
+temp path every iteration, writing the destination through an `F_NOCACHE`-flagged
+fd (`fcntl(fd, F_NOCACHE, 1)`, macOS-only, best-effort) so the copy's own pages
+aren't retained in the unified buffer cache — a fresh inode that should require
+genuine disk I/O on first touch, not whatever's resident from a prior iteration.
+`sudo purge` + `--mode validate --iters 1` is documented as the manual gold-standard
+cross-check if the automated ratio ever collapses toward 1x. Stats: median + MAD
+(median absolute deviation) over N iterations, per the task's "prefer medians,
+report dispersion" instruction — MAD is not dragged around by the occasional
+scheduler/thermal outlier the way stdev is.
+
+**Validation** (`--mode validate --page 0`, M1, local NVMe): cold ≫ warm, cleanly
+and repeatably —
+
+| run | warm median (MAD) | cold median (MAD) | ratio |
+|-----|--------------------|--------------------|-------|
+| iters=9  | — | — | 1.99x |
+| iters=12 | 7.224 ms (0.161) | 34.388 ms (0.464) | **4.76x** |
+
+Both arms have tight MAD relative to their median (warm 2.2%, cold 1.3%) — the gap
+is a real cache-identity effect, not noise. **Verdict: the F_NOCACHE-fresh-copy
+strategy is the reliable one on macOS**; strategy (a) alone (`F_NOCACHE` on the
+*original* file without copying) does not evict already-resident pages from a
+prior `mmap`/read of the same vnode (confirmed against the documented fcntl
+semantics before building the harness around it), so the copy is load-bearing, not
+just belt-and-suspenders.
+
+**Decision.** Kept as infra — this is the harness the B6/B7 backlog item was
+blocked on. `--mode madvise` and `--mode prefetch` build on the same cold-copy /
+warm-reuse machinery for the two levers below.
+
+### B6_MADVISE — `MADV_WILLNEED` on page byte range after mmap — **Rejected (neutral; not shipped disabled)** (2026-07-06)
+
+**Setup.** `MmapDocument::advise_page_willneed(index)` (`src/djvu_document.rs`)
+calls `memmap2::Mmap::advise_range(Advice::WillNeed, ..)` — the crate's safe
+wrapper, no unsafe in library code — over a page's own FORM byte range (from the
+existing `DjVuDocument::page_byte_range` API). Measured cold open→first-render
+delta via `--mode madvise`, interleaved no-advise/with-advise pairs (fresh cold
+copy per iteration) so drift affects both arms evenly.
+
+**First attempt (rejected outright): advise the whole `0..range.end` prefix**
+(header + DIRM + every page before the target, reasoning "grab it all while
+we're at it") — this **reproducibly regressed cold open by ~12%** (page 250,
+iters=20: 61.4 ms → 68.9 ms, tight MAD ~1 ms both arms — a real effect, not
+noise). Over-advising is actively harmful on this host, not just wasted effort:
+it appears to compete with the demand-fault path for readahead bandwidth on a
+range far larger than what's about to be read.
+
+**Corrected version: advise only the target page's own range** — neutral:
+
+| page | delay | no madvise median (MAD) | madvise median (MAD) | delta |
+|------|-------|--------------------------|------------------------|-------|
+| 250 | 0 ms | 45.649 ms (1.600) | 46.390 ms (0.797) | −1.6% |
+
+±0–2% across pages/delays tested — inside noise. **Why no win, even scoped**: (1)
+`MmapDocument::open()` already synchronously walks every page's IFF chunk header
+across the *whole* 517-page file to build `page_byte_ranges`, before the caller
+can even call `advise_page_willneed` — most of the structural cold-read cost is
+paid before the hint exists to issue; (2) individual page FORM ranges are small
+(tens of KB) so on fast local NVMe the demand-fault latency already approaches
+the readahead latency — there's little headroom left for a hint to close.
+
+**Decision.** **Rejected as a default-on lever** — no measurable win on this
+host/corpus, and the naive version actively regressed. **Kept as an opt-in,
+tested primitive** (`#[cfg(unix)]`, best-effort `Result`, no-op on out-of-range
+index) rather than reverted outright: the negative result is hardware-specific
+(fast local SSD, small per-page ranges) not a conceptual flaw — analogous to
+AVX2_IDWT's "D/F — blocked, no x86 host" status. Likely worth revisiting on
+higher-latency storage (network mounts, spinning disks, remote filesystems)
+where readahead has more room to hide behind. Tests:
+`mmap_advise_page_willneed_in_range_and_out_of_range`.
+
+### B7_PREFETCH_PAGE — background decode of next page during reader dwell time — **Kept (opt-in)** (2026-07-06)
+
+**Setup.** `DjVuDocument::prefetch_page(self: &Arc<Self>, index)` (`parallel`
+feature, `src/djvu_document.rs`), `rayon::spawn`'d fire-and-forget: decodes the
+target page's mask/FG44/BG layers into the existing `OnceLock`-backed
+`PageLayers` render caches (same ones a later synchronous `render_pixmap` reads)
+— no new cache machinery, no unsafe, thread-safety comes from `OnceLock::get_or_init`
+naturally deduplicating a concurrent decode against a later synchronous one.
+Out-of-range index is a no-op. Measured via `--mode prefetch`: render page K,
+call `prefetch_page(K+1)`, sleep `dwell_ms` (simulating reading time), then time
+`render(K+1)` — with vs without the prefetch call. Whole file is warmed into the
+OS page cache up front so the delta isolates decode-overlap, not disk I/O.
+
+| page K | dwell | no-prefetch median (MAD) | prefetch median (MAD) | delta |
+|--------|-------|---------------------------|--------------------------|-------|
+| 0   | 150 ms | 6.939 ms (3.864) | 5.099 ms (1.809) | +26.5% |
+| 0   | 150 ms (n=12, earlier run) | — | — | +23.8% |
+| 100 | 300 ms | 30.393 ms (12.063) | 3.142 ms (1.642) | **+89.7%** |
+| 0   | 0 ms (negative control) | 2.111 ms (0.393) | 2.126 ms (0.466) | −0.7% (noise) |
+
+Two independent runs at page 0/dwell 150 ms agree (+23.8%, +26.5%), and the
+prefetch arm's MAD is consistently tighter than the baseline's — a real,
+reproducible effect, not a fluke. Page 100/dwell 300 ms (deeper into the corpus,
+more dwell time for the background decode to finish) shows a much larger win
+(+89.7%) because the baseline's cold-cache decode is heavier there, giving the
+background thread more useful work to hide. The dwell=0 "instant page flip"
+control correctly shows **no win** (delta pinned at noise level) — honest
+disclosure: prefetch only pays off when the reader's dwell time is comparable to
+or longer than the background decode time; a reader who flips pages faster than
+the decode completes gets no benefit (but also no regression — the foreground
+render just does the same work itself, `OnceLock` prevents duplicate work either
+way).
+
+**Decision.** **Kept**, opt-in (`parallel` feature only, must be called
+explicitly — no automatic prefetch policy shipped, that's a viewer-level
+decision about which page to guess next). Consistent, reproducible win (+24–90%
+depending on dwell/page) with a correctly-behaving null case at dwell=0 and no
+observed downside (respects the existing C5 cache-budget/LRU eviction machinery
+since it writes through the same `PageLayers` cache, no separate unbounded
+prefetch buffer). Tests: `prefetch_page_warms_cache_and_ignores_out_of_range`.
+
+**Known pre-existing issue found, not caused by this round**: with `--features
+mmap` enabled, `djvu_render::tests::progressive_decoder_chunk_decodes_are_on_not_on_squared`
+fails (expects 6 decode calls, observes 0). Verified via `git stash` that this
+reproduces identically on the pre-round-38 tree — unrelated to this diff. CI's
+test gate doesn't hit it (`--features cli` doesn't enable `mmap`), so it's
+recorded here rather than fixed in scope.
+
+**Follow-ups**: (1) B6 madvise deserves a re-measurement on higher-latency
+storage (network share, spinning disk, or a VM with artificially throttled I/O)
+where the current "no headroom" reasoning may not hold. (2) B7 prefetch is a
+manual primitive — an automatic "prefetch page N+1 whenever page N finishes
+rendering" viewer-level policy is a natural next step but is a product decision
+(prefetch direction, cancellation on rapid back-and-forth, budget vs C5) out of
+scope here.
