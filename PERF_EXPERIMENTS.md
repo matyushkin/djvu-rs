@@ -9337,3 +9337,109 @@ other feature-combination failures found).
 
 **Decision.** Fixed the test, not the code — behavior was already correct,
 only the thread-local counting was feature-sensitive.
+## Perf round 43 (2026-07-06) — OCR_QA: OCR-based legibility metric for lossy JB2 levers
+
+The journal's JB2 lossy levers (`lossy_text()` −22 % Sjbz round 19, `lossy_scan`
+despeckle round 30, cross-threshold sweeps in `jb2-size-gap-plan.md`) are all
+gated on the D1 structural metric (SSIM of the decoded mask). For a *text*
+document the real acceptance test is "does it still read correctly", which SSIM
+only approximates — a few flipped pixels concentrated on a diacritic can flip a
+character while barely moving global SSIM, and diffuse sub-pixel blur can drop
+SSIM without ever confusing a real OCR engine. This round adds an
+OCR-agreement column next to the existing Sjbz/SSIM ones so both questions can
+be read off the same table.
+
+### OCR_QA — OCR-agreement harness for the JB2 lossy sweep — **Kept (infra)** (2026-07-06)
+
+**Prior art.** `EXPERIMENTS_INDEX.md`, `gh pr list --search ocr`, and
+`git branch -r` show no existing OCR-QA harness — issue #382/PR #125 built the
+`OcrBackend` seam (`src/ocr.rs`, `docs/ocr-backend-seam.md`) and its Tesseract/
+ONNX/Candle backends, and PRs #98/#239/#315 built export/reflow on top of it,
+but nothing measures OCR degradation from the lossy JB2 levers. New harness,
+not a duplicate.
+
+**Setup.** `examples/ocr_qa.rs`, std-only, no new required dependency (uses the
+already-optional `ocr-tesseract` feature purely as a *consumer* of the existing
+seam, exactly like the CLI's `--backend` selector). For each corpus
+(`watchmaker.djvu`, text; `pathogenic_bacteria_1896.djvu`, 517-page scan) and
+each JB2 mask operating point already measured structurally by
+`jb2_lossy_b0`/`jb2_despeckle` (`lossy_threshold` ∈ {2, 5, 8, 10}%, plus
+`despeckle=8` on the scan corpus), the harness encodes+decodes every page's
+mask (full corpus, matching the existing structural harnesses), renders the
+lossless and lossy decodes as black-on-white bitonal images, and OCRs both with
+`TesseractBackend`. It diffs **lossy-OCR vs lossless-OCR** (not vs. an external
+ground truth) via a Levenshtein-based char/word agreement score — this isolates
+the *degradation the lever introduces* and cancels Tesseract's own baseline
+recognition error, which is common to both runs. OCR itself (the expensive
+step) runs on the first 3 pages per corpus by default (`OCR_QA_PAGES` env var
+to raise/lower); Sjbz size and SSIM always cover the whole corpus, matching the
+sibling harnesses. Backend dispatch degrades gracefully: without
+`--features ocr-tesseract`, or if a system Tesseract install can't recognize a
+smoke page, the harness still runs and prints the Sjbz/SSIM columns with the
+OCR columns marked `n/a` — no fake numbers. The harness's own diff logic
+(Levenshtein, char/word accuracy, backend dispatch) is unit-tested (11 tests)
+against a deterministic mock `OcrBackend` that needs neither Tesseract nor the
+feature flag, so it runs in every CI lane, not only the optional
+"OCR (tesseract)" job.
+
+**Environment.** macOS, `tesseract` 5.5.2 + `leptonica` 1.87.0 via Homebrew
+(`brew list` confirms both; `ocr-tesseract` feature builds and links cleanly).
+A real backend ran for this measurement — this is not a harness-only report.
+
+**Results** (OCR over the first 3 pages/corpus; Sjbz/SSIM over the whole
+corpus):
+
+`watchmaker.djvu` (12 masks, lossless Sjbz = 130,036 B):
+
+| operating point | Sjbz Δ | SSIM | OCR char-agree | OCR word-agree |
+|---|---|---|---|---|
+| lossless | +0.00% | 1.00000 | 100.00% | 100.00% |
+| `lossy_text()` (2%) | **−21.96%** | 0.99928 | 100.00% | 100.00% |
+| lossy 5% | −23.39% | 0.99889 | 100.00% | 100.00% |
+| lossy 8% | −23.99% | 0.99864 | 99.98% | 99.86% |
+| lossy 10% | −24.47% | 0.99852 | 99.89% | 99.58% |
+
+`pathogenic_bacteria_1896.djvu` (517 masks, lossless Sjbz = 34,254,905 B):
+
+| operating point | Sjbz Δ | SSIM | OCR char-agree | OCR word-agree |
+|---|---|---|---|---|
+| lossless | +0.00% | 1.00000 | 100.00% | 100.00% |
+| despeckle=8 | −2.43% | 0.99845 | 100.00% | 100.00% |
+| `lossy_text()` (2%) | −0.01% | 1.00000 | 100.00% | 100.00% |
+| lossy 5% | −0.25% | 0.99985 | 100.00% | 100.00% |
+| lossy 8% | −4.79% | 0.99557 | 100.00% | 100.00% |
+| lossy 10% | −11.23% | 0.98871 | 99.97% | 99.84% |
+
+**The interesting question, answered both ways.** The shipped `lossy_text()`
+preset (2%) is OCR-invisible on both corpora — 100/100% agreement — so the
+round-19 SSIM-based "sweet spot" call holds up under the OCR lens too, on this
+sample. But the two metrics *disagree in direction* once pushed further: on the
+scan corpus, `lossy 8%` already shows a real SSIM dip (0.99557, the largest
+drop of any point below `lossy 10%`) while OCR agreement is still a flat
+100.00% — SSIM is flagging pixel-level change that Tesseract does not care
+about at all. Conversely on the text corpus, OCR is the more sensitive
+instrument: `lossy 8%`/`10%` show word-agreement (99.86%/99.58%) dropping
+faster in relative terms than SSIM (0.99864/0.99852) does — a handful of
+flipped glyphs cost whole words while barely denting a whole-page pixel
+metric. So: **SSIM over-warns on the noisy scan corpus and under-warns on the
+clean text corpus, relative to what an OCR engine actually notices** — exactly
+the complementary-metric case this round set out to check for. Both hold at
+`lossy_text()`'s already-shipped 2% operating point; the gap only opens up past
+it, at settings nothing currently ships.
+
+**Caveats.** (1) OCR sampled 3 pages/corpus (wall-clock: full-corpus Tesseract
+OCR at 6 operating points × 517 pages is not a quick-iteration harness run —
+`OCR_QA_PAGES` is there for a deeper manual sweep). (2) The harness OCRs the
+raw bitonal JB2 mask directly (black text on white), not a fully composited
+page — deliberate, since the levers under test only ever touch the mask, and
+this isolates their effect from unrelated BG44/IW44 noise; a hypothetical
+consumer OCRing the final rendered page would additionally be subject to
+whatever downstream rendering does. (3) One Tesseract engine/language
+(`eng`) at default DPI — not a cross-engine or multi-language validation.
+
+**Decision.** **Kept as infra.** Confirms `lossy_text()` (already shipped,
+opt-in) is OCR-safe at its shipped operating point on both sampled corpora, and
+demonstrates SSIM and OCR-agreement are usefully complementary past that point
+in *both* directions — future lossy-lever work (e.g. a hypothetical
+`lossy_threshold > 0.02` default, or new despeckle levels) should check both,
+not just SSIM. No shipped-code change; `examples/ocr_qa.rs` only.
