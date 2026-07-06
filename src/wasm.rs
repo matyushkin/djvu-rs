@@ -36,6 +36,27 @@ use crate::{
     djvu_render::{render_coarse, render_progressive},
 };
 
+// ── Thread pool (opt-in, `wasm-threads` feature) ─────────────────────────────
+//
+// Re-exports `wasm-bindgen-rayon`'s pool initializer so JS callers can spin up
+// the Web Worker pool that backs rayon's parallel compositor (PARALLEL) and
+// IDWT (IW44_PAR) paths inside the browser. Building this feature requires a
+// nightly toolchain with `-Z build-std` and wasm atomics (see
+// `make wasm-threads-check`); it is never part of the default `wasm` build.
+//
+// JS usage (after `await init()` from the generated glue):
+// ```js
+// import init, { initThreadPool } from 'djvu-rs';
+// await init();
+// await initThreadPool(navigator.hardwareConcurrency);
+// ```
+//
+// The page/document also needs `Cross-Origin-Opener-Policy: same-origin` and
+// `Cross-Origin-Embedder-Policy: require-corp` response headers so the
+// browser exposes `SharedArrayBuffer` — without them `initThreadPool` throws.
+#[cfg(feature = "wasm-threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 // ── WasmDocument ─────────────────────────────────────────────────────────────
 
 /// A parsed DjVu document.

@@ -59,6 +59,10 @@ serde = { version = "1", features = ["derive"], optional = true }
 image = { version = "0.25", default-features = false, optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
+# wasm32 threads only — requires a nightly toolchain + `-Z build-std` with
+# atomics/bulk-memory target features (see WASM_THREADS in PERF_EXPERIMENTS.md).
+# Never pulled in by the default `wasm` feature or any CI-required gate.
+wasm-bindgen-rayon = { version = "1.3", optional = true }
 tesseract = { version = "0.15", optional = true }
 tract-onnx = { version = "0.21", optional = true }
 
@@ -77,6 +81,15 @@ mmap = ["dep:memmap2", "std"]
 serde = ["dep:serde"]
 image = ["dep:image", "std"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "std"]
+# Opt-in wasm32 thread pool (rayon workers via Web Workers). Layers over
+# `wasm` + `parallel` to reuse the existing rayon-parallel compositor/IDWT
+# paths (PARALLEL/IW44_PAR, 3.8x/2.2x on native) inside the browser. Building
+# this target requires a nightly toolchain (`-Z build-std=panic_abort,std`
+# with `+atomics,+bulk-memory` codegen plus `--shared-memory`/`--import-memory`
+# linker flags) — it is NOT part of the stable `wasm32 build check` CI gate
+# and must never be pulled in by it. See `make wasm-threads-check` and
+# PERF_EXPERIMENTS.md (WASM_THREADS).
+wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 epub = ["std"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "std"]
