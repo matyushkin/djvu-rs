@@ -1214,6 +1214,34 @@ impl PageLayers {
             + self.tile_cache_bytes()
     }
 
+    /// C5_COMPRESS: drop the expensive full-resolution derivations —
+    /// `bg44`/`bg44_partial` coefficient images, `bg_rgb_s1`, mask +
+    /// `mask_sub4`, `fg44`, `mask_indexed`, and the composited-tile cache —
+    /// while **preserving** any already-cached `bg_rgb_s2` / `bg_rgb_s4`
+    /// downscaled RGB pixmap.
+    ///
+    /// This is the cheaper middle tier between "keep everything" and
+    /// [`evict_render_cache`](DjVuPage::evict_render_cache)'s full drop: a
+    /// later downscaled render (subsample ≥ 2 — e.g. a thumbnail, contact
+    /// sheet, or zoomed-out pan) stays warm, while a full-resolution render
+    /// still pays a cold decode. Measured (see PERF_EXPERIMENTS.md
+    /// C5_COMPRESS): the coefficient `Iw44Image` retained by `bg44` is *not*
+    /// cheaper to keep than the derived RGB pixmap (same size class once
+    /// colour planes are counted), so there is no cheap "upgrade sub=2→sub=1"
+    /// path — only the already-decoded downscaled pixmaps are worth keeping.
+    /// No-op on fields that were never populated.
+    pub(crate) fn downgrade(&mut self) {
+        self.bg44 = std::sync::OnceLock::new();
+        self.bg44_partial = std::sync::OnceLock::new();
+        self.mask = std::sync::OnceLock::new();
+        self.mask_sub4 = std::sync::OnceLock::new();
+        self.fg44 = std::sync::OnceLock::new();
+        self.mask_indexed = std::sync::OnceLock::new();
+        self.bg_rgb_s1 = std::sync::OnceLock::new();
+        self.tile_cache = std::sync::Mutex::new(TileCacheState::default());
+        // bg_rgb_s2 / bg_rgb_s4 / access tick intentionally preserved.
+    }
+
     /// Bytes currently held by the composited-tile cache (see `tile_cache`).
     pub(crate) fn tile_cache_bytes(&self) -> usize {
         self.tile_cache
@@ -1469,13 +1497,30 @@ fn decode_background_chunks<'a>(
                 return Ok(page.decoded_bg_rgb_s1().map(Cow::Borrowed));
             }
             if subsample == 2 {
+                // C5_COMPRESS: `PageLayers::downgrade` can clear `bg44` while
+                // deliberately *keeping* an already-cached `bg_rgb_s2` (the
+                // cheaper middle tier — see downgrade's doc comment). Check the
+                // terminal cache first so that case stays warm: `bg_rgb_s2`'s
+                // own initialiser already routes through `bg44(page)?`, so a
+                // populated `Some` here can only follow a prior successful
+                // decode — no need to force `decoded_bg44()` again.
+                if let Some(cached) = page.decoded_bg_rgb_s2() {
+                    return Ok(Some(Cow::Borrowed(cached)));
+                }
                 // Same memoization as sub=1 for the common 150-from-300-DPI render.
+                // Strict-mode error propagation: if BG44 failed to decode,
+                // decoded_bg44() returns None; treat that as a hard error.
                 let _ = page
                     .decoded_bg44()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
                 return Ok(page.decoded_bg_rgb_s2().map(Cow::Borrowed));
             }
             if subsample == 4 {
+                // C5_COMPRESS: mirrors the subsample==2 short-circuit above for
+                // `bg_rgb_s4` / `bg44_partial`.
+                if let Some(cached) = page.decoded_bg_rgb_s4() {
+                    return Ok(Some(Cow::Borrowed(cached)));
+                }
                 // Cache the sub=4 RGB conversion (built from the partial image,
                 // matching the sub>=4 path) so repeated thumbnail / downscale
                 // renders skip the IDWT + YCbCr->RGB conversion.
@@ -4946,6 +4991,108 @@ mod tests {
         };
         let second0 = render_pixmap(doc.page(0).unwrap(), &opts).unwrap();
         assert_eq!(first0.unwrap().data, second0.data);
+    }
+
+    /// C5_COMPRESS: `downgrade_render_cache` must (a) shrink the cache, (b)
+    /// keep a previously-cached `bg_rgb_s2` warm — a subsequent sub=2 render
+    /// must not force a fresh BG44 decode — and (c) still reproduce the exact
+    /// same full-resolution output on a later cold sub=1 render (the
+    /// full-res path re-decodes from scratch, byte-identically).
+    #[test]
+    fn downgrade_render_cache_keeps_downscaled_tier_warm() {
+        let mut doc = load_doc("colorbook.djvu");
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts_s1 = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        // sub=2 request: half-resolution output.
+        let opts_s2 = RenderOptions {
+            width: w / 2,
+            height: h / 2,
+            ..Default::default()
+        };
+
+        let first_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+        let first_s2 = render_pixmap(doc.page(0).unwrap(), &opts_s2).unwrap();
+        let bytes_before = doc.page(0).unwrap().render_cache_bytes();
+        assert!(bytes_before > 0);
+
+        doc.downgrade_render_caches();
+        let bytes_after = doc.page(0).unwrap().render_cache_bytes();
+        assert!(
+            bytes_after > 0 && bytes_after < bytes_before,
+            "downgrade should shrink but not zero the cache: before={bytes_before} after={bytes_after}"
+        );
+
+        // sub=2 render after downgrade: warm (bg_rgb_s2 preserved), and output
+        // is unchanged.
+        let second_s2 = render_pixmap(doc.page(0).unwrap(), &opts_s2).unwrap();
+        assert_eq!(first_s2.data, second_s2.data, "sub=2 output changed");
+
+        // sub=1 (full-res) render after downgrade: cold-decodes but still
+        // reproduces the original output exactly.
+        let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+        assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
+    }
+
+    /// `enforce_cache_budget_with(downgrade_before_drop: true)` honours the same
+    /// byte ceiling as `enforce_cache_budget`, and a downgraded (not fully
+    /// dropped) page still reproduces byte-identical output.
+    #[test]
+    fn enforce_cache_budget_with_downgrade_matches_budget_and_output() {
+        let mut doc = load_doc("colorbook.djvu");
+        if doc.page_count() < 3 {
+            return;
+        }
+        let mut expected = Vec::new();
+        for i in 0..3 {
+            let (w, h) = {
+                let p = doc.page(i).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+            let p = doc.page(i).unwrap();
+            expected.push(render_pixmap(p, &opts).unwrap());
+        }
+
+        let total_before = doc.render_cache_bytes();
+        assert!(total_before > 0);
+        let budget = total_before / 2;
+        let opts = crate::djvu_document::CacheBudgetOptions {
+            downgrade_before_drop: true,
+        };
+        let _freed = doc.enforce_cache_budget_with(budget, &[], opts);
+        assert!(
+            doc.render_cache_bytes() <= budget,
+            "cache not held under budget: {} > {}",
+            doc.render_cache_bytes(),
+            budget
+        );
+
+        // Re-render every page (whichever were downgraded or dropped) and
+        // check the output is unchanged either way.
+        for (i, expected_pm) in expected.iter().enumerate().take(3) {
+            let (w, h) = {
+                let p = doc.page(i).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+            let pm = render_pixmap(doc.page(i).unwrap(), &opts).unwrap();
+            assert_eq!(expected_pm.data, pm.data, "page {i} output changed");
+        }
     }
 
     /// `fit_to_width` scales correctly, preserving aspect ratio.
