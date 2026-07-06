@@ -9443,3 +9443,102 @@ demonstrates SSIM and OCR-agreement are usefully complementary past that point
 in *both* directions — future lossy-lever work (e.g. a hypothetical
 `lossy_threshold > 0.02` default, or new despeckle levels) should check both,
 not just SSIM. No shipped-code change; `examples/ocr_qa.rs` only.
+## Perf round 44 (2026-07-06) — TH44_GRID: fast thumbnail-grid decode path — **Kept (opt-in)**
+
+**Prior art check.** D5_TH44_PREVIEW (round-9) measured that decoding a page's
+embedded `TH44` chunk instead of rendering the real page is 20–30× faster but
+only SSIM 0.50–0.68 vs a true downscale, and recorded it as "viable only as
+explicit opt-in for thumbnail grids, not a default." No grid-level API existed
+before this round: `djvu_document::DjVuPage` only exposed a single-page
+`thumbnail()` helper (added alongside PR #476, which taught the layered/JB2
+encoders to emit `TH44` into multi-page bundles), and there was no
+`Document`-level batch entry point, no strategy flag, and no corpus file with a
+decodable `TH44` to bench against (checked via `gh pr list --search "thumbnail
+OR th44"` and `git branch -r` — nothing pending). This round builds the grid
+API D5 called for and validates it on a bundle synthesized with the #476
+encoder.
+
+**Approach.** `Document::thumbnails(max_w, max_h) -> Vec<Result<Pixmap, Error>>`
+(`src/lib.rs`) + `Document::thumbnails_with_strategy(.., ThumbnailStrategy)` and
+a per-page `Page::thumbnail_with_strategy`. `ThumbnailStrategy` is `Auto`
+(default: use the page's `TH44` if present, else fall back to a real box-fit
+render), `Th44Only` (error if no `TH44`), or `RenderOnly` (always the real
+render path, ignores any `TH44`). `Auto`'s fallback and `RenderOnly` both go
+through the existing `fit_to_box`-style Lanczos-3 box-fit — byte-identical to
+what a caller doing this by hand today would get, so nothing about existing
+single-page rendering changed. The whole-document call runs the per-page work
+under `rayon::par_iter` behind the existing `parallel` feature, sequential
+`iter` otherwise (same pattern as `epub.rs`'s parallel export).
+
+**Structural proof, not just a benchmark claim.** A dedicated test
+(`thumbnails_th44_path_never_touches_corrupted_jb2_background`) builds a 2-page
+bilevel bundle with `TH44` thumbnails via `encode_djvm_bundle_jb2_with_thumbnails`,
+then corrupts every `Sjbz` chunk's payload bytes in place (keeping the IFF
+length/framing intact so the container still parses). `Th44Only` and `Auto`
+still decode successfully and match each other byte-for-byte; `RenderOnly`
+fails because it has no choice but to touch the now-garbage JB2 mask. This
+proves by construction — not by counting decode calls — that the `TH44` fast
+path never reaches BG44/JB2 decode.
+
+**Speed.** Two synthesized bundles (no corpus file embeds a real `TH44`, per
+D5): a 20-page bilevel bundle (JB2 masks pulled from `pathogenic_bacteria_1896.djvu`,
+re-encoded via `encode_djvm_bundle_jb2_with_thumbnails`) and a 6-page colour
+bundle (half-res renders of `colorbook.djvu`, re-encoded via
+`encode_djvm_layered_shared_with_thumbnails`). Both `benches/document.rs`
+(criterion, cold — a fresh `Document::from_bytes` inside every `b.iter()`
+closure, mirroring `bench_open_and_render_first`, since a thumbnail grid is a
+first-open workload, not a re-render of an already-open page) and a standalone
+D1 harness (`examples/thumbnail_grid_quality.rs`) agree on the direction:
+
+| scenario | pages | Th44Only | RenderOnly | speedup |
+|---|---|---|---|---|
+| bilevel (criterion, cold) | 20 | 31.2 ms | 127.5 ms | ~4.1× |
+| colour (criterion, cold) | 6 | 13.1 ms | 24.5 ms | ~1.9× |
+| colour (example harness, cold) | 6 | 0.55 ms | 8.13 ms | ~14.9× |
+
+The colour speedup varies a lot between runs (1.9×–14.9× seen across methods
+and machine load) — this repo's benches are explicitly non-deterministic /
+not CI-gated (see project `CLAUDE.md`), and thumbnail-grid timings are small
+absolute numbers (single-digit ms for 6 pages) that are unusually sensitive to
+scheduling noise. What's consistent across every run and every scenario:
+`Th44Only` never loses, and the D5 finding that this is a real, large win
+(never below ~2×, often an order of magnitude) reproduces on both a bilevel
+and a colour corpus, not just the single page D5 originally measured.
+
+**Quality (D1).** SSIM of `Th44Only` vs `RenderOnly` on the same 6-page colour
+bundle, at several grid box sizes (aligned to the same pixel dimensions via a
+local bilinear resample before comparing, since the two strategies' box-fit
+math can differ by ±1px):
+
+| box size | mean SSIM (6 pages) |
+|---|---|
+| 48px | 0.3562 |
+| 64px | 0.4033 |
+| 96px | 0.4934 |
+| 128px | 0.5355 |
+| 256px | 0.6299 |
+
+128px lands right in D5's original 0.50–0.68 single-page range (0.5355) —
+confirmed, not improved: a `TH44` is baked in at encode time as its own lossy
+~128px-class preview, not a faithful downscale of the full-fidelity page, so
+fidelity doesn't meaningfully improve by asking for a smaller box (a smaller
+box just discards more of both images' detail equally). No evidence the 128px
+class is "much better" than the D5 baseline; it's the same trade D5 already
+quantified, now confirmed to hold across a small multi-page corpus and exposed
+through a real grid API instead of a one-off.
+
+**Decision.** **Kept, opt-in.** Default `Document::thumbnails()` uses `Auto`
+(prefer `TH44`, fall back to a real render byte-identical to today's), matching
+D5's verdict that this is viable only as an explicit choice for thumbnail-grid
+UIs that can tolerate lower per-thumbnail fidelity in exchange for a large,
+reproducible speedup opening a grid of many pages at once — never a default
+for single full-page rendering. `RenderOnly`/`Th44Only` let a caller pin the
+exact behaviour they want (e.g. a viewer that always wants full fidelity, or
+one that wants to fail loudly if a bundle lacks thumbnails rather than silently
+paying the render cost). Tests:
+`thumbnails_auto_uses_th44_and_matches_th44_only`,
+`thumbnails_th44_path_never_touches_corrupted_jb2_background`,
+`thumbnails_th44_only_errors_without_th44`,
+`thumbnails_auto_falls_back_to_render_without_th44`,
+`thumbnails_never_upscale_a_small_th44_thumbnail`,
+`thumbnails_downscale_an_oversized_th44_thumbnail`.
