@@ -3202,7 +3202,24 @@ impl Iw44Image {
             payload_start = 2;
         }
 
-        let zp_data = &data[payload_start..];
+        // A refinement chunk's ZP payload may legitimately be shorter than
+        // `ZpDecoder::new`'s 2-byte minimum — even empty — when the encoder had
+        // nothing left to encode for these `slices` (observed on a real corpus
+        // file: a `[serial, slices]` header with a zero-length payload). This is
+        // not malformed input: `ZpDecoder` already treats reads past the end of
+        // its buffer as synthetic `0xFF` padding (see `read_byte`), which is
+        // exactly how a normal chunk's *trailing* padding is already decoded
+        // (see the slice-loop comment below). Pad up to 2 bytes with `0xFF`
+        // here so a short/empty payload takes that same, already-relied-upon
+        // padding path through initialization too, instead of hard-erroring.
+        let raw_zp_data = &data[payload_start..];
+        let padded_zp_data;
+        let zp_data: &[u8] = if raw_zp_data.len() >= 2 {
+            raw_zp_data
+        } else {
+            padded_zp_data = [raw_zp_data.first().copied().unwrap_or(0xff), 0xff];
+            &padded_zp_data
+        };
         let mut zp = ZpDecoder::new(zp_data).map_err(|_| Iw44Error::ZpTooShort)?;
 
         for _ in 0..slices {
@@ -3738,6 +3755,31 @@ mod tests {
             img.decode_chunk(&[0x01, 0x01]),
             Err(Iw44Error::MissingFirstChunk)
         ));
+    }
+
+    /// BUG-ZPSHORT regression: a refinement chunk (`serial != 0`) whose ZP
+    /// payload is short or entirely empty must decode as a no-op refinement
+    /// round, not a hard error. Real BG44 streams contain such chunks (e.g.
+    /// `watchmaker.djvu`'s page-0 chunk 2, a bare 2-byte `[serial, slices]`
+    /// header) when the encoder had nothing left to encode for that round —
+    /// `ZpDecoder` already treats reads past a stream's true end as synthetic
+    /// `0xFF` padding, so a chunk that is *entirely* padding is not malformed.
+    #[test]
+    fn iw44_decode_chunk_tolerates_empty_refinement_payload() {
+        let mut img = Iw44Image::new();
+        // First chunk: minimal valid grayscale header, 1x1, no slices decoded.
+        let header = [0x00u8, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00];
+        img.decode_chunk(&header).expect("first chunk must decode");
+
+        // Refinement chunk: serial=1, slices=4, zero-length ZP payload.
+        assert!(img.decode_chunk(&[0x01, 0x04]).is_ok());
+
+        // Another refinement chunk with a single stray payload byte (still
+        // short of ZpDecoder's normal 2-byte minimum) must also be tolerated.
+        assert!(img.decode_chunk(&[0x02, 0x04, 0xab]).is_ok());
+
+        // The image must still be usable afterwards (no poisoned state).
+        assert!(img.to_rgb().is_ok());
     }
 
     /// `to_rgb()` on an uninitialised decoder must return an error.
