@@ -8779,3 +8779,114 @@ deferred). This round's contribution is closing the validation gap — proving
 the shipped feature on real corpus content instead of only synthetic
 fixtures — and recording the true fate of the dangling branch ref so it
 isn't proposed again as abandoned work.
+## Perf round 38 (2026-07-06) — VIEWER_BENCH + C4_TILE_CACHE: pan/zoom scenario bench, then the tile cache it justifies
+
+Round-8 triage flagged the tile-cache question as NEEDS-INFRA: "C4 tile cache —
+an API feature (pan/zoom viewer), needs a panorama-scenario bench." C3_ZOOM_SCOPE
+(round 14) showed region/zoom rendering is already scoped and linear in viewport
+pixels (~5.5 ns/px, flat vs zoom) — but that diagnostic never asked what happens
+when *consecutive* viewports overlap, which is exactly what a pan gesture does.
+Existing caches (BG/MASK/FG layer caches, C5 LRU byte budget) only memoize
+*decoded* layers; nothing memoizes the compositor's *output*. This round builds
+the scenario bench first, then closes C4 with data.
+
+### VIEWER_BENCH — scripted pan/zoom session bench — infra (2026-07-06)
+
+**Setup.** New `benches/viewer.rs`, harness-registered in `Cargo.toml`. Scripts a
+realistic interactive session on two page kinds — a colour page (`colorbook.djvu`,
+BG44+FG44/FGbz) and a bilevel page (`cable_1973_100133.djvu`, JB2 mask only):
+open → first full render → zoom 2× at page centre → pan across the page in 12
+overlapping viewport steps (25% overlap, so each step exposes ~75% new content on
+its trailing edge) → zoom 4× → pan again. For every pan sequence, two variants are
+benched using only the *existing* `render_region` API (no new production code
+needed to answer this question):
+
+- `full_recomposite`: today's behaviour — every step re-renders its entire
+  viewport rectangle from scratch.
+- `incremental_strip`: a lower-bound proxy for a tile-cache-backed viewer — every
+  step after the first renders *only* its newly-exposed trailing strip; a real
+  cache would supply the rest from memory.
+
+`incremental_strip / full_recomposite` (both the whole-sequence total and the
+per-step `BenchmarkId`s) estimates the compositor-only dividend a tile cache could
+capture, measured against the real compositor rather than a per-pixel cost model.
+M1 Max, `cargo bench --bench viewer -- --quick`, `[profile.bench]` fat LTO.
+
+**Results (whole-sequence totals, the load-robust number — wall-clock is noisy
+with concurrent agents, but the two variants run back-to-back in the same
+process):**
+
+| Page | Zoom | full_recomposite_sequence | incremental_strip_sequence | Δ |
+|---|---|---|---|---|
+| colour (colorbook) | 2× | 5.370 ms | 4.251 ms | **−20.9%** |
+| colour (colorbook) | 4× | 21.89 ms | 16.78 ms | **−23.3%** |
+| bilevel (cable) | 2× | 5.459 ms | 4.318 ms | **−20.9%** |
+| bilevel (cable) | 4× | 20.90 ms | 16.78 ms | **−19.7%** |
+
+Per-step numbers tell the same story steadily across all 12 steps (not just an
+average): e.g. colour 2× per-step settles at full≈447 µs vs incremental≈345 µs
+(steps 1–11, ratio ≈0.77) once past step 0 (where `fresh == viewport` by
+definition, so both variants cost the same). Colour 4× per-step: full≈1.74–1.83 ms
+vs incremental≈1.32–1.42 ms (ratio ≈0.76). Bilevel tracks the same ~20–25% band at
+both zoom levels. The ratio lines up almost exactly with the 25% pan overlap
+parameter — each step only reuses (skips) the 25% shared strip, which is the
+*minimum* a real cache would save: a straight-line pan never revisits a tile, so
+this proxy cannot show the cache-hit wins a real viewer gets from zooming back
+out/in, panning back, or re-exposing previously-composited regions.
+
+### C4_TILE_CACHE — composited-output tile cache, `render_region_tiled` — **Kept** (2026-07-06)
+
+**Decision basis.** VIEWER_BENCH shows overlapping pans redo a steady ~20–25% of
+compositor work on *every* step, on both colour and bilevel pages, at both tested
+zoom levels — and that's a lower bound (see above). This is exactly the
+"substantial compositor work redone" case the task's Phase 2 threshold called for
+building the cache.
+
+**Implementation.** `render_region_tiled(page, region, opts)` in `src/djvu_render.rs`
+(std-only, `#[cfg(feature = "std")]`) is a new, separate entry point — it does not
+modify `render_region` or its hot loop, so existing callers (thumbnails, export,
+one-shot renders) pay zero overhead. It decodes layers once via the existing
+`decode_layers`, then assembles the requested rectangle from `TILE_SIZE=256`
+(256 KiB/tile RGBA) composited tiles cached per-page in a new `PageLayers::tile_cache`
+(`HashMap<TileKey, Arc<TileEntry>>` + FIFO order + running byte total), keyed by
+`(full_w, full_h, tile_x, tile_y, bold, mask_aa)`. A cache miss composites exactly
+that tile via `composite_into` (unchanged compositor) and inserts it; a hit clones
+an `Arc`. FIFO-evicts at a `TILE_CACHE_MAX_BYTES = 8 MiB` per-page budget, and the
+tile bytes are folded additively into `PageLayers::cached_bytes()` — so the
+existing C5 `DjVuDocument::enforce_cache_budget` / `evict_render_cache` machinery
+automatically reclaims tile memory as a side effect of evicting a page; no
+separate cross-page tile LRU was needed.
+
+**Byte-identical, by construction.** `composite_into` computes every output pixel
+from its *absolute* position (`ctx.offset_x + ox`, `ctx.offset_y + oy`), never from
+the requested `out_w`/`out_h` — confirmed by reading `precompute_area_avg_x` /
+`area_range`. Tile boundaries sit on that same absolute pixel grid
+(`CompositeContext` gained `#[derive(Clone, Copy)]` so each tile stamps a cheap
+per-tile copy of one template context), so assembling a request from whole or
+partial cached tiles reproduces exactly the bytes a direct `render_region` call
+would. Eligibility is deliberately narrow — the tiled path only activates for
+`Resampling::Bilinear`, identity combined rotation, and non-permissive decode;
+anything else (Lanczos3, any rotation, `permissive: true`) falls straight through
+to a plain `render_region` call with no tile bookkeeping. This is opt-in by
+construction: callers who want tile caching (a pan/zoom viewer) call
+`render_region_tiled`; nobody else's byte output or performance changes.
+
+**Tests** (`src/djvu_render.rs::tests`, all passing under `cargo test --lib`):
+`render_region_tiled_matches_render_region` (7 regions incl. multi-tile-spanning,
+edge tiles, sub-tile slivers, at a non-256-multiple size), `render_region_tiled_
+repeated_region_matches` (cache-hit + neighbour-overlap correctness),
+`render_region_tiled_falls_back_for_ineligible_modes` (rotation, Lanczos3,
+permissive all match `render_region` exactly), `render_region_tiled_cache_is_
+budget_bounded_and_evictable` (tile bytes stay `> 0` and `<= TILE_CACHE_MAX_BYTES`;
+`evict_render_caches()` zeroes them), `render_region_tiled_rejects_zero_dimensions`.
+
+**Verdict.** **Kept.** Data-justified addition: VIEWER_BENCH measured a real,
+steady ~20–25% compositor-time gap per pan step across both page kinds and both
+zoom levels the task specified, and a real tile cache captures strictly more than
+the `incremental_strip` proxy did (it also serves exact re-visits — zoom out/in,
+pan-back — which the proxy's straight-line pan never exercises). Kept off the
+`render_region` hot path entirely (new function, `#[cfg(feature = "std")]`-gated,
+no_std/wasm32 builds carry zero extra code), byte-identical by construction and by
+test, and its memory is accounted for and evicted through the existing C5 budget
+machinery rather than a new one. `make check` (fmt, clippy -D warnings, no_std
+build, wasm32 build, full test suite) green.
