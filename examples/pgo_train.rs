@@ -33,6 +33,7 @@ fn opts(w: u32, h: u32, resampling: Resampling) -> RenderOptions {
         rotation: UserRotation::None,
         permissive: false,
         resampling,
+        mask_aa: false,
     }
 }
 

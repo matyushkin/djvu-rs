@@ -187,6 +187,19 @@ pub struct RenderOptions {
     ///
     /// Default: [`Resampling::Bilinear`] (preserves backward compatibility).
     pub resampling: Resampling,
+    /// Anti-alias the JB2 bilevel mask's edges when rendering at **upscale**
+    /// (zoom > 1): instead of the hard nearest-bit lookup, bilinearly
+    /// interpolate the mask's 0/255 coverage and blend foreground/background
+    /// colour proportionally — smoother glyph edges under zoom.
+    ///
+    /// A no-op at scale ≤ 1 (native or downscaled renders are unaffected).
+    ///
+    /// **Opt-in, default `false`.** DjVuLibre hard-edges the mask under zoom,
+    /// so enabling this is a deliberate, judged divergence from the reference
+    /// renderer's pixel output — a "prettier than DjVuLibre" quality mode, not
+    /// a faithfulness fix. Leaving it `false` keeps `render_pixmap` and
+    /// friends byte-identical to prior releases.
+    pub mask_aa: bool,
 }
 
 impl Default for RenderOptions {
@@ -201,6 +214,7 @@ impl Default for RenderOptions {
             rotation: UserRotation::None,
             permissive: false,
             resampling: Resampling::Bilinear,
+            mask_aa: false,
         }
     }
 }
@@ -760,6 +774,45 @@ fn mask_box_coverage(
     // cover > 16.8 M foreground bits, where `count * 255` overflows u32 (wrong
     // value in release, panic in debug).
     ((count as u64 * 255 + total as u64 / 2) / total as u64) as u8
+}
+
+/// Bilinearly interpolate the JB2 mask's 0/255 bits as a continuous coverage
+/// field, for anti-aliased glyph edges at **upscale** (zoom > 1).
+///
+/// Treats each set mask bit as full foreground coverage (255) and each clear
+/// bit as full background coverage (0), then blends the four nearest mask
+/// pixels the same way [`sample_bilinear`] blends a [`Pixmap`] — mirroring
+/// `mask_box_coverage`'s box-average approach used at *downscale*, but for the
+/// opposite direction.
+///
+/// Returns the interpolated foreground fraction, 0 (all background) ..= 255
+/// (all foreground) — same convention as `mask_box_coverage`.
+///
+/// Opt-in via [`RenderOptions::mask_aa`]: DjVuLibre hard-edges the mask under
+/// zoom, so this is a deliberate, judged divergence from the reference
+/// renderer, not a faithfulness fix — the default (`mask_aa: false`) path
+/// never calls this function.
+#[inline]
+fn mask_bilinear_coverage(mask: &crate::bitmap::Bitmap, fx: u32, fy: u32) -> u8 {
+    let x0 = (fx >> FRACBITS).min(mask.width.saturating_sub(1));
+    let y0 = (fy >> FRACBITS).min(mask.height.saturating_sub(1));
+    let x1 = (x0 + 1).min(mask.width.saturating_sub(1));
+    let y1 = (y0 + 1).min(mask.height.saturating_sub(1));
+
+    let tx = fx & FRAC_MASK;
+    let ty = fy & FRAC_MASK;
+
+    let bit = |x: u32, y: u32| -> u32 { if mask.get(x, y) { 255 } else { 0 } };
+    let v00 = bit(x0, y0);
+    let v10 = bit(x1, y0);
+    let v01 = bit(x0, y1);
+    let v11 = bit(x1, y1);
+
+    let top = v00 * (FRAC - tx) + v10 * tx;
+    let bot = v01 * (FRAC - tx) + v11 * tx;
+    let numerator = top * (FRAC - ty) + bot * ty;
+    // Same shape as sample_bilinear's lerp: v <= 255 — no clamp needed.
+    ((numerator + (1 << (2 * FRACBITS - 1))) >> (2 * FRACBITS)) as u8
 }
 
 /// Find the center foreground pixel in a mask box for palette color lookup.
@@ -2161,6 +2214,14 @@ fn composite_rows_bilevel_one(
                 // Anti-aliased: coverage fraction → gray.
                 255 - mask_box_coverage(mask, fx, fy, fx_step, fy_step)
             }
+        } else if ctx.opts.mask_aa && ctx.mask_shift == 0 {
+            // D_AA_ZOOM (opt-in): this branch is only reachable past the exact
+            // 1:1 early return above, so `!downscale` here means a genuine
+            // upscale (zoom > 1) in at least one axis. Bilinearly interpolate
+            // the mask's 0/255 bits instead of the hard nearest-bit lookup —
+            // smooths glyph edges under zoom. Default `mask_aa: false` never
+            // takes this branch, so the fast nearest path below is untouched.
+            255 - mask_bilinear_coverage(mask, fx, fy)
         } else if px < mask.width && py < mask.height && mask.get(px, py) {
             0u8
         } else {
@@ -2508,19 +2569,55 @@ fn composite_rows_bilinear_one(
         (row0, row1, bg.width, ty)
     });
 
+    // D_AA_ZOOM (opt-in): this function is only invoked when `!downscale`
+    // (composite_into/composite_rows dispatch downscale to the area-average
+    // path), but that includes an exact page-level 1:1 render whose *bg*
+    // plane is subsampled (bg_x_q24/bg_y_q24 != 1<<24) — very common for
+    // scanned BG44 pages — which fails the "extra-tight" 1:1 fast path above
+    // and falls through here too. Mask AA must only kick in on a genuine
+    // zoom (upscale in at least one axis), never on that native 1:1 case, so
+    // gate on `fx_step`/`fy_step` directly rather than reusing `!downscale`.
+    let mask_upscale =
+        ctx.opts.mask_aa && ctx.mask_shift == 0 && (fx_step < FRAC || fy_step < FRAC);
+
     for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-        let is_fg = !mask_all_bg
+        // `coverage` generalises the binary `is_fg` lookup to a 0..=255
+        // foreground fraction: 0 = fully background, 255 = fully foreground,
+        // matching `mask_bilinear_coverage`'s convention. With `mask_aa`
+        // disabled (default) it only ever takes the values 0 or 255 via the
+        // exact same nearest-bit test as before, and the two special cases
+        // below reproduce the original is_fg true/false branches exactly —
+        // byte-identical output.
+        let coverage: u8 = if mask_upscale {
+            if mask_all_bg {
+                0
+            } else {
+                ctx.mask.map_or(0, |m| mask_bilinear_coverage(m, fx, fy))
+            }
+        } else if !mask_all_bg
             && mask_hoist.is_some_and(|(mask_row, mask_w)| {
                 let pxu = px as usize;
                 pxu < mask_w as usize
                     && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
-            });
+            })
+        {
+            255
+        } else {
+            0
+        };
 
-        let (r, g, b) = if is_fg {
-            if let Some(pal) = ctx.fg_palette {
+        let (r, g, b) = if coverage == 0 {
+            if let Some((row0, row1, bg_w, ty)) = bg_rows {
+                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+                bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
+            } else {
+                (255, 255, 255)
+            }
+        } else {
+            let (fr, fg_g, fb) = if let Some(pal) = ctx.fg_palette {
                 let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                 (color.r, color.g, color.b)
             } else if let Some(fg) = ctx.fg44 {
@@ -2529,12 +2626,24 @@ fn composite_rows_bilinear_one(
                 sample_bilinear(fg, fg_fx, fg_fy)
             } else {
                 (0, 0, 0)
+            };
+            if coverage == 255 {
+                (fr, fg_g, fb)
+            } else {
+                // Partial coverage (mask_aa only): blend fg/bg proportionally
+                // to the interpolated mask coverage for a smoothed glyph edge.
+                let (br, bg_g, bb) = if let Some((row0, row1, bg_w, ty)) = bg_rows {
+                    let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+                    bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
+                } else {
+                    (255, 255, 255)
+                };
+                let cov = coverage as u32;
+                let inv = 255 - cov;
+                let blend =
+                    |f: u8, b: u8| -> u8 { ((f as u32 * cov + b as u32 * inv + 127) / 255) as u8 };
+                (blend(fr, br), blend(fg_g, bg_g), blend(fb, bb))
             }
-        } else if let Some((row0, row1, bg_w, ty)) = bg_rows {
-            let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-            bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
-        } else {
-            (255, 255, 255)
         };
 
         // D1: skip LUT scatter reads when gamma is the identity mapping.
@@ -3708,6 +3817,347 @@ mod tests {
         assert_eq!(mask_box_coverage(&bm_empty, 0, 0, 2 * FRAC, 2 * FRAC), 0);
     }
 
+    // ── D_AA_ZOOM: mask_aa (bilinear coverage AA at upscale) ─────────────────
+
+    #[test]
+    fn mask_bilinear_coverage_values() {
+        use crate::bitmap::Bitmap;
+        // 4×1 mask: bit 0 set, rest clear.
+        let mut bm = Bitmap::new(4, 1);
+        bm.set(0, 0, true);
+        // Exactly on a pixel centre (tx=ty=0): pure sample of bit 0 → 255.
+        assert_eq!(mask_bilinear_coverage(&bm, 0, 0), 255);
+        // Halfway between bit 0 (255) and bit 1 (0): (255+0)/2 rounded → 128.
+        assert_eq!(mask_bilinear_coverage(&bm, 8, 0), 128);
+        // Halfway between bit 1 and bit 2, both clear → 0.
+        assert_eq!(mask_bilinear_coverage(&bm, 24, 0), 0);
+        // All-foreground mask → 255 everywhere, no interpolation artifacts.
+        let mut bm_full = Bitmap::new(2, 2);
+        bm_full.set(0, 0, true);
+        bm_full.set(1, 0, true);
+        bm_full.set(0, 1, true);
+        bm_full.set(1, 1, true);
+        assert_eq!(mask_bilinear_coverage(&bm_full, 4, 4), 255);
+        // All-background mask → 0 everywhere.
+        let bm_empty = Bitmap::new(2, 2);
+        assert_eq!(mask_bilinear_coverage(&bm_empty, 4, 4), 0);
+    }
+
+    /// `composite_rows_bilevel_one` at 2× upscale with `mask_aa: false` (the
+    /// default) must reproduce the exact nearest-bit pattern — hard requirement
+    /// that the opt-in flag changes nothing unless explicitly enabled.
+    #[test]
+    fn composite_bilevel_one_mask_aa_disabled_matches_nearest_at_upscale() {
+        let opts = RenderOptions::default();
+        assert!(!opts.mask_aa);
+        let mut mask = crate::bitmap::Bitmap::new(4, 1);
+        mask.set(0, 0, true); // only x=0 is foreground
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 4, 1, None, Some(&mask), &lut, 8, 2);
+
+        let fx_step = FRAC / 2; // 2× upscale
+        let fy_step = FRAC / 2;
+        let mut row = vec![0u8; 8 * 4];
+        composite_rows_bilevel_one(&ctx, 0, fx_step, fy_step, &mut row);
+
+        // Nearest-neighbour duplication of source pixels [0,0,1,1,2,2,3,3];
+        // only source pixel 0 is foreground (black), rest background (white).
+        let expected_black = [true, true, false, false, false, false, false, false];
+        for (x, &is_black) in expected_black.iter().enumerate() {
+            let p = &row[x * 4..x * 4 + 4];
+            if is_black {
+                assert_eq!(p, [0, 0, 0, 255], "expected black at x={x}");
+            } else {
+                assert_eq!(p, [255, 255, 255, 255], "expected white at x={x}");
+            }
+        }
+    }
+
+    /// With `mask_aa: true` at the same 2× upscale, the pixel straddling the
+    /// mask edge (x=1, halfway between the set bit 0 and clear bit 1) must come
+    /// out as an intermediate gray — proof the bilinear coverage path actually
+    /// smooths the edge instead of just reproducing nearest-neighbour.
+    #[test]
+    fn composite_bilevel_one_mask_aa_enabled_smooths_edge_at_upscale() {
+        let opts = RenderOptions {
+            mask_aa: true,
+            ..Default::default()
+        };
+        let mut mask = crate::bitmap::Bitmap::new(4, 1);
+        mask.set(0, 0, true);
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 4, 1, None, Some(&mask), &lut, 8, 2);
+
+        let fx_step = FRAC / 2;
+        let fy_step = FRAC / 2;
+        let mut row = vec![0u8; 8 * 4];
+        composite_rows_bilevel_one(&ctx, 0, fx_step, fy_step, &mut row);
+
+        // x=0 lands exactly on the set bit → still pure black.
+        assert_eq!(&row[0..4], [0, 0, 0, 255], "x=0 exact sample stays black");
+        // x=1 straddles bit 0 (fg) / bit 1 (bg) at tx=8/16 → coverage 128 → gray 127.
+        assert_eq!(&row[4..8], [127, 127, 127, 255], "x=1 is a blended gray");
+        // x=2 onward land entirely within the background region → white.
+        for x in 2..8usize {
+            assert_eq!(
+                &row[x * 4..x * 4 + 4],
+                [255, 255, 255, 255],
+                "x={x} stays white"
+            );
+        }
+    }
+
+    /// `mask_aa` must be a no-op on the exact 1:1 fast path (native scale) —
+    /// the flag only ever matters past the early return for genuine upscale.
+    #[test]
+    fn composite_bilevel_one_mask_aa_is_noop_at_native_scale() {
+        let mut mask = crate::bitmap::Bitmap::new(4, 1);
+        mask.set(0, 0, true);
+        let lut = identity_lut();
+
+        let opts_off = RenderOptions::default();
+        let ctx_off = synth_ctx(&opts_off, 4, 1, None, Some(&mask), &lut, 4, 1);
+        let mut row_off = vec![0u8; 4 * 4];
+        composite_rows_bilevel_one(&ctx_off, 0, FRAC, FRAC, &mut row_off);
+
+        let opts_on = RenderOptions {
+            mask_aa: true,
+            ..Default::default()
+        };
+        let ctx_on = synth_ctx(&opts_on, 4, 1, None, Some(&mask), &lut, 4, 1);
+        let mut row_on = vec![0u8; 4 * 4];
+        composite_rows_bilevel_one(&ctx_on, 0, FRAC, FRAC, &mut row_on);
+
+        assert_eq!(row_off, row_on, "mask_aa must not affect native 1:1 scale");
+    }
+
+    /// `mask_aa` must be a no-op on downscale — the bilinear-upscale branch is
+    /// only reachable when `!downscale`, so a `mask_aa: true` downscale render
+    /// must still take the existing `mask_box_coverage` path unchanged.
+    #[test]
+    fn composite_bilevel_one_mask_aa_is_noop_at_downscale() {
+        let mut mask = crate::bitmap::Bitmap::new(4, 1);
+        mask.set(0, 0, true);
+        mask.set(2, 0, true);
+        mask.set(3, 0, true);
+        let lut = identity_lut();
+
+        let fx_step = 4 * FRAC; // 4× downscale
+        let fy_step = FRAC;
+
+        let opts_off = RenderOptions::default();
+        let ctx_off = synth_ctx(&opts_off, 4, 1, None, Some(&mask), &lut, 1, 1);
+        let mut row_off = vec![0u8; 4];
+        composite_rows_bilevel_one(&ctx_off, 0, fx_step, fy_step, &mut row_off);
+
+        let opts_on = RenderOptions {
+            mask_aa: true,
+            ..Default::default()
+        };
+        let ctx_on = synth_ctx(&opts_on, 4, 1, None, Some(&mask), &lut, 1, 1);
+        let mut row_on = vec![0u8; 4];
+        composite_rows_bilevel_one(&ctx_on, 0, fx_step, fy_step, &mut row_on);
+
+        assert_eq!(row_off, row_on, "mask_aa must not affect downscale");
+    }
+
+    /// `composite_rows_bilinear_one` (colour path) at 2× upscale with
+    /// `mask_aa: false` must reproduce the exact binary nearest-bit coverage —
+    /// same hard byte-identical requirement as the bilevel path, for the
+    /// colour+mask compositor.
+    #[test]
+    fn composite_bilinear_one_mask_aa_disabled_matches_nearest_at_upscale() {
+        let opts = RenderOptions::default();
+        let bg = Pixmap::new(8, 1, 200, 150, 100, 255);
+        let mut mask = crate::bitmap::Bitmap::new(8, 1);
+        mask.set(0, 0, true); // only x=0 is foreground
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 8, 1, Some(&bg), Some(&mask), &lut, 4, 1);
+
+        let fx_step = FRAC / 2; // 2× upscale
+        let fy_step = FRAC / 2;
+        let mut row = vec![0u8; 4 * 4];
+        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row);
+
+        // Nearest px indices for ox=0..4 are [0,0,1,1]; only px 0 is foreground,
+        // rendered black (no FG44 layer ⇒ (0,0,0)); px 1 is background colour.
+        assert_eq!(&row[0..4], [0, 0, 0, 255], "ox=0 nearest foreground");
+        assert_eq!(&row[4..8], [0, 0, 0, 255], "ox=1 nearest foreground");
+        assert_eq!(&row[8..12], [200, 150, 100, 255], "ox=2 background");
+        assert_eq!(&row[12..16], [200, 150, 100, 255], "ox=3 background");
+    }
+
+    /// With `mask_aa: true` the pixel straddling the mask edge blends the
+    /// (black) foreground colour with the background colour proportionally to
+    /// the interpolated coverage, instead of snapping to one or the other.
+    #[test]
+    fn composite_bilinear_one_mask_aa_enabled_blends_fg_bg_at_upscale() {
+        let opts = RenderOptions {
+            mask_aa: true,
+            ..Default::default()
+        };
+        let bg = Pixmap::new(8, 1, 200, 150, 100, 255);
+        let mut mask = crate::bitmap::Bitmap::new(8, 1);
+        mask.set(0, 0, true);
+        let lut = identity_lut();
+        let ctx = synth_ctx(&opts, 8, 1, Some(&bg), Some(&mask), &lut, 4, 1);
+
+        let fx_step = FRAC / 2;
+        let fy_step = FRAC / 2;
+        let mut row = vec![0u8; 4 * 4];
+        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row);
+
+        // ox=0 lands exactly on the set bit → still pure (black) foreground.
+        assert_eq!(
+            &row[0..4],
+            [0, 0, 0, 255],
+            "ox=0 exact sample stays foreground"
+        );
+        // ox=1 straddles the edge at coverage 128 → blend(0, 200/150/100, 128).
+        assert_eq!(
+            &row[4..8],
+            [100, 75, 50, 255],
+            "ox=1 is a fg/bg blend, not a hard snap"
+        );
+        // ox=2, ox=3 are entirely background.
+        assert_eq!(&row[8..12], [200, 150, 100, 255], "ox=2 background");
+        assert_eq!(&row[12..16], [200, 150, 100, 255], "ox=3 background");
+    }
+
+    /// Subtle no-op case: an exact page-level 1:1 render (`fx_step == fy_step
+    /// == FRAC`) whose *background* plane is internally subsampled still falls
+    /// through to the general B-series loop (the "extra-tight" 1:1 fast path
+    /// requires `bg_x_q24 == 1<<24`, which fails here) — but `mask_aa` must
+    /// still be a no-op there because there is no genuine axis upscale.
+    #[test]
+    fn composite_bilinear_one_mask_aa_is_noop_when_bg_subsampled_at_native_scale() {
+        let bg = Pixmap::new(4, 1, 200, 150, 100, 255); // subsampled: page_w=8, bg_w=4
+        let mut mask = crate::bitmap::Bitmap::new(8, 1);
+        mask.set(0, 0, true);
+        let lut = identity_lut();
+
+        let opts_off = RenderOptions::default();
+        let ctx_off = synth_ctx(&opts_off, 8, 1, Some(&bg), Some(&mask), &lut, 8, 1);
+        assert_ne!(
+            ctx_off.bg_x_q24,
+            1 << 24,
+            "test must exercise subsampled bg"
+        );
+        let mut row_off = vec![0u8; 8 * 4];
+        composite_rows_bilinear_one(&ctx_off, 0, FRAC, FRAC, &mut row_off);
+
+        let opts_on = RenderOptions {
+            mask_aa: true,
+            ..Default::default()
+        };
+        let ctx_on = synth_ctx(&opts_on, 8, 1, Some(&bg), Some(&mask), &lut, 8, 1);
+        let mut row_on = vec![0u8; 8 * 4];
+        composite_rows_bilinear_one(&ctx_on, 0, FRAC, FRAC, &mut row_on);
+
+        assert_eq!(
+            row_off, row_on,
+            "mask_aa must not affect native 1:1 scale even with a subsampled bg plane"
+        );
+    }
+
+    /// Integration-level: `render_pixmap` at native scale on a real bilevel
+    /// document must be byte-identical whether `mask_aa` is on or off — the
+    /// no-op-at-scale-≤1 guarantee holding end-to-end, not just at the
+    /// synthetic-context unit level.
+    #[test]
+    fn render_pixmap_mask_aa_is_noop_at_native_scale_real_doc() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let (w, h) = (page.width() as u32, page.height() as u32);
+
+        let opts_off = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let opts_on = RenderOptions {
+            width: w,
+            height: h,
+            mask_aa: true,
+            ..Default::default()
+        };
+        let pm_off = render_pixmap(page, &opts_off).expect("render should succeed");
+        let pm_on = render_pixmap(page, &opts_on).expect("render should succeed");
+        assert_eq!(
+            pm_off.data, pm_on.data,
+            "mask_aa must be a no-op at native scale"
+        );
+    }
+
+    /// Integration-level: `render_pixmap` at downscale on a real bilevel
+    /// document must also be byte-identical between `mask_aa` on/off.
+    #[test]
+    fn render_pixmap_mask_aa_is_noop_at_downscale_real_doc() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let (w, h) = ((page.width() as u32) / 2, (page.height() as u32) / 2);
+
+        let opts_off = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let opts_on = RenderOptions {
+            width: w,
+            height: h,
+            mask_aa: true,
+            ..Default::default()
+        };
+        let pm_off = render_pixmap(page, &opts_off).expect("render should succeed");
+        let pm_on = render_pixmap(page, &opts_on).expect("render should succeed");
+        assert_eq!(
+            pm_off.data, pm_on.data,
+            "mask_aa must be a no-op at downscale"
+        );
+    }
+
+    /// Integration-level: at genuine 2× and 4× upscale on a real bilevel
+    /// document, `mask_aa: true` must actually change the output (introduce
+    /// intermediate gray values along glyph edges) — proving the flag is wired
+    /// end-to-end, not just correct in isolated unit tests.
+    #[test]
+    fn render_pixmap_mask_aa_smooths_edges_at_zoom_real_doc() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let (pw, ph) = (page.width() as u32, page.height() as u32);
+
+        for &zoom in &[2u32, 4u32] {
+            let opts_off = RenderOptions {
+                width: pw * zoom,
+                height: ph * zoom,
+                ..Default::default()
+            };
+            let opts_on = RenderOptions {
+                width: pw * zoom,
+                height: ph * zoom,
+                mask_aa: true,
+                ..Default::default()
+            };
+            let pm_off = render_pixmap(page, &opts_off).expect("nearest render should succeed");
+            let pm_on = render_pixmap(page, &opts_on).expect("AA render should succeed");
+            assert_eq!(pm_off.width, pm_on.width);
+            assert_eq!(pm_off.height, pm_on.height);
+
+            assert_ne!(
+                pm_off.data, pm_on.data,
+                "mask_aa=true must change output at {zoom}× zoom"
+            );
+            let has_intermediate_gray = pm_on
+                .data
+                .chunks_exact(4)
+                .any(|px| px[0] == px[1] && px[1] == px[2] && px[0] != 0 && px[0] != 255);
+            assert!(
+                has_intermediate_gray,
+                "mask_aa=true should introduce intermediate gray values at {zoom}× zoom"
+            );
+        }
+    }
+
     /// RenderOptions default values.
     #[test]
     fn render_options_default() {
@@ -3717,6 +4167,7 @@ mod tests {
         assert_eq!(opts.bold, 0);
         assert!(!opts.aa);
         assert_eq!(opts.resampling, Resampling::Bilinear);
+        assert!(!opts.mask_aa, "mask_aa must default to false (opt-in)");
     }
 
     /// RenderOptions can be constructed with explicit fields.

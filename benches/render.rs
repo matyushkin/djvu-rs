@@ -33,6 +33,7 @@ fn render_opts(width: u32, height: u32, scale: f32) -> djvu_rs::djvu_render::Ren
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     }
 }
 
@@ -80,6 +81,7 @@ fn bench_render_at_dpi(c: &mut Criterion) {
             rotation: djvu_rs::djvu_render::UserRotation::None,
             permissive: false,
             resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+            mask_aa: false,
         };
 
         group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {
@@ -118,6 +120,7 @@ fn bench_render_coarse(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
 
     c.bench_function("render_coarse", |b| {
@@ -162,6 +165,7 @@ fn bench_render_corpus_color(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
     c.bench_function("render_corpus_color", |b| {
         b.iter(|| {
@@ -207,6 +211,7 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
     c.bench_function("render_corpus_bilevel", |b| {
         b.iter(|| {
@@ -267,6 +272,7 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
             rotation: djvu_rs::djvu_render::UserRotation::None,
             permissive: false,
             resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+            mask_aa: false,
         };
         let buf_len = opts.width as usize * opts.height as usize * 4;
 
@@ -567,6 +573,7 @@ fn bench_render_scaled(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
     group.bench_function("bilinear", |b| {
         b.iter(|| {
@@ -583,6 +590,7 @@ fn bench_render_scaled(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Lanczos3,
+        mask_aa: false,
     };
     group.bench_function("lanczos3", |b| {
         b.iter(|| {
@@ -675,6 +683,7 @@ fn bench_render_colorbook(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
 
     c.bench_function("render_colorbook", |b| {
@@ -718,6 +727,7 @@ fn bench_render_colorbook_stages(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
 
     // Warm the bg cache (decoded_bg44_partial) — we want to measure each stage in isolation.
@@ -792,6 +802,7 @@ fn bench_render_colorbook_cold(c: &mut Criterion) {
         rotation: djvu_rs::djvu_render::UserRotation::None,
         permissive: false,
         resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+        mask_aa: false,
     };
 
     c.bench_function("render_colorbook_cold", |b| {
