@@ -13,8 +13,15 @@
 //! 9       1     flags            bits 0-1: rotation, bit 6: orientation
 //! ```
 //!
-//! The minimum INFO chunk size is 10 bytes; some older files may omit the
-//! trailing fields.
+//! The canonical INFO chunk size is 10 bytes, but `width`/`height` are the
+//! only fields DjVuLibre treats as mandatory — real-world files (and
+//! `djvudump`/`ddjvu`) accept anything down to 4 bytes, defaulting the
+//! version/dpi/gamma/flags fields that are absent. `tests/fixtures/carte.djvu`
+//! (a real-world bundled document, byte-exact against DjVuLibre's own
+//! tolerance — see `djvu_document::tests::parse_carte_with_short_info_chunk`)
+//! ships a 5-byte INFO chunk (width, height, version byte only, no
+//! dpi/gamma/flags), so this parser must accept it too rather than reject the
+//! whole document as truncated.
 
 use crate::error::IffError;
 
@@ -53,9 +60,14 @@ impl PageInfo {
     ///
     /// # Errors
     ///
-    /// Returns [`IffError::Truncated`] if the data is shorter than 10 bytes.
+    /// Returns [`IffError::Truncated`] if the data is shorter than 4 bytes
+    /// (not enough to recover `width`/`height`). Anything from 4 bytes up
+    /// parses successfully; fields beyond what's present (version, dpi,
+    /// gamma, flags) fall back to their DjVuLibre-compatible defaults —
+    /// matching real-world short INFO chunks (e.g. `carte.djvu`'s 5-byte
+    /// chunk) that DjVuLibre itself accepts.
     pub fn parse(data: &[u8]) -> Result<Self, IffError> {
-        if data.len() < 10 {
+        if data.len() < 4 {
             return Err(IffError::Truncated);
         }
 
@@ -63,11 +75,14 @@ impl PageInfo {
         let width = u16::from_be_bytes(data[0..2].try_into().map_err(|_| IffError::Truncated)?);
         let height = u16::from_be_bytes(data[2..4].try_into().map_err(|_| IffError::Truncated)?);
 
-        // DPI is little-endian u16 at offset 6
-        let dpi = u16::from_le_bytes(data[6..8].try_into().map_err(|_| IffError::Truncated)?);
+        // DPI is little-endian u16 at offset 6; absent (short chunk) → default.
+        let dpi = match data.get(6..8) {
+            Some(b) => u16::from_le_bytes(b.try_into().map_err(|_| IffError::Truncated)?),
+            None => 300,
+        };
 
-        // Gamma: byte value / 10.0 (e.g. 22 → 2.2)
-        let gamma_byte = data[8];
+        // Gamma: byte value / 10.0 (e.g. 22 → 2.2); absent → default.
+        let gamma_byte = data.get(8).copied().unwrap_or(0);
         let gamma = if gamma_byte == 0 {
             2.2_f32 // default gamma when not specified
         } else {
@@ -78,8 +93,8 @@ impl PageInfo {
         // Real-world DjVu files use three specific flag values:
         //   5 → CW 90°    2 → 180°    6 → CW 270° (= CCW 90°)
         // Other values (including 1, 3) are treated as no rotation,
-        // matching DjVuLibre behavior.
-        let flags = data[9];
+        // matching DjVuLibre behavior. Absent (short chunk) → no rotation.
+        let flags = data.get(9).copied().unwrap_or(0);
         let rotation = match flags & 0x07 {
             5 => Rotation::Cw90,
             2 => Rotation::Rot180,
@@ -125,14 +140,46 @@ mod tests {
     }
 
     #[test]
-    fn too_short_is_error() {
-        let data = [0u8; 9]; // one byte short
+    fn shorter_than_width_height_is_error() {
+        let data = [0u8; 3]; // can't even recover width/height
         assert_eq!(PageInfo::parse(&data).unwrap_err(), IffError::Truncated);
     }
 
     #[test]
     fn empty_is_error() {
         assert_eq!(PageInfo::parse(&[]).unwrap_err(), IffError::Truncated);
+    }
+
+    /// Real-world short INFO chunk (`tests/fixtures/carte.djvu`: width, height,
+    /// and a single version byte, no dpi/gamma/flags) must parse rather than
+    /// error — DjVuLibre (`djvudump`/`ddjvu`) accepts this file, so rejecting
+    /// it as `Truncated` was a parser-strictness bug, not a corrupt fixture.
+    #[test]
+    fn carte_style_five_byte_info_parses_with_defaults() {
+        let data = [0x10, 0x68, 0x09, 0xFC, 0x11]; // width=4200, height=2556, version=17
+        let info = PageInfo::parse(&data).expect("short INFO chunk should parse");
+        assert_eq!(info.width, 4200);
+        assert_eq!(info.height, 2556);
+        assert_eq!(info.dpi, 300, "dpi should default when absent");
+        assert!(
+            (info.gamma - 2.2).abs() < 0.01,
+            "gamma should default to 2.2 when absent"
+        );
+        assert_eq!(info.rotation, Rotation::None, "flags absent → no rotation");
+    }
+
+    /// Nine bytes (one short of the canonical 10) still lacks only the flags
+    /// byte — dpi and gamma are present and must be honored, not defaulted.
+    #[test]
+    fn nine_bytes_parses_dpi_and_gamma_defaults_only_flags() {
+        let mut data = chicken_info_bytes().to_vec();
+        data.truncate(9);
+        let info = PageInfo::parse(&data).expect("should parse");
+        assert_eq!(info.width, 181);
+        assert_eq!(info.height, 240);
+        assert_eq!(info.dpi, 100);
+        assert!((info.gamma - 2.2).abs() < 0.01);
+        assert_eq!(info.rotation, Rotation::None);
     }
 
     #[test]

@@ -9115,7 +9115,10 @@ mmap` enabled, `djvu_render::tests::progressive_decoder_chunk_decodes_are_on_not
 fails (expects 6 decode calls, observes 0). Verified via `git stash` that this
 reproduces identically on the pre-round-38 tree — unrelated to this diff. CI's
 test gate doesn't hit it (`--features cli` doesn't enable `mmap`), so it's
-recorded here rather than fixed in scope.
+recorded here rather than fixed in scope. **Fixed in round 41** (MMAP_TEST_THREADLOCAL
+below) — root cause turned out to be `parallel`, not `mmap`, dispatching the
+counted decode onto a rayon worker thread invisible to the test's thread-local
+counter.
 
 **Follow-ups**: (1) B6 madvise deserves a re-measurement on higher-latency
 storage (network share, spinning disk, or a VM with artificially throttled I/O)
@@ -9232,3 +9235,105 @@ heap-allocated shape/strides arrays threaded through `view.internal` for cleanup
 which is more `unsafe` surface for a marginal ergonomic win (`np.asarray(pixmap)`
 directly vs. `np.frombuffer(pixmap, ...).reshape(...)`); left as-is on a
 safety/benefit tradeoff.
+## Perf round 42 (2026-07-06) — two recorded defects: `carte.djvu` parse rejection, mmap/parallel test failure
+
+Two independent fixes carried over from earlier rounds' "known issue" notes
+(PR #525, PR #529): `carte.djvu` failing `DjVuDocument::parse` with
+`Iff(Truncated)`, and `progressive_decoder_chunk_decodes_are_on_not_on_squared`
+failing under extra feature combinations. Both category **fix/robustness**, not
+performance — no benchmark numbers, just root-caused and closed.
+
+### CARTE_INFO_TRUNCATED — short INFO chunk rejected as truncated — **Fixed** (2026-07-06)
+
+**Diagnosis.** `carte.djvu` (`tests/fixtures/carte.djvu` and the identical
+`references/djvujs/library/assets/carte.djvu`) has been noted as a truncated/
+unparseable fixture since at least round 15 (`PERF_EXPERIMENTS.md` lines
+~2961, ~6251, ~8513, ~8679 all skip it as "truncated"). Checked whether it's a
+genuinely corrupt fixture or a parser bug: `djvudump`/`ddjvu`/`djvused` (real
+DjVuLibre, `/opt/homebrew/bin`) all parse and render the file cleanly —
+`djvused -e "select 1; size"` reports `width=4200 height=2556`, matching the
+file's own `INFO` chunk. Manually walked the IFF byte stream (Python):
+`AT&T`(4) + `FORM`(4) + big-endian length(4) = 154270, ending exactly at the
+154282-byte file's last byte — no dangling padding, no length overrun,
+byte-exact framing all the way down through `DIRM`/`FORM:THUM`/`FORM:DJVU` and
+every leaf chunk inside it (`INFO`, `Sjbz`, 4×`BG44`, `FG44`, `ANTz`, `TXTz`).
+The single anomaly: `carte.djvu`'s `INFO` chunk is **5 bytes**
+(`10 68 09 fc 11` = width 4200, height 2556, one version byte, no
+dpi/gamma/flags), where every other fixture in the corpus (`boy.djvu`,
+`colorbook.djvu`, `chicken.djvu`, etc. — checked all of `tests/fixtures`,
+`tests/corpus`, `references/djvujs/library/assets`) ships the canonical
+10-byte `INFO`. `src/info.rs`'s `PageInfo::parse` hard-required 10 bytes
+(`too_short_is_error` even tested 9 bytes as the strictness bar), so
+`DjVuDocument::parse` failed early with `Iff(Truncated)` on this one file —
+DjVuLibre tolerates variable-length `INFO` chunks (missing trailing fields
+default: dpi 300, gamma 2.2, no rotation) and this corpus fixture is the proof;
+our parser did not.
+
+**Fix.** `PageInfo::parse` (`src/info.rs`) now requires only 4 bytes
+(width + height — the only fields DjVuLibre effectively treats as mandatory)
+and defaults `dpi`/`gamma`/`flags` when the chunk ends before those offsets,
+matching DjVuLibre's own tolerance rather than inventing new leniency.
+Regression tests: `info::tests::carte_style_five_byte_info_parses_with_defaults`
+(unit-level, the exact 5 bytes from the fixture) and
+`djvu_document::tests::parse_carte_with_short_info_chunk` (document-level,
+reads the real fixture and asserts `DjVuDocument::parse` now succeeds with the
+right dimensions). Existing `too_short_is_error` renamed/adjusted to
+`shorter_than_width_height_is_error` (< 4 bytes) since 9 bytes is now valid;
+added `nine_bytes_parses_dpi_and_gamma_defaults_only_flags` to pin that
+dpi/gamma are still honored when present and only the trailing flags byte is
+defaulted. `examples/interop_pixdiff --corpus` now processes `carte.djvu`
+instead of skipping it with a parse error — worth noting the *rendered pixels*
+still diverge heavily from `ddjvu` (mean-abs 73.76, a separate, already-tracked
+issue: `djvu-iw44`'s chroma-half decode of this file produces noise, pinned
+since #99 — unrelated to and unblocked by this parse fix, comment updated in
+`crates/djvu-iw44/src/lib.rs` to stop attributing that noise to the (now-fixed)
+parser rejection).
+
+**Decision.** Parser bug, fixed. Not a corrupt fixture — no `SOURCES.md` note
+needed.
+
+### MMAP_TEST_THREADLOCAL — feature-sensitive decode-count assertion — **Fixed (test)** (2026-07-06)
+
+**Diagnosis.** PR #529 recorded `progressive_decoder_chunk_decodes_are_on_not_on_squared`
+failing "under `--features mmap`" (expects 6 decode calls, observes 0).
+Reproduced with the full `--features cli,mmap,parallel` combo — but bisecting
+the feature list shows **`mmap` is not implicated**: `cargo test --features
+mmap --lib` (692/692) and even the full suite with `mmap` alone are green;
+`cargo test --features parallel --lib` alone reproduces the failure in
+isolation. The original report's feature list conflated the two.
+
+Root cause: the test counts `Iw44Image::decode_chunk` calls via a
+`#[cfg(test)]` `thread_local!` `Cell<usize>` (`BG44_CHUNK_DECODES`), set and
+read from the test's own thread. Under `parallel`, `decode_layers` (`#440`,
+round 40-ish PAR_DEC) runs the naive session's background decode inside
+`rayon::join(bg, fg)`. Calling `rayon::join` from a plain thread that is not
+already a rayon worker — the test thread — makes rayon bridge the whole join
+onto a worker thread from its shared *global* pool to execute it. Instrumented
+`count_bg44_chunk_decode()` with a `ThreadId` eprintln and confirmed: each of
+the 3 `render_progressive_step` calls in the naive loop executed its counted
+decodes on a *different* rayon worker thread (`ThreadId(10)`, `(12)`, `(5)`
+across the run), never the test's own thread — so the test-thread's
+thread-local view of the counter stays at 0 while the streamed
+(`ProgressiveDecoder::push_bg44_chunk`, called directly, no `rayon::join`)
+session is unaffected. The underlying O(N) vs O(N²) decode-count behavior is
+unchanged and correct; only the counting mechanism was blind to work done on
+another thread.
+
+**Fix.** Test-only change (`src/djvu_render.rs`). Under `#[cfg(feature =
+"parallel")]`, the whole measurement body now runs inside a dedicated,
+freshly-built single-worker `rayon::ThreadPoolBuilder::new().num_threads(1)`
+pool via `pool.install(...)`. With exactly one worker, any `rayon::join`
+bridged into it can only resolve on that same worker thread, so setting and
+reading `BG44_CHUNK_DECODES` from inside the pool keeps everything on one
+thread regardless of whether `parallel` is enabled — and because the pool is
+freshly built per test run (not rayon's shared global pool), this stays
+isolated from any other test's concurrent decode calls on other threads,
+preserving the original reason the counter was thread-local in the first
+place. Without `parallel`, the body runs directly as before (no rayon
+dependency pulled in when the feature is off). Verified green under
+`--features parallel`, `--features cli,mmap,parallel`, and default (no
+`parallel`) — 693/693 tests pass under the full `cli,mmap,parallel` combo (no
+other feature-combination failures found).
+
+**Decision.** Fixed the test, not the code — behavior was already correct,
+only the thread-local counting was feature-sensitive.
