@@ -7603,3 +7603,132 @@ IW44-size effort starts from the true, content-split picture instead of the
 misleading flat "1.2–1.6× worse than c44". The big interop-safe BG44 win was
 BG_DIFFUSE (round 17); the masked transform was shown unnecessary (round 20); this
 closes the "what's left" question for the IW44 background size axis.
+
+## Perf round 23 (2026-07-06) — diagnostics: BZZ encoder headroom + PDF DCT raster
+
+Two cheap diagnostic probes from the experiment-swarm queue (no shipped-code
+changes; new bench + two example drivers only).
+
+### BZZ_ENC_DIAG — is the BZZ encoder worth a suffix-sort upgrade? — **Diagnostic** (2026-07-06)
+
+**Question.** `EXPERIMENTS_INDEX.md` had zero BZZ *encoder* entries (only `BZZ_DEC_MTF`,
+decode side). BZZ compresses `TXTz`/`ANTz`/`DIRM`/`NAVM`/`FGbz`-palette payloads
+(`crates/djvu-bzz/src/encode.rs`, re-exported via `src/bzz_encode.rs`). Is a
+SA-IS/divsufsort-style suffix-sort rewrite worth queuing?
+
+**Algorithm identified.** `suffix_array_of_bwt_string` is **prefix-doubling with a
+two-pass counting/radix sort per round** (`O(n log n)`, not the naive `O(n² log n)`
+comparison sort). Block cap is `MAX_BLOCK_SIZE = 4 MiB`, matching DjVuLibre's
+`MAXBLOCK`. No suffix-sort crate dependency exists today; the whole thing is hand-rolled,
+`#![deny(unsafe_code)]`, and the encoder module is already `#[cfg(feature = "std")]`
+(so it's outside the no_std/wasm32 gate — an external suffix-sort dependency would not
+affect the `make check` no_std/wasm build).
+
+**Real corpus block sizes are small.** Scanned every `TXTz` payload in 7 corpus docs
+(malliavin, czech, DjVu3Spec, colorbook, watchmaker, conquete_paix, cable_1973):
+per-page decompressed plaintext averages **1.6–6.4 KB**, single largest chunk in the
+whole corpus is **~10.6 KB**. `DIRM` (directory metadata) stays under 5 KB even for a
+520-page document (grows with page *count*, not text volume). So BZZ, in practice, is
+called on small, per-page/per-chunk blocks — never on the 100 KB–4 MB inputs where a
+suffix-sort's asymptotic class dominates wall time.
+
+**Scaling measured on real (non-tiled) OCR text.** Concatenated the plaintext of 7
+corpus TXTz layers (2.25 MB total, genuinely varied content — tiling one block to
+reach size artificially creates periodicity that's *not* representative and was ruled
+out after an initial run showed misleading numbers) and timed `bzz_encode` on real
+prefixes:
+
+| n | compressed | time | ratio_n | ratio_time |
+|---|-----------|------|---------|-------------|
+| 10,000 B | 3,700 B (37.0%) | 1.7 ms | — | — |
+| 100,000 B | 27,755 B (27.8%) | 15.9 ms | 10.0× | 9.1× |
+| 500,000 B | 130,366 B (26.1%) | 80.6 ms | 5.0× | 5.1× |
+| 2,251,406 B | 515,610 B (22.9%) | 960.7 ms | 4.5× | 11.9× |
+
+100 KB→2.25 MB is 22.5× the bytes but 60× the time (~`n^1.3`), worse than the
+`n log n` prediction (~29×) — consistent with the doubling+counting-sort's known
+cache-unfriendliness at multi-hundred-KB+ scale (each round scatters over an array of
+size `m`, increasingly cache-hostile as `m` grows past L2/L3). Confirms the algorithm
+is already the right complexity class, not the naive one, but shows real headroom
+*if* block sizes ever grow into the 100 KB–4 MB range.
+
+**Share of real per-page encode time (same-session, not cross-run; wall-clock,
+provisional — this host runs concurrent agents, repeated runs varied 2× on the
+absolute ms but the *shape* held).** Timed `bzz_encode` of a representative
+per-page block against a full `PageEncoder` page encode of the same order, see
+`examples/bzz_encode_diag.rs`:
+
+| Fixture | Full page encode | Page's bzz_encode(text) | Share |
+|---|---|---|---|
+| `cable_1973_100133.djvu` p0, 2550×3301 native, **Lossless** (JB2 mask only) | 13–26 ms | 0.6–0.98 ms (5,286 B text) | **3–6 %** |
+| `colorbook.djvu` p0, 754×1223, **Quality** (JB2+IW44+FGbz) | 5–10 ms | 0.7–1.6 ms (6,394 B avg text) | **12–19 %** |
+
+Not negligible — roughly 3–19 % of a text-bearing page's total encode time across
+repeated runs, consistently higher on the smaller/lower-res colour page (less
+absolute JB2/IW44 work per page) than on the full-native-resolution bilevel scan.
+But it's secondary to JB2/IW44, which dominate both size (per `ENC_SIZE_DIAG`,
+94–99.9 % of compressed bytes) and, on any full-native-resolution scanned page,
+absolute encode time too.
+
+**Verdict.** BZZ encode is a real but bounded lever, not negligible and not a
+priority. The current `O(n log n)` doubling+radix-sort is the right complexity class
+already (not naive) and is fast in absolute terms for the block sizes DjVu actually
+produces (sub-2ms/page). A SA-IS/divsufsort-style linear suffix sort would mainly pay
+off if a future feature merges many pages' text into one large single BZZ block
+(nothing today does this — `TXTz`/`DIRM`/`NAVM`/`ANTz` are all naturally small,
+per-page or per-document-metadata). **Recommend:** queue as a low-priority,
+well-scoped future experiment, gated on either (a) a real large-single-block BZZ use
+case appearing, or (b) a follow-up that first profiles `bzz_encode` internally
+(BWT-sort vs MTF vs ZP-coding split — not done here) to confirm the suffix sort, not
+the entropy coder, is the dominated stage before investing in a rewrite. Added
+`bench_bzz_encode` to `benches/codecs.rs` (real TXTz payload from
+`cable_1973_100133.djvu`, decoded to plaintext) since none existed.
+
+### PDF_DCT_PROBE — potential of JPEG backgrounds in PDF export — **Diagnostic** (2026-07-06)
+
+**Correction to the probe's premise.** The task brief assumed colour/gray PDF page
+images ship as Deflate-compressed raster today. That's stale: **`src/pdf.rs` already
+ships DCTDecode (JPEG) by default** — `PdfOptions::default().jpeg_quality == Some(80)`,
+landed in `#59`/`de90a9f` ("DCTDecode background encoding — smaller PDF output",
+Issue #49) and already covered by tests (`pdf_options_default_is_jpeg80`,
+`dct_pdf_is_smaller_than_deflate_pdf`, etc.). `jpeg_quality: None` is the existing
+opt-out to Deflate. Bilevel-only pages (`is_bilevel_only`) are unaffected either way —
+they always ship as a 1-bit `ImageMask`/FlateDecode; that's the separate,
+already-deferred CCITT G4/JBIG2 item, not touched here.
+
+**So the actual open question was:** how much is the *shipped* JPEG-80 default
+winning today, is quality 85 a better operating point, and is blanket per-document
+JPEG the right default at all? Measured 3 real colour corpus pages, native resolution,
+Deflate (zlib level 6, matching `src/pdf.rs`'s `deflate()`) vs JPEG (`jpeg-encoder`,
+matching `encode_rgb_to_jpeg`) at q80/q85, round-tripped q80/q85 through `zune-jpeg`
+(already a `std`-feature dependency) and scored with `src/quality::ssim`:
+
+| Page | Deflate | JPEG q80 (shipped default) | JPEG q85 | SSIM q80 / q85 |
+|---|---|---|---|---|
+| `colorbook.djvu` p0, 2260×3669 | 1,376,897 B | 378,741 B (**3.64× smaller**) | 419,447 B (3.28×) | 0.9983 / 0.9986 |
+| `watchmaker.djvu` p0, 2550×3301 | 245,584 B | 767,028 B (**0.32× — JPEG is 3.1× LARGER**) | 839,949 B (0.29×) | 0.9996 / 0.9997 |
+| `big-scanned-page.djvu` p0, 6780×9148 | 33,867,843 B | 3,030,350 B (**11.18× smaller**) | 3,466,798 B (9.77×) | 0.9957 / 0.9964 |
+
+**Finding — the shipped default is content-dependent, and sometimes loses.**
+`colorbook`/`big-scanned-page` are photographic/gradient-rich colour scans: JPEG-80
+wins big (3.6×–11.2× smaller than Deflate), matching the historical "5–10× smaller"
+CHANGELOG note. But `watchmaker` p0 is a colour-mode scan of what's visually a
+near-flat white-paper-plus-text page — Deflate's LZ77+predictor crushes the huge flat
+regions (102.8× vs raw) far better than JPEG's block-DCT quantization does, so the
+*shipped default* (unconditional JPEG-80) makes this file **3.1× larger** than the
+Deflate alternative would, at no quality benefit (SSIM is already ≥0.999 either way).
+**Quality 85 is strictly worse than 80 on all 3 pages** — larger for +0.0002–0.0004
+SSIM, not a useful knob in the direction tested.
+
+**Verdict.** No further "should we add JPEG" work — it already shipped years ago and
+is well-tested. The real remaining lever is that `PdfOptions.jpeg_quality` is a single
+global choice for the whole document, applied blindly per page, and per-page image
+content varies enough (this 3-page sample already found a 3× regression case) that a
+blanket default can't be optimal for every document. **Recommended follow-up
+(not implemented here, per the probe's no-shipped-changes scope):** an opt-in
+`pdf_adaptive_raster` mode that encodes each colour page both ways and keeps
+whichever is smaller (or a cheap flatness/entropy heuristic to skip the double-encode
+cost) — bounded, backward-compatible (falls back to today's behaviour when off),
+and would close exactly the regression case this probe found without touching the
+CCITT/JBIG2-for-bilevel item, which stays out of scope. Not promoting the "quality 85"
+knob — measured strictly worse than the existing 80 default.
