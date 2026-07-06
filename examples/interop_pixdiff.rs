@@ -33,6 +33,7 @@ fn native_opts(w: u32, h: u32) -> RenderOptions {
         rotation: UserRotation::None,
         permissive: false,
         resampling: Resampling::Bilinear,
+        mask_aa: false,
     }
 }
 
