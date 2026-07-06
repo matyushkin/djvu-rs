@@ -683,6 +683,7 @@ mod tests {
         // struct-update nor reassign-after-default triggers a clippy lint.
         let jb2 = Jb2EncodeOptions {
             lossy_threshold: 0.04,
+            despeckle: None,
             #[cfg(feature = "experimental")]
             cross_size_rec6_probe: None,
             #[cfg(feature = "experimental")]
