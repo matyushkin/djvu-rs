@@ -8188,3 +8188,77 @@ while getting the `experimental` test binary to build: `with_jb2_options_lossy_t
 field added by round 18 (#512); harmless under the default feature set (the struct
 literal only exists in a `#[cfg(test)]` module) but broke `cargo test --features
 experimental`. Added the missing `#[cfg(feature = "experimental")] same_size_rec6: None,` arm.
+
+## Perf round 30 (2026-07-06) — JB2_DESPECKLE: speck-removal pre-pass for lossy JB2 on noisy scans
+
+**Issue.** Round 19 (Branch B) found the shipped same-size `lossy_threshold` lever
+gives −22 % on clean text but almost nothing on the noisy 600 dpi
+`pathogenic_bacteria_1896` scan (near-twins there are far apart, median 12.9 %
+Hamming — binarisation noise makes every glyph instance unique), and cross-size
+lossy substitution (B1) was tried and reverted (dominated by same-size). The one
+untried lossy lever for scans was **despeckle** — cjb2's classic move: drop tiny
+isolated noise components before they ever become dict entries.
+
+**Approach.** Added `pixel_count` (true foreground-pixel count, not bbox area) to
+the `Cc` struct extracted by `extract_ccs`, populated for free from the DFS pixel
+list already built during extraction. New `Jb2EncodeOptions::despeckle: Option<u32>`
+(default `None`, stable, not `experimental`): when `Some(max_px)`, any connected
+component with `pixel_count <= max_px` is `retain`-filtered out of the CC list in
+`encode_jb2_dict_with_options` **before** reading-order sort, clustering, or
+dedup — so a speck never becomes a rec-1 dict entry, a coordinate record, or noise
+in the near-twin population `lossy_threshold` matches against. This is lossy: the
+removed pixels have no dict entry to reconstruct from. Filtering on actual ink-pixel
+count (not bbox `w*h`) avoids overcrediting thin diagonal strokes as "small". No
+proximity/isolation heuristic was added (no DjVuLibre C++ source was available in
+`references/` to check cjb2's exact rule — only `djvujs`, a viewer, is vendored);
+instead punctuation/diacritic safety was validated empirically (below).
+`with_despeckle(max_px)` builder + `lossy_scan()` preset (`despeckle=8,
+lossy_threshold=0.02`) added alongside, mirroring `lossy_text()`'s pattern.
+
+**Numbers** (`examples/jb2_despeckle.rs`, per-page independent, `shared=[]`, D1 SSIM
+harness on the decoded mask; all pages round-trip/decode cleanly at every setting):
+
+| Corpus | despeckle=2 | despeckle=4 | despeckle=8 |
+|--------|-------------|-------------|-------------|
+| watchmaker (text) | **+0.00 %**, SSIM 1.00000 (byte-identical) | +0.00 %, SSIM 1.00000 | +0.00 %, SSIM 1.00000 |
+| pathogenic_bacteria_1896 (600 dpi scan) | −0.94 %, SSIM 0.99950 | −1.59 %, SSIM 0.99904 | **−2.43 %**, SSIM 0.99845 |
+
+Stacking `lossy_threshold=0.02` on top of despeckle adds only ≈0.01 pp more on the
+scan (e.g. despeckle=8 alone −2.43 % → despeckle=8+lossy 2 % −2.44 %) — consistent
+with round 19's A0 finding that the same-size near-twin population there stays thin
+regardless of despeckling. Fraction of mask pixels flipped stays tiny even at the
+most aggressive tested level: 0.0047 % (despeckle=2) → 0.0106 % (despeckle=4) →
+0.0195 % (despeckle=8).
+
+**Punctuation/diacritic safety.** Added
+`despeckle_preserves_punctuation_and_diacritic_dots`: a synthetic page with an 'i'
+stem + 4×4 dot (16 px, mimicking a real dot-of-i/period at typical scan resolution),
+an isolated 4×4 period, and a true 1×1 dust speck. At every tested level (2, 4, 8)
+the dot and period (16 px > 8) survive pixel-exact while the 1 px speck is removed —
+the failure mode called out in the task (eating real ink) does not fire at these
+levels. `despeckle_removes_isolated_1px_specks_and_shrinks_output` confirms specks
+are actually dropped and the real glyph stays pixel-exact;
+`despeckle_off_is_byte_identical` confirms the default (`None`) reproduces the
+shipped encoder exactly, byte-for-byte, even on a page containing specks.
+
+**Reading.** This is the first lossy lever that moves the noisy-scan corpus at
+all — same-size `lossy_threshold` alone gives ≈0 % there (round 19 B0) and
+cross-size lossy was reverted for adding nothing beyond same-size (round 19 B1).
+Despeckle's win is real but modest (−2.43 % at the most aggressive tested level, far
+short of text's −22 % `lossy_threshold` win) because binarisation dust, while
+plentiful in CC *count* (thousands of one-off symbols), is small in *byte* terms per
+component (a 1–8 px rec-1 already costs only a few bytes; the saving is the
+record/coordinate overhead avoided, not a large payload). On clean text it is a
+provable no-op (byte-identical, not just "flat") — real glyphs are all far above
+8 px, so nothing is ever dropped, matching the hypothesis that this is a
+scan-specific lever.
+
+**Decision. Kept.** Shipped as a stable (non-`experimental`) opt-in
+`Jb2EncodeOptions::despeckle` field, `with_despeckle(max_px)` builder, and a
+`lossy_scan()` preset (`despeckle=8, lossy_threshold=0.02`) recommended for noisy
+scans — same shipping posture as `lossy_text()` (round 19): off by default
+(archival-safe), one call to opt in. Recommended operating point: **despeckle=8**
+for scans (SSIM 0.99845, −2.43 % Sjbz); levels 2 and 4 are safer/smaller-gain
+fallbacks if a corpus's real content runs unusually small. Not extended past 8 px in
+this round — the task's specified sweep stopped there; higher values are unexplored
+headroom for a future round if a corpus's dust population runs larger.
