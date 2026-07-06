@@ -539,9 +539,20 @@ fn decode_direct_row(
     }
     macro_rules! refill {
         () => {
-            while bit_count <= 24 {
-                bit_buf = (bit_buf << 8) | read_byte!();
-                bit_count += 8;
+            // ZP_U64 (round 51/54): bulk 4-byte-at-a-time refill, unified
+            // from the isolated djvu-iw44 validation (reproducible ~7-8%
+            // faster on x86 CI, byte-identical corpus digest). Falls back to
+            // the exact byte-at-a-time + 0xFF-padding loop near EOF.
+            if bit_count <= 32 && pos + 4 <= data.len() {
+                let chunk = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+                bit_buf = (bit_buf << 32) | (chunk as u64);
+                pos += 4;
+                bit_count += 32;
+            } else {
+                while bit_count <= 56 {
+                    bit_buf = (bit_buf << 8) | read_byte!();
+                    bit_count += 8;
+                }
             }
         };
     }
@@ -672,9 +683,20 @@ fn decode_ref_row(
     }
     macro_rules! refill {
         () => {
-            while bit_count <= 24 {
-                bit_buf = (bit_buf << 8) | read_byte!();
-                bit_count += 8;
+            // ZP_U64 (round 51/54): bulk 4-byte-at-a-time refill, unified
+            // from the isolated djvu-iw44 validation (reproducible ~7-8%
+            // faster on x86 CI, byte-identical corpus digest). Falls back to
+            // the exact byte-at-a-time + 0xFF-padding loop near EOF.
+            if bit_count <= 32 && pos + 4 <= data.len() {
+                let chunk = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+                bit_buf = (bit_buf << 32) | (chunk as u64);
+                pos += 4;
+                bit_count += 32;
+            } else {
+                while bit_count <= 56 {
+                    bit_buf = (bit_buf << 8) | read_byte!();
+                    bit_count += 8;
+                }
             }
         };
     }

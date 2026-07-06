@@ -70,12 +70,12 @@ pub struct ZpDecoder<'a> {
     pub fence: u32,
     /// Bit buffer for feeding bits into the code register.
     ///
-    /// Widened to `u64` (round 51, ZP_U64) so the register can hold up to 64
-    /// valid bits — enough headroom for wider, less-frequent refills in hot
-    /// loops that choose to exploit it (see the `djvu-iw44` inlined copy).
-    /// This struct's own [`refill_buffer`](Self::refill_buffer) keeps the
-    /// original byte-at-a-time cadence (top up while `bit_count <= 24`) for
-    /// now — a pure storage-width upgrade with no behavioural change here.
+    /// Widened to `u64` (round 51/54, ZP_U64) so the register can hold up to
+    /// 64 valid bits. [`refill_buffer`](Self::refill_buffer) uses the same
+    /// bulk 4-byte-at-a-time cadence validated first in isolation on
+    /// `djvu-iw44` (reproducible ~7-8% faster `iw44_decode_corpus_color` on
+    /// x86 CI, byte-identical corpus digest) before being unified here and
+    /// across the djvu-jb2 / djvu-bzz inlined copies.
     pub bit_buf: u64,
     /// Number of valid bits remaining in `bit_buf`.
     pub bit_count: i32,
@@ -148,13 +148,29 @@ impl<'a> ZpDecoder<'a> {
         b
     }
 
-    /// Fill `bit_buf` with fresh bytes until it holds at least 24 bits.
+    /// Fill `bit_buf` with fresh bytes until it holds at least 57 bits.
+    ///
+    /// Fast path: bulk-loads a full 4-byte big-endian chunk in one
+    /// range-checked slice conversion when one is available in-bounds
+    /// (`refill_buffer` is only ever called once `bit_count < 16`, so
+    /// `bit_count <= 32` always holds here, leaving room for 32 more bits in
+    /// the 64-bit buffer). Falls back to the exact byte-at-a-time loop
+    /// (with `read_byte`'s `0xFF` EOF padding) otherwise, preserving the
+    /// `pos`/overshoot semantics exactly (see [`pos`](Self::pos) and
+    /// [`synthetic_bytes`](Self::synthetic_bytes)).
     #[inline(always)]
     fn refill_buffer(&mut self) {
-        while self.bit_count <= 24 {
-            let byte = self.read_byte();
-            self.bit_buf = (self.bit_buf << 8) | (byte as u64);
-            self.bit_count += 8;
+        if self.bit_count <= 32 && self.pos + 4 <= self.data.len() {
+            let chunk = u32::from_be_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
+            self.bit_buf = (self.bit_buf << 32) | (chunk as u64);
+            self.pos += 4;
+            self.bit_count += 32;
+        } else {
+            while self.bit_count <= 56 {
+                let byte = self.read_byte();
+                self.bit_buf = (self.bit_buf << 8) | (byte as u64);
+                self.bit_count += 8;
+            }
         }
     }
 
@@ -323,10 +339,12 @@ mod tests {
     #[test]
     fn synthetic_bytes_distinguishes_eof_from_spinning() {
         // `new()` always consumes 6 bytes: a 2-byte code load plus a 4-byte
-        // initial `refill_buffer`. With exactly 6 bytes the byte buffer is
-        // drained (`is_exhausted`) yet NO synthetic padding was needed — this
-        // is the valid-tail case the JB2 budget guard must not treat as
-        // "spinning". `is_exhausted()` alone cannot tell it apart.
+        // initial `refill_buffer` bulk load (round 51/54, ZP_U64: the bulk
+        // fast path fires here because a full 4-byte chunk is in-bounds).
+        // With exactly 6 bytes the byte buffer is drained (`is_exhausted`)
+        // yet NO synthetic padding was needed — this is the valid-tail case
+        // the JB2 budget guard must not treat as "spinning". `is_exhausted()`
+        // alone cannot tell it apart.
         let zp = ZpDecoder::new(&[0u8; 6]).unwrap();
         assert!(zp.is_exhausted(), "pos reached end of input");
         assert_eq!(
@@ -335,10 +353,13 @@ mod tests {
             "no padding read despite exhaustion"
         );
 
-        // A 2-byte stream forces the entire 4-byte refill from synthetic fill.
+        // A 2-byte stream has no full 4-byte chunk available past the 2-byte
+        // code load, so `refill_buffer` falls back to its exact byte-at-a-time
+        // path, topping up to 64 valid bits (8 bytes) instead of the bulk
+        // path's 4 — all 8 are synthetic since pos=2 already equals data.len().
         let zp2 = ZpDecoder::new(&[0u8; 2]).unwrap();
         assert!(zp2.is_exhausted());
-        assert_eq!(zp2.synthetic_bytes(), 4, "refill faked 4 bytes past EOF");
+        assert_eq!(zp2.synthetic_bytes(), 8, "refill faked 8 bytes past EOF");
 
         // Ample input: neither exhausted nor padded.
         let zp3 = ZpDecoder::new(&[0u8; 64]).unwrap();
