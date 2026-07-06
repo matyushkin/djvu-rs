@@ -1289,6 +1289,46 @@ impl DjVuDocument {
         self.page_byte_ranges.get(index).cloned()
     }
 
+    /// Speculatively decode page `index`'s render layers (background, mask,
+    /// foreground) on a background thread pool, so that a **later**,
+    /// synchronous [`crate::djvu_render::render_pixmap`] call at native
+    /// resolution finds the caches already warm (the B7 next-page prefetch
+    /// lever — e.g. call `doc.prefetch_page(k + 1)` right after rendering
+    /// page `k`, while the reader is still looking at it).
+    ///
+    /// Requires an `Arc<DjVuDocument>` so the spawned task can outlive this
+    /// call — the background closure holds its own clone of the `Arc` and
+    /// writes into the *same* page's existing `OnceLock`-backed
+    /// [`crate::djvu_render::PageLayers`] cache, so there is no separate
+    /// "prefetch buffer" to race against: whichever caller (the background
+    /// task or a later foreground render) reaches `get_or_init` first does
+    /// the decode, the other observes the cached result. Out-of-range
+    /// `index` is a no-op. This is a hint, not a guarantee — if the
+    /// background task hasn't finished by the time the page is rendered, the
+    /// caller still gets correct output, just without the latency win.
+    ///
+    /// Requires the `parallel` feature (spawns onto the shared rayon pool).
+    #[cfg(all(feature = "std", feature = "parallel"))]
+    pub fn prefetch_page(self: &Arc<Self>, index: usize) {
+        if index >= self.page_count() {
+            return;
+        }
+        let doc = Arc::clone(self);
+        rayon::spawn(move || {
+            let Ok(page) = doc.page(index) else {
+                return;
+            };
+            // Mirrors the common full-resolution render path's dependency
+            // chain: mask/fg44 are independent of bg; bg_rgb_s1 subsumes the
+            // bg44 ZP arithmetic decode (see `PageLayers::bg_rgb_s1`), so this
+            // warms every cache slot a native-resolution `render_pixmap` call
+            // reads from.
+            let _ = page.decoded_mask();
+            let _ = page.decoded_fg44();
+            let _ = page.decoded_bg_rgb_s1();
+        });
+    }
+
     /// Access a page by 0-based index.
     ///
     /// # Errors
@@ -1500,6 +1540,11 @@ pub struct MmapDocument {
     /// and this simply outlives the parse. Held via the same `Arc` the pages
     /// clone, so the mapping cannot be dropped while a lazy page still needs it.
     _backing: Backing,
+    /// The same mapping, kept as its concrete type (an extra `Arc` clone of
+    /// the identical allocation `_backing` erases) so
+    /// [`MmapDocument::advise_page_willneed`] can call `memmap2::Mmap::advise_range`
+    /// directly — the type-erased `Backing` alias can't expose that method.
+    mmap: Arc<memmap2::Mmap>,
     doc: DjVuDocument,
 }
 
@@ -1526,11 +1571,15 @@ impl MmapDocument {
         let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 
         // Move the mapping into the shared backing; bundled pages read from it
-        // lazily (zero-copy open), and the `Arc` keeps it alive for them.
-        let backing: Backing = Arc::new(mmap);
+        // lazily (zero-copy open), and the `Arc` keeps it alive for them. Keep a
+        // second, concretely-typed clone (same allocation, just another strong
+        // ref) for `advise_page_willneed`.
+        let mmap = Arc::new(mmap);
+        let backing: Backing = mmap.clone();
         let doc = DjVuDocument::parse_backed(backing.clone())?;
         Ok(MmapDocument {
             _backing: backing,
+            mmap,
             doc,
         })
     }
@@ -1558,9 +1607,11 @@ impl MmapDocument {
         // Indirect documents resolve external component files, so pages are eager
         // here; the mapping is still held via the shared backing for uniformity.
         let doc = DjVuDocument::parse_from_dir(&mmap, &base_dir)?;
-        let backing: Backing = Arc::new(mmap);
+        let mmap = Arc::new(mmap);
+        let backing: Backing = mmap.clone();
         Ok(MmapDocument {
             _backing: backing,
+            mmap,
             doc,
         })
     }
@@ -1578,6 +1629,74 @@ impl MmapDocument {
     /// Access a page by 0-based index.
     pub fn page(&self, index: usize) -> Result<&DjVuPage, DocError> {
         self.doc.page(index)
+    }
+
+    /// Hint to the OS that page `index`'s own bytes will be needed soon
+    /// (`MADV_WILLNEED`). The cold-open (B6) lever: call this right after
+    /// [`MmapDocument::open`], before the first render, so the kernel can
+    /// start readahead I/O while the caller does anything else (parse
+    /// metadata, build UI, etc.) instead of only starting on the page fault
+    /// the render's first chunk read triggers.
+    ///
+    /// # Measured (COLD_OPEN, round 36)
+    ///
+    /// On a local NVMe SSD (M1) with `pathogenic_bacteria_1896.djvu` (517
+    /// pages, 26 MB — small per-page FORM ranges, tens of KB), this hint is a
+    /// wash: ±0–2%, inside measurement noise, whether issued for page 0 or a
+    /// page deep in the file. Two things account for it: (1) most of a
+    /// bundled document's structural cost (walking every page's IFF chunk
+    /// headers to build `page_byte_range`) is already paid synchronously
+    /// inside [`MmapDocument::open`], before this hint can be issued — there
+    /// isn't much cold-read work left to schedule ahead by the time the
+    /// caller gets a `MmapDocument` back; (2) a single page's FORM range is
+    /// small enough that on fast local storage the demand-fault path is
+    /// already close to the readahead path's latency. **An earlier version
+    /// of this method advised the whole `0..range.end` prefix (covering the
+    /// header/DIRM region too) and *reproducibly regressed cold open by
+    /// ~12%*** (low dispersion, not noise) — advising far more than what's
+    /// about to be read is actively harmful, not just wasted effort. Scoped
+    /// to just `range` (this page's own bytes) it's harmless but unproven on
+    /// this host; likely worth revisiting on higher-latency storage (network
+    /// mounts, spinning disks) where a real win is more plausible. See
+    /// `examples/cold_open_bench.rs --mode madvise`.
+    ///
+    /// Best-effort — a `madvise` failure (unsupported platform, unmapped
+    /// range) is surfaced as `Err` but changes no state; correctness never
+    /// depends on the hint landing. A `None` from
+    /// [`DjVuDocument::page_byte_range`] (out-of-range index, indirect
+    /// document, or an unmatched DIRM offset table) is treated as a no-op
+    /// `Ok(())` rather than an error, since there is nothing wrong to report
+    /// — there's just no known byte range to advise on.
+    ///
+    /// Only supported on Unix (the underlying `memmap2::Mmap::advise_range`
+    /// is `#[cfg(unix)]`); a no-op stub is not provided for other platforms —
+    /// gate calls with `#[cfg(unix)]` if you need to build for Windows too.
+    #[cfg(unix)]
+    pub fn advise_page_willneed(&self, index: usize) -> std::io::Result<()> {
+        let Some(range) = self.doc.page_byte_range(index) else {
+            return Ok(());
+        };
+        let start = (range.start as usize).min(self.mmap.len());
+        let end = (range.end as usize).min(self.mmap.len());
+        if end <= start {
+            return Ok(());
+        }
+        self.mmap
+            .advise_range(memmap2::Advice::WillNeed, start, end - start)
+    }
+
+    /// Consume this `MmapDocument`, returning the owned [`DjVuDocument`].
+    ///
+    /// Bundled documents' lazily-constructed pages ([`ChunkStore::Lazy`])
+    /// hold their own `Arc` clone of the memory mapping, so it stays mapped
+    /// for as long as any page needs it — dropping this wrapper's own
+    /// reference here is safe (indirect documents' pages are eager and don't
+    /// reference the mapping at all after parsing). Useful to obtain an owned
+    /// value to wrap in `Arc<DjVuDocument>`, which [`DjVuDocument::prefetch_page`]
+    /// requires so a background task can share ownership of the same page
+    /// caches the foreground render uses.
+    pub fn into_document(self) -> DjVuDocument {
+        self.doc
     }
 }
 
@@ -2611,8 +2730,90 @@ mod tests {
         // document() accessor (line 1128-1129)
         assert!(mmap_doc.document().page_count() > 0);
         // Deref to &DjVuDocument (lines 1146-1147)
-        let inner: &DjVuDocument = &*mmap_doc;
+        let inner: &DjVuDocument = &mmap_doc;
         assert!(inner.page_count() > 0);
+    }
+
+    /// `advise_page_willneed` is a best-effort hint: it must not error on a
+    /// real bundled document and must be a harmless no-op for an
+    /// out-of-range index (COLD_OPEN B6).
+    #[test]
+    #[cfg(all(feature = "mmap", unix))]
+    fn mmap_advise_page_willneed_in_range_and_out_of_range() {
+        let path = assets_path().join("chicken.djvu");
+        let mmap_doc = MmapDocument::open(&path).expect("mmap open should succeed");
+        mmap_doc
+            .advise_page_willneed(0)
+            .expect("advise on page 0 should not error");
+        // Out of range: page_byte_range returns None, so this must be a no-op
+        // Ok(()), not an error.
+        mmap_doc
+            .advise_page_willneed(9_999)
+            .expect("advise on an out-of-range page must be a harmless no-op");
+    }
+
+    /// `into_document` must yield a document that still renders correctly —
+    /// the lazily-constructed pages hold their own `Arc` clone of the
+    /// mapping, so dropping `MmapDocument`'s own reference must not unmap the
+    /// file out from under them (COLD_OPEN B6/B7 prerequisite).
+    #[test]
+    #[cfg(feature = "mmap")]
+    fn mmap_into_document_pages_still_render_after_wrapper_dropped() {
+        let path = assets_path().join("chicken.djvu");
+        let mmap_doc = MmapDocument::open(&path).expect("mmap open should succeed");
+        let doc = mmap_doc.into_document();
+        let page = doc.page(0).expect("page 0 should exist");
+        let pm = crate::djvu_render::render_pixmap(
+            page,
+            &crate::djvu_render::RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                ..crate::djvu_render::RenderOptions::default()
+            },
+        )
+        .expect("render after into_document should succeed");
+        assert!(pm.width > 0 && pm.height > 0);
+    }
+
+    /// `prefetch_page` must actually warm the page's render caches before the
+    /// caller does a synchronous render (COLD_OPEN B7). Not a timing
+    /// assertion (that's what the `cold_open_bench` example measures) — just
+    /// correctness: the background decode must land in the same cache a
+    /// subsequent `render_pixmap` reads, and out-of-range indices must be a
+    /// no-op rather than a panic.
+    #[test]
+    #[cfg(all(feature = "mmap", feature = "parallel"))]
+    fn prefetch_page_warms_cache_and_ignores_out_of_range() {
+        let path = assets_path().join("chicken.djvu");
+        let mmap_doc = MmapDocument::open(&path).expect("mmap open should succeed");
+        let doc = Arc::new(mmap_doc.into_document());
+
+        doc.prefetch_page(9_999); // out of range: must not panic
+        doc.prefetch_page(0);
+
+        // Give the background task a moment to finish (this test only checks
+        // correctness, not latency — a generous sleep avoids flakiness).
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let page = doc.page(0).unwrap();
+        // Cache should already be warm: render_layers() bytes > 0 without us
+        // having called any decoded_* accessor on this thread ourselves.
+        assert!(
+            page.render_cache_bytes() > 0,
+            "prefetch_page should have populated the render cache"
+        );
+
+        // A subsequent render must still succeed and be unaffected.
+        let pm = crate::djvu_render::render_pixmap(
+            page,
+            &crate::djvu_render::RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                ..crate::djvu_render::RenderOptions::default()
+            },
+        )
+        .expect("render after prefetch should succeed");
+        assert!(pm.width > 0 && pm.height > 0);
     }
 
     #[test]
