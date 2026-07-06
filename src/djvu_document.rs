@@ -443,6 +443,26 @@ impl DjVuPage {
         self.render_layers = std::sync::OnceLock::new();
     }
 
+    /// C5_COMPRESS: cheaper alternative to [`evict_render_cache`](Self::evict_render_cache)
+    /// — instead of dropping this page's entire render cache, drop only the
+    /// expensive full-resolution derivations (the BG44 coefficient image,
+    /// the full-res RGB pixmap, mask, foreground, and composited tiles) while
+    /// keeping any already-cached downscaled RGB pixmap (`bg_rgb_s2` /
+    /// `bg_rgb_s4`, populated by a prior 150-DPI-class or thumbnail render).
+    ///
+    /// A later downscaled render of this page (subsample ≥ 2) then stays
+    /// warm instead of re-paying the full BG44 ZP decode; a full-resolution
+    /// render still cold-decodes, same as after a full
+    /// [`evict_render_cache`](Self::evict_render_cache) — see
+    /// PERF_EXPERIMENTS.md C5_COMPRESS for why a cheap sub=2→sub=1 "upgrade"
+    /// is not possible. No-op if the page was never rendered.
+    #[cfg(feature = "std")]
+    pub fn downgrade_render_cache(&mut self) {
+        if let Some(layers) = self.render_layers.get_mut() {
+            layers.downgrade();
+        }
+    }
+
     /// Return the raw bytes of the first chunk with the given 4-byte ID.
     ///
     /// Returns `None` if no chunk with that ID exists.  The returned slice
@@ -908,6 +928,26 @@ impl DjVuPage {
 }
 
 // ---- Document ---------------------------------------------------------------
+
+/// Options for [`DjVuDocument::enforce_cache_budget_with`].
+///
+/// Default (`downgrade_before_drop: false`) is byte-identical to
+/// [`DjVuDocument::enforce_cache_budget`]'s all-or-nothing eviction.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheBudgetOptions {
+    /// C5_COMPRESS's cheaper middle tier: when true, a least-recently-used
+    /// page over budget is first [`DjVuPage::downgrade_render_cache`]d —
+    /// keeping its already-cached downscaled RGB pixmap
+    /// (`bg_rgb_s2`/`bg_rgb_s4`) alive while dropping the expensive
+    /// full-resolution derivations — rather than fully dropped. If the
+    /// document is still over budget after downgrading every eligible page
+    /// (or a page has nothing left to downgrade), the sweep falls back to a
+    /// full drop, LRU-first, exactly like `enforce_cache_budget`. So the byte
+    /// ceiling is honoured identically either way; only the *shape* of what
+    /// stays cached changes.
+    pub downgrade_before_drop: bool,
+}
 
 /// An opened DjVu document.
 ///
@@ -1412,6 +1452,80 @@ impl DjVuDocument {
             total = total.saturating_sub(bytes);
         }
         freed
+    }
+
+    /// C5_COMPRESS: like [`downgrade_render_caches`](Self::downgrade_render_caches)
+    /// applied to every page — downgrade instead of drop.
+    #[cfg(feature = "std")]
+    pub fn downgrade_render_caches(&mut self) {
+        for p in &mut self.pages {
+            p.downgrade_render_cache();
+        }
+    }
+
+    /// Like [`enforce_cache_budget`](Self::enforce_cache_budget), but taking
+    /// [`CacheBudgetOptions`] to opt into the C5_COMPRESS downgrade-before-drop
+    /// tier. Returns the bytes freed (net of any bytes still held by
+    /// downgraded — not fully dropped — pages).
+    #[cfg(feature = "std")]
+    pub fn enforce_cache_budget_with(
+        &mut self,
+        max_bytes: usize,
+        protect: &[usize],
+        opts: CacheBudgetOptions,
+    ) -> usize {
+        if !opts.downgrade_before_drop {
+            return self.enforce_cache_budget(max_bytes, protect);
+        }
+        let mut total = self.render_cache_bytes();
+        if total <= max_bytes {
+            return 0;
+        }
+        let starting_total = total;
+
+        // Pass 1: downgrade LRU-first (cheap tier) until under budget or no
+        // eligible candidates remain.
+        let mut cands: Vec<(usize, u64, usize)> = self
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !protect.contains(i) && p.render_cache_bytes() > 0)
+            .map(|(i, p)| (i, p.render_cache_access_tick(), p.render_cache_bytes()))
+            .collect();
+        cands.sort_by_key(|&(_, tick, _)| tick);
+
+        for &(i, _, before) in &cands {
+            if total <= max_bytes {
+                break;
+            }
+            self.pages[i].downgrade_render_cache();
+            let after = self.pages[i].render_cache_bytes();
+            total = total.saturating_sub(before.saturating_sub(after));
+        }
+
+        // Pass 2: still over budget (downgrading wasn't enough, e.g. many
+        // small pages or nothing left to shrink) — fall back to full drops,
+        // LRU-first, same as `enforce_cache_budget`.
+        if total > max_bytes {
+            let mut cands2: Vec<(usize, u64, usize)> = self
+                .pages
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| !protect.contains(i) && p.render_cache_bytes() > 0)
+                .map(|(i, p)| (i, p.render_cache_access_tick(), p.render_cache_bytes()))
+                .collect();
+            cands2.sort_by_key(|&(_, tick, _)| tick);
+
+            for (i, _, bytes) in cands2 {
+                if total <= max_bytes {
+                    break;
+                }
+                self.pages[i].evict_render_cache();
+                total = total.saturating_sub(bytes);
+            }
+        }
+
+        starting_total.saturating_sub(total)
     }
 
     /// The NAVM table of contents, or an empty slice if not present.
