@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0](https://github.com/matyushkin/djvu-rs/compare/v0.24.4...v0.25.0) (2026-07-06)
+
+
+### Features
+
+* **encode:** TXTZ_OCR — encode-time OCR text layer via PageEncoder (round 51) ([#540](https://github.com/matyushkin/djvu-rs/issues/540)) ([3cad5c3](https://github.com/matyushkin/djvu-rs/commit/3cad5c306218884c8ea5b16981269509cc18250f))
+* **fgbz:** median-cut foreground palette quantiser (opt-in) ([#522](https://github.com/matyushkin/djvu-rs/issues/522)) ([440ed07](https://github.com/matyushkin/djvu-rs/commit/440ed0772d4ed571d9f71d5862bd59b2be2c56d9))
+* **jb2:** lossy_text() preset — expose the −22% text lossy lever (Branch B complete) ([#514](https://github.com/matyushkin/djvu-rs/issues/514)) ([fad0c28](https://github.com/matyushkin/djvu-rs/commit/fad0c28ff5345847ce0a19e85e245d9061963c55))
+* **pdf:** PDF_G4 — CCITT Group 4 encoding for bilevel PDF masks (round 51) ([#543](https://github.com/matyushkin/djvu-rs/issues/543)) ([470b40b](https://github.com/matyushkin/djvu-rs/commit/470b40b31538b0011be52bf69b155ab75f36e935))
+* **render:** D_AA_ZOOM — opt-in bilinear mask-coverage AA at upscale ([#517](https://github.com/matyushkin/djvu-rs/issues/517)) ([54a0939](https://github.com/matyushkin/djvu-rs/commit/54a09398e46402ef4b096ef59ce7237906d8ec23))
+* **render:** streaming ProgressiveDecoder — the deferred B5 stateful API ([#510](https://github.com/matyushkin/djvu-rs/issues/510)) ([1760bd0](https://github.com/matyushkin/djvu-rs/commit/1760bd0ebd72bc14276c85a862dd027bb9fda5c9))
+* **render:** TH44_GRID — fast thumbnail-grid decode path via embedded TH44 (opt-in) ([#533](https://github.com/matyushkin/djvu-rs/issues/533)) ([1c36093](https://github.com/matyushkin/djvu-rs/commit/1c360930df68588707fa44a3e31c3a4d4e520979))
+* **wasm:** WASM_THREADS — opt-in rayon thread pool via wasm-bindgen-rayon (feasibility + infra) ([#528](https://github.com/matyushkin/djvu-rs/issues/528)) ([e7d523b](https://github.com/matyushkin/djvu-rs/commit/e7d523b6bd72f84a9edbdc7b32f2c103d73f44b5))
+
+
+### Bug Fixes
+
+* **iff,interop:** INTEROP_INFO — INFO version ceiling + gamma clamp vs DjVuLibre ([#538](https://github.com/matyushkin/djvu-rs/issues/538)) ([518834b](https://github.com/matyushkin/djvu-rs/commit/518834b4f67ba74c36ee22224dc6856f7718e893))
+* **iff,test:** carte.djvu short-INFO parse rejection + mmap/parallel decode-count test ([#531](https://github.com/matyushkin/djvu-rs/issues/531)) ([097f9de](https://github.com/matyushkin/djvu-rs/commit/097f9de953b56958fb9195cc2e6360419560dd19))
+* **iw44:** INTEROP_STREAMS — BG44/IW44 serial + dimension checks, JB2 divergence root-caused (round 46) ([#539](https://github.com/matyushkin/djvu-rs/issues/539)) ([c524585](https://github.com/matyushkin/djvu-rs/commit/c5245857bf2e9909ff71b1d7f3aaf62f5d80fbdf))
+* **iw44:** tolerate zero-length BG44 refinement chunk payload (BUG-ZPSHORT) ([#518](https://github.com/matyushkin/djvu-rs/issues/518)) ([2387d88](https://github.com/matyushkin/djvu-rs/commit/2387d88e2919866a2e741e56c811c91ae072d421))
+
+
+### Performance Improvements
+
+* **bench:** large single-page colour-encode bench + PAR_PAGE_LAYERS revisit ([#513](https://github.com/matyushkin/djvu-rs/issues/513)) ([b5363b1](https://github.com/matyushkin/djvu-rs/commit/b5363b150c06c2304f8747ac132ad42130c44367))
+* **diag:** BZZ encoder + PDF JPEG-background diagnostics (no shipped-code changes) ([#515](https://github.com/matyushkin/djvu-rs/issues/515)) ([2012345](https://github.com/matyushkin/djvu-rs/commit/2012345f0391ae77a33b6f2728d232acec95e2f8))
+* **diag:** JB2_DICT_ORDER — shared-dict index permutation, no size win (Round 24) ([#520](https://github.com/matyushkin/djvu-rs/issues/520)) ([d1463ac](https://github.com/matyushkin/djvu-rs/commit/d1463ac171677a3bf8f625f5d4b573ef6a15c42d))
+* **fuzz:** DIFF_FUZZ — corpus-mutation differential fuzzer vs DjVuLibre ([#534](https://github.com/matyushkin/djvu-rs/issues/534)) ([01570eb](https://github.com/matyushkin/djvu-rs/commit/01570ebc5b4f35f38f61d18b7ffce23b11e71f3d))
+* gray/Lanczos/memory sweep + D1 quality harness (rounds 7-14) ([cfd018a](https://github.com/matyushkin/djvu-rs/commit/cfd018a23c40e7fdfef7c6d368ec1771321b5e9b))
+* **iw44:** AVX2_IDWT — rejected (runtime dispatch regresses IDWT, round 51) ([#541](https://github.com/matyushkin/djvu-rs/issues/541)) ([d749712](https://github.com/matyushkin/djvu-rs/commit/d7497125b2a1b39db06684d8dc241ac246b02af1))
+* **iw44:** harmonic BG diffusion for masked cells (−52% to −97% BG44, quality up) ([#505](https://github.com/matyushkin/djvu-rs/issues/505)) ([5d09e0c](https://github.com/matyushkin/djvu-rs/commit/5d09e0cd44a2ac0fba0b1102a188e4f5fa6db42c))
+* **iw44:** IW44_ENTROPY_PROBE — localize textured-content size gap vs c44 (round 51, diagnostic) ([#542](https://github.com/matyushkin/djvu-rs/issues/542)) ([a94fc84](https://github.com/matyushkin/djvu-rs/commit/a94fc84d1648d8db9ddda3b641426f5f8d84308b))
+* **jb2:** borrow shared dict instead of cloning per page (byte-identical) ([#504](https://github.com/matyushkin/djvu-rs/issues/504)) ([da9bbd5](https://github.com/matyushkin/djvu-rs/commit/da9bbd5e8e76eb5f177139f61ec49cb41dd95495))
+* **jb2:** hash-index shared-symbol clustering — −81% (≈5.2×) on 517-page corpus ([#503](https://github.com/matyushkin/djvu-rs/issues/503)) ([f45a607](https://github.com/matyushkin/djvu-rs/commit/f45a607a0e37f31ecbc40567c5f337f5c254fc2e))
+* **jb2:** JB2_AUTO_REC6 — density-probe auto-policy for same-size rec-6 ([#516](https://github.com/matyushkin/djvu-rs/issues/516)) ([33606db](https://github.com/matyushkin/djvu-rs/commit/33606dbed54cf92bb82e5a39944f16f148b2ae33))
+* **jb2:** JB2_DESPECKLE — speck-removal pre-pass for lossy JB2 on noisy scans ([#521](https://github.com/matyushkin/djvu-rs/issues/521)) ([8aa8b2f](https://github.com/matyushkin/djvu-rs/commit/8aa8b2f0a653d9034ef585b392cfe51f821b5807))
+* **jb2:** OCR_QA — OCR-agreement metric for lossy JB2 levers (round 41) ([#532](https://github.com/matyushkin/djvu-rs/issues/532)) ([353bc01](https://github.com/matyushkin/djvu-rs/commit/353bc01a773dd09f9a09df374489206a1c72c2a7))
+* **jb2:** same-size rec-6 refinement — validated lossless −11.7% Sjbz on text ([#512](https://github.com/matyushkin/djvu-rs/issues/512)) ([25736a3](https://github.com/matyushkin/djvu-rs/commit/25736a3043e7df14af7f117d509e2d4a2b51512d))
+* **mmap:** COLD_OPEN — cold-start harness + madvise (neutral) / prefetch (+24-90%) levers ([#529](https://github.com/matyushkin/djvu-rs/issues/529)) ([e237d50](https://github.com/matyushkin/djvu-rs/commit/e237d501dcd11463c603328651176411194f7df0))
+* **pdf:** PDF_ADAPTIVE_RASTER — opt-in per-page Deflate-vs-JPEG choice ([#519](https://github.com/matyushkin/djvu-rs/issues/519)) ([47fec99](https://github.com/matyushkin/djvu-rs/commit/47fec996986c479aacce84e0f1d66603f1fc466a))
+* **py:** PY_ZEROCOPY — GIL release + buffer-protocol zero-copy Pixmap in djvu-py ([#530](https://github.com/matyushkin/djvu-rs/issues/530)) ([bde8421](https://github.com/matyushkin/djvu-rs/commit/bde84217af65601c0ff8c095b6017ef619780eff))
+* **quality:** QUALITY_COLOR — colour-aware D1 metric (Y/Cb/Cr SSIM + CIE76 ΔE) ([#525](https://github.com/matyushkin/djvu-rs/issues/525)) ([bd90536](https://github.com/matyushkin/djvu-rs/commit/bd90536fb7c01aaa677ce022b9434c8485a53de9))
+* **render:** C5_COMPRESS — opt-in downgrade-on-evict render-cache tier (round 47) ([#537](https://github.com/matyushkin/djvu-rs/issues/537)) ([2ae8cf2](https://github.com/matyushkin/djvu-rs/commit/2ae8cf2cacc994e4c7a2a9fbdac9dd1cd09e2f63))
+* **render:** D3_BICUBIC — FG44 bicubic upsampling measured, rejected ([#523](https://github.com/matyushkin/djvu-rs/issues/523)) ([37d42e6](https://github.com/matyushkin/djvu-rs/commit/37d42e6a9e1074e34df43c9f6930bb714da22361))
+* **render:** Lanczos RGBA-interleaved accumulate — −22 to −27%, bit-identical ([#508](https://github.com/matyushkin/djvu-rs/issues/508)) ([95de0c4](https://github.com/matyushkin/djvu-rs/commit/95de0c4ab555078e2dad344580d3ce7db0dda3ce))
+* **render:** VIEWER_BENCH + C4_TILE_CACHE — pan/zoom scenario bench justifies a composited-tile cache ([#527](https://github.com/matyushkin/djvu-rs/issues/527)) ([7304d9a](https://github.com/matyushkin/djvu-rs/commit/7304d9aeb4c63d2459b2cac1e4b6fdc910ad66d0))
+* **zp:** ZP_U64 — u64 bit_buf widening investigated, reverted (round 54) ([#544](https://github.com/matyushkin/djvu-rs/issues/544)) ([f6e0f57](https://github.com/matyushkin/djvu-rs/commit/f6e0f571ff07fffbb189972b3c9a67237442362e))
+
 ## [0.24.4](https://github.com/matyushkin/djvu-rs/compare/v0.24.3...v0.24.4) (2026-07-03)
 
 
