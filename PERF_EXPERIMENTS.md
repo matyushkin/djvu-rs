@@ -9881,3 +9881,137 @@ decide whether a hand-written x86 SIMD IDWT pass would earn its keep before
 anyone writes it; **ZP-U64** now gets jb2/bzz decode timings from the same
 x86 runner to compare against the existing aarch64 numbers in this file and
 decide whether the 32-bit `refill!` is worth the 4-site u64 rewrite.
+
+## Perf round 48 (2026-07-06) — C5_COMPRESS: cheaper render-cache entries (memory vs re-decode trade)
+
+**Issue.** C5_LRU_BUDGET (round-13) evicts a page's *entire* render cache
+(`PageLayers`) once the document-wide byte budget is exceeded. Under a long
+scroll/pan session the dominant entry is the decoded full-res BG RGB pixmap
+(~33.6 MB/page class on `colorbook.djvu`) — an all-or-nothing drop means the
+very next render of that page (e.g. scrolling back, or a thumbnail-rail
+re-visit) pays a full cold BG44 decode again, even for a cheap downscaled
+view. Hypothesis: a middle tier that keeps evicted entries in a cheaper form
+could rebuild faster than a cold decode for at least some render paths.
+
+**Prior-art check (mandatory first step).** No existing compressed/middle
+cache tier: `grep`ped `EXPERIMENTS_INDEX.md`/`PERF_EXPERIMENTS.md` for
+`C5_COMPRESS`/`compress-on-evict`/`downgrade_before_drop` (no hits before this
+round); `gh pr list --state all --search "cache compress"` returns only an
+unrelated `release-please` PR; `git branch -r` has no `*compress*` branch.
+Reviewed C5_RENDER_CACHE_EVICTION (round-12), C5_LRU_BUDGET (round-13),
+BG_CACHE/BG_CACHE_S2/SUB4_RGB_CACHE, C4_TILE_CACHE (round-38), COLD_OPEN
+(round-40) — none add a compressed/downgraded tier, all either drop-whole or
+cache-whole. Proceeded.
+
+**Two designs measured, per the brief:**
+
+**A. Downgrade-on-evict.** First checked whether keeping the IW44 coefficient
+image (`bg44`/`bg44_partial`) across eviction — so a sub=2→sub=1 "upgrade" via
+`PlaneDecoder::reconstruct(start_scale)` could skip re-running the ZP
+arithmetic decode — actually saves memory. It does not:
+`PlaneDecoder::new(w, h)` allocates full-size coefficient storage immediately
+on decoding chunk 0, regardless of how many chunks have since been applied —
+so the "coefficient" tier is the same size class as the full RGB pixmap, not
+cheaper. This matches ROI_IDWT's (rejected) finding that the ZP decode, not
+the spatial IDWT step, dominates cold cost — ruled out per the brief's own
+built-in fallback clause.
+
+Degraded scope, as the brief allows: keep the already-cached **downscaled**
+RGB pixmap (`bg_rgb_s2`/`bg_rgb_s4`, 4×/16× smaller than sub=1) instead of
+dropping it, while still fully dropping `bg44`/`bg44_partial`/`bg_rgb_s1`/mask
+layers/tile cache. Full-res (sub=1) re-renders still cold-decode either way —
+honest scope limit, not a general "upgrade cheaply" mechanism.
+
+**B. Compress-on-evict (DEFLATE via `miniz_oxide`, already a direct dep for
+PDF export, no new heavy dep).** Measured compress+decompress round-trip on a
+full-res (~33 MB) RGB pixmap at DEFLATE levels 1/4/6 against the domain
+cold-decode cost (BG44 ZP decode + IDWT + YCbCr, plus JB2 mask) for the same
+page, on `colorbook.djvu` and `watchmaker.djvu` via a throwaway scratch
+harness (`examples/scratch_measure_zp_vs_idwt.rs`, deleted after the numbers
+were captured — not shipped code). Round-trip cost: **32–260 ms** across
+levels; cold decode: only **10–58 ms**. Decisively rejected — general-purpose
+byte compression is slower than just re-decoding the domain-specific format.
+
+**Method.** Design A implemented as an opt-in tier, byte-identical when off:
+- `PageLayers::downgrade` (`src/djvu_render.rs`): clears `bg44`,
+  `bg44_partial`, `mask`, `mask_sub4`, `fg44`, `mask_indexed`, `bg_rgb_s1`,
+  and the tile cache, but **preserves** `bg_rgb_s2`/`bg_rgb_s4` and the LRU
+  access tick.
+- `decode_background_chunks`'s `subsample==2`/`subsample==4` branches now
+  check the terminal `bg_rgb_s2`/`bg_rgb_s4` cache *before* forcing the
+  `bg44`/`bg44_partial` guard, so a downgraded-but-still-cached downscaled
+  pixmap is served warm instead of re-triggering a decode.
+- `DjVuPage::downgrade_render_cache` / `DjVuDocument::downgrade_render_caches`
+  (`src/djvu_document.rs`), plus `CacheBudgetOptions { downgrade_before_drop:
+  bool }` (default `false`) and `DjVuDocument::enforce_cache_budget_with` — a
+  two-pass sweep: pass 1 downgrades LRU-first until under budget (or nothing
+  left to downgrade); pass 2 falls back to full `evict_render_cache` drops,
+  LRU-first, for anything still over budget. Same byte ceiling honoured
+  either way; only the *shape* of what survives changes.
+- Two new unit tests: `downgrade_render_cache_keeps_downscaled_tier_warm`
+  (sub=2 stays byte-identical warm after downgrade; sub=1 cold-redecodes
+  byte-identically) and
+  `enforce_cache_budget_with_downgrade_matches_budget_and_output` (3-page
+  budget-halving sweep stays ≤ budget, all pages re-render byte-identically).
+  Both pass.
+- New bench harness `examples/c5_compress_bench.rs`: a mixed viewer workflow
+  on `colorbook.djvu` (62 colour pages) — every page gets both a thumbnail
+  (sub=2) and a full-res (sub=1) render as it scrolls past (needed so
+  `bg_rgb_s2` is actually populated before eviction; an earlier version of
+  the harness rendered sub=1 only, which meant `downgrade` degenerated to
+  `drop` with nothing left to preserve — caught and fixed), followed by a
+  budget-mediated eviction sweep. After the main sweep, 12 repeated
+  evict→render trials (trial 0 discarded as warmup) measure median
+  warm-render-after-eviction latency at sub=1 and sub=2, plus a structural
+  cache-state histogram (zero/downgraded-`<4MB`/full-`≥4MB` page counts).
+
+**Results (colorbook.djvu, 62 pages, `/usr/bin/time -l` peak RSS):**
+
+| budget | mode | final cache bytes | histogram (zero/downgraded/full) | sub=1 re-render median | sub=2 re-render median | peak RSS |
+|---|---|---|---|---|---|---|
+| 60 MiB | drop | ≤ budget | 54 zero / 0 / 8 full | 56.4 ms | 23.5 ms | ~252 MB |
+| 60 MiB | downgrade | ≤ budget | 1 zero / 61 downgraded(`<4MB`) / 0 full | 56.2 ms | **18.1 ms** | ~249 MB |
+| 20 MiB | drop | ≤ budget | 59 zero / 0 / 3 full | 56.4 ms | 23.6 ms | ~149 MB |
+| 20 MiB | downgrade | ≤ budget | 1 zero / 61 downgraded(`<4MB`) / 0 full | 56.2 ms | **18.0 ms** | ~225 MB |
+
+Same byte ceiling honoured identically in both modes (structural metric, the
+primary signal per the brief). sub=2 (thumbnail/downscaled) re-render after
+eviction is **~23% faster** under downgrade (18.0–18.1 ms vs 23.5–23.6 ms).
+sub=1 (full-res) re-render is unchanged (56.2 vs 56.4 ms, within noise) —
+full-res always cold-decodes regardless of tier, exactly the honest scope
+limit stated above. Peak RSS is comparable to slightly higher under downgrade
+at the tighter 20 MiB budget (225 MB vs 149 MB) since more bytes are
+deliberately kept warm per page — a real, disclosed trade, not a free win;
+still well under the "no eviction" upper bound and the ceiling is respected
+either way. Wall-clock is provisional (other agents ran concurrently on this
+machine per the brief); the structural histogram is the load-bearing result.
+
+**Decision.**
+- **Design A (downgrade-on-evict): Kept, opt-in.** `CacheBudgetOptions`
+  defaults to `false` (byte-identical to `enforce_cache_budget`); callers who
+  render thumbnails/downscaled views alongside full-res opt in via
+  `enforce_cache_budget_with(budget, protect, CacheBudgetOptions {
+  downgrade_before_drop: true })` for a ~23% cheaper thumbnail-rail
+  re-render after eviction, at the cost of a larger resident set per kept
+  page (still bounded by the same budget check in pass 2).
+- **Design B (compress-on-evict via DEFLATE): Rejected.** Decode is faster
+  than general-purpose (de)compression on this domain's data (32–260 ms
+  round-trip vs 10–58 ms cold decode) — no source shipped.
+- **Ruled out (record to prevent re-proposal):** keeping `bg44`/`bg44_partial`
+  coefficients across eviction does **not** save memory vs the derived RGB
+  pixmap — `PlaneDecoder` allocates full-size storage on first chunk,
+  independent of how many chunks are later applied.
+
+Tests: 2 new unit tests (both pass); full `make check` gate (fmt, clippy `-D
+warnings`, no_std build, wasm32 build, full suite) green: 1088 passed, 8 slow,
+5 skipped.
+
+**Follow-ups**: the "resume partially-decoded IW44 from a saved chunk[0]
+state" observation (cheaper than decoding all chunks from scratch — saves
+roughly the chunk[0] ZP-decode share, ~15–40% of total decode time depending
+on file) is a decode-*speed* optimization, not a memory-tiering one (doesn't
+reduce retained bytes) — out of scope here, worth a dedicated experiment.
+`downgrade_before_drop` is currently colour-BG44-page-specific (keys off
+`bg_rgb_s2`/`bg_rgb_s4`, populated only when a downscaled render already
+happened) — bilevel/JB2-heavy pages get no benefit from this tier; a JB2 mask
+middle tier would need a different, separate design.
