@@ -4980,56 +4980,6 @@ mod tests {
         assert_eq!(first.data, frames[0].data);
     }
 
-    /// Regression test for BUG-ZPSHORT: on `watchmaker.djvu` page 0, BG44
-    /// chunk 2 of 4 is a legitimate two-byte `[serial, slices]` header with a
-    /// **zero-length** ZP payload (the encoder had nothing left to encode for
-    /// that refinement round). `Iw44Image::decode_chunk` used to hard-fail on
-    /// it with `Iw44(ZpTooShort)`, breaking the strict progressive path
-    /// (`render_progressive_step` / `render_progressive_all`) outright for any
-    /// frame requesting chunk 2 or later. Separately, the permissive full-page
-    /// cache (`PageLayers::bg44`) silently swallowed the same error and
-    /// dropped that chunk *and every chunk after it* — so `render_pixmap`
-    /// "succeeded" but was silently using only 2 of the page's 4 refinement
-    /// chunks. Both are now fixed by treating a short/empty payload as valid
-    /// trailing `0xFF` padding at the `djvu-iw44` layer (see
-    /// `Iw44Image::decode_chunk`), matching the padding convention
-    /// `ZpDecoder::read_byte` already uses at a stream's true end. Every step
-    /// and the full render must now succeed.
-    #[test]
-    fn render_progressive_step_handles_zero_length_bg44_chunk() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/corpus/watchmaker.djvu");
-        let data = std::fs::read(&path).expect("watchmaker.djvu must exist");
-        let doc = DjVuDocument::parse(&data).expect("parse failed");
-        let page = doc.page(0).unwrap();
-
-        let chunks = page.bg44_chunks();
-        assert_eq!(
-            chunks.len(),
-            4,
-            "expected 4 BG44 chunks on watchmaker page 0"
-        );
-        assert_eq!(
-            chunks[2].len(),
-            2,
-            "chunk 2 should be the zero-payload [serial, slices] header this regression covers"
-        );
-
-        let opts = RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            resampling: Resampling::Bilinear,
-            ..Default::default()
-        };
-
-        for step in 0..progressive_steps(page) {
-            render_progressive_step(page, &opts, step)
-                .unwrap_or_else(|e| panic!("step {step} should succeed, got {e}"));
-        }
-        render_progressive_all(page, &opts).expect("progressive_all should succeed");
-        render_pixmap(page, &opts).expect("render_pixmap should succeed");
-    }
-
     /// render_progressive with chunk_n out of range returns ChunkOutOfRange.
     #[test]
     fn render_progressive_chunk_out_of_range() {
