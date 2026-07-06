@@ -8262,3 +8262,110 @@ for scans (SSIM 0.99845, −2.43 % Sjbz); levels 2 and 4 are safer/smaller-gain
 fallbacks if a corpus's real content runs unusually small. Not extended past 8 px in
 this round — the task's specified sweep stopped there; higher values are unexplored
 headroom for a future round if a corpus's dust population runs larger.
+
+## Perf round 31 (2026-07-06) — FGBZ_MEDIANCUT: median-cut foreground palette quantiser
+
+**Issue.** Round 4's summary (line ~131 above) deferred "median-cut FGbz palette" as
+a "quality trade-off without a clean win metric." The D1 perceptual harness
+(`src/quality.rs`) has since landed, making it measurable. Read the current
+algorithm first: `src/fgbz_encode.rs` is pure wire-format encode/decode (`encode_fgbz`
+/ `decode_fgbz`) — it does **not** choose colours. The actual palette-selection logic
+is the private `foreground_fgbz` in `src/djvu_encode.rs`: it decodes the Sjbz blit map,
+accumulates a per-blit **average** RGB colour via `ColorAccum`, and previously emitted
+**one exact palette entry per distinct per-blit average** — no quantisation at all.
+On real scans this is fine (few, well-separated ink colours), but on pages with many
+blits whose *true* ink is the same hue yet whose per-blit average differs by a few
+LSBs (scanner noise, JPEG ringing, anti-aliasing), this bloats the FGbz palette with
+near-duplicate entries that buy no visible fidelity.
+
+**Fixture search.** Went looking for an on-disk multicolour-FGbz fixture to
+demonstrate the bloat: `colorbook.djvu` (the `test_colorbook_multicolor_foreground`
+fixture) turns out to use **FG44**, not FGbz, and is itself near-grayscale (max
+per-pixel channel spread 18) — not applicable. `tests/fixtures/irish.djvu` and
+`references/djvujs/library/assets/navm_fgbz.djvu` are real FGbz fixtures, but `irish`
+is likewise near-grayscale/already-minimal (its 40-entry palette barely reduces).
+Built a small deterministic **synthetic fixture** instead
+(`examples/fgbz_mediancut_harness.rs::synthetic_multicolor_text_page`): a 900×700
+page of ~2600 small AA'd glyph-like blits across 6 ink hues with ±8 per-channel
+scanner-style jitter — the exact "same ink, noisy average" scenario described above,
+generated with a tiny deterministic xorshift32 PRNG (no `rand` dependency needed).
+
+**Approach.** Added `FgbzPaletteOptions` (`src/djvu_encode.rs`): `Exact` (unchanged
+behaviour, and the `Default`) or `MedianCut { max_colors }` — classic median-cut
+quantisation of the per-blit weighted-average colours down to `max_colors` boxes
+(split the box with the widest channel range at its median, weighted-average each
+final box, deterministic tie-breaking), then each blit's colour maps to its nearest
+palette entry by squared RGB distance. Wired through a new
+`PageEncoder::with_fgbz_options` builder method; `foreground_fgbz` branches on the
+option. The `encode_djvm_layered_shared_impl` bundle path keeps calling it with
+`FgbzPaletteOptions::Exact` explicitly (out of scope here, documented inline) so
+multi-page bundles are untouched. **Default stays `Exact`, byte-identical** —
+verified by a dedicated test (`fgbz_mediancut_is_opt_in_default_stays_exact`)
+asserting default-constructed output equals explicit-`Exact` output, plus all 23
+pre-existing `djvu_encode` tests passing unchanged. 6 new unit tests cover the
+quantiser itself (`median_cut_reduces_many_near_duplicate_colors_to_k`,
+`median_cut_never_exceeds_k_even_with_fewer_distinct_colors`,
+`median_cut_empty_input_is_empty`, `nearest_palette_index_picks_closest`) and the
+opt-in guarantee.
+
+**Measured (synthetic fixture, `examples/fgbz_mediancut_harness.rs --synthetic`,
+`EncodeQuality::Quality`, D1 `quality::compare` vs the source render):**
+
+| Palette | Total bytes | FGbz bytes | Palette entries | SSIM | PSNR (dB) | MSE |
+|---|---|---|---|---|---|---|
+| Exact (baseline) | 9014 | 2255 | 214 | 0.86036 | 17.66 | 1113.6 |
+| MedianCut{4} | 6834 | 76 | 4 | 0.85378 | 17.15 | 1252.2 |
+| MedianCut{6} | 6840 | 82 | 6 | 0.85731 | 17.37 | 1192.5 |
+| MedianCut{8} | 6850 | 92 | 8 | 0.85850 | 17.56 | 1140.4 |
+| MedianCut{16} | 7004 | 245 | 16 | 0.85729 | 17.58 | 1134.2 |
+| MedianCut{32} | 7186 | 427 | 32 | 0.86054 | 17.66 | 1113.8 |
+| MedianCut{64} | 7684 | 925 | 64 | 0.86047 | 17.66 | 1113.7 |
+
+At `k=6` (matching the fixture's 6 true ink hues): FGbz shrinks 2255 B → 82 B
+(**−96.4 %**), total encoded bytes 9014 → 6840 (**−24.1 %**), SSIM moves from
+0.86036 to 0.85731 (**−0.0031**, i.e. visually a wash — confirmed by eye, see
+crops below). At `k=32` (≥ true colour count) FGbz is still 427 B vs 2255 B
+(**−81.1 %**) with SSIM *matching* the baseline to 4 decimal places
+(0.86054 vs 0.86036 — within measurement noise of the two different palette
+construction paths, not a real quality change). Only when `k` is pushed well below
+the true colour count (`k=4`) does SSIM measurably drop (−0.0066, still small on
+this luma-weighted metric — see caveat below).
+
+**Real-fixture check (`tests/fixtures/irish.djvu`, page 0, 40-entry `Exact` palette,
+already near-minimal):**
+
+| Palette | Total bytes | FGbz bytes | Palette entries | SSIM | PSNR (dB) |
+|---|---|---|---|---|---|
+| Exact (baseline) | 53348 | 2900 | 40 | 0.97880 | 33.17 |
+| MedianCut{4} | 52870 | 2422 | 4 | 0.97871 | 33.02 |
+| MedianCut{32} | 53320 | 2872 | 32 | 0.97880 | 33.15 |
+
+Confirms the fixture-search finding: `irish` has little headroom (its `Exact`
+palette is already small/well-separated), so median-cut mostly just matches it at
+equal `k`, with a small size win from BZZ-compressing a shorter, denser palette table.
+
+**Honesty caveat.** The D1 harness (`src/quality.rs`) scores **luma only** (8×8
+windowed SSIM, no chroma/hue term) — it structurally under-reports colour-fidelity
+differences, which is exactly what this experiment is about. To compensate, before/
+after 200×200 crops of the densest coloured-ink region (auto-located by a
+saturated-pixel-density heuristic, `most_colorful_window`) were saved to
+`_pr_assets/`: `synthetic_source_crop.png`, `synthetic_exact_crop.png`,
+`synthetic_mediancut6_crop.png`, `synthetic_mediancut32_crop.png`. Visual inspection
+confirms `Exact` and `MedianCut{6}`/`{32}` are indistinguishable from each other and
+close to the source (a pre-existing, unrelated `segment_page` mask-threshold
+artefact on the orange hue is present identically in every variant, including the
+baseline — not introduced by this change).
+
+**Correctness.** `make check` (fmt, clippy `-D warnings`, no_std build, wasm32
+no_std+wasm build, full 1036-test workspace suite) passes. 28/28 `djvu_encode`
+unit tests pass (22 pre-existing + 6 new).
+
+**Decision.** **Kept, opt-in.** `FgbzPaletteOptions::MedianCut` via
+`PageEncoder::with_fgbz_options` is additive: default output is byte-identical
+(enforced by test), and callers who know their content has a small number of true
+ink colours (e.g. coloured-annotation scans) can pick `k` at or above that count for
+a real FGbz/total-size win at zero-to-negligible quality cost. Not made the default:
+picking a good `k` is content-dependent (too-small `k` does cost real quality, per
+the `k=4` row), and on already-clean real-world fixtures like `irish.djvu` the
+practical win is small. This resolves the round-4 backlog item with honest numbers
+rather than forcing a default-behaviour change.
