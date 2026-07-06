@@ -10727,3 +10727,121 @@ round now that this data exists, not required to close this item.
 test and `force_use_simd` test hook were reverted along with the dispatch
 change, since they were written specifically to validate the (rejected)
 runtime-dispatch mechanism.
+
+## Perf round 55 (2026-07-06) — ZP_U64: widen the ZP bit-buffer to u64
+
+**Issue.** Round 47 (`X86_CI_BENCH`) found the ZP-decode-only benches
+(`jb2_decode`, `jb2_decode_corpus_bilevel`, `jb2_decode_large_600dpi`,
+`iw44_decode_first_chunk`, `iw44_decode_corpus_color`, `bzz_decode`) running
+faster under `-C target-cpu=x86-64-v3` and flagged **ZP_U64** — widening the
+shared `ZpDecoder`'s `bit_buf` from `u32` to `u64` so the four inline
+`refill!` copies (djvu-jb2 ×2, djvu-iw44 ×1, djvu-bzz ×1, plus djvu-zp's own
+`refill_buffer`) can bulk-load 4 bytes at once and refill less often — as a
+previously-deferred idea worth reopening.
+
+**Approach.** Two-stage rollout, byte-exactness gated throughout.
+Stage 1: widen `bit_buf`'s type to `u64` everywhere (structural necessity —
+all four sites share one field) but apply the actual bulk-refill cadence
+(4-byte big-endian chunk load, raised `bit_count` threshold, `<=32` bulk
+check / `<=56` byte-wise fallback ceiling) only in djvu-iw44's
+`previously_active_coefficient_decoding_pass`, the smallest blast radius.
+Stage 2: after an initial (later-revised, see below) positive read on x86 CI,
+unify the same cadence into the remaining three sites (`djvu-zp`'s
+`refill_buffer`, both `djvu-jb2` inline copies, `djvu-bzz`'s
+`decode_mtf_phase`). The `pos` overshoot/EOF-padding semantics (synthetic
+`0xFF` bytes past EOF, relied on by round 26's BUG-ZPSHORT) were preserved
+exactly — the fast path only fires when a full 4-byte chunk is verifiably
+in-bounds, otherwise falling back to the byte-at-a-time loop with its
+existing `read_byte`/padding logic unchanged. One test
+(`synthetic_bytes_distinguishes_eof_from_spinning`) needed its hardcoded
+"4 bytes overshoot" expectation updated to 8, since raising the byte-wise
+fallback's threshold from `<=24` to `<=56` legitimately changes how much
+padding a bare 2-byte input synthesizes on its first refill — verified this
+stays well inside `ZP_EOF_SLACK_BYTES=16`, so the safety margin is intact,
+just smaller (12→8 bytes of cushion).
+
+**Byte-exactness.** Verified via a new `examples/zp_u64_digest.rs` (SipHash
+digest of width/height/data per decoded page) across the full
+`tests/corpus/*.djvu` set (556 pages, 4 files): identical
+`grand_digest=fcc12acf155b60b8` at every checkpoint — stage 1, post-`cargo
+fmt`, stage 2, post-second-`cargo fmt`, and after a merge+cherry-pick branch
+reconstruction forced by a fast-moving `origin/main` — zero divergence,
+ever. Full test suite green throughout (1127 tests on the final branch
+state); `make check` (fmt, clippy `-D warnings`, no_std, wasm32, tests)
+green at every checkpoint.
+
+**Numbers — M1 (Apple Silicon aarch64, local).** 5 independent back-to-back
+A/B pairs (`git worktree add <path> origin/main` for an isolated control
+checkout vs. this branch, both built `--release`, `cargo bench --bench
+codecs`, `--output-format bencher`), varying warm-up/measurement time and
+run order to rule out a warm-up confound. Ratio = treatment/control − 1,
+negative = branch faster:
+
+| bench | pair 1 | pair 2 | pair 3† | pair 4 | pair 5 |
+|---|---|---|---|---|---|
+| `bzz_decode` | −6.1% | −4.5% | −1.6% | 0.0% | 0.0% |
+| `jb2_decode` | −3.7% | −5.6% | −1.5% | −0.1% | **+4.0%** |
+| `iw44_decode_first_chunk` | −6.3% | −6.1% | −0.7% | −1.5% | **+1.8%** |
+| `jb2_decode_corpus_bilevel` | −2.5% | −4.9% | −2.8% | +0.8% | −1.2% |
+| `iw44_decode_corpus_color` | +0.2% | −3.5% | **+1.5%** | −2.3% | −3.1% |
+| `jb2_decode_large_600dpi` | −2.4% | −2.5% | **+1.3%** | −4.3% | −2.0% |
+
+† pair 3 ran the branch checkout first / control second (order flipped) to
+rule out a "second-run-is-always-faster" warm-up artifact; the fact it
+didn't erase the effect ruled that specific bias out, but pairs 4–5 (longer
+warm-up, more elapsed wall-clock/thermal settling) shrank the deltas toward
+zero and, for `jb2_decode`/`iw44_decode_first_chunk`, **reversed sign**.
+Across all 5 pairs every bench's ratio spans a range that straddles zero —
+no bench shows a consistently-signed, reproducible ≥3% effect once more
+than 2 samples are gathered.
+
+**Numbers — x86 (GitHub Actions `ubuntu-latest`, `bench-x86-64-v3` job,
+default-RUSTFLAGS arm, `ns/iter`).** 4 control (`main`) samples, 2 stage-1
+treatment samples, 1 stage-2 (final, all-sites-unified) treatment sample:
+
+| bench | Control A | Control B | Control C | Control D | Stage-1 T1 | Stage-1 T2 | Stage-2 T3 |
+|---|---|---|---|---|---|---|---|
+| `bzz_decode` | 106 | 104 | 106 | 106 | 93 | 100 | 92 |
+| `jb2_decode` | 160,964 | 162,443 | 161,487 | 160,816 | 172,964 | 159,856 | 168,871 |
+| `iw44_decode_first_chunk` | 758,502 | 771,110 | 764,868 | 765,663 | 843,891 | 772,343 | 813,581 |
+| `jb2_decode_corpus_bilevel` | 581,879 | 589,009 | 581,645 | 585,620 | **391,744** | 588,102 | **401,664** |
+| `iw44_decode_corpus_color` | 1,427,347 | 1,387,089 | 1,277,856 | 1,400,562 | 1,301,453 | 1,297,508 | 1,178,703 |
+| `jb2_decode_large_600dpi` | 2,397 | 2,496 | 2,492 | 2,409 | 2,366 | 2,456 | 2,531 |
+
+Two findings undercut treating any of this as a clean win. First,
+`iw44_decode_corpus_color`'s 4 control samples (identical code, zero-diff)
+span 1,277,856–1,400,562/1,427,347 ns — an **11.7% spread with no code
+change at all** — comparable to or larger than the apparent ~7–13%
+treatment "improvement," so the treatment cluster sits inside the control's
+own noise band, not clearly below it. Second, and more decisively,
+`jb2_decode_corpus_bilevel`'s two **stage-1 treatment samples are the exact
+same commit run twice** and disagree by 33 percentage points (T1 −33% vs T2
++1% relative to the control mean) — direct, unambiguous proof that
+shared-runner cross-run noise alone (most likely noisy-neighbor contention
+on GitHub-hosted `ubuntu-latest`) can swing a single bench by more than 10×
+this task's 3% decision threshold on literally identical code. Any
+single-or-double-sample x86 CI comparison is unable to distinguish signal
+from this noise floor.
+
+**Decision.** **Reverted.** Byte-exactness held perfectly throughout (the
+one unambiguous, load-bearing result), but neither architecture produced a
+reproducible ≥3% win once sampled honestly: M1's apparent early "−3 to −6%"
+(pairs 1–2) crossed zero and flipped sign by pair 5; x86's apparent
+"−7–13%" on `iw44_decode_corpus_color` sits inside a directly-measured
+11.7% same-code noise band, and `jb2_decode_corpus_bilevel`'s identical-code
+replay proved the runner noise floor alone exceeds the decision threshold
+several times over. The methodologically honest read of 5 M1 pairs + 7 x86
+CI samples is "no measurable, reproducible effect on either architecture" —
+this task's own decision gate ("flat/slower on both → revert") applies.
+Reverted `crates/djvu-zp/src/lib.rs`, `crates/djvu-jb2/src/lib.rs`,
+`crates/djvu-bzz/src/decode.rs`, `crates/djvu-iw44/src/lib.rs` to
+`origin/main`'s content exactly (verified via an empty `git diff`); deleted
+`examples/zp_u64_digest.rs`. Reason for keeping this entry despite the
+revert: (a) it closes the round-47 lead so it isn't re-attempted blind, and
+(b) the noise-floor evidence above (an 11.7% same-code spread on x86 CI, a
+33-point swing on identical code for one bench, and a sign-flipping M1
+result once sampled 5× instead of 2×) is itself a reusable methodological
+finding for this repo's benchmark infra — small (<10%) single/double-sample
+wins on either the shared x86 CI runners or short local M1 runs should not
+be trusted without ≥4–5 independent samples and an explicit check for
+sign-consistency.
