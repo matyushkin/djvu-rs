@@ -8473,3 +8473,63 @@ parallel + hoist wins. Bit-identical, no `unsafe`, no `#[target_feature]` — so
 holds on every target LLVM auto-vectorises (unlike the manual-NEON dead-ends #3),
 and it needs no runtime feature detection. Lanczos is the recommended text-downscale
 resampler (D2), so this speeds the quality render path directly.
+## Perf round 34 (2026-07-04) — encoder-side DjVuLibre interop harness (unblocks the masked-wavelet work)
+
+Rounds 8/17 both blocked the full normative IW44 masked-wavelet transform on the
+same missing piece: a harness that validates **files we encode are decodable by
+DjVuLibre**. The two existing interop tools are decode-side only — `interop_pixdiff`
+and `diff_djvulibre` render an *existing* `.djvu` with our decoder and with `ddjvu`
+and compare. Neither ever feeds `ddjvu` a file **we produced**. This round builds
+that gate.
+
+### INTEROP_ENCODE — round-trip our encoder through ddjvu — **Kept (infra)** (2026-07-04)
+
+**Tool.** `examples/interop_encode.rs`. For each source page it (1) renders it to a
+pixmap with our decoder, (2) re-encodes that pixmap with our colour `Quality`
+encoder, (3) decodes the result with **`ddjvu`** (DjVuLibre) → PPM — the interop
+gate, (4) decodes the same bytes with our decoder, and reports two pixel-diff
+distributions:
+- **interop** (`ddjvu`-of-ours vs us-of-ours): both decode the *same* bytes, so a
+  large diff is a latent encoder-interop bug (the two decoders read our stream
+  differently).
+- **quality** (`ddjvu`-of-ours vs the original source): end-to-end encode quality
+  as DjVuLibre sees it.
+
+Exit code is non-zero if any page fails the gate (`ddjvu` rejects the file or the
+dimensions disagree), so it doubles as a pass/fail interop check and, later, a CI /
+fuzz target. It catches exactly the hazard the `chroma_half` code comment already
+documents (a half-resolution chroma stream makes `ddjvu` abort with *Unexpected End
+Of File*).
+
+**Baseline (current `Quality` encoder, `--corpus`, 21 pages, M1 Max + DjVuLibre
+`ddjvu`):**
+
+- **Interop gate: 21 / 21 pass.** DjVuLibre decodes every file our encoder
+  produces — our colour `Quality` output is DjVuLibre-interoperable today. (3 files
+  skipped: `big-scanned-page` JB2 too-large, `carte` truncated, `czech` needs an
+  external shared dict — decode-side limits, not encode failures.)
+- **Interop fidelity is excellent on real colour scans:** `ddjvu` and our decoder
+  agree to mean |Δ| < 0.3/255 on colorbook (0.274), watchmaker (0.130), conquete
+  (0.99), irish (0.10), cable (0.11), malliavin (0.003); byte-identical on the
+  bilevel-heavy `pathogenic`/`DjVu3Spec` (mean 0.000).
+- **Larger interop diffs (mean 20–29) appear only on degenerate re-encodes** —
+  feeding a *bilevel* page's render (boy_jb2, links, the rotate* variants) or a
+  *photo* (boy, vega, chicken) through the layered colour segmenter. These aren't
+  representative inputs for `PageEncoder::from_pixmap(Quality)`; the diff is the
+  edge-heavy mask-AA / chroma divergence `interop_pixdiff` already documents,
+  amplified by the degenerate segmentation. Flagged as a follow-up to confirm it is
+  cosmetic (our-decoder mask AA vs `ddjvu`) and not a real stream ambiguity.
+- **Encoder quality vs source** is faithful where fg/bg separate cleanly (watchmaker
+  0.60, cable 0.22) and expectedly lossy on detailed photos the layered model
+  cannot represent (colorbook 17.9, chicken 26.8) — a property of layered encoding,
+  not an interop issue.
+
+**Decision.** **Kept** as infra. This is the gate the masked-wavelet normative work
+was waiting on: the future masked forward-transform (mask plumbed through
+`encode_iw44_color` → `PlaneEncoder`) can now be validated by requiring
+`interop_encode --corpus` to stay 21/21 on the gate **and** not regress the
+interop-fidelity means on the real colour scans. Sits alongside D1 (`quality.rs`)
+and `interop_pixdiff` as the encoder-side complement to the decode-side tools.
+Follow-up: investigate the degenerate-re-encode interop diffs (likely mask-AA
+cosmetic), and extend the harness to also drive `c44`/`cjb2` → our decoder for the
+reverse direction.
