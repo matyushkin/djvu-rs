@@ -961,6 +961,7 @@ fn bench_pdf_export_flatdecode(c: &mut Criterion) {
     let opts = djvu_rs::pdf::PdfOptions {
         jpeg_quality: None,
         output_dpi: 150,
+        adaptive_raster: false,
     };
     let mut group = c.benchmark_group("export");
     group.sample_size(10);
