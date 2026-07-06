@@ -7402,3 +7402,204 @@ default wrong, and it matches the repo's byte-identical-default culture). Landed
 
 This closes the JB2 size-gap plan: the biggest practical text-size lever is now a
 one-call, documented opt-in, without changing anyone's default output.
+
+## Perf round 20 (2026-07-04) — IW44_MASKED_WAVELET down-payment: harmonic BG inpaint
+
+Round 8 recorded IW44_MASKED_WAVELET (the ~3.9% residual BG44 size gap vs
+DjVuLibre `c44`) as the priority *size* lever, but the full masked-wavelet
+transform is a normative bitstream change gated on a DjVuLibre interop-diff
+harness — deferred. The same entry flagged the **interop-safe first step**:
+improve the background *inpainting* under the mask in `segment_page`
+(encoder-only, decoder never sees it). This round lands that step and finds it is
+far more than a "down-payment": the production colour encoder was not inpainting
+at all, so this alone captures most of the masked-wavelet size win with **zero**
+bitstream risk — and *improves* decoded quality.
+
+### BG_DIFFUSE — harmonic diffusion of fully-masked background cells — **Kept** (2026-07-04)
+
+**Issue.** `segment_page` builds a sub-sampled BG pixmap where each cell is the
+mean of its block's *unmasked* source pixels. A **fully-masked** cell (its whole
+`sub × sub` block is foreground ink → invisible in the render) fell back, by
+default, to the *full-block mean including the ink* — a near-black cell. Adjacent
+to light background cells that is a large high-frequency step, and the IW44
+background codec spends bits coding it, even though the pixels are never seen. The
+existing `bg_inpaint` (ring-average) fixed the worst of this but was **off by
+default and in every shipping profile** (`default_segment_options` returned plain
+`SegmentOptions::default()` for `Quality` and `SegmentOptions::archival()` for
+`Archival`, both `bg_inpaint = false`). So the colour encoder was paying full
+freight for invisible ink cells.
+
+**Approach.** New `SegmentOptions::bg_diffuse`: after the BG fill, every
+fully-masked cell is overwritten with the **harmonic** (smoothest) interpolation
+of the confident cells — Gauss-Seidel relaxation of Laplace's equation with the
+confident cells as fixed Dirichlet boundary (`diffuse_masked_cells`). Being
+maximally smooth it injects the least wavelet energy, so it codes smaller than
+either the ink fallback or the ring average. Confident (visible) cells are left
+byte-exact, so visible background is untouched; only invisible masked cells
+change. Iterations cap at the grid's larger dimension (16–512) with an early stop
+at Δ < 0.5/255. Wired into the `Quality` and `Archival` profiles'
+`default_segment_options`; the CLI `--bg-inpaint` flag now explicitly selects the
+legacy ring fill (turns diffusion off) so it remains distinguishable.
+
+**Numbers — BG44 chunk bytes** (native-resolution render → `segment_page` →
+`encode_iw44_color`, M1 Max; `default` = current shipping ink-fallback):
+
+| Page | default | ring (`bg_inpaint`) | diffuse (`bg_diffuse`) | diffuse vs default | vs ring |
+|------|---------|---------------------|------------------------|--------------------|---------|
+| colorbook (2260×3669) | 3964 B | 2078 B | **1917 B** | **−51.6%** | −7.7% |
+| watchmaker (2550×3301) | 1736 B | 189 B | 189 B | **−89.1%** | 0% |
+| malliavin (2862×4916) | 267 B | 179 B | 179 B | −33.0% | 0% |
+| irish (2479×3504) | 2473 B | 2434 B | 2434 B | −1.6% | 0% |
+| conquete_paix (4267×6853) | 22 970 B | 768 B | **758 B** | **−96.7%** | −1.3% |
+| chicken / vega / cable | — | — | — | 0% (no masked cells) | 0% |
+
+**Quality — full colour encode, decoded render SSIM/PSNR vs the original render**
+(`PageEncoder::from_pixmap`, `Quality` profile, default segmentation vs
+`bg_diffuse`):
+
+| Page | file default → diffuse | SSIM default → diffuse | PSNR default → diffuse |
+|------|------------------------|------------------------|------------------------|
+| colorbook | 18 092 → 16 044 B (−11.3%) | 0.97598 → 0.97741 | 22.01 → 22.05 dB |
+| watchmaker | 14 070 → 12 518 B (−11.0%) | 0.99868 → 0.99981 | 41.23 → 49.11 dB |
+| malliavin | 1 120 → 1 032 B (−7.9%) | 0.99999 → 1.00000 | 63.2 → ∞ dB |
+| conquete_paix | 28 348 → **6 134 B (−78.4%)** | 0.99526 → 0.99899 | 37.51 → 50.42 dB |
+
+**Strict win on both axes.** Diffusion is never worse than the ink fallback on
+either size or quality: it is smaller (−8% to −78% of the whole colour file, all
+of it BG44) **and** higher SSIM/PSNR on every page — because removing the near-black
+ink-fallback cells also removes the dark halos they bled across mask edges via BG
+upsampling. Pages with no fully-masked cells (chicken, vega, cable) are unchanged
+(0%), so it is safe where it does nothing.
+
+**Correctness.** Encoder-only; the decoder never sees the mask or the BG fill.
+Visible (confident) cells are byte-exact, so the change only touches invisible
+pixels (± the BG-upsampling boundary bleed, which the SSIM table shows *improves*).
+New unit test `bg_diffuse_smooths_masked_cells_and_keeps_confident_cells`; the CLI
+test that asserted `--bg-inpaint` changes the BG became
+`encode_quality_inpaints_masked_background_by_default` (the default now inpaints).
+`make check` (1028+ tests, incl. no_std / wasm32) green.
+
+**Decision.** **Kept**, and enabled in the shipping `Quality`/`Archival` colour
+profiles. It is the interop-safe capture of most of the IW44_MASKED_WAVELET size
+gap with a quality *gain*, not a trade. The remaining, still-deferred piece is the
+normative masked forward-transform + coefficient gathering (mask plumbed through
+`encode_iw44_color` → `PlaneEncoder`), which needs the DjVuLibre interop-diff
+harness before it can be attempted.
+
+## Perf round 21 (2026-07-04) — masked forward-transform: measured unnecessary (BG_DIFFUSE subsumes it)
+
+Round 17 (BG_DIFFUSE) landed the interop-safe "first step" of IW44_MASKED_WAVELET
+— smoothing the invisible masked background before the codec sees it. The deferred
+big piece was the **normative masked forward-transform** (plumb the mask into
+`encode_iw44_color` → `PlaneEncoder`, interpolate masked pixels inside the lifting,
+skip fully-masked coefficient buckets). Before building that — a bitstream change
+the repo has repeatedly found interop-fragile — this round **measures whether it
+can still help** now that BG_DIFFUSE smooths the input. It cannot: DjVuLibre's own
+masked encoder produces the same size as its unmasked encoder fed our diffused BG.
+
+### IW44_MASKED_TRANSFORM — is the normative masked transform worth it after BG_DIFFUSE? — **Rejected / unnecessary** (2026-07-04)
+
+**Method.** For each colour page: segment with `bg_diffuse` → the smoothed
+sub-sampled BG. Encode that BG three ways and compare BG44 bytes at a matched
+100-slice schedule, full chroma:
+1. **ours** — `encode_iw44_color(diffused_bg)` (our current pipeline),
+2. **c44 (diffused)** — DjVuLibre `c44 -slice 100 -crcbfull` on the same diffused BG,
+   *no* mask,
+3. **c44 (-mask, raw)** — `c44 -mask` on the *raw* (ink-fallback) BG with a PBM
+   marking exactly the fully-masked cells — DjVuLibre's masked-wavelet lever.
+
+**Numbers** (M1 Max + DjVuLibre `c44`):
+
+| Page (BG) | ours | c44 (diffused, no mask) | c44 (-mask, raw) | ours SSIM / c44 SSIM |
+|-----------|------|-------------------------|------------------|----------------------|
+| colorbook (189×306) | 1917 B | 1445 B | 1471 B | 0.97754 / 0.98447 |
+| watchmaker (213×276) | 189 B | 117 B | 117 B | 0.99797 / 0.99760 |
+| irish (207×292) | 2434 B | 2063 B | 2063 B | 0.98211 / 0.98050 |
+| conquete_paix (356×572) | 758 B | 644 B | 643 B | 0.99893 / 0.99882 |
+
+**Finding 1 — the masked lever is fully subsumed by BG_DIFFUSE.** c44's *masked*
+encoding of the raw BG (col 3) is within noise of c44's *unmasked* encoding of our
+*diffused* BG (col 2): 1471≈1445, 117=117, 2063=2063, 643≈644. Feeding a diffused
+BG to a mask-blind encoder is equivalent to feeding a raw BG + mask to a masking
+encoder. So implementing the normative masked forward-transform in our codec would
+**not shrink BG44 at all** beyond what round-17 BG_DIFFUSE already delivers — the
+whole benefit of masking is the input smoothing, which we now do explicitly and
+interop-safely at the BG-pixel level.
+
+**Finding 2 — the real residual gap is entropy coding, not masking.** Our IW44 is
+1.18–1.62× larger than c44 on the *identical* diffused input (both mask-blind), so
+the gap is our coder's rate-distortion efficiency, not a missing masked transform.
+It is partly a curve-position difference (watchmaker/irish/conquete: ours is bigger
+but ≥ c44 on SSIM) and partly a genuine loss (colorbook: bigger **and** lower SSIM,
+0.9775 vs 0.9845). This is IW44_ACT_THRESH territory — normative quantization /
+context-table work that IW44_SWARM_REST showed breaks DjVuLibre interop — and is
+untouched by masking.
+
+**Decision.** **Rejected — the normative masked forward-transform is unnecessary.**
+BG_DIFFUSE (round 17) captured the entire masked-encoding size win at zero bitstream
+risk; the c44 mask-vs-diffused equivalence proves there is nothing left for the
+normative transform to gain. **IW44_MASKED_WAVELET is closed.** The remaining IW44
+size lever is the ~1.2–1.6× entropy-coding gap vs c44 (measured here on smooth BG),
+a separate, interop-fragile axis — not the masked transform. This is the highest-value
+outcome available: a large, high-risk normative change shown to be *not worth doing*
+before writing it.
+
+## Perf round 22 (2026-07-04) — IW44 entropy gap, characterized (diagnostic)
+
+Round 20 measured our IW44 encoder 1.18–1.62× larger than `c44` on the same
+diffused BG at a matched 100-slice schedule, and attributed it to entropy coding.
+That was at matched *slices*, not matched *quality*. This round measures the true
+rate-distortion parity — sweep the slice count for both encoders, decode **both
+with our decoder** (one consistent SSIM metric), and read size-at-equal-SSIM — to
+find out whether the gap is real coding efficiency or a slice-schedule artifact.
+The answer is "both, split by content".
+
+### IW44_ENTROPY_GAP — is the c44 size gap real at matched quality? — **Diagnostic** (2026-07-04)
+
+**RD curves (diffused BG, our decoder for both, M1 Max + DjVuLibre `c44`):**
+
+colorbook BG 189×306 (textured):
+
+| slices | ours B / SSIM | c44 B / SSIM |
+|--------|---------------|--------------|
+| 50 | 97 / 0.93466 | 55 / 0.93053 |
+| 74 | 345 / 0.95928 | 257 / 0.95920 |
+| 100 | 1917 / 0.97754 | 1445 / 0.98447 |
+
+watchmaker BG 213×276 (smooth):
+
+| slices | ours B / SSIM | c44 B / SSIM |
+|--------|---------------|--------------|
+| 30 | 57 / 0.99789 | 30 / 0.98467 |
+| 50 | 89 / 0.99789 | 50 / 0.99757 |
+| 74 | 131 / 0.99789 | 84 / 0.99756 |
+| 100 | 189 / 0.99797 | 117 / 0.99760 |
+
+**Finding — the gap splits by content:**
+- **Smooth BG: we are competitive-to-better at matched quality.** watchmaker's SSIM
+  saturates at slice 30 (57 B / 0.99789); `c44` needs 74 slices / 84 B to reach a
+  *lower* 0.99756. So at equal quality ours (57 B) beats `c44` (84 B). The raw
+  slice-100 "gap" (189 vs 117 B) is ours **over-coding past its own saturation** —
+  the IW44_SLICE_RD (round 18) effect, amplified because BG_DIFFUSE makes the BG
+  even smoother. This is an interop-safe lever, but a **fixed** `Iw44Target::Bpp`
+  cap cannot capture it: the saturation bitrate is content-dependent and spans 30×
+  (~0.008 bpp for watchmaker vs ~0.265 bpp for colorbook), so any cap that trims
+  the smooth page destroys the textured one. It needs a **content-adaptive quality
+  target** (a `-decibel`-style stop), a new RD-control feature worth only ~100 B on
+  smooth colour pages.
+- **Textured BG: a genuine ~1.3× coding gap at matched quality.** At slice 74 both
+  reach SSIM 0.9592 but ours is 345 B vs `c44` 257 B (1.34×). This is real per-slice
+  coding efficiency — our activation/quantization policy emits more than `c44` for
+  the same reconstruction. It is the IW44_ACT_THRESH residual, in the
+  normative-adjacent activation territory IW44_SWARM_REST showed is interop-fragile
+  (changing quantization/context tables broke `ddjvu` decoding).
+
+**Verdict.** **Diagnostic — no change.** The two remaining IW44 size levers are now
+correctly scoped and both are low-priority: (1) an interop-safe content-adaptive
+quality target to stop the smooth-BG slice over-coding — real feature, ~100 B/page,
+low EV; (2) the ~1.3× textured-content coding gap — interop-fragile normative
+activation work, high risk. Neither is a quick clean win. Recorded so the next
+IW44-size effort starts from the true, content-split picture instead of the
+misleading flat "1.2–1.6× worse than c44". The big interop-safe BG44 win was
+BG_DIFFUSE (round 17); the masked transform was shown unnecessary (round 20); this
+closes the "what's left" question for the IW44 background size axis.
