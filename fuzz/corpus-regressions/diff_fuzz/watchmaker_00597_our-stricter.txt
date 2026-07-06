@@ -1,0 +1,7 @@
+class: our-stricter
+source file: watchmaker
+mutant index: 597
+mutation: truncate-start-of-TXTz@182182
+target page (0-based): 11
+detail: parse: IFF error: chunk [70, 79, 82, 77] claims 183340 bytes but only 182170 are available
+djvudump stderr: 

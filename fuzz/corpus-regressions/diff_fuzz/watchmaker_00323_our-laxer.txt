@@ -1,0 +1,9 @@
+class: our-laxer
+source file: watchmaker
+mutant index: 323
+mutation: resize-length-of-TXTz->3130
+target page (0-based): 1
+detail: rendered 2550x3301
+djvudump stderr: *** [1-15106] Corrupted IFF file (EndOfChunk while reading chunk ID).
+*** (IFFByteStream.cpp:208)
+*** 'int DJVU::IFFByteStream::get_chunk(GUTF8String &, int *, int *)'

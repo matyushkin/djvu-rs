@@ -9542,3 +9542,116 @@ paying the render cost). Tests:
 `thumbnails_auto_falls_back_to_render_without_th44`,
 `thumbnails_never_upscale_a_small_th44_thumbnail`,
 `thumbnails_downscale_an_oversized_th44_thumbnail`.
+## Perf round 45 (2026-07-06) — DIFF_FUZZ: corpus-mutation differential fuzzing vs DjVuLibre
+
+**Motivation.** Existing fuzzers (`fuzz/fuzz_jb2` etc.) catch panics/timeouts/OOM
+but not *semantic* divergence: a file both we and DjVuLibre parse but render
+differently (silently wrong pixels), or accept/reject asymmetrically. The
+existing `examples/interop_pixdiff.rs` quality-floor tool only compares on the
+fixed, well-formed corpus — the gap is running the comparison over *mutated*
+inputs.
+
+**Infra shipped.**
+- `examples/support/mod.rs` — `native_opts`/`parse_ppm`/`DiffStats`/`diff_stats`
+  extracted out of `interop_pixdiff.rs` into a shared module (no duplicated
+  diff logic); `interop_pixdiff.rs` now imports it via `#[path = "support/mod.rs"]`.
+- `examples/diff_fuzz.rs` — deterministic (splitmix64, seed CLI arg), corpus-
+  mutation differential driver. Self-contained IFF chunk walker (no
+  `djvu-iff` dependency) with page-scope tracking (`ChunkSpan::page_index`,
+  so a mutation inside page K's chunks renders/compares page K, not always
+  page 0). Three mutation operators: truncate-at-chunk-boundary, bit-flip-in-
+  payload, resize-length-field (+ generic whole-file-bitflip fallback).
+  Crash-safe (`catch_unwind` + silent panic hook) and per-mutant timeout
+  (thread+channel for our side, manual `try_wait` polling for `djvudump`/
+  `ddjvu` subprocesses). Classifies every mutant on a **symmetric 3-level
+  acceptance ladder** (0=structural reject, 1=structurally-ok-but-render-
+  fails, 2=fully rendered), computed independently for our side (parse+
+  render) and DjVuLibre's side (`djvudump` for structural, `ddjvu` for
+  actual render) — a plain binary accept/reject compare missed real
+  divergence where djvudump structurally accepts a file but ddjvu's own
+  decoder still refuses to render it (djvudump only validates IFF chunk-tree
+  framing, it doesn't decode JB2/IW44 payloads). Falls back to a solo
+  parse-robustness mode if `ddjvu`/`djvudump` aren't on `PATH` (env-var-
+  overridable binary paths). Findings saved to `fuzz/corpus-regressions/diff_fuzz/`
+  as a minimal-repro `.djvu` + a `.txt` sidecar (mutation applied, target
+  page, our detail, captured reference-tool stderr).
+
+**Session.** 2100 mutants (700/file × 3 corpus files: `watchmaker.djvu` 12-page
+bundled/183 KB, `cable_1973_100133.djvu` 2-page/15 KB, `boy.djvu` 1-page/4.8 KB),
+seed 42, 2 s our-timeout / 5 s ref-timeout, wall time 153 s.
+
+| class | count | % | meaning |
+|---|---|---|---|
+| both-reject | 1266 | 60.3% | both correctly reject malformed input |
+| both-accept-match | 429 | 20.4% | both render, pixels match — safe majority |
+| our-renders-what-they-reject | 310 | 14.8% | we render, DjVuLibre's own decoder refuses (see below) |
+| both-render-fail | 63 | 3.0% | both structurally ok, neither renders |
+| our-laxer | 19 | 0.9% | `djvudump` itself rejects (BZZ/arithmetic-decoder corruption), we still parse+render |
+| our-render-fail | 4 | 0.2% | we fail to render, ddjvu renders fine |
+| our-stricter | 4 | 0.2% | we reject upfront, djvudump structurally accepts |
+| pixel-mismatch | 4 | 0.2% | both fully render, pixels differ beyond threshold |
+| dim-mismatch | 1 | 0.05% | both fully render, reported dimensions differ |
+
+**0 crashes, 0 timeouts** across 2100 mutants — the existing JB2 decode caps
+(`MAX_SYMBOL_PIXELS`/`MAX_TOTAL_SYMBOL_PIXELS`/`MAX_PAGE_SYMBOL_PIXELS`/
+`MAX_TOTAL_BLIT_PIXELS`, #503/#512) hold up fine under mutation.
+
+**Confirmed findings (repros under `fuzz/corpus-regressions/diff_fuzz/`), not
+fixed in-session — none are crashes, all require DjVu-format-spec judgment to
+fix without risking false-positive rejections elsewhere, so recorded as
+follow-ups per the "fix only if small/obvious" rule:**
+1. **INFO version ceiling not enforced.** Bit-flipping `watchmaker.djvu`'s
+   INFO version byte to ≥50 makes DjVuLibre reject ("Cannot decode DjVu files
+   with version>= 50" — a forward-compat guard), we decode anyway.
+   (`watchmaker_*_our-renders-what-they-reject`)
+2. **BG44/IW44 truncated-stream tolerance.** Bit-flips/truncation in BG44
+   payloads that make `ddjvu` abort ("Unexpected End Of File" / "Chunk does
+   not bear expected serial number") still render for us — we don't detect
+   the truncated/desynced wavelet stream and produce output anyway (possibly
+   from a partially-corrupt tail). Majority of the 310 `our-renders-what-
+   they-reject` bucket. Also the original `boy.djvu` case: an INFO-height
+   bit-flip yields 192×384 for us where the BG44 payload only encodes
+   192×256 — DjVuLibre rejects with "Corrupted data (Incorrect size in BG44
+   chunk)" — i.e. no INFO-vs-payload dimension cross-check.
+3. **INFO minor-version byte affects rendered pixels/dimensions on both
+   sides, differently.** All 5 boy.djvu `pixel-mismatch`/`dim-mismatch`
+   findings are single/double bit-flips at file offset 24 (the INFO
+   `minor_version` byte) — both decoders fully render but disagree, likely
+   from version-dependent gamma/flag-byte interpretation. Not yet root-
+   caused; needs spec-revision research.
+4. **`our-render-fail`: JB2 "unknown record type" where ddjvu still renders.**
+   Verified manually (`ddjvu -format=ppm` on the saved repro exits 0, produces
+   a full page) — a bit-flip inside `Sjbz` corrupts the arithmetic-coded
+   stream such that our decoder's next `decode_num` call lands on record type
+   >11 (`Jb2Error::UnknownRecordType`, `crates/djvu-jb2/src/lib.rs:1745`)
+   while DjVuLibre's decoder apparently doesn't. Most likely arithmetic-coder
+   state divergence cascading from the corrupted bit rather than a JB2-spec
+   interpretation gap — unconfirmed, needs bit-level trace against
+   DjVuLibre's `JB2Image.cpp`.
+5. **`our-stricter`: verified NOT a bug.** `truncate-start-of-TXTz` mutations
+   make our IFF parser reject upfront ("chunk [FORM] claims N bytes but only
+   M available") because we validate the outer `FORM:DJVM`'s declared total
+   length against the actual file length. Manually ran `djvudump` on the
+   saved repro: exit 0, prints the full (stale) chunk tree — djvudump doesn't
+   do this upfront whole-container check, it only fails once something
+   actually tries to read past EOF. This is us being *more* defensive, not a
+   regression; no fix needed.
+
+**Decision.** **Kept** (infra). No source-code fixes applied this round — 0
+crashes found, and all 5 confirmed semantic-divergence classes require
+DjVu-format-spec-level judgment (forward-compat version ceiling, wavelet
+stream integrity, INFO field versioning, JB2 record-type space) to fix safely
+without introducing false-positive rejections on legitimate files. Recorded
+above as follow-ups. Tests: none added (this is an example-only diagnostic
+tool, no library code changed); `make check` gate covers fmt/clippy/no_std/
+wasm32/tests on the existing tree, unaffected by this change.
+
+**Follow-ups**: (1) cross-validate INFO width/height against decoded BG44/FG44
+subsample geometry before trusting INFO's declared canvas size (addresses
+finding 2's dimension half). (2) enforce the DjVu version-ceiling check DjVuLibre
+applies (finding 1). (3) detect/report truncated or serial-number-desynced IW44
+slice streams instead of silently rendering a partial decode (finding 2's
+truncation half). (4) root-cause the INFO minor-version pixel divergence
+(finding 3) against the DjVu format revision history. (5) trace whether finding
+4's JB2 "unknown record type" divergence is arithmetic-coder noise or a genuine
+gap against DjVuLibre's record-type handling.

@@ -1,0 +1,9 @@
+class: our-laxer
+source file: cable_1973_100133
+mutant index: 5
+mutation: bitflip-3bits-in-BG44@12526
+target page (0-based): 1
+detail: rendered 2550x3301
+djvudump stderr: *** Unexpected End Of File.
+*** (ByteStream.cpp:557)
+*** 'unsigned int DJVU::ByteStream::read8()'

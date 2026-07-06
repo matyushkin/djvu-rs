@@ -1,0 +1,7 @@
+class: our-render-fail
+source file: cable_1973_100133
+mutant index: 472
+mutation: bitflip-3bits-in-Sjbz@4814
+target page (0-based): 1
+detail: render: document error: JB2 error: JB2: unknown record type
+ddjvu stderr: 
