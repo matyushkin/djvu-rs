@@ -1,29 +1,59 @@
 # Releasing djvu-rs
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please).
-You do **not** need to manually edit `CHANGELOG.md`, bump `Cargo.toml`, or create tags.
+Releases are cut by **pushing a version tag**. The tag — not release-please — is what
+triggers publication to crates.io. This is deliberate: it does **not** depend on
+`RELEASE_PLEASE_TOKEN` (a PAT that expires and has silently broken a release before),
+only on `CARGO_REGISTRY_TOKEN`, which crates.io requires and which should be issued
+**without an expiry**.
 
-## How it works
+## Standard release procedure
 
-1. **Merge PRs to `main`** — use [Conventional Commits](#conventional-commits) in every commit
-   message so release-please can determine the correct version bump.
+1. **Land a version-bump commit on `main`** — a commit titled `chore(main): release X.Y.Z`
+   that bumps the workspace `version` in `Cargo.toml`, updates `CHANGELOG.md`, and sets
+   `.release-please-manifest.json` to `X.Y.Z`. This normally comes from the release-please
+   PR (see below), but you can also write it by hand.
 
-2. **release-please opens a Release PR automatically** — after each push to `main` it creates
-   (or updates) a PR titled `chore(main): release X.Y.Z` containing:
-   - `Cargo.toml` version bump
-   - `CHANGELOG.md` update (new section with all changes since last release)
+2. **Push the tag** — pointing at that release commit:
 
-3. **Merge the Release PR when ready** — this is the only manual step. release-please then:
-   - Creates the `vX.Y.Z` git tag
-   - Creates a GitHub Release with the changelog notes
+   ```sh
+   git tag -a vX.Y.Z <release-commit-sha> -m "Release X.Y.Z"
+   git push --no-verify origin vX.Y.Z
+   ```
 
-4. **CI publishes to crates.io** — `.github/workflows/publish.yml` triggers on the new tag,
-   runs tests, and runs `cargo publish`.
+   `--no-verify` skips the pre-push hook (a full `make check`); the commit is already on
+   `main` and green, so re-running it on a tag push is wasted minutes.
+
+3. **CI publishes** — `.github/workflows/publish.yml` fires on `push: tags: ['v*']`,
+   runs the release validation, then `cargo publish` for every workspace crate. It skips
+   any crate whose version already exists on crates.io, so re-pushing a tag is safe.
+
+4. **Create the GitHub Release** (optional but recommended, since a manual tag does not
+   create one):
+
+   ```sh
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <changelog-section>.md
+   ```
+
+## Where the version-bump commit comes from
+
+release-please still does the tedious part — it opens a `chore(main): release X.Y.Z` PR
+that accumulates the `Cargo.toml` bump and the `CHANGELOG.md` section from Conventional
+Commits since the last release. Merge that PR to get the release commit on `main`, **then
+push the tag yourself** (step 2 above).
+
+> **Do not rely on release-please to create the tag / GitHub Release.** That step runs
+> under `RELEASE_PLEASE_TOKEN`; when the PAT is expired the release-please workflow fails
+> with `Bad credentials` and nothing gets tagged or published. The manual tag push in
+> step 2 bypasses that path entirely.
+
+If `RELEASE_PLEASE_TOKEN` is expired and you don't want to rotate it, you can also write
+the release commit by hand (bump `Cargo.toml` + `.release-please-manifest.json`, edit
+`CHANGELOG.md`), merge it, and proceed to step 2 — the tag flow is identical.
 
 ## Conventional Commits
 
 Every commit message must start with a type prefix. release-please reads these to decide
-the version bump:
+the version bump when it prepares the release PR:
 
 | Commit prefix | Version bump | Example |
 |---------------|-------------|---------|
@@ -51,27 +81,9 @@ Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 
 While version is `0.x`, minor bumps may include breaking changes per SemVer §4.
 
-## Emergency / manual release
+## Tokens
 
-If you need to release outside the normal flow:
-
-```sh
-# 1. Edit Cargo.toml and CHANGELOG.md manually
-git add Cargo.toml CHANGELOG.md
-git commit -m "chore: release vX.Y.Z"
-
-# 2. Tag and push
-git tag vX.Y.Z
-git push origin main --tags
-
-# 3. Create the GitHub Release manually (publish.yml does not do this for manual tags)
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/release-notes.md
-```
-
-CI will pick up the tag and publish to crates.io. Note that `publish.yml` skips
-the publish step automatically if the version already exists on crates.io, so
-pushing a tag for a version you already published manually is safe.
-
-> **Important:** manual tags do not create a GitHub Release automatically.
-> Always run `gh release create` after a manual tag, otherwise the GitHub
-> Releases page will be out of sync with crates.io.
+| Secret | Used by | Notes |
+|--------|---------|-------|
+| `CARGO_REGISTRY_TOKEN` | `publish.yml` (`cargo publish`) | **Required** — crates.io cannot publish without it. Issue it with **no expiry** at <https://crates.io/settings/tokens> so it never becomes a release blocker. |
+| `RELEASE_PLEASE_TOKEN` | `release-please.yml` | Only prepares the changelog/version PR and (if you let it) the tag. **Not** on the critical path for the tag-push release flow above. If it expires, releases still go out via the manual tag. |
