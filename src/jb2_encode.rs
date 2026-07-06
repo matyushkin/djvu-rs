@@ -687,4 +687,135 @@ mod tests {
             );
         }
     }
+
+    // ── JB2_DICT_ORDER probe: does shared-dict permutation change Sjbz size? ──
+    //
+    // Diagnostic-only measurement. The permutation types live behind
+    // `experimental` in `djvu-jb2` (`DictOrderVariants` /
+    // `cluster_shared_symbols_order_variants`); this driver loads real corpus
+    // pages, builds all three orderings from the *same* clustering pass
+    // (so the promoted symbol *set* is identical, only the index assignment
+    // differs), re-encodes Djbz + every page's Sjbz against each ordering,
+    // and round-trips every page through the real decoder to confirm
+    // pixel-exact reconstruction regardless of dict order.
+
+    #[cfg(feature = "experimental")]
+    #[derive(Default)]
+    struct DictOrderReport {
+        pages: usize,
+        shared_symbols: usize,
+        baseline_bytes: u64,
+        by_frequency_bytes: u64,
+        by_bucket_bytes: u64,
+        roundtrip_failures: usize,
+    }
+
+    /// Encode `Djbz` (from `shared`) + every page's `Sjbz` against it, sum the
+    /// real emitted bytes, and round-trip-decode every page against the real
+    /// decoder. Returns `(total_bytes, roundtrip_failures)`.
+    #[cfg(feature = "experimental")]
+    fn total_jb2_bytes_roundtripped(pages: &[Bitmap], shared: &[Bitmap]) -> (u64, usize) {
+        let djbz = encode_jb2_djbz(shared);
+        let mut total = djbz.len() as u64;
+        let mut failures = 0usize;
+        let dict = crate::jb2::decode_dict(&djbz, None).ok();
+        for page in pages {
+            let sjbz = encode_jb2_dict_with_shared(page, shared);
+            total += sjbz.len() as u64;
+            let ok = dict.as_ref().is_some_and(|d| {
+                crate::jb2::decode(&sjbz, Some(d)).is_ok_and(|decoded| {
+                    decoded.width == page.width
+                        && decoded.height == page.height
+                        && (0..page.height)
+                            .all(|y| (0..page.width).all(|x| decoded.get(x, y) == page.get(x, y)))
+                })
+            });
+            if !ok {
+                failures += 1;
+            }
+        }
+        (total, failures)
+    }
+
+    #[cfg(feature = "experimental")]
+    fn measure_dict_order_probe(
+        path: &str,
+        page_threshold: usize,
+        max_pages: usize,
+    ) -> DictOrderReport {
+        let data = std::fs::read(path).unwrap();
+        let doc = crate::DjVuDocument::parse(&data).unwrap();
+        let n = doc.page_count().min(max_pages);
+        let mut pages: Vec<Bitmap> = Vec::with_capacity(n);
+        for i in 0..n {
+            let Ok(page) = doc.page(i) else { continue };
+            let Ok(Some(mask)) = page.extract_mask() else {
+                continue;
+            };
+            if mask.width == 0 || mask.height == 0 {
+                continue;
+            }
+            pages.push(mask);
+        }
+
+        let mut report = DictOrderReport {
+            pages: pages.len(),
+            ..Default::default()
+        };
+
+        let variants =
+            djvu_jb2::encode::cluster_shared_symbols_order_variants(&pages, page_threshold);
+        report.shared_symbols = variants.baseline.len();
+        if variants.baseline.is_empty() {
+            return report;
+        }
+
+        let (baseline_bytes, f1) = total_jb2_bytes_roundtripped(&pages, &variants.baseline);
+        let (freq_bytes, f2) = total_jb2_bytes_roundtripped(&pages, &variants.by_frequency);
+        let (bucket_bytes, f3) = total_jb2_bytes_roundtripped(&pages, &variants.by_bucket);
+
+        report.baseline_bytes = baseline_bytes;
+        report.by_frequency_bytes = freq_bytes;
+        report.by_bucket_bytes = bucket_bytes;
+        report.roundtrip_failures = f1 + f2 + f3;
+        report
+    }
+
+    /// Experiment driver for JB2_DICT_ORDER. Ignored by default — re-encodes
+    /// full corpus documents against 3 shared-dict orderings (slow). Run with:
+    ///   cargo test --lib --release --features experimental dict_order_probe_corpus_measurement -- --ignored --nocapture
+    #[cfg(feature = "experimental")]
+    #[test]
+    #[ignore = "slow corpus re-encode; measurement driver for JB2_DICT_ORDER"]
+    fn dict_order_probe_corpus_measurement() {
+        for (path, max_pages) in [
+            ("tests/corpus/conquete_paix.djvu", usize::MAX),
+            ("tests/corpus/pathogenic_bacteria_1896.djvu", usize::MAX),
+        ] {
+            let r = measure_dict_order_probe(path, 2, max_pages);
+            let pct = |bytes: u64| -> f64 {
+                if r.baseline_bytes > 0 {
+                    100.0 * (bytes as i64 - r.baseline_bytes as i64) as f64
+                        / r.baseline_bytes as f64
+                } else {
+                    0.0
+                }
+            };
+            println!(
+                "{path}: pages={} shared_symbols={} baseline={}B by_frequency={}B ({:+.3}%) by_bucket={}B ({:+.3}%) roundtrip_failures={}",
+                r.pages,
+                r.shared_symbols,
+                r.baseline_bytes,
+                r.by_frequency_bytes,
+                pct(r.by_frequency_bytes),
+                r.by_bucket_bytes,
+                pct(r.by_bucket_bytes),
+                r.roundtrip_failures
+            );
+            assert_eq!(
+                r.roundtrip_failures, 0,
+                "dict-order probe must round-trip losslessly on {path} for every ordering"
+            );
+        }
+    }
 }

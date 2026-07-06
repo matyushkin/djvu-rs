@@ -685,6 +685,8 @@ mod tests {
             lossy_threshold: 0.04,
             #[cfg(feature = "experimental")]
             cross_size_rec6_probe: None,
+            #[cfg(feature = "experimental")]
+            same_size_rec6: None,
         };
         let bytes = PageEncoder::from_pixmap(&pm)
             .with_quality(EncodeQuality::Quality)
