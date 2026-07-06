@@ -1,4 +1,4 @@
-//! Perceptual image-quality metrics (PSNR, SSIM) for render experiments.
+//! Perceptual image-quality metrics (PSNR, SSIM, colour) for render experiments.
 //!
 //! The existing pixel-diff tooling (`examples/interop_pixdiff.rs`) reports the
 //! *arithmetic* per-pixel RGB difference distribution versus DjVuLibre. That
@@ -8,7 +8,7 @@
 //! bicubic FG upsampling, gamma-correct downscale — see PERF_EXPERIMENTS.md
 //! round-5 QUALITY_AA and the round-8 QUALITY-GATED list).
 //!
-//! This module adds the two standard perceptual metrics so a change can be
+//! This module adds the standard perceptual metrics so a change can be
 //! judged against a reference image with a single number:
 //!
 //! - [`psnr`] — peak signal-to-noise ratio in dB. Higher is closer; ∞ (returned
@@ -22,6 +22,44 @@
 //! and grayscale renders compare on the same perceptual channel. A convenience
 //! [`compare`] returns both plus MSE in one pass-pair.
 //!
+//! # Colour blindness of the luma-only metrics — [`compare_color`]
+//!
+//! `psnr`/`ssim`/`compare` are **structurally colour-blind**: two renders that
+//! agree on luma but disagree on hue or saturation score as identical. This
+//! bit the round-31 `FGBZ_MEDIANCUT` experiment (PERF_EXPERIMENTS.md) —
+//! aggressive foreground-palette quantisation visibly washed out coloured
+//! text, but the D1 harness reported no drop, forcing a fall-back to manual
+//! crop inspection. [`compare_color`] closes that gap:
+//!
+//! - Converts both images to **YCbCr** (ITU-R BT.601, the same colour model
+//!   DjVu itself stores IW44 planes in — see `djvu-iw44::encode::rgb_to_ycbcr`)
+//!   and runs the same windowed SSIM independently on the `Cb` and `Cr`
+//!   chroma planes, alongside the existing luma `Y` SSIM.
+//! - Reports a **weighted combined SSIM** (`0.8·Y + 0.1·Cb + 0.1·Cr`), the
+//!   luma-dominant weighting standard in colour-video quality metrics —
+//!   matches the perceptual reality DjVu's own chroma subsampling and
+//!   chroma-delay design already assume (`CHROMA_BILINEAR` #422,
+//!   `chroma_delay` in `Iw44EncodeOptions`).
+//! - Reports mean/max **ΔE76** (Euclidean distance in CIE L\*a\*b\*, the
+//!   classic "perceptually uniform colour difference" metric) so a colour
+//!   drift can be quoted in the same units printed shops/paint charts use.
+//!
+//! ## Interpreting the numbers
+//!
+//! *Chroma SSIM (`ssim_cb`/`ssim_cr`/`ssim_combined`)* reads the same way as
+//! luma SSIM: 1.0 = identical, and values noticeably below the luma SSIM on
+//! the same pair mean the difference lives mostly in colour, not structure —
+//! exactly the FGBZ_MEDIANCUT scenario. A combined score within ~0.001 of the
+//! luma-only [`ssim`] means the change is colour-neutral; a combined score
+//! more than ~0.01 below the luma score means colour is doing the damage.
+//!
+//! *ΔE76* (per CIE guidance, carried over unchanged from colour-reproduction
+//! practice): `< 1.0` is imperceptible to the human eye; `1–2` is only
+//! detectable by a trained observer under ideal conditions; `2–10` is
+//! perceptible at a glance; `> 10` is an obviously different colour. `delta_e_max`
+//! catches localised colour damage (e.g. one washed-out palette entry) that
+//! `delta_e_mean` can dilute away over a large page.
+//!
 //! # Reference-vs-ideal workflow
 //!
 //! The most useful mode for an *intentional* quality change is to compare the
@@ -29,7 +67,7 @@
 //! take a known image, encode it to DjVu, render it back, and measure SSIM/PSNR
 //! against the original. A change that raises SSIM-vs-source is genuinely better,
 //! independent of whether it drifts from DjVuLibre. `examples/quality_harness.rs`
-//! drives exactly this.
+//! drives exactly this, now with [`compare_color`] columns alongside luma.
 
 #[cfg(feature = "std")]
 use crate::pixmap::{GrayPixmap, Pixmap};
@@ -47,6 +85,120 @@ fn luma_plane(rgba: &[u8]) -> Vec<f64> {
     rgba.chunks_exact(4)
         .map(|p| luma(p[0], p[1], p[2]))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Colour-aware metrics (QUALITY_COLOR)
+// ---------------------------------------------------------------------------
+
+/// ITU-R BT.601 `Cb` (blue-difference) chroma of an RGB triple, centred at 128.
+///
+/// Standard full-range JPEG/BT.601 coefficients (not DjVu's internal IW44
+/// `b - g` shortcut, which is a lossless-reversible encoding trick rather than
+/// a perceptual chroma axis). Result is in `0.0..=255.0` for valid RGB input.
+#[inline]
+fn chroma_cb(r: u8, g: u8, b: u8) -> f64 {
+    128.0 - 0.168_736 * r as f64 - 0.331_264 * g as f64 + 0.5 * b as f64
+}
+
+/// ITU-R BT.601 `Cr` (red-difference) chroma of an RGB triple, centred at 128.
+#[inline]
+fn chroma_cr(r: u8, g: u8, b: u8) -> f64 {
+    128.0 + 0.5 * r as f64 - 0.418_688 * g as f64 - 0.081_312 * b as f64
+}
+
+/// Extract the `Cb` plane (`f64`, one sample per pixel) from an RGBA byte buffer.
+#[cfg(feature = "std")]
+fn cb_plane(rgba: &[u8]) -> Vec<f64> {
+    rgba.chunks_exact(4)
+        .map(|p| chroma_cb(p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Extract the `Cr` plane (`f64`, one sample per pixel) from an RGBA byte buffer.
+#[cfg(feature = "std")]
+fn cr_plane(rgba: &[u8]) -> Vec<f64> {
+    rgba.chunks_exact(4)
+        .map(|p| chroma_cr(p[0], p[1], p[2]))
+        .collect()
+}
+
+/// sRGB electro-optical transfer function inverse: gamma-encoded `0..=255`
+/// channel to linear-light `0.0..=1.0`. Standard sRGB piecewise curve.
+#[inline]
+fn srgb_to_linear(c: u8) -> f64 {
+    let c = c as f64 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// CIE 1931 D65 reference white (standard sRGB working space illuminant).
+const D65_XN: f64 = 0.950_47;
+const D65_YN: f64 = 1.0;
+const D65_ZN: f64 = 1.088_83;
+
+/// CIE L\*a\*b\* forward companding function (`f(t)` in the standard definition).
+#[inline]
+fn lab_f(t: f64) -> f64 {
+    const DELTA: f64 = 6.0 / 29.0;
+    if t > DELTA * DELTA * DELTA {
+        t.cbrt()
+    } else {
+        t / (3.0 * DELTA * DELTA) + 4.0 / 29.0
+    }
+}
+
+/// Convert one sRGB pixel to CIE L\*a\*b\* (D65 white point).
+///
+/// Standard sRGB → linear → XYZ (D65) → Lab pipeline. `L*` in `0..=100`,
+/// `a*`/`b*` roughly in `-128..=127` for in-gamut sRGB colours.
+fn rgb_to_lab(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let (rl, gl, bl) = (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+    // sRGB (D65) linear RGB → XYZ matrix (IEC 61966-2-1).
+    let x = rl * 0.412_456_4 + gl * 0.357_576_1 + bl * 0.180_437_5;
+    let y = rl * 0.212_672_9 + gl * 0.715_152_2 + bl * 0.072_175_0;
+    let z = rl * 0.019_333_9 + gl * 0.119_192_0 + bl * 0.950_304_1;
+    let fx = lab_f(x / D65_XN);
+    let fy = lab_f(y / D65_YN);
+    let fz = lab_f(z / D65_ZN);
+    let l = 116.0 * fy - 16.0;
+    let a = 500.0 * (fx - fy);
+    let bb = 200.0 * (fy - fz);
+    (l, a, bb)
+}
+
+/// CIE76 colour difference: Euclidean distance between two Lab triples.
+#[inline]
+fn delta_e76(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    let (dl, da, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    (dl * dl + da * da + db * db).sqrt()
+}
+
+/// A colour-aware comparison of two same-size RGBA images: per-channel
+/// (Y/Cb/Cr) SSIM, a luma-dominant combined score, and CIE76 ΔE colour
+/// difference. See the module docs for interpretation guidance.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorQualityReport {
+    /// Luma-channel SSIM — identical value/definition to [`ssim`].
+    pub ssim_y: f64,
+    /// `Cb` (blue-difference chroma) channel SSIM.
+    pub ssim_cb: f64,
+    /// `Cr` (red-difference chroma) channel SSIM.
+    pub ssim_cr: f64,
+    /// Weighted combined SSIM: `0.8·Y + 0.1·Cb + 0.1·Cr`. The luma-dominant
+    /// weighting standard for colour-video quality metrics (chroma is only
+    /// ~1/8 as perceptually salient as luminance to the human visual system;
+    /// the same asymmetry DjVu's own chroma subsampling/delay design assumes).
+    pub ssim_combined: f64,
+    /// Mean CIE76 ΔE (Euclidean CIE L\*a\*b\* distance) over all pixels.
+    pub delta_e_mean: f64,
+    /// Maximum per-pixel CIE76 ΔE — catches localised colour damage that
+    /// `delta_e_mean` can dilute away over a large page.
+    pub delta_e_max: f64,
 }
 
 /// A one-shot quality comparison of two same-size images.
@@ -221,6 +373,61 @@ pub fn compare_gray(a: &GrayPixmap, b: &GrayPixmap) -> QualityReport {
     }
 }
 
+/// Colour-aware [`ColorQualityReport`] for two RGBA [`Pixmap`]s: per-channel
+/// (Y/Cb/Cr) SSIM plus mean/max CIE76 ΔE. See the module docs for how this
+/// differs from (and complements) [`compare`], which is luma-only.
+///
+/// # Panics
+/// Panics if the two pixmaps differ in dimensions.
+#[cfg(feature = "std")]
+pub fn compare_color(a: &Pixmap, b: &Pixmap) -> ColorQualityReport {
+    assert_eq!(
+        (a.width, a.height),
+        (b.width, b.height),
+        "compare_color: dimension mismatch"
+    );
+    let (w, h) = (a.width as usize, a.height as usize);
+
+    let (ya, yb) = (luma_plane(&a.data), luma_plane(&b.data));
+    let ssim_y = ssim_planes(&ya, &yb, w, h);
+
+    let (cba, cbb) = (cb_plane(&a.data), cb_plane(&b.data));
+    let ssim_cb = ssim_planes(&cba, &cbb, w, h);
+
+    let (cra, crb) = (cr_plane(&a.data), cr_plane(&b.data));
+    let ssim_cr = ssim_planes(&cra, &crb, w, h);
+
+    let ssim_combined = 0.8 * ssim_y + 0.1 * ssim_cb + 0.1 * ssim_cr;
+
+    let mut delta_e_sum = 0.0f64;
+    let mut delta_e_max = 0.0f64;
+    let mut count = 0usize;
+    for (pa, pb) in a.data.chunks_exact(4).zip(b.data.chunks_exact(4)) {
+        let lab_a = rgb_to_lab(pa[0], pa[1], pa[2]);
+        let lab_b = rgb_to_lab(pb[0], pb[1], pb[2]);
+        let de = delta_e76(lab_a, lab_b);
+        delta_e_sum += de;
+        if de > delta_e_max {
+            delta_e_max = de;
+        }
+        count += 1;
+    }
+    let delta_e_mean = if count == 0 {
+        0.0
+    } else {
+        delta_e_sum / count as f64
+    };
+
+    ColorQualityReport {
+        ssim_y,
+        ssim_cb,
+        ssim_cr,
+        ssim_combined,
+        delta_e_mean,
+        delta_e_max,
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -309,5 +516,122 @@ mod tests {
         let gray = compare_gray(&a.to_gray8(), &b.to_gray8());
         assert!((rgba.mse - gray.mse).abs() < 1.0);
         assert!((rgba.ssim - gray.ssim).abs() < 1e-3);
+    }
+
+    // ---- QUALITY_COLOR ------------------------------------------------------
+
+    /// Same-luma, wildly-different-hue test: (200,104,255) "lavender" and
+    /// (0,255,3) "green" were solved so `306·r + 601·g + 117·b` (the fixed-point
+    /// luma weights [`luma`] uses) is within 0.07 of each other, but the RGB
+    /// triples themselves share no channel in common. A luma-only metric must
+    /// report near-perfect similarity; the colour metric must not.
+    #[test]
+    fn same_luma_shifted_chroma_flags_where_luma_ssim_cannot() {
+        let w = 32u32;
+        let h = 32u32;
+        let lavender = solid(w, h, 200, 104, 255);
+        let green = solid(w, h, 0, 255, 3);
+
+        // Sanity: the two solid colours really are near-isoluminant.
+        let ly = luma(200, 104, 255);
+        let lg = luma(0, 255, 3);
+        assert!(
+            (ly - lg).abs() < 0.1,
+            "fixture not isoluminant: {ly} vs {lg}"
+        );
+
+        // Luma-only SSIM: structurally "identical" (both flat fields, equal mean).
+        let luma_ssim = ssim(&lavender, &green);
+        assert!(
+            luma_ssim > 0.999,
+            "luma-only SSIM should be ≈1.0 for isoluminant colours, got {luma_ssim}"
+        );
+
+        // Colour-aware metric must flag the hue shift luma-SSIM missed.
+        let rep = compare_color(&lavender, &green);
+        assert!(
+            rep.ssim_cb < 0.8,
+            "Cb SSIM should drop sharply on a hue shift, got {}",
+            rep.ssim_cb
+        );
+        assert!(
+            rep.ssim_cr < 0.8,
+            "Cr SSIM should drop sharply on a hue shift, got {}",
+            rep.ssim_cr
+        );
+        assert!(
+            rep.ssim_combined < luma_ssim - 0.05,
+            "combined SSIM ({}) should read well below luma-only SSIM ({luma_ssim})",
+            rep.ssim_combined
+        );
+        // Lavender vs green is a dramatic colour difference — ΔE76 should be huge
+        // (for reference, >10 is "obviously different colour" per CIE guidance).
+        assert!(
+            rep.delta_e_mean > 100.0,
+            "ΔE76 should be large for lavender-vs-green, got {}",
+            rep.delta_e_mean
+        );
+        assert!(
+            (rep.delta_e_mean - rep.delta_e_max).abs() < 1e-6,
+            "flat fields: mean == max"
+        );
+    }
+
+    #[test]
+    fn identical_images_have_perfect_color_score() {
+        let a = solid(24, 24, 60, 130, 200);
+        let rep = compare_color(&a, &a);
+        assert!((rep.ssim_y - 1.0).abs() < 1e-9);
+        assert!((rep.ssim_cb - 1.0).abs() < 1e-9);
+        assert!((rep.ssim_cr - 1.0).abs() < 1e-9);
+        assert!((rep.ssim_combined - 1.0).abs() < 1e-9);
+        assert!(rep.delta_e_mean < 1e-6, "delta_e_mean {}", rep.delta_e_mean);
+        assert!(rep.delta_e_max < 1e-6, "delta_e_max {}", rep.delta_e_max);
+    }
+
+    #[test]
+    fn ssim_y_matches_luma_only_ssim() {
+        // ColorQualityReport.ssim_y must agree exactly with the standalone
+        // luma-only `ssim()` — it is documented as the same value.
+        let a = solid(40, 30, 120, 130, 140);
+        let b = solid(40, 30, 100, 90, 80);
+        let luma_ssim = ssim(&a, &b);
+        let rep = compare_color(&a, &b);
+        assert!((rep.ssim_y - luma_ssim).abs() < 1e-12);
+    }
+
+    #[test]
+    fn delta_e_zero_for_identical_pixel() {
+        let lab = rgb_to_lab(128, 64, 200);
+        assert!(delta_e76(lab, lab) < 1e-9);
+    }
+
+    #[test]
+    fn delta_e_white_black_is_max_lightness_gap() {
+        // Pure white vs pure black in Lab: L*=100 vs L*=0, a*=b*=0 for both
+        // (neutral greys sit on the a*=b*=0 axis) → ΔE76 == 100.
+        let white = rgb_to_lab(255, 255, 255);
+        let black = rgb_to_lab(0, 0, 0);
+        assert!(
+            (white.1).abs() < 1e-3,
+            "white a* should be ~0, got {}",
+            white.1
+        );
+        assert!(
+            (white.2).abs() < 1e-3,
+            "white b* should be ~0, got {}",
+            white.2
+        );
+        assert!((black.0).abs() < 1e-6, "black L* should be ~0");
+        let de = delta_e76(white, black);
+        assert!((de - 100.0).abs() < 1e-3, "ΔE76(white, black) = {de}");
+    }
+
+    #[test]
+    fn tiny_images_handled_by_color_metric() {
+        // Smaller than one 8×8 SSIM window — must not panic and must be perfect.
+        let a = solid(3, 2, 10, 20, 30);
+        let rep = compare_color(&a, &a);
+        assert!((rep.ssim_combined - 1.0).abs() < 1e-9);
     }
 }
