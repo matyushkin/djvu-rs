@@ -525,7 +525,7 @@ fn decode_direct_row(
     let mut a: u32 = zp.a;
     let mut c: u32 = zp.c;
     let mut fence: u32 = zp.fence;
-    let mut bit_buf: u64 = zp.bit_buf;
+    let mut bit_buf = zp.bit_buf;
     let mut bit_count = zp.bit_count;
     let data = zp.data;
     let mut pos = zp.pos;
@@ -534,25 +534,14 @@ fn decode_direct_row(
         () => {{
             let b = if pos < data.len() { data[pos] } else { 0xff };
             pos = pos.wrapping_add(1);
-            b as u64
+            b as u32
         }};
     }
     macro_rules! refill {
         () => {
-            // ZP_U64 (round 51/54): bulk 4-byte-at-a-time refill, unified
-            // from the isolated djvu-iw44 validation (reproducible ~7-8%
-            // faster on x86 CI, byte-identical corpus digest). Falls back to
-            // the exact byte-at-a-time + 0xFF-padding loop near EOF.
-            if bit_count <= 32 && pos + 4 <= data.len() {
-                let chunk = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
-                bit_buf = (bit_buf << 32) | (chunk as u64);
-                pos += 4;
-                bit_count += 32;
-            } else {
-                while bit_count <= 56 {
-                    bit_buf = (bit_buf << 8) | read_byte!();
-                    bit_count += 8;
-                }
+            while bit_count <= 24 {
+                bit_buf = (bit_buf << 8) | read_byte!();
+                bit_count += 8;
             }
         };
     }
@@ -562,8 +551,7 @@ fn decode_direct_row(
             bit_count -= shift as i32;
             a = (a << shift) & 0xffff;
             let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-            let bits = ((bit_buf >> (bit_count as u32 & 63)) & mask as u64) as u32;
-            c = ((c << shift) | bits) & 0xffff;
+            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
             if bit_count < 16 {
                 refill!();
             }
@@ -609,8 +597,7 @@ fn decode_direct_row(
                     }
                     bit_count -= 1;
                     a = (z_clamped << 1) & 0xffff;
-                    let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
-                    c = ((c << 1) | next_bit) & 0xffff;
+                    c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
                     if bit_count < 16 {
                         refill!();
                     }
@@ -669,7 +656,7 @@ fn decode_ref_row(
     let mut a: u32 = zp.a;
     let mut c: u32 = zp.c;
     let mut fence: u32 = zp.fence;
-    let mut bit_buf: u64 = zp.bit_buf;
+    let mut bit_buf = zp.bit_buf;
     let mut bit_count = zp.bit_count;
     let data = zp.data;
     let mut pos = zp.pos;
@@ -678,25 +665,14 @@ fn decode_ref_row(
         () => {{
             let b = if pos < data.len() { data[pos] } else { 0xff };
             pos = pos.wrapping_add(1);
-            b as u64
+            b as u32
         }};
     }
     macro_rules! refill {
         () => {
-            // ZP_U64 (round 51/54): bulk 4-byte-at-a-time refill, unified
-            // from the isolated djvu-iw44 validation (reproducible ~7-8%
-            // faster on x86 CI, byte-identical corpus digest). Falls back to
-            // the exact byte-at-a-time + 0xFF-padding loop near EOF.
-            if bit_count <= 32 && pos + 4 <= data.len() {
-                let chunk = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
-                bit_buf = (bit_buf << 32) | (chunk as u64);
-                pos += 4;
-                bit_count += 32;
-            } else {
-                while bit_count <= 56 {
-                    bit_buf = (bit_buf << 8) | read_byte!();
-                    bit_count += 8;
-                }
+            while bit_count <= 24 {
+                bit_buf = (bit_buf << 8) | read_byte!();
+                bit_count += 8;
             }
         };
     }
@@ -706,8 +682,7 @@ fn decode_ref_row(
             bit_count -= shift as i32;
             a = (a << shift) & 0xffff;
             let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-            let bits = ((bit_buf >> (bit_count as u32 & 63)) & mask as u64) as u32;
-            c = ((c << shift) | bits) & 0xffff;
+            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
             if bit_count < 16 {
                 refill!();
             }
@@ -761,8 +736,7 @@ fn decode_ref_row(
                 }
                 bit_count -= 1;
                 a = (z_clamped << 1) & 0xffff;
-                let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
-                c = ((c << 1) | next_bit) & 0xffff;
+                c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
                 if bit_count < 16 {
                     refill!();
                 }

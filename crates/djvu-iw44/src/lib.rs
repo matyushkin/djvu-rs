@@ -1517,13 +1517,7 @@ impl PlaneDecoder {
         let mut a = zp.a;
         let mut c = zp.c;
         let mut fence = zp.fence;
-        // ZP_U64 (round 51): 64-bit bit buffer for this hot loop specifically.
-        // `refill!` below exploits the extra headroom with a 4-byte bulk load
-        // instead of a byte-at-a-time loop, cutting the number of times this
-        // macro is invoked roughly in half versus the shared u32 cadence used
-        // elsewhere (see djvu-zp::ZpDecoder::refill_buffer and the jb2/bzz
-        // inline copies, which keep the original 32-bit-equivalent cadence).
-        let mut bit_buf: u64 = zp.bit_buf;
+        let mut bit_buf = zp.bit_buf;
         let mut bit_count = zp.bit_count;
         let data = zp.data;
         let mut pos = zp.pos;
@@ -1532,33 +1526,14 @@ impl PlaneDecoder {
             () => {{
                 let b = if pos < data.len() { data[pos] } else { 0xff };
                 pos = pos.wrapping_add(1);
-                b as u64
+                b as u32
             }};
         }
         macro_rules! refill {
             () => {
-                // Fast path: a full 4-byte chunk is available in-bounds and
-                // there is guaranteed room (bit_count <= 32 whenever this is
-                // reached, since callers only invoke `refill!()` once
-                // `bit_count < 16`, leaving >= 32 bits of headroom in the
-                // 64-bit buffer). Bulk-load it as one big-endian u32 instead
-                // of 4 individual bounds-checked byte reads. `pos` still
-                // advances by exactly 4 — identical to 4x `read_byte!()` — so
-                // the EOF/overshoot semantics (`synthetic_bytes`, BUG-ZPSHORT
-                // round 26) are unaffected. Falls back to the exact
-                // byte-at-a-time + 0xFF-padding loop near EOF.
-                if bit_count <= 32 && pos + 4 <= data.len() {
-                    // Single range-checked slice + array conversion (one
-                    // bounds check) instead of 4 individual indexing ops.
-                    let chunk = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
-                    bit_buf = (bit_buf << 32) | (chunk as u64);
-                    pos += 4;
-                    bit_count += 32;
-                } else {
-                    while bit_count <= 56 {
-                        bit_buf = (bit_buf << 8) | read_byte!();
-                        bit_count += 8;
-                    }
+                while bit_count <= 24 {
+                    bit_buf = (bit_buf << 8) | read_byte!();
+                    bit_count += 8;
                 }
             };
         }
@@ -1568,8 +1543,7 @@ impl PlaneDecoder {
                 bit_count -= shift as i32;
                 a = (a << shift) & 0xffff;
                 let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-                let bits = ((bit_buf >> (bit_count as u32 & 63)) & mask as u64) as u32;
-                c = ((c << shift) | bits) & 0xffff;
+                c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
                 if bit_count < 16 {
                     refill!();
                 }
@@ -1601,8 +1575,7 @@ impl PlaneDecoder {
                         }
                         bit_count -= 1;
                         a = (z_clamped << 1) & 0xffff;
-                        let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
-                        c = ((c << 1) | next_bit) & 0xffff;
+                        c = ((c << 1) | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
                         if bit_count < 16 {
                             refill!();
                         }
@@ -1625,8 +1598,7 @@ impl PlaneDecoder {
                 } else {
                     bit_count -= 1;
                     a = (z as u32 * 2) & 0xffff;
-                    let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
-                    c = (c << 1 | next_bit) & 0xffff;
+                    c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
                     if bit_count < 16 {
                         refill!();
                     }
