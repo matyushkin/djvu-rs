@@ -200,7 +200,7 @@ fn decode_mtf_phase(
     let mut a = zp.a;
     let mut c = zp.c;
     let mut fence = c.min(0x7fff); // same invariant as zp.fence
-    let mut bit_buf = zp.bit_buf;
+    let mut bit_buf: u64 = zp.bit_buf;
     let mut bit_count = zp.bit_count;
     let data = zp.data;
     let mut pos = zp.pos;
@@ -210,7 +210,7 @@ fn decode_mtf_phase(
         () => {{
             let b = if pos < data.len() { data[pos] } else { 0xff };
             pos = pos.wrapping_add(1);
-            b as u32
+            b as u64
         }};
     }
     macro_rules! refill {
@@ -227,7 +227,8 @@ fn decode_mtf_phase(
             bit_count -= shift as i32;
             a = (a << shift) & 0xffff;
             let mask = (1u32 << (shift & 31)).wrapping_sub(1);
-            c = ((c << shift) | (bit_buf >> (bit_count as u32 & 31)) & mask) & 0xffff;
+            let bits = ((bit_buf >> (bit_count as u32 & 63)) & mask as u64) as u32;
+            c = ((c << shift) | bits) & 0xffff;
             if bit_count < 16 {
                 refill!();
             }
@@ -261,7 +262,8 @@ fn decode_mtf_phase(
                     }
                     bit_count -= 1;
                     a = (z_clamped << 1) & 0xffff;
-                    c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                    let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
+                    c = (c << 1 | next_bit) & 0xffff;
                     if bit_count < 16 {
                         refill!();
                     }
@@ -286,7 +288,8 @@ fn decode_mtf_phase(
             } else {
                 bit_count -= 1;
                 a = (z as u32 * 2) & 0xffff;
-                c = (c << 1 | (bit_buf >> (bit_count as u32 & 31)) & 1) & 0xffff;
+                let next_bit = ((bit_buf >> (bit_count as u32 & 63)) & 1) as u32;
+                c = (c << 1 | next_bit) & 0xffff;
                 if bit_count < 16 {
                     refill!();
                 }

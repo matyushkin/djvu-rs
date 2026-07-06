@@ -69,7 +69,14 @@ pub struct ZpDecoder<'a> {
     /// Cached upper bound for the fast decode path (= min(c, 0x7fff)).
     pub fence: u32,
     /// Bit buffer for feeding bits into the code register.
-    pub bit_buf: u32,
+    ///
+    /// Widened to `u64` (round 51, ZP_U64) so the register can hold up to 64
+    /// valid bits — enough headroom for wider, less-frequent refills in hot
+    /// loops that choose to exploit it (see the `djvu-iw44` inlined copy).
+    /// This struct's own [`refill_buffer`](Self::refill_buffer) keeps the
+    /// original byte-at-a-time cadence (top up while `bit_count <= 24`) for
+    /// now — a pure storage-width upgrade with no behavioural change here.
+    pub bit_buf: u64,
     /// Number of valid bits remaining in `bit_buf`.
     pub bit_count: i32,
     /// Compressed input bytes.
@@ -146,7 +153,7 @@ impl<'a> ZpDecoder<'a> {
     fn refill_buffer(&mut self) {
         while self.bit_count <= 24 {
             let byte = self.read_byte();
-            self.bit_buf = (self.bit_buf << 8) | (byte as u32);
+            self.bit_buf = (self.bit_buf << 8) | (byte as u64);
             self.bit_count += 8;
         }
     }
@@ -189,7 +196,8 @@ impl<'a> ZpDecoder<'a> {
             }
             self.bit_count -= 1;
             self.a = (z_clamped << 1) & 0xffff;
-            self.c = (self.c << 1 | (self.bit_buf >> self.bit_count as u32) & 1) & 0xffff;
+            let next_bit = ((self.bit_buf >> self.bit_count as u32) & 1) as u32;
+            self.c = (self.c << 1 | next_bit) & 0xffff;
             if self.bit_count < 16 {
                 self.refill_buffer();
             }
@@ -263,7 +271,8 @@ impl<'a> ZpDecoder<'a> {
             // Bit is 0
             self.bit_count -= 1;
             self.a = (z as u32 * 2) & 0xffff;
-            self.c = (self.c << 1 | (self.bit_buf >> self.bit_count as u32) & 1) & 0xffff;
+            let next_bit = ((self.bit_buf >> self.bit_count as u32) & 1) as u32;
+            self.c = (self.c << 1 | next_bit) & 0xffff;
             if self.bit_count < 16 {
                 self.refill_buffer();
             }
@@ -282,7 +291,8 @@ impl<'a> ZpDecoder<'a> {
         self.bit_count -= shift as i32;
         self.a = (self.a << shift) & 0xffff;
         let mask = (1u32 << shift) - 1;
-        self.c = ((self.c << shift) | (self.bit_buf >> self.bit_count as u32) & mask) & 0xffff;
+        let bits = ((self.bit_buf >> self.bit_count as u32) & mask as u64) as u32;
+        self.c = ((self.c << shift) | bits) & 0xffff;
         if self.bit_count < 16 {
             self.refill_buffer();
         }
@@ -346,6 +356,44 @@ mod tests {
             zp4.synthetic_bytes() > 16,
             "spinning should exceed the slack, got {}",
             zp4.synthetic_bytes()
+        );
+    }
+
+    #[test]
+    fn u64_bit_buffer_survives_long_padding_run_without_overflow() {
+        // Round 51 (ZP_U64): `bit_buf` widened from `u32` to `u64`. The
+        // concrete new failure mode this introduces is a shift-amount
+        // overflow panic — debug builds panic on `<<`/`>>` by an amount `>=`
+        // the operand's bit width — if `bit_count` ever strayed outside the
+        // `0 <= bit_count < 64` invariant that `refill_buffer`'s unchanged
+        // "top up while `bit_count <= 24`" cadence is supposed to maintain
+        // even at 64-bit width. Decode tens of thousands of bits from a
+        // short (2-byte) stream — forcing continuous synthetic `0xFF`
+        // padding well past EOF, the exact scenario BUG-ZPSHORT (round 26)
+        // depends on — and confirm it runs to completion without panicking,
+        // `pos` never regresses, `bit_count` stays in range, and the
+        // overshoot grows unbounded (proving padding still flows correctly
+        // through the wider buffer).
+        let mut zp = ZpDecoder::new(&[0x00, 0x00]).unwrap();
+        let mut ctx = 0u8;
+        let mut last_pos = zp.pos;
+        for _ in 0..100_000 {
+            let _ = zp.decode_bit(&mut ctx);
+            assert!(
+                zp.pos >= last_pos,
+                "pos must be monotonically non-decreasing"
+            );
+            assert!(
+                (0..64).contains(&zp.bit_count),
+                "bit_count {} escaped the u64 buffer's valid range",
+                zp.bit_count
+            );
+            last_pos = zp.pos;
+        }
+        assert!(
+            zp.synthetic_bytes() > 16,
+            "spinning should exceed the slack, got {}",
+            zp.synthetic_bytes()
         );
     }
 
