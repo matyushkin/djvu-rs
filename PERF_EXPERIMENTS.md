@@ -9741,3 +9741,143 @@ exercised — cross-version/OS wheel-build verification (the `publish.yml`
 release path doesn't build djvu-py wheels for distribution at all yet) is out
 of scope here and would be a separate follow-up if djvu-py is ever published
 to PyPI.
+## Perf round 47 (2026-07-06) — X86_CI_BENCH: unblocking the x86-gated AVX2_IDWT / ZP-U64 backlog items
+
+### X86_CI_BENCH — verify + widen the x86-64-v3 validation job — **Kept (infra)** (2026-07-06)
+
+**Issue.** Two backlog items are stuck behind "no x86 host": **AVX2_IDWT**
+(round-5 #8, "blocked, no x86 host") and the **ZP-U64** ZP-decoder-refill
+deferral ("only after x86 profile shows ZP decode is dearer there", round-3/4
+deferred list). Every "Platform" line in this file reads Apple M1 Max
+(aarch64) — there genuinely is no local x86 host to measure on. `bench.yml`
+already has a job called "Benchmark (x86-64-v3 AVX2 validation)" that shows
+SKIPPED on most recent PR checks — worth confirming whether that's rot to fix
+or working-as-designed gating before assuming it's broken.
+
+**Investigation.** Read `.github/workflows/bench.yml` and `ci.yml` end to end,
+then cross-checked against actual run history (`gh run list --workflow=bench.yml`,
+`gh run view <id> --json jobs`), `gh pr list --search "x86 OR avx2"`, and
+`git branch -r`:
+
+- The `detect` job (`dorny/paths-filter`) gates `bench-x86-64-v3` **on PRs
+  only** to when `crates/djvu-iw44/src/{lib,encode}.rs`, `benches/{codecs,
+  render}.rs`, or `bench.yml` itself changed — added by PR #363 ("skip AVX2
+  validation on non-SIMD PRs") specifically to stop burning ~30% of per-PR
+  bench minutes validating AVX2 on refactor PRs that never touch the SIMD
+  path. This is intentional, documented scoping, not bit rot.
+- Outside PRs the job's `if:` (`github.event_name != 'pull_request' ||
+  needs.detect.outputs.simd == 'true'`) is unconditionally true, so it runs on
+  every `push` to `main`/tags and every `workflow_dispatch`. Checked the last
+  4 main-branch push runs (`28775743121`, `28771006572`, `28767553829`,
+  `28763496645`) — `bench-x86-64-v3` is `success` on all of them. **The job is
+  not broken**; it already produces fresh x86 AVX2-vs-baseline deltas on every
+  merge to main. The "SKIPPED" badges people see are just PRs that legitimately
+  didn't touch IW44/SIMD files (e.g. `TH44_GRID`, the `carte.djvu` parse fix)
+  — correct behavior, working as designed.
+- `workflow_dispatch` is already wired at the top of `bench.yml` ("Allow manual
+  runs (e.g. to seed the initial baseline)"), and the job's own `if:` already
+  covers it (`event_name != 'pull_request'` is true for `workflow_dispatch`
+  too) — nothing to add there. `gh run list` showed no *past*
+  `workflow_dispatch` runs of this workflow, so it had never actually been
+  exercised end-to-end before this round (see Validation run below).
+- `ci.yml`'s `Test (beta)` and `OCR (tesseract)` use the identical
+  `if: github.event_name != 'pull_request'` push-to-main-only pattern —
+  also by design (keeps PR feedback fast/deterministic, matching this repo's
+  CLAUDE.md: "Fuzz/Benchmarks are intentionally not required" for merge
+  gating), and unrelated to the two x86-gated backlog items — left untouched.
+  `Benchmark (macOS)` is tag/dispatch-only by design too (feeds a separate
+  BENCHMARKS.md baseline, not a gate).
+- `gh pr list --search "x86 OR avx2"` surfaced #363 (the `detect` gate, above)
+  and one closed, unrelated spike (`codex/issue-307-avx2-row-pass`, a rejected
+  row-pass change, not IDWT). No abandoned x86-CI branch to resurrect.
+
+**Gap found and fixed.** The job's codec bench filter (`iw44_to_rgb|
+iw44_decode`) only exercises the IW44 SIMD path — correct for AVX2_IDWT,
+since `to_rgb`/`to_rgb_subsample` (`crates/djvu-iw44/src/lib.rs`) call
+`inverse_wavelet_transform` → `row_pass_inner`, exactly the IDWT row/col pass
+that item is about. It excluded `jb2_decode`/`bzz_decode`, which is what
+**ZP-U64** needs (the ZP-decoder `refill!` hot loop the deferred note says is
+shared, with separate inlined copies, across jb2/iw44/bzz). Widened both
+`cargo bench --bench codecs` invocations in `bench-x86-64-v3` to
+`'iw44_to_rgb|iw44_decode|jb2_decode|bzz_decode'` — a cheap addition since the
+toolchain/runner for this job is already paid for by the existing steps.
+
+**Ratio methodology (documented, no change needed).** The job already
+implements the "compare target vs control within the same run" pattern this
+repo uses elsewhere to cancel noisy-cloud-runner variance (cf. B7_PREFETCH_PAGE's
+dwell=0 negative control, COLD_OPEN's per-iteration fresh-copy strategy): it
+runs the *same* benches twice back-to-back on the *same* GitHub-hosted runner
+— once at default `RUSTFLAGS` (baseline, effectively SSE2-only codegen) and
+once with `-C target-cpu=x86-64-v3` (enables the `cfg(target_feature =
+"avx2")` branches) — resets `target/criterion` between them so Criterion
+treats each as an independent baseline, then diffs the two `--output-format
+bencher` outputs and posts a Δ% table with a ≥3% speedup/regression threshold.
+Because both arms share one runner instance, the GitHub Actions runner-to-
+runner lottery (CPU model, neighbour contention) cancels out of the ratio
+even though absolute ns/iter numbers aren't comparable run-to-run. This
+already matches the "same-run ratio" methodology the task asked to document;
+only the bench *selection* (the "what", not the "how") had the gap above.
+
+**Validation run.** Pushed `infra/x86-ci-bench` and dispatched the workflow:
+`gh workflow run bench.yml --ref infra/x86-ci-bench`, then `gh run watch` on
+the resulting run.
+
+Run [28784274181](https://github.com/matyushkin/djvu-rs/actions/runs/28784274181),
+`bench-x86-64-v3` job: **success** (first-ever `workflow_dispatch` run of this
+workflow). Real x86 (GitHub-hosted `ubuntu-latest`) numbers, default RUSTFLAGS
+vs `-C target-cpu=x86-64-v3`, same runner back-to-back:
+
+**ZP-decode-only benches (no IDWT) — consistently faster under `x86-64-v3`:**
+
+| Bench | default ns | +x86-64-v3 ns | Δ% |
+|---|---:|---:|---:|
+| `bzz_decode` | 104 | 75 | −27.9% |
+| `iw44_decode_corpus_color` | 1,387,089 | 1,224,073 | −11.8% |
+| `iw44_decode_first_chunk` | 771,110 | 723,477 | −6.2% |
+| `jb2_decode` | 162,443 | 153,187 | −5.7% |
+| `jb2_decode_corpus_bilevel` | 589,009 | 567,637 | −3.6% |
+| `jb2_decode_large_600dpi` | 2,496 | 2,256 | −9.6% |
+
+**IDWT-inclusive benches (`to_rgb`/`to_rgb_subsample`) — regressed under
+`x86-64-v3`:**
+
+| Bench | default ns | +x86-64-v3 ns | Δ% |
+|---|---:|---:|---:|
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 9,197,177 | 9,572,581 | +4.1% |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2,230,159 | 2,287,465 | +2.6% |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 579,158 | 662,081 | +14.3% |
+
+Render (whole-pipeline, includes IDWT + ZP decode + compositing — mixed, as
+expected from summing an accelerated stage and a regressed one):
+`render_colorbook` −1.0%, `render_colorbook_cold` −4.6%, `render_colorbook_
+stages/mask_decode` −5.0%, `render_corpus_color` +1.7%. Job's own verdict:
+"Mixed: some speedup, some regression."
+
+**Reading this (data only, no SIMD implementation attempted per task scope):**
+`iw44_decode_first_chunk`/`iw44_decode_corpus_color` isolate the ZP-entropy-
+decode stage (`decode_chunk`, before `to_rgb` runs the IDWT), so the
+consistent −6 to −28% across all three ZP-heavy codecs (jb2/iw44/bzz) is real
+signal that the shared ZP-decoder hot loop *is* codegen-sensitive on x86 —
+gives ZP-U64 a concrete, positive first data point (contrast with the "blocked,
+no x86 host" status quo). Conversely, the `to_rgb_colorbook` group (which adds
+the IDWT row/col pass — the exact code AVX2_IDWT is about) *regresses* under
+`-C target-cpu=x86-64-v3` even though there is no hand-written AVX2 IDWT path
+to benefit — i.e. simply raising the codegen target is not a free win for
+IDWT the way it is for ZP decode, so a hand-written x86 SIMD IDWT pass (the
+actual AVX2_IDWT proposal) still has real headroom to prove out, it just
+won't come from `-C target-cpu` alone. `bzz_decode`'s −27.9% is on a tiny
+(single-digit-µs) fixture and should be treated as noisy/indicative, not
+load-bearing. This is one run, not a multi-sample statistical claim — the
+`workflow_dispatch` trigger this round adds means a maintainer can re-run
+it on demand for a cleaner sample before either backlog item is actually
+picked up.
+
+**Decision.** **Kept (infra-only).** No source/runtime code changed —
+`.github/workflows/bench.yml` comments + the two bench-filter regexes only.
+`make check` passes unaffected (workflow YAML, not Rust). This unblocks both
+backlog items: **AVX2_IDWT** now has a real, continuously-refreshed x86 IDWT-
+path measurement (every main push, or on-demand via `workflow_dispatch`) to
+decide whether a hand-written x86 SIMD IDWT pass would earn its keep before
+anyone writes it; **ZP-U64** now gets jb2/bzz decode timings from the same
+x86 runner to compare against the existing aarch64 numbers in this file and
+decide whether the 32-bit `refill!` is worth the 4-site u64 rewrite.
