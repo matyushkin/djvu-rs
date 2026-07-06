@@ -7903,3 +7903,53 @@ is explicitly enabled.
 (byte-identical default output, proven by test); callers who want smoother zoomed text
 opt in explicitly. Resolves QUALITY_AA's deferred #13 with the requested aesthetic
 judgement now on record.
+## Perf round 26 (2026-07-06) — BUG-ZPSHORT: zero-length BG44 refinement chunk
+
+Follow-up from the B5 stateful-progressive-decoder work (`feat/progressive-streaming-decoder`,
+PR #510): validating the new `ProgressiveDecoder` against real corpus files surfaced
+`render_progressive_all` hitting `Iw44(ZpTooShort)` on `watchmaker.djvu` page 0.
+Reproduced and root-caused in isolation (this branch carries only the fix, kept
+separate from the decoder-API PR).
+
+### BUG-ZPSHORT — pad short BG44 refinement payloads instead of erroring — **Fixed** (2026-07-06)
+
+**Root cause.** `watchmaker.djvu` page 0 has 4 BG44 chunks; chunk index 2 is a bare
+2-byte `[serial=2, slices=4]` header with **zero ZP-coded payload bytes** — a
+legitimate refinement round where the encoder had nothing left to encode.
+`Iw44Image::decode_chunk` sliced `zp_data = &data[payload_start..]` (empty here) and
+called `ZpDecoder::new(zp_data)`, which requires ≥2 bytes and returned
+`ZpError::TooShort` → `Iw44Error::ZpTooShort`. This is inconsistent with the ZP
+decoder's own design: `ZpDecoder::read_byte` already treats reads *past the end* of
+a normal chunk's buffer as synthetic `0xFF` padding (documented, and relied on by the
+"do not early-exit on `is_exhausted()`" slice loop a few lines below) — a chunk whose
+real payload is entirely padding from byte zero is not meaningfully different from a
+normal chunk's *trailing* padding, so hard-erroring in `decode_chunk` was an
+inconsistency, not a real malformed-input case.
+
+This surfaced two different symptoms depending on caller: the strict progressive
+path (`render_progressive_step` / `render_progressive_all`) propagated the error and
+failed outright for any frame requesting chunk 2 or later; the permissive full-page
+cache (`PageLayers::bg44`, used by `render_pixmap`) silently `break`s on the first
+chunk error and keeps whatever decoded so far — so the "successful" full-page render
+was silently using only 2 of the page's 4 refinement chunks, a correctness bug of
+its own (not just a progressive-API robustness gap).
+
+**Fix.** Scoped to `Iw44Image::decode_chunk` in `crates/djvu-iw44/src/lib.rs` only
+(the shared `ZpDecoder::new` and its 2-byte-minimum contract, used by JB2/BZZ too,
+is untouched). When the sliced payload is shorter than 2 bytes, pad it up to 2 bytes
+with `0xFF` — reusing the "past-end reads are `0xFF`" convention the decoder already
+applies everywhere else — before constructing the `ZpDecoder`. Well-formed (≥2-byte)
+payloads are completely unaffected (same bytes, same decode).
+
+**Correctness.** New `iw44_decode_chunk_tolerates_empty_refinement_payload` (crate
+`djvu-iw44`) covers a zero-length and a one-byte refinement payload directly. New
+`render_progressive_step_handles_zero_length_bg44_chunk` (crate `djvu-rs`)
+regression-tests the real `watchmaker.djvu` fixture end-to-end: every progressive
+step, `render_progressive_all`, and `render_pixmap` now succeed. Note this *does*
+change `watchmaker.djvu`'s full-page render output (previously silently truncated to
+2 of 4 chunks by the permissive path's swallowed error, now correctly using all 4) —
+a correctness fix, not a regression; no test in the suite pins that page's exact
+output bytes.
+
+**Decision. Fixed**, small and scoped (one `if` + a 2-byte stack array), with
+regression tests at both the codec and the render-API layer. `make check` green.
