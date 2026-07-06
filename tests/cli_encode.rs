@@ -335,11 +335,16 @@ fn encode_quality_fixed_binarization_keeps_default_output() {
 }
 
 #[test]
-fn encode_quality_bg_inpaint_affects_layered_background() {
+fn encode_quality_inpaints_masked_background_by_default() {
+    // The 24×24 fixture is black on the left half (fully masked) / white on the
+    // right. Its top-left BG cell is fully covered by foreground ink. The colour
+    // `Quality` profile now diffuses such invisible cells (round 17), so the
+    // stored background must NOT be the ink colour (black) — it inpaints to the
+    // neighbouring white background instead. This is the size+quality win, and
+    // it holds without passing any segmentation flag.
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("ink.png");
     let default_output = dir.path().join("default.djvu");
-    let inpaint_output = dir.path().join("inpaint.djvu");
     write_test_png(&input, 24, 24);
 
     Command::cargo_bin("djvu")
@@ -355,23 +360,11 @@ fn encode_quality_bg_inpaint_affects_layered_background() {
         .assert()
         .success();
 
-    Command::cargo_bin("djvu")
-        .unwrap()
-        .args([
-            "encode",
-            input.to_str().unwrap(),
-            "-o",
-            inpaint_output.to_str().unwrap(),
-            "--quality",
-            "quality",
-            "--bg-inpaint",
-        ])
-        .assert()
-        .success();
-
+    let (r, g, b) = first_background_pixel(&default_output);
     assert_ne!(
-        first_background_pixel(&default_output),
-        first_background_pixel(&inpaint_output)
+        (r, g, b),
+        (0, 0, 0),
+        "fully-masked BG cell should be inpainted, not left as ink black"
     );
 }
 

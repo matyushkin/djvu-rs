@@ -104,13 +104,27 @@ impl EncodeQuality {
     /// — `PageEncoder::encode`, `encode_djvm_layered_shared`, and the CLI all
     /// call it instead of re-deriving the mapping inline.
     pub fn default_segment_options(self) -> SegmentOptions {
+        // Colour profiles enable harmonic BG diffusion: fully-masked background
+        // cells (covered by foreground ink, hence invisible) are filled with the
+        // smoothest interpolation of the confident cells instead of the ink
+        // colour. This cuts BG44 by up to ~90% on text-heavy scans and, because
+        // it removes the dark ink-fallback halos that bled across mask edges via
+        // BG upsampling, it *raises* decoded SSIM/PSNR too — a strict win on both
+        // size and quality (see PERF_EXPERIMENTS.md round 17).
         match self {
-            EncodeQuality::Archival => SegmentOptions::archival(),
+            EncodeQuality::Archival => SegmentOptions {
+                bg_diffuse: true,
+                ..SegmentOptions::archival()
+            },
+            EncodeQuality::Quality => SegmentOptions {
+                bg_diffuse: true,
+                ..SegmentOptions::default()
+            },
             // `Lossless` never segments (bilevel input has no FG/BG split); it
             // returns the defaults only so this mapping is total. Callers must
             // gate on the profile before reaching `segment_page` — both
             // `PageEncoder::encode` and the CLI reject `Lossless` upstream.
-            EncodeQuality::Quality | EncodeQuality::Lossless => SegmentOptions::default(),
+            EncodeQuality::Lossless => SegmentOptions::default(),
         }
     }
 }

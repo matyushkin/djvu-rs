@@ -44,6 +44,15 @@ pub struct SegmentOptions {
     /// the masked block mean. This prevents solid ink from becoming a black BG
     /// cell under text strokes.
     pub bg_inpaint: bool,
+    /// When true, fully-masked BG cells are filled by **harmonic diffusion** of
+    /// the confident (unmasked-derived) cells — a Laplace/Jacobi relaxation that
+    /// solves for the smoothest interpolation. Being maximally smooth, it injects
+    /// the least high-frequency wavelet energy, so the IW44 background codes to
+    /// fewer bytes than either the ink-colour fallback or the ring-average
+    /// [`Self::bg_inpaint`]. Masked cells are covered by the foreground layer, so
+    /// their value is invisible; smoothing them is a pure encoder-side size win.
+    /// Takes precedence over `bg_inpaint` when both are set.
+    pub bg_diffuse: bool,
 }
 
 impl Default for SegmentOptions {
@@ -53,6 +62,7 @@ impl Default for SegmentOptions {
             bg_subsample: 12,
             binarization: Binarization::Fixed,
             bg_inpaint: false,
+            bg_diffuse: false,
         }
     }
 }
@@ -178,7 +188,143 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
         }
     }
 
+    if opts.bg_diffuse {
+        diffuse_masked_cells(&mut bg, rgba, &mask, sub, w, h);
+    }
+
     SegmentedPage { mask, bg }
+}
+
+/// Overwrite every fully-masked BG cell with the harmonic (smoothest)
+/// interpolation of the confident cells, minimising the wavelet energy the IW44
+/// background codec must spend on invisible pixels.
+///
+/// A BG cell is *confident* when its `sub × sub` source block holds at least one
+/// unmasked pixel (so its colour is real background); the fill loop above already
+/// wrote those. The remaining *masked* cells are entirely covered by foreground
+/// ink, so their value is never rendered — we are free to pick whatever codes
+/// smallest. The smoothest such choice is the solution of Laplace's equation with
+/// the confident cells as Dirichlet boundary, approximated here by Gauss-Seidel
+/// relaxation (in-place, so it converges roughly twice as fast as Jacobi).
+fn diffuse_masked_cells(bg: &mut Pixmap, rgba: &Pixmap, mask: &Bitmap, sub: u32, w: u32, h: u32) {
+    let bw = bg.width as usize;
+    let bh = bg.height as usize;
+    if bw == 0 || bh == 0 {
+        return;
+    }
+
+    // Confidence grid: a cell is fixed iff its block has any unmasked pixel.
+    let mut confident = vec![false; bw * bh];
+    let mut any_masked = false;
+    for by in 0..bh {
+        for bx in 0..bw {
+            let x0 = bx as u32 * sub;
+            let x1 = (x0 + sub).min(w);
+            let y0 = by as u32 * sub;
+            let y1 = (y0 + sub).min(h);
+            let c = block_mean(rgba, mask, x0, x1, y0, y1, true).is_some();
+            confident[by * bw + bx] = c;
+            any_masked |= !c;
+        }
+    }
+    if !any_masked {
+        return;
+    }
+
+    // Per-channel f32 working buffers seeded from the current BG (confident cells
+    // hold their real colour; masked cells start at the mean of all confident
+    // cells for faster convergence).
+    let mut plane = [
+        vec![0f32; bw * bh],
+        vec![0f32; bw * bh],
+        vec![0f32; bw * bh],
+    ];
+    let mut seed = [0f64; 3];
+    let mut nconf = 0u64;
+    for i in 0..bw * bh {
+        let px = &bg.data[i * 4..i * 4 + 3];
+        for c in 0..3 {
+            plane[c][i] = px[c] as f32;
+        }
+        if confident[i] {
+            nconf += 1;
+            for c in 0..3 {
+                seed[c] += px[c] as f64;
+            }
+        }
+    }
+    if nconf == 0 {
+        return; // no boundary to diffuse from; leave the fallback fills as-is
+    }
+    let seed = [
+        (seed[0] / nconf as f64) as f32,
+        (seed[1] / nconf as f64) as f32,
+        (seed[2] / nconf as f64) as f32,
+    ];
+    for i in 0..bw * bh {
+        if !confident[i] {
+            for c in 0..3 {
+                plane[c][i] = seed[c];
+            }
+        }
+    }
+
+    // Gauss-Seidel relaxation: each masked cell ← average of its 4-neighbours
+    // (edges drop the missing neighbour). Cap iterations at the grid's larger
+    // dimension (enough for a fill to propagate across the widest masked span)
+    // and stop early once the largest per-cell update falls below 0.5/255.
+    let max_iters = bw.max(bh).clamp(16, 512);
+    for _ in 0..max_iters {
+        let mut max_delta = 0f32;
+        for by in 0..bh {
+            for bx in 0..bw {
+                let i = by * bw + bx;
+                if confident[i] {
+                    continue;
+                }
+                for p in plane.iter_mut() {
+                    let mut sum = 0f32;
+                    let mut n = 0f32;
+                    if bx > 0 {
+                        sum += p[i - 1];
+                        n += 1.0;
+                    }
+                    if bx + 1 < bw {
+                        sum += p[i + 1];
+                        n += 1.0;
+                    }
+                    if by > 0 {
+                        sum += p[i - bw];
+                        n += 1.0;
+                    }
+                    if by + 1 < bh {
+                        sum += p[i + bw];
+                        n += 1.0;
+                    }
+                    let nv = sum / n;
+                    let d = (nv - p[i]).abs();
+                    if d > max_delta {
+                        max_delta = d;
+                    }
+                    p[i] = nv;
+                }
+            }
+        }
+        if max_delta < 0.5 {
+            break;
+        }
+    }
+
+    // Write the relaxed values back into the masked cells (confident cells keep
+    // their exact original colour — visible background is untouched).
+    for i in 0..bw * bh {
+        if confident[i] {
+            continue;
+        }
+        for (c, p) in plane.iter().enumerate() {
+            bg.data[i * 4 + c] = p[i].round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 /// Colour of a single BG cell `(bx, by)`: the mask-excluded block mean, falling
@@ -610,5 +756,53 @@ mod tests {
         );
         assert_eq!(seg.bg.width, 3);
         assert_eq!(seg.bg.height, 3);
+    }
+
+    #[test]
+    fn bg_diffuse_smooths_masked_cells_and_keeps_confident_cells() {
+        // 4×1 blocks (bg_subsample = 1 → one cell per pixel). Left and right
+        // pixels are red background (confident); the two middle pixels are ink
+        // (fully masked). With diffusion the masked cells must interpolate
+        // smoothly between the red neighbours instead of falling back to the
+        // ink colour, and the confident cells must be left exactly as-is.
+        // Boundary colour must be light enough to stay *unmasked* (luminance ≥
+        // the 128 threshold): (230,150,150) has luma ≈ 174.
+        let mut pm = Pixmap::white(4, 1);
+        pm.set_rgb(0, 0, 230, 150, 150);
+        pm.set_rgb(1, 0, 0, 0, 0); // ink → masked
+        pm.set_rgb(2, 0, 0, 0, 0); // ink → masked
+        pm.set_rgb(3, 0, 230, 150, 150);
+        let opts = SegmentOptions {
+            threshold: 128,
+            bg_subsample: 1,
+            bg_diffuse: true,
+            ..SegmentOptions::default()
+        };
+        let seg = segment_page(&pm, &opts);
+        assert_eq!(seg.bg.width, 4);
+        // Confident endpoints untouched.
+        assert_eq!(seg.bg.get_rgb(0, 0), (230, 150, 150));
+        assert_eq!(seg.bg.get_rgb(3, 0), (230, 150, 150));
+        // Masked interior converges to the (uniform) boundary value, never the
+        // black ink fallback the default path would have produced.
+        for x in 1..=2 {
+            let (r, g, b) = seg.bg.get_rgb(x, 0);
+            assert_eq!(
+                (r, g, b),
+                (230, 150, 150),
+                "masked cell {x} should diffuse to the boundary, got {:?}",
+                (r, g, b)
+            );
+        }
+
+        // Without diffusion the same masked interior falls back to the ink
+        // colour (black) — confirms the modes differ and diffusion is the win.
+        let plain = SegmentOptions {
+            threshold: 128,
+            bg_subsample: 1,
+            ..SegmentOptions::default()
+        };
+        let seg_plain = segment_page(&pm, &plain);
+        assert_eq!(seg_plain.bg.get_rgb(1, 0), (0, 0, 0));
     }
 }
