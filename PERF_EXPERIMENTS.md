@@ -9655,3 +9655,89 @@ truncation half). (4) root-cause the INFO minor-version pixel divergence
 (finding 3) against the DjVu format revision history. (5) trace whether finding
 4's JB2 "unknown record type" divergence is arithmetic-coder noise or a genuine
 gap against DjVuLibre's record-type handling.
+
+## Perf round 46 (2026-07-06) — PY_CI: pytest suite + CI job for djvu-py
+
+**Prior-art check.** Round 41 (PY_GIL_DETACH/PY_ZEROCOPY_BUFFER, #530) explicitly
+flagged this as a follow-up: "djvu-py has no pytest suite and no CI job at all
+… the ad hoc scratchpad scripts used here aren't checked in." Verified nothing
+landed since: `djvu-py/` still has no `tests/` directory and no `Makefile`;
+`.github/workflows/` has no maturin/python/pytest step in any of the 8
+workflows; `gh pr list --state all --search "djvu-py OR pytest"` shows only
+#530 itself and unrelated matches; no local or remote branch touches this
+(`git branch -a` clean of it). Proceeded.
+
+**Setup.** Built `djvu-py` via `maturin develop --release` into a `uv`-managed
+venv to confirm the crate actually builds standalone before writing tests
+against it — it does (`djvu-py/Cargo.toml` depends on the workspace root via
+`path = ".."`, no separate lockfile drift). No existing CI or local-runner
+touched djvu-py at all (every workspace-wide `cargo test`/`nextest` invocation
+in `ci.yml`/`publish.yml`/`scripts/check.sh` carries `--exclude djvu-py`), and
+there was no `maturin`/wheel-build step anywhere in the repo prior to this.
+
+**pytest suite** (`djvu-py/tests/`, 41 tests, `conftest.py` resolves corpus/
+fixture paths relative to the repo root via `Path(__file__).parents[2]` so
+pytest works from any cwd):
+- `test_document.py` (16): `Document.open`/`from_bytes` agree byte-for-byte on
+  metadata, page-count on a real 2-page OCR'd corpus file
+  (`tests/corpus/cable_1973_100133.djvu`), out-of-range `page()` raises
+  `IndexError`, and 6 error-path cases (empty bytes, garbage bytes, truncated
+  valid file, bad path, directory-as-path) all raise a Python exception
+  rather than crashing the interpreter.
+- `test_render.py` (8): rendered dimensions match page metadata, RGBA byte
+  length is exactly `w*h*4`, output isn't a flat/blank buffer (bilevel JB2
+  included), DPI up/downscaling produces the expected pixel dimensions, and
+  the alpha channel is fully opaque.
+- `test_text.py` (3): text layer present/non-empty on an OCR'd page, `None`
+  when absent (the plain `boy.djvu` fixture has no text layer).
+- `test_buffer_protocol.py` (14) — dedicated coverage of round 41's
+  `PY_ZEROCOPY_BUFFER` additions: `memoryview(pixmap)` format/readonly/length,
+  `numpy.frombuffer(pixmap, ...)` and `bytes(pixmap)` byte-equal to `.data()`,
+  `to_numpy_zerocopy()`/`to_pil_zerocopy()` byte-equal to the copying
+  `to_numpy()`/`to_pil()`, and lifetime safety: `del pixmap` while a
+  `memoryview`/zero-copy numpy array/PIL image is still alive leaves the data
+  valid and correct (the `Py_buffer.obj` owned reference keeps the Rust
+  `Pixmap` alive), followed by a clean release; plus a 50-iteration
+  alloc/view/release loop as a lightweight leak/crash smoke test.
+- `test_gil.py` (1) — dedicated coverage of round 41's `PY_GIL_DETACH`: renders
+  6 pages of the 12-page `watchmaker.djvu` corpus file sequentially vs.
+  2-6-threaded, asserting `sequential/parallel > 1.3×` (deliberately lenient
+  vs. the ~1.9–3.9× measured in round 41, to absorb CI-runner noise); skips
+  outright on `os.cpu_count() < 2` and on unmeasurably-fast renders rather than
+  flaking. Measured locally (M1 Max, 6 pages): sequential 0.32s, parallel
+  0.054s, **5.9× speedup** — well clear of the 1.3× gate; reran 3× standalone,
+  stable each time (0.52–0.57s each, all passed).
+
+**Local runner**: `djvu-py/Makefile` (`py-venv`/`py-build`/`py-test`/`py-clean`)
+— `uv venv` + `uv pip install maturin pytest numpy pillow`, then
+`maturin develop --release` (with `VIRTUAL_ENV`/`PATH` pointed at the venv
+explicitly, since the target is invoked non-interactively without `source
+.venv/bin/activate`) and `pytest tests -v`. `[tool.pytest.ini_options]` added
+to `djvu-py/pyproject.toml` (`testpaths = ["tests"]`).
+
+**CI job**: new `djvu-py` job in `.github/workflows/ci.yml`, placed right
+before `deps-check` — installs Rust stable + `Swatinem/rust-cache` (own cache
+key, doesn't disturb the main workspace cache), `actions/setup-python@v5`
+(3.12), `pip install uv`, then `make -C djvu-py py-test`. **Not** added to any
+required-checks list — the branch-protection ruleset (`Lint`, `Test (stable)`,
+`wasm32 build check`, `MSRV`, `Dependencies`) is untouched, matching how
+`OCR (tesseract)`/`Coverage (llvm-cov)` are wired as informational jobs. Runs
+on every push/PR (no `if:` restriction, unlike the OCR job) since the whole
+build+test cycle is ~15-25s locally — fast enough to gate PRs that touch
+`djvu-py/` without the apt-install cost that makes the OCR job push-only.
+
+**Decision.** Kept (infra). `make -C djvu-py py-test`: 41 passed in ~3.3s, run
+3× including `test_gil.py` standalone 3×, no flakes observed. Full `make
+check` (1086 tests, `--exclude djvu-py` as before) unaffected: 1086 passed, 6
+slow, 5 skipped. `.venv`/`.pytest_cache`/`__pycache__` under `djvu-py/` added
+to `.gitignore`.
+
+**Follow-ups**: the GIL-release test's 1.3× threshold is a judgment call —
+if it proves flaky on a specific CI runner shape (e.g. a 1-vCPU/burstable
+instance where `os.cpu_count()` overreports usable parallelism), downgrade the
+assert to a printed report per the task brief's own suggested escape hatch.
+Currently only one Python version (3.12) and one OS (ubuntu-latest) are
+exercised — cross-version/OS wheel-build verification (the `publish.yml`
+release path doesn't build djvu-py wheels for distribution at all yet) is out
+of scope here and would be a separate follow-up if djvu-py is ever published
+to PyPI.

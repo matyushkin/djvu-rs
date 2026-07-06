@@ -24,3 +24,9 @@ pillow = ["Pillow"]
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "djvu_rs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+test = ["pytest>=7", "numpy", "pillow"]

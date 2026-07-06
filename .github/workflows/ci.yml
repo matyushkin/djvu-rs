@@ -246,6 +246,39 @@ jobs:
       - name: Test (ocr-tesseract integration)
         run: cargo test --test ocr_tesseract --features cli,ocr-tesseract
 
+  # ── Python bindings (djvu-py) ────────────────────────────────────────────────
+  # Non-required (informational): builds the extension module via maturin into
+  # a uv-managed venv and runs the pytest suite covering the public API surface,
+  # including the round-41 (PY_GIL_DETACH/PY_ZEROCOPY, #530) additions — buffer
+  # protocol, zero-copy numpy/PIL views, Pixmap lifetime safety, and GIL release.
+  # Not part of the branch-protection required-checks list (see CLAUDE.md);
+  # kept fast: one Python version, cached cargo build. See djvu-py/Makefile.
+  djvu-py:
+    name: djvu-py (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: djvu-py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build + test djvu-py (maturin develop + pytest)
+        run: make -C djvu-py py-test
+
   # ── Licenses & security audit (combined — both are fast, one runner) ─────────
   deps-check:
     name: Dependencies (deny + audit)
