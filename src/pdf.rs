@@ -172,6 +172,20 @@ fn make_dct_stream(dict_extra: &str, jpeg_bytes: &[u8]) -> Vec<u8> {
     make_stream(&extra, jpeg_bytes)
 }
 
+/// Helper: make a CCITTFaxDecode (Group 4 / T.6) stream object.
+///
+/// `K -1` selects pure two-dimensional (G4) decoding. `BlackIs1 true` matches
+/// this crate's `Bitmap`/JB2 convention (bit `1` = black/marked pixel) so the
+/// decoded samples are byte-identical to what the Deflate path already embeds
+/// — only the filter changes, not the downstream `/Decode` array.
+fn make_ccitt_stream(dict_extra: &str, ncols: u32, nrows: u32, bitstream: &[u8]) -> Vec<u8> {
+    let extra = format!(
+        " /Filter /CCITTFaxDecode /DecodeParms\
+         << /K -1 /Columns {ncols} /Rows {nrows} /BlackIs1 true >>{dict_extra}"
+    );
+    make_stream(&extra, bitstream)
+}
+
 // ---- PDF font for invisible text --------------------------------------------
 
 /// Build a Type1 font dictionary for Helvetica (standard 14 font, no embedding needed).
@@ -245,7 +259,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
 
     let (img0_body, mask_obj_body) = if is_bilevel_only {
         // Bilevel fast path: embed the 1-bit JB2 mask as the sole XObject.
-        let mask = collect_mask_stream(page);
+        let mask = collect_mask_stream(page, opts);
         (mask, None)
     } else {
         let (rw, rh) = render_dims(page, opts.output_dpi);
@@ -288,7 +302,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
             None => make_deflate_stream(&img_dict, &rgb),
         };
 
-        let mask = collect_mask_stream(page);
+        let mask = collect_mask_stream(page, opts);
         (Some(img_body), mask)
     };
 
@@ -319,8 +333,15 @@ fn render_rgb_for_pdf(
     Ok(rgb)
 }
 
-/// Decode and deflate the JB2 foreground mask into a PDF ImageMask XObject body.
-fn collect_mask_stream(page: &DjVuPage) -> Option<Vec<u8>> {
+/// Decode and compress the JB2 foreground mask into a PDF ImageMask XObject body.
+///
+/// When `opts.ccitt_g4` is set (`PDF_G4`, opt-in), the mask is also encoded as
+/// CCITTFaxDecode (Group 4 / T.6) via [`crate::smmr::encode_g4`] and whichever
+/// stream is smaller is kept — the same "encode both, keep smaller" pattern as
+/// `adaptive_raster` (round 28), so enabling it can never regress a page's mask
+/// size. Default (`ccitt_g4: false`) is byte-identical to the pre-existing
+/// Deflate-only behaviour.
+fn collect_mask_stream(page: &DjVuPage, opts: &PdfOptions) -> Option<Vec<u8>> {
     let sjbz = page.find_chunk(b"Sjbz")?;
     let dict = page
         .find_chunk(b"Djbz")
@@ -334,7 +355,17 @@ fn collect_mask_stream(page: &DjVuPage) -> Option<Vec<u8>> {
         " /Type /XObject /Subtype /Image /Width {bw} /Height {bh}\
          /ImageMask true /BitsPerComponent 1 /Decode [1 0]"
     );
-    Some(make_deflate_stream(&dict_extra, &bitmap.data))
+    let deflate_body = make_deflate_stream(&dict_extra, &bitmap.data);
+    if !opts.ccitt_g4 {
+        return Some(deflate_body);
+    }
+    let g4_bits = crate::smmr::encode_g4(&bitmap);
+    let g4_body = make_ccitt_stream(&dict_extra, bw, bh, &g4_bits);
+    Some(if g4_body.len() < deflate_body.len() {
+        g4_body
+    } else {
+        deflate_body
+    })
 }
 
 /// Build pre-serialized annotation bodies for all hyperlinks on a page.
@@ -774,6 +805,23 @@ pub struct PdfOptions {
     /// immediately), so this doesn't change the O(1)-per-page memory profile.
     /// Has no effect when `jpeg_quality` is `None` (already all-Deflate).
     pub adaptive_raster: bool,
+
+    /// Opt-in CCITT Group 4 (T.6) encoding for JB2 bilevel masks (default `false`).
+    ///
+    /// Every page's mask (the bilevel-only `/Im0` fast path *and* the `/Mask0`
+    /// overlay on mixed pages) is currently always emitted as Deflate of the
+    /// raw 1-bit raster. For scanned/text-dominated bilevel content, Group 4
+    /// (fax) run-length coding exploits row-to-row redundancy that Deflate's
+    /// generic LZ77 window doesn't reliably catch, often 1.5-2x+ smaller.
+    ///
+    /// When `true`, each mask is encoded *both* ways (Deflate and G4 via
+    /// [`crate::smmr::encode_g4`]) and whichever stream is smaller is
+    /// embedded — this can never regress a page's mask size, the same
+    /// "encode both, keep smaller" pattern as `adaptive_raster`. On
+    /// halftone/dithered bilevel content (rare for JB2 masks, which are
+    /// normally already-segmented text/line-art) G4's run-length model can
+    /// lose to Deflate; the per-mask min guards against that.
+    pub ccitt_g4: bool,
 }
 
 impl Default for PdfOptions {
@@ -782,6 +830,7 @@ impl Default for PdfOptions {
             jpeg_quality: Some(80),
             output_dpi: 150,
             adaptive_raster: false,
+            ccitt_g4: false,
         }
     }
 }
@@ -793,6 +842,7 @@ impl PdfOptions {
             jpeg_quality: Some(90),
             output_dpi: 0,
             adaptive_raster: false,
+            ccitt_g4: false,
         }
     }
 }
@@ -1190,6 +1240,7 @@ mod tests {
                 jpeg_quality: Some(75),
                 output_dpi: 150,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .expect("DCT conversion must succeed");
@@ -1199,6 +1250,7 @@ mod tests {
                 jpeg_quality: None,
                 output_dpi: 150,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .expect("FlateDecode conversion must succeed");
@@ -1220,6 +1272,7 @@ mod tests {
                 jpeg_quality: Some(80),
                 output_dpi: 150,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .unwrap();
@@ -1237,6 +1290,7 @@ mod tests {
                 jpeg_quality: None,
                 output_dpi: 150,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .unwrap();
@@ -1255,6 +1309,7 @@ mod tests {
                 jpeg_quality: None,
                 output_dpi: 150,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .unwrap();
@@ -1340,6 +1395,99 @@ mod tests {
         )
         .unwrap();
         assert!(adaptive_pdf.len() <= default_pdf.len());
+    }
+
+    // ── PDF_G4: opt-in CCITTFaxDecode (G4/T.6) for JB2 masks ────────────────────
+
+    #[test]
+    fn ccitt_g4_defaults_to_off() {
+        assert!(!PdfOptions::default().ccitt_g4);
+        assert!(!PdfOptions::archival().ccitt_g4);
+    }
+
+    /// With `ccitt_g4: false` (the default), output must be byte-identical to
+    /// the pre-existing always-Deflate mask behaviour.
+    #[test]
+    fn ccitt_g4_off_is_byte_identical_to_default() {
+        let doc = load_doc("boy_jb2.djvu"); // Sjbz-only (bilevel fast path)
+        let plain = djvu_to_pdf(&doc).unwrap();
+        let explicit_off = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                ccitt_g4: false,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plain, explicit_off);
+    }
+
+    /// `ccitt_g4: true` must produce a PDF containing `/CCITTFaxDecode` for a
+    /// bilevel document, and must never be larger than the Deflate-only default
+    /// (it's a per-mask min, same pattern as `adaptive_raster`).
+    #[test]
+    fn ccitt_g4_on_uses_ccittfaxdecode_and_never_larger() {
+        let doc = load_doc("boy_jb2.djvu");
+        let default_pdf = djvu_to_pdf(&doc).unwrap();
+        let g4_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                ccitt_g4: true,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+        let has_ccitt = g4_pdf.windows(14).any(|w| w == b"CCITTFaxDecode");
+        assert!(has_ccitt, "ccitt_g4 PDF must contain /CCITTFaxDecode");
+        assert!(
+            g4_pdf.len() <= default_pdf.len(),
+            "g4 PDF ({} B) must not be larger than default ({} B)",
+            g4_pdf.len(),
+            default_pdf.len()
+        );
+    }
+
+    /// On a real scanned bilevel corpus doc (`watchmaker.djvu`), `ccitt_g4: true`
+    /// must shrink the whole-file PDF meaningfully (measured ~1.7x on this file's
+    /// masks — see `PDF_G4` in `PERF_EXPERIMENTS.md`).
+    #[test]
+    fn ccitt_g4_shrinks_bilevel_corpus_doc() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus/watchmaker.djvu"),
+        )
+        .expect("watchmaker.djvu must exist");
+        let doc = crate::djvu_document::DjVuDocument::parse(&data).expect("parse");
+
+        let default_pdf = djvu_to_pdf(&doc).unwrap();
+        let g4_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                ccitt_g4: true,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            g4_pdf.len() < default_pdf.len(),
+            "g4 PDF ({} B) must be smaller than Deflate-only default ({} B)",
+            g4_pdf.len(),
+            default_pdf.len()
+        );
+    }
+
+    /// `collect_mask_stream` with `ccitt_g4: true` still returns `None` for a
+    /// page without `Sjbz` (same short-circuit as the Deflate-only path).
+    #[test]
+    fn collect_mask_stream_g4_returns_none_for_no_sjbz() {
+        let doc = load_doc("chicken.djvu"); // no Sjbz
+        let page = doc.page(0).unwrap();
+        let opts = PdfOptions {
+            ccitt_g4: true,
+            ..PdfOptions::default()
+        };
+        assert!(collect_mask_stream(page, &opts).is_none());
     }
 
     #[test]
@@ -1583,6 +1731,7 @@ mod tests {
                 jpeg_quality: None,
                 output_dpi: 0,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .unwrap();
@@ -1592,6 +1741,7 @@ mod tests {
                 jpeg_quality: None,
                 output_dpi: 50,
                 adaptive_raster: false,
+                ccitt_g4: false,
             },
         )
         .unwrap();
@@ -1700,7 +1850,7 @@ mod tests {
     fn collect_mask_stream_returns_none_for_no_sjbz() {
         let doc = load_doc("chicken.djvu"); // no Sjbz
         let page = doc.page(0).unwrap();
-        let result = collect_mask_stream(page);
+        let result = collect_mask_stream(page, &PdfOptions::default());
         assert!(
             result.is_none(),
             "page without Sjbz must return None from collect_mask_stream"
@@ -1711,7 +1861,7 @@ mod tests {
     fn collect_mask_stream_returns_some_for_sjbz_page() {
         let doc = load_doc("boy_jb2.djvu"); // has Sjbz
         let page = doc.page(0).unwrap();
-        let result = collect_mask_stream(page);
+        let result = collect_mask_stream(page, &PdfOptions::default());
         assert!(
             result.is_some(),
             "page with Sjbz must return Some from collect_mask_stream"

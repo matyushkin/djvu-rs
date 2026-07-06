@@ -962,6 +962,7 @@ fn bench_pdf_export_flatdecode(c: &mut Criterion) {
         jpeg_quality: None,
         output_dpi: 150,
         adaptive_raster: false,
+        ccitt_g4: false,
     };
     let mut group = c.benchmark_group("export");
     group.sample_size(10);
