@@ -269,6 +269,18 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
                 let jpeg = encode_rgb_to_jpeg(&rgb, rw, rh, quality);
                 if jpeg.is_empty() {
                     make_deflate_stream(&img_dict, &rgb)
+                } else if opts.adaptive_raster {
+                    // PDF_ADAPTIVE_RASTER: encode both, keep the smaller. Only one
+                    // page's worth of both encodings is ever live at once (the
+                    // loser is dropped here, before returning), so this doesn't
+                    // regress the O(1)-per-page streaming from #449.
+                    let dct_body = make_dct_stream(&img_dict, &jpeg);
+                    let deflate_body = make_deflate_stream(&img_dict, &rgb);
+                    if deflate_body.len() < dct_body.len() {
+                        deflate_body
+                    } else {
+                        dct_body
+                    }
                 } else {
                     make_dct_stream(&img_dict, &jpeg)
                 }
@@ -745,6 +757,23 @@ pub struct PdfOptions {
     /// - `300` — print quality
     /// - `0` — use native page DPI (maximum quality, slowest)
     pub output_dpi: u32,
+
+    /// Opt-in per-page adaptive raster encoding (default `false`).
+    ///
+    /// When `jpeg_quality` is `Some`, the default behaviour always emits
+    /// DCTDecode (JPEG). On near-flat/text-dominated colour pages this can be
+    /// *larger* than plain FlateDecode at no quality gain — JPEG's DCT
+    /// overhead doesn't pay for itself when there's little photographic
+    /// detail to amortize it against (see `PDF_DCT_PROBE` in
+    /// `PERF_EXPERIMENTS.md`).
+    ///
+    /// When `true`, each page's rendered RGB is encoded *both* ways and
+    /// whichever stream is smaller is embedded — losslessly (FlateDecode) when
+    /// Deflate wins, lossy (DCTDecode) when JPEG wins. Only one page's pair of
+    /// encodings is ever held in memory at a time (the loser is dropped
+    /// immediately), so this doesn't change the O(1)-per-page memory profile.
+    /// Has no effect when `jpeg_quality` is `None` (already all-Deflate).
+    pub adaptive_raster: bool,
 }
 
 impl Default for PdfOptions {
@@ -752,6 +781,7 @@ impl Default for PdfOptions {
         PdfOptions {
             jpeg_quality: Some(80),
             output_dpi: 150,
+            adaptive_raster: false,
         }
     }
 }
@@ -762,6 +792,7 @@ impl PdfOptions {
         PdfOptions {
             jpeg_quality: Some(90),
             output_dpi: 0,
+            adaptive_raster: false,
         }
     }
 }
@@ -1158,6 +1189,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: Some(75),
                 output_dpi: 150,
+                adaptive_raster: false,
             },
         )
         .expect("DCT conversion must succeed");
@@ -1166,6 +1198,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: None,
                 output_dpi: 150,
+                adaptive_raster: false,
             },
         )
         .expect("FlateDecode conversion must succeed");
@@ -1186,6 +1219,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: Some(80),
                 output_dpi: 150,
+                adaptive_raster: false,
             },
         )
         .unwrap();
@@ -1202,6 +1236,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: None,
                 output_dpi: 150,
+                adaptive_raster: false,
             },
         )
         .unwrap();
@@ -1219,6 +1254,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: None,
                 output_dpi: 150,
+                adaptive_raster: false,
             },
         )
         .unwrap();
@@ -1226,6 +1262,84 @@ mod tests {
             default_pdf.len() < flat_pdf.len(),
             "default PDF must use DCT and be smaller than FlateDecode"
         );
+    }
+
+    // ── PDF_ADAPTIVE_RASTER: opt-in per-page Deflate-vs-JPEG choice ─────────────
+
+    #[test]
+    fn adaptive_raster_defaults_to_off() {
+        assert!(!PdfOptions::default().adaptive_raster);
+        assert!(!PdfOptions::archival().adaptive_raster);
+    }
+
+    /// With `adaptive_raster: false` (the default), output must be byte-identical
+    /// to the pre-existing always-DCT behaviour.
+    #[test]
+    fn adaptive_raster_off_is_byte_identical_to_default() {
+        let doc = load_doc("chicken.djvu");
+        let plain = djvu_to_pdf(&doc).unwrap();
+        let explicit_off = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                adaptive_raster: false,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plain, explicit_off);
+    }
+
+    /// On a near-flat colour scan (`PDF_DCT_PROBE`'s regression case), JPEG-80 is
+    /// 3.1x larger than Deflate at no SSIM gain. `adaptive_raster: true` must pick
+    /// Deflate on every such page and produce a visibly smaller whole-file PDF.
+    #[test]
+    fn adaptive_raster_shrinks_flat_colour_scan() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus/watchmaker.djvu"),
+        )
+        .expect("watchmaker.djvu must exist");
+        let doc = crate::djvu_document::DjVuDocument::parse(&data).expect("parse");
+
+        let default_pdf = djvu_to_pdf(&doc).unwrap();
+        let adaptive_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                adaptive_raster: true,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            adaptive_pdf.len() < default_pdf.len(),
+            "adaptive PDF ({} B) must be smaller than always-DCT default ({} B)",
+            adaptive_pdf.len(),
+            default_pdf.len()
+        );
+        // Expect a substantial win (measured ~1.6x on this corpus file), not a
+        // rounding-error difference.
+        assert!(
+            (default_pdf.len() as f64) / (adaptive_pdf.len() as f64) > 1.3,
+            "expected a large win from adaptive raster on a flat colour scan"
+        );
+    }
+
+    /// `adaptive_raster: true` must never be *larger* than always-DCT: it's a
+    /// per-page min, so image-heavy pages where JPEG already wins are unchanged.
+    #[test]
+    fn adaptive_raster_never_larger_than_default() {
+        let doc = load_doc("chicken.djvu");
+        let default_pdf = djvu_to_pdf(&doc).unwrap();
+        let adaptive_pdf = djvu_to_pdf_with_options(
+            &doc,
+            &PdfOptions {
+                adaptive_raster: true,
+                ..PdfOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(adaptive_pdf.len() <= default_pdf.len());
     }
 
     #[test]
@@ -1468,6 +1582,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: None,
                 output_dpi: 0,
+                adaptive_raster: false,
             },
         )
         .unwrap();
@@ -1476,6 +1591,7 @@ mod tests {
             &PdfOptions {
                 jpeg_quality: None,
                 output_dpi: 50,
+                adaptive_raster: false,
             },
         )
         .unwrap();
