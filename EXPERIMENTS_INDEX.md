@@ -1,6 +1,7 @@
 # Experiments Index
 
 
+
 Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-06.
 
 ## Legend
@@ -13,6 +14,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_SLICE_RD | 2026-07-04 | IW44 encoder (slice budget) | D | default well-tuned; no change | RD curve via D1: past 100 slices PSNR pinned (22.42/39.03 dB), SSIM +≤0.003 while size grows 2–25× (colorbook 100→150 = +1.8 MB for +0.0003 SSIM). total_slices=100 sits at the knee. Refutes IW44_DIAG "starved in 100 slices" — avg_abs=8.72 is the transform's quantization floor, not slice starvation. BG44 lever was BG_DIFFUSE (r17, smaller input), not the slice schedule. Round-35 |
 | INTEROP_ENCODE | 2026-07-04 | encoder interop (infra) | **K** (infra) | **21/21 our encodes decode in ddjvu**; real-scan fidelity mean<0.3 | `examples/interop_encode.rs` — encode → ddjvu-decode gate (unblocks masked-wavelet: "ddjvu must accept our stream"). Encode-side complement to interop_pixdiff/diff_djvulibre (decode-side). Gate: non-zero exit if ddjvu rejects. Real colour scans mean|Δ|<0.3 vs ddjvu; degenerate re-encodes (bilevel/photo-as-colour) show mask-AA edge diffs (follow-up). Round-34 |
 | LANCZOS_RGBA_ACC | 2026-07-04 | Lanczos-3 resampler | **K** | **−22 to −27% Lanczos cost** (auto-vec, bit-identical) | Both separable passes accumulated 3 scalar r/g/b from a stride-4 RGBA read, blocking LLVM auto-vec. Restructure: horizontal → `[f32;4]` per pixel over 4 contiguous bytes/tap; vertical → single interleaved `acc[dw*4]` contiguous SAXPY. Alpha lane accumulates 255, ignored. Bit-identical (digest 1154d165a6a72d7d). No unsafe / target_feature → holds on all auto-vec targets (unlike manual-NEON dead-ends #3). On top of PAR_LANCZOS + LANCZOS_HOIST. Round-33 |
 | D3_BICUBIC | 2026-07-06 | render FG44 upsampling (quality) | X (no perceptible gain) | SSIM ≥0.9982 bilinear-vs-bicubic (FG-only isolated), 0.9999 whole-page; ~17% slower when enabled | Catmull-Rom bicubic swap for `sample_bilinear` in the compositor's B-series (upscale) FG44 path; measured 12.0× FG44 subsample ratio is already below the perceptual floor under bilinear. Byte-identical default, macro-hoisted flag (zero cost off), but rejected on quality grounds — not shipped, reverted from `src/djvu_render.rs`. Crops visually indistinguishable. Round-32 |
@@ -220,5 +222,7 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 **Pre-existing (not from swarm):** #422 bilinear chroma upsampling · #423 Lanczos-3 resampling option
 
 **Still open from prior analysis (no issue yet):** JB2 byte-cost estimator before cross-size emit
-(#301; JB2_CROSS6 was +4% size — need cost model first) · IW44 quantization/slice-budget increase
-for fine bands (IW44_DIAG: starved in 100 slices, quality floor avg_abs=8.72).
+(#301; JB2_CROSS6 was +4% size — need cost model first). ~~IW44 quantization/slice-budget increase
+for fine bands (IW44_DIAG)~~ **CLOSED by IW44_SLICE_RD (round 18):** the RD curve shows
+`total_slices=100` is at the knee and avg_abs=8.72 is the transform's quantization floor, not
+slice starvation — more slices explode size for ≤0.003 SSIM.
