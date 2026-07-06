@@ -113,6 +113,8 @@ serde_json = "1"
 futures = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 proptest = "1"
+# cold_open_bench only: F_NOCACHE fcntl for the cold-copy strategy (macOS).
+libc = "0.2"
 
 [[bin]]
 name = "djvu"
@@ -122,6 +124,10 @@ required-features = ["cli"]
 [[example]]
 name = "async_lazy_first_page"
 required-features = ["async"]
+
+[[example]]
+name = "cold_open_bench"
+required-features = ["mmap", "parallel"]
 
 [[example]]
 name = "probe_tiff_streaming_memory"
