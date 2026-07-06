@@ -53,13 +53,17 @@
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
 
 use crate::bitmap::Bitmap;
+use crate::bzz_encode::bzz_encode;
 use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk, encode_info};
 use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use crate::jb2_encode::{self, Jb2EncodeOptions};
+use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
 use crate::segment::{SegmentOptions, segment_page};
+use crate::text::TextLayer;
+use crate::text_encode::encode_text_layer;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -310,6 +314,7 @@ pub struct PageEncoder<'a> {
     iw44_options: Option<Iw44EncodeOptions>,
     jb2_options: Option<Jb2EncodeOptions>,
     fgbz_options: FgbzPaletteOptions,
+    text_layer: Option<TextLayer>,
 }
 
 impl<'a> PageEncoder<'a> {
@@ -323,6 +328,7 @@ impl<'a> PageEncoder<'a> {
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
+            text_layer: None,
         }
     }
 
@@ -338,6 +344,7 @@ impl<'a> PageEncoder<'a> {
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
+            text_layer: None,
         }
     }
 
@@ -399,6 +406,49 @@ impl<'a> PageEncoder<'a> {
         self
     }
 
+    /// Attach a pre-built text layer to be embedded as a BZZ-compressed
+    /// `TXTz` chunk, making the encoded page text-searchable.
+    ///
+    /// `layer`'s zone rectangles must use the page's top-left pixel
+    /// coordinate system (the convention [`OcrBackend::recognize`] returns
+    /// and [`crate::text::TextZone`] documents) — `encode()` converts them to
+    /// DjVu's bottom-left origin using the page height set via
+    /// [`with_dpi`](Self::with_dpi) / the source image's height.
+    ///
+    /// Opt-in: the default (no call) omits the chunk entirely and produces
+    /// byte-identical output to before this method existed.
+    pub fn with_text_layer(mut self, layer: TextLayer) -> Self {
+        self.text_layer = Some(layer);
+        self
+    }
+
+    /// Run `backend` over the page image and attach the resulting OCR text
+    /// layer (see [`with_text_layer`](Self::with_text_layer)) — the standard
+    /// "searchable scan" workflow in one step.
+    ///
+    /// Bilevel ([`Bitmap`]) sources are expanded to a black-on-white RGBA
+    /// [`Pixmap`] for the OCR engine (which only sees pixels, not the JB2
+    /// encode); colour sources are OCR'd directly. Opt-in and fallible: a
+    /// backend/init failure (e.g. missing Tesseract install) is returned as
+    /// [`OcrError`] rather than silently producing a page with no text layer.
+    pub fn with_ocr_text_layer(
+        mut self,
+        backend: &dyn OcrBackend,
+        options: &OcrOptions,
+    ) -> Result<Self, OcrError> {
+        let owned_pixmap;
+        let pixmap: &Pixmap = match &self.source {
+            Source::Pixmap(p) => p,
+            Source::Bitmap(b) => {
+                owned_pixmap = bitmap_to_pixmap(b);
+                &owned_pixmap
+            }
+        };
+        let layer = backend.recognize(pixmap, options)?;
+        self.text_layer = Some(layer);
+        Ok(self)
+    }
+
     /// Produce the bytes of a single-page DjVu file (`FORM:DJVU`
     /// wrapped in the `AT&T` IFF container).
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
@@ -412,16 +462,20 @@ impl<'a> PageEncoder<'a> {
         let info = encode_info(w, h, self.dpi);
 
         match (&self.source, self.quality) {
-            (Source::Bitmap(bm), EncodeQuality::Lossless) => Ok(encode_form_djvu(vec![
-                Chunk::Leaf {
-                    id: *b"INFO",
-                    data: info,
-                },
-                Chunk::Leaf {
-                    id: *b"Sjbz",
-                    data: jb2_encode::encode_jb2(bm),
-                },
-            ])),
+            (Source::Bitmap(bm), EncodeQuality::Lossless) => {
+                let mut chunks = vec![
+                    Chunk::Leaf {
+                        id: *b"INFO",
+                        data: info,
+                    },
+                    Chunk::Leaf {
+                        id: *b"Sjbz",
+                        data: jb2_encode::encode_jb2(bm),
+                    },
+                ];
+                self.push_text_layer_chunk(&mut chunks, h as u32);
+                Ok(encode_form_djvu(chunks))
+            }
             (Source::Pixmap(pm), EncodeQuality::Quality | EncodeQuality::Archival) => {
                 let segment_options = self
                     .segment_options
@@ -439,7 +493,7 @@ impl<'a> PageEncoder<'a> {
                 let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None, self.fgbz_options);
 
                 let mut chunks =
-                    Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()));
+                    Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()) + 1);
                 chunks.push(Chunk::Leaf {
                     id: *b"INFO",
                     data: info,
@@ -457,6 +511,7 @@ impl<'a> PageEncoder<'a> {
                 if let Some(chunk) = fgbz {
                     chunks.push(chunk.into_leaf());
                 }
+                self.push_text_layer_chunk(&mut chunks, h as u32);
                 Ok(encode_form_djvu(chunks))
             }
             (Source::Pixmap(_), EncodeQuality::Lossless) => Err(EncodeError::Unsupported(
@@ -470,6 +525,40 @@ impl<'a> PageEncoder<'a> {
             )),
         }
     }
+
+    /// Append the BZZ-compressed `TXTz` chunk for `self.text_layer`, if one
+    /// was attached via [`with_text_layer`](Self::with_text_layer) /
+    /// [`with_ocr_text_layer`](Self::with_ocr_text_layer). No-op (and hence
+    /// byte-identical output) when no text layer is attached.
+    fn push_text_layer_chunk(&self, chunks: &mut Vec<Chunk>, page_height: u32) {
+        if let Some(layer) = &self.text_layer {
+            let plain = encode_text_layer(layer, page_height);
+            let compressed = bzz_encode(&plain);
+            chunks.push(Chunk::Leaf {
+                id: *b"TXTz",
+                data: compressed,
+            });
+        }
+    }
+}
+
+/// Expand a bilevel [`Bitmap`] into a black-on-white RGBA [`Pixmap`] for
+/// OCR engines that only accept pixel input (not the packed 1-bpp mask).
+/// Mirrors `mask_to_pixmap` in `examples/ocr_qa.rs` (round 43's OCR_QA
+/// machinery) — both convert `true` (black/ink) pixels to RGB(0,0,0) over an
+/// all-white background, preserving the mask's top-left-origin coordinate
+/// system so the returned [`TextLayer`] rects line up with `page_height`
+/// unmodified.
+fn bitmap_to_pixmap(bm: &Bitmap) -> Pixmap {
+    let mut pm = Pixmap::white(bm.width, bm.height);
+    for y in 0..bm.height {
+        for x in 0..bm.width {
+            if bm.get(x, y) {
+                pm.set_rgb(x, y, 0, 0, 0);
+            }
+        }
+    }
+    pm
 }
 
 /// Encode a directory of colour pages as a single bundled DJVM with a **shared
@@ -808,6 +897,7 @@ mod tests {
     use super::*;
     use crate::iff::parse_form;
     use crate::jb2;
+    use crate::text::{TextZone, TextZoneKind};
 
     fn checkerboard(w: u32, h: u32) -> Bitmap {
         let mut bm = Bitmap::new(w, h);
@@ -1566,5 +1656,178 @@ mod tests {
                 "page {i} must NOT carry a TH44 thumbnail when with_thumbnails=false"
             );
         }
+    }
+
+    // ── TXTZ_OCR: encode-time text layer ────────────────────────────────────
+
+    fn sample_text_layer(page_w: u32, page_h: u32) -> TextLayer {
+        use crate::text::Rect;
+        TextLayer {
+            text: "Hello World".into(),
+            zones: vec![TextZone {
+                kind: TextZoneKind::Page,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: page_w,
+                    height: page_h,
+                },
+                text: "Hello World".into(),
+                children: vec![TextZone {
+                    kind: TextZoneKind::Line,
+                    rect: Rect {
+                        x: 4,
+                        y: 6,
+                        width: page_w.saturating_sub(8),
+                        height: 20,
+                    },
+                    text: "Hello World".into(),
+                    children: vec![
+                        TextZone {
+                            kind: TextZoneKind::Word,
+                            rect: Rect {
+                                x: 4,
+                                y: 6,
+                                width: 50,
+                                height: 20,
+                            },
+                            text: "Hello".into(),
+                            children: vec![],
+                        },
+                        TextZone {
+                            kind: TextZoneKind::Word,
+                            rect: Rect {
+                                x: 60,
+                                y: 6,
+                                width: 50,
+                                height: 20,
+                            },
+                            text: "World".into(),
+                            children: vec![],
+                        },
+                    ],
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn no_text_layer_is_byte_identical_to_pre_txtz_ocr_baseline() {
+        // Opt-in guarantee: not calling with_text_layer()/with_ocr_text_layer()
+        // must produce exactly the same bytes as before those methods existed
+        // (no stray empty TXTz chunk, no size/behavior change for existing
+        // callers). Cross-checked against `lossless_bilevel_round_trips`
+        // et al., which continue to pass unmodified.
+        let bm = checkerboard(32, 24);
+        let bytes = PageEncoder::from_bitmap(&bm).encode().expect("encode");
+        let form = parse_form(&bytes).expect("parse_form");
+        assert!(
+            !form
+                .chunks
+                .iter()
+                .any(|c| &c.id == b"TXTz" || &c.id == b"TXTa"),
+            "no text layer attached => no TXTz/TXTa chunk should be emitted"
+        );
+    }
+
+    #[test]
+    fn with_text_layer_emits_txtz_and_round_trips_through_our_decoder() {
+        let bm = checkerboard(120, 80);
+        let layer = sample_text_layer(120, 80);
+        let bytes = PageEncoder::from_bitmap(&bm)
+            .with_quality(EncodeQuality::Lossless)
+            .with_text_layer(layer.clone())
+            .encode()
+            .expect("encode");
+
+        let form = parse_form(&bytes).expect("parse_form");
+        assert!(
+            form.chunks.iter().any(|c| &c.id == b"TXTz"),
+            "TXTz chunk should be present after with_text_layer"
+        );
+
+        // Round-trip through our own decoder end to end (DjVuDocument), the
+        // primary validator per the task brief.
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse document");
+        let page = doc.page(0).expect("page 0");
+        let decoded = page
+            .text_layer()
+            .expect("text_layer() must not error")
+            .expect("text_layer() must return Some after with_text_layer");
+        assert_eq!(decoded.text, "Hello World");
+        let words: Vec<&str> = decoded
+            .zones
+            .first()
+            .and_then(|page_zone| page_zone.children.first())
+            .map(|line| line.children.iter().map(|w| w.text.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(words, vec!["Hello", "World"]);
+
+        let plain = page.text().expect("text()").expect("Some plain text");
+        assert_eq!(plain, "Hello World");
+    }
+
+    /// Deterministic mock `OcrBackend` for `with_ocr_text_layer` — mirrors the
+    /// pattern used by `examples/ocr_qa.rs`'s test-only mock backend so this
+    /// unit test needs no real Tesseract install.
+    struct MockOcrBackend {
+        layer: TextLayer,
+    }
+
+    impl OcrBackend for MockOcrBackend {
+        fn recognize(
+            &self,
+            _pixmap: &Pixmap,
+            _options: &OcrOptions,
+        ) -> Result<TextLayer, OcrError> {
+            Ok(self.layer.clone())
+        }
+    }
+
+    #[test]
+    fn with_ocr_text_layer_runs_backend_and_attaches_result() {
+        let bm = checkerboard(96, 64);
+        let backend = MockOcrBackend {
+            layer: sample_text_layer(96, 64),
+        };
+        let bytes = PageEncoder::from_bitmap(&bm)
+            .with_quality(EncodeQuality::Lossless)
+            .with_ocr_text_layer(&backend, &OcrOptions::default())
+            .expect("OCR backend should not fail")
+            .encode()
+            .expect("encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse document");
+        let page = doc.page(0).expect("page 0");
+        let text = page.text().expect("text()").expect("Some plain text");
+        assert_eq!(text, "Hello World");
+    }
+
+    #[test]
+    fn with_ocr_text_layer_works_from_colour_pixmap_source_too() {
+        // Quality/Archival (Pixmap source) path: OCR runs directly on the
+        // pixmap without the bitmap_to_pixmap conversion.
+        let pm = Pixmap::white(96, 64);
+        let backend = MockOcrBackend {
+            layer: sample_text_layer(96, 64),
+        };
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .with_ocr_text_layer(&backend, &OcrOptions::default())
+            .expect("OCR backend should not fail")
+            .encode()
+            .expect("encode");
+
+        let form = parse_form(&bytes).expect("parse_form");
+        assert!(form.chunks.iter().any(|c| &c.id == b"TXTz"));
+    }
+
+    #[test]
+    fn bitmap_to_pixmap_maps_black_pixels_to_black_rgb() {
+        let mut bm = Bitmap::new(4, 2);
+        bm.set_black(1, 0);
+        let pm = bitmap_to_pixmap(&bm);
+        assert_eq!(pm.get_rgb(1, 0), (0, 0, 0));
+        assert_eq!(pm.get_rgb(0, 0), (255, 255, 255));
     }
 }

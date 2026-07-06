@@ -10255,3 +10255,81 @@ verified directly (see finding 2a above) rather than via the aggregate table.
 **Follow-ups (updated):** round 45's (2) and (5) are now closed by this
 round. Remaining open: (1)/(4) INFO version-ceiling and minor-version pixel
 divergence (findings 1/3 — separate INFO_VERSION effort, `src/info.rs`).
+
+## Perf round 51 (2026-07-06) — TXTZ_OCR: encode-time OCR text layer — **Kept (opt-in)**
+
+**Goal.** Give the encoder a "searchable scan" one-step workflow: run an
+`OcrBackend` on the page image during encoding and emit a proper `TXTz` chunk,
+so the output DjVu is text-searchable without a separate mutation pass.
+
+**Prior art (mandatory check).** `gh pr list --search "txtz OR text layer"`
+turned up PR #315 (`feat(cli/ocr): embed OCR text layers in DjVu output`,
+merged) — but that wires OCR into `djvu ocr --output`, which rewrites an
+*already-encoded* file via `DjVuDocumentMut::page_mut().set_text_layer()`
+(`src/djvu_mut.rs`), a post-hoc mutation pass, not encode-time. Reading the
+seam confirmed the low-level pieces were already complete and *not*
+duplicated by building this:
+- `OcrBackend::recognize` (`src/ocr.rs`, PR #125) already returns a full
+  `page → line → word` `TextLayer` with pixel bounding boxes — the trait did
+  **not** need extending. `TesseractBackend` (`src/ocr_tesseract.rs`) already
+  parses Tesseract's hOCR output into the full zone hierarchy.
+- `text_encode::encode_text_layer` (`src/text_encode.rs`) already serializes a
+  `TextLayer` to the DjVu zone-tree binary format (delta-coded rects,
+  bottom-left coordinate flip) with round-trip tests against `text.rs`'s
+  decoder, and `bzz_encode` already compresses it to `TXTz`.
+- What was missing: `PageEncoder` (`src/djvu_encode.rs`) had **zero**
+  awareness of text layers or OCR — the CLI's `Encode` and `Ocr` subcommands
+  are two fully separate code paths (confirmed via `grep` — no
+  `text_layer`/`TextLayer`/`ocr` hits in `djvu_encode.rs` before this round).
+  That's the actual gap: wiring, not new format/backend work.
+
+**Change.** Additive `PageEncoder` API, `src/djvu_encode.rs`:
+- `with_text_layer(TextLayer) -> Self` — attach a pre-built layer.
+- `with_ocr_text_layer(&dyn OcrBackend, &OcrOptions) -> Result<Self, OcrError>`
+  — runs the backend on the page image (bilevel `Bitmap` sources are expanded
+  to a black-on-white RGBA `Pixmap` via a new `bitmap_to_pixmap`, mirroring
+  `examples/ocr_qa.rs`'s `mask_to_pixmap`; colour `Pixmap` sources are OCR'd
+  directly) and attaches the result.
+- `encode()` appends the BZZ-compressed `TXTz` chunk (via the existing
+  `encode_text_layer` + `bzz_encode`) to both the `Lossless` (bitmap) and
+  `Quality`/`Archival` (colour) chunk lists when a text layer is attached; a
+  no-op (byte-identical output, confirmed by test) when it isn't.
+- No trait/backend changes — `OcrBackend`, `TesseractBackend`, and the zone
+  encoder are all untouched, used exactly as they already existed.
+
+**Validation.**
+- 6 new unit tests in `src/djvu_encode.rs`: default omits TXTz entirely
+  (opt-in guarantee, cross-checked against the unmodified pre-existing
+  `PageEncoder` test suite all still passing byte-for-byte); `with_text_layer`
+  round-trips through `DjVuDocument::parse` + `page.text_layer()`/`page.text()`
+  (decoded words/text match what was encoded); `with_ocr_text_layer` against a
+  deterministic mock `OcrBackend` from both `Bitmap` and `Pixmap` sources;
+  `bitmap_to_pixmap` pixel mapping.
+- New `examples/txtz_ocr_demo.rs`, run against `tests/corpus/watchmaker.djvu`
+  page 0 (2550×3301 bilevel mask) with the real `ocr-tesseract` feature
+  (Tesseract 5.5.2 on this machine):
+  - **Size cost:** baseline (no text layer) 29,666 B → with `TXTz` 32,348 B —
+    **+2,682 B (+2.62 KB)**, in the task's expected 1–3 KB/page range.
+  - **Round-trip:** decoded text layer has 1,453 chars, 242 word zones with
+    sane pixel coordinates (e.g. `"Chapter"` @ (1119, 846) 258×83), and the
+    plain text reads correctly: `"Chapter 5\nDeath of the Watchmaker:\nModern
+    Science and\nthe Providence of God!\nArnold E. Sikkema\n\net me begin by
+    quoting John Polkinghorne, theoretical physicist and Anglican priest…"`.
+  - **PDF export:** `pdf::djvu_to_pdf` on the re-encoded document produces a
+    `/Font` resource (the existing `pdf_with_text_layer` path in `src/pdf.rs`
+    picks it up with no changes needed) — confirms the searchable-scan
+    workflow is complete end-to-end (encode with OCR → decode → export to
+    searchable PDF).
+  - **Quality note (honest, no fabricated ground truth):** the embedded text
+    is Tesseract's raw recognition output, unmodified by the TXTz plumbing —
+    this feature's accuracy is exactly whatever Tesseract achieves on a given
+    scan. No ground-truth transcription is checked into the repo for
+    `watchmaker.djvu` to quote an independent accuracy number against; OCR_QA
+    (round 43) already established Tesseract is stable on this exact corpus
+    (100% char/word agreement at the shipped `lossy_text()` operating point).
+  - Demo also builds and runs cleanly without `ocr-tesseract` (falls back to a
+    stub backend), so it stays part of the default-feature build surface.
+
+**Decision.** **Kept, opt-in.** Default encode paths are unchanged (byte-
+identical, tested). One `make check` run (fmt/clippy/no_std/wasm32/tests, all
+1104 tests green) before push.
