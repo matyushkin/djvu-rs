@@ -7913,43 +7913,152 @@ separate from the decoder-API PR).
 
 ### BUG-ZPSHORT — pad short BG44 refinement payloads instead of erroring — **Fixed** (2026-07-06)
 
-**Root cause.** `watchmaker.djvu` page 0 has 4 BG44 chunks; chunk index 2 is a bare
-2-byte `[serial=2, slices=4]` header with **zero ZP-coded payload bytes** — a
-legitimate refinement round where the encoder had nothing left to encode.
-`Iw44Image::decode_chunk` sliced `zp_data = &data[payload_start..]` (empty here) and
-called `ZpDecoder::new(zp_data)`, which requires ≥2 bytes and returned
-`ZpError::TooShort` → `Iw44Error::ZpTooShort`. This is inconsistent with the ZP
-decoder's own design: `ZpDecoder::read_byte` already treats reads *past the end* of
-a normal chunk's buffer as synthetic `0xFF` padding (documented, and relied on by the
-"do not early-exit on `is_exhausted()`" slice loop a few lines below) — a chunk whose
-real payload is entirely padding from byte zero is not meaningfully different from a
-normal chunk's *trailing* padding, so hard-erroring in `decode_chunk` was an
-inconsistency, not a real malformed-input case.
+Round 8 measured `render_progressive` at O(N²) chunk decodes and recorded a design
+for a stateful decoder; round 11 (B5_INCREMENTAL_PROGRESSIVE) fixed the *batch*
+case (`render_progressive_all`) but left the harder case open: a viewer driving
+`render_progressive_step` one chunk at a time as chunks arrive over a network still
+pays O(N²) across the session, because there is no state to persist between calls.
+This round closes that gap.
 
-This surfaced two different symptoms depending on caller: the strict progressive
-path (`render_progressive_step` / `render_progressive_all`) propagated the error and
-failed outright for any frame requesting chunk 2 or later; the permissive full-page
-cache (`PageLayers::bg44`, used by `render_pixmap`) silently `break`s on the first
-chunk error and keeps whatever decoded so far — so the "successful" full-page render
-was silently using only 2 of the page's 4 refinement chunks, a correctness bug of
-its own (not just a progressive-API robustness gap).
+## Perf round 27 (2026-07-04) — B5 streaming ProgressiveDecoder (the deferred stateful API)
 
-**Fix.** Scoped to `Iw44Image::decode_chunk` in `crates/djvu-iw44/src/lib.rs` only
-(the shared `ZpDecoder::new` and its 2-byte-minimum contract, used by JB2/BZZ too,
-is untouched). When the sliced payload is shorter than 2 bytes, pad it up to 2 bytes
-with `0xFF` — reusing the "past-end reads are `0xFF`" convention the decoder already
-applies everywhere else — before constructing the `ZpDecoder`. Well-formed (≥2-byte)
-payloads are completely unaffected (same bytes, same decode).
+Round 8 flagged the streaming-step progressive case as needing a stateful decoder
+API; round 11 (B5_INCREMENTAL_PROGRESSIVE) landed the O(N) *batch* path inside
+`render_progressive_all` but left the streaming API deferred. This round adds it
+and dogfoods it from the batch path.
+
+### B5_STREAMING_DECODER — `ProgressiveDecoder` stateful streaming API — **Kept** (2026-07-04)
+
+**Gap.** The public progressive entry points are `render_progressive(page, opts,
+chunk_n)` — which re-decodes BG44 chunks `1..=chunk_n` from scratch per frame,
+O(N²) over a full progressive sequence — and `render_progressive_all(page, opts)`,
+which is O(N) but requires **every** BG44 chunk up front. Neither serves a viewer
+receiving chunks incrementally over a network, which wants to render after each
+arriving chunk without holding the whole sequence or re-decoding the prefix.
+
+**API.** New `pub struct ProgressiveDecoder<'a>`:
+- `ProgressiveDecoder::new(page, opts)` decodes the foreground (mask / FG44 /
+  palette, plus any `bold` dilation) **once** and sets up the shared render params;
+- `push_bg44_chunk(&mut self, chunk) -> Result<Pixmap>` feeds one refinement chunk
+  into a single accumulating `Iw44Image` and returns the refined frame;
+- `frames_produced()` reports progress.
+
+O(N) total decode across the whole sequence — the foreground is never re-decoded and
+the background accumulates in place, exactly the batch fast path's economy, now
+usable one chunk at a time. It serves the case that path already served
+byte-identically (strict decode, `Bilinear`); `Lanczos3`/`permissive` are rejected
+with `UnsupportedOption` (Lanczos re-renders at native per frame, so there is no
+shared incremental state — those callers use `render_progressive_all`).
+
+**Refactor + correctness.** `render_progressive_all`'s incremental fast path was
+re-pointed at the new type (it now builds a `ProgressiveDecoder` and calls
+`push_bg44_chunk` per chunk) instead of inlining the decode/composite/snapshot loop
+— one implementation, no drift. Byte-identical: the pre-existing
+`render_progressive_all_matches_per_frame` (+ `_bold`) tests still pass (the batch
+output is unchanged), and a new `progressive_decoder_streams_frames_matching_batch`
+test asserts the streamed frames equal `render_progressive_all`'s frame-for-frame,
+pixel-for-pixel, on the 3-chunk `chicken.djvu`. A rejection test covers the
+`Lanczos3` / zero-dimension guards. `make check` green (1030 tests).
+
+**Decision.** **Kept.** Closes the last B5 item: the O(N) streaming progressive
+decode a network/viewer consumer needs, delivered as a small stateful wrapper over
+the already-incremental building blocks, with the batch path refactored to share it.
+No new decode cost (identical work, just re-shaped for incremental delivery); the win
+is the enabled use-case (render-as-you-receive) plus the removed duplication.
+with `0xFF` — reusing the same "past-end reads are `0xFF`" convention the decoder
+already applies everywhere else — before constructing the `ZpDecoder`. Well-formed
+(≥2-byte) payloads are completely unaffected (same bytes, same decode).
 
 **Correctness.** New `iw44_decode_chunk_tolerates_empty_refinement_payload` (crate
-`djvu-iw44`) covers a zero-length and a one-byte refinement payload directly. New
-`render_progressive_step_handles_zero_length_bg44_chunk` (crate `djvu-rs`)
+`djvu-iw44`) covers a zero-length and a one-byte refinement payload directly.
+New `render_progressive_step_handles_zero_length_bg44_chunk` (crate `djvu-rs`)
 regression-tests the real `watchmaker.djvu` fixture end-to-end: every progressive
-step, `render_progressive_all`, and `render_pixmap` now succeed. Note this *does*
-change `watchmaker.djvu`'s full-page render output (previously silently truncated to
-2 of 4 chunks by the permissive path's swallowed error, now correctly using all 4) —
-a correctness fix, not a regression; no test in the suite pins that page's exact
-output bytes.
+step, `render_progressive_all`, `render_pixmap`, and a full `ProgressiveDecoder`
+session now succeed. Note this *does* change `watchmaker.djvu`'s full-page render
+output (previously silently truncated to 2 of 4 chunks by the permissive path's
+swallowed error, now correctly using all 4) — a correctness fix, not a regression;
+no test in the suite pins that page's exact output bytes.
 
 **Decision. Fixed**, small and scoped (one `if` + a 2-byte stack array), with
-regression tests at both the codec and the render-API layer. `make check` green.
+regression tests at both the codec and the render-API layer.
+
+
+*(Verification note: a second, independent implementation of the same design
+converged byte-for-byte on the ProgressiveDecoder core. Its extra evidence is kept
+here: a `#[cfg(test)]` BG44 chunk-decode counter proving O(N²)→O(N) — chicken 6→3,
+colorbook 10→4 — and direct byte-identity tests against `render_progressive_step`
+on both corpora. The duplicate BUG-ZPSHORT write-up was dropped in favour of round 26.)*
+
+### B5_STATEFUL — independent reimplementation: structural O(N) proof + direct byte-identity tests (2026-07-06)
+
+**What.** New `pub struct ProgressiveDecoder<'a>` in `src/djvu_render.rs`, matching
+the round-8 design almost exactly:
+
+- `ProgressiveDecoder::new(page, opts)` decodes the foreground (mask / FG44 /
+  palette, plus any `bold` dilation) **once** and captures the render parameters
+  (gamma LUT, subsample, rotation);
+- `push_bg44_chunk(&mut self, chunk) -> Result<Pixmap>` feeds one BG44 refinement
+  chunk into a single accumulating `Iw44Image` held in the struct and returns the
+  composited frame for the chunks fed so far;
+- `frames_produced()` reports progress.
+
+Only the background differs per frame — one BG44 chunk decoded into the same
+`Iw44Image` — the foreground is decoded exactly once for the whole session. Scoped
+to the case this is provably byte-identical for: strict decode, `Bilinear`
+resampling. `Lanczos3` and `permissive` return `RenderError::UnsupportedOption`
+(Lanczos re-renders at native resolution per frame — no shared incremental state to
+build on; those callers keep using `render_progressive_all`). `render_progressive_all`'s
+own incremental fast path (round 11) is refactored to build one `ProgressiveDecoder`
+and drive it, so there is exactly one implementation of the accumulate-and-composite
+logic behind both the batch and streaming entry points — per the round-8 design note,
+`decode_layers`' bg+fg+bold+composite assembly is reused, not forked.
+
+**Correctness.** Byte-identical, proven directly against `render_progressive_step`
+(not only via the `render_progressive_all` batch path already covered by the
+round-11 tests) on both corpus pages the task called for:
+`progressive_decoder_matches_render_progressive_step_chicken` (3 BG44 chunks) and
+`_colorbook` (4 chunks) feed the decoder one chunk at a time and assert every
+streamed frame is pixel-identical to `render_progressive_step(page, opts, i)`.
+`progressive_decoder_rejects_lanczos_and_zero_dims` covers the two guard branches.
+1039 tests green, `make check` clean.
+
+**Structural evidence (primary — wall-clock is noisy on this shared machine).**
+A `#[cfg(test)]`-only thread-local counter (`BG44_CHUNK_DECODES`) at the two real
+`Iw44Image::decode_chunk` call sites (the naive per-frame `decode_background_chunks`
+loop and `ProgressiveDecoder::push_bg44_chunk`) turns the O(N²)→O(N) claim into an
+exact, assertable count instead of timing
+(`progressive_decoder_chunk_decodes_are_on_not_on_squared`). Zero-cost outside test
+builds — the counter and its increments do not exist in release code.
+
+| Page | N (BG44 chunks) | naive session (`render_progressive_step(0..N)`) | `ProgressiveDecoder` session |
+|------|------------------|---------------------------------------------------|-------------------------------|
+| chicken.djvu | 3 | 1+2+3 = **6** decodes | **3** decodes |
+| colorbook.djvu | 4 | 1+2+3+4 = **10** decodes | **4** decodes |
+
+Exactly the `N(N+1)/2` vs `N` the design predicted; the gap widens with N (a
+15-chunk streamed photo would be 120 vs 15 — 8×).
+
+**Indicative timing (provisional — shared, noisy machine; ratio vs. an in-session
+control, not an absolute number).** `colorbook.djvu`, 4 BG44 chunks, native
+2260×3669, release build, mean of 5 iterations:
+
+| Session | Time | vs. naive |
+|---------|------|-----------|
+| naive per-frame (`render_progressive_step(0..N)`) | 206.2 ms | — |
+| `render_progressive_all` (round-11 incremental batch) | 191.4 ms | −7% |
+| `ProgressiveDecoder` streaming (this round) | 193.7 ms | −6% |
+| single `render_pixmap` (reference) | 43.3 ms | — |
+
+Matches round 11's finding exactly: on colorbook the *addressable* redundancy is the
+ZP entropy-decode step only (small relative to the per-frame IDWT+composite cost at
+4 chunks), so the streaming decoder's wall-clock is within noise of the batch path —
+both real wins are structural (decode count) and will dominate at higher chunk
+counts or on small pages (round 11 measured 1.50× on chicken).
+
+**Decision. Kept.** Closes the B5 backlog item exactly as designed in round 8: one
+implementation shared between `render_progressive_all` and the new streaming API,
+byte-identical against `render_progressive_step` on both required fixtures, and a
+direct structural proof of O(N²)→O(N) chunk decodes (not just an inference from
+round 11's batch numbers). The streaming API is what an actual network viewer needs
+— render-as-you-receive without holding the whole chunk sequence — which
+`render_progressive_all` alone could not provide.
