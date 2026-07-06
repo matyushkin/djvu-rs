@@ -10455,3 +10455,120 @@ against) and is left as an open hypothesis, not a finding.
 root `Cargo.toml` (`iw44-probe` feature), `examples/iw44_band_probe.rs`,
 `examples/iw44_chunking_lever.rs`, `examples/iw44_chunking_sweep.rs`. Full
 `make check` green (1099 tests, 0 failures).
+## Perf round 53 (2026-07-06) — PDF_G4: CCITT Group 4 encoding for bilevel PDF masks
+
+**Issue.** Round 23 (`PDF_DCT_PROBE`) and round 28 (`PDF_ADAPTIVE_RASTER`)
+fixed the *colour* raster path in PDF export; the bilevel side was
+untouched — JB2 masks are re-encoded as a generic Deflate raster
+(`collect_mask_stream` in `src/pdf.rs`), which wastes most of the
+row-to-row redundancy a real fax/MMR coder would exploit. No G4 (T.6)
+*encoder* existed in the codebase — `src/smmr.rs` only had a decoder
+(`decode_smmr`) plus a Horizontal-mode-only encoder (`encode_smmr`, used for
+DjVu's own `Smmr` chunk, not PDF).
+
+**Approach.** Added a full 2D T.6 encoder, `smmr::encode_g4` (pass /
+horizontal / vertical modes, changing-element arrays + `partition_point`
+binary search instead of `find_b1`/`find_b2`'s linear scans, to stay
+`O(n log n)` on adversarial input), producing the exact payload PDF's
+`CCITTFaxDecode` filter expects (`K -1`, no in-band header). Wired into
+`src/pdf.rs::collect_mask_stream` behind a new opt-in `PdfOptions::ccitt_g4`
+flag, following round 28's "encode both, keep the smaller" pattern instead
+of an unconditional switch: encode both the Deflate raster and the G4
+bitstream, emit whichever is smaller. Default stays off; `ccitt_g4: false`
+is byte-identical to today's output (`ccitt_g4_off_is_byte_identical_to_default`).
+
+**A first pass using the existing `encode_smmr` (H-mode only) as the "G4"
+lever was 2–4× *larger* than Deflate**, not smaller — the whole win comes
+from vertical/pass mode exploiting row correlation, which H-mode-only
+cannot do. That motivated writing `encode_g4` as new code rather than
+reusing `encode_smmr`.
+
+**Correctness — a real bug was found and fixed, not just the new encoder.**
+The plan was to round-trip `encode_g4`'s output through this crate's own
+`decode_smmr` as a "free" oracle (it already implements all three T.6
+modes). All 51 `smmr` unit tests passed this way — but validating against
+*external* decoders (poppler's `pdftoppm`, libtiff via a hand-built
+single-strip Group4 TIFF + Pillow) showed real corpus PDFs full of
+`Syntax Error: CCITTFax row is wrong length` and an 8×8 checkerboard test
+pattern decoding to the wrong image after row 0.
+
+Root cause: both `find_b1` (decoder) and the new `find_transition`
+(encoder) searched for the next reference-line changing element
+*inclusive* of the current coding position `a0`, instead of *strictly
+after* it. That's only spec-equivalent for the very first changing element
+of a row (where `a0`'s initial value stands in for the T.6 sentinel `-1`);
+on every later step within the row, `a0` is a real pixel position, and an
+inclusive search wrongly lets `b1` land exactly on `a0` whenever the
+reference row has a changing element there — common on any row correlated
+with its predecessor (which is precisely when vertical/pass mode matter
+most). A prior "correctness review" comment in the code already flagged
+this exact issue and attempted the `a0+1` fix, but reverted it because it
+broke a hand-crafted decoder test (`decoder_vr1_vertical_mode_produces_correct_output`)
+— that test's expected bitstream had itself been hand-reasoned under the
+same wrong assumption, so it wasn't actually validating against real T.6,
+just against the bug's own logic. Both encoder and decoder shared the bug
+symmetrically, so self-round-tripping could never catch it.
+
+Fixed by tracking `a0` as `i64` with the T.6 sentinel `-1` uniformly (search
+start = `a0 + 1`, always strict), in both `find_b1`/`decode_row_pixels` and
+`find_transition`/`encode_row_2d`. Re-ran the full `smmr` suite: 50/51
+tests passed unchanged; the one hand-crafted VR1 test was rewritten with a
+non-colliding row pair (verified by hand-tracing the fixed algorithm) and
+its bitstream generated via `encode_g4` rather than hand bit-twiddling, to
+avoid reintroducing the same class of error. Re-validated:
+- libtiff/Pillow: 7/7 synthetic test bitmaps (checkerboard, stripes,
+  diagonal, sparse-text-like, all-white/black) now decode byte-identically
+  via an independent Group4 TIFF decoder (previously 6/7, checkerboard
+  wrong past row 0).
+- `pdftoppm` on all four target corpus PDFs (`watchmaker`,
+  `cable_1973_100133`, `pathogenic_bacteria_1896` — 520 pages,
+  `conquete_paix`): **zero** CCITTFax syntax errors (previously dozens per
+  file), and every rasterized page pixel-identical (`compare -metric AE`
+  → `0 (0)`) between the `ccitt_g4` and default PDF, across all pages of
+  all four documents.
+
+**Numbers** (mask-only JB2→bitmap payload, Deflate vs G4, corpus totals):
+
+| doc | pages w/ mask | Deflate | G4 | adaptive min | ratio |
+|---|---:|---:|---:|---:|---:|
+| cable_1973_100133 | 2 | 64,504 | 40,191 | 40,191 | 1.60× |
+| pathogenic_bacteria_1896 | 4 | 1,019,016 | 1,532,283 | 1,017,131 | 1.00× |
+| watchmaker | 12 | 1,241,144 | 717,731 | 717,731 | 1.73× |
+| conquete_paix | 22 | 381,466 | 165,079 | 165,079 | 2.31× |
+
+Whole-PDF-file sizes (default vs `ccitt_g4` vs `adaptive_raster` vs both,
+150 dpi):
+
+| doc | default | g4 | adaptive | both |
+|---|---:|---:|---:|---:|
+| watchmaker | 5,928,714 | 5,406,020 (−8.8%) | 3,896,362 | 3,373,668 (−43.1%) |
+| cable_1973_100133 | 335,732 | 311,554 (−7.2%) | 237,705 | 213,527 (−36.4%) |
+| pathogenic_bacteria_1896 | 1,194,452 | 1,192,699 (−0.15%) | 1,163,399 | 1,161,646 (−2.75%) |
+| conquete_paix | 11,761,406 | 11,546,465 (−1.8%) | 11,386,161 | 11,171,220 (−5.0%) |
+
+Whole-file wins are much smaller than the mask-only ratios because most of
+these documents' bytes are colour/JPEG background raster, not the bilevel
+mask overlay — `ccitt_g4` only touches the latter. `pathogenic_bacteria_1896`
+is the one doc where G4 loses on 2 of its 4 mask pages (photographic/
+halftone-ish bilevel content defeats run-length coding), which is exactly
+why this is wired as "encode both, keep smaller" rather than an
+unconditional switch: the adaptive minimum never regresses even there.
+
+**Decision.** **Kept, opt-in** (`PdfOptions::ccitt_g4`, default `false`,
+composes with `adaptive_raster`). Real, validated size win on text-dominated
+bilevel content (1.6–2.3× smaller masks, up to −43% whole-file combined with
+`adaptive_raster`); a wash-to-slightly-worse on halftone-heavy bilevel
+content, fully absorbed by the adaptive "keep smaller" pattern so it never
+regresses. Not made the default — that's a maintainer call given it changes
+the PDF filter used for masks (still spec-standard `CCITTFaxDecode`, just a
+lever nobody asked to flip yet). Also fixed a real, pre-existing T.6
+changing-element bug in `decode_smmr`'s `find_b1` (used for production
+`Smmr`-chunk decoding, not just this new encoder) — round-trip-only testing
+against a decoder sharing the same bug had hidden it; this is now closed for
+both directions. Tests: 51 `smmr` unit tests (13 new `g4_roundtrip_*` +
+1 rewritten VR1 test), 5 new `pdf` tests
+(`ccitt_g4_defaults_to_off`, `ccitt_g4_off_is_byte_identical_to_default`,
+`ccitt_g4_on_uses_ccittfaxdecode_and_never_larger`,
+`ccitt_g4_shrinks_bilevel_corpus_doc`,
+`collect_mask_stream_g4_returns_none_for_no_sjbz`); full
+`cargo test --lib` green (723 tests); `make check` gate green.
