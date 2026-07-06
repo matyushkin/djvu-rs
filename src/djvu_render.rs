@@ -1051,6 +1051,52 @@ fn best_iw44_subsample(scale: f32) -> u32 {
     s.min(8)
 }
 
+/// Tile edge length (pixels) used by [`render_region_tiled`]'s composited-
+/// output cache. 256 keeps a full RGBA tile at 256 KiB — small enough that a
+/// pan/zoom viewer's working set (a screenful of tiles) stays a few MB, large
+/// enough that the per-tile `HashMap`/`Mutex` overhead is negligible next to
+/// the compositor work it avoids repeating.
+#[cfg(feature = "std")]
+const TILE_SIZE: u32 = 256;
+
+/// Per-page byte budget for the composited-tile cache — about 32 full tiles
+/// (256×256×4 B = 256 KiB each). Independent of, but counted towards,
+/// [`PageLayers::cached_bytes`] / `DjVuDocument::enforce_cache_budget`: a
+/// document-wide budget sweep evicts whole pages (tiles included), while this
+/// bound keeps one page's own pan history from growing unboundedly between
+/// sweeps.
+#[cfg(feature = "std")]
+const TILE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Composited-output tile cache key: `(full_w, full_h, tile_x, tile_y, bold,
+/// mask_aa)` — the tuple of [`RenderOptions`] fields (plus the tile's
+/// top-left corner in full-render space) that `composite_into`'s per-pixel
+/// output actually depends on for a [`render_region_tiled`]-eligible request
+/// (bilinear resampling, identity rotation, strict decode). Any option that
+/// can change a composited pixel's bytes must be part of this key.
+#[cfg(feature = "std")]
+type TileKey = (u32, u32, u32, u32, u8, bool);
+
+/// One cached composited tile: `w × h` (≤ [`TILE_SIZE`], smaller at the
+/// page's right/bottom edge) RGBA bytes, row-major, stride `w * 4`.
+#[cfg(feature = "std")]
+struct TileEntry {
+    w: u32,
+    h: u32,
+    data: Vec<u8>,
+}
+
+/// [`PageLayers`]'s composited-tile store: the tile map, FIFO insertion order
+/// for eviction, and the running byte total (avoids re-summing on every
+/// insert/evict).
+#[cfg(feature = "std")]
+#[derive(Default)]
+struct TileCacheState {
+    map: std::collections::HashMap<TileKey, std::sync::Arc<TileEntry>>,
+    order: std::collections::VecDeque<TileKey>,
+    bytes: usize,
+}
+
 /// Render-tier cache of a page's decoded layers.
 ///
 /// These are the decoded wavelet / bitmap forms the compositor consumes —
@@ -1100,6 +1146,15 @@ pub(crate) struct PageLayers {
     /// (without touching) by `DjVuDocument::enforce_cache_budget` to evict the
     /// least-recently-used pages first. Not part of the decoded data.
     access: std::sync::atomic::AtomicU64,
+    /// C4_TILE_CACHE: composited-output tiles for [`render_region_tiled`],
+    /// keyed by `(full_w, full_h, tile_x, tile_y, bold, mask_aa)`. Unlike the
+    /// layers above (which cache *decoded* data), these cache the *compositor's
+    /// output* — the per-pixel work `composite_into` repeats on every call is
+    /// not memoized anywhere else. Bounded to `TILE_CACHE_MAX_BYTES` per page
+    /// with FIFO eviction; counted in [`cached_bytes`](Self::cached_bytes) so
+    /// it shares the page's C5 byte-budget accounting, and dropped whenever
+    /// this whole `PageLayers` is (`evict_render_cache`).
+    tile_cache: std::sync::Mutex<TileCacheState>,
 }
 
 /// Process-global monotonic source for the per-page LRU access tick.
@@ -1156,6 +1211,50 @@ impl PageLayers {
             + iw(&self.bg44)
             + iw(&self.bg44_partial)
             + mi
+            + self.tile_cache_bytes()
+    }
+
+    /// Bytes currently held by the composited-tile cache (see `tile_cache`).
+    pub(crate) fn tile_cache_bytes(&self) -> usize {
+        self.tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes
+    }
+
+    /// Look up a cached composited tile, cloning the `Arc` handle on a hit.
+    fn get_tile(&self, key: TileKey) -> Option<std::sync::Arc<TileEntry>> {
+        self.tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .get(&key)
+            .cloned()
+    }
+
+    /// Insert a freshly composited tile, evicting the oldest tiles (FIFO)
+    /// until back under `TILE_CACHE_MAX_BYTES`.
+    fn insert_tile(&self, key: TileKey, entry: std::sync::Arc<TileEntry>) {
+        let mut state = self
+            .tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.map.contains_key(&key) {
+            return;
+        }
+        state.bytes += entry.data.len();
+        state.map.insert(key, entry);
+        state.order.push_back(key);
+        while state.bytes > TILE_CACHE_MAX_BYTES {
+            match state.order.pop_front() {
+                Some(old_key) => {
+                    if let Some(old) = state.map.remove(&old_key) {
+                        state.bytes = state.bytes.saturating_sub(old.data.len());
+                    }
+                }
+                None => break,
+            }
+        }
     }
 
     /// The fully decoded BG44 wavelet image (all chunks), decoding on first
@@ -1745,6 +1844,12 @@ pub struct RenderRect {
 }
 
 /// All decoded layers and options passed to the compositor.
+///
+/// `Clone`/`Copy`: every field is a reference or a `Copy` primitive, so
+/// [`render_region_tiled`] can stamp out one context per tile (only
+/// `offset_x`/`offset_y`/`out_w`/`out_h` differ) without rebuilding the q24 /
+/// gamma-LUT plumbing each time.
+#[derive(Clone, Copy)]
 struct CompositeContext<'a> {
     opts: &'a RenderOptions,
     page_w: u32,
@@ -3234,6 +3339,182 @@ pub fn render_region(
         pm,
         combine_rotations(page.rotation(), opts.rotation),
     ))
+}
+
+/// Render a sub-rectangle of a page, assembling the output from a per-page
+/// cache of composited [`TILE_SIZE`]×`TILE_SIZE` output tiles.
+///
+/// # Why this exists (C4_TILE_CACHE)
+///
+/// [`render_region`] recomposites its entire requested rectangle from scratch
+/// on every call — the per-pixel work in `composite_into` is not memoized
+/// anywhere. VIEWER_BENCH (`benches/viewer.rs`) scripted an interactive
+/// pan/zoom session (open → full render → zoom → 12-step overlapping pan →
+/// zoom → pan) and measured that a `full_recomposite` pan step costs
+/// proportionally to its *entire* viewport every time, while an
+/// `incremental_strip` step (composite only the newly-exposed edge) costs
+/// proportionally to just that edge — see `PERF_EXPERIMENTS.md` round 36 for
+/// the numbers. A tile cache captures that gap for real: it composites each
+/// `TILE_SIZE`-aligned tile once and reuses it for every subsequent request
+/// that touches it, regardless of how the requested rectangle is framed.
+///
+/// # Correctness
+///
+/// **Byte-identical** to [`render_region`] for every input — this is a cache
+/// in front of the same compositor, not a different one. `composite_into`
+/// computes each output pixel from its *absolute* position
+/// (`offset_x + ox`, `offset_y + oy`); tile boundaries are aligned to that
+/// same absolute grid, so assembling a request from whole or partial tiles
+/// reproduces exactly the bytes a direct `render_region` call would have
+/// produced (see `render_region_tiled_matches_render_region` and
+/// `render_region_tiled_overlapping_regions_share_cache` in the test module).
+///
+/// # Eligibility
+///
+/// The cache only activates for the mode it was built for; anything else
+/// falls back to a plain [`render_region`] call with no tile bookkeeping:
+///
+/// - `opts.resampling == Resampling::Lanczos3` — its native-scale re-render
+///   recursion isn't compatible with per-tile assembly.
+/// - the combined page + user rotation isn't the identity — tiles are cached
+///   pre-rotation, so a rotated request would need a different assembly.
+/// - `opts.permissive` — kept off the fast path defensively; this targets the
+///   interactive strict-decode hot path, not error recovery.
+///
+/// This is an **opt-in** entry point: call it where you want tile caching
+/// (e.g. a pan/zoom viewer). [`render_region`] itself is untouched and pays no
+/// overhead for callers (thumbnails, export, one-shot renders) that don't
+/// want a per-page tile cache.
+///
+/// # Errors
+///
+/// Same as [`render_region`].
+#[cfg(feature = "std")]
+pub fn render_region_tiled(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    if region.width == 0 || region.height == 0 {
+        return Err(RenderError::InvalidDimensions {
+            width: region.width,
+            height: region.height,
+        });
+    }
+
+    let full_w = opts.width.max(1);
+    let full_h = opts.height.max(1);
+
+    let eligible = opts.resampling == Resampling::Bilinear
+        && !opts.permissive
+        && combine_rotations(page.rotation(), opts.rotation) == crate::info::Rotation::None;
+
+    if !eligible {
+        return render_region(page, region, opts);
+    }
+
+    let gamma_lut = build_gamma_lut(page.gamma());
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
+
+    let region_opts = RenderOptions {
+        width: full_w,
+        height: full_h,
+        ..*opts
+    };
+    // Template context for the whole full_w×full_h render; each tile below
+    // copies it (cheap: `Copy`) and only overwrites offset/out fields.
+    let ctx_template = CompositeContext::from_layers(
+        page,
+        &region_opts,
+        bg.as_deref(),
+        mask.as_deref(),
+        0,
+        fg_palette.as_ref(),
+        blit_map.as_deref(),
+        fg44.as_deref(),
+        &gamma_lut,
+        (0, 0),
+        (full_w, full_h),
+    );
+
+    let out_w = region.width;
+    let out_h = region.height;
+    let mut pm = Pixmap::white(out_w, out_h);
+    let out_stride = out_w as usize * 4;
+
+    let region_x1 = region.x.saturating_add(region.width).min(full_w);
+    let region_y1 = region.y.saturating_add(region.height).min(full_h);
+    if region_x1 <= region.x || region_y1 <= region.y {
+        // Region lies entirely outside the full render — nothing to copy;
+        // return the white-filled pixmap (matches render_region's behaviour,
+        // whose compositor loop would likewise touch no valid pixels).
+        return Ok(pm);
+    }
+    let tx0 = region.x / TILE_SIZE;
+    let ty0 = region.y / TILE_SIZE;
+    let tx1 = (region_x1 - 1) / TILE_SIZE;
+    let ty1 = (region_y1 - 1) / TILE_SIZE;
+
+    let layers = page.render_layers();
+    for ty in ty0..=ty1 {
+        let tile_y0 = ty * TILE_SIZE;
+        let tile_h = TILE_SIZE.min(full_h - tile_y0);
+        for tx in tx0..=tx1 {
+            let tile_x0 = tx * TILE_SIZE;
+            let tile_w = TILE_SIZE.min(full_w - tile_x0);
+            let key: TileKey = (full_w, full_h, tile_x0, tile_y0, opts.bold, opts.mask_aa);
+
+            let tile = match layers.get_tile(key) {
+                Some(t) => t,
+                None => {
+                    let mut tile_ctx = ctx_template;
+                    tile_ctx.offset_x = tile_x0;
+                    tile_ctx.offset_y = tile_y0;
+                    tile_ctx.out_w = tile_w;
+                    tile_ctx.out_h = tile_h;
+                    let mut data = vec![0u8; tile_w as usize * tile_h as usize * 4];
+                    composite_into(&tile_ctx, &mut data)?;
+                    let entry = std::sync::Arc::new(TileEntry {
+                        w: tile_w,
+                        h: tile_h,
+                        data,
+                    });
+                    layers.insert_tile(key, entry.clone());
+                    entry
+                }
+            };
+
+            // Copy the overlap between `region` and this tile into `pm`.
+            let ox0 = tile_x0.max(region.x);
+            let oy0 = tile_y0.max(region.y);
+            let ox1 = (tile_x0 + tile.w).min(region_x1);
+            let oy1 = (tile_y0 + tile.h).min(region_y1);
+            if ox0 >= ox1 || oy0 >= oy1 {
+                continue;
+            }
+            let copy_w = (ox1 - ox0) as usize;
+            let tile_stride = tile.w as usize * 4;
+            for y in oy0..oy1 {
+                let tile_row = (y - tile_y0) as usize;
+                let tile_col = (ox0 - tile_x0) as usize;
+                let src_start = tile_row * tile_stride + tile_col * 4;
+                let dst_row = (y - region.y) as usize;
+                let dst_col = (ox0 - region.x) as usize;
+                let dst_start = dst_row * out_stride + dst_col * 4;
+                pm.data[dst_start..dst_start + copy_w * 4]
+                    .copy_from_slice(&tile.data[src_start..src_start + copy_w * 4]);
+            }
+        }
+    }
+
+    Ok(pm)
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -5614,6 +5895,241 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── C4_TILE_CACHE: render_region_tiled ───────────────────────────────────
+
+    /// `render_region_tiled` is byte-identical to `render_region` across a
+    /// scripted "pan": many overlapping regions, some spanning multiple
+    /// `TILE_SIZE`-aligned tiles, some landing on partial edge tiles at the
+    /// full render's right/bottom border (full render size deliberately not a
+    /// multiple of `TILE_SIZE`).
+    #[test]
+    fn render_region_tiled_matches_render_region() {
+        let doc = load_doc("colorbook.djvu");
+        let page = doc.page(0).unwrap();
+        // Not a multiple of TILE_SIZE (256), so the sequence below touches
+        // partial edge tiles too.
+        let opts = RenderOptions {
+            width: 900,
+            height: 700,
+            ..Default::default()
+        };
+
+        // A little pan sequence: overlapping viewports sweeping across and
+        // down the page, each straddling tile boundaries differently.
+        let regions = [
+            RenderRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 220,
+            },
+            RenderRect {
+                x: 60,
+                y: 0,
+                width: 300,
+                height: 220,
+            },
+            RenderRect {
+                x: 200,
+                y: 40,
+                width: 300,
+                height: 220,
+            },
+            RenderRect {
+                x: 400,
+                y: 40,
+                width: 300,
+                height: 220,
+            },
+            RenderRect {
+                x: 600,
+                y: 480,
+                width: 300,
+                height: 220,
+            }, // right/bottom edge tiles
+            RenderRect {
+                x: 250,
+                y: 250,
+                width: 400,
+                height: 300,
+            }, // spans 2x2 tiles
+            RenderRect {
+                x: 1,
+                y: 1,
+                width: 5,
+                height: 5,
+            }, // sub-tile sliver
+        ];
+
+        for region in regions {
+            let direct = render_region(page, region, &opts).expect("render_region");
+            let tiled = render_region_tiled(page, region, &opts).expect("render_region_tiled");
+            assert_eq!(tiled.width, direct.width);
+            assert_eq!(tiled.height, direct.height);
+            assert_eq!(
+                tiled.data, direct.data,
+                "render_region_tiled diverged from render_region for {region:?}"
+            );
+        }
+    }
+
+    /// A second call for a region already fully covered by previously-cached
+    /// tiles still reproduces the same bytes (exercises the cache-hit path,
+    /// not just cold tile composition).
+    #[test]
+    fn render_region_tiled_repeated_region_matches() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 640,
+            height: 480,
+            ..Default::default()
+        };
+        let region = RenderRect {
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 150,
+        };
+
+        let first = render_region_tiled(page, region, &opts).unwrap();
+        // Bytes should now be resident in the page's tile cache.
+        assert!(page.render_cache_bytes() > 0);
+        let second = render_region_tiled(page, region, &opts).unwrap();
+        assert_eq!(first.data, second.data);
+
+        // A neighbouring, overlapping region should also match a direct render.
+        let overlapping = RenderRect {
+            x: 150,
+            y: 120,
+            width: 200,
+            height: 150,
+        };
+        let direct = render_region(page, overlapping, &opts).unwrap();
+        let tiled = render_region_tiled(page, overlapping, &opts).unwrap();
+        assert_eq!(direct.data, tiled.data);
+    }
+
+    /// Ineligible modes (rotation, Lanczos-3, permissive) fall back to
+    /// `render_region` and still produce its exact output.
+    #[test]
+    fn render_region_tiled_falls_back_for_ineligible_modes() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let region = RenderRect {
+            x: 5,
+            y: 5,
+            width: 40,
+            height: 30,
+        };
+
+        let rotated_opts = RenderOptions {
+            width: 200,
+            height: 150,
+            rotation: UserRotation::Cw90,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_region(page, region, &rotated_opts).unwrap().data,
+            render_region_tiled(page, region, &rotated_opts)
+                .unwrap()
+                .data
+        );
+
+        let lanczos_opts = RenderOptions {
+            width: 100,
+            height: 75,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_region(page, region, &lanczos_opts).unwrap().data,
+            render_region_tiled(page, region, &lanczos_opts)
+                .unwrap()
+                .data
+        );
+
+        let permissive_opts = RenderOptions {
+            width: 200,
+            height: 150,
+            permissive: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_region(page, region, &permissive_opts).unwrap().data,
+            render_region_tiled(page, region, &permissive_opts)
+                .unwrap()
+                .data
+        );
+    }
+
+    /// The tile cache's byte accounting is bounded (FIFO eviction) and feeds
+    /// into `render_cache_bytes` / `evict_render_cache` like the other layer
+    /// caches (C5 integration).
+    #[test]
+    fn render_region_tiled_cache_is_budget_bounded_and_evictable() {
+        let mut doc = load_doc("colorbook.djvu");
+        let (native_w, native_h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        // A render large enough to have many more than
+        // TILE_CACHE_MAX_BYTES / (TILE_SIZE*TILE_SIZE*4) tiles available.
+        let opts = RenderOptions {
+            width: native_w.max(4000),
+            height: native_h.max(4000),
+            ..Default::default()
+        };
+        let full_w = opts.width;
+
+        {
+            let page = doc.page(0).unwrap();
+            // Touch many disjoint tiles by requesting a small region in each.
+            let tiles_per_side = (full_w / TILE_SIZE).clamp(1, 12);
+            for ty in 0..tiles_per_side {
+                for tx in 0..tiles_per_side {
+                    let region = RenderRect {
+                        x: tx * TILE_SIZE,
+                        y: ty * TILE_SIZE,
+                        width: 8,
+                        height: 8,
+                    };
+                    let _ = render_region_tiled(page, region, &opts).unwrap();
+                }
+            }
+            let bytes = page.render_layers().tile_cache_bytes();
+            assert!(bytes > 0, "expected some tile bytes cached");
+            assert!(
+                bytes <= TILE_CACHE_MAX_BYTES,
+                "tile cache exceeded its byte budget: {bytes} > {TILE_CACHE_MAX_BYTES}"
+            );
+        }
+
+        // Evicting the whole page's render cache drops the tiles too.
+        doc.evict_render_caches();
+        assert_eq!(doc.page(0).unwrap().render_cache_bytes(), 0);
+    }
+
+    /// `render_region_tiled` with zero-size dimensions errors like
+    /// `render_region`.
+    #[test]
+    fn render_region_tiled_rejects_zero_dimensions() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 100,
+            height: 80,
+            ..Default::default()
+        };
+        let region = RenderRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 10,
+        };
+        assert!(render_region_tiled(page, region, &opts).is_err());
     }
 
     /// `render_region` with a byte-aligned x offset on a bilevel page matches the
