@@ -1828,30 +1828,6 @@ struct FlatPlane {
 
 use wide::i32x8;
 
-/// Returns `true` once the current CPU has been confirmed to support AVX2.
-///
-/// Backed by a `OnceLock` so the actual `is_x86_feature_detected!` CPUID-based
-/// probe runs at most once per process; every subsequent call (including the
-/// ones inside the `load8s`/`store8s` hot loop, invoked once per 8-element
-/// chunk) is a single cached-bool load — coarse-grained runtime detection,
-/// not a per-call CPUID probe. Requires `std` (`is_x86_feature_detected!` is
-/// unavailable in `no_std`); `no_std` builds always take the portable path.
-///
-/// Previously this dispatch used a compile-time `cfg(target_feature = "avx2")`
-/// gate, which only activates when the *crate itself* is compiled with AVX2
-/// enabled (e.g. `-C target-cpu=x86-64-v3`) — not the default for `cargo
-/// build --release`, so the hand-written AVX2 kernels below were dead code
-/// for ordinary published-crate users on stock x86-64 toolchains even though
-/// their host CPU supports AVX2. Runtime detection activates them on any
-/// AVX2-capable host regardless of how the crate was compiled.
-#[cfg(all(target_arch = "x86_64", feature = "std"))]
-#[inline(always)]
-fn avx2_available() -> bool {
-    use std::sync::OnceLock;
-    static AVX2: OnceLock<bool> = OnceLock::new();
-    *AVX2.get_or_init(|| std::is_x86_feature_detected!("avx2"))
-}
-
 /// Load 8 `i16` values at stride `s` starting at `slice[phys_off]`.
 ///
 /// Reads `slice[phys_off + j*s]` for j = 0..7. For s=1 this is identical to
@@ -1864,15 +1840,14 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
     // the s=1 branch is a single cmp+b (not taken on s≠1) rather than a 5-branch
     // dispatch chain inside load8s_neon.
     if s == 1 {
-        // x86_64 + AVX2 detected at runtime (cached, see `avx2_available`):
-        // `vpmovsxwd ymm, [mem]` is one instruction (movdqu + vpmovsxwd, fused
-        // on most µarchs).
-        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        // x86_64 + AVX2 enabled at compile time: `vpmovsxwd ymm, [mem]` is one
+        // instruction (movdqu + vpmovsxwd, fused on most µarchs). Compile-time
+        // gating keeps the hot loop branch-free; runtime detection in this loop
+        // would dominate the kernel.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
-            if avx2_available() {
-                #[allow(unsafe_code)]
-                return unsafe { load8s_s1_avx2(slice, phys_off) };
-            }
+            #[allow(unsafe_code)]
+            return unsafe { load8s_s1_avx2(slice, phys_off) };
         }
         // WASM simd128 compile-time path: `i32x4.extend_low/high_i16x8_s` sign-extends
         // 8×i16 → 8×i32 in two 128-bit ops, avoiding 8 scalar cast+store pairs.
@@ -1924,12 +1899,10 @@ fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
 fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
     // s=1 fast path: narrow and store contiguously.  Same reasoning as load8s.
     if s == 1 {
-        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
-            if avx2_available() {
-                #[allow(unsafe_code)]
-                return unsafe { store8s_s1_avx2(slice, phys_off, v) };
-            }
+            #[allow(unsafe_code)]
+            return unsafe { store8s_s1_avx2(slice, phys_off, v) };
         }
         // WASM simd128: byte-shuffle to pack the low halfword of each i32 lane into
         // a contiguous i16x8.  Indices 0,1,4,5,8,9,12,13 pick bytes 0-1 of each 4-byte
@@ -2706,24 +2679,6 @@ fn inverse_wavelet_transform_from(
     subsample: usize,
     start_scale: usize,
 ) {
-    inverse_wavelet_transform_from_ex(plane, width, height, subsample, start_scale, None);
-}
-
-/// Test-only entry point: like [`inverse_wavelet_transform_from`], but
-/// `force_use_simd` (when `Some`) overrides the column pass's `use_simd`
-/// decision (normally `s <= 4`) so tests can force the pure-scalar column
-/// pass to compare bit-exactly against the SIMD/AVX2-dispatching path on
-/// the very same `s == 1` level where `load8s`/`store8s` now runtime-dispatch
-/// to AVX2 (see `avx2_available`). Production callers always pass `None`.
-#[cfg_attr(not(test), allow(dead_code))]
-fn inverse_wavelet_transform_from_ex(
-    plane: &mut FlatPlane,
-    width: usize,
-    height: usize,
-    subsample: usize,
-    start_scale: usize,
-    force_use_simd: Option<bool>,
-) {
     let stride = plane.stride;
     let data = plane.data.as_mut_slice();
     let mut s = start_scale;
@@ -2738,9 +2693,8 @@ fn inverse_wavelet_transform_from_ex(
 
         // Column pass SIMD: enabled for s=1,2,4 using stride-aware load8s/store8s.
         // For s=2 the load uses vld2q_s16 (deinterleave even/odd), for s=4 vld4q_s16.
-        // The scalar else-branches below are now only reached for s>4 (s=8, s=16),
-        // unless a test forces the scalar path via `force_use_simd`.
-        let use_simd = force_use_simd.unwrap_or(s <= 4);
+        // The scalar else-branches below are now only reached for s>4 (s=8, s=16).
+        let use_simd = s <= 4;
 
         // ── Column pass (transposed) ──────────────────────────────────────────
         {
@@ -4451,88 +4405,6 @@ mod tests {
             scalar_data, simd_data,
             "SIMD row pass (s=2) must produce identical output to scalar"
         );
-    }
-
-    /// Full inverse-wavelet-transform (column pass + row pass, every resolution
-    /// level) must be bit-exact whether the column pass takes the SIMD path
-    /// (which, at `s == 1`, now runtime-dispatches to `load8s_s1_avx2`/
-    /// `store8s_s1_avx2` on AVX2-capable x86_64 hosts per `avx2_available`) or
-    /// the pure-scalar column pass, across a range of widths (including odd
-    /// widths that leave a scalar tail after the 8-wide SIMD chunks), heights,
-    /// and `(subsample, start_scale)` combinations that exercise every stride
-    /// the column pass supports (`s` = 16, 8, 4, 2, 1 — including the `s == 2`
-    /// / `sd == 1` case the round-5 `IDWT_S2_NEON` premise break was about).
-    ///
-    /// This is the exhaustive AVX2-vs-scalar equivalence test for the column
-    /// pass (mirroring `simd_row_pass_matches_scalar`/`simd_row_pass_s2_matches_scalar`
-    /// for the row pass): it runs the *real* `inverse_wavelet_transform_from`
-    /// logic twice — once with the column pass's `use_simd` forced true (SIMD/AVX2
-    /// when available), once forced false (pure scalar) — and asserts identical
-    /// output. On x86_64 CI runners with AVX2 this test actually exercises the
-    /// hand-written AVX2 kernels; on hosts without AVX2 (or non-x86_64) it still
-    /// validates the SIMD-vs-scalar column pass logic itself.
-    #[test]
-    fn column_pass_simd_matches_scalar_exhaustive() {
-        // (width, height, subsample, start_scale) — chosen so `s` sweeps every
-        // supported stride (16, 8, 4, 2, 1) across the run, and widths include
-        // both round multiples of 8/32 and odd/off-by-one residues.
-        let cases: &[(usize, usize, usize, usize)] = &[
-            (32, 32, 1, 16), // full sweep s=16..1, canonical block size
-            (33, 31, 1, 16), // odd width AND odd height
-            (1, 32, 1, 16),  // width=1 (degenerate column pass: num_cols=1)
-            (7, 16, 1, 4),   // width < 8 (no full SIMD chunk, all scalar tail)
-            (9, 16, 1, 4),   // width just over one 8-wide chunk
-            (17, 16, 1, 2),  // s sweeps 2, 1 only; odd width
-            (65, 40, 1, 4),  // width spans many 8-wide chunks + odd tail
-            (32, 32, 2, 8),  // subsample=2: stops at s=2 (s==2/sd==1 case retained)
-            (24, 24, 4, 4),  // subsample=4: single level at s=4
-            (16, 8, 1, 16),  // height < width, exercises transposed column pass shape
-        ];
-
-        for &(width, height, subsample, start_scale) in cases {
-            let stride = width;
-            let n = stride * height;
-            // Deterministic non-trivial pattern covering the full i16 range,
-            // including negative values and zero.
-            let initial: Vec<i16> = (0..n)
-                .map(|i| {
-                    let x = (i as u64).wrapping_mul(2654435761).wrapping_add(i as u64);
-                    ((x % 65536) as i32 - 32768) as i16
-                })
-                .collect();
-
-            let mut scalar_plane = super::FlatPlane {
-                data: initial.clone(),
-                stride,
-            };
-            super::inverse_wavelet_transform_from_ex(
-                &mut scalar_plane,
-                width,
-                height,
-                subsample,
-                start_scale,
-                Some(false),
-            );
-
-            let mut simd_plane = super::FlatPlane {
-                data: initial.clone(),
-                stride,
-            };
-            super::inverse_wavelet_transform_from_ex(
-                &mut simd_plane,
-                width,
-                height,
-                subsample,
-                start_scale,
-                Some(true),
-            );
-
-            assert_eq!(
-                scalar_plane.data, simd_plane.data,
-                "column+row pass output mismatch for width={width} height={height} \
-                 subsample={subsample} start_scale={start_scale}"
-            );
-        }
     }
 
     /// Reference scalar implementation of the fused-normalize YCbCr→RGBA path.
