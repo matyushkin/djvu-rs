@@ -1938,6 +1938,190 @@ pub fn cluster_shared_symbols_tunable(
     promoted.into_iter().map(|c| c.rep).collect()
 }
 
+/// JB2_DICT_ORDER probe (diagnostic-only): three orderings of the same
+/// byte-exact shared-symbol set [`cluster_shared_symbols`] produces, for
+/// measuring whether dictionary index assignment affects `Sjbz`/`Djbz` size.
+///
+/// The JB2 format numbers dictionary entries by emission order — decoders
+/// resolve rec-6/rec-7 references by that index, and a rec-6 refinement can
+/// only reference an already-emitted entry. The whole shared block is always
+/// emitted before any page-local symbol, so reordering *within* the shared
+/// block alone can never violate that "reference precedes refiner" rule —
+/// any permutation here is a legal encoder choice. This type exists purely to
+/// feed [`encode_jb2_djbz`] / [`encode_jb2_dict_with_shared`] with different
+/// shared-dict orderings for A/B size measurement; it ships no behavior
+/// change (gated behind `experimental`, called from no default code path).
+#[cfg(feature = "experimental")]
+pub struct DictOrderVariants {
+    /// Current shipped order: first-seen (page, then CC index within page).
+    /// Identical to [`cluster_shared_symbols`]'s output.
+    pub baseline: Vec<Bitmap>,
+    /// Descending usage-frequency (number of distinct pages a symbol was
+    /// promoted from), ties broken by first-seen order.
+    pub by_frequency: Vec<Bitmap>,
+    /// Grouped by `(width, height)` size bucket (ascending), first-seen order
+    /// within each bucket — same-shaped symbols end up adjacent. This is the
+    /// clustering pass's natural bucket-iteration order, before the final
+    /// first-seen sort the shipped path applies.
+    pub by_bucket: Vec<Bitmap>,
+}
+
+/// Build the three [`DictOrderVariants`] orderings from the same byte-exact
+/// clustering pass [`cluster_shared_symbols`] runs. Mirrors that function's
+/// dedup + pixel-budget trim exactly (so the *set* of promoted symbols is
+/// identical to what the shipped encoder would use) and only changes what
+/// happens after: instead of one fixed sort, it captures per-cluster
+/// usage-count and bucket-position metadata to emit all three orderings.
+#[cfg(feature = "experimental")]
+pub fn cluster_shared_symbols_order_variants(
+    pages: &[Bitmap],
+    page_threshold: usize,
+) -> DictOrderVariants {
+    if page_threshold < 2 || pages.len() < page_threshold {
+        return DictOrderVariants {
+            baseline: Vec::new(),
+            by_frequency: Vec::new(),
+            by_bucket: Vec::new(),
+        };
+    }
+
+    struct Cluster {
+        rep: Bitmap,
+        pages_seen: Vec<usize>,
+        first_seen: (usize, usize),
+    }
+
+    #[derive(Default)]
+    struct SizeBucket {
+        clusters: Vec<Cluster>,
+        by_hash: BTreeMap<u64, Vec<usize>>,
+    }
+
+    fn bucket_page_ccs(
+        buckets: &mut BTreeMap<(u32, u32), SizeBucket>,
+        ccs: &[Cc],
+        page_idx: usize,
+    ) {
+        for (cc_idx, cc) in ccs.iter().enumerate() {
+            let bm = &cc.bitmap;
+            let bucket = buckets.entry((bm.width, bm.height)).or_default();
+            let hash = symbol_hash(bm.width, bm.height, &bm.data);
+            let hit = bucket.by_hash.get(&hash).and_then(|cands| {
+                cands
+                    .iter()
+                    .copied()
+                    .find(|&i| bucket.clusters[i].rep.data == bm.data)
+            });
+            match hit {
+                Some(i) => {
+                    if bucket.clusters[i].pages_seen.last() != Some(&page_idx) {
+                        bucket.clusters[i].pages_seen.push(page_idx);
+                    }
+                }
+                None => {
+                    let idx = bucket.clusters.len();
+                    bucket.clusters.push(Cluster {
+                        rep: bm.clone(),
+                        pages_seen: vec![page_idx],
+                        first_seen: (page_idx, cc_idx),
+                    });
+                    bucket.by_hash.entry(hash).or_default().push(idx);
+                }
+            }
+        }
+    }
+
+    let mut buckets: BTreeMap<(u32, u32), SizeBucket> = BTreeMap::new();
+    const BATCH: usize = 32;
+    let mut page_idx = 0usize;
+    for chunk in pages.chunks(BATCH) {
+        #[cfg(feature = "parallel")]
+        let ccs_batch: Vec<Vec<Cc>> = {
+            use rayon::prelude::*;
+            chunk.par_iter().map(extract_ccs).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let ccs_batch: Vec<Vec<Cc>> = chunk.iter().map(extract_ccs).collect();
+
+        for ccs in &ccs_batch {
+            bucket_page_ccs(&mut buckets, ccs, page_idx);
+            page_idx += 1;
+        }
+    }
+
+    let mut promoted: Vec<Cluster> = buckets
+        .into_values()
+        .flat_map(|b| b.clusters)
+        .filter(|c| c.pages_seen.len() >= page_threshold)
+        .collect();
+
+    // Same pixel-budget trim as `cluster_shared_symbols_tunable`, so the
+    // promoted *set* matches the shipped path exactly (only its order
+    // differs below).
+    let mut total_pixels: u64 = 0;
+    let cap = SHARED_DICT_PIXEL_BUDGET as u64;
+    let any_over_budget = promoted.iter().fold(0u64, |acc, c| {
+        acc + (c.rep.width as u64) * (c.rep.height as u64)
+    }) > cap;
+    if any_over_budget {
+        let mut by_value: Vec<usize> = (0..promoted.len()).collect();
+        by_value.sort_by(|&a, &b| {
+            promoted[b]
+                .pages_seen
+                .len()
+                .cmp(&promoted[a].pages_seen.len())
+                .then_with(|| {
+                    let pa = (promoted[a].rep.width as u64) * (promoted[a].rep.height as u64);
+                    let pb = (promoted[b].rep.width as u64) * (promoted[b].rep.height as u64);
+                    pa.cmp(&pb)
+                })
+        });
+        let mut keep = vec![false; promoted.len()];
+        for &i in &by_value {
+            let pix = (promoted[i].rep.width as u64) * (promoted[i].rep.height as u64);
+            if total_pixels + pix > cap {
+                continue;
+            }
+            keep[i] = true;
+            total_pixels += pix;
+        }
+        let mut idx = 0;
+        promoted.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+    }
+
+    // `promoted` right now is in bucket-iteration order: `(width, height)`
+    // ascending (BTreeMap key order), then first-seen within each bucket
+    // (creation order) — same-shaped symbols are already adjacent.
+    let by_bucket: Vec<Bitmap> = promoted.iter().map(|c| c.rep.clone()).collect();
+
+    let mut baseline_idx: Vec<usize> = (0..promoted.len()).collect();
+    baseline_idx.sort_by_key(|&i| promoted[i].first_seen);
+    let baseline: Vec<Bitmap> = baseline_idx
+        .iter()
+        .map(|&i| promoted[i].rep.clone())
+        .collect();
+
+    let mut freq_idx: Vec<usize> = (0..promoted.len()).collect();
+    freq_idx.sort_by(|&a, &b| {
+        promoted[b]
+            .pages_seen
+            .len()
+            .cmp(&promoted[a].pages_seen.len())
+            .then_with(|| promoted[a].first_seen.cmp(&promoted[b].first_seen))
+    });
+    let by_frequency: Vec<Bitmap> = freq_idx.iter().map(|&i| promoted[i].rep.clone()).collect();
+
+    DictOrderVariants {
+        baseline,
+        by_frequency,
+        by_bucket,
+    }
+}
+
 /// Per-CC accounting of which JB2 record type a single page would emit
 /// against a given shared dictionary, without performing the actual encode.
 ///

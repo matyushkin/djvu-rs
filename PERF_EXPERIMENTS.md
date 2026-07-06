@@ -8104,3 +8104,87 @@ default off). Tests: `adaptive_raster_defaults_to_off`,
 `adaptive_raster_off_is_byte_identical_to_default`,
 `adaptive_raster_shrinks_flat_colour_scan` (asserts >1.3× win on `watchmaker.djvu`),
 `adaptive_raster_never_larger_than_default`. `make check` green (1035 tests).
+## Perf round 29 (2026-07-06) — JB2_DICT_ORDER: does dictionary symbol order cut Sjbz bytes?
+
+### JB2_DICT_ORDER — shared-dict index permutation vs `Sjbz`/`Djbz` size — **Diagnostic, negative result** (2026-07-06)
+
+**Question.** JB2 numbers dictionary entries by emission order; blit records
+reference them by index via an adaptive binary-tree integer coder
+(`NumContext`/`encode_num`/`decode_num` in `crates/djvu-jb2/src/{encode,lib}.rs`).
+Any dict order the encoder chooses is legal as long as the decoder agrees (order =
+emission order, no side channel). Two plausible reorderings could, in principle, cut
+the index-coding entropy: **(a)** frequency order — put the most-referenced symbols
+at the smallest indices, since the integer coder's phase-2/3 traversal is
+Elias-gamma-ish (numbers near 0 resolve in fewer tree-node decisions); **(b)**
+similarity order — group same-shape symbols adjacently.
+
+**Ordering constraint confirmed by reading the codec.** A record-6 refinement
+(`Action::Refine(dict_idx)` in `encode_jb2_dict_with_options`, `encode.rs:~1432`)
+can only reference `dict_entries[dict_idx]` for `dict_idx < dict_entries.len()` at
+that point — i.e. **the reference must already be emitted**, a topological
+constraint. But the entire shared block (`shared_symbols`) is always emitted before
+any page-local symbol (`encode_jb2_dict_with_shared`/`_with_options` seed
+`dict_entries` from `shared_symbols` first, unconditionally). So **any permutation
+purely within the shared block** can never place a refiner before its target — the
+constraint is satisfied automatically regardless of internal shared-block order.
+(In the shipped path this is moot anyway: `encode_djvm_bundle_jb2_with_shared` uses
+`Jb2EncodeOptions::default()`, which has both `same_size_rec6` and
+`cross_size_rec6_probe` `None` — rec-6 is never emitted by the production bundler
+today. The probe below still round-trips real records, whatever they are.)
+
+**Probe (measurement only, no shipped-code change).** Added, behind the
+`experimental` feature: `DictOrderVariants` / `cluster_shared_symbols_order_variants`
+(`crates/djvu-jb2/src/encode.rs`) — reruns the exact same byte-exact clustering +
+pixel-budget trim as `cluster_shared_symbols` (identical promoted symbol *set*), then
+emits 3 orderings of that same set instead of one fixed sort:
+- `baseline` — current shipped order (first-seen: page, then CC position).
+- `by_frequency` — descending count of distinct pages a symbol was promoted from,
+  ties broken by first-seen.
+- `by_bucket` — grouped by `(width, height)` size bucket ascending (the
+  clustering pass's natural pre-sort iteration order — same-shaped symbols land
+  adjacent; note the *shipped* order is **not** already bucket/hash-grouped, it's
+  first-seen, contrary to the task brief's premise).
+
+Driver `measure_dict_order_probe`/`dict_order_probe_corpus_measurement` (ignored
+test, `src/jb2_encode.rs`) loads real corpus pages, builds all three orderings from
+one clustering pass, re-encodes real `Djbz` (`encode_jb2_djbz`) + every page's real
+`Sjbz` (`encode_jb2_dict_with_shared`) against each, sums actual emitted bytes, and
+round-trip-decodes every page (`crate::jb2::decode_dict` + `crate::jb2::decode`)
+against the real decoder to confirm pixel-exact reconstruction. Run:
+`cargo test --lib --release --features experimental,parallel dict_order_probe_corpus_measurement -- --ignored --nocapture`.
+
+**Numbers** (release, `parallel` feature, M1 Max; `page_threshold=2`, matching
+`bench_cluster_shared_symbols`):
+
+| Corpus | pages | shared symbols | baseline | by_frequency | by_bucket | roundtrip failures |
+|---|---|---|---|---|---|---|
+| `conquete_paix.djvu` | 22 | 75 | 53,219 B | 53,194 B (**−0.047%**) | 53,230 B (+0.021%) | 0 |
+| `pathogenic_bacteria_1896.djvu` | 517 | 5,164 | 33,394,769 B | 33,397,363 B (+0.008%) | 33,409,746 B (+0.045%) | 0 |
+
+All three orderings round-trip pixel-exact on every page of both documents (0
+failures out of 22 + 517 = 539 page decodes × 3 orderings each), confirming the
+topological-safety argument above empirically, not just by code inspection.
+
+**Why the effect is ~0, not the hoped-for few %.** `NumContext` is an *adaptive*
+binary arithmetic coder — each tree node's probability is learned online from the
+actual bit sequence that node sees across the whole document, not looked up from a
+fixed code table. Permuting symbol indices changes *which* value a given reference
+carries, but every context node still adapts to whatever empirical distribution of
+decisions it ends up seeing; the coder is close to matching the empirical entropy of
+the index stream either way. There's no static Huffman-style table where reassigning
+short codes to frequent symbols pays off — the adaptive model already captures that
+degree of freedom for any fixed permutation. Net measured deltas (−0.05%…+0.05%) are
+consistent with noise from a handful of tie-break/threshold changes in Hamming-based
+candidate matching, not a real entropy effect.
+
+**Decision.** **No shipping change recommended.** Deltas are 30–60× below the
+~1.5% bar for a real win, in both directions, on a 75-symbol and a 5,164-symbol
+shared dict (two orders of magnitude apart) — consistent negative result across
+corpus scale. Recorded here so dictionary-symbol reordering is not re-proposed
+without new evidence (e.g. a non-adaptive or partially-static index coder, which
+JB2/DjVuLibre does not have). Fixed a pre-existing, unrelated compile break found
+while getting the `experimental` test binary to build: `with_jb2_options_lossy_threshold_round_trips`
+(`src/djvu_encode.rs`) constructed `Jb2EncodeOptions` without the `same_size_rec6`
+field added by round 18 (#512); harmless under the default feature set (the struct
+literal only exists in a `#[cfg(test)]` module) but broke `cargo test --features
+experimental`. Added the missing `#[cfg(feature = "experimental")] same_size_rec6: None,` arm.
