@@ -8369,3 +8369,56 @@ picking a good `k` is content-dependent (too-small `k` does cost real quality, p
 the `k=4` row), and on already-clean real-world fixtures like `irish.djvu` the
 practical win is small. This resolves the round-4 backlog item with honest numbers
 rather than forcing a default-behaviour change.
+## Perf round 32 (2026-07-06) — D3_BICUBIC: FG44 bicubic upsampling — **Rejected**
+
+**Question.** FG44 (the colour foreground/text layer) is stored heavily subsampled
+(measured **exactly 12.0×** per axis on `colorbook.djvu`, both tested pages) and the
+compositor upsamples it per-pixel via `sample_bilinear` in the non-1:1 (upscale)
+branch of `composite_rows_bilinear_one`. Bilinear over a 12× gap is a plausible place
+for colour to smear across glyph clusters — would a sharper reconstruction kernel
+(Catmull-Rom bicubic, 4×4-tap, a=-0.5) visibly help colour text?
+
+**Implementation (measured, then reverted).** Added an opt-in `RenderOptions::fg_bicubic`
+flag, dispatched via a macro-duplicated loop (`b_series_fg_row!`) so the boolean check
+sits outside the per-pixel hot loop (matching the `a2_has_mask_loop!` pattern) —
+zero cost on the default path, proved by a byte-identical test. Scope was deliberately
+limited to the B-series (upscale) branch that literally calls `sample_bilinear`, per
+the task; the 1:1 fast path (`bilinear_from_rows`) and the downscale/area-avg path are
+untouched (downscale routes through `composite_rows_area_avg_one`, a completely
+different box-filter code path — the bicubic flag has zero effect there, confirmed by
+a probe that found 0 diff bytes when accidentally testing at downscale before this
+was root-caused).
+
+**D1 measurement (real in-compositor implementation, before revert).**
+`colorbook.djvu` (multicolour FG), pages 0–1, 2×/2.4× zoom, whole-page render vs `ddjvu`:
+
+| Case | Bilinear vs ddjvu | Bicubic vs ddjvu | Bilinear vs Bicubic (direct) |
+|---|---|---|---|
+| p0 @2× | SSIM 0.9895, PSNR 36.36 dB | SSIM 0.9895, PSNR 36.37 dB | SSIM 0.9999, PSNR 59.73 dB |
+| p0 @2.4× | (ddjvu off-by-one size, skipped) | — | SSIM 0.9999, PSNR 58.83 dB |
+| p1 @2× | SSIM 0.9924, PSNR 38.48 dB | SSIM 0.9923, PSNR 38.48 dB | SSIM 0.9999, PSNR 61.02 dB |
+
+Identical to 4 decimal places against the reference decoder; the direct bilinear-vs-
+bicubic delta (SSIM 0.9999, PSNR 59-61 dB) is itself below any perceptible threshold.
+Saved before/after PNG crops of colour text (`_pr_assets/`) — visually indistinguishable
+side by side. **Perf cost when enabled:** ~17% slower in the affected path (285 ms vs
+334 ms/frame, colorbook p0 @2×, 8-frame average) — a real cost for zero visible gain.
+
+**Isolated re-check (FG44 plane alone, post-revert, public-API-only).** To avoid a
+confound found while writing the standalone reproduction (a whole-*page* bicubic
+resize looks much better vs `ddjvu` than the isolated FG-only comparison — because it
+also sharpens mask/text edges, a different effect from FG colour reconstruction), the
+kept example (`examples/fg_bicubic_quality.rs`) isolates just the FG44 plane via
+`DjVuPage::extract_foreground()` (public API) and upsamples it bilinear vs bicubic
+directly: SSIM 0.998, PSNR ~51.7 dB, confirming the same negligible-gap conclusion
+with no full-page confound.
+
+**Verdict.** Rejected — no perceptible gain (SSIM delta ~0.0001, visually
+indistinguishable crops), a real ~17% perf cost when opted in, and it would add
+public API surface (`RenderOptions::fg_bicubic`) for a feature with nothing to show.
+`sample_bicubic`/`catmull_rom_weights`/the flag were **not shipped** — reverted from
+`src/djvu_render.rs` entirely (confirmed byte-identical to origin/main). Kept only
+this journal entry and the measurement example. The 12× FG44 subsample ratio is
+already reconstructed by bilinear below the perceptual floor at realistic zoom levels;
+future colour-text quality work should look elsewhere (e.g. encoder-side FG44
+fidelity, not decoder-side interpolation kernel).
