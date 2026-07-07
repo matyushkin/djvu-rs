@@ -20,12 +20,16 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          # A dedicated PAT (not GITHUB_TOKEN) so the release PR that
-          # release-please opens triggers the required CI workflows. GitHub does
-          # not run workflows on events created by GITHUB_TOKEN (recursion guard),
-          # which otherwise leaves the release PR BLOCKED on never-run checks and
-          # forces a manual close/reopen. See RELEASING.md.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # Use the built-in GITHUB_TOKEN — no dependency on an expiring PAT.
+          # A dedicated RELEASE_PLEASE_TOKEN was previously used only so the release
+          # PR would auto-trigger CI, but that PAT expired and silently broke the
+          # 0.25.0 release ('Bad credentials'). Releases are now cut by manually
+          # pushing the vX.Y.Z tag, which triggers publish.yml independently of this
+          # workflow (see RELEASING.md), so the PAT is no longer on the release path.
+          # Tradeoff: GitHub does not run workflows on events created by GITHUB_TOKEN,
+          # so the release PR shows BLOCKED on never-run checks — nudge it
+          # (close/reopen) or admin-merge to land the version bump, then push the tag.
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
