@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1](https://github.com/matyushkin/djvu-rs/compare/v0.26.0...v0.26.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* decode ANTa/ANTz annotation payloads leniently — one bad byte no longer drops all annotations ([#553](https://github.com/matyushkin/djvu-rs/issues/553)) ([#554](https://github.com/matyushkin/djvu-rs/issues/554)) ([9806824](https://github.com/matyushkin/djvu-rs/commit/98068241cec25820fe628efbd63d148c6af7ca03))
+* decode non-structural strings leniently — CP1252 fallback for NAVM/TXTz/METa ([#524](https://github.com/matyushkin/djvu-rs/issues/524)) ([#551](https://github.com/matyushkin/djvu-rs/issues/551)) ([a461a8a](https://github.com/matyushkin/djvu-rs/commit/a461a8a411e6124660ae5e8be3a9428b7f45f1a8))
+
 ## [0.26.0](https://github.com/matyushkin/djvu-rs/compare/v0.25.0...v0.26.0) (2026-07-09)
 
 
