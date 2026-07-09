@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0](https://github.com/matyushkin/djvu-rs/compare/v0.25.0...v0.26.0) (2026-07-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* `djvu_rs::pdf` now requires the `pdf` feature (`djvu-rs = { version = "…", features = ["pdf"] }`); the `cli` feature enables it automatically.
+
+### Features
+
+* decouple writer-side deps from std — pdf/epub/cli own them ([#509](https://github.com/matyushkin/djvu-rs/issues/509)) ([#547](https://github.com/matyushkin/djvu-rs/issues/547)) ([62f30f6](https://github.com/matyushkin/djvu-rs/commit/62f30f690d6d8035e04398c8c654af0bbe54274e))
+
 ## [0.25.0](https://github.com/matyushkin/djvu-rs/compare/v0.24.4...v0.25.0) (2026-07-06)
 
 
