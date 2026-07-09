@@ -83,6 +83,9 @@ pub(crate) fn size_at_dpi(page: &DjVuPage, target_dpi: f32) -> (u32, u32) {
 ///
 /// The per-row strip both the PDF and TIFF streaming encoders build from their
 /// [`render_streaming`](crate::djvu_render::render_streaming) callback.
+///
+/// `#[allow(dead_code)]`: only the `pdf`/`tiff`-gated exporters call it.
+#[allow(dead_code)]
 pub(crate) fn rgba_row_to_rgb(dst: &mut Vec<u8>, rgba_row: &[u8]) {
     for rgba in rgba_row.chunks_exact(4) {
         dst.extend_from_slice(&rgba[..3]);
@@ -158,6 +161,9 @@ pub(crate) fn bookmark_page_index(url: &str) -> Option<usize> {
 ///
 /// Borrows from the source [`TextLayer`]; `rect` is in top-left-origin pixels
 /// (see [`Rect`]). Callers apply their own unit conversion and vertical flip.
+///
+/// `#[allow(dead_code)]`: only the `pdf`/`epub`-gated exporters use it.
+#[allow(dead_code)]
 pub(crate) struct WordSpan<'a> {
     pub rect: &'a Rect,
     pub text: &'a str,
@@ -174,6 +180,9 @@ pub(crate) struct WordSpan<'a> {
 ///
 /// The hOCR/ALTO writers deliberately do *not* use this: they emit the full
 /// zone hierarchy (block/par/line/word), a structurally different traversal.
+///
+/// `#[allow(dead_code)]`: only the `pdf`/`epub`-gated exporters call it.
+#[allow(dead_code)]
 pub(crate) fn word_spans(layer: &TextLayer) -> Vec<WordSpan<'_>> {
     fn walk<'a>(zones: &'a [TextZone], out: &mut Vec<WordSpan<'a>>) {
         for zone in zones {

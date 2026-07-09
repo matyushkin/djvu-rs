@@ -54,7 +54,7 @@ jobs:
         run: cargo bench --bench codecs -- --output-format bencher 2>&1 | tee bench_output.txt
 
       - name: Bench render
-        run: cargo bench --bench render -- --output-format bencher 2>&1 | tee -a bench_output.txt
+        run: cargo bench --bench render --features pdf -- --output-format bencher 2>&1 | tee -a bench_output.txt
 
       - name: Bench document
         run: cargo bench --bench document -- --output-format bencher 2>&1 | tee -a bench_output.txt

@@ -256,7 +256,7 @@ mod export_common;
 /// (PDF link annotations).
 ///
 /// Key function: [`pdf::djvu_to_pdf`].
-#[cfg(feature = "std")]
+#[cfg(feature = "pdf")]
 pub mod pdf;
 
 /// DjVu to EPUB 3 exporter.
