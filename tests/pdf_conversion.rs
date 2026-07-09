@@ -3,6 +3,8 @@
 //! These tests verify that the PDF output is structurally valid and contains
 //! the expected features (images, text, bookmarks, hyperlinks).
 
+#![cfg(feature = "pdf")]
+
 use djvu_rs::djvu_document::DjVuDocument;
 use djvu_rs::pdf::djvu_to_pdf;
 use std::path::PathBuf;

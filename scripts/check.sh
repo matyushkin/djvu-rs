@@ -10,6 +10,7 @@ run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --check
 run cargo clippy --all-targets -- -D warnings
+run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
 run cargo build --no-default-features                       # no_std (host)
 
 # wasm32 — the gate that catches no_std `vec!` / leaked `std::*` (#448 class).

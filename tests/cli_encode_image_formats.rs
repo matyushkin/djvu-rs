@@ -1,7 +1,7 @@
 //! Integration tests for `djvu encode` with JPEG and TIFF inputs.
 //!
-//! JPEG fixtures are generated in-process using `jpeg-encoder` (already in the
-//! `std` feature set). TIFF fixtures are generated using the `tiff` crate
+//! JPEG fixtures are generated in-process using `jpeg-encoder` (a
+//! dev-dependency). TIFF fixtures are generated using the `tiff` crate
 //! (feature-gated). No binary fixtures are committed.
 
 use assert_cmd::Command;

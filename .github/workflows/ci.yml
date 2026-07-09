@@ -37,6 +37,12 @@ jobs:
       - name: Clippy (all targets)
         run: cargo clippy --all-targets -- -D warnings
 
+      # #509 regression guard: writer/feature-owned crates (zip, zopfli,
+      # jpeg-encoder, clap, …) must not leak into the default (decode-only)
+      # dependency tree. Part of the required Lint gate on purpose.
+      - name: Feature hygiene (decode-only default tree)
+        run: scripts/check_feature_hygiene.sh
+
   # ── Tests ────────────────────────────────────────────────────────────────────
   # stable: every push + PRs, full suite on main
   test-stable:

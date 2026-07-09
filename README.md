@@ -24,7 +24,7 @@ Pure-Rust DjVu codec — decode and encode DjVu documents. MIT licensed, no GPL 
 - **Bookmark encoding** — serialize `DjVuBookmark` trees into NAVM chunk payloads
 - **Multi-page documents** — DJVM bundle format with DIRM directory chunk; indirect DJVM creation and loading from directory
 - **Page rendering** — composite foreground + background into RGBA output
-- **PDF export** — selectable text, lossless IW44/JB2 embedding, bookmarks, hyperlinks
+- **PDF export** — selectable text, lossless IW44/JB2 embedding, bookmarks, hyperlinks (feature flag `pdf`)
 - **TIFF export** — multi-page color and bilevel modes (feature flag `tiff`)
 - **hOCR / ALTO XML export** — text layer as hOCR or ALTO XML for OCR toolchains and archives
 - **Serde support** — `Serialize`/`Deserialize` on all public data types (feature flag `serde`)
@@ -74,6 +74,8 @@ if let Some(text) = page.text()? {
 ```
 
 ## PDF export
+
+Requires the `pdf` feature flag: `djvu-rs = { version = "…", features = ["pdf"] }`.
 
 ```rust
 use djvu_rs::{DjVuDocument, pdf::djvu_to_pdf};
@@ -460,8 +462,9 @@ regression gates.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `std` | enabled | `DjVuDocument`, file I/O, rendering, PDF export |
-| `cli` | disabled | Build the `djvu` command-line binary |
+| `std` | enabled | `DjVuDocument`, file I/O, rendering — the decode-only surface |
+| `pdf` | disabled | PDF export via `djvu_to_pdf` (owns `miniz_oxide` + `jpeg-encoder`) |
+| `cli` | disabled | Build the `djvu` command-line binary (implies `pdf`) |
 | `tiff` | disabled | TIFF export via the `tiff` crate |
 | `async` | disabled | Async render API and lazy `AsyncRead + AsyncSeek` document loading |
 | `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
@@ -469,7 +472,7 @@ regression gates.
 | `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
 | `serde` | disabled | `Serialize` + `Deserialize` for all public data types |
 | `image` | disabled | `image::ImageDecoder` impl via `DjVuDecoder` — integrates with the `image` crate |
-| `epub` | disabled | EPUB 3 export via `djvu_to_epub` — page images, text overlay, bookmarks as nav |
+| `epub` | disabled | EPUB 3 export via `djvu_to_epub` — page images, text overlay, bookmarks as nav (owns `zip`) |
 | `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`) |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
