@@ -138,7 +138,7 @@ fn main() {
     );
     println!(
         "plain text (first 200 chars): {:?}",
-        &plain.chars().take(200).collect::<String>()
+        plain.chars().take(200).collect::<String>()
     );
 
     // Sample a handful of word zones with their DjVu-decoded (top-left,

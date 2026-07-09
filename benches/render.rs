@@ -816,40 +816,46 @@ fn bench_render_colorbook_cold(c: &mut Criterion) {
 }
 
 /// Benchmark full DjVu→PDF export pipeline (render + DCTDecode JPEG compression).
+/// Only compiled/run with `--features pdf` (the module is feature-gated); the
+/// body is a no-op otherwise so registration stays unconditional.
+#[allow(unused_variables)]
 fn bench_pdf_export(c: &mut Criterion) {
-    let path = corpus_path().join("watchmaker.djvu");
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("skipping bench_pdf_export: watchmaker.djvu not found in tests/corpus/");
-            return;
-        }
-    };
-    let doc = match djvu_rs::DjVuDocument::parse(&data) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("skipping bench_pdf_export: failed to parse watchmaker.djvu");
-            return;
-        }
-    };
+    #[cfg(feature = "pdf")]
+    {
+        let path = corpus_path().join("watchmaker.djvu");
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_pdf_export: watchmaker.djvu not found in tests/corpus/");
+                return;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_pdf_export: failed to parse watchmaker.djvu");
+                return;
+            }
+        };
 
-    c.bench_function("pdf_export_sequential", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+        c.bench_function("pdf_export_sequential", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+            });
         });
-    });
 
-    // pdf_export_parallel calls the same API as pdf_export_sequential; the difference
-    // is that this binary was compiled with --features parallel, so djvu_to_pdf uses
-    // rayon internally. To compare the two, run each in a separate cargo bench invocation:
-    //   cargo bench --bench render --features std          -- pdf_export_sequential
-    //   cargo bench --bench render --features std,parallel -- pdf_export_parallel
-    #[cfg(feature = "parallel")]
-    c.bench_function("pdf_export_parallel", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+        // pdf_export_parallel calls the same API as pdf_export_sequential; the difference
+        // is that this binary was compiled with --features parallel, so djvu_to_pdf uses
+        // rayon internally. To compare the two, run each in a separate cargo bench invocation:
+        //   cargo bench --bench render --features std          -- pdf_export_sequential
+        //   cargo bench --bench render --features std,parallel -- pdf_export_parallel
+        #[cfg(feature = "parallel")]
+        c.bench_function("pdf_export_parallel", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::pdf::djvu_to_pdf(black_box(&doc));
+            });
         });
-    });
+    }
 }
 
 /// Benchmark bilevel corpus page at multiple DPIs to measure anti-aliased downscale.
@@ -945,33 +951,38 @@ fn bench_render_region_bilevel(c: &mut Criterion) {
 /// default JPEG backgrounds. Isolates the RGBA→RGB conversion + deflate path
 /// (where JPEG CPU no longer dominates), so `export_common::rgba_row_to_rgb` and
 /// the deflate glue become the measurable cost. Multi-page watchmaker.
+/// Only compiled/run with `--features pdf`; no-op body otherwise.
+#[allow(unused_variables)]
 fn bench_pdf_export_flatdecode(c: &mut Criterion) {
-    let path = corpus_path().join("watchmaker.djvu");
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("skipping bench_pdf_export_flatdecode: watchmaker.djvu not found");
-            return;
-        }
-    };
-    let doc = match djvu_rs::DjVuDocument::parse(&data) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let opts = djvu_rs::pdf::PdfOptions {
-        jpeg_quality: None,
-        output_dpi: 150,
-        adaptive_raster: false,
-        ccitt_g4: false,
-    };
-    let mut group = c.benchmark_group("export");
-    group.sample_size(10);
-    group.bench_function("pdf_flatdecode", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::pdf::djvu_to_pdf_with_options(black_box(&doc), black_box(&opts));
+    #[cfg(feature = "pdf")]
+    {
+        let path = corpus_path().join("watchmaker.djvu");
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_pdf_export_flatdecode: watchmaker.djvu not found");
+                return;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let opts = djvu_rs::pdf::PdfOptions {
+            jpeg_quality: None,
+            output_dpi: 150,
+            adaptive_raster: false,
+            ccitt_g4: false,
+        };
+        let mut group = c.benchmark_group("export");
+        group.sample_size(10);
+        group.bench_function("pdf_flatdecode", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::pdf::djvu_to_pdf_with_options(black_box(&doc), black_box(&opts));
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
 }
 
 /// EPUB export (`djvu_to_epub`) — per-page render → PNG encode → ZIP assembly.
