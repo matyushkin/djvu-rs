@@ -10,9 +10,9 @@
 //! The reader is lenient and best-effort: malformed fragments (unmatched
 //! parens, payload past the depth limit) are dropped rather than reported, so
 //! that a partially-valid chunk still yields the forms it can. Each caller
-//! keeps its own `&[u8]` → `&str` decode policy (metadata decodes leniently
-//! via [`crate::lenient_text`] since #524; annotation still drops the whole
-//! payload on invalid UTF-8) and its own interpretation of the tree.
+//! keeps its own `&[u8]` → `&str` decode policy; metadata and annotation
+//! payloads both decode leniently via [`crate::lenient_text`] since #524/#553,
+//! before applying their own interpretation of the tree.
 
 #[cfg(not(feature = "std"))]
 use alloc::{
