@@ -3,13 +3,16 @@ name: Benchmarks
 on:
   # Track regressions on every PR that touches code or benchmarks.
   # Workflow file itself is included so changes to bench.yml re-run on PR.
+  # Root Cargo.toml/Cargo.lock are deliberately NOT in the PR list (#548):
+  # feature/metadata manifest changes were paying ~10 min of benchmarks with no
+  # perf-relevant diff (Cargo.lock is gitignored, so that entry never fired
+  # anyway). Dependency changes still get benchmarked on the main push (below),
+  # and code changes are covered by the src/crates/benches paths.
   pull_request:
     paths:
       - 'src/**'
       - 'crates/**'
       - 'benches/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
       - '.github/workflows/bench.yml'
 
   # Update the baseline when code or benchmarks actually change on main / release tags.
@@ -23,7 +26,6 @@ on:
       - 'crates/**'
       - 'benches/**'
       - 'Cargo.toml'
-      - 'Cargo.lock'
       - '.github/workflows/bench.yml'
 
   # Allow manual runs (e.g. to seed the initial baseline).

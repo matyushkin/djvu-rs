@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs — e.g. collecting Coverage for a PR branch (main-only otherwise).
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -311,9 +313,14 @@ jobs:
   # ── Code coverage (report-only, non-gating) ─────────────────────────────────
   # Surfaces the line-coverage trend and an lcov.info artifact. Intentionally not
   # a required check / no --fail-under gate: it informs review, it does not block.
+  # main-only (#548): at ~13 min it was the last check to finish on every PR,
+  # defining perceived PR latency while gating nothing. The trend still updates
+  # on every push to main; run it on a PR ad hoc via workflow_dispatch or
+  # locally with `cargo llvm-cov`.
   coverage:
     name: Coverage (llvm-cov)
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -331,10 +338,16 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
       # Collect once, then render both a human summary and the lcov artifact from
       # the same profile data (benches/examples/fuzz harnesses excluded).
+      # nextest (#548): the plain `cargo llvm-cov` harness runs test binaries
+      # sequentially; nextest runs them in parallel like the Test (stable) job,
+      # cutting several minutes off the collect step.
       - name: Collect coverage
-        run: cargo llvm-cov --workspace --features cli --no-report
+        run: cargo llvm-cov nextest --profile ci --workspace --features cli --no-report
 
       - name: Coverage summary
         run: |
