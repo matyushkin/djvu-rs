@@ -243,6 +243,11 @@ pub mod metadata;
 /// the recursion-depth guard protects both consumers.
 mod sexp;
 
+/// Lenient (UTF-8 with CP1252 fallback) decoding for non-structural DjVu
+/// strings (#524): NAVM bookmark titles/URLs, TXTz/TXTa text layers, METa
+/// values. One bad legacy byte in a bookmark must not abort `Document::open`.
+mod lenient_text;
+
 /// Shared document-to-export traversal primitives (#345) used by the PDF,
 /// EPUB, TIFF, and OCR exporters: the per-page loop, the scale→size kernel,
 /// the leaf word/character zone-walk, and the vertical coordinate flip.
