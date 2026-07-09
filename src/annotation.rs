@@ -136,8 +136,8 @@ pub struct Annotation {
 /// This is a pure parser: BZZ decompression for `ANTz` is handled upstream by
 /// [`DjVuPage::chunk_payload`](crate::DjVuPage::chunk_payload).
 pub fn parse_annotations(data: &[u8]) -> Result<(Annotation, Vec<MapArea>), AnnotationError> {
-    let text = core::str::from_utf8(data).unwrap_or("");
-    parse_annotation_text(text)
+    let text = crate::lenient_text::decode_lossy(data);
+    parse_annotation_text(&text)
 }
 
 // ---- Annotation builder from S-expressions ----------------------------------
@@ -528,6 +528,15 @@ mod tests {
         assert_eq!(areas[0].url, "http://example.com");
         assert_eq!(areas[0].description, "Example");
         assert!(matches!(&areas[0].shape, Shape::Rect(r) if r.x == 10 && r.y == 20));
+    }
+
+    #[test]
+    fn test_parse_maparea_decodes_cp1252_byte_leniently() {
+        let input = b"(maparea \"http://example.com/a\x96b\" \"Example\" (rect 10 20 100 50))";
+        let (_, areas) = parse_annotations(input).unwrap();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].url, "http://example.com/a–b");
+        assert_eq!(areas[0].description, "Example");
     }
 
     #[test]
