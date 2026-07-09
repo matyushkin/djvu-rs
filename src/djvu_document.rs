@@ -89,6 +89,9 @@ pub enum DocError {
     PageOutOfRange { index: usize, count: usize },
 
     /// Invalid UTF-8 in a string field.
+    ///
+    /// No longer produced since #524: NAVM bookmark strings are decoded
+    /// leniently (CP1252 fallback). Kept so matching code keeps compiling.
     #[error("invalid UTF-8 in DjVu metadata")]
     InvalidUtf8,
 
@@ -2021,9 +2024,11 @@ fn parse_bookmark_entry(
     })
 }
 
-/// Read a length-prefixed UTF-8 string from NAVM data.
+/// Read a length-prefixed string from NAVM data.
 ///
-/// Format: `[be_u24 length][utf8 bytes]`
+/// Format: `[be_u24 length][text bytes]`. Nominally UTF-8, but legacy files
+/// (DjVuLibre on Windows) carry CP1252 bytes in bookmark titles; decoded
+/// leniently so one bad byte cannot abort `Document::open` (#524).
 fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
     if *pos + 3 > data.len() {
         return Err(DocError::Malformed("NAVM string length truncated"));
@@ -2038,9 +2043,7 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
         .ok_or(DocError::Malformed("NAVM string bytes truncated"))?;
     *pos += len;
 
-    core::str::from_utf8(bytes)
-        .map(|s| s.to_string())
-        .map_err(|_| DocError::InvalidUtf8)
+    Ok(crate::lenient_text::decode_lossy_string(bytes))
 }
 
 // ---- Tests ------------------------------------------------------------------
@@ -3077,6 +3080,30 @@ mod tests {
             result.is_err(),
             "NAVM with declared count > 0 but no entry data must error"
         );
+    }
+
+    /// NAVM bookmark title with CP1252 bytes (0x96 en dash — DjVuLibre on
+    /// Windows) must decode leniently instead of aborting the open (#524).
+    #[test]
+    fn parse_navm_bookmarks_cp1252_title_is_lenient() {
+        use crate::bzz_encode::bzz_encode;
+        // [total_count u16 = 1][n_children u8 = 0]
+        // [title: u24 len + bytes][url: u24 len + bytes]
+        let title = b"Chapter 1 \x96 Intro";
+        let mut payload = vec![0x00, 0x01, 0x00];
+        payload.extend_from_slice(&[0x00, 0x00, title.len() as u8]);
+        payload.extend_from_slice(title);
+        payload.extend_from_slice(&[0x00, 0x00, 0x02]);
+        payload.extend_from_slice(b"#1");
+        let bzz = bzz_encode(&payload);
+        let chunk = crate::iff::IffChunk {
+            id: *b"NAVM",
+            data: &bzz,
+        };
+        let bookmarks = parse_navm_bookmarks(&[chunk]).expect("CP1252 title must not abort");
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].title, "Chapter 1 \u{2013} Intro");
+        assert_eq!(bookmarks[0].url, "#1");
     }
 
     /// NAVM entry whose n_children byte is present but the title string's 3-byte

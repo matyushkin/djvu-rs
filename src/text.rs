@@ -44,6 +44,9 @@ pub enum TextError {
     TextOverflow,
 
     /// The text bytes are not valid UTF-8.
+    ///
+    /// No longer produced since #524: invalid bytes are decoded leniently
+    /// (CP1252 fallback). Kept so matching code keeps compiling.
     #[error("invalid UTF-8 in text layer")]
     InvalidUtf8,
 
@@ -320,14 +323,21 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
     // Read text length (u24be)
     let text_len = read_u24(data, &mut pos).ok_or(TextError::TooShort)?;
 
-    // Read UTF-8 text
+    // Read the text blob. Nominally UTF-8; legacy files carry CP1252 bytes
+    // (#524), so decode leniently instead of aborting the whole layer. Zone
+    // records index this blob by ON-DISK BYTE offset, so when the bytes are
+    // not valid UTF-8 the zones must slice the original bytes (and decode
+    // each slice), never a re-encoded String whose offsets no longer line up.
     let text_end = pos.checked_add(text_len).ok_or(TextError::TextOverflow)?;
     if text_end > data.len() {
         return Err(TextError::TextOverflow);
     }
-    let text = core::str::from_utf8(data.get(pos..text_end).ok_or(TextError::TextOverflow)?)
-        .map_err(|_| TextError::InvalidUtf8)?
-        .to_string();
+    let text_bytes = data.get(pos..text_end).ok_or(TextError::TextOverflow)?;
+    let full_text = match core::str::from_utf8(text_bytes) {
+        Ok(s) => FullText::Utf8(s),
+        Err(_) => FullText::Legacy(text_bytes),
+    };
+    let text = crate::lenient_text::decode_lossy(text_bytes).to_string();
     pos = text_end;
 
     // Consume version byte (if present)
@@ -338,11 +348,22 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
     // Parse zone tree
     let mut zones = Vec::new();
     if pos < data.len() {
-        let zone = parse_zone(data, &mut pos, None, None, &text, page_height)?;
+        let zone = parse_zone(data, &mut pos, None, None, &full_text, page_height)?;
         zones.push(zone);
     }
 
     Ok(TextLayer { text, zones })
+}
+
+/// The page's text blob as zone parsing sees it (#524).
+///
+/// Zone records address the text by on-disk byte offset, so the two variants
+/// preserve exact offsets in both worlds: valid UTF-8 slices the `&str`
+/// directly (with char-boundary clamping), legacy bytes are sliced raw and
+/// each slice is decoded leniently on extraction.
+enum FullText<'a> {
+    Utf8(&'a str),
+    Legacy(&'a [u8]),
 }
 
 // ---- Zone parsing -----------------------------------------------------------
@@ -363,7 +384,7 @@ fn parse_zone(
     pos: &mut usize,
     parent: Option<&ZoneCtx>,
     prev: Option<&ZoneCtx>,
-    full_text: &str,
+    full_text: &FullText<'_>,
     page_height: u32,
 ) -> Result<TextZone, TextError> {
     if *pos >= data.len() {
@@ -483,19 +504,31 @@ fn parse_zone(
 
 /// Extract a substring from `full_text` starting at byte offset `start` with byte length `len`.
 ///
-/// Clamps to valid char boundaries to avoid panics on multi-byte UTF-8.
-fn extract_text_slice(full_text: &str, start: usize, len: usize) -> String {
-    let end = start.saturating_add(len).min(full_text.len());
-    let start = start.min(end);
-    // Walk back to a valid char boundary
-    let safe_start = (0..=start)
-        .rev()
-        .find(|&i| full_text.is_char_boundary(i))
-        .unwrap_or(0);
-    let safe_end = (end..=full_text.len())
-        .find(|&i| full_text.is_char_boundary(i))
-        .unwrap_or(full_text.len());
-    full_text[safe_start..safe_end].to_string()
+/// UTF-8 text clamps to valid char boundaries to avoid panics on multi-byte
+/// chars. Legacy (non-UTF-8) text slices the on-disk bytes exactly and
+/// decodes the slice leniently (#524) — a slice edge that happens to split a
+/// multi-byte sequence just decodes those bytes as CP1252.
+fn extract_text_slice(full_text: &FullText<'_>, start: usize, len: usize) -> String {
+    match *full_text {
+        FullText::Utf8(text) => {
+            let end = start.saturating_add(len).min(text.len());
+            let start = start.min(end);
+            // Walk back to a valid char boundary
+            let safe_start = (0..=start)
+                .rev()
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(0);
+            let safe_end = (end..=text.len())
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(text.len());
+            text[safe_start..safe_end].to_string()
+        }
+        FullText::Legacy(bytes) => {
+            let end = start.saturating_add(len).min(bytes.len());
+            let start = start.min(end);
+            crate::lenient_text::decode_lossy(&bytes[start..end]).to_string()
+        }
+    }
 }
 
 // ---- Low-level readers (no indexing, no unwrap) -----------------------------
@@ -581,29 +614,42 @@ mod tests {
 
     #[test]
     fn test_extract_text_slice_basic() {
-        assert_eq!(extract_text_slice("hello world", 0, 5), "hello");
-        assert_eq!(extract_text_slice("hello world", 6, 5), "world");
+        let t = FullText::Utf8("hello world");
+        assert_eq!(extract_text_slice(&t, 0, 5), "hello");
+        assert_eq!(extract_text_slice(&t, 6, 5), "world");
     }
 
     #[test]
     fn test_extract_text_slice_out_of_bounds() {
-        assert_eq!(extract_text_slice("hello", 10, 5), "");
-        assert_eq!(extract_text_slice("hello", 0, 100), "hello");
+        let t = FullText::Utf8("hello");
+        assert_eq!(extract_text_slice(&t, 10, 5), "");
+        assert_eq!(extract_text_slice(&t, 0, 100), "hello");
     }
 
     #[test]
     fn test_extract_text_slice_utf8_boundary() {
         // Multi-byte char: each char is 2 bytes
-        let s = "\u{00e9}\u{00e8}"; // é è — 2 bytes each
+        let s = FullText::Utf8("\u{00e9}\u{00e8}"); // é è — 2 bytes each
         // Slicing at byte 1 (mid-char) should snap to boundary
-        let result = extract_text_slice(s, 1, 2);
+        let result = extract_text_slice(&s, 1, 2);
         assert!(result.is_char_boundary(0));
     }
 
     #[test]
     fn test_extract_text_slice_empty() {
-        assert_eq!(extract_text_slice("", 0, 0), "");
-        assert_eq!(extract_text_slice("abc", 1, 0), "");
+        assert_eq!(extract_text_slice(&FullText::Utf8(""), 0, 0), "");
+        assert_eq!(extract_text_slice(&FullText::Utf8("abc"), 1, 0), "");
+    }
+
+    #[test]
+    fn test_extract_text_slice_legacy_exact_offsets() {
+        // CP1252 bytes: zone offsets address the raw bytes, one byte per char.
+        let bytes = b"a\x96b\x97c";
+        let t = FullText::Legacy(bytes);
+        assert_eq!(extract_text_slice(&t, 1, 1), "\u{2013}");
+        assert_eq!(extract_text_slice(&t, 3, 1), "\u{2014}");
+        assert_eq!(extract_text_slice(&t, 0, 5), "a\u{2013}b\u{2014}c");
+        assert_eq!(extract_text_slice(&t, 10, 3), "");
     }
 
     // ── Error paths ─────────────────────────────────────────────────────────
@@ -631,13 +677,37 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_utf8() {
-        // text_len = 2, then 2 invalid bytes
+    fn test_invalid_utf8_decodes_leniently() {
+        // text_len = 2, then 2 bytes that are not valid UTF-8. Legacy CP1252
+        // text must not abort the layer (#524): 0xFF = ÿ, 0xFE = þ.
         let data = [0x00, 0x00, 0x02, 0xFF, 0xFE];
-        assert!(matches!(
-            parse_text_layer(&data, 100),
-            Err(TextError::InvalidUtf8)
-        ));
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.text, "ÿþ");
+        assert!(result.zones.is_empty());
+    }
+
+    #[test]
+    fn test_cp1252_text_zone_offsets_stay_exact() {
+        // CP1252 text "a\x96b" with a Page zone covering all 3 on-disk bytes.
+        // Offsets address the original bytes, so the zone text must decode to
+        // the full "a–b" even though the decoded String is 5 bytes (#524).
+        let data = [
+            0x00, 0x00, 0x03, // text_len = 3
+            b'a', 0x96, b'b', // CP1252 text (0x96 = en dash)
+            0x00, // version
+            0x01, // zone type = Page
+            0x80, 0x00, // x = 0 (biased)
+            0x80, 0x00, // y = 0
+            0x80, 0x03, // width = 3
+            0x80, 0x0A, // height = 10
+            0x80, 0x00, // text_start = 0 (biased)
+            0x00, 0x00, 0x03, // text_len = 3 (i24)
+            0x00, 0x00, 0x00, // children = 0 (i24)
+        ];
+        let result = parse_text_layer(&data, 100).unwrap();
+        assert_eq!(result.text, "a\u{2013}b");
+        assert_eq!(result.zones.len(), 1);
+        assert_eq!(result.zones[0].text, "a\u{2013}b");
     }
 
     #[test]

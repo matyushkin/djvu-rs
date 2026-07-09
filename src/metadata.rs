@@ -43,6 +43,9 @@ use crate::sexp::SExpr;
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
     /// The chunk is not valid UTF-8.
+    ///
+    /// No longer produced since #524: invalid bytes are decoded leniently
+    /// (CP1252 fallback). Kept so matching code keeps compiling.
     #[error("metadata chunk is not valid UTF-8")]
     InvalidUtf8,
 }
@@ -80,8 +83,11 @@ pub struct DjVuMetadata {
 /// `data` is the raw bytes of the METa chunk (not including the 4-byte chunk
 /// ID or the 4-byte length prefix — just the payload).
 pub fn parse_metadata(data: &[u8]) -> Result<DjVuMetadata, MetadataError> {
-    let text = core::str::from_utf8(data).map_err(|_| MetadataError::InvalidUtf8)?;
-    Ok(parse_metadata_text(text))
+    // Nominally UTF-8; legacy files carry CP1252 bytes in metadata values.
+    // Decoded leniently — metadata is not structural and must not abort
+    // document open over one bad byte (#524).
+    let text = crate::lenient_text::decode_lossy(data);
+    Ok(parse_metadata_text(&text))
 }
 
 // ---- Encoder ----------------------------------------------------------------
@@ -294,12 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_returns_error() {
+    fn invalid_utf8_decodes_leniently() {
+        // Legacy CP1252 bytes must not abort metadata parsing (#524); stray
+        // non-S-expression text simply yields empty metadata.
         let invalid = b"\xFF\xFE";
-        assert!(matches!(
-            parse_metadata(invalid),
-            Err(MetadataError::InvalidUtf8)
-        ));
+        let meta = parse_metadata(invalid).unwrap();
+        assert!(meta.title.is_none());
+        assert!(meta.extra.is_empty());
+    }
+
+    #[test]
+    fn cp1252_value_decodes_leniently() {
+        // 0xE9 = é, 0x96 = – in CP1252 (#524).
+        let raw = b"(metadata (title \"Caf\xE9 \x96 Bar\"))";
+        let meta = parse_metadata(raw).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Caf\u{E9} \u{2013} Bar"));
     }
 
     #[test]

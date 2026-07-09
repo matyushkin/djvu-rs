@@ -9,9 +9,9 @@
 //!
 //! The reader is lenient and best-effort: malformed fragments (unmatched
 //! parens, payload past the depth limit) are dropped rather than reported, so
-//! that a partially-valid chunk still yields the forms it can. Each caller
-//! keeps its own `&[u8]` → `&str` decode policy (annotation is lossy, metadata
-//! rejects invalid UTF-8) and its own interpretation of the resulting tree.
+//! that a partially-valid chunk still yields the forms it can. Callers decode
+//! `&[u8]` → `&str` leniently up front (see [`crate::lenient_text`], #524) and
+//! keep their own interpretation of the resulting tree.
 
 #[cfg(not(feature = "std"))]
 use alloc::{
@@ -77,13 +77,18 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
             }
             Some(b'"') => {
                 i += 1;
-                let mut s = String::new();
+                // Collect the raw bytes and decode once at the end. Pushing
+                // each byte as a char would Latin-1-ize multi-byte UTF-8
+                // ("Café" → "CafÃ©"); deleting backslashes can never split a
+                // multi-byte char (its bytes are all ≥ 0x80, '\\' is ASCII),
+                // so the collected bytes stay valid UTF-8 (#524).
+                let mut s = Vec::new();
                 while i < bytes.len() {
                     match bytes.get(i) {
                         Some(b'\\') if i + 1 < bytes.len() => {
                             i += 1;
                             if let Some(&c) = bytes.get(i) {
-                                s.push(c as char);
+                                s.push(c);
                             }
                             i += 1;
                         }
@@ -92,13 +97,13 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
                             break;
                         }
                         Some(&c) => {
-                            s.push(c as char);
+                            s.push(c);
                             i += 1;
                         }
                         None => break,
                     }
                 }
-                tokens.push(Token::Quoted(s));
+                tokens.push(Token::Quoted(crate::lenient_text::decode_lossy_string(&s)));
             }
             Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {
                 i += 1;
@@ -184,6 +189,20 @@ mod tests {
             SExpr::Atom(s) => Some(s.as_str()),
             SExpr::List(_) => None,
         }
+    }
+
+    #[test]
+    fn quoted_utf8_survives_tokenizing() {
+        // Regression (#524 review): the tokenizer used to push each byte as a
+        // char, Latin-1-izing multi-byte UTF-8 ("Café" → "CafÃ©").
+        let exprs = parse_sexprs("(title \"Café — Кафе\")");
+        let SExpr::List(items) = &exprs[0] else {
+            panic!("expected list")
+        };
+        let SExpr::Atom(s) = &items[1] else {
+            panic!("expected quoted atom")
+        };
+        assert_eq!(s, "Café — Кафе");
     }
 
     #[test]
