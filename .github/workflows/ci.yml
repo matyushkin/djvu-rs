@@ -37,6 +37,12 @@ jobs:
       - name: Clippy (all targets)
         run: cargo clippy --all-targets -- -D warnings
 
+      # Writer surface moved out of the default features in #509, so the
+      # default-features pass above no longer sees src/pdf.rs / src/epub.rs.
+      # Lint them explicitly (cli implies pdf; epub added on top).
+      - name: Clippy (all targets, cli+epub features)
+        run: cargo clippy --all-targets --features cli,epub -- -D warnings
+
       # #509 regression guard: writer/feature-owned crates (zip, zopfli,
       # jpeg-encoder, clap, …) must not leak into the default (decode-only)
       # dependency tree. Part of the required Lint gate on purpose.

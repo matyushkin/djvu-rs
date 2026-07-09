@@ -10,6 +10,7 @@ run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --check
 run cargo clippy --all-targets -- -D warnings
+run cargo clippy --all-targets --features cli,epub -- -D warnings  # pdf/epub writers (#509)
 run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
 run cargo build --no-default-features                       # no_std (host)
 
