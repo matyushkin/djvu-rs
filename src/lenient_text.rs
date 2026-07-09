@@ -14,10 +14,7 @@
 //! U+FFFD. Structural parsing (chunk layout, BZZ, zone records) stays strict.
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::Cow,
-    string::{String, ToString},
-};
+use alloc::{borrow::Cow, string::String};
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
@@ -60,19 +57,23 @@ pub(crate) fn decode_lossy(bytes: &[u8]) -> Cow<'_, str> {
 
 /// Convenience: owned-`String` form of [`decode_lossy`].
 pub(crate) fn decode_lossy_string(bytes: &[u8]) -> String {
-    decode_lossy(bytes).to_string()
+    // into_owned(), not to_string(): the latter re-allocates even when the
+    // Cow is already Owned — i.e. exactly on the fallback path.
+    decode_lossy(bytes).into_owned()
 }
 
 /// Map one Windows-1252 byte to its Unicode character.
 ///
 /// `0x00..=0x7F` is ASCII and `0xA0..=0xFF` coincides with Latin-1 (= the
-/// first 256 Unicode code points); only `0x80..=0x9F` needs a table. The five
-/// bytes CP1252 leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) become
-/// U+FFFD REPLACEMENT CHARACTER.
+/// first 256 Unicode code points); only `0x80..=0x9F` needs a table. The
+/// table matches the WHATWG `windows-1252` index (what browsers'
+/// `TextDecoder` uses): the five bytes CP1252 leaves undefined (0x81, 0x8D,
+/// 0x8F, 0x90, 0x9D) pass through as their C1 control code points, so the
+/// decoding is total and standard-shaped.
 fn cp1252_char(b: u8) -> char {
     const C1: [char; 32] = [
         '\u{20AC}', // 0x80 €
-        '\u{FFFD}', // 0x81 (undefined)
+        '\u{0081}', // 0x81 (undefined in CP1252 — C1 pass-through per WHATWG)
         '\u{201A}', // 0x82 ‚
         '\u{0192}', // 0x83 ƒ
         '\u{201E}', // 0x84 „
@@ -84,10 +85,10 @@ fn cp1252_char(b: u8) -> char {
         '\u{0160}', // 0x8A Š
         '\u{2039}', // 0x8B ‹
         '\u{0152}', // 0x8C Œ
-        '\u{FFFD}', // 0x8D (undefined)
+        '\u{008D}', // 0x8D (undefined — C1 pass-through)
         '\u{017D}', // 0x8E Ž
-        '\u{FFFD}', // 0x8F (undefined)
-        '\u{FFFD}', // 0x90 (undefined)
+        '\u{008F}', // 0x8F (undefined — C1 pass-through)
+        '\u{0090}', // 0x90 (undefined — C1 pass-through)
         '\u{2018}', // 0x91 '
         '\u{2019}', // 0x92 '
         '\u{201C}', // 0x93 "
@@ -100,7 +101,7 @@ fn cp1252_char(b: u8) -> char {
         '\u{0161}', // 0x9A š
         '\u{203A}', // 0x9B ›
         '\u{0153}', // 0x9C œ
-        '\u{FFFD}', // 0x9D (undefined)
+        '\u{009D}', // 0x9D (undefined — C1 pass-through)
         '\u{017E}', // 0x9E ž
         '\u{0178}', // 0x9F Ÿ
     ];
@@ -140,10 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn undefined_cp1252_bytes_become_replacement() {
+    fn undefined_cp1252_bytes_pass_through_as_c1_controls() {
+        // WHATWG windows-1252 behavior (browsers' TextDecoder): the five
+        // undefined bytes map to their C1 control code points, not U+FFFD.
         assert_eq!(
             decode_lossy_string(b"\x81\x8D\x8F\x90\x9D"),
-            "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+            "\u{0081}\u{008D}\u{008F}\u{0090}\u{009D}"
         );
     }
 

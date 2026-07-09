@@ -333,11 +333,15 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
         return Err(TextError::TextOverflow);
     }
     let text_bytes = data.get(pos..text_end).ok_or(TextError::TextOverflow)?;
-    let full_text = match core::str::from_utf8(text_bytes) {
-        Ok(s) => FullText::Utf8(s),
-        Err(_) => FullText::Legacy(text_bytes),
+    // One validation pass decides both views (review of #524: don't scan a
+    // multi-megabyte blob twice).
+    let (full_text, text) = match core::str::from_utf8(text_bytes) {
+        Ok(s) => (FullText::Utf8(s), s.to_string()),
+        Err(_) => (
+            FullText::Legacy(text_bytes),
+            crate::lenient_text::decode_lossy(text_bytes).into_owned(),
+        ),
     };
-    let text = crate::lenient_text::decode_lossy(text_bytes).to_string();
     pos = text_end;
 
     // Consume version byte (if present)
@@ -506,8 +510,13 @@ fn parse_zone(
 ///
 /// UTF-8 text clamps to valid char boundaries to avoid panics on multi-byte
 /// chars. Legacy (non-UTF-8) text slices the on-disk bytes exactly and
-/// decodes the slice leniently (#524) — a slice edge that happens to split a
-/// multi-byte sequence just decodes those bytes as CP1252.
+/// decodes the slice leniently (#524). Known tradeoff: when a legacy blob
+/// contains a valid multi-byte UTF-8 run and a zone edge lands inside it,
+/// that zone's text decodes the split bytes as CP1252 and can genuinely
+/// differ from the same region of [`TextLayer::text`] (e.g. a zone covering
+/// the second byte of "é" reads "©"). Byte-exact offsets for the dominant
+/// pure-CP1252 case are worth that edge; no panic, no out-of-bounds either
+/// way. Pinned by `test_legacy_zone_split_of_utf8_run_diverges`.
 fn extract_text_slice(full_text: &FullText<'_>, start: usize, len: usize) -> String {
     match *full_text {
         FullText::Utf8(text) => {
@@ -526,7 +535,7 @@ fn extract_text_slice(full_text: &FullText<'_>, start: usize, len: usize) -> Str
         FullText::Legacy(bytes) => {
             let end = start.saturating_add(len).min(bytes.len());
             let start = start.min(end);
-            crate::lenient_text::decode_lossy(&bytes[start..end]).to_string()
+            crate::lenient_text::decode_lossy(&bytes[start..end]).into_owned()
         }
     }
 }
@@ -639,6 +648,25 @@ mod tests {
     fn test_extract_text_slice_empty() {
         assert_eq!(extract_text_slice(&FullText::Utf8(""), 0, 0), "");
         assert_eq!(extract_text_slice(&FullText::Utf8("abc"), 1, 0), "");
+    }
+
+    #[test]
+    fn test_legacy_zone_split_of_utf8_run_diverges() {
+        // Documented tradeoff (#524 review): blob = valid UTF-8 "é" + "A" +
+        // stray 0x96 → whole blob is invalid, Legacy mode. A zone edge inside
+        // the "é" run decodes the split byte as CP1252 ("©") and differs from
+        // the whole-text view ("éA–"). This pins the tradeoff so a future
+        // change that alters it does so deliberately.
+        let bytes = [0xC3, 0xA9, b'A', 0x96];
+        let t = FullText::Legacy(&bytes);
+        assert_eq!(
+            crate::lenient_text::decode_lossy(&bytes).as_ref(),
+            "\u{E9}A\u{2013}"
+        );
+        assert_eq!(extract_text_slice(&t, 1, 1), "\u{A9}");
+        // Aligned slices still decode cleanly.
+        assert_eq!(extract_text_slice(&t, 0, 2), "\u{E9}");
+        assert_eq!(extract_text_slice(&t, 3, 1), "\u{2013}");
     }
 
     #[test]
