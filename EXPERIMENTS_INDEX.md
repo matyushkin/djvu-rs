@@ -268,16 +268,18 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#439 proportional fg/bg blend in color area-avg~~ **DONE (Kept, quality)** → COLOR_AA · ~~#440 PAR-DEC parallel layer decode~~ **DONE (Kept, −22% cold)** → PAR_DEC
 
 **P3:**
-- #441 hoist NEON splat consts in IDWT · ~~#442 NEON s=2 row pass in IW44 IDWT~~ **REJECTED (incorrect premise: s==2 implies sd==1)** → IDWT_S2_NEON
+- ~~#441 hoist NEON splat consts in IDWT~~ **REVERTED (movi is free in the ALU-bound loop, no benefit)** → IDWT_SPLAT · ~~#442 NEON s=2 row pass in IW44 IDWT~~ **REJECTED (incorrect premise: s==2 implies sd==1)** → IDWT_S2_NEON
 - ~~#443 F2 fast path for non-identity gamma~~ **DONE (Kept, safe ext)** → F2_GAMMA · ~~#444 cache parsed FGbz palette~~ **REVERTED (+1%, 21-byte chunk)** → FGPAL_CACHE
 - ~~#445 rolling 1-bit register in decode_ref_row~~ **REVERTED (col_shift unbounded, no benefit)** → REFROW_REG · ~~#446 O(1) dedup in cluster_shared_symbols~~ **DONE (Kept, O(P²)→O(P))** → CLUSTER_DEDUP
 - ~~#447 cache-tiled transpose in rotate_pixmap~~ **DONE (Kept, ~2–6%)** → ROTATE_TILE · ~~#448 Lanczos3 vertical-pass weight precompute~~ **DONE (Kept, −22.5%)** → LANCZOS_HOIST
 - ~~#449 PDF streaming render-and-emit~~ **DONE (Kept, strictly ≤ peak)** → PDF_STREAM
 
-**Pre-existing (not from swarm):** #422 bilinear chroma upsampling · #423 Lanczos-3 resampling option
+**Pre-existing (not from swarm):** ~~#422 bilinear chroma upsampling~~ **DONE (Kept, quality — chroma_half pages)** → CHROMA_BILINEAR · ~~#423 Lanczos-3 resampling option~~ **DONE (shipped; D2 verdict: decisively better than bilinear, SSIM 0.99 vs 0.86–0.96)** → QUALITY_HARNESS_D1
 
-**Still open from prior analysis (no issue yet):** JB2 byte-cost estimator before cross-size emit
-(#301; JB2_CROSS6 was +4% size — need cost model first). ~~IW44 quantization/slice-budget increase
+**From prior analysis:** ~~JB2 byte-cost estimator before cross-size emit (#301; JB2_CROSS6 was
++4% size — need cost model first)~~ **CLOSED: #301 built the estimator (2026-05-17), but the #322
+real emitter still lost +4.37% — cross-size rec-6 is dead in lossless and lossy form; the lever
+that won is same-size rec-6 (SAME_SIZE_REC6 / LOSSY_B_SHIP)**. ~~IW44 quantization/slice-budget increase
 for fine bands (IW44_DIAG)~~ **CLOSED by IW44_SLICE_RD (round 18):** the RD curve shows
 `total_slices=100` is at the knee and avg_abs=8.72 is the transform's quantization floor, not
 slice starvation — more slices explode size for ≤0.003 SSIM.
@@ -297,6 +299,20 @@ PAR_PAGE_LAYERS round-56 stage split), **#560** (rotation fusing → round-8 C2 
 **#564** (near-size lossy matching → LOSSY_B1 "not re-attempted" + LOSSY_B0
 saturation). That failure mode is why the addendum below and the maintenance rule at
 the top exist.
+
+**2026-07-10 rerank (same-day follow-up).** #88 reopened as **P1**: the `bench.yml` PR gate is
+silently broken end-to-end (baseline extracted to `baseline/` but compared at
+`baseline/target/criterion`; bench steps `continue-on-error`; a real regression kills the compare
+step under bash `-e` before `regression_exit` is written, so "Fail on regression" is skipped;
+empty current results return 0 — found in the wild by ZP_U64, round 55). Priority moves:
+#559 P2→P1 (PDF flattens coloured foreground to black — silent fidelity loss), #562 P1→P2
+(blocked on mixed-layout fixtures), #558 P3→P2 (now gates #562/#569–#571/#591–#593/#603),
+#575/#598 P3→P2 (parallel quick wins), #566 P2→P3 (undecidable below the round-55 noise floor;
+waits on #557, which itself waits on the #88 repair). Scope split: #599 owns EPUB/CBZ PNG
+colour-type payloads (RGB + Gray8), #580 keeps adaptive PNG/JPEG only. New experiment issue:
+#612 — build the FGbz palette from encoder blit metadata instead of `foreground_fgbz`'s
+decode-after-encode round-trip. Stale rows in "Open Hypotheses" above (#441, #422/#423, #301)
+struck through the same day.
 
 ---
 
