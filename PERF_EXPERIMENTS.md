@@ -10947,3 +10947,22 @@ half-resolution-chroma decode case; future chroma-quality work must start from a
 whose plane dimensions DjVuLibre confirms, rather than from the `delay_byte` high bit alone.
 The legacy encoder `chroma_half` option is retained as a source-compatible no-op so it cannot
 produce a stream that the corrected decoder (or DjVuLibre) misreads.
+
+## Perf round 58 (2026-07-10) — BENCH_GATE: repair the Criterion PR regression gate (#88)
+
+### #88 — fail closed on missing results and regressions — **Fixed** (2026-07-10)
+
+**Approach.** The PR workflow downloaded the artifact root to `baseline/` but compared
+`baseline/target/criterion`, ignored both Criterion bench failures, and lost the compare exit
+under `bash -e` before its output was written. The workflow now compares `baseline` directly,
+requires the two Criterion benches to succeed, captures the compare exit explicitly before
+posting its comment, then fails the job on every non-zero status. `bench_compare.py` returns 2
+instead of success when the current run has no Criterion estimates; a missing baseline remains a
+non-failing first-run report.
+
+**Validation.** `actionlint .github/workflows/bench.yml` passes. A missing-current probe exits 2;
+`python3 scripts/bench_compare.py target/criterion target/criterion` exits 0 and reports no
+regressions. The PR's CI run is the end-to-end validation of artifact download and exit plumbing.
+
+**Decision.** Fixed. #557 may now build its instruction-count artifact channel on fail-closed
+compare semantics rather than duplicating the former fail-open workflow.

@@ -52,8 +52,8 @@ def main() -> int:
     current = load_results(current_dir) if current_dir.exists() else {}
 
     if not current:
-        print("No benchmark results found in current run.")
-        return 0
+        print("No benchmark results found in current run.", file=sys.stderr)
+        return 2
 
     if not baseline:
         print("### Benchmark results (no baseline for comparison)\n")
