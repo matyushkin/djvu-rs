@@ -10945,3 +10945,5 @@ bit. `cargo test -p djvu-iw44` passed 49 tests plus one doctest (one diagnostic 
 upsampling bug. It also supersedes #422/`CHROMA_BILINEAR`'s assumption that `carte` was a valid
 half-resolution-chroma decode case; future chroma-quality work must start from a verified stream
 whose plane dimensions DjVuLibre confirms, rather than from the `delay_byte` high bit alone.
+The legacy encoder `chroma_half` option is retained as a source-compatible no-op so it cannot
+produce a stream that the corrected decoder (or DjVuLibre) misreads.

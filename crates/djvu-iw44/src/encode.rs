@@ -1300,7 +1300,11 @@ pub struct Iw44EncodeOptions {
     pub total_slices: u8,
     /// Chroma delay — Y slices before Cb/Cr encoding begins (default 0).
     pub chroma_delay: u8,
-    /// Encode chroma at half resolution (default true).
+    /// Legacy no-op retained for source compatibility.
+    ///
+    /// IW44 v1.2 colour streams always use full-resolution chroma planes;
+    /// half-resolution output is not interoperable with DjVuLibre and is no
+    /// longer emitted, regardless of this value.
     pub chroma_half: bool,
     /// Encode-stopping criterion. Default: [`Iw44Target::Slices`] (encode all
     /// `total_slices`, byte-identical to pre-target versions).
@@ -1343,7 +1347,11 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
 
     let mut y_plane = vec![0i16; stride * plane_h];
 
-    let (cw, ch) = if opts.chroma_half {
+    // `chroma_half` remains in the public options for source compatibility,
+    // but its old half-plane encoding was not a valid IW44 v1.2 stream: both
+    // DjVuLibre and our corrected decoder consume full-resolution Cb/Cr.
+    let chroma_half = false;
+    let (cw, ch) = if chroma_half {
         (w.div_ceil(2), h.div_ceil(2))
     } else {
         (w, h)
@@ -1359,7 +1367,7 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
     //
     // Single pass: compute Y for every pixel; if chroma_half, accumulate 2×2
     // box-filter for Cb/Cr (matches DjVuLibre's chroma downsampling).
-    if opts.chroma_half {
+    if chroma_half {
         // Single pass: fill Y and accumulate 2×2 box-filter chroma (matches
         // DjVuLibre's c44 downsampling).  Each chroma output cell receives
         // contributions from up to 4 source pixels with weight 16 each, so
@@ -1579,13 +1587,9 @@ fn encode_chunks(
             chunk.push(width as u8);
             chunk.push((height >> 8) as u8);
             chunk.push(height as u8);
-            // delay_byte: bits 0-6 = chroma_delay, bit 7 = !chroma_half
-            let delay_byte = (opts.chroma_delay & 0x7F)
-                | if is_color && !opts.chroma_half {
-                    0x80
-                } else {
-                    0x00
-                };
+            // delay_byte: bits 0-6 = chroma_delay, bit 7 advertises the
+            // full-resolution chroma planes required by IW44 v1.2.
+            let delay_byte = (opts.chroma_delay & 0x7F) | if is_color { 0x80 } else { 0x00 };
             chunk.push(delay_byte);
         } else {
             chunk.push(serial);
@@ -2261,17 +2265,18 @@ mod tests {
         assert!(avg < 30.0, "avg gray abs error = {avg:.2} (expected < 30)");
     }
 
-    // Lines 1230, 1261-1268, 1441: chroma_half=false path in encode_iw44_color.
+    // The legacy chroma_half option must still emit a full-resolution,
+    // interoperable stream and round-trip through the decoder.
     #[test]
-    fn encode_color_chroma_full_roundtrips() {
+    fn encode_color_legacy_chroma_half_stays_full_resolution() {
         let src = make_pixmap(32, 32, |x, y| ((x * 8) as u8, (y * 8) as u8, 128));
         let opts = Iw44EncodeOptions {
-            chroma_half: false,
+            chroma_half: true,
             ..Default::default()
         };
         let chunks = encode_iw44_color(&src, &opts);
         assert!(!chunks.is_empty());
-        // delay_byte bit 7 should be set (0x80) for color + !chroma_half
+        // delay_byte bit 7 must still advertise full-resolution chroma.
         assert_eq!(chunks[0][8] & 0x80, 0x80, "delay_byte bit 7 must be set");
         let decoded = decode_color(&chunks);
         assert_eq!((decoded.width, decoded.height), (32, 32));
