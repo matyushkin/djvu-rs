@@ -210,7 +210,7 @@ let chunks: Vec<Vec<u8>> = encode_iw44_gray(&gray, &Iw44EncodeOptions::default()
 | `slices_per_chunk` | 10 | Slices packed into each BG44/FG44 chunk |
 | `total_slices` | 100 | Total refinement slices to encode |
 | `chroma_delay` | 0 | Y slices before Cb/Cr encoding begins |
-| `chroma_half` | true | Encode chroma at half resolution |
+| `chroma_half` | false | Legacy no-op; IW44 v1.2 always emits full-resolution chroma |
 
 ### Bookmark encoder
 
