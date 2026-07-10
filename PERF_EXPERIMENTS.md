@@ -10907,3 +10907,41 @@ state and the chunk order is unchanged. Gated to the opt-in `parallel` feature l
 PAR_SEGMENT/PAR_ENCODE. Closes the issue-#496 loop: the fixture that finally resolved
 it is the **composited** render, not a bigger BG44-layer decode — future colour-encode
 micro-parallelism should be measured on `encode_color_page_quality_bgheavy` first.
+
+## Perf round 57 (2026-07-10) — CARTE_CHROMA_HEADER: IW44 v1.2 chroma-plane interpretation (#561)
+
+### #561 — decode `carte.djvu` chroma with full-resolution planes — **Fixed** (2026-07-10)
+
+**Issue.** `carte.djvu` was the corpus outlier in `examples/interop_pixdiff`: mean absolute
+RGB error **73.76/255** against DjVuLibre, while every other control was below 0.3. The old
+decoder read a clear high bit in an IW44 v1.2 `delay_byte` as `chroma_half`, allocated
+700×426 Cb/Cr planes for the file's 1400×852 BG44 image, and therefore fed a different
+adaptive-ZP bucket layout from the stream's actual full-resolution chroma payload.
+
+**Approach.** Treat IW44 v1.2 colour planes as full resolution irrespective of that bit. This
+matches DjVuLibre's `IWPixmap::decode_chunk` behaviour recorded in the encoder interop audit:
+it always builds and consumes full-resolution Cb/Cr planes. The change is confined to first-
+chunk header interpretation in `Iw44Image::decode_chunk`; no wavelet or colour-conversion math
+changes. The old `carte` test was a noisy self-consistency golden; it is replaced by assertions
+for full-size chroma allocation and a fixed FNV-1a digest of the corrected background pixels.
+
+**Platform / commands.** macOS 26.5.1, Apple Silicon host, Rust 1.92.0
+(`aarch64-apple-darwin`), release interop harness and debug test profile:
+
+```sh
+cargo run --release --example interop_pixdiff -- tests/fixtures/carte.djvu
+cargo run --release --example interop_pixdiff -- --corpus
+cargo test -p djvu-iw44
+make check
+```
+
+**Numbers.** The targeted render changes from mean |Δ| **73.76 → 0.53/255**; p50 60→0,
+p95 191→2, p99 210→6, and only 0.01% of channels differ by more than 32. The corpus control
+run remains at watchmaker 0.03, cable 0.01, colorbook 0.14, navm_fgbz 0.00, and boy 0.00 mean
+absolute difference; no non-carte control changes because their headers already set the high
+bit. `cargo test -p djvu-iw44` passed 49 tests plus one doctest (one diagnostic ignored).
+
+**Decision.** Fixed. This is a header-interpretation defect, not an inverse-DWT or coordinate-
+upsampling bug. It also supersedes #422/`CHROMA_BILINEAR`'s assumption that `carte` was a valid
+half-resolution-chroma decode case; future chroma-quality work must start from a verified stream
+whose plane dimensions DjVuLibre confirms, rather than from the `delay_byte` high bit alone.
