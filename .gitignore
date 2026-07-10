@@ -38,3 +38,6 @@ examples/wasm/pkg/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# Serena local project state (user-specific, never shared)
+/.serena/
