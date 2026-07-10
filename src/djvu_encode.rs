@@ -483,13 +483,22 @@ impl<'a> PageEncoder<'a> {
                 let seg = segment_page(pm, &segment_options);
                 // Use the dictionary encoder for color profiles so FGbz can
                 // address foreground colors per blitted component.
-                let sjbz = jb2_encode::encode_jb2_dict_with_options(
-                    &seg.mask,
-                    &[],
-                    &self.jb2_options.unwrap_or_default(),
+                // Given `seg`, the Sjbz (JB2 mask) and BG44 (IW44 background)
+                // layers are fully independent — FGbz needs the finished Sjbz
+                // and stays after — so with the `parallel` feature they encode
+                // concurrently (PAR_PAGE_LAYERS). Byte-identical either way.
+                let jb2_options = self.jb2_options.unwrap_or_default();
+                let iw44_options = self.iw44_options.unwrap_or_default();
+                #[cfg(feature = "parallel")]
+                let (sjbz, bg44_chunks) = rayon::join(
+                    || jb2_encode::encode_jb2_dict_with_options(&seg.mask, &[], &jb2_options),
+                    || encode_iw44_color(&seg.bg, &iw44_options),
                 );
-                let bg44_chunks =
-                    encode_iw44_color(&seg.bg, &self.iw44_options.unwrap_or_default());
+                #[cfg(not(feature = "parallel"))]
+                let (sjbz, bg44_chunks) = (
+                    jb2_encode::encode_jb2_dict_with_options(&seg.mask, &[], &jb2_options),
+                    encode_iw44_color(&seg.bg, &iw44_options),
+                );
                 let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None, self.fgbz_options);
 
                 let mut chunks =

@@ -10845,3 +10845,65 @@ finding for this repo's benchmark infra — small (<10%) single/double-sample
 wins on either the shared x86 CI runners or short local M1 runs should not
 be trusted without ≥4–5 independent samples and an explicit check for
 sign-consistency.
+
+## Perf round 56 (2026-07-10) — PAR_PAGE_LAYERS third attempt on a true BG-heavy fixture (#496)
+
+Issue #496 asked for a BG-heavy single-page colour fixture to make the twice-reverted
+PAR_PAGE_LAYERS (`rayon::join` of the independent Sjbz/JB2 and BG44/IW44 layers in
+`PageEncoder::encode`) measurable. The prior attempts failed for two reasons this
+round fixes: (1) the existing colour-encode benches feed `PageEncoder` a decode of
+the **BG44 layer only** (`load_color_pixmaps`), which re-segments to a nearly empty
+mask + smooth background — neither layer is substantial; (2) the 2026-07-04 criterion
+A/B ran a 400 ms × 100-sample bench back-to-back and drowned in thermal throttle
+(±13% swing on identical code).
+
+### Fixture search (fresh, both layers timed per page)
+
+A probe timed `segment_page` + `encode_jb2_dict` + `encode_iw44_color` separately on
+every colorbook page, first on the BG44-layer decode (matching the existing benches),
+then on the **full composited render** (`render_pixmap` at native resolution — the
+"picture page decoded to a full-resolution Pixmap" the issue meant):
+
+- BG44-layer decode: the "BG-dominant by bytes" pages (98% BG44 share) are near-blank
+  (Sjbz 5–6 B); every page's iw44/jb2 time ratio ≤ 0.40 with IW44 ≈ 0.2 ms absolute —
+  nothing to overlap. Confirms the 07-04 finding on the old pipeline.
+- Full composited render (2215×3669): layers become substantial. Best page = **58**:
+  jb2 7.8 ms, iw44 1.8 ms, seg 21 ms, re-encoded BG44 byte share 34% (highest in the
+  corpus; iw44/jb2 0.23). Still JB2-leaning — no true photo page exists in the corpus —
+  but the overlap (`min(jb2, iw44)` ≈ 1.8 ms of a ~40 ms encode) is finally above noise.
+
+### PAR_PAGE_LAYERS (3rd attempt) — **Kept** (2026-07-10)
+
+**Approach.** New bench **`encode_color_page_quality_bgheavy`** (benches/codecs.rs):
+colorbook page 58 composited at native resolution via the new `load_rendered_page`
+helper, full `PageEncoder::from_pixmap(...).with_quality(Quality).encode()`. Then the
+same change as rounds 2/4: `#[cfg(feature = "parallel")] rayon::join(|| sjbz, || bg44)`
+in the Quality/Archival arm of `PageEncoder::encode`, sequential fallback otherwise
+(`src/djvu_encode.rs`). FGbz needs the finished Sjbz and stays after the join.
+
+**Platform / command.** Apple M1 Max, Rust stable, `[profile.bench]`. Baseline = clean
+tree via `git stash push -- src/djvu_encode.rs`; the ~8 s criterion run (40 ms × 200
+iterations) is short enough to stay out of the thermal-throttle regime that
+contaminated the 07-04 attempt:
+
+```sh
+cargo bench --features parallel --bench codecs -- encode_color_page_quality_bgheavy --save-baseline pl_before
+# apply change, then:
+cargo bench --features parallel --bench codecs -- encode_color_page_quality_bgheavy --baseline pl_before
+```
+
+**Numbers (two independent baseline/compare pairs):**
+
+| Benchmark | Run 1 | Run 2 |
+|---|---:|---:|
+| `encode_color_page_quality_bgheavy` (colorbook p58 composited) | **−4.26%** (p = 0.00, CI −5.0…−3.5%) | **−5.18%** (p = 0.00, CI −6.1…−4.2%) |
+| `encode_color_page_quality` (JB2-dominated, regression check) | −1.1% (p = 0.13, no change) | — |
+
+**Decision.** Kept — both runs p < 0.05 with consistent sign and magnitude matching
+the predicted `min(jb2, iw44)` overlap; the JB2-dominated bench shows no regression
+(the join is µs-overhead). Byte-identical output verified (FNV-1a over the full
+container, `parallel` on vs off: identical), as expected — the two closures share no
+state and the chunk order is unchanged. Gated to the opt-in `parallel` feature like
+PAR_SEGMENT/PAR_ENCODE. Closes the issue-#496 loop: the fixture that finally resolved
+it is the **composited** render, not a bigger BG44-layer decode — future colour-encode
+micro-parallelism should be measured on `encode_color_page_quality_bgheavy` first.
