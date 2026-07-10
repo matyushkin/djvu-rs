@@ -739,6 +739,41 @@ fn bench_encode_color_page_quality(c: &mut Criterion) {
     });
 }
 
+/// Decode one page to a full-resolution *composited* Pixmap (mask + FG + BG
+/// via `render_pixmap`), unlike `load_color_pixmaps` which decodes the BG44
+/// background layer only. The composited render keeps the picture content in
+/// the pixmap, so the re-encode's Sjbz/BG44 split is as BG-heavy as the
+/// corpus allows (issue #496).
+fn load_rendered_page(path: &std::path::Path, page_index: usize) -> Option<djvu_rs::Pixmap> {
+    let data = std::fs::read(path).ok()?;
+    let doc = djvu_rs::DjVuDocument::parse(&data).ok()?;
+    let page = doc.page(page_index).ok()?;
+    let opts = djvu_rs::djvu_render::RenderOptions::fit_to_width(page, u32::from(page.width()));
+    djvu_rs::djvu_render::render_pixmap(page, &opts).ok()
+}
+
+/// Full single-page colour encode on the most BG-heavy page available
+/// (issue #496): colorbook page 58 composited at native resolution
+/// (2215×3669). Of all corpus pages it has the highest re-encoded BG44
+/// byte share (~34%) and the highest IW44/JB2 encode-time ratio (~0.23),
+/// so it is the fixture where layer-level parallelism (PAR_PAGE_LAYERS,
+/// the Sjbz ∥ BG44 `rayon::join`) is largest relative to the total encode.
+fn bench_encode_color_page_quality_bgheavy(c: &mut Criterion) {
+    let Some(pm) = load_rendered_page(&assets_path().join("colorbook.djvu"), 58) else {
+        eprintln!("skipping bench_encode_color_page_quality_bgheavy: colorbook.djvu missing");
+        return;
+    };
+    c.bench_function("encode_color_page_quality_bgheavy", |b| {
+        b.iter(|| {
+            let _ = black_box(
+                djvu_rs::djvu_encode::PageEncoder::from_pixmap(black_box(&pm))
+                    .with_quality(djvu_rs::djvu_encode::EncodeQuality::Quality)
+                    .encode(),
+            );
+        });
+    });
+}
+
 /// Full single-page colour encode on the largest available page
 /// (`big-scanned-page.djvu`, 6780×9148). Exercises the same Quality path as
 /// `bench_encode_color_page_quality` but with a JB2/IW44 split large enough in
@@ -917,6 +952,7 @@ criterion_group!(
     bench_jb2_encode_dict,
     bench_segment_page_color,
     bench_encode_color_page_quality,
+    bench_encode_color_page_quality_bgheavy,
     bench_encode_color_page_quality_large,
     bench_encode_djvm_layered_shared,
     bench_encode_djvm_bundle_jb2,
