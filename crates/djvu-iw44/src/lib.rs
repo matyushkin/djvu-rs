@@ -3200,7 +3200,12 @@ impl Iw44Image {
             let h = u16::from_be_bytes([data[6], data[7]]);
             let delay_byte = data[8];
             let delay = if minor >= 2 { delay_byte & 127 } else { 0 };
-            let chroma_half = minor >= 2 && (delay_byte & 0x80) == 0;
+            // IW44 v1.2 streams store full-resolution Cb/Cr planes.  In
+            // particular, a clear high bit here is not a half-resolution-plane
+            // signal: DjVuLibre decodes `carte.djvu` with full-resolution
+            // chroma.  Treating it as one desynchronizes the adaptive ZP
+            // streams and turns the chroma into plausible-looking noise.
+            let chroma_half = false;
 
             if w == 0 || h == 0 {
                 return Err(Iw44Error::ZeroDimension);
@@ -4162,14 +4167,14 @@ mod tests {
         );
     }
 
-    // ── chroma_half allocation test ──────────────────────────────────────────
+    // ── v1.2 chroma-plane header interpretation ─────────────────────────────
 
-    /// When `chroma_half=true`, chroma planes must be allocated at half
-    /// resolution (ceil(w/2) × ceil(h/2)), not at full luma resolution.
-    ///
-    /// carte.djvu is a color image with chroma_half=true (w=1400, h=852).
+    /// IW44 v1.2's delay-byte high bit does not make the Cb/Cr planes half
+    /// resolution.  `carte.djvu` has that bit clear but DjVuLibre decodes its
+    /// full-resolution chroma planes; allocating them at half size desynchronizes
+    /// their ZP streams into chroma noise.
     #[test]
-    fn chroma_half_allocates_half_size_plane() {
+    fn carte_v12_allocates_full_size_chroma_planes() {
         let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu not found");
         let file = djvu_iff::parse(&data).expect("iff parse");
         let chunks = extract_bg44_chunks(&file);
@@ -4179,32 +4184,32 @@ mod tests {
         img.decode_chunk(chunks[0]).expect("decode_chunk");
 
         assert!(img.is_color(), "carte.djvu must be a color image");
-        assert!(img.chroma_half(), "carte.djvu must have chroma_half=true");
+        assert!(
+            !img.chroma_half(),
+            "v1.2 chroma planes must stay full resolution"
+        );
         let (cw, ch) = img
             .chroma_plane_dims()
             .expect("chroma plane must be allocated after first color chunk");
         let lw = img.width as usize;
         let lh = img.height as usize;
-        let expected_w = lw.div_ceil(2);
-        let expected_h = lh.div_ceil(2);
+        let expected_w = lw;
+        let expected_h = lh;
         assert_eq!(
             cw, expected_w,
-            "chroma plane width must be ceil(luma_w/2)={expected_w}, got {cw}"
+            "chroma plane width must equal luma_w={expected_w}, got {cw}"
         );
         assert_eq!(
             ch, expected_h,
-            "chroma plane height must be ceil(luma_h/2)={expected_h}, got {ch}"
+            "chroma plane height must equal luma_h={expected_h}, got {ch}"
         );
     }
 
-    /// Decode carte.djvu (chroma_half=true color image) fully and exercise the
-    /// half-resolution chroma-plane allocation path, comparing against a golden
-    /// snapshot for self-consistency. See the note at the `assert_ppm_match`
-    /// call below: this fixture currently decodes to noise (a separate, known
-    /// issue), so the golden pins decoder stability, not visual correctness.
-    /// Visual chroma-half correctness is covered at the document level vs ddjvu.
+    /// Decode the real v1.2 `carte.djvu` stream with full-resolution chroma.
+    /// The fixed digest prevents a regression back to the half-plane
+    /// interpretation that yielded chroma noise.
     #[test]
-    fn iw44_new_decode_carte_bg_chroma_half() {
+    fn iw44_new_decode_carte_bg_full_chroma() {
         let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu not found");
         let file = djvu_iff::parse(&data).expect("iff parse");
         let chunks = extract_bg44_chunks(&file);
@@ -4217,24 +4222,13 @@ mod tests {
         assert_eq!(img.height, 852);
 
         let pm = img.to_rgb().expect("to_rgb failed");
-        // NOTE: carte.djvu is a problematic fixture — this crate's standalone
-        // decode of its background produces noise (the committed golden has
-        // pinned that noise since #99). (`DjVuDocument::parse` used to reject
-        // this file outright as truncated IFF too — that was a separate bug,
-        // a too-strict INFO-chunk length check, fixed in `src/info.rs`;
-        // ddjvu has always rendered the file cleanly, confirming the fixture
-        // itself is intact.) Whatever the root cause of the chroma noise
-        // (ddjvu renders the file cleanly), it is independent of the
-        // slice-loop early-exit removed in 2026-06; that change only shifts
-        // the existing noise. The golden was regenerated from the corrected
-        // decoder so this self-consistency check stays green. See
-        // PERF_EXPERIMENTS.md.
-        //
-        // Regenerated again for #422: carte is the only chroma_half fixture, so
-        // its decode now reflects bilinear chroma upsampling (was nearest). The
-        // upsampler's correctness is covered directly by
-        // `upsample_chroma_row_bilinear_values`; this remains a determinism check.
-        assert_ppm_match(&pm.to_ppm(), "carte_bg.ppm");
+        let hash = pm.data.iter().fold(0xcbf29ce484222325u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        assert_eq!(
+            hash, 0x2118_2ba8_f124_2124,
+            "carte full-chroma pixel digest"
+        );
     }
 
     // ── Error path tests ────────────────────────────────────────────────────
