@@ -274,7 +274,10 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 - ~~#447 cache-tiled transpose in rotate_pixmap~~ **DONE (Kept, ~2–6%)** → ROTATE_TILE · ~~#448 Lanczos3 vertical-pass weight precompute~~ **DONE (Kept, −22.5%)** → LANCZOS_HOIST
 - ~~#449 PDF streaming render-and-emit~~ **DONE (Kept, strictly ≤ peak)** → PDF_STREAM
 
-**Pre-existing (not from swarm):** ~~#422 bilinear chroma upsampling~~ **DONE (Kept, quality — chroma_half pages)** → CHROMA_BILINEAR · ~~#423 Lanczos-3 resampling option~~ **DONE (shipped; D2 verdict: decisively better than bilinear, SSIM 0.99 vs 0.86–0.96)** → QUALITY_HARNESS_D1
+**Pre-existing (not from swarm):** ~~#422 bilinear chroma upsampling~~ **DONE (historical;
+superseded by #561's verified full-chroma v1.2 header interpretation)** → CHROMA_BILINEAR ·
+~~#423 Lanczos-3 resampling option~~ **DONE (shipped; D2 verdict: decisively better than
+bilinear, SSIM 0.99 vs 0.86–0.96)** → QUALITY_HARNESS_D1
 
 **From prior analysis:** ~~JB2 byte-cost estimator before cross-size emit (#301; JB2_CROSS6 was
 +4% size — need cost model first)~~ **CLOSED: #301 built the estimator (2026-05-17), but the #322
