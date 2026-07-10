@@ -2,7 +2,9 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-06.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-07-10.
+
+**Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
 ## Legend
 
@@ -14,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| PAR_PAGE_LAYERS | 2026-07-10 | encoder (single-page colour, parallel) | **K** (3rd attempt) | **−4.3…−5.2%** on new `encode_color_page_quality_bgheavy`; JB2-dominated bench unchanged | `rayon::join(Sjbz, BG44)` in `PageEncoder::encode` (`parallel` feature, byte-identical). Arc: reverted 2026-07-02 (noise — text-only fixture, jb2≫iw44) and 2026-07-04 (thermal-contaminated A/B), kept 2026-07-10 on the #496 fixture = colorbook p58 **composited** render. Key stage split there: seg 21 ms / jb2 7.8 ms / **iw44 1.8 ms** of ~40 ms — corpus has no true photo page; measure future colour-encode micro-parallelism on this bench first (this is what closed #574). Round-56 |
 | ZP_U64 | 2026-07-06 | ZP decoder (djvu-zp/jb2/iw44/bzz, `bit_buf` width) | **R** | no reproducible ≥3% win on either arch: M1 5-pair ratios span and cross zero (sign flips by pair 5); x86 CI same-code replay proved an 11.7% control-only noise spread and a 33-point swing on one bench from identical code | Reopened round-47's `X86_CI_BENCH` lead — widened `bit_buf` u32→u64 for bulk 4-byte refill in all 4 inline `refill!` sites, byte-exact throughout (556-page corpus digest identical at every stage, `pos`/EOF-padding semantics preserved, `ZP_EOF_SLACK_BYTES=16` margin intact). Two-stage rollout (iw44-only, then unified) both fully byte-exact and both fully reverted — decision hinged entirely on the honest multi-sample benchmark read, not correctness. Round-55 |
 | IW44_ENTROPY_PROBE | 2026-07-06 | IW44 encoder (size, diagnostic) | **D** | localizes Round-52's gap to band 0/DC on small pages (`corr(bytes,ratio)=−0.591` across 62 colorbook pages, worst page 1.251×); best lever (chunking) only −0.04 to −1.7%, below the 3% bar | Instrumented `PlaneEncoder` with a thread-local, decoder-unchanged `iw44-probe` feature (`djvu_iw44::encode::probe`: per-band bytes + block-band/bucket-NEW/activate/refine call-true counts), guarded by a `probe_does_not_change_output` regression test. `examples/iw44_band_probe.rs` found watchmaker (smooth) is 98.6–99.4% band-0 at ~parity, while colorbook's worst-ratio pages (61, 2, 59, 1, 60) are >79% band-0 vs its best-ratio pages (35, 36, 25, 21, 54) at ≥55% mid+fine share — reframing round-22's "textured" label as "small/DC-dominated," not "high-frequency." Candidate (a) band-dependent activation threshold: already fully closed by IW44_ACT_THRESH (round pre-5), zero slack confirmed. Candidate (b) coefficient pre-quantization: inherently PSNR-coupled (forward DWT is a tested exact i32 mirror), out of scope for a zero-PSNR probe, not attempted. Candidate (c) chunk/slice boundary layout (`slices_per_chunk`): tested {10,25,50,74,99} via `examples/iw44_chunking_lever.rs` (ddjvu-validated, 3 full pages, 0 maxΔpx) and `examples/iw44_chunking_sweep.rs` (96 real BG44 pages across 3 corpora, bit-identical decode asserted) — real but small savings (0.04–1.7%, best on small smooth pages), non-monotonic, interop-safe, left as an existing option (`Iw44EncodeOptions::slices_per_chunk`), not a new default. Root cause of the residual band-0 gap (likely encoder-vs-DjVuLibre coefficient-value differences in the forward wavelet transform) not validated — no DjVuLibre C++ source available locally to diff. Round-51 |
 | TXTZ_OCR | 2026-07-06 | encode (`PageEncoder`, opt-in text layer) | **K** (opt-in) | +2,682 B (2.62 KB) TXTz cost on watchmaker.djvu page 0 (2550×3301); 242 word zones round-trip with sane coords | New `PageEncoder::with_text_layer`/`with_ocr_text_layer` (`src/djvu_encode.rs`) — runs an `OcrBackend` on the page image during encode and appends a BZZ-compressed `TXTz` chunk; default omits it entirely (byte-identical, tested). Reused, not rebuilt: `OcrBackend::recognize` already returned the full page→line→word zone tree (PR #125), `text_encode::encode_text_layer`/`bzz_encode` already serialized it (used by PR #315's post-hoc `djvu ocr --output` mutation path) — the actual gap was `PageEncoder` having no text-layer awareness at all. New `bitmap_to_pixmap` expands bilevel sources for OCR (mirrors `examples/ocr_qa.rs`'s `mask_to_pixmap`). Real Tesseract 5.5.2 run on `watchmaker.djvu`: OCR text reads correctly, decodes back through `DjVuDocument::text_layer()`, and exports to a `/Font`-bearing PDF via the existing `pdf_with_text_layer` path with no changes. New `examples/txtz_ocr_demo.rs` + 6 unit tests. Round-51 |
@@ -41,11 +44,18 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 | IW44_SLICE_RD | 2026-07-04 | IW44 encoder (slice budget) | D | default well-tuned; no change | RD curve via D1: past 100 slices PSNR pinned (22.42/39.03 dB), SSIM +≤0.003 while size grows 2–25× (colorbook 100→150 = +1.8 MB for +0.0003 SSIM). total_slices=100 sits at the knee. Refutes IW44_DIAG "starved in 100 slices" — avg_abs=8.72 is the transform's quantization floor, not slice starvation. BG44 lever was BG_DIFFUSE (r17, smaller input), not the slice schedule. Round-35 |
 | INTEROP_ENCODE | 2026-07-04 | encoder interop (infra) | **K** (infra) | **21/21 our encodes decode in ddjvu**; real-scan fidelity mean<0.3 | `examples/interop_encode.rs` — encode → ddjvu-decode gate (unblocks masked-wavelet: "ddjvu must accept our stream"). Encode-side complement to interop_pixdiff/diff_djvulibre (decode-side). Gate: non-zero exit if ddjvu rejects. Real colour scans mean|Δ|<0.3 vs ddjvu; degenerate re-encodes (bilevel/photo-as-colour) show mask-AA edge diffs (follow-up). Round-34 |
 | LANCZOS_RGBA_ACC | 2026-07-04 | Lanczos-3 resampler | **K** | **−22 to −27% Lanczos cost** (auto-vec, bit-identical) | Both separable passes accumulated 3 scalar r/g/b from a stride-4 RGBA read, blocking LLVM auto-vec. Restructure: horizontal → `[f32;4]` per pixel over 4 contiguous bytes/tap; vertical → single interleaved `acc[dw*4]` contiguous SAXPY. Alpha lane accumulates 255, ignored. Bit-identical (digest 1154d165a6a72d7d). No unsafe / target_feature → holds on all auto-vec targets (unlike manual-NEON dead-ends #3). On top of PAR_LANCZOS + LANCZOS_HOIST. Round-33 |
+| SAME_SIZE_REC6 | 2026-07-04 | JB2 encoder (lossless size) | **K** (experimental) | watchmaker Sjbz **−11.67%** @frac 2% (−11.2/−10.65 @5/8%); pathogenic ≈0…+0.5%; all round-trips pixel-exact | A0 population gate (39.6% of text fresh CCs have a ≤5% same-bbox twin, median 0.6%; scans thin: 0.9%, median 12.9%) → A1/A2 emitter `Jb2EncodeOptions::same_size_rec6` — same-bbox lossless rec-6 refinement. First lever to beat DjVuLibre glyph matching losslessly (cross-size rec-6 #322 *lost* +4.37% on the same corpus). A3 maintainer decision: stays behind `experimental`, default byte-identical. Auto-policy: JB2_AUTO_REC6. Rounds 17–18 |
+| LOSSY_B0 | 2026-07-04 | JB2 encoder (lossy sweep) | D | text: **−21.96% Sjbz @thr 2%** (SSIM 0.99928), saturating ≈−24% @10%; scan: ≈0 below 8%, −11.23% @10% (SSIM 0.98871) | D1-harness sweep of the already-shipped same-size lossy rec-7 `lossy_threshold` (#224). Key finding: the big text lever already ships, just off by default; **diminishing returns above 2%**. Round-19 |
+| LOSSY_B1_PROBE | 2026-07-04 | JB2 encoder (cross-size lossy population) | D | cross-size (±2 px bbox, ≤5% resampled Hamming) adds 16.2% of text fresh CCs, 2.6% on scans | Also pinned the rec-7 layout constraint: decoder sizes coords by `dict[index]` dims → a cross-size copy must code by the *twin's* dims or every later glyph shifts. Round-19 |
+| LOSSY_B1 | 2026-07-04 | JB2 encoder (cross-size lossy rec-7) | **R** | dominated: same-size 2% + cross 5% = −24.81% @SSIM 0.99639 vs plain same-size 5% = −23.39% @0.99889; cross-size standalone −8.7%, worse both ways | Emitter implemented correctly (twin-dims layout, SSIM ≥0.989 everywhere) then reverted: every operating point matched/beaten by a higher same-size `lossy_threshold` with none of the machinery. **Recorded so cross-size / near-size lossy matching is not re-attempted** (this is what closed #564). Round-19 |
+| LOSSY_B_SHIP | 2026-07-04 | JB2 encoder (preset) | **K** | — | `Jb2EncodeOptions::lossy_text()` (0.02) + `with_lossy_threshold` + documented operating-point table. **Closes the JB2 size-gap plan**: same-size lossless rec-6 (experimental) + same-size lossy preset; cross-size dead in both lossless (#322) and lossy (LOSSY_B1) form. Round-19 |
+| GRAY_DIRECT_E2E | 2026-07-04 | render (gray output) | X | — | Wiring `to_gray8_subsample` into `render_gray8` rejected: would fork all three tuned RGBA row writers (P2/G1/F2/area-avg — the most-optimised code in the repo) and silently change the Rec.601 contract (DjVu Y ≠ Rec.601-of-RGB). Codec-level GRAY_DIRECT stays the interface via `page.decoded_bg44()?.to_gray8()`. Round-14 |
 | D3_BICUBIC | 2026-07-06 | render FG44 upsampling (quality) | X (no perceptible gain) | SSIM ≥0.9982 bilinear-vs-bicubic (FG-only isolated), 0.9999 whole-page; ~17% slower when enabled | Catmull-Rom bicubic swap for `sample_bilinear` in the compositor's B-series (upscale) FG44 path; measured 12.0× FG44 subsample ratio is already below the perceptual floor under bilinear. Byte-identical default, macro-hoisted flag (zero cost off), but rejected on quality grounds — not shipped, reverted from `src/djvu_render.rs`. Crops visually indistinguishable. Round-32 |
 | FGBZ_MEDIANCUT | 2026-07-06 | FGbz encoder (foreground palette) | **K** (opt-in) | synthetic fixture: FGbz −96.4% (2255B→82B), total −24.1% at k=6, SSIM −0.0031 (wash); at k≥true-colour-count SSIM matches baseline | Closes Round-31 backlog item. `foreground_fgbz` (`src/djvu_encode.rs`) previously emitted one exact palette entry per distinct per-blit average colour, bloating on scanner-noise/AA near-duplicates. New `FgbzPaletteOptions::MedianCut{max_colors}` via `PageEncoder::with_fgbz_options` runs classic median-cut quantisation + nearest-colour remap; default stays `Exact`, byte-identical (enforced by test `fgbz_mediancut_is_opt_in_default_stays_exact`). `irish.djvu` real fixture (already near-minimal 40-entry palette) shows small win only. D1 harness is luma-only (chroma blind) — compensated with before/after crops in `_pr_assets/`, visually indistinguishable at k=6/32. Not defaulted: picking `k` is content-dependent, too-small `k` (e.g. 4) does cost measurable SSIM. |
 | JB2_DESPECKLE | 2026-07-06 | JB2 encoder (speck-removal pre-pass) | **K** (stable opt-in) | pathogenic (600 dpi scan) −0.94%/−1.59%/**−2.43%** Sjbz at despeckle=2/4/8 (SSIM 0.9995/0.9990/0.9985); watchmaker (text) byte-identical no-op at all levels | Round-30. First lossy lever to move the noisy-scan corpus at all — same-size `lossy_threshold` alone ≈0% there (round 19 B0), cross-size lossy reverted (round 19 B1, dominated). New `Jb2EncodeOptions::despeckle: Option<u32>` drops CCs with `pixel_count <= max_px` (true ink area, not bbox) before clustering/dedup; stable (not `experimental`), default `None` = byte-identical. `with_despeckle()` builder + `lossy_scan()` preset (`despeckle=8, lossy_threshold=0.02`). Punctuation/diacritic-dot survival validated by targeted test (16px dot/period survive, 1px dust removed) at every tested level. |
 | JB2_DICT_ORDER | 2026-07-06 | JB2 encoder (shared dict) | D (negative) | Round-29; frequency/bucket-order permutation of shared dict: −0.05%…+0.05% (both directions), 30–60× below the ~1.5% bar | Confirmed rec-6 topological constraint (refiner must reference an already-emitted entry) is satisfied automatically for any in-block permutation, since the whole shared block is always emitted before page-local symbols. Measured real bytes (Djbz+Sjbz) on 75-symbol (`conquete_paix`, 22p) and 5,164-symbol (`pathogenic_bacteria_1896`, 517p) shared dicts; 0/539×3 round-trip failures. `NumContext` is an adaptive binary coder — it learns whatever empirical index distribution results from any fixed permutation, so static frequency/similarity reordering has no fixed-Huffman-style win to capture. No shipped-code change; recorded so dict reordering isn't re-proposed without a non-adaptive index coder |
 | B5_STREAMING_DECODER | 2026-07-04 | progressive decode (API) | **K** | O(N) streaming progressive decode (render-as-you-receive) | Closes the deferred B5 stateful API. New `pub ProgressiveDecoder`: `new(page,opts)` decodes FG once, `push_bg44_chunk(chunk)` accumulates one BG44 chunk in a shared `Iw44Image` and returns the refined frame — for network viewers that render per arriving chunk (vs render_progressive O(N²) or render_progressive_all needing all chunks up front). Strict Bilinear only (Lanczos/permissive → UnsupportedOption). render_progressive_all's fast path refactored to dogfood it. Byte-identical (streaming-vs-batch test + direct vs render_progressive_step on chicken/colorbook; O(N) proven by chunk-decode counter: chicken 6→3, colorbook 10→4). Round-27 |
+| B5_STATEFUL | 2026-07-06 | progressive decode (validation) | D | — | Independent reimplementation check of B5_STREAMING_DECODER: structural O(N) proof + direct byte-identity tests. No shipped-code change |
 | BUG_ZPSHORT | 2026-07-06 | IW44 decode (BG44 refinement) | **K** (fix) | fixes `Iw44(ZpTooShort)` on watchmaker.djvu page 0; correctness (was silently using 2/4 chunks) | `Iw44Image::decode_chunk` hard-errored on a legitimate zero-length BG44 refinement payload; `ZpDecoder::new` requires ≥2 bytes. Pad short payloads to 2 bytes with `0xFF` (same convention `ZpDecoder::read_byte` already uses past a stream's end), scoped to djvu-iw44 only. Surfaced while validating PR #510's `ProgressiveDecoder`. Round-26 |
 | JB2_AUTO_REC6 | 2026-07-06 | JB2 encoder (same-size rec-6 auto-policy) | **K** (experimental) | watchmaker −11.67% Sjbz (auto fires); pathogenic/conquete_paix byte-identical (auto stays off) | A3 follow-up of SAME_SIZE_REC6: `Jb2EncodeOptions::same_size_rec6_auto()` runs a bounded (≤1000-fresh-CC) density probe (`probe_same_size_rec6_density`) and enables `same_size_rec6=Some(0.02)` when ≥5% of sampled fresh CCs have a same-size ≤5% Hamming twin, else leaves it off. Threshold calibrated against **real emitted-byte deltas** on 4 corpora (not just population): watchmaker 39.6% density → −11.67%; cable_1973 12.4% → −0.43%; conquete_paix 1.7% → +0.49% (loss); pathogenic 0.9% → +0.00%. 0.05 sits ~2.9×/2.5× margin either side of the measured loss/win crossover. All round-trips pixel-exact. Still behind `experimental`, not default — same A3 shipping decision as SAME_SIZE_REC6. |
 | PDF_ADAPTIVE_RASTER | 2026-07-06 | PDF export (colour raster) | **K** | **1.62× smaller** whole-file PDF on watchmaker.djvu (regression case), 1.05× on mixed content, unchanged when JPEG already wins | Round-28; implements PDF_DCT_PROBE's follow-up. Opt-in `PdfOptions::adaptive_raster` (default off, byte-identical). Per page, encodes both DCTDecode(JPEG-80) and FlateDecode, keeps smaller; loser dropped immediately (no O(1)-per-page memory regression, #449). Composes with the rayon parallel path (#298) — verified byte-identical seq vs parallel output. Lossless when Deflate wins, unchanged JPEG-80 when JPEG wins |
@@ -66,11 +76,11 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 | PAR_LANCZOS | 2026-07-04 | Lanczos-3 resampler | **K** | **−69% (3.2×)** large-page Lanczos (parallel) | Row-parallel both separable passes behind `parallel` feature (par_chunks_mut + for_each_init scratch). Bit-identical. Isolated on colorbook native→½: 100.5→31.2ms. Amplifies D2 (Lanczos now ~3× not ~10× a bilinear downscale). Backlog A4, round-10 |
 | QUALITY_HARNESS_D1 | 2026-07-03 | quality infra (unblocks D branch) | **K** (infra) | perceptual gate + D2 decided | New `src/quality.rs` (PSNR/SSIM/`compare`, 6 tests) + `examples/quality_harness.rs` (vs ddjvu). Immediate finding: Lanczos3 downscale SSIM 0.993/0.989 vs Bilinear 0.959/0.861 → **Lanczos decisively better** (#423/D2 answered). Gates A3/D3/D4/D5. Round-9 |
 | GRAY_DIRECT | 2026-07-03 | IW44 decode (gray axis) | **K** | **−71% seq / −46% par** gray decode of colour page | New `Iw44Image::to_gray8[_subsample]`: reconstruct Y plane only, skip both chroma IDWTs + YCbCr math. Grayscale imgs byte-identical to `to_rgb().to_gray8()`; colour = DjVu luma (mean<4/255 vs Rec.601). Additive, no risk. Round-7, backlog B2 |
-| TRIAGE_ROUND8 | 2026-07-03 | breadth triage (axes A–D) | D | verdicts for ~25 proposals | B3 (early wavelet stop) + B4-hot (word blit) **already implemented**; C1-compositor + C2 **ruled out**; B5 (progressive O(N²) decode) **top opportunity, measured 4.8× on colorbook, deferred → needs stateful decoder**; rest NEEDS-INFRA / QUALITY-GATED (D1 harness unblocks D branch). See PERF round 8 |
+| TRIAGE_ROUND8 | 2026-07-03 | breadth triage (axes A–D) | D | verdicts for ~25 proposals | B3 (early wavelet stop) + B4-hot (word blit) **already implemented**; **C1 = RGB-writing compositor** deferred/ruled-out wide-surface (every fast path emits RGBA, SIMD tables assume 4-byte px; exports already strip per row via `rgba_row_to_rgb` — but note EPUB/CBZ PNGs don't use it, → issue #599); **C2 = fuse rotation into compositor** ruled out (strided scatter writes = the exact pattern ROTATE_TILE removed; the saved alloc is cheap — this closed #560); B5 (progressive O(N²) decode) **top opportunity, measured 4.8× on colorbook, deferred → needs stateful decoder**; rest NEEDS-INFRA / QUALITY-GATED (D1 harness unblocks D branch). See PERF round 8 |
 | GATHER_ZIGZAG_INV | 2026-07-03 | IW44 encode | **K** | ~1% iw44_encode + cleanup | Row-major plane read + ZIGZAG_INV scatter into L1 block (mirrors decoder); deletes 2 dup zigzag tables. Byte-identical. Round-6 swarm P5 |
 | EPUB_PNG_COMPRESSION | 2026-07-03 | EPUB export | X | rejected on verification | Swarm P1 claimed −43.5% via png Fast, but Fast makes files **2.84× larger** (measured 271KB→770KB) — bad trade for a doc format. Default already balanced. Case study: verify swarm claims |
 | LAZY_PAGE_CONSTRUCT | 2026-07-03 | container cold-open | **K** | **−48% from_bytes(520pp), −9% open+render-first**; mmap zero-copy | Bundled pages defer per-chunk copy: `ChunkStore::Lazy` holds shared backing (`Arc<dyn AsRef<[u8]>>`) + FORM range, materialises on first access. from_bytes/mmap funnel owned backing. Byte-identical (mmap parity test). Swarm P3 |
-| PGO | 2026-07-03 | build profile (all paths) | **K** (opt-in) | **−15% cold render**; codec kernels flat/±1% | Profile-guided opt over fat-LTO. Big win on branch-heavy cold end-to-end render; neutral on LTO-inlined SIMD decode kernels (2 micro-benches +1–2%). Opt-in only (`make pgo`, corpus/host-specific profdata, can't ship to crates.io). `examples/pgo_train.rs` + `scripts/pgo.sh`. Round-5 #4 |
+| PGO | 2026-07-03 | build profile (all paths) | **K** (opt-in) | **−15% cold render**; codec kernels flat/±1% | Profile-guided opt over fat-LTO. Big win on branch-heavy cold end-to-end render; neutral on LTO-inlined SIMD decode kernels (2 micro-benches +1–2%). Opt-in only (`make pgo`, corpus/host-specific profdata, can't ship to crates.io). `examples/pgo_train.rs` + `scripts/pgo.sh`. NB: the 2026-07-02 *manual* attempt (PGO_MANUAL) regressed encode +28%/+12% via an instrumented-build/layout mismatch — any PGO artifact work must use this round's recipe and watch encode benches. Round-5 #4 |
 | INTEROP_PIXDIFF | 2026-07-03 | render quality (infra) | **K** (tool) | quality floor: mean <0.25/255 vs ddjvu | `examples/interop_pixdiff.rs` — per-pixel diff vs DjVuLibre. Palette/bilevel byte-identical; colour mean <0.25 (bilinear chroma #422). Validates round-5 changes pixel-faithful. Round-5 #14 |
 | QUALITY_AA | 2026-07-03 | color/mask AA | D/F | deferred | Linear-light blend (#12) + mask upscale AA (#13) would diverge from the near-identical DjVuLibre reference; opt-in quality-mode territory, needs aesthetic judgement. Gate on scale>1. Round-5 #12/#13 |
 | AVX2_IDWT | 2026-07-06 | IW44 IDWT (x86) | **X** (rejected) | activating existing AVX2 column-pass kernel **regresses** `iw44_to_rgb_colorbook` ~10-24% (two independent activation mechanisms agree) | Runtime-dispatched (`is_x86_feature_detected!`, `OnceLock`) the pre-existing but compile-time-dead `load8s_s1_avx2`/`store8s_s1_avx2` kernels; bit-exact (exhaustive equivalence test, CI `Test (stable)` on x86_64) but measurably slower, not faster — confirms round-47's flag-based finding with a real hand-written kernel. Reverted; closed with data. Round-5 #8, Round-47, Round-54 |
@@ -82,6 +92,26 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 | RENDER_REGION_SCOPE | 2026-07-03 | render_region | D | no change | `render_region` already composites only the region (offset + out_w×out_h); no full-page composite/crop. Residual cold-decode narrowing = ROI_IDWT (#1). Round-5 #1/#10 |
 
 | IW44_MASKED_WAVELET | 2026-07-02 | IW44 encoder (size) | **CLOSED** (r21) | superseded by BG_DIFFUSE (r20) | Masked BG encoding (DjVuLibre c44 lever). **Resolved:** the low-risk first step (BG_DIFFUSE, r20) captured the whole win interop-safely; IW44_MASKED_TRANSFORM (r21) then measured the normative transform adds 0 on top (c44 -mask ≈ c44-on-diffused). No further masked work needed; residual gap is entropy coding, not masking. |
+| PAR_SEGMENT | 2026-07-02 | segmentation (parallel) | **K** | `segment_page_color` **−39.7/−41.2%**; no multi-page nesting regression | Parallel BG-cell fill via `par_chunks_mut` row slices; byte-identical; `parallel` feature. The Sauvola *threshold* pass itself is still serial (→ issue #575). Sweep round 4 |
+| PAR_TIFF | 2026-07-02 | TIFF export (parallel) | **K** | **−73%** | Parallel per-page image build, serial in-order IFD writes; SHA-256 byte-identity verified; new `export/tiff` bench. Sweep round 4 |
+| PAR_EPUB | 2026-07-02 | EPUB export (parallel) | **K** | **−81%** | Parallel per-page artifact build, ordered writes (mirrors the PDF parallel exporter). CBZ was NOT covered by this sweep (→ issue #598). Sweep round 4 |
+| PAR_CLUSTER | 2026-07-02 | JB2 shared-dict clustering (parallel) | **K** | `encode_djvm_bundle_jb2` **−58%**; layered −17…22% | Parallel per-page `extract_ccs`. Sweep round 4 |
+| PGO_MANUAL | 2026-07-02 | build profile (PGO over LTO_FAT, 1st attempt) | X | `jb2_encode_dict` **+28%**, `iw44_encode_color` **+12%**, decode ≈0 | Manual PGO with the profile gathered from a **non-LTO cu=16 instrumented build** applied to a fat-LTO binary — layout mismatch not disambiguated from a real PGO-vs-LTO conflict. Superseded by round-5 PGO (Kept opt-in, −15% cold render, `scripts/pgo.sh`). Encode benches are the canary for any PGO-artifact work (#586) |
+| JB2_SINGLETON_PRUNE | 2026-07-02 | JB2 encoder (dict membership) | **R** | **+0.070%** (+1,555 B / 120 pages; all 7 docs grew) | Rec-3 for exact-unique glyphs loses: adaptive index contexts already charge ≈0 for unused range, while a third `record_type` value raises that context's entropy. Its closing verdict — "the gap lives in glyph *matching*" — was then executed by SAME_SIZE_REC6 / LOSSY_B* (rounds 17–19) |
+| PARTIAL_DECODE_SCALE | 2026-07-02 | IW44 decode (chunk budget @ sub=2) | D | drop-last-chunk @sub2: text lossless but ≈0 saving; photo −26…−41% decode at 43.2/30.6 dB | sub≥4 already uses `bg44_partial` (1 chunk); sub=2 decodes all chunks. No default change (30.6 dB borderline + interop divergence); opt-in "draft render" mode deferred as a feature PR. Lever considered closed |
+| MIMALLOC | 2026-07-02 | memory (global allocator) | X | parallel ≈−1% (noise); `parse_multipage_520p` **+8.6%**, cold IW44 decode **+9.7%** | Interleaved same-session A/B (thermal-safe method). macOS libmalloc already fits the workload; a library must not pin `#[global_allocator]` anyway |
+| PS4 | 2026-07-02 | JB2 encoder (`extract_ccs`) | **K** | `jb2_encode_dict` **−25.8%** | Byte-unpack in dict-encoder CC extraction (same pattern as PS2). Perf swarm |
+| PS5 | 2026-07-02 | segmentation | **K** | `segment_page_color` **−14.0%** | `segment_page` row-slice mask + block-mean scan. Perf swarm |
+| PS6 | 2026-07-02 | FGbz encoder | **K** | `encode_color_page_quality` **−2.2%** | `foreground_fgbz` row-slice blit-colour averaging. Perf swarm |
+| PS-R2 | 2026-07-02 | IW44 decode | **R** | no consistent win | Register-hoist `newly_active_coefficient_decoding_pass` — reverted. Perf swarm |
+| PS-R3 | 2026-07-02 | IW44 encode (RGB→YCbCr) | **R** | no consistent win | Row-slice colour conversion — reverted; chroma_half NEON upsample also assessed not-worth (carte-only path). Perf swarm |
+| BENCH_0702 | 2026-07-02 | bench infra | D | — | Sweep bench workloads added (incl. `encode_color_page_quality`) |
+| PS1 | 2026-07-01 | BZZ decode (MTF) | **K** | `bzz_decode` **−2.2%** | `copy_within` memmove + drop dead per-element `.ok_or()?` branches; byte-identical. (Round-6's BZZ_DEC_MTF "already covered" refers to this.) Perf swarm |
+| PS2 | 2026-07-01 | JB2 encoder (bitmap unpack) | **K** | `jb2_encode` **−20.2%**, multitile **−25.9%** | Byte→8px unpack replaces per-pixel non-inlined `bm.get()` (integer divide per pixel). Biggest swarm encode win. Perf swarm |
+| PS3 | 2026-07-01 | Lanczos (horizontal pass) | **K** | `render_scaled_0.5x/lanczos3` **−69.1%** | Per-column kernel weights precomputed once (horizontal analogue of #448); bit-identical. Perf swarm |
+| PS-R1 | 2026-07-01 | area-avg compositor | **R** | no consistent win | FG44 row-invariant hoist (cf. dead-end §1). Perf swarm |
+| JB2_DICT_HASH_DEDUP | 2026-07-01 | JB2 encoder (exact dedup) | **K** | **~2–3%** (36.6→35.8 / 42.8→41.9 / 27.2→26.4 ms) | FNV `symbol_hash` bucket + verify replaces the per-CC `Vec<u8>` key clone; byte-identical. Distinct from CLUSTER_BUCKET_HASH_DEDUP (round-15, clustering pass) |
+| ENCODER_INTEROP_FIX | 2026-06-30 | encoder ↔ DjVuLibre (correctness) | **Fixed** | colour corpus in ddjvu: 0/6 → **6/6**; net size **+0.3%** after `crcbdelay=10` follow-up (−10…18% BG44) | Two encoder bugs invisible to our own round-trips: (1) IW44 major byte 0 → 0x01/0x81 (#462, `IWCODEC_MAJOR`); (2) **the chroma_half saga** — our `chroma_half=true` default emitted half-resolution chroma, but DjVuLibre's `IWPixmap::decode_chunk` **always builds/reads full-resolution chroma** (root-caused from fetched source after black-box testing was exhausted; real c44 output: `crcbdelay=10`, never `crcb_half`) → default flipped to full-res. Cite before proposing any half-res-chroma work (closed #587); decode-side suspicion for carte noise → #561 |
 | LTO_FAT | 2026-07-02 | build profile (all paths) | **K** | **−65% jb2_encode_dict, −7% bzz/segment, −2…3% iw44** | `lto="fat"` + `codegen-units=1` release/bench profile (none existed before). Cross-crate ZP inlining; render flat. Cost: ~2× build time |
 | PAR_ENCODE | 2026-07-02 | encoder (multi-page) | **K** | **−35…43% layered, −39% bundle_jb2** | Parallel per-page encoding via rayon in both DJVM bundlers (`parallel` feature); byte-identical, seq fallback. Decode was parallel (PAR_DEC) but encode wasn't — largest untouched lever |
 | ENC_SPEED_DIAG | 2026-06-26 | encoder (speed) | D | IW44 1.46× faster than c44; JB2 ~par with cjb2 | Head-to-head on identical inputs. Encode speed competitive — no hot-spot; axis healthy, not a gap |
@@ -199,6 +229,7 @@ Decode pipeline:
 | `render_corpus_bilevel_dpi/72` | ~7 ms | bilevel downscale (POPCNT) |
 | `render_corpus_bilevel_dpi/150` | ~23 ms | bilevel downscale (POPCNT) |
 | `render_colorbook` | ~3.5 ms | area-avg downscale (AREA_FIX) |
+| `encode_color_page_quality_bgheavy` | ~40 ms | single-page colour encode on the BG-heavy composited fixture (seg 21 / jb2 7.8 / iw44 1.8 ms) — the round-56 bench for colour-encode micro-parallelism |
 
 Thermal methodology: use intra-session ratio `target / control` to cancel M1 Max throttling.
 Control for bilevel experiments: `color_native_cached`. Control for color: `bilevel_native_cached`.
@@ -250,3 +281,94 @@ record the result in `PERF_EXPERIMENTS.md`, close the issue.
 for fine bands (IW44_DIAG)~~ **CLOSED by IW44_SLICE_RD (round 18):** the RD curve shows
 `total_slices=100` is at the knee and avg_abs=8.72 is the transform's quantization floor, not
 slice starvation — more slices explode size for ≤0.003 SSIM.
+
+### 2026-07-10 — experiment-candidate backlog (issues #557–#603)
+
+A code+log audit generated 47 experiment issues (30 + 17). After cross-checking against
+the **full log** (not just this index), 43 remain open — highlights: P1 #561 (carte
+chroma noise — see ENCODER_INTEROP_FIX for the sharpened header-interpretation
+hypothesis), #562 (text-vs-photo segmentation classifier); P2 #557 (iai-callgrind
+instruction-count channel), #559/#563 (PDF stencil colour / true-MRC), #565 (streaming
+bundle encode), #566 (ZP x86 codegen flags — revalidate first, see ZP_U64 noise),
+#567 (encoder fuzz gaps), #588 (wasm lazy Range open), #589 (resource-ceiling audit).
+Closed same-day as already answered by entries this index was missing: **#587**
+(chroma_half interop → ENCODER_INTEROP_FIX), **#574** (within-plane forward DWT →
+PAR_PAGE_LAYERS round-56 stage split), **#560** (rotation fusing → round-8 C2 verdict),
+**#564** (near-size lossy matching → LOSSY_B1 "not re-attempted" + LOSSY_B0
+saturation). That failure mode is why the addendum below and the maintenance rule at
+the top exist.
+
+---
+
+## Addendum (2026-07-10 audit): previously unindexed entries
+
+Status-only pointers; numbers live in the full log entries.
+
+### June 09–19 compositor / coder sweep
+
+| Entry (log name) | Date | Status | One-liner |
+|---|---|---|---|
+| IW44 slice-loop early-exit (`zp.is_exhausted()`) | 2026-06-09 | **R** | early-exit reverted |
+| JB2 post-EOF guard (`pos` overshoot) | 2026-06-16 | **K** | robustness: synthetic-byte overshoot instead of `is_exhausted()` |
+| BILINEAR_1_1_NEAREST | 2026-06-18 | **K** | `sample_nearest` at exact 1:1 scale |
+| DECODE_SCALE_ROUND | 2026-06-18 | **K** | `.round()` in `best_iw44_subsample` |
+| BILEVEL_EXPAND_LUT | 2026-06-18 | **R** | early LUT attempt; superseded by P2 (2026-06-24, kept) |
+| A2 (MASK_EXPAND LUT + branchless blend, tight 1:1) | 2026-06-18 | **K** | precursor of G1 |
+| B1 (bg_fy hoist + incremental bg_fx accumulator) | 2026-06-18 | **K** | general bilinear path |
+| B1b (MASK_EXPAND specialization for cable) | 2026-06-18 | **R** | — |
+| B2 (precompute BG row slices) | 2026-06-18 | **K** | — |
+| B2b (mask row slice hoist) | 2026-06-18 | **K** | — |
+| B2c (fx multiply → running accumulator) | 2026-06-18 | **R** | — |
+| B2d (two bounds checks per row) | 2026-06-18 | **R** | — |
+| LERP_NO_CLAMP | 2026-06-18 | **K** | remove `min(255)` from bilinear lerp |
+| C1_SIMD (`wide::u32x4` lerp) | 2026-06-18 | **R** | SIMD lerp loses (cf. dead-ends §3/§4) |
+| D1 (gamma identity fast path) | 2026-06-18 | **K** | skip LUT reads when gamma = identity |
+| E1 (no-mask bulk memcpy, gamma-identity 1:1) | 2026-06-18 | **K** | distinct from the 06-24 "E1" (reverted MASK_EXPAND batch) |
+| E2 (specialized no-mask bilinear loop) | 2026-06-18 | **R** | — |
+| F3 (4-byte pixel read in `bilinear_from_rows`) | 2026-06-18 | **K** | — |
+| F3b (4-byte BG read in A2 loop) | 2026-06-18 | **K** | — |
+| G1 4-byte RGBA write in A2 | 2026-06-18 | **R** | distinct from the 06-24 "G1" (kept MASK_EXPAND) |
+| A3 (mb==0 bulk-copy in A2) | 2026-06-18 | **R** | — |
+| AA1 (u64 bg_fx accumulator, area-avg) | 2026-06-18 | **R** | — |
+| H1 (4-weight bilinear lerp precompute) | 2026-06-19 | **K** | — |
+| H2 (slice-trim to exact stride) | 2026-06-19 | **R** | — |
+| H3 (FG44 x-coordinate accumulator) | 2026-06-19 | **R** | — |
+| #416 H1 (horizontal coord table) | 2026-06-19 | **R** | — |
+| #416 H2 (black-mask identity dispatch) | 2026-06-19 | **R** | — |
+| #416 H3 (byte-run mask traversal) | 2026-06-19 | **R** | — |
+| #416 H4 (precompute area-avg BG x/y bounds) | 2026-06-19 | **K** | — |
+| #416 H5 (integral-image BG downscale sampling) | 2026-06-19 | **R** | — |
+| #416 H6 (fuse alpha write into area-avg rows) | 2026-06-19 | **K** | — |
+
+### Pre-index era (2026-04-18 … 2026-05-17)
+
+| Entry | Date | Status | One-liner |
+|---|---|---|---|
+| #185 bit-pack `Jbm` to 1 bpp | 2026-04-18 | **K** | JB2 memory/layout foundation |
+| #184 IW44 `column_pass` SIMD at s=2 | 2026-04-18 | **R** | cf. later IDWT_S2_NEON rejection (same premise) |
+| #194 Ph2 multi-page shared Djbz w/ Hamming clustering | 2026-04-28 | **R** default | kept as tunable knob; see #258 |
+| #194 Ph2.5 per-CC accounting harness | 2026-04-28 | **K** (instr) | — |
+| #224 Ph4 opt-in lossy rec-7 substitution | 2026-04-28 | **K** | became `lossy_threshold` (see LOSSY_B0/B_SHIP) |
+| #190 Ph2 wasm simd128 inverse wavelet | 2026-04-29 | **K** | — |
+| #225 Ph1 internal row-streaming render | 2026-04-29 | **K** | — |
+| #225 Ph2 public `render_streaming` API | 2026-04-30 | **K** | — |
+| #229 PR1 extract `djvu-zp` crate | 2026-04-30 | **K** | — |
+| #189 Ph3 AVX2 `prelim_flags_*` ports | 2026-04-30 | **K** | — |
+| #222 PR1 `DjVuDocumentMut` + chunk replacement | 2026-04-30 | **K** | — |
+| #222 PR2 high-level setters | 2026-05-01 | **K** | — |
+| #233 async lazy first-page probe | 2026-05-04 | **K** | → `LazyDocument` lineage |
+| #189 x86-64-v3 AVX2 validation | 2026-05-04 | **K** partial/F | — |
+| #258 shared-Djbz Hamming clustering | 2026-05-04 | **X** | produced invalid output; cited in `encode.rs` comments |
+| #283 cross-size refinement probe | 2026-05-12 | **K** (instr) | → #301/#322 lineage, all dead ends |
+| #278 PR1 single-page Quality/Archival FGbz profiles | 2026-05-12 | **K** | — |
+| #289 per-blit FGbz indices | 2026-05-12 | **K** | — |
+| #292 cross-architecture benchmark matrix | 2026-05-17 | **K** | — |
+| #295 JB2 corpus round-trip + size baseline | 2026-05-17 | F | refreshed later (issue #295 closed) |
+| #298 PDF export memory + parallel baseline | 2026-05-17 | F | → PDF_STREAM/#449, PDF parallel |
+| #299 PDF color row streaming | 2026-05-17 | **K** | no full RGBA/RGB staging in PDF |
+| #300 IW44 low-PSNR diagnosis (conquete_paix) | 2026-05-17 | F | → #320: loss = finest-band quantization schedule |
+| #301 JB2 cross-size byte-cost estimator | 2026-05-17 | F | → #322 emitter: loses bytes, stays behind probe flag |
+| #307 x86 AVX2 row-pass feasibility spike | 2026-05-17 | **X** | cf. AVX2_IDWT rejections (round 5/47/54) |
+| #308 aarch64 NEON validation | 2026-05-17 | **K** partial | — |
+| Post-roadmap render baseline correction | 2026-05-17 | **K** | — |
+| Post-roadmap full benchmark refresh | 2026-05-17 | F | — |
