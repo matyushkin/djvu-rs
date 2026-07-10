@@ -49,6 +49,7 @@ jobs:
     name: Detect SIMD-relevant changes
     runs-on: ubuntu-latest
     outputs:
+      code: ${{ steps.filter.outputs.code }}
       simd: ${{ steps.filter.outputs.simd }}
     steps:
       - uses: actions/checkout@v6
@@ -56,6 +57,10 @@ jobs:
         id: filter
         with:
           filters: |
+            code:
+              - 'src/**'
+              - 'crates/**'
+              - 'benches/**'
             simd:
               # IW44 SIMD lives in the djvu-iw44 crate since the codec extraction
               # (#344); the old `src/iw44_*.rs` are thin re-export shims now.
@@ -70,6 +75,7 @@ jobs:
     # Single platform for reproducible comparisons.
     # (macos-latest numbers are kept separately via workflow_dispatch / tags.)
     runs-on: ubuntu-latest
+    needs: detect
 
     permissions:
       actions: read         # needed by dawidd6/action-download-artifact to list artifacts
@@ -169,7 +175,7 @@ jobs:
       # missing current Criterion output).  This must not be `bash -e`'s direct
       # exit: that would skip writing the step output and fail open.
       - name: Fail on benchmark comparison
-        if: github.event_name == 'pull_request' && steps.compare.outputs.compare_exit != '0'
+        if: github.event_name == 'pull_request' && needs.detect.outputs.code == 'true' && steps.compare.outputs.compare_exit != '0'
         run: |
           if [ "${{ steps.compare.outputs.compare_exit }}" = "1" ]; then
             echo "Benchmark regressions detected — see PR comment for details."
