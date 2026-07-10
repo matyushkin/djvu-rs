@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.2](https://github.com/matyushkin/djvu-rs/compare/v0.26.1...v0.26.2) (2026-07-10)
+
+
+### Performance Improvements
+
+* BG-heavy colour-encode bench + land PAR_PAGE_LAYERS (Sjbz ∥ BG44 join) ([#496](https://github.com/matyushkin/djvu-rs/issues/496)) ([#555](https://github.com/matyushkin/djvu-rs/issues/555)) ([ad29126](https://github.com/matyushkin/djvu-rs/commit/ad29126b411a81cdeda60040e137da3321d368f1))
+
 ## [0.26.1](https://github.com/matyushkin/djvu-rs/compare/v0.26.0...v0.26.1) (2026-07-09)
 
 
