@@ -67,6 +67,19 @@ fn count_bg44_chunk_decode() {
     BG44_CHUNK_DECODES.with(|c| c.set(c.get() + 1));
 }
 
+// Structural counter for full JB2 mask decodes (test-only), mirroring
+// `BG44_CHUNK_DECODES`. Lets the #607 retained-sub4 test prove that a warm
+// downgraded page's sub≥4 re-render never re-runs the JB2 arithmetic decode.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static JB2_MASK_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_jb2_mask_decode() {
+    JB2_MASK_DECODES.with(|c| c.set(c.get() + 1));
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /// Errors that can occur during DjVuPage rendering.
@@ -1234,7 +1247,10 @@ impl PageLayers {
         self.bg44 = std::sync::OnceLock::new();
         self.bg44_partial = std::sync::OnceLock::new();
         self.mask = std::sync::OnceLock::new();
-        self.mask_sub4 = std::sync::OnceLock::new();
+        // mask_sub4 intentionally preserved (#607): ~1/16 of the packed mask
+        // bytes keeps sub>=4 re-renders (thumbnails, zoomed-out pans) warm
+        // without re-running the JB2 arithmetic decode. `decode_layers`
+        // consults it before forcing a full mask decode.
         self.fg44 = std::sync::OnceLock::new();
         self.mask_indexed = std::sync::OnceLock::new();
         self.bg_rgb_s1 = std::sync::OnceLock::new();
@@ -1360,7 +1376,11 @@ impl PageLayers {
     /// when the page has no mask chunk or decoding fails.
     pub(crate) fn mask(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
         self.mask
-            .get_or_init(|| page.extract_mask().ok().flatten())
+            .get_or_init(|| {
+                #[cfg(test)]
+                count_jb2_mask_decode();
+                page.extract_mask().ok().flatten()
+            })
             .as_ref()
     }
 
@@ -1376,6 +1396,13 @@ impl PageLayers {
                 Some(downsample_mask_4x(src))
             })
             .as_ref()
+    }
+
+    /// Peek at an already-built 1/4-resolution mask without triggering any
+    /// decode. `Some` only when a previous sub>=4 render populated the slot
+    /// (possibly retained across [`downgrade`](Self::downgrade), #607).
+    pub(crate) fn mask_sub4_cached(&self) -> Option<&crate::bitmap::Bitmap> {
+        self.mask_sub4.get().and_then(|o| o.as_ref())
     }
 
     /// The decoded FG44 foreground colour layer, decoding on first call.
@@ -1452,7 +1479,11 @@ impl PageLayers {
         page: &DjVuPage,
     ) -> Option<&(crate::bitmap::Bitmap, Vec<i32>)> {
         self.mask_indexed
-            .get_or_init(|| page.extract_mask_indexed().ok().flatten())
+            .get_or_init(|| {
+                #[cfg(test)]
+                count_jb2_mask_decode();
+                page.extract_mask_indexed().ok().flatten()
+            })
             .as_ref()
     }
 }
@@ -1767,6 +1798,37 @@ fn decode_layers<'a>(
     bg_subsample: u32,
     bg_chunk_limit: usize,
 ) -> Result<DecodedLayers<'a>, RenderError> {
+    // #607: an eligible sub>=4 render with a warm retained 1/4-res mask skips
+    // the full JB2 decode entirely. Eligibility mirrors `resolve_sub4_mask`
+    // (no bold dilation, no FGbz palette — those need full-resolution mask
+    // semantics); the compositor then reads only the sub4 plane, so output is
+    // pixel-identical to the full-decode path by construction.
+    #[cfg(feature = "std")]
+    if bg_subsample >= 4
+        && opts.bold == 0
+        && page.find_chunk(b"FGbz").is_none()
+        && page.render_layers().mask_sub4_cached().is_some()
+    {
+        let (bg, fg44) = if opts.permissive {
+            (
+                decode_background_chunks_permissive(page, bg_chunk_limit, bg_subsample),
+                decode_fg44(page).ok().flatten(),
+            )
+        } else {
+            (
+                decode_background_chunks(page, bg_chunk_limit, bg_subsample)?,
+                decode_fg44(page)?,
+            )
+        };
+        return Ok(DecodedLayers {
+            bg,
+            fg_palette: None,
+            mask: None,
+            blit_map: None,
+            fg44,
+        });
+    }
+
     let bg;
     let fg_palette;
     let mask;
@@ -5099,6 +5161,99 @@ mod tests {
         // reproduces the original output exactly.
         let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
         assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
+    }
+
+    /// #607: `downgrade` retains the 1/4-res mask, and an eligible sub>=4
+    /// re-render consumes it without re-running the JB2 decode — while
+    /// producing pixel-identical output. A full-resolution re-render stays
+    /// cold and also reproduces the original bytes.
+    #[test]
+    fn downgrade_retains_sub4_mask_and_skips_jb2_decode() {
+        let mut doc = load_doc("colorbook.djvu");
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts_s4 = RenderOptions {
+            width: w / 4,
+            height: h / 4,
+            ..Default::default()
+        };
+        let opts_s1 = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+
+        // Warm the sub4 tier (this decodes the full mask once and builds
+        // mask_sub4), then downgrade.
+        let first_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+        let first_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+        doc.downgrade_render_caches();
+        assert!(
+            doc.page(0)
+                .unwrap()
+                .render_layers()
+                .mask_sub4_cached()
+                .is_some(),
+            "downgrade must retain mask_sub4"
+        );
+
+        // Structural proof: the warm sub4 re-render must not invoke the JB2
+        // decoder at all.
+        JB2_MASK_DECODES.with(|c| c.set(0));
+        let second_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+        assert_eq!(
+            JB2_MASK_DECODES.with(|c| c.get()),
+            0,
+            "warm sub4 re-render after downgrade must not re-run the JB2 decode"
+        );
+        assert_eq!(first_s4.data, second_s4.data, "sub=4 output changed");
+
+        // Full-resolution re-render: cold (decodes the mask again), output
+        // unchanged.
+        JB2_MASK_DECODES.with(|c| c.set(0));
+        let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+        assert!(
+            JB2_MASK_DECODES.with(|c| c.get()) > 0,
+            "full-res re-render after downgrade must cold-decode the mask"
+        );
+        assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
+    }
+
+    /// #607 eligibility guard: bold dilation needs the full-resolution mask,
+    /// so a bold sub>=4 render after downgrade must decode it (and match the
+    /// pre-downgrade bold render exactly).
+    #[test]
+    fn downgraded_sub4_with_bold_still_full_decodes() {
+        let mut doc = load_doc("colorbook.djvu");
+        let (w, h) = {
+            let p = doc.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        let opts_bold = RenderOptions {
+            width: w / 4,
+            height: h / 4,
+            bold: 1,
+            ..Default::default()
+        };
+        let first = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
+        // Also warm the plain sub4 tier so mask_sub4 survives the downgrade.
+        let opts_s4 = RenderOptions {
+            width: w / 4,
+            height: h / 4,
+            ..Default::default()
+        };
+        let _ = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+        doc.downgrade_render_caches();
+
+        JB2_MASK_DECODES.with(|c| c.set(0));
+        let second = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
+        assert!(
+            JB2_MASK_DECODES.with(|c| c.get()) > 0,
+            "bold render must not take the retained-sub4 shortcut"
+        );
+        assert_eq!(first.data, second.data, "bold sub=4 output changed");
     }
 
     /// `enforce_cache_budget_with(downgrade_before_drop: true)` honours the same
