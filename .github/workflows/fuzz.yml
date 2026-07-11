@@ -26,6 +26,8 @@ jobs:
           - fuzz_iw44
           - fuzz_full
           - fuzz_encode
+          - fuzz_bzz_encode
+          - fuzz_g4
 
     steps:
       - uses: actions/checkout@v6
