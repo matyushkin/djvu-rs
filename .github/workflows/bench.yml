@@ -452,3 +452,27 @@ jobs:
             ddjvu_timing.txt
             target/criterion/
           retention-days: 90
+
+  instruction-count:
+    name: Instruction counts (Callgrind)
+    runs-on: ubuntu-latest
+    # Diagnostic while #557 calibrates same-code variance and baseline policy.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: callgrind-ubuntu
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install --yes valgrind
+      - name: Count instructions
+        run: cargo bench --bench instructions
+      - name: Upload Callgrind results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: callgrind-${{ github.sha }}
+          path: target/iai/
+          if-no-files-found: warn
+          retention-days: 30
