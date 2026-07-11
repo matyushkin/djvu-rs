@@ -647,8 +647,12 @@ fn render_pdf_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::
 
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-    let pdf = djvu_rs::pdf::djvu_to_pdf(&doc)?;
-    std::fs::write(output, pdf)?;
+    // Stream straight to the file (#606) — the whole PDF is never buffered.
+    let file = std::fs::File::create(output)?;
+    let mut writer = std::io::BufWriter::new(file);
+    djvu_rs::pdf::djvu_to_pdf_to_writer(&doc, &djvu_rs::pdf::PdfOptions::default(), &mut writer)?;
+    use std::io::Write;
+    writer.flush()?;
     Ok(())
 }
 
