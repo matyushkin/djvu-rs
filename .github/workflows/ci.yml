@@ -202,6 +202,10 @@ jobs:
       - name: cargo check --target wasm32-unknown-unknown
         run: cargo check --target wasm32-unknown-unknown --features wasm
 
+      # Lazy Range-based browser open (#588): wasm + async + wasm-bindgen-futures.
+      - name: cargo check --target wasm32-unknown-unknown (wasm-lazy)
+        run: cargo check --target wasm32-unknown-unknown --features wasm-lazy
+
       # Pure no_std build for wasm32 (no std feature, no wasm-bindgen).
       # This is the strictest test of the README "no_std compatible — IFF/BZZ/JB2/IW44/ZP
       # codec modules work with alloc only" claim — wasm32-unknown-unknown has no std

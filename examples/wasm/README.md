@@ -33,11 +33,33 @@ worse trades (see WASM_SIZE_DIET in `PERF_EXPERIMENTS.md`):
 dead-code-eliminated from the viewer surface (the whole decode stack fits in
 those 405 KiB). Don't switch profiles for size without re-measuring speed.
 
-## Lazy HTTP Range loading
+## Lazy HTTP Range loading (`wasm-lazy`, #588)
 
-`range_lazy.md` shows the `wasm32` integration shape for large remote books:
-implement an `AsyncRead + AsyncSeek` reader that fetches `Range:
-bytes=start-end` with `gloo::net::http::Request`, then pass it to
+`WasmLazyDocument` opens a remote book from ~one 64 KiB block instead of the
+whole file — page 1 of a 25 MiB / 520-page bundle renders after fetching 0.25%
+of it (11–19× faster time-to-first-page at 12.5 MiB/s in Chrome; see
+`bench_lazy_open.html`). Build the pkg with the feature, then hand `open` the
+file length and a range-fetch callback:
+
+```sh
+wasm-pack build --target web --out-dir examples/wasm/pkg --release -- --features wasm-lazy
+```
+
+```js
+const doc = await WasmLazyDocument.open(totalLen, async (offset, len) => {
+  const r = await fetch(url, { headers: { Range: `bytes=${offset}-${offset + len - 1}` } });
+  return new Uint8Array(await r.arrayBuffer());
+});
+const pm = await doc.render_page(0, 150);            // fetches just that page
+const coarse = await doc.render_page_progressive(0, 150, 1); // blurry-to-sharp
+```
+
+Reproduce the benchmark: `python3 examples/wasm/serve_lazy_bench.py
+--bandwidth-mib 12.5` (throttled Range server), then open
+`http://localhost:8080/bench_lazy_open.html` and press Run.
+
+For a hand-rolled reader instead of the binding, `range_lazy.md` shows the
+`AsyncRead + AsyncSeek` integration shape for
 `djvu_rs::djvu_async::from_async_reader_lazy_local`.
 
 ## npm package

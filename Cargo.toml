@@ -66,6 +66,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 image = { version = "0.25", default-features = false, optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 # wasm32 threads only — requires a nightly toolchain + `-Z build-std` with
 # atomics/bulk-memory target features (see WASM_THREADS in PERF_EXPERIMENTS.md).
 # Never pulled in by the default `wasm` feature or any CI-required gate.
@@ -96,6 +97,11 @@ mmap = ["dep:memmap2", "std"]
 serde = ["dep:serde"]
 image = ["dep:image", "std"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "std"]
+# Lazy Range-based document open for the browser (#588): a JS-supplied
+# `(offset, len) -> Promise<Uint8Array>` reader drives the native
+# `LazyDocument` index/fetch machinery, so page 1 renders after fetching
+# ~index + one page instead of the whole bundle.
+wasm-lazy = ["wasm", "async", "dep:wasm-bindgen-futures"]
 # Opt-in wasm32 thread pool (rayon workers via Web Workers). Layers over
 # `wasm` + `parallel` to reuse the existing rayon-parallel compositor/IDWT
 # paths (PARALLEL/IW44_PAR, 3.8x/2.2x on native) inside the browser. Building

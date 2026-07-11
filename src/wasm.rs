@@ -480,6 +480,260 @@ fn json_escape_into(s: &str, buf: &mut String) {
     }
 }
 
+// ── Lazy Range-based open (#588, `wasm-lazy` feature) ────────────────────────
+
+#[cfg(all(feature = "async", target_arch = "wasm32"))]
+mod lazy {
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        future::Future,
+        io::SeekFrom,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+    };
+
+    use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+
+    use super::WasmPixmap;
+    use crate::djvu_async::{LazyDocument, from_async_reader_lazy_local};
+
+    /// Fetch granularity. 64 KiB matches the native HTTP-Range probe (#584):
+    /// the whole head + DIRM index of a 500-component book fits in one block,
+    /// and a typical page spans 1–3 blocks.
+    const LAZY_BLOCK: u64 = 64 * 1024;
+    /// Block cache budget (64 × 64 KiB = 4 MiB).
+    const LAZY_CACHE_BLOCKS: usize = 64;
+
+    fn js_io_err(e: JsValue) -> std::io::Error {
+        std::io::Error::other(
+            e.as_string()
+                .unwrap_or_else(|| "JS range fetch failed".to_string()),
+        )
+    }
+
+    /// `AsyncRead + AsyncSeek` over a JS-supplied
+    /// `(offset: number, len: number) -> Promise<Uint8Array>` callback, with a
+    /// 64 KiB-block LRU cache so the DIRM index walk and page fetches issue a
+    /// handful of coarse range requests instead of one per small read.
+    struct JsRangeReader {
+        fetch: js_sys::Function,
+        len: u64,
+        pos: u64,
+        cache: BTreeMap<u64, Vec<u8>>,
+        order: VecDeque<u64>,
+        pending: Option<(u64, JsFuture)>,
+    }
+
+    impl JsRangeReader {
+        fn new(fetch: js_sys::Function, len: u64) -> Self {
+            Self {
+                fetch,
+                len,
+                pos: 0,
+                cache: BTreeMap::new(),
+                order: VecDeque::new(),
+                pending: None,
+            }
+        }
+
+        /// Poll the (possibly newly started) fetch of `block` to completion.
+        fn poll_block(&mut self, block: u64, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.cache.contains_key(&block) {
+                return Poll::Ready(Ok(()));
+            }
+            if self.pending.as_ref().map(|(b, _)| *b) != Some(block) {
+                let start = block * LAZY_BLOCK;
+                let len = LAZY_BLOCK.min(self.len.saturating_sub(start));
+                let promise = self
+                    .fetch
+                    .call2(
+                        &JsValue::NULL,
+                        &JsValue::from_f64(start as f64),
+                        &JsValue::from_f64(len as f64),
+                    )
+                    .map_err(js_io_err)?;
+                self.pending = Some((block, JsFuture::from(js_sys::Promise::from(promise))));
+            }
+            let (_, fut) = self.pending.as_mut().expect("pending fetch just set");
+            match Pin::new(fut).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(e)) => {
+                    self.pending = None;
+                    Poll::Ready(Err(js_io_err(e)))
+                }
+                Poll::Ready(Ok(value)) => {
+                    self.pending = None;
+                    let bytes = js_sys::Uint8Array::new(&value).to_vec();
+                    self.cache.insert(block, bytes);
+                    self.order.push_back(block);
+                    if self.order.len() > LAZY_CACHE_BLOCKS
+                        && let Some(old) = self.order.pop_front()
+                    {
+                        self.cache.remove(&old);
+                    }
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+    }
+
+    impl AsyncRead for JsRangeReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.pos >= self.len {
+                return Poll::Ready(Ok(())); // EOF: leave `buf` unfilled
+            }
+            let block = self.pos / LAZY_BLOCK;
+            match self.poll_block(block, cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+            let data = &self.cache[&block];
+            let off = (self.pos - block * LAZY_BLOCK) as usize;
+            let n = buf.remaining().min(data.len().saturating_sub(off));
+            if n == 0 {
+                return Poll::Ready(Err(std::io::Error::other(
+                    "range fetch returned fewer bytes than requested",
+                )));
+            }
+            buf.put_slice(&data[off..off + n]);
+            self.pos += n as u64;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for JsRangeReader {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+            self.pos = match position {
+                SeekFrom::Start(o) => o,
+                SeekFrom::End(o) => (self.len as i64).saturating_add(o).max(0) as u64,
+                SeekFrom::Current(o) => (self.pos as i64).saturating_add(o).max(0) as u64,
+            };
+            Ok(())
+        }
+
+        fn poll_complete(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Poll::Ready(Ok(self.pos))
+        }
+    }
+
+    /// Lazily opened DjVu document driven by a JS range-fetch callback (#588).
+    ///
+    /// `open(totalLen, fetch)` indexes the document from ~one block of head
+    /// bytes; each `page(i)` / `render_page(i, dpi)` then fetches only that
+    /// page's byte range (plus any shared dictionary it references, cached).
+    /// The `fetch` callback receives `(offset, len)` and must resolve to a
+    /// `Uint8Array` of exactly `len` bytes — e.g. an HTTP `Range` request:
+    ///
+    /// ```js
+    /// const doc = await WasmLazyDocument.open(totalLen, async (offset, len) => {
+    ///   const r = await fetch(url, { headers: { Range: `bytes=${offset}-${offset + len - 1}` } });
+    ///   return new Uint8Array(await r.arrayBuffer());
+    /// });
+    /// ```
+    #[wasm_bindgen]
+    pub struct WasmLazyDocument {
+        inner: LazyDocument<JsRangeReader>,
+    }
+
+    #[wasm_bindgen]
+    impl WasmLazyDocument {
+        /// Index a document of `total_len` bytes through the `fetch` callback.
+        pub async fn open(
+            total_len: f64,
+            fetch: js_sys::Function,
+        ) -> Result<WasmLazyDocument, JsError> {
+            let reader = JsRangeReader::new(fetch, total_len as u64);
+            let inner = from_async_reader_lazy_local(reader)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmLazyDocument { inner })
+        }
+
+        /// Number of pages in the index.
+        pub fn page_count(&self) -> u32 {
+            self.inner.page_count() as u32
+        }
+
+        /// Fetch (or reuse) page `index` and return `[width_px, height_px, dpi]`
+        /// at the page's native resolution.
+        pub async fn page_info(&self, index: u32) -> Result<js_sys::Uint32Array, JsError> {
+            let page = self
+                .inner
+                .page_async(index as usize)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            let out = [page.width() as u32, page.height() as u32, page.dpi() as u32];
+            Ok(js_sys::Uint32Array::from(&out[..]))
+        }
+
+        /// Fetch (or reuse) page `index` and render it at `target_dpi` into a
+        /// [`WasmPixmap`] (zero-copy `view()` / owned `to_bytes()`).
+        pub async fn render_page(
+            &self,
+            index: u32,
+            target_dpi: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let page = self
+                .inner
+                .page_async(index as usize)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Self::render(&page, target_dpi, u32::MAX)
+        }
+
+        /// Progressive variant of [`render_page`](Self::render_page): decode at
+        /// most `chunk_n` BG44 refinement chunks (0 ⇒ mask/foreground only) for
+        /// a fast blurry-to-sharp first paint. Fetching is unchanged (the page
+        /// range is one transfer); only decode work is bounded.
+        pub async fn render_page_progressive(
+            &self,
+            index: u32,
+            target_dpi: u32,
+            chunk_n: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let page = self
+                .inner
+                .page_async(index as usize)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Self::render(&page, target_dpi, chunk_n)
+        }
+
+        fn render(
+            page: &Arc<crate::djvu_document::DjVuPage>,
+            target_dpi: u32,
+            chunk_n: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
+            let pm = if chunk_n == u32::MAX {
+                crate::djvu_render::render_pixmap(page, &opts)
+            } else {
+                crate::djvu_render::render_progressive(page, &opts, chunk_n as usize)
+            }
+            .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmPixmap {
+                width: pm.width,
+                height: pm.height,
+                data: pm.data,
+            })
+        }
+    }
+}
+
+#[cfg(all(feature = "async", target_arch = "wasm32"))]
+pub use lazy::WasmLazyDocument;
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 //
 // Native tests (`#[cfg(not(target_arch = "wasm32"))]`) exercise the underlying
