@@ -650,9 +650,36 @@ impl DjVuPage {
     ///
     /// Returns `Ok(None)` if the page has no text layer.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, DocError> {
+        Ok(self.text_layer_shared()?.map(|arc| (*arc).clone()))
+    }
+
+    /// Shared-handle variant of [`text_layer`](Self::text_layer): the decoded
+    /// layer is cached per page (#605), so warm accesses skip the BZZ decode
+    /// and zone-tree rebuild and only bump an `Arc`. Prefer this in loops
+    /// (search, selection overlays); `text_layer` clones out of the same
+    /// cache for callers that need owned data.
+    #[cfg(feature = "std")]
+    pub fn text_layer_shared(&self) -> Result<Option<std::sync::Arc<TextLayer>>, DocError> {
+        self.render_layers().text_layer_cached(|| {
+            let page_height = self.info.height as u32;
+            match self.chunk_payload(b"TXTz", b"TXTa")? {
+                Some(bytes) => Ok(Some(std::sync::Arc::new(crate::text::parse_text_layer(
+                    &bytes,
+                    page_height,
+                )?))),
+                None => Ok(None),
+            }
+        })
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn text_layer_shared(&self) -> Result<Option<alloc::sync::Arc<TextLayer>>, DocError> {
         let page_height = self.info.height as u32;
         match self.chunk_payload(b"TXTz", b"TXTa")? {
-            Some(bytes) => Ok(Some(crate::text::parse_text_layer(&bytes, page_height)?)),
+            Some(bytes) => Ok(Some(alloc::sync::Arc::new(crate::text::parse_text_layer(
+                &bytes,
+                page_height,
+            )?))),
             None => Ok(None),
         }
     }
@@ -691,8 +718,32 @@ impl DjVuPage {
     ///
     /// Returns `Ok(None)` if the page has no annotation chunk.
     pub fn annotations(&self) -> Result<Option<(Annotation, Vec<MapArea>)>, DocError> {
+        Ok(self.annotations_shared()?.map(|arc| (*arc).clone()))
+    }
+
+    /// Shared-handle variant of [`annotations`](Self::annotations), cached per
+    /// page (#605) — warm accesses skip the BZZ decode and parse.
+    #[cfg(feature = "std")]
+    pub fn annotations_shared(
+        &self,
+    ) -> Result<Option<crate::djvu_render::SharedAnnotations>, DocError> {
+        self.render_layers()
+            .annotations_cached(|| match self.chunk_payload(b"ANTz", b"ANTa")? {
+                Some(bytes) => Ok(Some(std::sync::Arc::new(
+                    crate::annotation::parse_annotations(&bytes)?,
+                ))),
+                None => Ok(None),
+            })
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn annotations_shared(
+        &self,
+    ) -> Result<Option<alloc::sync::Arc<(Annotation, Vec<MapArea>)>>, DocError> {
         match self.chunk_payload(b"ANTz", b"ANTa")? {
-            Some(bytes) => Ok(Some(crate::annotation::parse_annotations(&bytes)?)),
+            Some(bytes) => Ok(Some(alloc::sync::Arc::new(
+                crate::annotation::parse_annotations(&bytes)?,
+            ))),
             None => Ok(None),
         }
     }
@@ -2175,6 +2226,51 @@ mod tests {
 
     /// Build a `DjVuPage` directly from hand-made chunks (INFO + extras), so the
     /// accessor can be tested without a full file round-trip through a parser.
+    /// #605: repeated metadata access returns identical results through the
+    /// cache, and the shared handles point at one allocation.
+    #[test]
+    fn metadata_cache_repeated_access_is_consistent() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/links.djvu"),
+        )
+        .unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+
+        let a1 = page.annotations().unwrap();
+        let a2 = page.annotations().unwrap();
+        assert_eq!(
+            a1.as_ref().map(|(_, m)| m.len()),
+            a2.as_ref().map(|(_, m)| m.len())
+        );
+        let s1 = page.annotations_shared().unwrap();
+        let s2 = page.annotations_shared().unwrap();
+        if let (Some(s1), Some(s2)) = (s1, s2) {
+            assert!(
+                std::sync::Arc::ptr_eq(&s1, &s2),
+                "warm hits must share one decode"
+            );
+        }
+        let h1 = page.hyperlinks().unwrap();
+        let h2 = page.hyperlinks().unwrap();
+        assert_eq!(h1.len(), h2.len());
+    }
+
+    /// #605: malformed TXTz keeps erroring on every call (errors are not
+    /// cached), matching the pre-cache behaviour.
+    #[test]
+    fn metadata_cache_does_not_cache_errors() {
+        // TXTz payload that BZZ-decodes but fails structured parse — or fails
+        // BZZ outright; either way both calls must return Err.
+        let bogus = [0xFFu8, 0x00, 0x12, 0x34, 0x56];
+        let page = page_with_chunks(&[(b"TXTz", &bogus)]);
+        assert!(page.text_layer().is_err());
+        assert!(
+            page.text_layer().is_err(),
+            "second call must error identically"
+        );
+    }
+
     fn page_with_chunks(extra: &[(&[u8; 4], &[u8])]) -> DjVuPage {
         let info = make_info(64, 48);
         let mut chunks = Vec::new();
