@@ -11716,3 +11716,32 @@ size is a first-class metric.
 (−10.4% at +180%). Frontier documented in `examples/wasm/README.md` so nobody flips
 `opt-level = "z"` "for free" later. A non-gating CI size line was considered and skipped —
 the artifact isn't produced in CI today; revisit if a wasm publish workflow appears.
+
+## Perf round 81 (2026-07-12) — PHOTO_PROFILE: mask-less DjVuPhoto encode (#571)
+
+### #571 — `EncodeQuality::Photo` (INFO + BG44 only, grayscale-aware) — **Kept** (2026-07-12)
+
+**Issue.** No mask-less encode profile existed: every colour path emitted Sjbz + BG44 +
+FGbz, although the decoder fully supports mask-less pages and `encode_iw44_gray` was wired
+only to thumbnails. Photographs and grayscale scans had to pretend to be layered documents.
+
+**Approach.** New `EncodeQuality::Photo`: no segmentation, no Sjbz/FGbz — `INFO + BG44…`
+only; pure-grayscale sources (r==g==b scan) route through `encode_iw44_gray` (single luma
+plane). CLI `--quality photo`. The multi-page bundle path stays Quality/Archival-only for
+now (recorded; the auto-profile issue #570 is the natural place to extend it).
+
+**Numbers** (source-referenced fidelity via `compare_color`; boy = photo, watchmaker page =
+grayscale scan, both rendered to PNG and re-encoded):
+- photo input: Quality 1,450 B / dE_mean **9.34** → Photo 9,200 B / dE_mean **2.29** —
+  the layered profile's 12× background subsample + bogus mask wreck a photograph; Photo is
+  the faithful encoding (4× lower colour error).
+- grayscale input: Quality 17 KB / ssim_y 0.973 → Photo 255 KB / ssim_y **0.992**,
+  dE 1.46 → 0.50 (full-resolution luma plane vs 12×-subsampled background).
+- **Interop:** `ddjvu` decodes both Photo outputs cleanly (colour and grayscale).
+- Unit test: Photo emits no Sjbz/FGbz, has BG44, round-trips through our decoder for both
+  colour and pure-grayscale sources.
+
+**Decision.** Kept. Decision rule ("ddjvu-compatible and smaller **and/or** higher-PSNR
+than the forced-layered path") met on fidelity — which is the profile's whole purpose; the
+size axis is apples-to-oranges (full-resolution continuous tone vs a subsampled document
+model) and is controllable via `Iw44EncodeOptions::target` (bpp budget) when size matters.

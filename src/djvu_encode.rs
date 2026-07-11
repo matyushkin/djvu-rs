@@ -249,6 +249,13 @@ pub enum EncodeQuality {
     /// the same layered chunks as `Quality`, but keeps a denser background
     /// sample grid. Bilevel input should use `Lossless`.
     Archival,
+    /// Mask-less continuous-tone profile (DjVuPhoto, #571). Requires color
+    /// input; writes `INFO + BG44…` only — no segmentation, no Sjbz/FGbz.
+    /// Pure-grayscale sources encode through the grayscale IW44 encoder
+    /// (single luma plane); the decoder treats every pixel as background.
+    /// The right profile for photographs and grayscale scans, where the
+    /// forced layered mask costs bytes and can introduce artifacts.
+    Photo,
 }
 
 impl EncodeQuality {
@@ -281,6 +288,9 @@ impl EncodeQuality {
             // gate on the profile before reaching `segment_page` — both
             // `PageEncoder::encode` and the CLI reject `Lossless` upstream.
             EncodeQuality::Lossless => SegmentOptions::default(),
+            // Photo never segments; the value is unused but keeps the match
+            // total.
+            EncodeQuality::Photo => SegmentOptions::default(),
         }
     }
 }
@@ -530,6 +540,36 @@ impl<'a> PageEncoder<'a> {
                 self.push_text_layer_chunk(&mut chunks, h as u32);
                 Ok(encode_form_djvu(chunks))
             }
+            (Source::Pixmap(pm), EncodeQuality::Photo) => {
+                let iw44_options = self.iw44_options.unwrap_or_default();
+                // Pure-grayscale sources go through the dedicated grayscale
+                // encoder: one luma plane instead of Y+Cb+Cr.
+                let gray = pm
+                    .data
+                    .chunks_exact(4)
+                    .all(|px| px[0] == px[1] && px[1] == px[2]);
+                let bg44_chunks = if gray {
+                    crate::iw44_encode::encode_iw44_gray(&pm.to_gray8(), &iw44_options)
+                } else {
+                    encode_iw44_color(pm, &iw44_options)
+                };
+                let mut chunks = Vec::with_capacity(1 + bg44_chunks.len() + 1);
+                chunks.push(Chunk::Leaf {
+                    id: *b"INFO",
+                    data: info,
+                });
+                for body in bg44_chunks {
+                    chunks.push(Chunk::Leaf {
+                        id: *b"BG44",
+                        data: body,
+                    });
+                }
+                self.push_text_layer_chunk(&mut chunks, h as u32);
+                Ok(encode_form_djvu(chunks))
+            }
+            (Source::Bitmap(_), EncodeQuality::Photo) => Err(EncodeError::Unsupported(
+                "Photo profile requires color input (from_pixmap)",
+            )),
             (Source::Pixmap(_), EncodeQuality::Lossless) => Err(EncodeError::Unsupported(
                 "Lossless requires bilevel input — use from_bitmap or switch to Quality",
             )),
@@ -1539,6 +1579,65 @@ mod tests {
             adaptive_err < fixed_err * 0.70,
             "adaptive decoded render should be closer to source ({adaptive_err:.2} vs {fixed_err:.2})"
         );
+    }
+
+    /// #571: the Photo profile writes INFO + BG44 only (no Sjbz/FGbz) and
+    /// round-trips through our decoder; grayscale sources take the grayscale
+    /// IW44 encoder.
+    #[test]
+    fn photo_profile_masks_nothing_and_round_trips() {
+        // Colour gradient source.
+        let mut pm = Pixmap::white(64, 48);
+        for y in 0..48 {
+            for x in 0..64 {
+                pm.set_rgb(x, y, (x * 4) as u8, (y * 5) as u8, 128);
+            }
+        }
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_dpi(100)
+            .with_quality(EncodeQuality::Photo)
+            .encode()
+            .unwrap();
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        assert!(page.find_chunk(b"Sjbz").is_none(), "no mask in Photo");
+        assert!(page.find_chunk(b"FGbz").is_none(), "no palette in Photo");
+        assert!(page.find_chunk(b"BG44").is_some(), "background present");
+        let out = crate::djvu_render::render_pixmap(
+            page,
+            &crate::djvu_render::RenderOptions {
+                width: 64,
+                height: 48,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!((out.width, out.height), (64, 48));
+
+        // Pure-grayscale source must also round-trip (grayscale IW44 path).
+        let mut gray = Pixmap::white(64, 48);
+        for y in 0..48 {
+            for x in 0..64 {
+                let v = ((x + y) * 3) as u8;
+                gray.set_rgb(x, y, v, v, v);
+            }
+        }
+        let gbytes = PageEncoder::from_pixmap(&gray)
+            .with_dpi(100)
+            .with_quality(EncodeQuality::Photo)
+            .encode()
+            .unwrap();
+        let gdoc = crate::djvu_document::DjVuDocument::parse(&gbytes).unwrap();
+        let gout = crate::djvu_render::render_pixmap(
+            gdoc.page(0).unwrap(),
+            &crate::djvu_render::RenderOptions {
+                width: 64,
+                height: 48,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!((gout.width, gout.height), (64, 48));
     }
 
     fn adaptive_segment_options() -> SegmentOptions {
