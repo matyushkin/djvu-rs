@@ -11634,3 +11634,30 @@ pages, byte-identical, honest memory accounting) met — and the chosen integrat
 the rule's memory-tradeoff concern entirely by only reusing state that a previous render
 already cached. A *retained-across-downgrade* checkpoint tier (the issue's original shape)
 remains unattractive per C5_COMPRESS: the coefficient planes cost as much as the pixmap.
+
+## Perf round 79 (2026-07-12) — PAR_OCR: parallelize OCR across pages (#573)
+
+### #573 — rayon fan-out in `cmd_ocr`, one backend per task — **Kept** (2026-07-12)
+
+**Issue.** OCR ran strictly sequentially (CLI `cmd_ocr` page loop) although Tesseract
+instances are independent and OCR dominates wall-clock whenever enabled.
+
+**Approach.** With the `parallel` feature, render+recognize fan out over rayon; each task
+builds its own backend (`recognize` constructs a fresh Tesseract per call, so instances
+never cross threads — no trait changes needed). Text layers are injected sequentially in
+page order afterwards, so output bytes are identical to the sequential path. The
+encode-side `with_ocr_text_layer` is per-`PageEncoder` (single page) — nothing to
+parallelize there; the CLI loop was the only multi-page OCR driver. Drive-by: pre-existing
+`items_after_test_module` clippy failure in `ocr_tesseract.rs` fixed (the tests module was
+also missing its `#[cfg(test)]`).
+
+**Platform / commands.** macOS 26.5.0, tesseract 5.5.2; watchmaker (12 pages, 300 dpi),
+`RAYON_NUM_THREADS` sweep, `/usr/bin/time -l`.
+
+**Numbers.** 1 thread 38.7 s / 321 MB → 2: 20.1 s (**1.93×**, 542 MB) → 4: 11.3 s
+(**3.42×**, 914 MB) → 8: 8.5 s (4.55×, 1.62 GB). Output `.djvu` bytes identical across
+thread counts (t1==t4, t2==t8). Memory grows ≈ +150–190 MB per concurrent Tesseract
+instance — the recorded cost; workers are bounded by `RAYON_NUM_THREADS`.
+
+**Decision.** Kept. Decision rule (≥1.8× at 2 workers, ≥3× at 4, bounded memory,
+byte-identical TXTz) met: 1.93× / 3.42×.
