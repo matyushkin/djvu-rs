@@ -11108,3 +11108,43 @@ recoloured text) or a measured ΔE improvement with a size reduction. Regression
 `fg44_page_skips_mask_stencil`, updated `mixed_page_has_both_image_and_mask_xobject`
 (irish, the palette path), plus round-59's FGbz tests still green. Follow-up candidates:
 per-region FG44 stencils (true MRC, #563); external-DJVI resolution for indirect docs.
+## Perf round 63 (2026-07-11) — FGBZ_FROM_BLITS: build the FGbz palette from encoder blit metadata (#612)
+
+### #612 — drop the Sjbz decode-after-encode in `foreground_fgbz` — **Kept** (2026-07-11)
+
+**Issue.** `foreground_fgbz` decoded the Sjbz chunk the encoder had just produced
+(`jb2::decode_indexed`) to reconstruct a page-sized per-pixel blit map, then re-scanned the
+whole page to accumulate per-blit foreground colours — a structural decode-after-encode
+round-trip on every colour-profile page.
+
+**Approach.** New `djvu_jb2::encode::encode_jb2_dict_with_blits` returns the emitted blits
+(cropped component bitmap + top-left position, in emission order) alongside the byte stream;
+the bitmaps are moved out of the encoder's own `ccs` (no clones), and
+`encode_jb2_dict_with_options` now delegates to it — the byte stream is unchanged by
+construction. `foreground_fgbz_from_blits` accumulates per-blit colours directly off those
+blits (blits are pixel-disjoint connected components of the mask, so per-blit sums equal the
+decode-based scan's). The decode-based path remains only as the fallback for lossy rec-7
+substitution (`lossy_threshold > 0`), where the decoder blits a near-twin whose pixels can
+differ from the emitted component. Bonus: the bundle path no longer decodes the shared Djbz
+back at all (it was needed only to resolve the per-page blit maps).
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0. Old side measured from a
+worktree pinned at pre-change main.
+
+```sh
+cargo bench --bench codecs -- encode_color_page_quality_bgheavy
+cargo bench --bench codecs -- "jb2_encode_dict|encode_color_page_quality$"
+```
+
+**Numbers.**
+- `encode_color_page_quality_bgheavy` (round-56 designated instrument): 52.56 ms → 34.15 ms,
+  **−35.0%** (repeat run 33.90 ms).
+- `encode_color_page_quality`: 6.07 ms → 4.53 ms, **−25.4%**.
+- `jb2_encode_dict`: 7.10 → 7.00 ms — unchanged (blit hand-back is move-only).
+- Byte-identity: old-vs-new CLI `encode` outputs `cmp`-identical for quality/archival/lossless
+  × single-page and multi-page-directory (shared-dict bundle) on navm_fgbz-derived PNGs.
+
+**Decision.** Kept. Decision rule (≥3% on the bgheavy bench, byte-identical default output,
+shared-dict parity) exceeded by an order of magnitude. The remaining decode-based scan runs
+only under `lossy_threshold > 0`; unifying that case would need the encoder to hand back the
+substituted twin's shape per blit — noted as possible follow-up, not needed now.
