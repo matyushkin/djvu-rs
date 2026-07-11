@@ -172,6 +172,15 @@ jobs:
           cargo bench --bench codecs -- "$filter" || true
           cargo bench --bench render --features pdf -- "$filter" || true
           popd
+          # Re-measure the PR side of the suspects too, back-to-back with the
+          # merge-base numbers: comparing a fresh baseline against PR numbers
+          # taken ~20 minutes earlier in the job reintroduces thermal/order
+          # skew (observed as a borderline +5.8% on an untouched bench in
+          # #622's run; locally that PR was 2.3% faster on the same bench).
+          # Criterion only overwrites the filtered benches, so the archived
+          # full results keep every other bench's numbers.
+          cargo bench --bench codecs -- "$filter" || true
+          cargo bench --bench render --features pdf -- "$filter" || true
           python3 scripts/bench_compare.py \
             ../base-src/target/criterion \
             target/criterion \
