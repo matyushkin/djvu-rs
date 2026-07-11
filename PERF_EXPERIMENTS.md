@@ -11536,3 +11536,39 @@ continuous tone), grayscale/bilevel pages waste 3 bytes/px.
 pixel-identical); colour pages stay byte-identical by construction. EPUB_PNG_COMPRESSION's
 old rejection (filter tweaks, 2.84× larger) remains untouched — this changes format choice,
 not compression settings.
+
+## Round 75 (2026-07-11) — RESOURCE_CEILING_AUDIT: decode-time bounds inventory + TXTz caps (#589)
+
+### #589 — systematic untrusted-length allocation/loop audit — **Fixed** (one axis) + **Documented** (2026-07-11)
+
+**Issue.** Decode-time resource ceilings existed only where fuzzing happened to hurt
+(JB2_PAGE_SYM_CAP, BZZ); no systematic pass. Untrusted-length-driven allocations elsewhere
+(DIRM counts, TXTz/ANTz expansion, zone-tree depth/width, IW44 blocks, thumbnails, NAVM)
+had no stated bounds.
+
+**Approach.** Full inventory of open/decode allocation and loop sites, each classified by
+driving field and current bound (the deliverable table, now in SECURITY.md). Result: every
+axis is bounded **except** the TXTz zone tree — `parse_zone` reserved
+`Vec::with_capacity(children_count)` from an unchecked `i24` (up to 16,777,215 → ~1.5 GB
+from 3 crafted bytes) and recursed with no depth limit (stack-overflow DoS on a crafted
+single-child chain). Every other reviewed axis (DIRM, ANTz s-expr, IW44 planes, JB2, IFF,
+NAVM) already has an explicit `checked_add`-against-buffer, a named `MAX_*` constant, or a
+narrow integer width.
+
+**Fix.** `MAX_ZONE_DEPTH = 64` (mirrors `MAX_NAVM_DEPTH`) threaded through `parse_zone`;
+the child reservation is capped to `children_count.min(remaining / MIN_ZONE_RECORD_BYTES)`
+(each child needs ≥17 bytes), so the up-front allocation is O(remaining input), not O(2^24).
+The loop still iterates the full declared count and fails with `ZoneTruncated` exactly as
+before on genuinely-truncated files (a pre-existing truncation test still passes unchanged).
+Regression seeds: `zone_child_count_amplification_is_rejected`, `zone_depth_is_bounded`,
+`zone_normal_tree_still_parses`. SECURITY.md now states the full "at most X memory / Y work"
+table across all codecs.
+
+**Validation.** Real text layers still parse (watchmaker, malliavin — full chapter text;
+maskless fixtures report "No text layer" as before). `make check` 1156 tests. No DjVuLibre
+behaviour change: the caps only reject inputs that cannot decode to a valid tree anyway
+(the #577 discipline — a 64-deep or 16.7M-child single zone is not a real DjVu file).
+
+**Decision.** Fixed (TXTz) + documented (all axes). The issue's "done when every axis is
+capped+tested or documented as bounded-by-construction" is met: one axis capped+tested, the
+rest recorded as bounded-by-construction in SECURITY.md.
