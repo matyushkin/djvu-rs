@@ -11257,3 +11257,41 @@ corpus persistence. djvu-bzz suite green incl. the new block-boundary test.
 external libtiff/Pillow differential for G4) is not in this change — noted as the remaining
 follow-up on #567's plan; the in-tree differential (own decoder) plus the CI fuzz jobs cover
 the symmetric-bug class the round-53 lesson warned about only partially.
+## Perf round 66 (2026-07-11) — PDF_WRITER_STREAM: stream PDF objects to a writer (#606)
+
+### #606 — writer-oriented PDF serialization, bytes API as a wrapper — **Kept** (2026-07-11)
+
+**Issue.** `PdfWriter` retained every PDF object body and `serialize` then built a second
+full output buffer — peak memory ≈ retained bodies + final PDF bytes, even though the page
+render pipeline was already O(1) in page bodies (#449).
+
+**Approach.** `PdfWriter` is now generic over `std::io::Write`: the header is written at
+construction, each `add_obj` streams `N 0 obj … endobj` immediately and retains only
+`(id, offset)` for the xref; `finish()` writes xref + trailer. Objects flow in the same
+insertion order the old writer serialized in, so output bytes are unchanged. New public
+`djvu_to_pdf_to_writer(doc, opts, sink)`; `djvu_to_pdf(_with_options)` are now thin `Vec`
+wrappers. The CLI's PDF export streams straight to a `BufWriter<File>` (never buffers the
+whole PDF). The parallel path renders in bounded chunks (8 × threads) instead of collecting
+all rendered pages, then emits each chunk in order — O(chunk) retained bodies (issue plan
+item 5). New `PdfError::Io` variant (additive).
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0. 504-page fixture =
+`djvu merge` of watchmaker ×42 (249 MB output PDF); old side = worktree pinned at main.
+
+```sh
+/usr/bin/time -l <djvu> render --format pdf --all --output big.pdf big504.djvu
+```
+
+**Numbers.** Sequential: peak RSS **2.718 GB → 2.189 GB (−529 MB, 1.24×)**, wall-clock
+28.40 → 28.39 s, output byte-identical. Parallel: **2.846 GB → 2.34 GB (1.22×)**, wall-clock
+4.48 vs 4.02–4.82 s (within noise; the first chunking attempt at 2× threads cost +27% from
+chunk-barrier tail imbalance — 8× threads recovered it). All 20 fixture PDFs byte-identical
+to main; poppler `pdfinfo`/`pdftoppm` read the 504-page output cleanly.
+
+**Decision.** Kept, with the decision rule's 1.5× *total*-RSS target explicitly not met —
+and the measurement says why: the writer path removed essentially all of its addressable
+memory (~530 MB ≈ 2× final PDF bytes on this fixture), but peak RSS is dominated by
+per-page render caches (~4.3 MB/page × 504) that exporters, holding `&DjVuDocument`,
+cannot evict today. Filed #629 for that (interior-mutability eviction / cache-bypassing
+export render); once it lands the combined reduction on this fixture should far exceed
+1.5×. Wall-clock and byte-identity criteria met.
