@@ -16,6 +16,23 @@ python3 -m http.server 8080 --directory examples/wasm
 # Then open http://localhost:8080
 ```
 
+## Binary size (measured frontier, #582)
+
+The shipped release profile (fat LTO, `codegen-units = 1`) already produces a
+compact ~405 KiB `djvu_rs_bg.wasm`. The measured alternatives are strictly
+worse trades (see WASM_SIZE_DIET in `PERF_EXPERIMENTS.md`):
+
+| profile | size | render speed |
+|---------|------|--------------|
+| release (shipped) | 414.6 KiB | baseline |
+| `opt-level = "s"` | 372.7 KiB (−10.1%) | not measured (z is the floor) |
+| `opt-level = "z"` | 371.6 KiB (−10.4%) | **~2.8× slower** full-page render |
+| + `wasm-opt -Oz` | −0.3…−0.5 KiB extra | — |
+
+`wasm-opt` finds almost nothing after fat LTO, and the encoder code is already
+dead-code-eliminated from the viewer surface (the whole decode stack fits in
+those 405 KiB). Don't switch profiles for size without re-measuring speed.
+
 ## Lazy HTTP Range loading
 
 `range_lazy.md` shows the `wasm32` integration shape for large remote books:

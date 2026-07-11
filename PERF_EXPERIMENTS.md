@@ -11692,3 +11692,27 @@ there-and-back) prints the telemetry and asserts a ≥30% floor.
 **Decision.** LRU adopted (better on the realistic scenario, provably identical on scans);
 budget constant unchanged (sweep recorded); eligibility extensions (Lanczos3, rotation)
 not pursued here — each needs its own correctness argument for the tile key.
+## Perf round 80 (2026-07-12) — WASM_SIZE_DIET: wasm binary size frontier (#582)
+
+### #582 — opt-level sweep + wasm-opt — **Rejected** (frontier recorded) (2026-07-12)
+
+**Issue.** No size work had ever been done on the wasm artifact; for a web viewer download
+size is a first-class metric.
+
+**Numbers** (wasm-pack `--release --features wasm`, macOS, wasm-opt 130):
+- Baseline (shipped fat-LTO release): **414,600 B**.
+- `opt-level = "s"`: 372,704 B (−10.1%); `opt-level = "z"`: 371,629 B (−10.4%);
+  `z` + `panic=abort`: 371,832 B (no further win).
+- `wasm-opt -Oz` post-pass: −0.3…−1.2 KB on every variant — fat LTO + `codegen-units = 1`
+  already did the work binaryen would do.
+- **Speed cost of `z`** (real Chrome, bench_zero_copy, navm @300 dpi full render):
+  56.6 ms → **158.9 ms (~2.8× slower)**. The size profiles trade double-digit render
+  regressions for a single-digit size win.
+- Decode-only check (issue item 3): the entire decode stack fits in ~405 KB — encoder code
+  is already dead-code-eliminated from the viewer surface (nothing in the `wasm` exports
+  reaches the encoders, and LTO strips them).
+
+**Decision.** Rejected: the ≥20%-size-at-≤3%-speed adoption bar is nowhere near met
+(−10.4% at +180%). Frontier documented in `examples/wasm/README.md` so nobody flips
+`opt-level = "z"` "for free" later. A non-gating CI size line was considered and skipped —
+the artifact isn't produced in CI today; revisit if a wasm publish workflow appears.
