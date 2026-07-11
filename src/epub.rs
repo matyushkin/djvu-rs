@@ -279,16 +279,29 @@ fn build_page_artifacts(
 // ── PNG encoder ───────────────────────────────────────────────────────────────
 
 fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    // Pages are always opaque (the compositor writes alpha=255 inline —
+    // ALPHA_INL), so encode RGB: 25% less raw data into deflate and a
+    // smaller payload for zero information loss (#599).
+    let rgb = rgba_to_rgb(rgba);
     let mut buf = Vec::new();
     {
         let mut enc = png::Encoder::new(std::io::Cursor::new(&mut buf), width, height);
-        enc.set_color(png::ColorType::Rgba);
+        enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         if let Ok(mut writer) = enc.write_header() {
-            let _ = writer.write_image_data(rgba);
+            let _ = writer.write_image_data(&rgb);
         }
     }
     buf
+}
+
+/// Strip the constant alpha channel from packed RGBA rows.
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
+    rgb
 }
 
 // ── Text overlay ─────────────────────────────────────────────────────────────
