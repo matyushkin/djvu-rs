@@ -11033,6 +11033,20 @@ already parallelise page building. PNG deflate is CPU-heavy and embarrassingly p
 DPI → user rotation → RGBA PNG) fans out over rayon under `parallel`, ZIP entries are then
 written serially in index order (stored, PNG is already deflated). The CLI's `render_cbz`
 delegates to it. New `export/cbz` Criterion bench (watchmaker, 12 pages, 150 dpi default).
+## Perf round 61 (2026-07-11) — PAR_SAUVOLA: row-parallel Sauvola threshold pass (#575)
+
+### #575 — `fill_sauvola_mask` over rayon row chunks — **Kept** (2026-07-11)
+
+**Issue.** `fill_sauvola_mask` ran a sequential double loop over all pixels while the BG-cell
+fill next to it was already rayon-parallel; on Sauvola-enabled encodes (opt-in
+`--binarization sauvola`) this pass is pure, embarrassingly parallel work over an immutable
+summed-area table.
+
+**Approach.** Factor the per-row threshold loop into `fill_sauvola_row` (writes packed mask
+bits directly into its row slice) and drive it with `par_chunks_mut(row_stride)` under the
+`parallel` feature; the serial build keeps a sequential driver over the same row body. The
+SAT construction (`integral_luma`) stays serial — two memory-bound passes. New
+`segment_page_color_sauvola` Criterion bench (2260×3669 colorbook page, window 31, k 0.34).
 
 **Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0.
 
@@ -11148,3 +11162,14 @@ cargo bench --bench codecs -- "jb2_encode_dict|encode_color_page_quality$"
 shared-dict parity) exceeded by an order of magnitude. The remaining decode-based scan runs
 only under `lossy_threshold > 0`; unifying that case would need the encoder to hand back the
 substituted twin's shape per blit — noted as possible follow-up, not needed now.
+cargo bench --bench codecs -- segment_page_color_sauvola --save-baseline serial
+cargo bench --bench codecs --features parallel -- segment_page_color_sauvola --baseline serial
+```
+
+**Numbers.** 6.276 ms → 3.638 ms, **−42.0%** [−43.2%, −40.5%] (p < 0.05). Byte-identical:
+`parallel_sauvola_mask_is_byte_identical_to_sequential` (131×97, non-byte-aligned width,
+checks row padding too) plus the pre-existing segment suite green in both modes.
+
+**Decision.** Kept. Decision rule (≥10% at 4 threads, byte-identical) exceeded. Note per the
+issue: per-page parallelism in bundles already amortizes this — the beneficiary is
+single-image/CLI latency on Sauvola profiles. Default (Otsu) segmentation untouched.
