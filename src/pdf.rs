@@ -235,9 +235,11 @@ struct RenderedPage {
     /// For bilevel-only pages this is the 1-bit JB2 mask; for mixed pages it is the
     /// RGB background image.
     img0_body: Option<Vec<u8>>,
-    /// Fully encoded XObject body for the JB2 mask overlay (`/Mask0`).
-    /// Only set for non-bilevel pages that have a Sjbz chunk.
-    mask_obj_body: Option<Vec<u8>>,
+    /// Fully encoded XObject bodies for the JB2 mask overlay (`/Mask0`,
+    /// `/Mask1`, …), one per foreground colour, each painted in its own
+    /// fill colour. Only populated for non-bilevel pages with a Sjbz chunk;
+    /// pages without an FGbz colour palette get a single black layer.
+    mask_layers: Vec<MaskLayer>,
     /// PDF content stream text operators (invisible text layer).
     text_ops: String,
     /// Pre-built annotation object bodies, one per hyperlink.
@@ -257,10 +259,10 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
 
     let is_bilevel_only = page.find_chunk(b"Sjbz").is_some() && page.find_chunk(b"BG44").is_none();
 
-    let (img0_body, mask_obj_body) = if is_bilevel_only {
+    let (img0_body, mask_layers) = if is_bilevel_only {
         // Bilevel fast path: embed the 1-bit JB2 mask as the sole XObject.
         let mask = collect_mask_stream(page, opts);
-        (mask, None)
+        (mask, Vec::new())
     } else {
         let (rw, rh) = render_dims(page, opts.output_dpi);
         // Set only the output size: the render pipeline derives the IW44 decode
@@ -302,8 +304,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
             None => make_deflate_stream(&img_dict, &rgb),
         };
 
-        let mask = collect_mask_stream(page, opts);
-        (Some(img_body), mask)
+        (Some(img_body), collect_mask_layers(page, opts))
     };
 
     let text_ops = build_text_content(page, dpi, pt_h);
@@ -314,7 +315,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         pt_h,
         is_bilevel_only,
         img0_body,
-        mask_obj_body,
+        mask_layers,
         text_ops,
         link_annot_bodies,
     })
@@ -347,6 +348,12 @@ fn collect_mask_stream(page: &DjVuPage, opts: &PdfOptions) -> Option<Vec<u8>> {
         .find_chunk(b"Djbz")
         .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
     let bitmap = crate::jb2::decode(sjbz, dict.as_ref()).ok()?;
+    Some(mask_body_from_bitmap(&bitmap, opts.ccitt_g4))
+}
+
+/// Encode one 1-bit bitmap as a PDF ImageMask XObject body (Deflate, or the
+/// smaller of Deflate/G4 when `use_g4` is set).
+fn mask_body_from_bitmap(bitmap: &crate::bitmap::Bitmap, use_g4: bool) -> Vec<u8> {
     let bw = bitmap.width;
     let bh = bitmap.height;
     // Bitmap data is already packed 1-bit MSB-first, which is what PDF expects
@@ -356,16 +363,173 @@ fn collect_mask_stream(page: &DjVuPage, opts: &PdfOptions) -> Option<Vec<u8>> {
          /ImageMask true /BitsPerComponent 1 /Decode [1 0]"
     );
     let deflate_body = make_deflate_stream(&dict_extra, &bitmap.data);
-    if !opts.ccitt_g4 {
-        return Some(deflate_body);
+    if !use_g4 {
+        return deflate_body;
     }
-    let g4_bits = crate::smmr::encode_g4(&bitmap);
+    let g4_bits = crate::smmr::encode_g4(bitmap);
     let g4_body = make_ccitt_stream(&dict_extra, bw, bh, &g4_bits);
-    Some(if g4_body.len() < deflate_body.len() {
+    if g4_body.len() < deflate_body.len() {
         g4_body
     } else {
         deflate_body
-    })
+    }
+}
+
+/// One foreground stencil layer: an ImageMask XObject body painted in `rgb`.
+///
+/// `bbox` is the layer's pixel bounding box `(x0, y0_top, bw, bh)` within the
+/// full mask of `mask_dims` pixels — colour planes are cropped to their
+/// bounding box before compression, so the content stream must scale and
+/// translate each stencil back into place.
+struct MaskLayer {
+    rgb: (u8, u8, u8),
+    bbox: (u32, u32, u32, u32),
+    mask_dims: (u32, u32),
+    body: Vec<u8>,
+}
+
+/// Build the foreground stencil layers for a mixed page.
+///
+/// Pages without an FGbz colour palette (or whose palette is entirely black)
+/// keep the historical single black stencil — byte-identical output. Pages with
+/// a non-black FGbz palette get one ImageMask per palette colour actually used,
+/// each painted in its own fill colour (#559: a single black stencil flattened
+/// coloured foreground text to black).
+fn collect_mask_layers(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
+    let palette = page
+        .find_chunk(b"FGbz")
+        .and_then(|d| crate::fgbz::parse_fgbz(d).ok())
+        .filter(|p| !p.colors.is_empty())
+        .filter(|p| p.colors.iter().any(|c| (c.r, c.g, c.b) != (0, 0, 0)));
+
+    let pal = match palette {
+        Some(pal) => pal,
+        None => return black_mask_layer(page, opts),
+    };
+
+    let Ok(Some((mask, blit_map))) = page.extract_mask_indexed() else {
+        // Indexed decode failed — fall back to the black stencil path.
+        return black_mask_layer(page, opts);
+    };
+
+    // Pass 1: per-pixel colour index + per-colour bounding box. Colour lookup
+    // mirrors the renderer (`lookup_palette_color`): blit index → FGbz index
+    // table (or direct index when the table is absent) → colour, falling back
+    // to colour 0.
+    let w = mask.width;
+    let h = mask.height;
+    const NO_PIXEL: u16 = u16::MAX;
+    let mut color_of_pixel = vec![NO_PIXEL; w as usize * h as usize];
+    // (min_x, min_y, max_x, max_y) per colour
+    let mut bboxes = vec![(u32::MAX, u32::MAX, 0u32, 0u32); pal.colors.len()];
+    for y in 0..h {
+        for x in 0..w {
+            if !mask.get(x, y) {
+                continue;
+            }
+            let mi = y as usize * w as usize + x as usize;
+            let blit_idx = blit_map.get(mi).copied().unwrap_or(-1);
+            let ci = if blit_idx >= 0 {
+                let raw = if pal.indices.is_empty() {
+                    blit_idx as usize
+                } else {
+                    pal.indices
+                        .get(blit_idx as usize)
+                        .map(|&i| i as usize)
+                        .unwrap_or(0)
+                };
+                if raw < pal.colors.len() { raw } else { 0 }
+            } else {
+                0
+            };
+            color_of_pixel[mi] = ci as u16;
+            let b = &mut bboxes[ci];
+            b.0 = b.0.min(x);
+            b.1 = b.1.min(y);
+            b.2 = b.2.max(x);
+            b.3 = b.3.max(y);
+        }
+    }
+
+    // Pass 2: one bilevel plane per used colour, cropped to its bounding box
+    // (a full-page plane per colour costs far more Deflate output — the crop
+    // is what keeps the multi-stencil overhead small).
+    let mut planes: Vec<Option<crate::bitmap::Bitmap>> = Vec::new();
+    planes.resize_with(pal.colors.len(), || None);
+    for y in 0..h {
+        for x in 0..w {
+            let ci = color_of_pixel[y as usize * w as usize + x as usize];
+            if ci == NO_PIXEL {
+                continue;
+            }
+            let ci = ci as usize;
+            let (x0, y0, x1, y1) = bboxes[ci];
+            planes[ci]
+                .get_or_insert_with(|| crate::bitmap::Bitmap::new(x1 - x0 + 1, y1 - y0 + 1))
+                .set_black(x - x0, y - y0);
+        }
+    }
+
+    planes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ci, plane)| {
+            let plane = plane?;
+            let c = pal.colors[ci];
+            let (x0, y0, x1, y1) = bboxes[ci];
+            Some(MaskLayer {
+                rgb: (c.r, c.g, c.b),
+                bbox: (x0, y0, x1 - x0 + 1, y1 - y0 + 1),
+                mask_dims: (w, h),
+                // Colour planes are new output (no byte-identity to preserve),
+                // so always pick the smaller of Deflate/G4 regardless of the
+                // `ccitt_g4` opt-in — the per-plane min can never regress size.
+                body: mask_body_from_bitmap(&plane, true),
+            })
+        })
+        .collect()
+}
+
+/// The historical single black stencil (pages without a colour palette).
+fn black_mask_layer(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
+    let Some(sjbz) = page.find_chunk(b"Sjbz") else {
+        return Vec::new();
+    };
+    let dict = page
+        .find_chunk(b"Djbz")
+        .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
+    let Ok(bitmap) = crate::jb2::decode(sjbz, dict.as_ref()) else {
+        return Vec::new();
+    };
+    let dims = (bitmap.width, bitmap.height);
+    vec![MaskLayer {
+        rgb: (0, 0, 0),
+        bbox: (0, 0, dims.0, dims.1),
+        mask_dims: dims,
+        body: mask_body_from_bitmap(&bitmap, opts.ccitt_g4),
+    }]
+}
+
+/// Format one colour component for a PDF `rg` operator (0..255 → 0..1).
+///
+/// `0` and `255` format as the exact literals `0` / `1` so the all-black layer
+/// emits the historical `0 0 0 rg` operator byte-for-byte.
+fn fmt_rg_component(v: u8) -> String {
+    match v {
+        0 => "0".to_string(),
+        255 => "1".to_string(),
+        _ => format!("{:.4}", f32::from(v) / 255.0),
+    }
+}
+
+/// Format a point offset for a `cm` operator: exact `0` for zero (matching the
+/// historical full-page operator), 4 decimals otherwise.
+fn fmt_pt(v: f32) -> String {
+    if v == 0.0 {
+        "0".to_string()
+    } else {
+        format!("{v:.4}")
+    }
 }
 
 /// Build pre-serialized annotation bodies for all hyperlinks on a page.
@@ -404,7 +568,15 @@ fn emit_page_objects(
     let pt_h = data.pt_h;
 
     let img_id = data.img0_body.map(|body| w.add(body));
-    let mask_img_id = data.mask_obj_body.map(|body| w.add(body));
+    let mask_layers: Vec<(MaskLayer, usize)> = data
+        .mask_layers
+        .into_iter()
+        .map(|mut layer| {
+            let body = core::mem::take(&mut layer.body);
+            let id = w.add(body);
+            (layer, id)
+        })
+        .collect();
 
     let mut content = String::new();
 
@@ -418,9 +590,25 @@ fn emit_page_objects(
         if img_id.is_some() {
             content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
         }
-        if mask_img_id.is_some() {
+        for (i, (layer, _)) in mask_layers.iter().enumerate() {
+            let (r, g, b) = layer.rgb;
+            let (x0, y0, bw, bh) = layer.bbox;
+            let (mw, mh) = layer.mask_dims;
+            // Map the cropped stencil back into place: PDF images fill the unit
+            // square of the current transform, rows top-down, page origin
+            // bottom-left. A full-page bbox reproduces the historical
+            // `{pt_w} 0 0 {pt_h} 0 0 cm` operator byte-for-byte.
+            let sw = pt_w * bw as f32 / mw as f32;
+            let sh = pt_h * bh as f32 / mh as f32;
+            let tx = pt_w * x0 as f32 / mw as f32;
+            let ty = pt_h * (mh - y0 - bh) as f32 / mh as f32;
             content.push_str(&format!(
-                "q 0 0 0 rg {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Mask0 Do Q\n"
+                "q {} {} {} rg {sw:.4} 0 0 {sh:.4} {} {} cm /Mask{i} Do Q\n",
+                fmt_rg_component(r),
+                fmt_rg_component(g),
+                fmt_rg_component(b),
+                fmt_pt(tx),
+                fmt_pt(ty),
             ));
         }
     }
@@ -436,8 +624,8 @@ fn emit_page_objects(
     if let Some(id) = img_id {
         resources.push_str(&format!(" /Im0 {id} 0 R"));
     }
-    if let Some(mid) = mask_img_id {
-        resources.push_str(&format!(" /Mask0 {mid} 0 R"));
+    for (i, (_, mid)) in mask_layers.iter().enumerate() {
+        resources.push_str(&format!(" /Mask{i} {mid} 0 R"));
     }
     resources.push_str(" >>");
     if !data.text_ops.is_empty() {

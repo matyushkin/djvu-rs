@@ -199,3 +199,69 @@ fn test_pdf_output_nonzero_size() {
         assert_valid_pdf_structure(&pdf);
     }
 }
+
+// ── FGbz coloured foreground stencils (#559) ────────────────────────────────
+
+/// Colored-FGbz pages must emit one stencil per palette colour, painted in
+/// non-black fill colours — not a single black /Mask0 that flattens coloured
+/// text (#559).
+#[test]
+fn test_fgbz_colored_foreground_multi_stencil() {
+    let doc = load_doc("navm_fgbz.djvu");
+    let pdf = djvu_to_pdf(&doc).unwrap();
+    assert_valid_pdf_structure(&pdf);
+    // More than one stencil layer on at least one page.
+    assert!(
+        pdf_contains(&pdf, b"/Mask1"),
+        "coloured-palette page must emit more than one stencil layer"
+    );
+    // At least one stencil painted in a non-black, non-white colour: the
+    // content streams are deflated, so check via the raw content ops instead.
+    // navm_fgbz page 0 has a pure-yellow (255,255,0) highlight → `1 1 0 rg`.
+    let decompressed = decompress_all_streams(&pdf);
+    assert!(
+        decompressed
+            .windows(b"1 1 0 rg".len())
+            .any(|w| w == b"1 1 0 rg"),
+        "expected a yellow `1 1 0 rg` stencil fill operator"
+    );
+}
+
+/// Shared-dictionary (DJVI Djbz) documents must still get a foreground mask in
+/// the PDF: the pre-#559 path decoded the mask with the inline Djbz only, so
+/// shared-dict pages silently lost their entire text overlay.
+#[test]
+fn test_fgbz_shared_dict_mask_present() {
+    let doc = load_doc("navm_fgbz.djvu");
+    let pdf = djvu_to_pdf(&doc).unwrap();
+    assert!(
+        pdf_contains(&pdf, b"/ImageMask true"),
+        "shared-dict pages must embed foreground ImageMask stencils"
+    );
+}
+
+/// Inflate every FlateDecode stream in the PDF and concatenate the results
+/// (raw streams are appended as-is).
+fn decompress_all_streams(pdf: &[u8]) -> Vec<u8> {
+    // `>>\nstream\n` can't be confused with the `stream` inside `endstream`.
+    const START: &[u8] = b">>\nstream\n";
+    const END: &[u8] = b"\nendstream";
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(off) = pdf[pos..]
+        .windows(START.len())
+        .position(|w| w == START)
+        .map(|o| pos + o + START.len())
+    {
+        let end = match pdf[off..].windows(END.len()).position(|w| w == END) {
+            Some(e) => off + e,
+            None => break,
+        };
+        match miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[off..end]) {
+            Ok(mut d) => out.append(&mut d),
+            Err(_) => out.extend_from_slice(&pdf[off..end]),
+        }
+        pos = end + END.len();
+    }
+    out
+}

@@ -10966,3 +10966,56 @@ regressions. The PR's CI run is the end-to-end validation of artifact download a
 
 **Decision.** Fixed. #557 may now build its instruction-count artifact channel on fail-closed
 compare semantics rather than duplicating the former fail-open workflow.
+
+## Perf round 59 (2026-07-11) — FGBZ_PDF_STENCIL: coloured foreground stencils in PDF export (#559)
+
+### #559 — per-palette-colour /MaskN stencils instead of one black /Mask0 — **Fixed** (2026-07-11)
+
+**Issue.** PDF export painted the JB2 mask as a single ImageMask stencil in solid black
+(`q 0 0 0 rg … /Mask0 Do Q`), silently flattening FGbz-coloured foreground text to black.
+While reproducing it a second, worse defect surfaced: `collect_mask_stream` decoded the mask
+with the *inline* Djbz only, so shared-dictionary (DJVI) documents lost their entire
+foreground text overlay from the PDF — `navm_fgbz.djvu` baseline PDFs contained **zero**
+ImageMask streams.
+
+**Approach (option a from the issue, plus crop + adaptive G4).** When the page has an FGbz
+palette with ≥1 non-black colour: decode via `extract_mask_indexed` (shared-dict aware), split
+the mask into one bilevel plane per palette colour actually used (colour lookup mirrors the
+renderer's `lookup_palette_color`, fallback to colour 0), crop each plane to its pixel bounding
+box, and emit one ImageMask XObject per colour painted with its own `r g b rg` fill, positioned
+by a scaled/translated `cm`. Colour planes always take the smaller of Deflate/G4 (they are new
+output, so the `ccitt_g4` opt-in gate doesn't apply; per-plane min can never regress). Pages
+without a palette (or with an all-black one) keep the historical single-black-stencil code path
+and formatting (`0 0 0 rg`, full-page `cm` with literal `0 0`) — byte-identical output.
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0. New
+`examples/pdf_fg_color_probe.rs`: export with lossless background → `pdftoppm`
+(`-scale-to-x/-y`, native pixel dims; poppler 25.x) → `quality::compare_color` against
+`render_pixmap` at identical dimensions.
+
+```sh
+cargo run --release --features pdf --example pdf_fg_color_probe
+make check
+```
+
+**Numbers.** Rasterized-PDF vs our renderer (QUALITY_COLOR metric):
+- `irish.djvu` (40-colour palette): ΔE mean **8.095 → 0.500**, luma SSIM **0.851 → 0.982**.
+- `navm_fgbz.djvu` (2–47 colours/page): ΔE mean improved on all 6 pages, e.g. p1
+  **1.046 → 0.537**, p4 **1.020 → 0.376**; luma SSIM up on every page.
+
+File size on the three colour-palette corpus docs (default options): DjVu3Spec **+5.7%**,
+irish **+7.2%** — within the <+10% budget. navm_fgbz **+20.1%**, but its baseline is not
+comparable: the baseline PDF had *no mask streams at all* (the shared-dict defect above), so
+the delta is the restored text overlay (+174 KB of mask streams), not stencil overhead.
+Bounding-box cropping cut the naive full-page-plane cost (irish +16.6% → +7.2%); always-adaptive
+G4 cut it further (navm +38.2% → +20.1%). All 17 corpus fixtures without a colour palette
+produce **byte-identical** PDFs (17/17).
+
+**Decision.** Fixed/Kept. Decision rule met: ΔE improves on every coloured-FG page, size within
+budget on true like-for-like docs, byte-identical for all-black-FG documents. Regression tests:
+`test_fgbz_colored_foreground_multi_stencil` (multi-stencil + non-black `rg` operator in the
+decompressed content stream), `test_fgbz_shared_dict_mask_present`. Unblocks #563 (true-MRC PDF),
+which builds on the per-colour stencil path. Follow-up worth filing: the legacy black-stencil
+path still uses inline-Djbz-only decode, so an *all-black* shared-dict document still loses its
+mask (kept for byte-identity here; should be fixed as its own change with the same
+`extract_mask_indexed` plumbing).
