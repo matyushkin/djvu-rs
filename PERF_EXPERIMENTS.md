@@ -11745,3 +11745,40 @@ grayscale scan, both rendered to PNG and re-encoded):
 than the forced-layered path") met on fidelity — which is the profile's whole purpose; the
 size axis is apples-to-oranges (full-resolution continuous tone vs a subsampled document
 model) and is controllable via `Iw44EncodeOptions::target` (bpp budget) when size matters.
+
+## Perf round 82 (2026-07-12) — QUALITY_AUTO: content-type detection for the encode profile (#570)
+
+### #570 — `classify_content` + CLI `--quality auto` — **Kept** (2026-07-12)
+
+**Issue.** `EncodeQuality` had to be hand-picked; `djvu encode` should do the right thing
+without the user knowing DjVu internals.
+
+**Approach.** New `djvu_encode::classify_content(&Pixmap) -> EncodeQuality`: samples ~64
+full rows and computes chroma share, a 256-bin luma histogram, and horizontal sharp-edge
+density (luma steps >64/pair). Decision tree, calibrated on corpus renders:
+- **Photo**: >160 occupied luma bins AND sharp edges <0.2% of pairs (boy: 248 bins /
+  0.04%; every text-bearing page measured ≥0.36%).
+- **Lossless (bilevel)**: no chroma, near-white paper mode (≥240), far ink mode, ≤128
+  occupied bins, ≥95% mass within ±16 of the two modes. Deliberately conservative — a
+  photo can *never* reach it (continuous tone fails the bin cap; regression-tested).
+- else **Quality** (layered).
+CLI `--quality auto` (single images: per-image; directories: bundle-wide — all-bilevel →
+Lossless bundle, anything else → layered Quality; per-page mixed bundles recorded as the
+follow-up). Column stride stays 1: a stride-2 scan inflated photo gradients into false
+"edges" and misrouted boy to Quality — caught by the corpus test during calibration.
+
+**Numbers.**
+- Corpus validation (unit test): boy→Photo (and asserted ≠Lossless — the catastrophic
+  misroute), boy_jb2→Lossless, cable@native→Lossless, colorbook→Quality, navm p1→Quality.
+- Boundary case recorded: watchmaker re-rendered at 150 dpi is genuinely 97.6% two-tone
+  (modes 255/3) and routes to Lossless — correct for those pixels, though the original
+  layered scan is Quality at native resolution; downscaled re-renders lose the texture
+  that made it layered.
+- Overhead: 0.184 ms vs a 16.8 ms Quality page encode (**1.09%** on the fastest encode;
+  smaller share on archival/photo encodes).
+- E2E CLI: photo PNG → `auto profile: Photo`, bilevel scan → `Lossless`, both encode
+  successfully.
+
+**Decision.** Kept. Auto matches the expert profile on every distinctive corpus case,
+photos provably cannot reach the bilevel path, and the stats pass is ~1% of the cheapest
+encode. Built on the Photo profile (#571) — PR stacked on that branch.

@@ -258,6 +258,109 @@ pub enum EncodeQuality {
     Photo,
 }
 
+/// Classify a source image into the most appropriate [`EncodeQuality`]
+/// profile from cheap pixel statistics (#570).
+///
+/// Heuristic (sampled at a stride, so the pass costs well under 1% of an
+/// encode):
+/// - **Bilevel** (→ `Lossless`): effectively no chroma AND ≥95% of sampled
+///   luminance within ±16 of two far-apart modes (ink + paper) — classic
+///   scanned text.
+/// - **Photo** (→ `Photo`): a spread, continuous luminance histogram (many
+///   occupied bins, no dominant paper mode) — continuous-tone content where a
+///   layered mask wrecks fidelity.
+/// - Everything else (→ `Quality`): layered documents — text over paper with
+///   colour, illustrations with text, etc.
+///
+/// The classifier is deliberately conservative about `Lossless`: any visible
+/// chroma or mid-tone mass keeps the page out of the bilevel path, because
+/// misrouting a photo to bilevel is catastrophic while misrouting text to
+/// `Quality` merely costs bytes.
+pub fn classify_content(pm: &Pixmap) -> EncodeQuality {
+    let (w, h) = (pm.width as usize, pm.height as usize);
+    if w == 0 || h == 0 {
+        return EncodeQuality::Quality;
+    }
+    // Sample up to ~64 full rows: stable histogram, chroma and horizontal
+    // sharp-edge statistics at well under 1% of encode time (measured
+    // ~0.15 ms vs a ~16 ms page encode). Rows are scanned at stride 1 so the
+    // sharp-edge statistic keeps true neighbour deltas (a column stride
+    // inflates photo gradients into false "edges").
+    let ystep = (h / 64).max(1);
+    let xstep = 1usize;
+    let mut hist = [0u32; 256];
+    let mut chroma_hits = 0u32;
+    let mut sharp = 0u32;
+    let mut pairs = 0u32;
+    let mut n = 0u32;
+    let mut y = 0usize;
+    while y < h {
+        let row = &pm.data[y * w * 4..(y + 1) * w * 4];
+        let mut prev: Option<u32> = None;
+        let mut x = 0usize;
+        while x < w {
+            let (r, g, b) = (row[x * 4], row[x * 4 + 1], row[x * 4 + 2]);
+            if r.max(g).max(b) - r.min(g).min(b) > 24 {
+                chroma_hits += 1;
+            }
+            // Rec. 601 integer luma.
+            let l = (77 * r as u32 + 150 * g as u32 + 29 * b as u32) >> 8;
+            hist[(l as usize).min(255)] += 1;
+            n += 1;
+            if let Some(pl) = prev {
+                pairs += 1;
+                if pl.abs_diff(l) > 64 {
+                    sharp += 1;
+                }
+            }
+            prev = Some(l);
+            x += xstep;
+        }
+        y += ystep;
+    }
+    let n = n.max(1);
+    let pairs = pairs.max(1);
+    let colourful = chroma_hits * 50 > n; // >2% clearly-chromatic samples
+    let occupied = hist.iter().filter(|&&c| c > 0).count();
+    // Sharp horizontal luma steps (>64) per neighbour pair — text/line art
+    // sits at 0.3–4% on the corpus, photographs at ~0.04%.
+    let sharp_permille = sharp as u64 * 1000 / pairs as u64;
+
+    // Photo: continuous tone (many occupied luma bins) with almost no sharp
+    // edges. Measured: boy(photo) occ=248 sharp=0.04%; every text-bearing
+    // corpus page has sharp >= 0.36%.
+    if occupied > 160 && sharp_permille < 2 {
+        return EncodeQuality::Photo;
+    }
+
+    // Bilevel: no chroma, near-white paper mode, one far-apart ink mode, and
+    // ~everything within +-16 of those two modes. `occupied <= 128` keeps any
+    // continuous-tone page out — misrouting a photo to bilevel is
+    // catastrophic, misrouting text to Quality merely costs bytes.
+    let mode1 = (0..256).max_by_key(|&k| hist[k]).unwrap_or(255);
+    let mode2 = (0..256)
+        .filter(|&k| (k as i32 - mode1 as i32).unsigned_abs() > 48)
+        .max_by_key(|&k| hist[k])
+        .unwrap_or(mode1);
+    let near_mass = |m: usize| -> u32 {
+        let lo = m.saturating_sub(16);
+        let hi = (m + 16).min(255);
+        hist[lo..=hi].iter().sum()
+    };
+    let bimodal_mass = near_mass(mode1) + if mode2 != mode1 { near_mass(mode2) } else { 0 };
+    let modes_far = (mode1 as i32 - mode2 as i32).unsigned_abs() > 100;
+    if !colourful
+        && mode1 >= 240
+        && modes_far
+        && occupied <= 128
+        && bimodal_mass as u64 * 100 >= n as u64 * 95
+    {
+        return EncodeQuality::Lossless;
+    }
+
+    EncodeQuality::Quality
+}
+
 impl EncodeQuality {
     /// The default segmentation knobs for this profile.
     ///
@@ -1638,6 +1741,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!((gout.width, gout.height), (64, 48));
+    }
+
+    /// #570: the auto-classifier must match the expert profile choice on the
+    /// corpus, and a photo must never be routed to the bilevel path
+    /// (catastrophic misroute).
+    #[test]
+    fn classify_content_matches_expert_choice_on_corpus() {
+        let render = |path: &str, page: usize, dpi: f32| -> Pixmap {
+            let data =
+                std::fs::read(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
+                    .unwrap();
+            let doc = crate::djvu_document::DjVuDocument::parse(&data).unwrap();
+            let p = doc.page(page).unwrap();
+            let scale = dpi / p.dpi().max(1) as f32;
+            let w = ((p.width() as f32 * scale).round() as u32).max(1);
+            let h = ((p.height() as f32 * scale).round() as u32).max(1);
+            crate::djvu_render::render_pixmap(
+                p,
+                &crate::djvu_render::RenderOptions {
+                    width: w,
+                    height: h,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        // Photo (boy.djvu is a photograph) — must be Photo, and NEVER Lossless.
+        let photo = classify_content(&render("tests/fixtures/boy.djvu", 0, 300.0));
+        assert_ne!(
+            photo,
+            EncodeQuality::Lossless,
+            "photo → bilevel is catastrophic"
+        );
+        assert_eq!(photo, EncodeQuality::Photo);
+
+        // Bilevel scans → Lossless.
+        assert_eq!(
+            classify_content(&render("tests/fixtures/boy_jb2.djvu", 0, 300.0)),
+            EncodeQuality::Lossless
+        );
+        // Native resolution — the real encode workflow feeds native scans;
+        // a downscaled render adds antialiasing midtones a true bilevel
+        // source doesn't have.
+        assert_eq!(
+            classify_content(&render("tests/corpus/cable_1973_100133.djvu", 0, 300.0)),
+            EncodeQuality::Lossless
+        );
+
+        // Layered colour documents → Quality.
+        assert_eq!(
+            classify_content(&render("tests/fixtures/colorbook.djvu", 0, 150.0)),
+            EncodeQuality::Quality
+        );
+        assert_eq!(
+            classify_content(&render("tests/fixtures/navm_fgbz.djvu", 1, 150.0)),
+            EncodeQuality::Quality
+        );
     }
 
     fn adaptive_segment_options() -> SegmentOptions {
