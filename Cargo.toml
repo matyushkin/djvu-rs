@@ -127,6 +127,7 @@ iw44-probe = ["std", "djvu-iw44/iw44-probe"]
 
 [dev-dependencies]
 criterion = "0.5"
+iai-callgrind = "0.16"
 # Tests/examples synthesize JPEG fixtures and deflate streams directly; as
 # dev-deps these stay available regardless of which crate features are on
 # (they left the `std` feature in #509).
@@ -220,6 +221,10 @@ harness = false
 
 [[bench]]
 name = "viewer"
+harness = false
+
+[[bench]]
+name = "instructions"
 harness = false
 
 [profile.release]
