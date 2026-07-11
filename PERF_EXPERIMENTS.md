@@ -11572,3 +11572,32 @@ behaviour change: the caps only reject inputs that cannot decode to a valid tree
 **Decision.** Fixed (TXTz) + documented (all axes). The issue's "done when every axis is
 capped+tested or documented as bounded-by-construction" is met: one axis capped+tested, the
 rest recorded as bounded-by-construction in SECURITY.md.
+## Perf round 76 (2026-07-12) — WASM_BATCH: coarse-grained batch page rendering in the browser (#610)
+
+### #610 — `WasmDocument::render_pages_batch` — **Kept** (2026-07-12)
+
+**Issue.** WASM_THREADS found wasm threading neutral for single-page decode and ~9× worse
+for fine-grained compositor work, and named coarse one-page-per-Worker tasks as the one
+viable threading shape. The browser binding only exposed one page per call.
+
+**Approach.** Additive `WasmDocument::render_pages_batch(dpi, start, count) →
+Vec<WasmPixmap>`: coarse page-level rayon tasks on the opt-in `wasm-threads` pool
+(`initThreadPool`), input order preserved by the indexed collect, memory bounded by the
+caller-chosen batch size (`count` pixmaps live at once), results as `WasmPixmap` handles
+(zero-copy `view()`, #611). Without a pool the same API renders sequentially. Single-page
+API untouched. New committed browser bench `examples/wasm/bench_batch.html` (needs the
+COOP/COEP server from the wasm README).
+
+**Platform / commands.** macOS 26.5.0, Chrome (real tab, cross-origin isolated), nightly
+`wasm-threads` build (`-Z build-std`, `+atomics,+bulk-memory`), median of 3.
+
+**Numbers** (vs the control: a JS loop over the existing single-page `render()`):
+- watchmaker ×8 pages @100 dpi: loop 94–99 ms → batch **22.0 ms at 4 workers (4.28×)**,
+  43.0 ms at 2 workers (2.31×), 85.4 ms with no pool (1.16× — sequential fallback works;
+  the residual win is the avoided per-page JS copy).
+- cable (bilevel, only 2 pages) @150 dpi: 36.7 → 22.6 ms (1.62× — bounded by 2 pages).
+- Page 0 pixels spot-checked identical to the single-page render; order preserved.
+
+**Decision.** Kept. Decision rule (≥2× at 4 workers on ≥8-page batches, ordered,
+pixel-identical, bounded memory, single-page untouched) met at 4.28×. This is the recorded
+revisit-condition of WASM_THREADS fulfilled: coarse batches are where the Worker pool pays.

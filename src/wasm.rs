@@ -181,6 +181,49 @@ impl WasmDocument {
         self.inner.page_count() as u32
     }
 
+    /// Render a contiguous batch of pages at `target_dpi`, returning one
+    /// [`WasmPixmap`] per page in input order (#610).
+    ///
+    /// With the opt-in `wasm-threads` build (rayon Web-Worker pool via
+    /// `initThreadPool`), pages render concurrently as coarse one-page tasks —
+    /// the threading shape WASM_THREADS measured as viable (fine-grained
+    /// compositor parallelism regressed ~9× and stays disabled). Without the
+    /// pool the batch renders sequentially with identical results.
+    ///
+    /// Memory is bounded by the caller-chosen batch size: `count` full-size
+    /// pixmaps are alive at once. Failed pages yield an error for the whole
+    /// batch (all-or-nothing keeps the ordering contract simple).
+    pub fn render_pages_batch(
+        &self,
+        target_dpi: u32,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<WasmPixmap>, JsError> {
+        let total = self.inner.page_count();
+        let end = (start as usize).saturating_add(count as usize).min(total);
+        let idxs: Vec<usize> = ((start as usize).min(total)..end).collect();
+
+        let render_one = |&i: &usize| -> Result<WasmPixmap, String> {
+            let pm = crate::foreign::render_at_dpi(&self.inner, i, target_dpi as f32)
+                .map_err(|e| e.to_string())?;
+            Ok(WasmPixmap {
+                width: pm.width,
+                height: pm.height,
+                data: pm.data,
+            })
+        };
+
+        #[cfg(feature = "parallel")]
+        let out: Result<Vec<WasmPixmap>, String> = {
+            use rayon::prelude::*;
+            idxs.par_iter().map(render_one).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let out: Result<Vec<WasmPixmap>, String> = idxs.iter().map(render_one).collect();
+
+        out.map_err(|e| JsError::new(&e))
+    }
+
     /// Return a handle to page `index` (0-based).
     ///
     /// Throws if `index >= page_count()`.
