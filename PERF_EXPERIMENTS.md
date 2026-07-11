@@ -11362,3 +11362,26 @@ regressions) met on constructor time; the absolute numbers are small on this 7.3
 bundle — the win scales with document size (the copies eliminated are O(file size)). Node
 ABI note: `Vec<u8>` params behave identically to `&[u8]` at the boundary (owned copy in),
 so the historical view-lifetime hazard does not apply.
+
+## Perf round 69 (2026-07-11) — RGB_PNG_EXPORT: RGB (not RGBA) PNG payloads in EPUB/CBZ (#599)
+
+### #599 — strip the constant alpha at PNG emit — **Kept** (lever 1) (2026-07-11)
+
+**Issue.** EPUB and CBZ encoded full RGBA PNGs although pages are always opaque (the
+compositor writes alpha=255 inline — ALPHA_INL): 33% more raw bytes into deflate for zero
+information.
+
+**Approach (lever 1 of the issue).** `encode_rgba_to_png` (EPUB) and the CBZ page encoder
+strip the alpha channel at emit and encode `ColorType::Rgb`. Pixels after decode are
+identical (verified per page via PIL against the RGBA builds).
+
+**Numbers.** navm_fgbz (6 pages): CBZ 1.692 → 1.557 MB (**−8.0%**), EPUB 1.697 → 1.562 MB
+(**−8.0%**); boy CBZ 87.4 → 78.7 KB (−9.9%). `export/epub` bench 290.9 → 297.9 ms (+2.4%,
+noise-level — the rgba→rgb pass roughly offsets the smaller deflate input on this corpus).
+Decision rule for lever 1 ("shrink **or** speed up, identical pixels") met on size.
+
+**Decision.** Kept (lever 1). Lever 2 (RGB-native row mode through the streaming render
+path, skipping RGBA staging for PDF/TIFF/EPUB/CBZ) not pursued: the emit-time conversion
+measured at noise level here, matching the ALPHA_INL/ZEROED history that output-bandwidth
+micro-changes rarely clear the 3% bar — revisit only with instruction-count benches (#557).
+Depends on the `cbz` module from PAR_CBZ (round 62) — PR based on that branch.

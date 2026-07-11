@@ -122,17 +122,24 @@ fn build_page_png(page: &DjVuPage, opts: &CbzOptions) -> Result<Vec<u8>, CbzErro
         UserRotation::Ccw90 => pixmap.rotate_ccw90(),
     };
 
+    // Pages are always opaque (alpha=255 inline — ALPHA_INL), so encode RGB:
+    // 25% less raw data into deflate, smaller archives, identical pixels
+    // (#599).
+    let mut rgb = Vec::with_capacity(pixmap.data.len() / 4 * 3);
+    for px in pixmap.data.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
     let mut buf = Vec::new();
     {
         let mut enc =
             png::Encoder::new(std::io::Cursor::new(&mut buf), pixmap.width, pixmap.height);
-        enc.set_color(png::ColorType::Rgba);
+        enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         let mut writer = enc
             .write_header()
             .map_err(|e| CbzError::Png(e.to_string()))?;
         writer
-            .write_image_data(&pixmap.data)
+            .write_image_data(&rgb)
             .map_err(|e| CbzError::Png(e.to_string()))?;
     }
     Ok(buf)
