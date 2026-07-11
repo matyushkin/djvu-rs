@@ -1344,8 +1344,23 @@ impl PageLayers {
                 if chunks.is_empty() {
                     return None;
                 }
-                let mut img = Iw44Image::new();
-                for chunk_data in &chunks {
+                // IW44_CHECKPOINT (#608): resume from the cached first-chunk
+                // decode when a sub>=4 render already paid for it (the common
+                // thumbnail -> full-view flow). Chunk 0 is the most expensive
+                // chunk (~16-19% of a 4-chunk full decode on the corpus), the
+                // clone is ~0.04-0.5 ms, and progressive decode is defined to
+                // produce byte-identical output to a fresh 0..n decode. Peek
+                // only (`get`) -- a cold full decode must not populate the
+                // partial tier as a side effect.
+                let mut img;
+                let mut start = 0;
+                if let Some(Some(partial)) = self.bg44_partial.get() {
+                    img = partial.clone();
+                    start = 1;
+                } else {
+                    img = Iw44Image::new();
+                }
+                for chunk_data in &chunks[start.min(chunks.len())..] {
                     if img.decode_chunk(chunk_data).is_err() {
                         break;
                     }
@@ -5233,6 +5248,50 @@ mod tests {
         // reproduces the original output exactly.
         let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
         assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
+    }
+
+    /// IW44_CHECKPOINT (#608): a full render after a sub>=4 render (which
+    /// cached the first-chunk partial decode) resumes from that checkpoint —
+    /// and must be byte-identical to a cold full render on a fresh document.
+    #[test]
+    fn full_decode_resumed_from_partial_is_byte_identical() {
+        let doc_a = load_doc("colorbook.djvu");
+        let (w, h) = {
+            let p = doc_a.page(0).unwrap();
+            (p.width() as u32, p.height() as u32)
+        };
+        // Warm the partial tier via a sub=4 render, then full render.
+        let opts_s4 = RenderOptions {
+            width: w / 4,
+            height: h / 4,
+            ..Default::default()
+        };
+        let opts_s1 = RenderOptions {
+            width: w,
+            height: h,
+            ..Default::default()
+        };
+        let _ = render_pixmap(doc_a.page(0).unwrap(), &opts_s4).unwrap();
+        assert!(
+            doc_a
+                .page(0)
+                .unwrap()
+                .render_layers()
+                .bg44_partial
+                .get()
+                .is_some(),
+            "sub=4 render must populate the partial tier"
+        );
+        let resumed = render_pixmap(doc_a.page(0).unwrap(), &opts_s1).unwrap();
+
+        // Cold full render on a fresh document (no partial tier).
+        let doc_b = load_doc("colorbook.djvu");
+        let cold = render_pixmap(doc_b.page(0).unwrap(), &opts_s1).unwrap();
+
+        assert_eq!(
+            resumed.data, cold.data,
+            "resumed full decode must be byte-identical"
+        );
     }
 
     /// #607: `downgrade` retains the 1/4-res mask, and an eligible sub>=4

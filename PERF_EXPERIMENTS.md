@@ -11601,3 +11601,36 @@ COOP/COEP server from the wasm README).
 **Decision.** Kept. Decision rule (≥2× at 4 workers on ≥8-page batches, ordered,
 pixel-identical, bounded memory, single-page untouched) met at 4.28×. This is the recorded
 revisit-condition of WASM_THREADS fulfilled: coarse batches are where the Worker pool pays.
+
+## Perf round 77 (2026-07-12) — IW44_CHECKPOINT: resume full decode from the cached first-chunk state (#608)
+
+### #608 — chunk-0 checkpoint via the existing `bg44_partial` tier — **Kept** (2026-07-12)
+
+**Issue.** After eviction (or on the first full render after a thumbnail), a full IW44
+decode restarts from BG44 chunk 0 — the most expensive chunk — even when a first-chunk
+decode already happened.
+
+**Approach.** Measured first (new committed probe `examples/iw44_checkpoint_probe.rs`):
+`Iw44Image` is `Clone`, and resuming a fresh clone of the post-chunk-0 state through chunks
+1..n is byte-identical to a cold 0..n decode (progressive-decode semantics). Clone cost
+0.04–0.52 ms; checkpoint bytes ≈ the coefficient planes (5–19 MB/page — the C5_COMPRESS
+finding that this is the RGB-pixmap size class stands). Integration therefore adds **no new
+retention**: `PageLayers::bg44` now *peeks* (`OnceLock::get`, never populates) the existing
+`bg44_partial` slot and resumes from a clone when a prior sub≥4 render already paid for
+chunk 0 — the common thumbnail→full-view flow. Cold full decodes are unchanged; no cache
+policy or budget accounting changes (bg44_partial was already counted).
+
+**Numbers.**
+- Isolated repeated full decode (checkpoint-resume vs cold, 4-chunk pages): watchmaker
+  **−19.2%**, colorbook **−18.0%**, conquete_paix **−17.4%**, carte **−16.0%** — all
+  byte-identical.
+- Integrated full *render* after a sub4 warm-up (includes mask + compositor, diluting the
+  IW44 share): watchmaker −6.6%, colorbook −11.8%, conquete −6.0%.
+- Unit test `full_decode_resumed_from_partial_is_byte_identical` (warm-partial full render
+  vs fresh-document full render).
+
+**Decision.** Kept. Decision rule (≥15% repeated full decode on multiple real multi-chunk
+pages, byte-identical, honest memory accounting) met — and the chosen integration sidesteps
+the rule's memory-tradeoff concern entirely by only reusing state that a previous render
+already cached. A *retained-across-downgrade* checkpoint tier (the issue's original shape)
+remains unattractive per C5_COMPRESS: the coefficient planes cost as much as the pixmap.
