@@ -11214,3 +11214,46 @@ same ceiling, pixel identity) exceeded. FGbz-palette pages intentionally exclude
 shortcut (need full-res indexed lookups) — same exclusion as the compositor's existing sub4
 path. Policy sweep note: `drop` mode still clears everything (unchanged); the retained tier
 only augments `downgrade`.
+## Perf round 64 (2026-07-11) — FUZZ_ENCODER_GAPS: bzz_encode and encode_g4 fuzz coverage (#567)
+
+### #567 — encoder fuzz gaps closed, one real encoder bug found — **Kept / Fixed** (2026-07-11)
+
+**Issue.** `bzz_encode` (feeds every TXTz/ANTz/NAVM/DIRM we write) had no fuzz coverage at
+all; `smmr::encode_g4` (round 53, with a history of a symmetric encoder/decoder bug that
+survived internal round-trips) was only exercised indirectly via `encode_smmr`.
+
+**Approach.**
+- New `fuzz_bzz_encode` target: arbitrary bytes → `bzz_encode` → `bzz_decode` → bit-exact
+  assert. Seeds: empty/text/random.
+- New `fuzz_g4` target: structured bitmap from fuzz input (bounded dims ≤200) →
+  `encode_g4` → 4-byte header + `decode_smmr` → pixel-exact assert. Seeds mirror the
+  round-53 synthetic shapes (stripes/bands/checker/sparse/single-row).
+- `fuzz_encode` extended with lossy `Jb2EncodeOptions` (despeckle 0–15 px,
+  `lossy_threshold` 0–0.15): decodable + dimension-exact always; despeckle-only output must
+  additionally never *add* ink (component drop is its only legal effect).
+- Both new targets wired into `.github/workflows/fuzz.yml` (weekly + on main) and
+  `oss-fuzz/build.sh` (which also gained the previously-missing `fuzz_encode`).
+
+**Found bug (block boundary).** The 4 MiB block-boundary case can't be reached by libFuzzer
+(`max_len`), so it became a unit test — which failed: `bzz_encode` split input at exactly
+`MAX_BLOCK_SIZE`, but the on-wire block size is the *BWT* size (input + 1 marker byte), so a
+4 MiB input block produced a 4 MiB + 1 wire block that `bzz_decode` (and DjVuLibre's
+equivalent cap) rejects — any BZZ payload we wrote from ≥ 4 MiB input was undecodable.
+Fixed: input blocks now split at `MAX_BLOCK_SIZE − 1`; `bzz_roundtrip_block_boundary` covers
+exactly-4-MiB and 4-MiB+1 inputs. Streams for inputs < 4 MiB are byte-identical (the split
+point only moves for larger inputs, which previously produced broken output).
+
+**Numbers / validation.** Local libFuzzer runs are currently blocked on this machine —
+the fuzz binary hangs at 100% CPU inside dyld initializers before reaching `main`
+(macOS 26.5 + nightly + ASan environment issue; `--sanitizer none` fails to link), so the
+planned 1 h/target local soak could not be executed honestly. Substitutes: (a) committed
+deterministic randomized soak tests exercising the same assertion bodies —
+`bzz_roundtrip_randomized_soak` (djvu-bzz) and `g4_roundtrip_randomized_soak` (smmr),
+hundreds of varied sizes/patterns each, green in `make check`; (b) the CI fuzz jobs
+(ubuntu, where the existing targets demonstrably run) pick the new targets up weekly with
+corpus persistence. djvu-bzz suite green incl. the new block-boundary test.
+
+**Decision.** Kept (infra) + the boundary fix shipped. Item 3 of the issue (scheduled
+external libtiff/Pillow differential for G4) is not in this change — noted as the remaining
+follow-up on #567's plan; the in-tree differential (own decoder) plus the CI fuzz jobs cover
+the symmetric-bug class the round-53 lesson warned about only partially.

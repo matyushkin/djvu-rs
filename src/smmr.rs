@@ -849,6 +849,60 @@ mod tests {
         assert!(matches!(decode_smmr(&data), Err(SmmrError::ImageTooLarge)));
     }
 
+    /// Randomized soak (#567): the `fuzz_g4` assertion body over hundreds of
+    /// varied dimensions and bit patterns. Deterministic xorshift, no deps —
+    /// a stand-in for local libFuzzer time (blocked on macOS, see round 64)
+    /// on top of the weekly CI fuzz jobs.
+    #[test]
+    fn g4_roundtrip_randomized_soak() {
+        let mut rng: u64 = 0xfeed_face_cafe_beef;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for case in 0..300 {
+            let w = (next() % 200 + 1) as u32;
+            let h = (next() % 200 + 1) as u32;
+            let mut bm = Bitmap::new(w, h);
+            // Alternate patterns: sparse random, dense random, stripes.
+            let density = match case % 3 {
+                0 => 20,
+                1 => 200,
+                _ => 0, // stripes below
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let set = if density == 0 {
+                        (x / (case % 7 + 1) as u32).is_multiple_of(2)
+                    } else {
+                        (next() & 0xff) < density
+                    };
+                    if set {
+                        bm.set(x, y, true);
+                    }
+                }
+            }
+            let g4 = encode_g4(&bm);
+            let mut chunk = Vec::with_capacity(4 + g4.len());
+            chunk.extend_from_slice(&(w as u16).to_be_bytes());
+            chunk.extend_from_slice(&(h as u16).to_be_bytes());
+            chunk.extend_from_slice(&g4);
+            let dec = decode_smmr(&chunk).expect("g4 soak decode");
+            assert_eq!((dec.width, dec.height), (w, h), "soak case {case} dims");
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(
+                        bm.get(x, y),
+                        dec.get(x, y),
+                        "soak case {case} pixel ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
     fn make_bm(w: u32, h: u32, f: impl Fn(u32, u32) -> bool) -> Bitmap {
         let mut bm = Bitmap::new(w, h);
         for y in 0..h {
