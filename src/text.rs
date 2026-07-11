@@ -57,7 +57,23 @@ pub enum TextError {
     /// An unknown zone type byte was encountered.
     #[error("unknown zone type {0}")]
     UnknownZoneType(u8),
+
+    /// The zone hierarchy nests deeper than [`MAX_ZONE_DEPTH`] (#589).
+    #[error("zone tree too deep (> {MAX_ZONE_DEPTH})")]
+    ZoneTooDeep,
 }
+
+/// Maximum text-zone nesting depth (#589). The DjVu hierarchy is
+/// page→column→region→para→line→word→character = 7 real levels; the generous
+/// cap tolerates degenerate-but-legitimate nesting while stopping a crafted
+/// single-child chain from overflowing the stack. Mirrors `MAX_NAVM_DEPTH`.
+pub const MAX_ZONE_DEPTH: usize = 64;
+
+/// Smallest possible child zone record in bytes: 1 type byte + five
+/// 2-byte biased coordinates + a 3-byte `text_len` + a 3-byte
+/// `children_count` = 17. Used to reject a `children_count` that cannot fit in
+/// the remaining input before reserving for it (#589).
+const MIN_ZONE_RECORD_BYTES: usize = 17;
 
 // ---- Public types -----------------------------------------------------------
 
@@ -352,7 +368,7 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
     // Parse zone tree
     let mut zones = Vec::new();
     if pos < data.len() {
-        let zone = parse_zone(data, &mut pos, None, None, &full_text, page_height)?;
+        let zone = parse_zone(data, &mut pos, None, None, &full_text, page_height, 0)?;
         zones.push(zone);
     }
 
@@ -390,7 +406,11 @@ fn parse_zone(
     prev: Option<&ZoneCtx>,
     full_text: &FullText<'_>,
     page_height: u32,
+    depth: usize,
 ) -> Result<TextZone, TextError> {
+    if depth > MAX_ZONE_DEPTH {
+        return Err(TextError::ZoneTooDeep);
+    }
     if *pos >= data.len() {
         return Err(TextError::ZoneTruncated(*pos));
     }
@@ -461,6 +481,15 @@ fn parse_zone(
     let children_count = read_i24(data, pos)
         .ok_or(TextError::ZoneTruncated(*pos))?
         .max(0) as usize;
+    // Cap the up-front reservation to what the remaining bytes could actually
+    // encode (#589): each child needs >= MIN_ZONE_RECORD_BYTES, so a crafted
+    // `children_count` (i24, up to ~16.7M) can no longer reserve ~1.5 GB
+    // before any child is read. The loop below still iterates the full
+    // `children_count` and fails with `ZoneTruncated` on the first missing
+    // child, so genuinely-truncated files error exactly as before — only the
+    // allocation is bounded to O(remaining input).
+    let remaining = data.len().saturating_sub(*pos);
+    let reserve = children_count.min(remaining / MIN_ZONE_RECORD_BYTES);
 
     let ctx = ZoneCtx {
         x,
@@ -471,7 +500,7 @@ fn parse_zone(
         text_len,
     };
 
-    let mut children = Vec::with_capacity(children_count);
+    let mut children = Vec::with_capacity(reserve);
     let mut prev_child: Option<ZoneCtx> = None;
 
     for _ in 0..children_count {
@@ -482,6 +511,7 @@ fn parse_zone(
             prev_child.as_ref(),
             full_text,
             page_height,
+            depth + 1,
         )?;
         prev_child = Some(ZoneCtx {
             x: child.rect.x as i32,
@@ -1107,5 +1137,85 @@ mod tests {
             height: 30,
         };
         assert_eq!(r.scale(100, 0, 200, 200), r);
+    }
+
+    // ── #589 resource-ceiling regression seeds ────────────────────────────
+
+    /// A zone declaring a huge `children_count` (i24) that cannot fit in the
+    /// remaining bytes is rejected up front — no ~1.5 GB `Vec::with_capacity`.
+    #[test]
+    fn zone_child_count_amplification_is_rejected() {
+        // One Page zone: type=0x00, then 5×2-byte biased coords, 3-byte
+        // text_len=0, 3-byte children_count = 0xFFFFFF. Then nothing.
+        // text-layer header: 3-byte text_len = 0, then a version byte
+        let mut d = vec![0u8, 0, 0, 0];
+        // zone: type + 5 biased-i16 coords (0x8000 = bias 0) + text_len(0) + children
+        d.push(0x01);
+        for _ in 0..5 {
+            d.extend_from_slice(&[0x80, 0x00]);
+        }
+        d.extend_from_slice(&[0, 0, 0]); // text_len = 0
+        d.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // children_count = 16,777,215
+        // The huge count is not backed by data, so the parse fails fast with
+        // ZoneTruncated — and crucially the `Vec::with_capacity` reservation is
+        // capped to `remaining / MIN_ZONE_RECORD_BYTES` (≈0 here), so no ~1.5 GB
+        // allocation happens on the way to that error.
+        let err = parse_text_layer(&d, 1000).unwrap_err();
+        assert!(
+            matches!(err, TextError::ZoneTruncated(_)),
+            "huge child count must fail fast without over-reserving, got {err:?}"
+        );
+    }
+
+    /// A single-child chain deeper than `MAX_ZONE_DEPTH` errors instead of
+    /// recursing to a stack overflow.
+    #[test]
+    fn zone_depth_is_bounded() {
+        fn zone_with_one_child(children: u32) -> Vec<u8> {
+            let mut z = Vec::new();
+            z.push(0x01); // type
+            for _ in 0..5 {
+                z.extend_from_slice(&[0x80, 0x00]); // biased coords = 0
+            }
+            z.extend_from_slice(&[0, 0, 0]); // text_len = 0
+            z.extend_from_slice(&(children).to_be_bytes()[1..4]); // 3-byte children_count
+            z
+        }
+        // Header (text_len=0) + a chain of MAX_ZONE_DEPTH+5 single-child zones,
+        // deepest one having 0 children.
+        let mut d = vec![0, 0, 0, 0]; // text_len(0) + version byte
+        let n = MAX_ZONE_DEPTH + 5;
+        for i in 0..n {
+            d.extend_from_slice(&zone_with_one_child(if i + 1 < n { 1 } else { 0 }));
+        }
+        let err = parse_text_layer(&d, 1000).unwrap_err();
+        assert!(
+            matches!(err, TextError::ZoneTooDeep),
+            "over-deep chain must error, got {err:?}"
+        );
+    }
+
+    /// A legitimate shallow tree with a realistic child count still parses.
+    #[test]
+    fn zone_normal_tree_still_parses() {
+        // Page with 2 word children, each 0 grandchildren.
+        let mut d = vec![0, 0, 0, 0]; // text_len(0) + version byte
+        d.push(0x01); // Page
+        for _ in 0..5 {
+            d.extend_from_slice(&[0x80, 0x00]);
+        }
+        d.extend_from_slice(&[0, 0, 0]); // text_len
+        d.extend_from_slice(&[0, 0, 2]); // 2 children
+        for _ in 0..2 {
+            d.push(0x06); // Word
+            for _ in 0..5 {
+                d.extend_from_slice(&[0x80, 0x00]);
+            }
+            d.extend_from_slice(&[0, 0, 0]); // text_len
+            d.extend_from_slice(&[0, 0, 0]); // 0 children
+        }
+        let tl = parse_text_layer(&d, 1000).unwrap();
+        assert_eq!(tl.zones.len(), 1);
+        assert_eq!(tl.zones[0].children.len(), 2);
     }
 }
