@@ -56,6 +56,36 @@ fuzz_target!(|data: &[u8]| {
     let dec = decode_smmr(&enc).expect("smmr: undecodable encoder output");
     assert_bitmap_eq(&bm, &dec);
 
+    // ---- lossy JB2 options (#567): decodable, dimension-exact ----
+    // Derive despeckle/lossy_threshold from the input so the option space is
+    // fuzzed too. Lossless bit-exactness no longer holds; despeckle-only
+    // output must still be a subset of the input ink (it only drops CCs).
+    let despeckle = u32::from(body[0] % 16);
+    let lossy_threshold = f32::from(body[body.len() / 2] % 16) / 100.0;
+    let opts = jb2_encode::Jb2EncodeOptions {
+        despeckle: (despeckle > 0).then_some(despeckle),
+        lossy_threshold,
+        ..jb2_encode::Jb2EncodeOptions::default()
+    };
+    let enc = jb2_encode::encode_jb2_dict_with_options(&bm, &[], &opts);
+    let dec = jb2::decode(&enc, None).expect("jb2 lossy: undecodable encoder output");
+    assert_eq!(
+        (dec.width, dec.height),
+        (bm.width, bm.height),
+        "jb2 lossy: dimension mismatch"
+    );
+    if lossy_threshold == 0.0 {
+        // Despeckle only removes whole components — never adds ink.
+        for y in 0..h {
+            for x in 0..w {
+                assert!(
+                    !dec.get(x, y) || bm.get(x, y),
+                    "jb2 despeckle added ink at ({x},{y})"
+                );
+            }
+        }
+    }
+
     // ---- IW44 colour encoder: lossy → dimensional round-trip only ----
     let mut pm = Pixmap::white(w, h);
     for i in 0..area {

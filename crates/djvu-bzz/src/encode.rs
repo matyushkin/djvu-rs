@@ -29,10 +29,15 @@ pub fn bzz_encode(data: &[u8]) -> Vec<u8> {
     let mut enc = ZpEncoder::new();
     let mut block_ctx = [0u8; CTX_COUNT];
 
-    // Split input into blocks of at most MAX_BLOCK_SIZE
+    // Split input into blocks. The on-wire block size is the *BWT* size —
+    // input bytes + 1 marker — and the decoder (ours and DjVuLibre's) rejects
+    // wire blocks above MAX_BLOCK_SIZE, so each input block must stay one
+    // byte under it. Splitting at MAX_BLOCK_SIZE exactly produced a stream
+    // our own bzz_decode refused (BlockSizeTooLarge, found by the #567
+    // block-boundary test).
     let mut offset = 0;
     while offset < data.len() {
-        let end = (offset + MAX_BLOCK_SIZE).min(data.len());
+        let end = (offset + MAX_BLOCK_SIZE - 1).min(data.len());
         let block = &data[offset..end];
         encode_one_block(&mut enc, &mut block_ctx, block);
         offset = end;
@@ -483,6 +488,68 @@ mod tests {
             compressed.len(),
             compressed.len() as f64 / input.len() as f64 * 100.0
         );
+    }
+
+    /// Block-boundary round-trips (#567): exactly one full 4 MiB block, and
+    /// one byte over (forcing a second block). The fuzz target can't reach
+    /// these sizes (libFuzzer max_len), so the boundary lives here.
+    #[test]
+    fn bzz_roundtrip_block_boundary() {
+        let pattern = b"block boundary coverage for MAXBLOCK splitting ";
+        for size in [MAX_BLOCK_SIZE, MAX_BLOCK_SIZE + 1] {
+            let mut input = Vec::with_capacity(size);
+            while input.len() < size {
+                input.extend_from_slice(pattern);
+            }
+            input.truncate(size);
+            let compressed = bzz_encode(&input);
+            let decoded = bzz_decode(&compressed).expect("decode");
+            assert_eq!(decoded, input, "block-boundary roundtrip at {size}");
+        }
+    }
+
+    /// Randomized soak (#567): the fuzz-target assertion body over hundreds of
+    /// varied sizes and byte distributions. Deterministic xorshift, no deps —
+    /// a stand-in for local libFuzzer time (blocked on macOS, see round 64)
+    /// on top of the weekly CI fuzz jobs.
+    #[test]
+    fn bzz_roundtrip_randomized_soak() {
+        let mut rng: u64 = 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for case in 0..300 {
+            let len = (next() % 8192) as usize;
+            let mut input = Vec::with_capacity(len);
+            // Alternate distributions: raw random, run-heavy, tiny alphabet.
+            match case % 3 {
+                0 => {
+                    for _ in 0..len {
+                        input.push((next() & 0xff) as u8);
+                    }
+                }
+                1 => {
+                    while input.len() < len {
+                        let b = (next() & 0xff) as u8;
+                        let run = (next() % 64) as usize + 1;
+                        for _ in 0..run.min(len - input.len()) {
+                            input.push(b);
+                        }
+                    }
+                }
+                _ => {
+                    for _ in 0..len {
+                        input.push(b"ab\n"[(next() % 3) as usize]);
+                    }
+                }
+            }
+            let compressed = bzz_encode(&input);
+            let decoded = bzz_decode(&compressed).expect("decode");
+            assert_eq!(decoded, input, "soak case {case} (len {len})");
+        }
     }
 
     #[test]

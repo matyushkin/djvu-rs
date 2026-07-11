@@ -51,3 +51,15 @@ djvu-rs = { path = ".." }
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "fuzz_bzz_encode"
+path = "fuzz_targets/fuzz_bzz_encode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_g4"
+path = "fuzz_targets/fuzz_g4.rs"
+test = false
+doc = false
