@@ -77,6 +77,19 @@ pub enum TiffMode {
     Bilevel,
 }
 
+/// Compression choice for [`TiffMode::Bilevel`] pages (#579).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TiffBilevelCompression {
+    /// 8-bit grayscale strips with Deflate — the historical default.
+    #[default]
+    Deflate,
+    /// 1-bit CCITT Group 4 (T.6) via [`crate::smmr::encode_g4`] — the native
+    /// archival compression for bilevel scans. Written by a minimal in-crate
+    /// IFD writer (the `tiff` crate has no CCITT encoder); validated against
+    /// libtiff/Pillow. Ignored in [`TiffMode::Color`].
+    G4,
+}
+
 /// Options for DjVu → TIFF conversion.
 #[derive(Debug, Clone)]
 pub struct TiffOptions {
@@ -84,6 +97,8 @@ pub struct TiffOptions {
     pub mode: TiffMode,
     /// Scale factor for color rendering (1.0 = native resolution).
     pub scale: f32,
+    /// Compression for bilevel pages (default: the historical Deflate).
+    pub bilevel_compression: TiffBilevelCompression,
 }
 
 impl Default for TiffOptions {
@@ -91,6 +106,7 @@ impl Default for TiffOptions {
         TiffOptions {
             mode: TiffMode::Color,
             scale: 1.0,
+            bilevel_compression: TiffBilevelCompression::default(),
         }
     }
 }
@@ -123,6 +139,9 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
     opts: &TiffOptions,
     writer: W,
 ) -> Result<(), TiffError> {
+    if opts.mode == TiffMode::Bilevel && opts.bilevel_compression == TiffBilevelCompression::G4 {
+        return write_bilevel_g4_tiff(doc, writer);
+    }
     let mut encoder = TiffEncoder::new(writer)?;
     let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
 
@@ -387,6 +406,122 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
 ///
 /// Returns a blank white buffer if no Sjbz chunk is present (pure IW44 page).
 /// Returns `Err` if an Sjbz chunk exists but decoding fails.
+// ---- Bilevel G4 writer (#579) ------------------------------------------------
+//
+// The `tiff` crate (0.9) has no CCITT encoder, so the G4 path hand-rolls the
+// minimal multi-page bilevel TIFF: little-endian header, one IFD per page with
+// the 11 tags libtiff expects for a G4 fax image, strip data = the raw
+// `smmr::encode_g4` T.6 payload (1 strip per page). Photometric is
+// min-is-white (0), matching T.6's white-first run convention and our mask's
+// 1 = black.
+fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Result<(), TiffError> {
+    let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
+
+    // Encode every page's G4 payload first (parallel when available) — the
+    // IFD chain needs strip offsets, so sizes must be known before layout.
+    let encode_one = |i: usize| -> Result<(u32, u32, u32, Vec<u8>), TiffError> {
+        let page = doc.page(i)?;
+        let pw = page.width() as u32;
+        let ph = page.height() as u32;
+        let dpi = page.dpi().max(1) as u32;
+        let mask = page
+            .extract_mask()
+            .map_err(TiffError::Doc)?
+            .filter(|m| m.width >= pw && m.height >= ph)
+            .unwrap_or_else(|| crate::bitmap::Bitmap::new(pw, ph));
+        Ok((pw, ph, dpi, crate::smmr::encode_g4(&mask)))
+    };
+    #[cfg(feature = "parallel")]
+    let pages: Vec<(u32, u32, u32, Vec<u8>)> = {
+        use rayon::prelude::*;
+        indices
+            .par_iter()
+            .map(|&i| encode_one(i))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    #[cfg(not(feature = "parallel"))]
+    let pages: Vec<(u32, u32, u32, Vec<u8>)> = indices
+        .iter()
+        .map(|&i| encode_one(i))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let io = |e: std::io::Error| TiffError::Encode(e.to_string());
+
+    // Layout: header (8) → per page [strip data, then 8-byte-aligned IFD].
+    const NTAGS: u16 = 11;
+    let ifd_size = 2 + NTAGS as u32 * 12 + 4; // count + entries + next-IFD ptr
+    let mut offset: u32 = 8;
+    let mut layout = Vec::with_capacity(pages.len()); // (strip_off, rational_off, ifd_off)
+    for (_, _, _, g4) in &pages {
+        let strip_off = offset;
+        // XResolution/YResolution rationals (2×8 bytes) live after the strip.
+        let rat_off = (strip_off + g4.len() as u32).div_ceil(2) * 2;
+        let ifd_off = (rat_off + 16).div_ceil(2) * 2;
+        layout.push((strip_off, rat_off, ifd_off));
+        offset = ifd_off + ifd_size;
+    }
+
+    // Header: little-endian, magic 42, first IFD offset.
+    w.write_all(b"II\x2a\x00").map_err(io)?;
+    w.write_all(&layout[0].2.to_le_bytes()).map_err(io)?;
+
+    let entry = |tag: u16, typ: u16, count: u32, value: u32| -> [u8; 12] {
+        let mut e = [0u8; 12];
+        e[0..2].copy_from_slice(&tag.to_le_bytes());
+        e[2..4].copy_from_slice(&typ.to_le_bytes());
+        e[4..8].copy_from_slice(&count.to_le_bytes());
+        e[8..12].copy_from_slice(&value.to_le_bytes());
+        e
+    };
+
+    let mut pos: u32 = 8;
+    for (idx, ((pw, ph, dpi, g4), &(strip_off, rat_off, ifd_off))) in
+        pages.iter().zip(&layout).enumerate()
+    {
+        debug_assert_eq!(pos, strip_off);
+        w.write_all(g4).map_err(io)?;
+        pos += g4.len() as u32;
+        while pos < rat_off {
+            w.write_all(&[0]).map_err(io)?;
+            pos += 1;
+        }
+        // X/Y resolution rationals (dpi / 1).
+        for _ in 0..2 {
+            w.write_all(&dpi.to_le_bytes()).map_err(io)?;
+            w.write_all(&1u32.to_le_bytes()).map_err(io)?;
+        }
+        pos += 16;
+        while pos < ifd_off {
+            w.write_all(&[0]).map_err(io)?;
+            pos += 1;
+        }
+
+        w.write_all(&NTAGS.to_le_bytes()).map_err(io)?;
+        // Types: 3 = SHORT, 4 = LONG, 5 = RATIONAL.
+        w.write_all(&entry(256, 4, 1, *pw)).map_err(io)?; // ImageWidth
+        w.write_all(&entry(257, 4, 1, *ph)).map_err(io)?; // ImageLength
+        w.write_all(&entry(258, 3, 1, 1)).map_err(io)?; // BitsPerSample
+        w.write_all(&entry(259, 3, 1, 4)).map_err(io)?; // Compression = CCITT G4
+        w.write_all(&entry(262, 3, 1, 0)).map_err(io)?; // Photometric = WhiteIsZero
+        w.write_all(&entry(273, 4, 1, strip_off)).map_err(io)?; // StripOffsets
+        w.write_all(&entry(277, 3, 1, 1)).map_err(io)?; // SamplesPerPixel
+        w.write_all(&entry(278, 4, 1, *ph)).map_err(io)?; // RowsPerStrip
+        w.write_all(&entry(279, 4, 1, g4.len() as u32))
+            .map_err(io)?; // StripByteCounts
+        w.write_all(&entry(282, 5, 1, rat_off)).map_err(io)?; // XResolution
+        w.write_all(&entry(283, 5, 1, rat_off + 8)).map_err(io)?; // YResolution
+        let next = if idx + 1 < layout.len() {
+            layout[idx + 1].2
+        } else {
+            0
+        };
+        w.write_all(&next.to_le_bytes()).map_err(io)?;
+        pos = ifd_off + ifd_size;
+    }
+    w.flush().map_err(io)?;
+    Ok(())
+}
+
 fn extract_bilevel_pixels(page: &DjVuPage, w: u32, h: u32) -> Result<Vec<u8>, TiffError> {
     let sjbz = match page.find_chunk(b"Sjbz") {
         Some(d) => d,
@@ -714,5 +849,89 @@ mod tests {
     fn tiff_error_display() {
         let e = TiffError::Encode("something went wrong".to_string());
         assert!(e.to_string().contains("something went wrong"));
+    }
+
+    /// #579: the G4 bilevel TIFF is structurally sound (LE header, one IFD per
+    /// page, CCITT G4 compression tag) and its strip round-trips through our
+    /// own T.6 decoder to the exact page mask.
+    #[test]
+    fn bilevel_g4_tiff_round_trips_through_own_decoder() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/boy_jb2.djvu"),
+        )
+        .unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let tiff = djvu_to_tiff(
+            &doc,
+            &TiffOptions {
+                mode: TiffMode::Bilevel,
+                bilevel_compression: TiffBilevelCompression::G4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(&tiff[0..4], b"II\x2a\x00", "little-endian TIFF header");
+        let rd32 = |o: usize| u32::from_le_bytes(tiff[o..o + 4].try_into().unwrap());
+        let rd16 = |o: usize| u16::from_le_bytes(tiff[o..o + 2].try_into().unwrap());
+        let ifd = rd32(4) as usize;
+        let ntags = rd16(ifd) as usize;
+        let mut tags = std::collections::BTreeMap::new();
+        for i in 0..ntags {
+            let e = ifd + 2 + i * 12;
+            tags.insert(rd16(e), rd32(e + 8));
+        }
+        assert_eq!(tags[&259], 4, "Compression must be CCITT G4");
+        assert_eq!(tags[&258], 1, "BitsPerSample must be 1");
+        assert_eq!(tags[&262], 0, "Photometric must be min-is-white");
+        assert_eq!(rd32(ifd + 2 + ntags * 12), 0, "single page: next IFD = 0");
+
+        let (w, h) = (tags[&256], tags[&257]);
+        let off = tags[&273] as usize;
+        let len = tags[&279] as usize;
+        let mut chunk = Vec::with_capacity(4 + len);
+        chunk.extend_from_slice(&(w as u16).to_be_bytes());
+        chunk.extend_from_slice(&(h as u16).to_be_bytes());
+        chunk.extend_from_slice(&tiff[off..off + len]);
+        let decoded = crate::smmr::decode_smmr(&chunk).expect("G4 strip must decode");
+
+        let mask = doc.page(0).unwrap().extract_mask().unwrap().unwrap();
+        assert_eq!((decoded.width, decoded.height), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(decoded.get(x, y), mask.get(x, y), "pixel ({x},{y})");
+            }
+        }
+    }
+
+    /// #579: multi-page G4 TIFF chains IFDs for every page.
+    #[test]
+    fn bilevel_g4_tiff_multipage_chains_ifds() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/corpus/cable_1973_100133.djvu"),
+        )
+        .unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let tiff = djvu_to_tiff(
+            &doc,
+            &TiffOptions {
+                mode: TiffMode::Bilevel,
+                bilevel_compression: TiffBilevelCompression::G4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rd32 = |o: usize| u32::from_le_bytes(tiff[o..o + 4].try_into().unwrap());
+        let rd16 = |o: usize| u16::from_le_bytes(tiff[o..o + 2].try_into().unwrap());
+        let mut ifd = rd32(4) as usize;
+        let mut pages = 0;
+        while ifd != 0 {
+            let ntags = rd16(ifd) as usize;
+            pages += 1;
+            ifd = rd32(ifd + 2 + ntags * 12) as usize;
+        }
+        assert_eq!(pages, doc.page_count(), "one IFD per page");
     }
 }
