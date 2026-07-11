@@ -11782,3 +11782,33 @@ follow-up). Column stride stays 1: a stride-2 scan inflated photo gradients into
 **Decision.** Kept. Auto matches the expert profile on every distinctive corpus case,
 photos provably cannot reach the bilevel path, and the stats pass is ~1% of the cheapest
 encode. Built on the Photo profile (#571) — PR stacked on that branch.
+## Perf round 83 (2026-07-12) — ADAPTIVE_BG_SUB: content-adaptive BG44 subsample (#569)
+
+### #569 — per-page subsample from measured background detail — **Kept** (opt-in) (2026-07-12)
+
+**Issue.** `bg_subsample` was a fixed profile constant (12 Quality / 6 Archival) never
+derived from content: flat paper loses nothing at 12, photo-heavy backgrounds smear at 12,
+and 6 doubles BG44 bytes on plain text for no visible gain.
+
+**Approach.** Opt-in `SegmentOptions::adaptive_bg_subsample` (default `false` —
+byte-identical): after the mask is built, per-12×12-cell luma spread of the *unmasked*
+pixels (under-ink pixels excluded, sampled every other cell row) gives a detail fraction;
+<5% detailed cells → the ceiling (`bg_subsample`, usually 12), <30% → 6, else → 3.
+
+**Numbers** (Quality profile, 300 dpi renders, `compare_color` vs source):
+
+| page | fix12 | fix6 | auto picked |
+|---|---|---|---|
+| watchmaker (flat paper) | 14,076 B / ssim .9989 | 24,982 B / **.9977 (worse!)** | **=fix12** |
+| conquete_paix (flat) | 28,348 B / .9962 | 66,668 B / .9954 (worse) | **=fix12** |
+| colorbook (detailed) | 12,988 B / dE 8.48 | 21,956 B / dE 8.39 | **=fix6** |
+| navm_fgbz (white bg) | 15,418 B / .9824 | 37,834 B / .9872 | =fix12 (bg truly flat; the fix6 ssim delta comes from FG palette quantization, not the background) |
+
+The auto curve sits on the better fixed point per page: on flat pages fix6 pays +78…135%
+bytes for *worse* SSIM (the encoder's RD at these budgets), on detailed pages 12 loses
+colour fidelity. Unit test: flat → ceiling, noisy → 3, noise fully under ink → ceiling
+(mask exclusion works).
+
+**Decision.** Kept as opt-in. Decision rule ("auto dominates both fixed settings on the
+mixed corpus") met. Wiring it into profile defaults belongs with #570's auto profile once
+corpus diversity (#558) gives more photo-background pages.
