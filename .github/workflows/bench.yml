@@ -146,11 +146,43 @@ jobs:
           python3 scripts/bench_compare.py \
             baseline \
             target/criterion \
+            --suspects-out suspects.txt \
             > bench_comment.md
           compare_exit=$?
           set -e
           echo "compare_exit=$compare_exit" >> "$GITHUB_OUTPUT"
           cat bench_comment.md
+
+      # ── Same-runner re-check (PR only, only when the artifact compare flags) ──
+      # The artifact baseline comes from a different runner whose CPU generation
+      # can differ enough to flag phantom regressions on micro benches (observed
+      # +11%/+34% on bzz_decode/bzz_encode across PRs that do not touch BZZ).
+      # Re-measure ONLY the flagged benches from the merge base on THIS runner
+      # and let that comparison be the verdict.
+      - name: Re-check suspects against merge base (same runner)
+        if: github.event_name == 'pull_request' && steps.compare.outputs.compare_exit == '1'
+        id: recheck
+        run: |
+          set +e
+          filter=$(paste -sd'|' suspects.txt | sed 's/[^a-zA-Z0-9_|\/]/./g')
+          echo "suspect filter: $filter"
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git worktree add ../base-src "${{ github.event.pull_request.base.sha }}"
+          pushd ../base-src
+          cargo bench --bench codecs -- "$filter" || true
+          cargo bench --bench render --features pdf -- "$filter" || true
+          popd
+          python3 scripts/bench_compare.py \
+            ../base-src/target/criterion \
+            target/criterion \
+            --restrict suspects.txt \
+            --title "Same-runner re-check (merge base rebuilt on this runner)" \
+            > recheck_comment.md
+          recheck_exit=$?
+          set -e
+          echo "recheck_exit=$recheck_exit" >> "$GITHUB_OUTPUT"
+          cat recheck_comment.md
+          cat recheck_comment.md >> bench_comment.md
 
       - name: Append DjVuLibre comparison
         if: github.event_name == 'pull_request'
@@ -178,7 +210,11 @@ jobs:
         if: github.event_name == 'pull_request' && needs.detect.outputs.code == 'true' && steps.compare.outputs.compare_exit != '0'
         run: |
           if [ "${{ steps.compare.outputs.compare_exit }}" = "1" ]; then
-            echo "Benchmark regressions detected — see PR comment for details."
+            if [ "${{ steps.recheck.outputs.recheck_exit }}" = "0" ]; then
+              echo "Artifact-baseline regressions did not reproduce against the merge base on this runner — phantom (cross-runner variance)."
+              exit 0
+            fi
+            echo "Benchmark regressions detected and confirmed on a same-runner merge-base re-check — see PR comment."
           else
             echo "Benchmark comparison failed: current Criterion results are missing or invalid."
           fi
