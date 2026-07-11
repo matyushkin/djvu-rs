@@ -969,6 +969,7 @@ fn bench_pdf_export_flatdecode(c: &mut Criterion) {
             Err(_) => return,
         };
         let opts = djvu_rs::pdf::PdfOptions {
+            mrc: false,
             jpeg_quality: None,
             output_dpi: 150,
             adaptive_raster: false,

@@ -168,6 +168,10 @@ name = "pdf_fg_color_probe"
 required-features = ["pdf"]
 
 [[example]]
+name = "pdf_mrc_probe"
+required-features = ["pdf"]
+
+[[example]]
 name = "txtz_ocr_demo"
 required-features = ["pdf"]
 

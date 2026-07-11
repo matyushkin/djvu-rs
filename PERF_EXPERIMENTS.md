@@ -11440,3 +11440,45 @@ follow-up if bundles grow to where that matters.
 **Decision.** Kept: byte-identical, strictly less retention, no wall-clock cost. A
 streaming-*input* encode API (pages supplied one at a time) is what a real ≥2× needs —
 out of scope for this experiment's fixed `&[Pixmap]` surface.
+## Perf round 72 (2026-07-11) — TRUE_MRC: background-only /Im0 at native BG44 resolution (#563)
+
+### #563 — opt-in `PdfOptions::mrc` — **Kept** (opt-in) (2026-07-11)
+
+**Issue.** The mixed-page PDF path embeds `/Im0` as the full composited render (background
+WITH text) at `output_dpi`, then repaints the text via the stencils anyway: the raster layer
+pays JPEG bits for glyph edges (plus ringing halos) and is stored upsampled relative to the
+background's native BG44 resolution.
+
+**Approach.** Opt-in `PdfOptions::mrc`: when the page's foreground is fully covered by
+stencils (the #559/#620 layer machinery — FGbz palette layers, uniform-FG44 colour, or plain
+black), embed the **background layer alone** (`extract_background`, native subsampled
+resolution; the page `cm` scales it) and let the stencils carry the text. Multi-colour-FG44
+pages (stencil skipped), photo-only and bilevel pages fall back to the default path
+unchanged. Raster policy (`jpeg_quality`/`adaptive_raster`) factored into a shared
+`encode_img0_body` and applied to both paths. Default `mrc: false` is byte-identical.
+
+**Platform / commands.** macOS 26.5.0; new committed probe:
+
+```sh
+cargo run --release --features pdf --example pdf_mrc_probe
+```
+
+**Numbers** (default options vs `mrc: true`; pdftoppm + `compare_color` vs our renderer,
+per-page averages):
+
+| doc | size | dE_mean avg | ssim_y avg |
+|---|---|---|---|
+| watchmaker (12 pp) | 5.72 MB → **2.03 MB (−64.5%)** | 7.38 → **2.15** | 0.794 → **0.940** |
+| irish | 1.23 MB → **0.16 MB (−86.7%)** | 0.600 → **0.003** | 0.981 → **0.9999** |
+| navm_fgbz (6 pp) | 1.21 MB → **0.26 MB (−78.9%)** | 0.641 → **0.062** | 0.979 → **0.998** |
+| colorbook (62 pp) | unchanged (fallback: multi-colour FG44, stencils skipped) | — | — |
+
+Size *and* fidelity improve together: the composited default upsamples the background and
+JPEG-compresses glyph edges, while MRC reproduces exactly the layering our renderer (and
+DjVu itself) uses. Under-mask diffusion (BG_DIFFUSE-style) wasn't needed for these corpora —
+encoder-produced BG44 is already smooth under the mask; left as a follow-up knob if foreign
+files show ghosting.
+
+**Decision.** Kept as opt-in. Decision rule (≥15% smaller, equal-or-better text quality)
+exceeded several times over; the "consider defaulting later" question should wait for
+corpus diversity (#558) since the win depends on stencil coverage.
