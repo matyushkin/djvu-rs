@@ -11661,3 +11661,34 @@ instance — the recorded cost; workers are bounded by `RAYON_NUM_THREADS`.
 
 **Decision.** Kept. Decision rule (≥1.8× at 2 workers, ≥3× at 4, bounded memory,
 byte-identical TXTz) met: 1.93× / 3.42×.
+## Perf round 78 (2026-07-12) — TILE_LRU: tile-cache study — LRU eviction, hit-rate telemetry, budget sweep (#576)
+
+### #576 — FIFO → LRU + measured budget knee — **Kept** (LRU); budget unchanged (2026-07-12)
+
+**Issue.** The viewer tile cache evicted FIFO with a fixed 8 MiB/page budget and no
+measured hit rates; C4_TILE_CACHE's ~20–25% win came from one-direction scripted pans,
+while a back-and-forth pan (the classic reading pattern) makes FIFO evict exactly the tiles
+about to be reused.
+
+**Approach.** Test-only hit/miss/eviction counters in `TileCacheState` (fields and
+increments under `#[cfg(test)]` — release lock section unchanged). `get_tile` now moves the
+hit key to the back of the eviction order (LRU); the order deque holds ≤ ~32 keys, so the
+reposition is a few dozen comparisons per hit. New scenario test
+`tile_cache_back_and_forth_pan_hit_rate` (colorbook @2× zoom, 1440×960 viewport, 25% steps,
+there-and-back) prints the telemetry and asserts a ≥30% floor.
+
+**Numbers** (same scenario, same build, policy flipped locally for the baseline):
+- Back-and-forth pan: FIFO **69.4%** → LRU **76.8%** hit rate (misses 137 → 104, −24%
+  recompositions; evictions 105 → 72).
+- One-direction pans (benches/viewer.rs): unchanged — a scan never revisits, so the
+  policies evict identically; per-step times within noise.
+- Budget sweep (LRU, same scenario): 4 MiB → **0%** (the ~24-tile viewport doesn't fit —
+  any policy thrashes), 8 MiB → 76.8%, 16 MiB → 83.9%. The knee is "budget must exceed the
+  viewport working set"; 16 MiB buys +7 п.п. for double the per-page memory — 8 MiB kept.
+  Note for retina-class viewports (2880×1920 ≈ 88 tiles ≈ 22 MiB): the fixed budget is the
+  binding constraint before eviction policy even matters — a viewport-scaled budget is the
+  real follow-up if viewer telemetry ever shows it.
+
+**Decision.** LRU adopted (better on the realistic scenario, provably identical on scans);
+budget constant unchanged (sweep recorded); eligibility extensions (Lanczos3, rotation)
+not pursued here — each needs its own correctness argument for the tile key.

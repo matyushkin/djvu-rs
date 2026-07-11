@@ -1108,6 +1108,14 @@ struct TileCacheState {
     map: std::collections::HashMap<TileKey, std::sync::Arc<TileEntry>>,
     order: std::collections::VecDeque<TileKey>,
     bytes: usize,
+    /// Hit/miss/eviction telemetry (#576). Test-only so the release lock
+    /// section stays exactly as cheap as before.
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    misses: usize,
+    #[cfg(test)]
+    evictions: usize,
 }
 
 /// Render-tier cache of a page's decoded layers.
@@ -1298,13 +1306,33 @@ impl PageLayers {
     }
 
     /// Look up a cached composited tile, cloning the `Arc` handle on a hit.
+    ///
+    /// LRU (#576): a hit moves the key to the back of the eviction order.
+    /// Under a back-and-forth pan — the classic reading pattern — FIFO evicts
+    /// exactly the tiles about to be reused; move-to-back keeps them. The
+    /// order deque holds ≤ `TILE_CACHE_MAX_BYTES / tile_bytes` ≈ 32 keys, so
+    /// the linear reposition is a few dozen comparisons per hit.
     fn get_tile(&self, key: TileKey) -> Option<std::sync::Arc<TileEntry>> {
-        self.tile_cache
+        let mut state = self
+            .tile_cache
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map
-            .get(&key)
-            .cloned()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hit = state.map.get(&key).cloned();
+        #[cfg(test)]
+        {
+            if hit.is_some() {
+                state.hits += 1;
+            } else {
+                state.misses += 1;
+            }
+        }
+        if hit.is_some()
+            && let Some(pos) = state.order.iter().position(|k| *k == key)
+        {
+            state.order.remove(pos);
+            state.order.push_back(key);
+        }
+        hit
     }
 
     /// Insert a freshly composited tile, evicting the oldest tiles (FIFO)
@@ -1325,11 +1353,25 @@ impl PageLayers {
                 Some(old_key) => {
                     if let Some(old) = state.map.remove(&old_key) {
                         state.bytes = state.bytes.saturating_sub(old.data.len());
+                        #[cfg(test)]
+                        {
+                            state.evictions += 1;
+                        }
                     }
                 }
                 None => break,
             }
         }
+    }
+
+    /// Tile-cache telemetry snapshot `(hits, misses, evictions)` (#576).
+    #[cfg(test)]
+    fn tile_cache_stats(&self) -> (usize, usize, usize) {
+        let s = self
+            .tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (s.hits, s.misses, s.evictions)
     }
 
     /// The fully decoded BG44 wavelet image (all chunks), decoding on first
@@ -5291,6 +5333,58 @@ mod tests {
         assert_eq!(
             resumed.data, cold.data,
             "resumed full decode must be byte-identical"
+        );
+    }
+
+    /// #576: back-and-forth pan hit-rate through the tile cache. LRU keeps
+    /// the tiles a reversing pan is about to revisit; the printed numbers are
+    /// the experiment's measurement (run with --nocapture), the assert is the
+    /// regression floor.
+    #[test]
+    fn tile_cache_back_and_forth_pan_hit_rate() {
+        let doc = load_doc("colorbook.djvu");
+        let page = doc.page(0).unwrap();
+        let (w, h) = (page.width() as u32, page.height() as u32);
+        // 2x zoom full-render space, viewport ~1/3 page, 25% pan steps,
+        // left-to-right then back — the classic reading pattern.
+        let opts = RenderOptions {
+            width: w * 2,
+            height: h * 2,
+            ..Default::default()
+        };
+        // Realistic laptop viewport: 1440×960 ≈ 24 tiles (fits the 8 MiB /
+        // ~32-tile budget with headroom — a viewport larger than the budget
+        // thrashes any policy).
+        let vw = 1440u32.min(w * 2);
+        let vh = 960u32.min(h * 2);
+        let step = vw / 4;
+        let max_x = (w * 2).saturating_sub(vw);
+        let mut xs: Vec<u32> = (0..=(max_x / step)).map(|i| i * step).collect();
+        let back: Vec<u32> = xs.iter().rev().skip(1).copied().collect();
+        xs.extend(back);
+        for &x in &xs {
+            let _ = render_region_tiled(
+                page,
+                RenderRect {
+                    x,
+                    y: 0,
+                    width: vw,
+                    height: vh,
+                },
+                &opts,
+            )
+            .unwrap();
+        }
+        let (hits, misses, evictions) = page.render_layers().tile_cache_stats();
+        let rate = hits as f64 / (hits + misses).max(1) as f64;
+        println!(
+            "tile cache back-and-forth pan: hits={hits} misses={misses} evictions={evictions} hit-rate={:.1}%",
+            rate * 100.0
+        );
+        assert!(
+            rate > 0.30,
+            "back-and-forth pan hit rate too low: {:.1}%",
+            rate * 100.0
         );
     }
 
