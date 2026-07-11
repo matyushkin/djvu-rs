@@ -490,16 +490,23 @@ impl<'a> PageEncoder<'a> {
                 let jb2_options = self.jb2_options.unwrap_or_default();
                 let iw44_options = self.iw44_options.unwrap_or_default();
                 #[cfg(feature = "parallel")]
-                let (sjbz, bg44_chunks) = rayon::join(
-                    || jb2_encode::encode_jb2_dict_with_options(&seg.mask, &[], &jb2_options),
+                let ((sjbz, blits), bg44_chunks) = rayon::join(
+                    || jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &jb2_options),
                     || encode_iw44_color(&seg.bg, &iw44_options),
                 );
                 #[cfg(not(feature = "parallel"))]
-                let (sjbz, bg44_chunks) = (
-                    jb2_encode::encode_jb2_dict_with_options(&seg.mask, &[], &jb2_options),
+                let ((sjbz, blits), bg44_chunks) = (
+                    jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &jb2_options),
                     encode_iw44_color(&seg.bg, &iw44_options),
                 );
-                let fgbz = foreground_fgbz(pm, &seg.mask, &sjbz, None, self.fgbz_options);
+                // Lossy rec-7 substitution blits near-twins whose pixels can
+                // differ from the emitted components — only there fall back to
+                // the decode-based palette scan (#612).
+                let fgbz = if jb2_options.lossy_threshold > 0.0 {
+                    foreground_fgbz(pm, &seg.mask, &sjbz, None, self.fgbz_options)
+                } else {
+                    foreground_fgbz_from_blits(pm, &seg.mask, &blits, self.fgbz_options)
+                };
 
                 let mut chunks =
                     Vec::with_capacity(2 + bg44_chunks.len() + usize::from(fgbz.is_some()) + 1);
@@ -664,17 +671,14 @@ fn encode_djvm_layered_shared_impl(
 
     let dict_id = "dict0001.djvi";
     let mut comps: Vec<(Vec<u8>, bool, String)> = Vec::new();
-    // Decoded form of the shared dictionary, needed to resolve the per-page Sjbz
-    // blit maps when rebuilding FGbz (the Sjbz references the dict via INCL).
-    let shared_dict = if has_shared {
+    // FGbz is rebuilt from the encoder's own emitted blits (#612), so the
+    // shared dictionary no longer needs to be decoded back for the per-page
+    // blit maps — only the DJVI component itself is emitted.
+    if has_shared {
         let djbz = jb2_encode::encode_jb2_djbz(&shared);
-        let dict = crate::jb2::decode_dict(&djbz, None).ok();
         let djvi_body = jb2_encode::build_form_body(b"DJVI", &[(*b"Djbz", djbz)]);
         comps.push((djvi_body, false, dict_id.to_string()));
-        dict
-    } else {
-        None
-    };
+    }
 
     // Each page's DJVU body is independent (JB2-dict Sjbz + IW44 background + FGbz +
     // optional TH44). Build one component per page; with the `parallel` feature the
@@ -689,22 +693,18 @@ fn encode_djvm_layered_shared_impl(
         let h = u16::try_from(pm.height)
             .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
 
-        let sjbz = if has_shared {
-            jb2_encode::encode_jb2_dict_with_shared(&seg.mask, &shared)
-        } else {
-            jb2_encode::encode_jb2_dict(&seg.mask)
-        };
-        // FGbz is derived from this page's Sjbz blit map, so it must be built
-        // from the shared-dictionary stream (passing the shared dict to resolve it).
-        // `Exact` here (not threaded from a caller option yet): the bundle path
-        // is out of scope for FGBZ_MEDIANCUT and stays byte-identical.
-        let fgbz = foreground_fgbz(
-            pm,
+        let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
+        let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits(
             &seg.mask,
-            &sjbz,
-            shared_dict.as_ref(),
-            FgbzPaletteOptions::Exact,
+            shared_for_encode,
+            &Jb2EncodeOptions::default(),
         );
+        // FGbz comes straight from the emitted blits (#612) — no decode of the
+        // just-encoded stream. Shared-dict rec-7 copies are exact matches, so
+        // the blit shapes equal the decoded ones. `Exact` here (not threaded
+        // from a caller option yet): the bundle path is out of scope for
+        // FGBZ_MEDIANCUT and stays byte-identical.
+        let fgbz = foreground_fgbz_from_blits(pm, &seg.mask, &blits, FgbzPaletteOptions::Exact);
         let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
 
         let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -834,6 +834,65 @@ fn foreground_fgbz(
         }
     }
 
+    fgbz_from_accums(by_blit, palette_options)
+}
+
+/// Build the FGbz chunk from per-blit colours accumulated straight off the
+/// encoder's emitted blits — no decode of the just-encoded Sjbz (#612).
+///
+/// Valid whenever every emitted blit's shape equals what the decoder will
+/// reconstruct (the lossless paths: default options, despeckle, exact rec-7
+/// and rec-6 matches). Blits are pixel-disjoint connected components of
+/// `mask`, so per-blit sums equal the decode-based scan's — byte-identical
+/// FGbz. Lossy rec-7 substitution (`lossy_threshold > 0`) blits near-twins
+/// whose pixels can differ; callers keep the decode-based
+/// [`foreground_fgbz`] for that case.
+fn foreground_fgbz_from_blits(
+    pm: &Pixmap,
+    mask: &Bitmap,
+    blits: &[jb2_encode::EncodedBlit],
+    palette_options: FgbzPaletteOptions,
+) -> Option<EncodedChunk> {
+    if blits.is_empty() {
+        return None;
+    }
+    let w = mask.width as usize;
+    let mstride = mask.row_stride();
+    let mut by_blit = vec![ColorAccum::default(); blits.len()];
+    for (accum, blit) in by_blit.iter_mut().zip(blits) {
+        let bstride = blit.bitmap.row_stride();
+        for by in 0..blit.bitmap.height as usize {
+            let y = blit.y as usize + by;
+            if y >= mask.height as usize {
+                break;
+            }
+            let brow = &blit.bitmap.data[by * bstride..(by + 1) * bstride];
+            let mrow = &mask.data[y * mstride..(y + 1) * mstride];
+            let prow = &pm.data[y * w * 4..(y + 1) * w * 4];
+            for bx in 0..blit.bitmap.width as usize {
+                if (brow[bx >> 3] >> (7 - (bx & 7))) & 1 == 0 {
+                    continue;
+                }
+                let x = blit.x as usize + bx;
+                if x >= w {
+                    break;
+                }
+                if (mrow[x >> 3] >> (7 - (x & 7))) & 1 != 0 {
+                    let px = &prow[x * 4..x * 4 + 3];
+                    accum.add(px[0], px[1], px[2]);
+                }
+            }
+        }
+    }
+    fgbz_from_accums(by_blit, palette_options)
+}
+
+/// Shared tail of the FGbz builders: per-blit colour accumulators → palette
+/// (+ optional index table) → encoded chunk.
+fn fgbz_from_accums(
+    by_blit: Vec<ColorAccum>,
+    palette_options: FgbzPaletteOptions,
+) -> Option<EncodedChunk> {
     let (palette, indices): (Vec<FgbzColor>, Vec<i16>) = match palette_options {
         FgbzPaletteOptions::Exact => {
             let mut palette: Vec<FgbzColor> = Vec::new();
