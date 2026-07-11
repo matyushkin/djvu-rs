@@ -1914,6 +1914,14 @@ pub fn cluster_shared_symbols(pages: &[Bitmap], page_threshold: usize) -> Vec<Bi
     cluster_shared_symbols_tunable(pages, page_threshold, 0)
 }
 
+/// Reference-slice variant of [`cluster_shared_symbols`] (#565): identical
+/// clustering over borrowed masks, so a caller holding masks inside larger
+/// per-page structs doesn't have to clone every bitmap into a contiguous
+/// `Vec<Bitmap>` first.
+pub fn cluster_shared_symbols_from_refs(pages: &[&Bitmap], page_threshold: usize) -> Vec<Bitmap> {
+    cluster_impl(pages, page_threshold)
+}
+
 /// Same as [`cluster_shared_symbols`], preserving the old benchmarking
 /// signature that accepted a per-CC Hamming allowance. The allowance is now
 /// ignored: #258 showed that Hamming shared clustering can produce invalid
@@ -1927,6 +1935,11 @@ pub fn cluster_shared_symbols_tunable(
     page_threshold: usize,
     _diff_fraction: u32,
 ) -> Vec<Bitmap> {
+    let refs: Vec<&Bitmap> = pages.iter().collect();
+    cluster_impl(&refs, page_threshold)
+}
+
+fn cluster_impl(pages: &[&Bitmap], page_threshold: usize) -> Vec<Bitmap> {
     if page_threshold < 2 || pages.len() < page_threshold {
         return Vec::new();
     }
@@ -2016,10 +2029,10 @@ pub fn cluster_shared_symbols_tunable(
         #[cfg(feature = "parallel")]
         let ccs_batch: Vec<Vec<Cc>> = {
             use rayon::prelude::*;
-            chunk.par_iter().map(extract_ccs).collect()
+            chunk.par_iter().map(|bm| extract_ccs(bm)).collect()
         };
         #[cfg(not(feature = "parallel"))]
-        let ccs_batch: Vec<Vec<Cc>> = chunk.iter().map(extract_ccs).collect();
+        let ccs_batch: Vec<Vec<Cc>> = chunk.iter().map(|bm| extract_ccs(bm)).collect();
 
         for ccs in &ccs_batch {
             bucket_page_ccs(&mut buckets, ccs, page_idx);

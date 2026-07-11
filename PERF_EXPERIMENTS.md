@@ -11407,3 +11407,36 @@ Warm `Arc` identity asserted (`Arc::ptr_eq`); malformed-TXTz double-error test.
 
 **Decision.** Kept. Decision rule (warm ≥3×, cold within ~1%, bounded/evictable memory) met:
 45× warm, cache lives in the budgeted, evictable `PageLayers`.
+
+## Perf round 71 (2026-07-11) — BUNDLE_TWO_PASS: drop segmented backgrounds and mask clones from the bundle encode (#565)
+
+### #565 — two-pass layered bundle encode — **Kept** (bounded scope recorded) (2026-07-11)
+
+**Issue.** Multi-page layered encode retained everything at once: every `SegmentedPage`
+(1-bit mask + subsampled RGBA background) survived to the end of the encode, plus a full
+clone of every mask made just for shared-dictionary clustering, plus all encoded bodies and
+the assembly buffer.
+
+**Approach.** Pass 1 (parallel): segment each page, immediately encode its BG44 (and
+optional TH44) and drop the background pixmap — between passes only the 1-bit masks and
+already-compressed chunk bodies are retained. Clustering now runs over borrowed masks (new
+additive `cluster_shared_symbols_from_refs` in djvu-jb2) — the per-mask clone is gone.
+Pass 2 (parallel): Sjbz + FGbz-from-blits + body assembly, unchanged chunk order. Emitted
+bytes are identical by construction and verified.
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon; 96-page PNG set (watchmaker pages at
+150 dpi ×8), CLI `encode -q archival <dir>`; old side = worktree at pre-change main.
+
+**Numbers.** Peak RSS 922.9 MB → 873.2 MB (**−50 MB**); wall 3.80 → 3.05 s; output
+`cmp`-identical. The remaining peak is dominated by the **caller-held input pixmaps**
+(96 × 8.4 MB ≈ 807 MB): the public API takes `&[Pixmap]`, so the ≥2× total-RSS target of
+the issue is unreachable by internal changes alone — that bound is the recorded outcome the
+issue's decision rule asked for. Internal retention between passes is now
+O(masks + compressed bodies) instead of O(masks×2 + background pixmaps). The final
+assembly (`assemble_djvm_bundle`: bodies + output ≈ 2× file size) is the remaining
+internal consumer; a DIRM-backpatching writer sink (the #606 pattern) is the natural
+follow-up if bundles grow to where that matters.
+
+**Decision.** Kept: byte-identical, strictly less retention, no wall-clock cost. A
+streaming-*input* encode API (pages supplied one at a time) is what a real ≥2× needs —
+out of scope for this experiment's fixed `&[Pixmap]` surface.
