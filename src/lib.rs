@@ -695,6 +695,62 @@ impl<'a> Page<'a> {
         self.render_with(&self.opts_for_size(width, height))
     }
 
+    /// Render a rectangular region of the page.
+    ///
+    /// `full_w × full_h` set the full-render output size the region is cut
+    /// from (the zoom level); `(x, y, w, h)` select the viewport within that
+    /// space. Routed through the composited-tile cache
+    /// ([`djvu_render::render_region_tiled`]) so viewer-style pans and
+    /// revisits reuse tiles (C4_TILE_CACHE / TILE_LRU) — O(viewport) work
+    /// instead of O(page).
+    pub fn render_region(
+        &self,
+        full_w: u32,
+        full_h: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<Pixmap, Error> {
+        let opts = self.opts_for_size(full_w, full_h);
+        djvu_render::render_region_tiled(
+            self.page,
+            djvu_render::RenderRect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            &opts,
+        )
+        .map_err(Self::render_err)
+    }
+
+    /// Fast coarse render — decodes only the first BG44 chunk (a blurry but
+    /// near-instant preview). Returns `Ok(None)` for bilevel-only pages.
+    pub fn render_coarse(&self, width: u32, height: u32) -> Result<Option<Pixmap>, Error> {
+        let opts = self.opts_for_size(width, height);
+        djvu_render::render_coarse(self.page, &opts).map_err(Self::render_err)
+    }
+
+    /// Progressive render: decode BG44 chunks `0..=chunk_n` plus all
+    /// foreground layers. `chunk_n = bg44_chunk_count() - 1` equals the full
+    /// render; each lower value is a coarser refinement stage.
+    pub fn render_progressive(
+        &self,
+        width: u32,
+        height: u32,
+        chunk_n: usize,
+    ) -> Result<Pixmap, Error> {
+        let opts = self.opts_for_size(width, height);
+        djvu_render::render_progressive(self.page, &opts, chunk_n).map_err(Self::render_err)
+    }
+
+    /// Number of BG44 refinement chunks on this page (0 for bilevel pages).
+    pub fn bg44_chunk_count(&self) -> usize {
+        self.page.bg44_chunks().len()
+    }
+
     /// Decode the page thumbnail, if available.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
         self.page

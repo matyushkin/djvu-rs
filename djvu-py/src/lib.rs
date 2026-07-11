@@ -74,6 +74,22 @@ struct Page {
     index: usize,
 }
 
+impl Page {
+    /// Output dims for an optional target DPI (native when `None`).
+    fn dims_at(&self, dpi: Option<f32>) -> (u32, u32) {
+        match dpi {
+            Some(target) => {
+                let scale = target / self.dpi as f32;
+                (
+                    ((self.width as f32 * scale).round() as u32).max(1),
+                    ((self.height as f32 * scale).round() as u32).max(1),
+                )
+            }
+            None => (self.width, self.height),
+        }
+    }
+}
+
 #[pymethods]
 impl Page {
     /// Page width in pixels.
@@ -128,6 +144,101 @@ impl Page {
             height: pixmap.height,
             data: pixmap.data,
         })
+    }
+
+    /// Render a rectangular region of the page (#583).
+    ///
+    /// Args:
+    ///     x, y, w, h: viewport rectangle in output pixels.
+    ///     full_width, full_height: the full-render size the region is cut
+    ///         from (the zoom level). Defaults to the native page size.
+    ///
+    /// Routed through the composited-tile cache, so viewer-style pans and
+    /// revisits reuse tiles — O(viewport) work instead of O(page). Releases
+    /// the GIL like `render`.
+    #[pyo3(signature = (x, y, w, h, full_width=None, full_height=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn render_region(
+        &self,
+        py: Python<'_>,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        full_width: Option<u32>,
+        full_height: Option<u32>,
+    ) -> PyResult<Pixmap> {
+        let fw = full_width.unwrap_or(self.width).max(1);
+        let fh = full_height.unwrap_or(self.height).max(1);
+        let pixmap = py.detach(|| {
+            let page = self
+                .doc
+                .page(self.index)
+                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+            page.render_region(fw, fh, x, y, w, h)
+                .map_err(|e| PyValueError::new_err(format!("render_region failed: {e}")))
+        })?;
+        Ok(Pixmap {
+            width: pixmap.width,
+            height: pixmap.height,
+            data: pixmap.data,
+        })
+    }
+
+    /// Fast coarse render — first BG44 chunk only (#583). A blurry but
+    /// near-instant preview; returns None for bilevel-only pages.
+    #[pyo3(signature = (dpi=None))]
+    fn render_coarse(&self, py: Python<'_>, dpi: Option<f32>) -> PyResult<Option<Pixmap>> {
+        let (w, h) = self.dims_at(dpi);
+        let pm = py.detach(|| {
+            let page = self
+                .doc
+                .page(self.index)
+                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+            page.render_coarse(w, h)
+                .map_err(|e| PyValueError::new_err(format!("render_coarse failed: {e}")))
+        })?;
+        Ok(pm.map(|p| Pixmap {
+            width: p.width,
+            height: p.height,
+            data: p.data,
+        }))
+    }
+
+    /// Progressive render (#583): decode BG44 chunks 0..=chunk_n plus all
+    /// foreground layers. `chunk_n = bg44_chunk_count - 1` equals the full
+    /// render.
+    #[pyo3(signature = (chunk_n, dpi=None))]
+    fn render_progressive(
+        &self,
+        py: Python<'_>,
+        chunk_n: usize,
+        dpi: Option<f32>,
+    ) -> PyResult<Pixmap> {
+        let (w, h) = self.dims_at(dpi);
+        let pm = py.detach(|| {
+            let page = self
+                .doc
+                .page(self.index)
+                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+            page.render_progressive(w, h, chunk_n)
+                .map_err(|e| PyValueError::new_err(format!("render_progressive failed: {e}")))
+        })?;
+        Ok(Pixmap {
+            width: pm.width,
+            height: pm.height,
+            data: pm.data,
+        })
+    }
+
+    /// Number of BG44 refinement chunks (0 for bilevel pages).
+    #[getter]
+    fn bg44_chunk_count(&self) -> PyResult<usize> {
+        let page = self
+            .doc
+            .page(self.index)
+            .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+        Ok(page.bg44_chunk_count())
     }
 
     /// Extract the text layer from this page.
