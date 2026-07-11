@@ -11295,3 +11295,40 @@ per-page render caches (~4.3 MB/page × 504) that exporters, holding `&DjVuDocum
 cannot evict today. Filed #629 for that (interior-mutability eviction / cache-bypassing
 export render); once it lands the combined reduction on this fixture should far exceed
 1.5×. Wall-clock and byte-identity criteria met.
+## Perf round 67 (2026-07-11) — WASM_ZERO_COPY: reusable Rust-owned pixel buffer + zero-copy view (#611)
+
+### #611 — `WasmPixmap` handle and `render*_into_pixmap` APIs — **Kept** (additive) (2026-07-11)
+
+**Issue.** Every browser render allocated a fresh JS `Uint8ClampedArray` and copied the full
+RGBA pixmap out of wasm memory — coarse, progressive and final renders alike, tens to
+hundreds of MB repeatedly after the codec had already finished.
+
+**Approach.** Additive only (existing copying `render*` methods unchanged, per the issue's
+out-of-scope): new `#[wasm_bindgen] WasmPixmap` (Rust-owned `Vec<u8>` + dims) with
+`view()` — a zero-copy `Uint8ClampedArray` view into wasm linear memory (one `unsafe`
+exception, documented lifetime contract: consume immediately; `ImageData` copies) — and
+`to_bytes()` (owned copy). `WasmPage::render_into_pixmap` reuses the handle's allocation
+via `djvu_render::render_into` (no per-frame Rust alloc either);
+`render_progressive_into_pixmap` gives progressive sessions one buffer for N passes.
+New committed browser bench: `examples/wasm/bench_zero_copy.html`.
+
+**Platform / commands.** macOS 26.5.0, Chrome (real tab), wasm-pack 0.13.1 release build
+(`--features wasm`), local `python3 -m http.server`.
+
+**Numbers** (median per frame, warm decode caches):
+- navm_fgbz @300 dpi (32 MB frames): copy 56.6 ms → into_pixmap+view 51.4 ms (−9.2%).
+- navm_fgbz @600 dpi (**128 MB** frames): copy 220.7 ms → 203.6 ms (−7.7%); the removed
+  17.1 ms is the entire JS alloc + wasm→JS copy — the transfer step itself goes from a
+  full-buffer copy to an O(1) view (**>99% transfer-overhead reduction**; the residual
+  time is codec/compositor).
+- bilevel boy_jb2 (0.2 MB): 0.30 → 0.10 ms.
+- Lifetime: after a wasm memory *growth* render, the stale view reports **length 0
+  (detached)** — visibly stale, never silently wrong; without growth the view stays mapped
+  to the same buffer. Fresh `view()` after re-render is correct.
+
+**Decision.** Kept. Decision rule's transfer-overhead criterion (≥80%) met (>99%); the
+total-latency alternative (≥15% at ≥50 MB) is not — the copy is only ~8–9% of a large
+frame's total time because the compositor dominates. Per-frame JS allocation eliminated;
+GC/growth lifetime behaviour verified in a real Chrome tab. Node-ABI note: the plain
+copying APIs remain the safe default there (the historical length-corruption motivation),
+and the new handle APIs are opt-in.
