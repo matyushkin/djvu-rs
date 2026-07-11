@@ -11019,3 +11019,33 @@ which builds on the per-colour stencil path. Follow-up worth filing: the legacy 
 path still uses inline-Djbz-only decode, so an *all-black* shared-dict document still loses its
 mask (kept for byte-identity here; should be fixed as its own change with the same
 `extract_mask_indexed` plumbing).
+
+## Perf round 62 (2026-07-11) — PAR_CBZ: parallel CBZ export (#598)
+
+### #598 — CBZ export through the render-parallel/write-serial pattern — **Kept** (2026-07-11)
+
+**Issue.** CBZ export rendered and PNG-encoded pages sequentially in the CLI
+(`render_cbz`), while the EPUB/PDF/TIFF exporters and the parallel PNG helper next to it
+already parallelise page building. PNG deflate is CPU-heavy and embarrassingly parallel.
+
+**Approach.** New library module `src/cbz.rs` (feature `cbz`, included in `cli`):
+`djvu_to_cbz`/`write_pages` mirror `djvu_to_epub`'s split — page building (render at target
+DPI → user rotation → RGBA PNG) fans out over rayon under `parallel`, ZIP entries are then
+written serially in index order (stored, PNG is already deflated). The CLI's `render_cbz`
+delegates to it. New `export/cbz` Criterion bench (watchmaker, 12 pages, 150 dpi default).
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0.
+
+```sh
+cargo bench --bench render --features cbz -- export/cbz --save-baseline cbz-serial
+cargo bench --bench render --features cbz,parallel -- export/cbz --baseline cbz-serial
+```
+
+**Numbers.** 299.6 ms → 81.9 ms, **−73.6%** [−76.5%, −69.6%] (p < 0.05) ≈ **3.7×**.
+Byte-identity vs the pre-change CLI binary (built at the old main in a separate worktree):
+`cmp` identical archives for boy, boy_jb2_rotate90, navm_fgbz, links, a single-page export,
+and `--rotate cw90` — zip entry names, order, stored method and default timestamps all
+preserved. Determinism/structure covered by 3 new unit tests.
+
+**Decision.** Kept. Decision rule (≥2× at 4 threads, byte-identical) exceeded. CBZ export is
+now also available as a library API (`djvu_rs::cbz`), not just a CLI path.

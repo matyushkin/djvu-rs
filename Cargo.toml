@@ -87,7 +87,7 @@ std = ["dep:png", "dep:zune-jpeg", "djvu-zp/std", "djvu-bzz/std", "djvu-iff/std"
 pdf = ["std", "dep:miniz_oxide", "dep:jpeg-encoder"]
 # The CLI also writes CBZ archives, so it owns zip (+ flate2, see the `zip`
 # dependency comment) alongside the PDF writer it exposes.
-cli = ["pdf", "dep:clap", "dep:zip", "dep:flate2"]
+cli = ["pdf", "cbz", "dep:clap", "dep:zip", "dep:flate2"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]
@@ -108,6 +108,7 @@ wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 # EPUB writer owns the zip dependency (#509). `dep:flate2` selects the
 # pure-Rust deflate backend for zip (see the `zip` dependency comment).
 epub = ["std", "dep:zip", "dep:flate2"]
+cbz = ["std", "dep:zip", "dep:flate2"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "std"]
 # ocr-neural: experimental placeholder only. It exposes the CandleBackend type

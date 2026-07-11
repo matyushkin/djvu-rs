@@ -503,7 +503,7 @@ fn cmd_render(
     match format {
         Format::Png => render_png(&doc, page, all, dpi, count, user_rot, output),
         Format::Pdf | Format::Epub => unreachable!(),
-        Format::Cbz => render_cbz(&doc, page, all, dpi, count, user_rot, output),
+        Format::Cbz => render_cbz(path, page, all, dpi, count, user_rot, output),
     }
 }
 
@@ -668,7 +668,7 @@ fn render_epub_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std:
 }
 
 fn render_cbz(
-    doc: &Document,
+    path: &Path,
     page: usize,
     all: bool,
     dpi: u32,
@@ -676,10 +676,10 @@ fn render_cbz(
     rotate: djvu_rs::djvu_render::UserRotation,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let pages: Vec<usize> = if all {
-        (0..count).collect()
+    let pages = if all {
+        None
     } else {
-        vec![page_idx(page, count)?]
+        Some(vec![page_idx(page, count)?])
     };
 
     if let Some(parent) = output.parent()
@@ -688,26 +688,17 @@ fn render_cbz(
         std::fs::create_dir_all(parent)?;
     }
 
+    let data = std::fs::read(path)?;
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
+    let opts = djvu_rs::cbz::CbzOptions {
+        dpi,
+        rotation: rotate,
+        pages,
+    };
+
     let file = std::fs::File::create(output)?;
     let mut zip = zip::ZipWriter::new(file);
-    let opts =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
-    for (n, idx) in pages.iter().enumerate() {
-        let p = doc.page(*idx)?;
-        let (w, h) = p.size_at_dpi(dpi as f32);
-        let pixmap = p.render_to_size(w, h)?;
-        let pixmap = apply_user_rotation(pixmap, rotate);
-
-        let mut png_buf = Vec::new();
-        encode_png(&mut png_buf, pixmap.width, pixmap.height, &pixmap.data)?;
-
-        let name = format!("page_{:04}.png", n + 1);
-        zip.start_file(name, opts)?;
-        use std::io::Write;
-        zip.write_all(&png_buf)?;
-    }
-
+    djvu_rs::cbz::write_pages(&mut zip, &doc, &opts)?;
     zip.finish()?;
     Ok(())
 }

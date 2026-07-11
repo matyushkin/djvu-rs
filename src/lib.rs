@@ -273,6 +273,15 @@ pub mod pdf;
 #[cfg(feature = "epub")]
 pub mod epub;
 
+/// DjVu to CBZ (comic book archive) exporter.
+///
+/// A ZIP of per-page PNGs; page rendering/encoding parallelises under the
+/// `parallel` feature (render-parallel, write-serial — #598).
+///
+/// Key function: [`cbz::djvu_to_cbz`].
+#[cfg(feature = "cbz")]
+pub mod cbz;
+
 /// DjVu to TIFF exporter — phase 4 format extension.
 ///
 /// Converts DjVu documents to multi-page TIFF files in color (RGB8) or
