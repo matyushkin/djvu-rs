@@ -1048,6 +1048,37 @@ fn bench_tiff_export(c: &mut Criterion) {
     }
 }
 
+/// CBZ export (`djvu_to_cbz`) — per-page render → PNG encode → stored ZIP.
+/// Only compiled/run with `--features cbz`; page building parallelises under
+/// `parallel` (#598). Multi-page watchmaker at the 150-dpi default.
+#[allow(unused_variables)]
+fn bench_cbz_export(c: &mut Criterion) {
+    #[cfg(feature = "cbz")]
+    {
+        let path = corpus_path().join("watchmaker.djvu");
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping bench_cbz_export: watchmaker.djvu not found");
+                return;
+            }
+        };
+        let doc = match djvu_rs::DjVuDocument::parse(&data) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let opts = djvu_rs::cbz::CbzOptions::default();
+        let mut group = c.benchmark_group("export");
+        group.sample_size(10);
+        group.bench_function("cbz", |b| {
+            b.iter(|| {
+                let _ = djvu_rs::cbz::djvu_to_cbz(black_box(&doc), black_box(&opts));
+            });
+        });
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_render_region_bilevel,
@@ -1068,5 +1099,6 @@ criterion_group!(
     bench_pdf_export_flatdecode,
     bench_epub_export,
     bench_tiff_export,
+    bench_cbz_export,
 );
 criterion_main!(benches);
