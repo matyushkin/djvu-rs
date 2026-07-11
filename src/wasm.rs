@@ -36,6 +36,95 @@ use crate::{
     djvu_render::{render_coarse, render_progressive},
 };
 
+// ── WasmPixmap — Rust-owned pixel buffer (#611) ──────────────────────────────
+
+/// A Rust-owned RGBA pixel buffer that stays alive as long as JS holds the
+/// handle, so pixels can be consumed **without** the per-frame
+/// `Uint8ClampedArray` allocation + full-buffer copy the plain `render*`
+/// methods pay.
+///
+/// Two usage modes:
+/// - **Zero-copy view**: [`view`](WasmPixmap::view) returns a typed-array view
+///   directly into wasm linear memory. Consume it immediately (e.g.
+///   `ctx.putImageData(new ImageData(pm.view(), pm.width(), pm.height()), 0, 0)`
+///   — `ImageData` copies). The view is invalidated by wasm memory growth and
+///   by dropping/re-rendering the pixmap; never store it.
+/// - **Buffer reuse**: pass the same `WasmPixmap` back to
+///   [`render_into_pixmap`](WasmPage::render_into_pixmap) /
+///   [`render_progressive_into_pixmap`](WasmPage::render_progressive_into_pixmap)
+///   — the Rust-side allocation is reused across frames (a progressive
+///   session allocates once instead of once per refinement pass).
+///
+/// The existing copying `render*` methods are unchanged for callers that need
+/// independently owned JS bytes.
+#[wasm_bindgen]
+pub struct WasmPixmap {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[wasm_bindgen]
+impl WasmPixmap {
+    /// An empty pixmap for use with the `*_into_pixmap` methods.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> WasmPixmap {
+        WasmPixmap {
+            data: Vec::new(),
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// Pixel width of the last render written into this pixmap.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Pixel height of the last render written into this pixmap.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// RGBA byte length (`width * height * 4`).
+    pub fn byte_length(&self) -> u32 {
+        self.data.len() as u32
+    }
+
+    /// Zero-copy `Uint8ClampedArray` view into wasm memory.
+    ///
+    /// Valid only until the next wasm memory growth, the next render into
+    /// this pixmap, or the pixmap being freed — consume it immediately and
+    /// never store it. `new ImageData(view, w, h)` copies, so canvas
+    /// consumption is safe.
+    // The crate denies unsafe; this is one of the few justified exceptions
+    // (like the SIMD intrinsics in djvu-iw44): `js_sys::…::view` is the only
+    // zero-copy wasm→JS surface, and the safety contract is documented above.
+    #[allow(unsafe_code)]
+    pub fn view(&self) -> js_sys::Uint8ClampedArray {
+        // SAFETY (lifetime contract): the view aliases `self.data`'s wasm
+        // linear memory. `self` is heap-boxed and owned by the JS handle, so
+        // the allocation outlives this call; the documented contract forbids
+        // holding the view across anything that can grow memory or mutate
+        // the buffer.
+        unsafe { js_sys::Uint8ClampedArray::view(&self.data) }
+    }
+
+    /// Copy the pixels into a fresh, independently owned
+    /// `Uint8ClampedArray` (same guarantee as the plain `render` API).
+    pub fn to_bytes(&self) -> js_sys::Uint8ClampedArray {
+        let arr = js_sys::Uint8ClampedArray::new_with_length(self.data.len() as u32);
+        arr.copy_from(&self.data);
+        arr
+    }
+}
+
+impl Default for WasmPixmap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Thread pool (opt-in, `wasm-threads` feature) ─────────────────────────────
 //
 // Re-exports `wasm-bindgen-rayon`'s pool initializer so JS callers can spin up
@@ -251,6 +340,44 @@ impl WasmPage {
         let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
         arr.copy_from(&pm.data);
         Ok(arr)
+    }
+
+    /// Render into a caller-owned [`WasmPixmap`], reusing its Rust-side
+    /// allocation (#611). No JS-side allocation, no wasm→JS copy — consume
+    /// the pixels via [`WasmPixmap::view`].
+    pub fn render_into_pixmap(&self, target_dpi: u32, out: &mut WasmPixmap) -> Result<(), JsError> {
+        let page = crate::foreign::page(&self.doc, self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
+        let need = opts.width as usize * opts.height as usize * 4;
+        out.data.resize(need, 0);
+        crate::djvu_render::render_into(page, &opts, &mut out.data)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        out.width = opts.width;
+        out.height = opts.height;
+        Ok(())
+    }
+
+    /// Progressive render into a caller-owned [`WasmPixmap`] (#611): the same
+    /// refinement semantics as [`render_progressive`](Self::render_progressive),
+    /// but an N-pass progressive session reuses one buffer instead of
+    /// allocating and copying N full frames.
+    pub fn render_progressive_into_pixmap(
+        &self,
+        target_dpi: u32,
+        chunk_n: u32,
+        out: &mut WasmPixmap,
+    ) -> Result<(), JsError> {
+        let page = crate::foreign::page(&self.doc, self.index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
+        let pm = render_progressive(page, &opts, chunk_n as usize)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        out.width = pm.width;
+        out.height = pm.height;
+        out.data.clear();
+        out.data.extend_from_slice(&pm.data);
+        Ok(())
     }
 }
 
