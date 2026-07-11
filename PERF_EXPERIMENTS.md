@@ -11173,3 +11173,44 @@ checks row padding too) plus the pre-existing segment suite green in both modes.
 **Decision.** Kept. Decision rule (≥10% at 4 threads, byte-identical) exceeded. Note per the
 issue: per-page parallelism in bundles already amortizes this — the beneficiary is
 single-image/CLI latency on Sauvola profiles. Default (Otsu) segmentation untouched.
+## Perf round 65 (2026-07-11) — C5_SUB4_MASK: preserve the 1/4-res JB2 mask across render-cache downgrade (#607)
+
+### #607 — retained mask_sub4 tier + decode bypass for eligible sub≥4 renders — **Kept** (2026-07-11)
+
+**Issue.** The C5_COMPRESS downgrade tier preserved downscaled colour backgrounds
+(`bg_rgb_s2`/`bg_rgb_s4`) but dropped both the full JB2 mask and its 1/4-res max-pool
+downsample, so a later thumbnail/zoomed-out render re-ran the complete JB2 arithmetic
+decode even when the tiny sub4 mask had already been computed. The middle tier benefited
+colour pages but not JB2-heavy pages.
+
+**Approach.** Two pieces (the issue's prior evidence was right that keeping the field alone
+is insufficient):
+1. `PageLayers::downgrade` no longer clears `mask_sub4` (~1/16 of the packed mask bytes;
+   already counted by `cached_bytes`, so budget enforcement is unchanged).
+2. `decode_layers` gained a warm-tier bypass: when `bg_subsample ≥ 4`, `bold == 0`, the page
+   has no FGbz chunk, and `mask_sub4` is already built (new peek accessor
+   `mask_sub4_cached`, no decode side effects), the full JB2 mask decode is skipped
+   entirely — the compositor reads only the sub4 plane on that path anyway (eligibility
+   mirrors `resolve_sub4_mask`), so output is pixel-identical by construction.
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0. Old side = worktree at
+pre-change main with the same sub4 rail patched into the harness.
+
+```sh
+cargo run --release --example c5_compress_bench downgrade 62914560
+```
+
+**Numbers.** `c5_compress_bench` (colorbook, 60 MB budget, `downgrade` mode, median of 11
+post-warm-up trials), new sub=4 rail: **11.88 ms → 3.96 ms (−67%)** re-render after
+downgrade; sub=1 (57.8 ms) and sub=2 (18.5 ms) rails unchanged; `final_render_cache_bytes`
+identical (62,756,604) — same ceiling honoured. Structural test proves the warm sub4
+re-render performs **zero** JB2 mask decodes (new `JB2_MASK_DECODES` test counter,
+mirroring `BG44_CHUNK_DECODES`) while the full-res re-render still cold-decodes; bold
+dilation is proven to bypass the shortcut (needs full-res mask semantics). Output equality
+asserted for sub4/bold/full-res before vs after downgrade.
+
+**Decision.** Kept. Decision rule (≥25% eligible re-render win, sub4-sized retained bytes,
+same ceiling, pixel identity) exceeded. FGbz-palette pages intentionally excluded from the
+shortcut (need full-res indexed lookups) — same exclusion as the compositor's existing sub4
+path. Policy sweep note: `drop` mode still clears everything (unchanged); the retained tier
+only augments `downgrade`.

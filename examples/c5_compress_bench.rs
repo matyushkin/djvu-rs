@@ -119,6 +119,13 @@ fn main() {
         height: h0 / 2,
         ..Default::default()
     };
+    // sub=4: the #607 tier — thumbnail-rail / zoomed-out renders that consume
+    // the retained 1/4-res mask instead of re-running the JB2 decode.
+    let opts_s4 = djvu_rs::djvu_render::RenderOptions {
+        width: w0 / 4,
+        height: h0 / 4,
+        ..Default::default()
+    };
 
     // Direct full-evict/downgrade convenience calls (not budget-mediated):
     // `downgrade_render_caches` deliberately preserves any already-cached
@@ -136,6 +143,7 @@ fn main() {
     let trials = 12;
     let mut s1_times = Vec::with_capacity(trials);
     let mut s2_times = Vec::with_capacity(trials);
+    let mut s4_times = Vec::with_capacity(trials);
 
     for trial in 0..trials {
         force_state(&mut doc);
@@ -148,13 +156,20 @@ fn main() {
         let _ = djvu_rs::djvu_render::render_pixmap(doc.page(0).unwrap(), &opts_s2).unwrap();
         let dt1 = t1.elapsed().as_secs_f64() * 1000.0;
 
+        force_state(&mut doc);
+        let t2 = Instant::now();
+        let _ = djvu_rs::djvu_render::render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+        let dt2 = t2.elapsed().as_secs_f64() * 1000.0;
+
         if trial > 0 {
             s1_times.push(dt0);
             s2_times.push(dt1);
+            s4_times.push(dt2);
         }
     }
 
     println!("sub1_render_after_evict_median_ms={:.3}", median(s1_times));
     println!("sub2_render_after_evict_median_ms={:.3}", median(s2_times));
+    println!("sub4_render_after_evict_median_ms={:.3}", median(s4_times));
     println!("final_render_cache_bytes={final_cache}");
 }
