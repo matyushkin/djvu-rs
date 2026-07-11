@@ -34,10 +34,8 @@ fn chunk(file: &str, id: &[u8; 4]) -> Vec<u8> {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bzz") => {
-            let bytes = std::fs::read(assets().join("navm_fgbz.djvu")).expect("fixture");
-            let form = djvu_rs::iff::parse_form(&bytes).expect("parse fixture");
-            let payload = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
-            std::hint::black_box(djvu_rs::bzz::bzz_decode(&payload.data[1..]).expect("decode"));
+            let payload = chunk("carte.djvu", b"TXTz");
+            std::hint::black_box(djvu_rs::bzz::bzz_decode(&payload).expect("decode"));
         }
         Some("jb2") => {
             std::hint::black_box(
