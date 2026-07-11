@@ -73,6 +73,14 @@ pub struct EpubOptions {
     /// flowable text (most e-readers) can render it; image-first viewers
     /// still get the bitmap above.
     pub reflowable_text: bool,
+    /// JPEG quality (1–100) for page images. `None` (default) keeps the
+    /// PNG-only behaviour. JPEG is core EPUB — every reader renders it — and
+    /// wins heavily on photo/continuous-tone pages (#580).
+    pub jpeg_quality: Option<u8>,
+    /// With `jpeg_quality: Some(_)`, encode each page image *both* ways and
+    /// keep the smaller (the PDF_ADAPTIVE_RASTER pattern; only one page's
+    /// pair is ever live at once). Without it, `Some(q)` means JPEG always.
+    pub adaptive: bool,
 }
 
 impl Default for EpubOptions {
@@ -84,6 +92,8 @@ impl Default for EpubOptions {
             language: "en".to_owned(),
             modified: None,
             reflowable_text: false,
+            jpeg_quality: None,
+            adaptive: false,
         }
     }
 }
@@ -125,6 +135,7 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
     let page_count = doc.page_count();
     let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
 
+    let mut image_names: Vec<String> = Vec::with_capacity(indices.len());
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
@@ -137,6 +148,7 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
             .collect::<Result<Vec<_>, EpubError>>()?;
         for art in &artifacts {
             write_page_artifacts(&mut zip, art)?;
+            image_names.push(art.img_name.clone());
         }
     }
 
@@ -145,6 +157,7 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
         let page = doc.page(i)?;
         let art = build_page_artifacts(page, i, opts)?;
         write_page_artifacts(&mut zip, &art)?;
+        image_names.push(art.img_name.clone());
     }
 
     // 4. Navigation document
@@ -156,7 +169,7 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
     zip.write_all(nav_xhtml.as_bytes())?;
 
     // 5. OPF package document
-    let opf = build_opf(opts, page_count);
+    let opf = build_opf(opts, page_count, &image_names);
     zip.start_file(
         "OEBPS/content.opf",
         SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
@@ -175,6 +188,8 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
 /// into the single `ZipWriter` is the serial tail.
 struct PageArtifacts {
     img_path: String,
+    /// Image file name (with extension) as referenced by the XHTML/OPF.
+    img_name: String,
     png_bytes: Vec<u8>,
     xhtml_path: String,
     xhtml_bytes: Vec<u8>,
@@ -225,11 +240,40 @@ fn build_page_artifacts(
         rgba.extend_from_slice(row);
     })?;
 
-    // Encode as PNG
-    let png_bytes = encode_rgba_to_png(&rgba, w, h);
+    // Encode the page image (#580): PNG (Gray8 when the render is pure
+    // grayscale — 3× less raw data into deflate, pixel-identical), optionally
+    // JPEG, or both with keep-smaller (`adaptive`, the PDF_ADAPTIVE_RASTER
+    // pattern — only one page's pair of encodings is ever live at once).
+    let gray = rgba
+        .chunks_exact(4)
+        .all(|px| px[0] == px[1] && px[1] == px[2]);
+    let make_png = || encode_rgba_to_png(&rgba, w, h, gray);
+    let make_jpeg = |q: u8| encode_rgba_to_jpeg(&rgba, w, h, q, gray);
+    let (img_bytes, is_jpeg) = match (opts.jpeg_quality, opts.adaptive) {
+        (None, _) => (make_png(), false),
+        (Some(q), false) => {
+            let j = make_jpeg(q);
+            if j.is_empty() {
+                (make_png(), false)
+            } else {
+                (j, true)
+            }
+        }
+        (Some(q), true) => {
+            let p = make_png();
+            let j = make_jpeg(q);
+            if !j.is_empty() && j.len() < p.len() {
+                (j, true)
+            } else {
+                (p, false)
+            }
+        }
+    };
+    let png_bytes = img_bytes;
 
     let page_num = index + 1;
-    let img_name = format!("page_{page_num:04}.png");
+    let ext = if is_jpeg { "jpg" } else { "png" };
+    let img_name = format!("page_{page_num:04}.{ext}");
     let img_path = format!("OEBPS/images/{img_name}");
 
     // Text overlay (invisible selectable text)
@@ -270,6 +314,7 @@ fn build_page_artifacts(
 
     Ok(PageArtifacts {
         img_path,
+        img_name,
         png_bytes,
         xhtml_path,
         xhtml_bytes: xhtml.into_bytes(),
@@ -278,21 +323,50 @@ fn build_page_artifacts(
 
 // ── PNG encoder ───────────────────────────────────────────────────────────────
 
-fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32, gray: bool) -> Vec<u8> {
     // Pages are always opaque (the compositor writes alpha=255 inline —
-    // ALPHA_INL), so encode RGB: 25% less raw data into deflate and a
-    // smaller payload for zero information loss (#599).
-    let rgb = rgba_to_rgb(rgba);
+    // ALPHA_INL), so encode RGB — 25% less raw data into deflate for zero
+    // information loss (#599) — or Gray8 when the render is pure grayscale
+    // (a further 3×, pixel-identical; #580).
+    let data: Vec<u8> = if gray {
+        rgba.chunks_exact(4).map(|px| px[0]).collect()
+    } else {
+        rgba_to_rgb(rgba)
+    };
     let mut buf = Vec::new();
     {
         let mut enc = png::Encoder::new(std::io::Cursor::new(&mut buf), width, height);
-        enc.set_color(png::ColorType::Rgb);
+        enc.set_color(if gray {
+            png::ColorType::Grayscale
+        } else {
+            png::ColorType::Rgb
+        });
         enc.set_depth(png::BitDepth::Eight);
         if let Ok(mut writer) = enc.write_header() {
-            let _ = writer.write_image_data(&rgb);
+            let _ = writer.write_image_data(&data);
         }
     }
     buf
+}
+
+/// Encode the page as JPEG (`quality` 1–100); empty `Vec` on encoder failure
+/// (the caller falls back to PNG).
+fn encode_rgba_to_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8, gray: bool) -> Vec<u8> {
+    use jpeg_encoder::{ColorType, Encoder};
+    let mut out = Vec::new();
+    let (data, ct): (Vec<u8>, ColorType) = if gray {
+        (
+            rgba.chunks_exact(4).map(|px| px[0]).collect(),
+            ColorType::Luma,
+        )
+    } else {
+        (rgba_to_rgb(rgba), ColorType::Rgb)
+    };
+    let enc = Encoder::new(&mut out, quality);
+    if enc.encode(&data, width as u16, height as u16, ct).is_err() {
+        return Vec::new();
+    }
+    out
 }
 
 /// Strip the constant alpha channel from packed RGBA rows.
@@ -445,7 +519,7 @@ fn resolve_link_href(url: &str) -> String {
 
 // ── OPF package ──────────────────────────────────────────────────────────────
 
-fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
+fn build_opf(opts: &EpubOptions, page_count: usize, image_names: &[String]) -> String {
     let title = xml_escape(&opts.title);
     let author = xml_escape(&opts.author);
     let language = xml_escape(&opts.language);
@@ -464,20 +538,37 @@ fn build_opf(opts: &EpubOptions, page_count: usize) -> String {
 "#,
     );
 
+    let media_type = |name: &str| {
+        if name.ends_with(".jpg") {
+            "image/jpeg"
+        } else {
+            "image/png"
+        }
+    };
+    let img = |i: usize| -> String {
+        image_names
+            .get(i - 1)
+            .cloned()
+            .unwrap_or_else(|| format!("page_{i:04}.png"))
+    };
+
     // cover image (first page)
     if page_count > 0 {
-        manifest_items.push_str(
-            r#"    <item id="cover-image" href="images/page_0001.png" media-type="image/png" properties="cover-image"/>
-"#,
-        );
+        let name = img(1);
+        manifest_items.push_str(&format!(
+            "    <item id=\"cover-image\" href=\"images/{name}\" media-type=\"{}\" properties=\"cover-image\"/>\n",
+            media_type(&name)
+        ));
     }
 
     for i in 1..=page_count {
         let pid = format!("page_{i:04}");
         // skip the cover-image item (already added above) but still add the page entry
         if i > 1 {
+            let name = img(i);
             manifest_items.push_str(&format!(
-                "    <item id=\"img_{pid}\" href=\"images/page_{i:04}.png\" media-type=\"image/png\"/>\n"
+                "    <item id=\"img_{pid}\" href=\"images/{name}\" media-type=\"{}\"/>\n",
+                media_type(&name)
             ));
         }
         manifest_items.push_str(&format!(
@@ -738,14 +829,14 @@ mod tests {
 
     #[test]
     fn opf_contains_cover_image_for_nonempty_doc() {
-        let opf = build_opf(&EpubOptions::default(), 3);
+        let opf = build_opf(&EpubOptions::default(), 3, &[]);
         assert!(opf.contains("cover-image"));
         assert!(opf.contains("properties=\"cover-image\""));
     }
 
     #[test]
     fn opf_no_cover_image_for_empty_doc() {
-        let opf = build_opf(&EpubOptions::default(), 0);
+        let opf = build_opf(&EpubOptions::default(), 0, &[]);
         assert!(!opf.contains("cover-image"));
     }
 
@@ -755,7 +846,7 @@ mod tests {
             language: "ru".to_owned(),
             ..Default::default()
         };
-        let opf = build_opf(&opts, 1);
+        let opf = build_opf(&opts, 1, &[]);
         assert!(opf.contains("<dc:language>ru</dc:language>"));
     }
 
@@ -765,7 +856,7 @@ mod tests {
             modified: Some("2025-01-01T00:00:00Z".to_owned()),
             ..Default::default()
         };
-        let opf = build_opf(&opts, 1);
+        let opf = build_opf(&opts, 1, &[]);
         assert!(opf.contains("2025-01-01T00:00:00Z"));
     }
 }

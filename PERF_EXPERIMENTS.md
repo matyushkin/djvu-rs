@@ -11507,3 +11507,32 @@ the page mask and walk the multi-page IFD chain.
 **Decision.** Kept (opt-in; default unchanged until broadly validated, per the issue).
 Decision rule (≥1.5× smaller, libtiff-identical pixels) exceeded — 2.5–2.8×. Upstreaming a
 `Fax4` backend to the `tiff` crate remains the ecosystem-friendly follow-up.
+
+## Perf round 74 (2026-07-11) — EPUB_ADAPTIVE_RASTER: adaptive PNG/JPEG + Gray8 page images in EPUB (#580)
+
+### #580 — two independent levers, both kept — **Kept** (2026-07-11)
+
+**Issue.** EPUB embedded every page as an RGB PNG: photo-heavy pages bloat (PNG on
+continuous tone), grayscale/bilevel pages waste 3 bytes/px.
+
+**Approach.**
+- **Lever 1 (adaptive JPEG):** `EpubOptions { jpeg_quality: Option<u8>, adaptive: bool }`
+  mirroring `PdfOptions`; with `adaptive`, each page image is encoded both ways and the
+  smaller wins (PDF_ADAPTIVE_RASTER pattern, one page's pair live at once). JPEG via the
+  same `jpeg-encoder` dep, now owned by the `epub` feature (#509 hygiene). Per-page
+  extension/media-type threaded through the XHTML/OPF manifest.
+- **Lever 2 (Gray8):** pages whose render is pure grayscale (r==g==b scan) encode as Gray8
+  PNG — 3× less raw data into deflate, pixel-identical. Applies to the default path.
+
+**Numbers.**
+- Adaptive (q80): colorbook 36.17 → **8.69 MB (−76.0%)** at JPEG-page fidelity
+  `ssim_y = 0.9969` / combined 0.9966 (rule: ≥25% at SSIM ≥0.99 — met); watchmaker adaptive
+  = PNG byte-for-byte (JPEG lost on every page — no regression, the guard works); cable −1.1%.
+- Gray8 (default path, vs pre-change main): cable_1973 666 KB → **254 KB (−61.9%)**,
+  watchmaker 11.21 → **4.40 MB (−60.7%)**; Pillow-verified pixel-identical page images on
+  both (14 pages total).
+
+**Decision.** Both levers kept. Default output changes only for grayscale pages (Gray8,
+pixel-identical); colour pages stay byte-identical by construction. EPUB_PNG_COMPRESSION's
+old rejection (filter tweaks, 2.84× larger) remains untouched — this changes format choice,
+not compression settings.
