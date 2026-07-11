@@ -220,6 +220,21 @@ fn bench_text_extraction(c: &mut Criterion) {
             let _ = black_box(page.text());
         });
     });
+
+    // Cold-vs-warm split (#605): the loop above measures *warm* repeated
+    // access (the metadata cache makes it an Arc bump + clone); this one
+    // re-parses the document per iteration so the first text() call pays the
+    // BZZ decode + zone-tree build.
+    let data_cold = std::fs::read(&path).unwrap();
+    c.bench_function("text_extraction_cold", |b| {
+        b.iter_batched(
+            || djvu_rs::DjVuDocument::parse(&data_cold).unwrap(),
+            |doc| {
+                let _ = black_box(doc.page(0).unwrap().text());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
 }
 
 /// Decode the JB2 masks of the first 30 pages of a bundled shared-dictionary
