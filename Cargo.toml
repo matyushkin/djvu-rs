@@ -107,7 +107,7 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys", "std"]
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 # EPUB writer owns the zip dependency (#509). `dep:flate2` selects the
 # pure-Rust deflate backend for zip (see the `zip` dependency comment).
-epub = ["std", "dep:zip", "dep:flate2"]
+epub = ["std", "dep:zip", "dep:flate2", "dep:jpeg-encoder"]
 cbz = ["std", "dep:zip", "dep:flate2"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "std"]
