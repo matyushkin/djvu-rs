@@ -227,6 +227,9 @@ enum EncodeQualityArg {
     Quality,
     /// Conservative layered profile with denser BG sampling and FGbz palette.
     Archival,
+    /// Mask-less continuous-tone profile (DjVuPhoto): INFO + BG44 only.
+    /// For photographs and grayscale scans.
+    Photo,
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -1062,6 +1065,7 @@ fn cmd_encode(
         EncodeQualityArg::Lossless => EncodeQuality::Lossless,
         EncodeQualityArg::Quality => EncodeQuality::Quality,
         EncodeQualityArg::Archival => EncodeQuality::Archival,
+        EncodeQualityArg::Photo => EncodeQuality::Photo,
     };
     let segment_options = segment_args.to_options(q)?;
 
@@ -1123,7 +1127,7 @@ fn cmd_encode(
                 .with_quality(EncodeQuality::Lossless)
                 .encode()
         }
-        EncodeQuality::Quality | EncodeQuality::Archival => {
+        EncodeQuality::Quality | EncodeQuality::Archival | EncodeQuality::Photo => {
             let mut encoder = PageEncoder::from_pixmap(&pixmap)
                 .with_dpi(dpi)
                 .with_quality(q);
