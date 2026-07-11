@@ -11836,3 +11836,39 @@ coarse returns `None` on bilevel pages.
 
 **Decision.** Kept (additive API). The measured region-vs-full ratio and thread scaling are
 the experiment's deliverable per the issue.
+## Perf round 85 (2026-07-12) — HTTP_RANGE_TTFP: lazy open over HTTP Range + DIRM size-table indexing (#584)
+
+**Issue.** #584 — demonstrate `LazyDocument` over an HTTP `Range` transport and
+measure time-to-first-page vs download-then-open. Decision rule: keep if TTFP
+improves ≥5× at realistic bandwidth with bytes fetched ≈ index + first page.
+
+**Approach.** New self-contained probe `examples/async_http_first_page.rs`:
+a local throttled `std::net` HTTP/1.1 server with `Range` support (fixed
+bandwidth), and an `AsyncRead + AsyncSeek` adapter fetching 64 KiB blocks over
+Range GETs with a 64-block LRU. First run exposed a real defect, not a transport
+problem: `index_bundled_djvm` probed every component's `FORM` header
+(`seek(offset+4)` + 4-byte read, one per component), so opening a 517-component
+book pulled 321 blocks — 20.5 MiB, 79% of the file, and lazy TTFP came out
+*slower* than a full download (0.8×). Fix in the loader, not the example:
+`DirmComponent` now surfaces the DIRM 24-bit size table, and the lazy indexer
+uses `offset..offset+size` when the table is populated, probing `FORM` headers
+only for zeroed tables (our own writer zeroes them). A new unit test
+(`dirm_size_table_matches_form_boundaries`) verifies size-table == FORM span
+across every bundled corpus/fixture file. The probe render is asserted
+byte-identical to the full-document render.
+
+**Numbers.** pathogenic_bacteria_1896.djvu (25.3 MiB, 517 components) at
+12.5 MiB/s: open = 1 GET / 64 KiB (was 321 GETs / 20.5 MiB); TTFP
+full-download 2.05 s vs lazy 0.02 s — **103×**, 0.25% of the file fetched.
+Page 50: 3 GETs / 192 KiB (40×); page 200: 2 GETs / 128 KiB (48×). At
+4 MiB/s: 209×. Small file (watchmaker, 0.2 MiB): 1.3× — neutral, as expected
+when the whole file fits in ~3 blocks.
+
+**Decision.** Kept. The DIRM size-table indexing makes lazy open O(head+DIRM)
+instead of O(components × block); the ≥5× bar is beaten by 20× at realistic
+bandwidth and bytes fetched ≈ index + one page. Example committed as the
+reproducible benchmark.
+
+**Reason.** The per-component probe was the entire cost of lazy open; DjVuLibre
+and IA files populate the DIRM size table, so trusting it (with FORM-boundary
+fallback for zeroed tables) removes the seek storm without a format risk.

@@ -100,6 +100,9 @@ struct LazyDirmEntry {
     comp_type: DirmComponentKind,
     id: String,
     offset: u32,
+    /// Component byte length from the DIRM size table, or 0 when the writer
+    /// left the table zeroed (then the loader probes the `FORM` header).
+    size: u32,
 }
 
 /// Native async lazy DjVu document.
@@ -304,12 +307,20 @@ where
     let mut pages = Vec::new();
     let mut shared = BTreeMap::new();
     for entry in entries {
-        reader
-            .seek(std::io::SeekFrom::Start(entry.offset as u64 + 4))
-            .await?;
-        let mut size_bytes = [0u8; 4];
-        reader.read_exact(&mut size_bytes).await?;
-        let range = crate::dirm::form_byte_range(entry.offset, size_bytes);
+        // The DIRM size table gives each component's byte length (FORM header
+        // included), so a populated table indexes the whole document from the
+        // head bytes alone — no seek across the file per component. Writers
+        // that zero the table (ours does) fall back to probing the FORM header.
+        let range = if entry.size > 8 {
+            entry.offset as u64..entry.offset as u64 + entry.size as u64
+        } else {
+            reader
+                .seek(std::io::SeekFrom::Start(entry.offset as u64 + 4))
+                .await?;
+            let mut size_bytes = [0u8; 4];
+            reader.read_exact(&mut size_bytes).await?;
+            crate::dirm::form_byte_range(entry.offset, size_bytes)
+        };
         match entry.comp_type {
             DirmComponentKind::Page => pages.push(LazyPageIndex { range }),
             DirmComponentKind::Shared => {
@@ -339,6 +350,7 @@ fn parse_lazy_dirm(data: &[u8]) -> Result<Vec<LazyDirmEntry>, AsyncLazyError> {
             comp_type: c.kind,
             id: c.id,
             offset,
+            size: c.size,
         })
         .collect())
 }
