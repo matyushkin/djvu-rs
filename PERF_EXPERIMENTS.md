@@ -11482,3 +11482,28 @@ files show ghosting.
 **Decision.** Kept as opt-in. Decision rule (≥15% smaller, equal-or-better text quality)
 exceeded several times over; the "consider defaulting later" question should wait for
 corpus diversity (#558) since the win depends on stencil coverage.
+
+## Perf round 73 (2026-07-11) — TIFF_G4: CCITT Group 4 for bilevel TIFF export (#579)
+
+### #579 — 1-bit G4 strips via `smmr::encode_g4`, minimal in-crate IFD writer — **Kept** (opt-in) (2026-07-11)
+
+**Issue.** Bilevel TIFF export wrote 8-bit grayscale strips with Deflate; the `tiff` crate
+(0.9) has no CCITT encoder at all, while we own a fully validated T.6 encoder (PDF_G4,
+round 53).
+
+**Approach.** New `TiffOptions::bilevel_compression` (`Deflate` default — byte-identical —
+or `G4`). The G4 path hand-rolls the minimal multi-page bilevel TIFF (LE header, 11-tag IFD
+per page, Compression=4, Photometric=min-is-white, 1 strip/page = raw `encode_g4` payload);
+page masks come from `extract_mask` (shared-dict aware), pages without a mask emit a blank
+white page. Parallel per-page G4 encode under the `parallel` feature.
+
+**Numbers.** Deflate → G4 whole-file: boy_jb2 1,144 → 464 B (**2.47×**), cable_1973 (2 pp)
+113,029 → 40,510 B (**2.79×**), watchmaker (12 pp) 1,812,826 → 719,516 B (**2.52×**).
+Validation: Pillow/libtiff reads all three pixel-identically to the Deflate variant
+(per-page ink-set equality, multi-page included); `tiffinfo` reports proper "CCITT Group 4 /
+min-is-white / Bits 1"; unit tests round-trip the strip through our own T.6 decoder against
+the page mask and walk the multi-page IFD chain.
+
+**Decision.** Kept (opt-in; default unchanged until broadly validated, per the issue).
+Decision rule (≥1.5× smaller, libtiff-identical pixels) exceeded — 2.5–2.8×. Upstreaming a
+`Fax4` backend to the `tiff` crate remains the ecosystem-friendly follow-up.
