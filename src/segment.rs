@@ -36,6 +36,13 @@ pub struct SegmentOptions {
     /// `ceil(width / bg_subsample) × ceil(height / bg_subsample)`.
     /// Saturated to `>= 1`. DjVuLibre default: 12.
     pub bg_subsample: u32,
+    /// Opt-in content-adaptive background subsample (#569). When `true`,
+    /// `bg_subsample` is treated as the *ceiling* and the effective factor is
+    /// chosen per page from the measured background detail (variance of the
+    /// non-mask pixels at cell level): flat paper stays at the ceiling
+    /// (smallest BG44), detailed/photo backgrounds drop to 6 or 3. `false`
+    /// (default) keeps the historical fixed factor — byte-identical output.
+    pub adaptive_bg_subsample: bool,
     /// Mask-generation method. Defaults to [`Binarization::Fixed`] to preserve
     /// the deterministic historical encoder output.
     pub binarization: Binarization,
@@ -60,6 +67,7 @@ impl Default for SegmentOptions {
         Self {
             threshold: 128,
             bg_subsample: 12,
+            adaptive_bg_subsample: false,
             binarization: Binarization::Fixed,
             bg_inpaint: false,
             bg_diffuse: false,
@@ -77,6 +85,7 @@ impl SegmentOptions {
     pub fn archival() -> Self {
         Self {
             bg_subsample: 6,
+            adaptive_bg_subsample: false,
             ..Self::default()
         }
     }
@@ -121,6 +130,65 @@ impl ColorAccum {
     }
 }
 
+/// Pick the effective background subsample from measured background detail
+/// (#569): per 12×12 cell, the luma spread (max−min) of unmasked pixels;
+/// the fraction of cells with spread > 24 is the detail statistic.
+///
+/// Flat paper (text pages) → the ceiling (usually 12, smallest BG44);
+/// moderately detailed backgrounds → 6; photo/texture-heavy → 3. Sampled at
+/// a row stride so the pass is a small fraction of segmentation cost.
+fn choose_bg_subsample(rgba: &Pixmap, mask: &Bitmap, ceiling: u32) -> u32 {
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    const CELL: usize = 12;
+    let cols = w.div_ceil(CELL);
+    let rows = h.div_ceil(CELL);
+    let mut spread_hi = 0usize;
+    let mut cells = 0usize;
+    // Sample every other cell row for speed.
+    let mut cy = 0usize;
+    while cy < rows {
+        for cx in 0..cols {
+            let x0 = cx * CELL;
+            let y0 = cy * CELL;
+            let x1 = (x0 + CELL).min(w);
+            let y1 = (y0 + CELL).min(h);
+            let mut lo = 255u8;
+            let mut hi = 0u8;
+            let mut seen = false;
+            for y in y0..y1 {
+                let row = &rgba.data[y * w * 4..(y + 1) * w * 4];
+                for x in x0..x1 {
+                    if mask.get(x as u32, y as u32) {
+                        continue;
+                    }
+                    let l = luminance(row[x * 4], row[x * 4 + 1], row[x * 4 + 2]);
+                    lo = lo.min(l);
+                    hi = hi.max(l);
+                    seen = true;
+                }
+            }
+            if seen {
+                cells += 1;
+                if hi - lo > 24 {
+                    spread_hi += 1;
+                }
+            }
+        }
+        cy += 2;
+    }
+    if cells == 0 {
+        return ceiling;
+    }
+    let detail_pct = spread_hi * 100 / cells;
+    if detail_pct < 5 {
+        ceiling
+    } else if detail_pct < 30 {
+        6.min(ceiling)
+    } else {
+        3.min(ceiling)
+    }
+}
+
 #[inline]
 fn luminance(r: u8, g: u8, b: u8) -> u8 {
     (((r as u32) * 306 + (g as u32) * 601 + (b as u32) * 117) >> 10) as u8
@@ -132,7 +200,6 @@ fn luminance(r: u8, g: u8, b: u8) -> u8 {
 pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
     let w = rgba.width;
     let h = rgba.height;
-    let sub = opts.bg_subsample.max(1);
 
     let mut mask = Bitmap::new(w, h);
     if w == 0 || h == 0 {
@@ -149,6 +216,16 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
             fill_sauvola_mask(&mut mask, &luma, w, h, window, k);
         }
     }
+
+    // #569: content-adaptive background subsample — measured detail of the
+    // non-mask pixels picks the effective factor, with `opts.bg_subsample`
+    // as the ceiling. Runs after the mask so under-ink pixels don't count
+    // as "background detail".
+    let sub = if opts.adaptive_bg_subsample {
+        choose_bg_subsample(rgba, &mask, opts.bg_subsample.max(1))
+    } else {
+        opts.bg_subsample.max(1)
+    };
 
     let bw = w.div_ceil(sub);
     let bh = h.div_ceil(sub);
@@ -638,6 +715,7 @@ mod tests {
             &SegmentOptions {
                 threshold: 128,
                 bg_subsample: 1,
+                adaptive_bg_subsample: false,
                 ..SegmentOptions::default()
             },
         );
@@ -740,6 +818,36 @@ mod tests {
         );
 
         assert_eq!(parallel.data, sequential.data);
+    }
+
+    /// #569: the adaptive chooser keeps flat backgrounds at the ceiling,
+    /// drops detailed ones, and ignores under-mask pixels.
+    #[test]
+    fn adaptive_bg_subsample_tracks_background_detail() {
+        // Flat white page -> ceiling.
+        let flat = Pixmap::white(120, 120);
+        let empty = Bitmap::new(120, 120);
+        assert_eq!(choose_bg_subsample(&flat, &empty, 12), 12);
+
+        // Noisy background -> 3.
+        let mut noisy = Pixmap::white(120, 120);
+        for y in 0..120 {
+            for x in 0..120 {
+                let v = ((x * 37 + y * 91) % 256) as u8;
+                noisy.set_rgb(x, y, v, v, v);
+            }
+        }
+        assert_eq!(choose_bg_subsample(&noisy, &empty, 12), 3);
+
+        // The same noise fully under the mask does not count as background
+        // detail -> ceiling.
+        let mut inked = Bitmap::new(120, 120);
+        for y in 0..120 {
+            for x in 0..120 {
+                inked.set_black(x, y);
+            }
+        }
+        assert_eq!(choose_bg_subsample(&noisy, &inked, 12), 12);
     }
 
     fn count_mask(mask: &Bitmap) -> u32 {
