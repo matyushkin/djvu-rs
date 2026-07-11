@@ -11332,3 +11332,33 @@ frame's total time because the compositor dominates. Per-frame JS allocation eli
 GC/growth lifetime behaviour verified in a real Chrome tab. Node-ABI note: the plain
 copying APIs remain the safe default there (the historical length-corruption motivation),
 and the new handle APIs are opt-in.
+## Perf round 68 (2026-07-11) — WASM_LAZY_OPEN: owned shared backing for the browser from_bytes (#609)
+
+### #609 — `WasmDocument::from_bytes` through `parse_backed` — **Kept** (2026-07-11)
+
+**Issue.** The browser binding opened documents via the borrowed-slice eager parser
+(`DjVuDocument::parse`), which copies every bundled page's bytes at open time — bypassing
+the owned shared-backing path (`parse_backed`) that made the native `Document::from_bytes`
+lazy (LAZY_PAGE_CONSTRUCT: −48% on a 520-page doc).
+
+**Approach.** `WasmDocument::from_bytes` now takes `Vec<u8>` (JS-visible signature
+unchanged — still pass a `Uint8Array`; the JS→wasm transfer is the single unavoidable
+copy) and moves the buffer into the shared `Backing`, so bundled pages materialize lazily
+on first access. New committed browser bench `examples/wasm/bench_open.html`.
+
+**Platform / commands.** macOS 26.5.0, Chrome (real tab), wasm-pack release build, 504-page
+7.3 MB bundle (watchmaker ×42), 25 constructor trials per run.
+
+**Numbers.** Constructor median 1.00 ms → 0.60 ms (**−40%**; steady-state tails
+0.9–1.3 ms → 0.4–0.7 ms; a second new-build run medianed 1.8 ms from GC noise in its first
+half with the same 0.4–0.7 ms tail). Open→first-render 23.8–29.3 ms (old) vs 19.3–44.3 ms
+(new) — single-shot, noise-dominated, no regression signal. Correctness spot-checks in the
+browser: page_count, first-page and mid-page renders. Native `parse_backed` behaviour
+(laziness, malformed input) is already covered by the existing suite; renders are
+byte-identical by construction (same parser underneath).
+
+**Decision.** Kept. Decision rule (≥30% construction improvement, no single-page/render
+regressions) met on constructor time; the absolute numbers are small on this 7.3 MB corpus
+bundle — the win scales with document size (the copies eliminated are O(file size)). Node
+ABI note: `Vec<u8>` params behave identically to `&[u8]` at the boundary (owned copy in),
+so the historical view-lifetime hazard does not apply.

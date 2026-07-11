@@ -158,11 +158,19 @@ pub struct WasmDocument {
 
 #[wasm_bindgen]
 impl WasmDocument {
-    /// Parse a DjVu document from a byte slice.
+    /// Parse a DjVu document from a byte buffer.
+    ///
+    /// The buffer is moved into a shared backing store and bundled pages
+    /// materialize lazily on first access (#609) — the same owned-bytes path
+    /// as the native `Document::from_bytes` (LAZY_PAGE_CONSTRUCT), instead of
+    /// the eager parser that copied every page at open time. The JS-visible
+    /// signature is unchanged (pass a `Uint8Array`); the JS→wasm transfer is
+    /// the single unavoidable copy.
     ///
     /// Throws a JavaScript `Error` if the bytes are not a valid DjVu file.
-    pub fn from_bytes(data: &[u8]) -> Result<WasmDocument, JsError> {
-        let doc = crate::foreign::open(data).map_err(|e| JsError::new(&e.to_string()))?;
+    pub fn from_bytes(data: Vec<u8>) -> Result<WasmDocument, JsError> {
+        let backing: crate::djvu_document::Backing = Arc::new(data);
+        let doc = DjVuDocument::parse_backed(backing).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmDocument {
             inner: Arc::new(doc),
         })
