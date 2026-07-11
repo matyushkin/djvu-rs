@@ -1126,6 +1126,14 @@ struct TileCacheState {
 /// arithmetic decode. A `DjVuPage` holds one of these behind a `OnceLock`;
 /// the accessors borrow the page only to decode on a cache miss, so the
 /// returned reference is tied to the cache, not the call.
+/// Cached decoded ANTz payload (#605): the parsed annotation record plus its
+/// map areas, shared behind an `Arc` between the per-page cache and callers.
+#[cfg(feature = "std")]
+pub(crate) type SharedAnnotations = std::sync::Arc<(
+    crate::annotation::Annotation,
+    Vec<crate::annotation::MapArea>,
+)>;
+
 #[cfg(feature = "std")]
 #[derive(Default)]
 pub(crate) struct PageLayers {
@@ -1154,6 +1162,14 @@ pub(crate) struct PageLayers {
     // every warm render of a palette page re-runs the full JB2 ZP decode and
     // re-allocates the page-sized blit map. Only populated for palette pages.
     mask_indexed: std::sync::OnceLock<Option<(crate::bitmap::Bitmap, Vec<i32>)>>,
+    // Decoded page metadata (#605): the TXTz/ANTz payloads are BZZ-compressed
+    // and rebuilt into full zone/annotation trees on every access, yet viewers
+    // ask for the same metadata repeatedly (search, selection, link overlays).
+    // Cached behind `Arc` so warm accesses share one decode. Only populated
+    // for pages whose metadata is actually touched; parse *errors* are not
+    // cached (malformed chunks keep erroring per call, unchanged behaviour).
+    text_layer: std::sync::OnceLock<Option<std::sync::Arc<crate::text::TextLayer>>>,
+    annotations: std::sync::OnceLock<Option<SharedAnnotations>>,
     /// Monotonic last-access tick for LRU cache-budget eviction. Bumped from a
     /// process-global counter every time this page's layers are touched; read
     /// (without touching) by `DjVuDocument::enforce_cache_budget` to evict the
@@ -1215,6 +1231,19 @@ impl PageLayers {
             .get()
             .and_then(|x| x.as_ref())
             .map_or(0, |(b, v)| b.data.len() + v.len() * 4);
+        // Metadata caches (#605): approximate — text bytes + a fixed cost per
+        // zone/map-area node. Small next to the pixel caches, but accounted so
+        // the budget sweep sees them.
+        let tl = self
+            .text_layer
+            .get()
+            .and_then(|x| x.as_ref())
+            .map_or(0, |t| t.text.len() + count_zones(&t.zones) * 64);
+        let an = self
+            .annotations
+            .get()
+            .and_then(|x| x.as_ref())
+            .map_or(0, |a| a.1.len() * 96 + 64);
         px(&self.fg44)
             + px(&self.bg_rgb_s1)
             + px(&self.bg_rgb_s2)
@@ -1224,6 +1253,8 @@ impl PageLayers {
             + iw(&self.bg44)
             + iw(&self.bg44_partial)
             + mi
+            + tl
+            + an
             + self.tile_cache_bytes()
     }
 
@@ -1474,6 +1505,38 @@ impl PageLayers {
     /// same page skip both. `None` when the page has no Sjbz/Smmr chunk or decode
     /// fails. The blit map is ~`width*height*4` bytes — only pages actually
     /// rendered with a palette ever populate this slot.
+    /// Cached decoded text layer (#605). `try_init` runs at most once
+    /// successfully; a parse error is returned without caching.
+    pub(crate) fn text_layer_cached(
+        &self,
+        parse: impl FnOnce() -> Result<
+            Option<std::sync::Arc<crate::text::TextLayer>>,
+            crate::djvu_document::DocError,
+        >,
+    ) -> Result<Option<std::sync::Arc<crate::text::TextLayer>>, crate::djvu_document::DocError>
+    {
+        if let Some(v) = self.text_layer.get() {
+            return Ok(v.clone());
+        }
+        let v = parse()?;
+        let _ = self.text_layer.set(v.clone());
+        Ok(v)
+    }
+
+    /// Cached decoded annotations (#605); same error semantics as
+    /// [`text_layer_cached`](Self::text_layer_cached).
+    pub(crate) fn annotations_cached(
+        &self,
+        parse: impl FnOnce() -> Result<Option<SharedAnnotations>, crate::djvu_document::DocError>,
+    ) -> Result<Option<SharedAnnotations>, crate::djvu_document::DocError> {
+        if let Some(v) = self.annotations.get() {
+            return Ok(v.clone());
+        }
+        let v = parse()?;
+        let _ = self.annotations.set(v.clone());
+        Ok(v)
+    }
+
     pub(crate) fn mask_indexed(
         &self,
         page: &DjVuPage,
@@ -1486,6 +1549,15 @@ impl PageLayers {
             })
             .as_ref()
     }
+}
+
+/// Recursive zone count for the metadata-cache byte estimate (#605).
+#[cfg(feature = "std")]
+fn count_zones(zones: &[crate::text::TextZone]) -> usize {
+    zones
+        .iter()
+        .map(|z| 1 + count_zones(&z.children))
+        .sum::<usize>()
 }
 
 /// Max-pool 4× downsample of a bilevel mask.

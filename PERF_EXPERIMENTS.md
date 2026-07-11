@@ -11385,3 +11385,25 @@ path, skipping RGBA staging for PDF/TIFF/EPUB/CBZ) not pursued: the emit-time co
 measured at noise level here, matching the ALPHA_INL/ZEROED history that output-bandwidth
 micro-changes rarely clear the 3% bar — revisit only with instruction-count benches (#557).
 Depends on the `cbz` module from PAR_CBZ (round 62) — PR based on that branch.
+
+## Perf round 70 (2026-07-11) — METADATA_CACHE: cache decoded TXTz/ANTz per page (#605)
+
+### #605 — per-page `Arc` cache for text layer and annotations — **Kept** (2026-07-11)
+
+**Issue.** Every text/annotation/hyperlink access re-ran the BZZ decode and rebuilt the full
+zone/annotation tree; viewers ask for the same metadata repeatedly (search, selection, link
+overlays).
+
+**Approach.** Two new `OnceLock` slots in `PageLayers` (so eviction and the cache budget see
+them; byte estimate accounted in `cached_bytes`): `Arc<TextLayer>` and
+`Arc<(Annotation, Vec<MapArea>)>`. Public owned-returning APIs unchanged (they clone out of
+the cache); new `text_layer_shared`/`annotations_shared` return the `Arc` for loop-heavy
+callers. Parse errors are **not** cached — malformed chunks keep erroring per call. New
+`text_extraction_cold` bench splits cold from warm.
+
+**Numbers.** watchmaker p0: warm repeated `text()` 177.1 µs → **3.90 µs (≈45×)**; cold
+179.1 µs vs old 177.1 µs (+1.1%, includes fresh-parse batch overhead — noise-level).
+Warm `Arc` identity asserted (`Arc::ptr_eq`); malformed-TXTz double-error test.
+
+**Decision.** Kept. Decision rule (warm ≥3×, cold within ~1%, bounded/evictable memory) met:
+45× warm, cache lives in the budgeted, evictable `PageLayers`.
