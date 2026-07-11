@@ -414,8 +414,25 @@ fn collect_mask_layers(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
             // multi-coloured text (colour fidelity over edge crispness; true
             // MRC stencilling of FG44 pages is #563).
             if !page.fg44_chunks().is_empty() || page.find_chunk(b"FGjp").is_some() {
-                return match uniform_fg_color(page) {
-                    Some(rgb) => single_stencil_layer(page, opts, rgb),
+                // `decoded_mask`/`decoded_fg44` hit the page cache — the
+                // page's own render (for /Im0) already decoded both layers,
+                // so the heuristic must not decode them a second time.
+                let Some(mask) = page.decoded_mask() else {
+                    return Vec::new();
+                };
+                let fg_owned;
+                let fg = match page.decoded_fg44() {
+                    Some(fg) => Some(fg),
+                    None => {
+                        fg_owned = page.extract_foreground().ok().flatten();
+                        fg_owned.as_ref()
+                    }
+                };
+                let Some(fg) = fg else {
+                    return Vec::new();
+                };
+                return match uniform_fg_color(fg, mask) {
+                    Some(rgb) => stencil_layer_from_mask(mask, opts, rgb),
                     None => Vec::new(),
                 };
             }
@@ -508,20 +525,27 @@ fn collect_mask_layers(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
 
 /// The historical single black stencil (pages without a colour palette).
 fn black_mask_layer(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
-    single_stencil_layer(page, opts, (0, 0, 0))
-}
-
-/// A single full-mask stencil painted in `rgb`.
-fn single_stencil_layer(page: &DjVuPage, opts: &PdfOptions, rgb: (u8, u8, u8)) -> Vec<MaskLayer> {
+    // Prefer the page cache (populated by this page's own /Im0 render).
+    if let Some(mask) = page.decoded_mask() {
+        return stencil_layer_from_mask(mask, opts, (0, 0, 0));
+    }
     let Ok(Some(bitmap)) = page.extract_mask() else {
         return Vec::new();
     };
-    let dims = (bitmap.width, bitmap.height);
+    stencil_layer_from_mask(&bitmap, opts, (0, 0, 0))
+}
+
+/// A single full-mask stencil painted in `rgb`, from an already-decoded mask.
+fn stencil_layer_from_mask(
+    mask: &crate::bitmap::Bitmap,
+    opts: &PdfOptions,
+    rgb: (u8, u8, u8),
+) -> Vec<MaskLayer> {
     vec![MaskLayer {
         rgb,
-        bbox: (0, 0, dims.0, dims.1),
-        mask_dims: dims,
-        body: mask_body_from_bitmap(&bitmap, opts.ccitt_g4),
+        bbox: (0, 0, mask.width, mask.height),
+        mask_dims: (mask.width, mask.height),
+        body: mask_body_from_bitmap(mask, opts.ccitt_g4),
     }]
 }
 
@@ -535,9 +559,7 @@ const FG44_UNIFORM_SPREAD: u8 = 48;
 /// returns the mean colour when every channel's spread stays within
 /// [`FG44_UNIFORM_SPREAD`]; `None` when the foreground is multi-coloured (or
 /// either layer fails to decode).
-fn uniform_fg_color(page: &DjVuPage) -> Option<(u8, u8, u8)> {
-    let fg = page.extract_foreground().ok()??;
-    let mask = page.extract_mask().ok()??;
+fn uniform_fg_color(fg: &crate::Pixmap, mask: &crate::bitmap::Bitmap) -> Option<(u8, u8, u8)> {
     if fg.width == 0 || fg.height == 0 || mask.width == 0 || mask.height == 0 {
         return None;
     }

@@ -11096,6 +11096,13 @@ make check
   czech¹, slow). ¹czech is an indirect doc whose DJVI lives in external files — no mask is
   decodable from the bundle alone; unchanged, pre-existing limitation.
 
+**Perf follow-up (same PR).** The CI benchmark gate flagged `export/pdf_flatdecode` +8.2%:
+the FG44 heuristic decoded the mask and FG44 a second time even though the page's own /Im0
+render had just decoded and cached both. Stencil building now reuses the page cache
+(`decoded_mask`/`decoded_fg44`); local re-measure: old main 1.254 s → fixed branch 1.097 s
+(the pre-existing double mask decode in `collect_mask_stream` is gone too). Output verified
+byte-identical to the branch's pre-refactor PDFs across all 20 fixtures.
+
 **Decision.** Fixed/Kept. Every changed fixture is a strict fidelity win (restored or
 recoloured text) or a measured ΔE improvement with a size reduction. Regression tests:
 `fg44_page_skips_mask_stencil`, updated `mixed_page_has_both_image_and_mask_xobject`
