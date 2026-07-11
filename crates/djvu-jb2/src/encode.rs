@@ -1441,10 +1441,42 @@ pub fn encode_jb2_dict_with_options(
     shared_symbols: &[Bitmap],
     opts: &Jb2EncodeOptions,
 ) -> Vec<u8> {
+    encode_jb2_dict_with_blits(bitmap, shared_symbols, opts).0
+}
+
+/// One emitted blit: its cropped shape and top-left position (top-down page
+/// coordinates), in emission order — blit *i* here is blit index *i* on the
+/// decoder side.
+///
+/// For the lossless paths (default options, despeckle, exact and rec-6
+/// matches) the shape is pixel-identical to what the decoder reconstructs;
+/// only lossy rec-7 substitution (`lossy_threshold > 0`) blits a near-twin
+/// whose pixels can differ from this original component.
+pub struct EncodedBlit {
+    /// Top-left x of the blit in the page (0 = left edge).
+    pub x: u32,
+    /// Top-left y of the blit in the page (0 = top edge, top-down).
+    pub y: u32,
+    /// Cropped component bitmap (tight bbox, this component's pixels only).
+    pub bitmap: Bitmap,
+}
+
+/// Encode like [`encode_jb2_dict_with_options`] and also return the emitted
+/// blits (shape + placement, in emission order).
+///
+/// The byte stream is identical to [`encode_jb2_dict_with_options`] — the
+/// blit list is metadata the encoder already owns, handed back so callers
+/// (e.g. the FGbz palette builder, #612) don't have to decode the stream
+/// they just produced to recover the per-blit layout.
+pub fn encode_jb2_dict_with_blits(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
     if w == 0 || h == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let mut ccs = extract_ccs(bitmap);
@@ -1734,7 +1766,23 @@ pub fn encode_jb2_dict_with_options(
     }
 
     encode_num(&mut zp, &mut record_type_ctx, 0, 11, 11);
-    zp.finish()
+    let bytes = zp.finish();
+
+    // Hand back the emitted blits in emission order. The bitmaps are moved
+    // out of `ccs` (no clones); `dict_entries`' borrows of them end here.
+    drop(dict_entries);
+    let blits = order
+        .iter()
+        .map(|&i| {
+            let cc = &mut ccs[i];
+            EncodedBlit {
+                x: cc.x,
+                y: cc.y,
+                bitmap: core::mem::replace(&mut cc.bitmap, Bitmap::new(0, 0)),
+            }
+        })
+        .collect();
+    (bytes, blits)
 }
 
 /// Same-line tolerances (Phase 2 of #188) used to decide between new_line
