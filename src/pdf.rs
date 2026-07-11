@@ -40,28 +40,44 @@ pub enum PdfError {
     /// Render error.
     #[error("render error: {0}")]
     Render(#[from] djvu_render::RenderError),
+    /// I/O error writing to the output sink (`djvu_to_pdf_to_writer`).
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 // ---- Low-level PDF object writer --------------------------------------------
 
-/// A PDF object body (bytes between `N 0 obj\n` and `\nendobj\n`).
-struct PdfObj {
-    id: usize,
-    body: Vec<u8>,
-}
-
-/// Accumulates PDF objects and serializes them into a valid PDF 1.4 file.
-struct PdfWriter {
-    objects: Vec<PdfObj>,
+/// Streams PDF objects to a [`Write`](std::io::Write) sink as they are added,
+/// retaining only `(id, byte offset)` per object for the final xref table
+/// (#606). Object bodies are written in insertion order — the same order the
+/// former buffer-everything writer serialized them in, so output bytes are
+/// unchanged.
+struct PdfWriter<W: std::io::Write> {
+    sink: W,
+    /// Bytes written so far (= next object's offset).
+    written: usize,
+    /// `(object id, byte offset)` in insertion order.
+    offsets: Vec<(usize, usize)>,
     next_id: usize,
 }
 
-impl PdfWriter {
-    fn new() -> Self {
-        PdfWriter {
-            objects: Vec::new(),
+impl<W: std::io::Write> PdfWriter<W> {
+    /// Create the writer and emit the PDF header.
+    fn new(sink: W) -> Result<Self, PdfError> {
+        let mut w = PdfWriter {
+            sink,
+            written: 0,
+            offsets: Vec::new(),
             next_id: 1,
-        }
+        };
+        w.write_all(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")?;
+        Ok(w)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), PdfError> {
+        self.sink.write_all(bytes)?;
+        self.written += bytes.len();
+        Ok(())
     }
 
     /// Reserve the next object ID.
@@ -71,39 +87,30 @@ impl PdfWriter {
         id
     }
 
-    /// Add an object with a pre-allocated ID.
-    fn add_obj(&mut self, id: usize, body: Vec<u8>) {
-        self.objects.push(PdfObj { id, body });
+    /// Write an object with a pre-allocated ID; its body is not retained.
+    fn add_obj(&mut self, id: usize, body: Vec<u8>) -> Result<(), PdfError> {
+        self.offsets.push((id, self.written));
+        self.write_all(format!("{id} 0 obj\n").as_bytes())?;
+        self.write_all(&body)?;
+        self.write_all(b"\nendobj\n")
     }
 
-    /// Allocate and add an object, returning its ID.
-    fn add(&mut self, body: Vec<u8>) -> usize {
+    /// Allocate and write an object, returning its ID.
+    fn add(&mut self, body: Vec<u8>) -> Result<usize, PdfError> {
         let id = self.alloc_id();
-        self.add_obj(id, body);
-        id
+        self.add_obj(id, body)?;
+        Ok(id)
     }
 
-    /// Serialize all objects into a complete PDF file.
-    fn serialize(self) -> Vec<u8> {
-        let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
-
-        let mut offsets: Vec<(usize, usize)> = Vec::new();
-        for obj in &self.objects {
-            offsets.push((obj.id, buf.len()));
-            buf.extend_from_slice(format!("{} 0 obj\n", obj.id).as_bytes());
-            buf.extend_from_slice(&obj.body);
-            buf.extend_from_slice(b"\nendobj\n");
-        }
-
-        // Cross-reference table
-        let xref_offset = buf.len();
-        let max_id = offsets.iter().map(|(id, _)| *id).max().unwrap_or(0);
-        buf.extend_from_slice(format!("xref\n0 {}\n", max_id + 1).as_bytes());
-        buf.extend_from_slice(b"0000000000 65535 f \n");
+    /// Write the cross-reference table and trailer, consuming the writer.
+    fn finish(mut self) -> Result<(), PdfError> {
+        let xref_offset = self.written;
+        let max_id = self.offsets.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        let mut tail = format!("xref\n0 {}\n", max_id + 1).into_bytes();
+        tail.extend_from_slice(b"0000000000 65535 f \n");
 
         let mut offset_map = vec![None; max_id + 1];
-        for (obj_id, off) in &offsets {
+        for (obj_id, off) in &self.offsets {
             if *obj_id <= max_id {
                 offset_map[*obj_id] = Some(*off);
             }
@@ -111,13 +118,13 @@ impl PdfWriter {
         for entry in offset_map.iter().skip(1) {
             match entry {
                 Some(off) => {
-                    buf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+                    tail.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
                 }
-                None => buf.extend_from_slice(b"0000000000 65535 f \n"),
+                None => tail.extend_from_slice(b"0000000000 65535 f \n"),
             }
         }
 
-        buf.extend_from_slice(
+        tail.extend_from_slice(
             format!(
                 "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
                 max_id + 1,
@@ -125,8 +132,9 @@ impl PdfWriter {
             )
             .as_bytes(),
         );
-
-        buf
+        self.write_all(&tail)?;
+        self.sink.flush()?;
+        Ok(())
     }
 }
 
@@ -641,25 +649,25 @@ fn collect_link_annot_bodies(page: &DjVuPage, dpi: f32, pt_h: f32) -> Vec<Vec<u8
 }
 
 /// Emit a pre-rendered page into `PdfWriter` (sequential). Returns the page object ID.
-fn emit_page_objects(
-    w: &mut PdfWriter,
+fn emit_page_objects<W: std::io::Write>(
+    w: &mut PdfWriter<W>,
     data: RenderedPage,
     pages_id: usize,
     font_id: usize,
-) -> usize {
+) -> Result<usize, PdfError> {
     let pt_w = data.pt_w;
     let pt_h = data.pt_h;
 
-    let img_id = data.img0_body.map(|body| w.add(body));
-    let mask_layers: Vec<(MaskLayer, usize)> = data
-        .mask_layers
-        .into_iter()
-        .map(|mut layer| {
-            let body = core::mem::take(&mut layer.body);
-            let id = w.add(body);
-            (layer, id)
-        })
-        .collect();
+    let img_id = match data.img0_body {
+        Some(body) => Some(w.add(body)?),
+        None => None,
+    };
+    let mut mask_layers: Vec<(MaskLayer, usize)> = Vec::with_capacity(data.mask_layers.len());
+    for mut layer in data.mask_layers {
+        let body = core::mem::take(&mut layer.body);
+        let id = w.add(body)?;
+        mask_layers.push((layer, id));
+    }
 
     let mut content = String::new();
 
@@ -705,7 +713,7 @@ fn emit_page_objects(
     }
 
     let content_body = make_deflate_stream("", content.as_bytes());
-    let content_id = w.add(content_body);
+    let content_id = w.add(content_body)?;
 
     let mut resources = String::from("/XObject <<");
     if let Some(id) = img_id {
@@ -719,11 +727,10 @@ fn emit_page_objects(
         resources.push_str(&format!(" /Font << /F1 {font_id} 0 R >>"));
     }
 
-    let annot_ids: Vec<usize> = data
-        .link_annot_bodies
-        .into_iter()
-        .map(|body| w.add(body))
-        .collect();
+    let mut annot_ids: Vec<usize> = Vec::with_capacity(data.link_annot_bodies.len());
+    for body in data.link_annot_bodies {
+        annot_ids.push(w.add(body)?);
+    }
     let mut annots_str = String::new();
     if !annot_ids.is_empty() {
         annots_str.push_str(" /Annots [");
@@ -923,22 +930,22 @@ fn shape_to_pdf_rect(shape: &Shape, dpi: f32, _pt_h: f32) -> Option<(f32, f32, f
 
 /// Build PDF outline objects from NAVM bookmarks.
 /// Returns the outline root object ID, or None if no bookmarks.
-fn build_outline(
-    w: &mut PdfWriter,
+fn build_outline<W: std::io::Write>(
+    w: &mut PdfWriter<W>,
     bookmarks: &[DjVuBookmark],
     page_ids: &[usize],
-) -> Option<usize> {
+) -> Result<Option<usize>, PdfError> {
     if bookmarks.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let outline_id = w.alloc_id();
 
     // Flatten the bookmark tree into outline item objects
-    let item_ids = build_outline_items(w, bookmarks, outline_id, page_ids);
+    let item_ids = build_outline_items(w, bookmarks, outline_id, page_ids)?;
 
     if item_ids.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let first = item_ids[0];
@@ -949,18 +956,18 @@ fn build_outline(
         outline_id,
         format!("<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {count} >>")
             .into_bytes(),
-    );
+    )?;
 
-    Some(outline_id)
+    Ok(Some(outline_id))
 }
 
 /// Recursively build outline items. Returns IDs of top-level items at this level.
-fn build_outline_items(
-    w: &mut PdfWriter,
+fn build_outline_items<W: std::io::Write>(
+    w: &mut PdfWriter<W>,
     bookmarks: &[DjVuBookmark],
     parent_id: usize,
     page_ids: &[usize],
-) -> Vec<usize> {
+) -> Result<Vec<usize>, PdfError> {
     let mut ids = Vec::new();
 
     for _bm in bookmarks {
@@ -985,7 +992,7 @@ fn build_outline_items(
         let dest = resolve_bookmark_dest(&bm.url, page_ids);
 
         // Build children
-        let child_ids = build_outline_items(w, &bm.children, item_id, page_ids);
+        let child_ids = build_outline_items(w, &bm.children, item_id, page_ids)?;
         let children_str = if !child_ids.is_empty() {
             let first = child_ids[0];
             let last = *child_ids.last().unwrap();
@@ -1002,10 +1009,10 @@ fn build_outline_items(
                 "<< /Title ({title}) /Parent {parent_id} 0 R{prev}{next}{dest}{children_str} >>"
             )
             .into_bytes(),
-        );
+        )?;
     }
 
-    ids
+    Ok(ids)
 }
 
 /// Count total outline items (including nested children).
@@ -1129,7 +1136,29 @@ pub fn djvu_to_pdf_with_options(
     doc: &DjVuDocument,
     opts: &PdfOptions,
 ) -> Result<Vec<u8>, PdfError> {
-    djvu_to_pdf_impl(doc, opts)
+    let mut buf = Vec::new();
+    djvu_to_pdf_to_writer(doc, opts, &mut buf)?;
+    Ok(buf)
+}
+
+/// Convert a DjVu document to PDF, streaming the output to `sink` (#606).
+///
+/// Object bodies are written as they are produced and dropped immediately, so
+/// peak memory stays O(1 page) plus the xref bookkeeping instead of holding
+/// every object body *and* a second full serialization buffer. Output bytes
+/// are identical to [`djvu_to_pdf_with_options`] (which now wraps this with a
+/// `Vec` sink). Wrap `sink` in a [`std::io::BufWriter`] for file output.
+///
+/// # Errors
+///
+/// Returns `PdfError` if page rendering, text layer parsing, or writing to
+/// `sink` fails. On error the sink is left with a partial PDF.
+pub fn djvu_to_pdf_to_writer<W: std::io::Write>(
+    doc: &DjVuDocument,
+    opts: &PdfOptions,
+    sink: W,
+) -> Result<(), PdfError> {
+    djvu_to_pdf_impl(doc, opts, sink)
 }
 
 /// This produces a PDF 1.4 file with:
@@ -1146,11 +1175,15 @@ pub fn djvu_to_pdf_with_options(
 ///
 /// Returns `PdfError` if page rendering or text layer parsing fails.
 pub fn djvu_to_pdf(doc: &DjVuDocument) -> Result<Vec<u8>, PdfError> {
-    djvu_to_pdf_impl(doc, &PdfOptions::default())
+    djvu_to_pdf_with_options(doc, &PdfOptions::default())
 }
 
-fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, PdfError> {
-    let mut w = PdfWriter::new();
+fn djvu_to_pdf_impl<W: std::io::Write>(
+    doc: &DjVuDocument,
+    opts: &PdfOptions,
+    sink: W,
+) -> Result<(), PdfError> {
+    let mut w = PdfWriter::new(sink)?;
 
     // Reserve IDs for catalog and pages
     let catalog_id = w.alloc_id(); // 1
@@ -1158,51 +1191,66 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
 
     // Reserve a font object ID
     let font_id = w.alloc_id(); // 3
-    w.add_obj(font_id, font_dict());
+    w.add_obj(font_id, font_dict())?;
 
     let page_count = doc.page_count();
 
     // Emit one page's objects (rendered body or a blank-page fallback) and return
     // its page-object id. Shared by both the parallel and sequential paths.
-    let emit_one =
-        |w: &mut PdfWriter, i: usize, rendered: Option<RenderedPage>| -> Result<usize, PdfError> {
-            Ok(match rendered {
-                Some(data) => emit_page_objects(w, data, pages_id, font_id),
-                None => {
-                    // Fallback: blank page at native dimensions
-                    let page = doc.page(i)?;
-                    let dpi = page.dpi().max(1) as f32;
-                    let pt_w = px_to_pt(page.width() as f32, dpi);
-                    let pt_h = px_to_pt(page.height() as f32, dpi);
-                    w.add(
-                        format!(
-                            "<< /Type /Page /Parent {pages_id} 0 R\n\
+    let emit_one = |w: &mut PdfWriter<W>,
+                    i: usize,
+                    rendered: Option<RenderedPage>|
+     -> Result<usize, PdfError> {
+        Ok(match rendered {
+            Some(data) => emit_page_objects(w, data, pages_id, font_id)?,
+            None => {
+                // Fallback: blank page at native dimensions
+                let page = doc.page(i)?;
+                let dpi = page.dpi().max(1) as f32;
+                let pt_w = px_to_pt(page.width() as f32, dpi);
+                let pt_h = px_to_pt(page.height() as f32, dpi);
+                w.add(
+                    format!(
+                        "<< /Type /Page /Parent {pages_id} 0 R\n\
                            /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
                            /Resources << >> >>"
-                        )
-                        .into_bytes(),
                     )
-                }
-            })
-        };
+                    .into_bytes(),
+                )?
+            }
+        })
+    };
 
     let mut page_obj_ids = Vec::with_capacity(page_count);
 
     // With the `parallel` feature, render all pages concurrently via rayon, then
     // emit sequentially (PdfWriter is not Send).
+    // #606: render in bounded chunks so the parallel path holds O(chunk) page
+    // bodies instead of all `page_count` at once, then emit each chunk in
+    // order (identical output ordering → identical bytes).
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let rendered_pages: Vec<Option<RenderedPage>> = (0..page_count)
-            .into_par_iter()
-            .map(|i| {
-                doc.page(i)
-                    .ok()
-                    .and_then(|p| render_page_data(p, opts).ok())
-            })
-            .collect();
-        for (i, rendered) in rendered_pages.into_iter().enumerate() {
-            page_obj_ids.push(emit_one(&mut w, i, rendered)?);
+        // Chunk size trades bounded memory (O(chunk) retained bodies) against
+        // scheduling: too small starves the pool at each chunk barrier on
+        // uneven pages. 8x threads measured within noise of the old
+        // collect-everything path on a 504-page doc while bounding bodies.
+        let chunk = rayon::current_num_threads().max(1) * 8;
+        let mut start = 0;
+        while start < page_count {
+            let end = (start + chunk).min(page_count);
+            let rendered_pages: Vec<Option<RenderedPage>> = (start..end)
+                .into_par_iter()
+                .map(|i| {
+                    doc.page(i)
+                        .ok()
+                        .and_then(|p| render_page_data(p, opts).ok())
+                })
+                .collect();
+            for (off, rendered) in rendered_pages.into_iter().enumerate() {
+                page_obj_ids.push(emit_one(&mut w, start + off, rendered)?);
+            }
+            start = end;
         }
     }
 
@@ -1219,7 +1267,7 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
     }
 
     // Build outline from bookmarks
-    let outline_id = build_outline(&mut w, doc.bookmarks(), &page_obj_ids);
+    let outline_id = build_outline(&mut w, doc.bookmarks(), &page_obj_ids)?;
 
     // Pages object
     let kids = page_obj_ids
@@ -1231,7 +1279,7 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
     w.add_obj(
         pages_id,
         format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>").into_bytes(),
-    );
+    )?;
 
     // Catalog
     let outline_ref = match outline_id {
@@ -1241,9 +1289,9 @@ fn djvu_to_pdf_impl(doc: &DjVuDocument, opts: &PdfOptions) -> Result<Vec<u8>, Pd
     w.add_obj(
         catalog_id,
         format!("<< /Type /Catalog /Pages {pages_id} 0 R{outline_ref} >>").into_bytes(),
-    );
+    )?;
 
-    Ok(w.serialize())
+    w.finish()
 }
 
 #[cfg(test)]
@@ -1274,10 +1322,11 @@ mod tests {
 
     #[test]
     fn test_pdf_writer_serialize() {
-        let mut w = PdfWriter::new();
-        let id = w.add(b"<< /Type /Catalog >>".to_vec());
+        let mut pdf = Vec::new();
+        let mut w = PdfWriter::new(&mut pdf).unwrap();
+        let id = w.add(b"<< /Type /Catalog >>".to_vec()).unwrap();
         assert_eq!(id, 1);
-        let pdf = w.serialize();
+        w.finish().unwrap();
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert!(pdf.windows(5).any(|w| w == b"%%EOF"));
     }
@@ -1321,7 +1370,8 @@ mod tests {
 
     #[test]
     fn test_pdf_writer_alloc_ids() {
-        let mut w = PdfWriter::new();
+        let mut buf = Vec::new();
+        let mut w = PdfWriter::new(&mut buf).unwrap();
         let id1 = w.alloc_id();
         let id2 = w.alloc_id();
         let id3 = w.alloc_id();
@@ -1332,10 +1382,11 @@ mod tests {
 
     #[test]
     fn test_pdf_writer_multiple_objects() {
-        let mut w = PdfWriter::new();
-        w.add(b"<< /Type /Catalog >>".to_vec());
-        w.add(b"<< /Type /Pages >>".to_vec());
-        let pdf = w.serialize();
+        let mut pdf = Vec::new();
+        let mut w = PdfWriter::new(&mut pdf).unwrap();
+        w.add(b"<< /Type /Catalog >>".to_vec()).unwrap();
+        w.add(b"<< /Type /Pages >>".to_vec()).unwrap();
+        w.finish().unwrap();
         let s = String::from_utf8_lossy(&pdf);
         assert!(s.contains("1 0 obj"));
         assert!(s.contains("2 0 obj"));
@@ -2252,14 +2303,15 @@ mod tests {
             ],
         }];
         let page_ids = [10usize, 20, 30];
-        let mut w = PdfWriter::new();
-        let outline_id = build_outline(&mut w, &bookmarks, &page_ids);
+        let mut pdf = Vec::new();
+        let mut w = PdfWriter::new(&mut pdf).unwrap();
+        let outline_id = build_outline(&mut w, &bookmarks, &page_ids).unwrap();
         assert!(
             outline_id.is_some(),
             "nested bookmarks must produce an outline"
         );
         // Serialize and check that /First and /Last are present
-        let pdf = w.serialize();
+        w.finish().unwrap();
         let s = String::from_utf8_lossy(&pdf);
         assert!(
             s.contains("/First"),
