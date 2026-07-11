@@ -396,23 +396,69 @@ fn fill_sauvola_mask(mask: &mut Bitmap, luma: &[u8], w: u32, h: u32, window: u32
     let (sum, sum_sq) = integral_luma(luma, w, h);
     let stride = w as usize + 1;
 
-    for y in 0..h {
-        let y0 = y.saturating_sub(radius);
-        let y1 = (y + radius + 1).min(h);
-        for x in 0..w {
-            let x0 = x.saturating_sub(radius);
-            let x1 = (x + radius + 1).min(w);
-            let area = f64::from((x1 - x0) * (y1 - y0));
-            let s = rect_sum(&sum, stride, x0, y0, x1, y1) as f64;
-            let ss = rect_sum(&sum_sq, stride, x0, y0, x1, y1) as f64;
-            let mean = s / area;
-            let variance = (ss / area - mean * mean).max(0.0);
-            let stddev = variance.sqrt();
-            let threshold = mean * (1.0 + f64::from(k) * (stddev / 128.0 - 1.0));
-            let idx = (y * w + x) as usize;
-            if f64::from(luma[idx]) < threshold {
-                mask.set(x, y, true);
-            }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let mask_stride = mask.row_stride();
+        mask.data
+            .par_chunks_mut(mask_stride)
+            .enumerate()
+            .for_each(|(y, row)| {
+                fill_sauvola_row(row, luma, &sum, &sum_sq, stride, w, h, radius, k, y as u32);
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    fill_sauvola_mask_sequential(mask, luma, &sum, &sum_sq, stride, w, h, radius, k);
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "parallel", allow(dead_code))]
+fn fill_sauvola_mask_sequential(
+    mask: &mut Bitmap,
+    luma: &[u8],
+    sum: &[u64],
+    sum_sq: &[u64],
+    stride: usize,
+    w: u32,
+    h: u32,
+    radius: u32,
+    k: f32,
+) {
+    let mask_stride = mask.row_stride();
+    for (y, row) in mask.data.chunks_mut(mask_stride).enumerate() {
+        fill_sauvola_row(row, luma, sum, sum_sq, stride, w, h, radius, k, y as u32);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_sauvola_row(
+    mask_row: &mut [u8],
+    luma: &[u8],
+    sum: &[u64],
+    sum_sq: &[u64],
+    stride: usize,
+    w: u32,
+    h: u32,
+    radius: u32,
+    k: f32,
+    y: u32,
+) {
+    let y0 = y.saturating_sub(radius);
+    let y1 = (y + radius + 1).min(h);
+    for x in 0..w {
+        let x0 = x.saturating_sub(radius);
+        let x1 = (x + radius + 1).min(w);
+        let area = f64::from((x1 - x0) * (y1 - y0));
+        let s = rect_sum(sum, stride, x0, y0, x1, y1) as f64;
+        let ss = rect_sum(sum_sq, stride, x0, y0, x1, y1) as f64;
+        let mean = s / area;
+        let variance = (ss / area - mean * mean).max(0.0);
+        let stddev = variance.sqrt();
+        let threshold = mean * (1.0 + f64::from(k) * (stddev / 128.0 - 1.0));
+        let idx = (y * w + x) as usize;
+        if f64::from(luma[idx]) < threshold {
+            mask_row[x as usize >> 3] |= 0x80 >> (x & 7);
         }
     }
 }
@@ -664,6 +710,36 @@ mod tests {
         assert!(adaptive.mask.get(11, 3), "light ink on light paper");
         assert!(!adaptive.mask.get(1, 1), "dark paper is background");
         assert!(!adaptive.mask.get(9, 1), "bright paper is background");
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_sauvola_mask_is_byte_identical_to_sequential() {
+        // Non-byte-aligned width also checks that row padding remains untouched.
+        let (w, h) = (131, 97);
+        let luma: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 73 + (i / w) * 29) & 0xff) as u8)
+            .collect();
+        let mut parallel = Bitmap::new(w, h);
+        fill_sauvola_mask(&mut parallel, &luma, w, h, 31, 0.34);
+
+        let window = 31_u32;
+        let radius = window / 2;
+        let (sum, sum_sq) = integral_luma(&luma, w, h);
+        let mut sequential = Bitmap::new(w, h);
+        fill_sauvola_mask_sequential(
+            &mut sequential,
+            &luma,
+            &sum,
+            &sum_sq,
+            w as usize + 1,
+            w,
+            h,
+            radius,
+            0.34,
+        );
+
+        assert_eq!(parallel.data, sequential.data);
     }
 
     fn count_mask(mask: &Bitmap) -> u32 {

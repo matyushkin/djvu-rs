@@ -678,6 +678,22 @@ fn bench_segment_page_color(c: &mut Criterion) {
             ));
         });
     });
+
+    let sauvola = djvu_rs::segment::SegmentOptions {
+        binarization: djvu_rs::segment::Binarization::Sauvola {
+            window: 31,
+            k: 0.34,
+        },
+        ..djvu_rs::segment::SegmentOptions::default()
+    };
+    c.bench_function("segment_page_color_sauvola", |b| {
+        b.iter(|| {
+            let _ = black_box(djvu_rs::segment::segment_page(
+                black_box(&pm),
+                black_box(&sauvola),
+            ));
+        });
+    });
 }
 
 /// Decode up to `max` colour pages of a document to full-resolution Pixmaps
