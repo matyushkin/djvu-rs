@@ -467,12 +467,17 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get update && sudo apt-get install --yes valgrind
       - name: Count instructions
-        run: cargo bench --bench instructions
+        run: |
+          cargo build --release --example callgrind_workload
+          for workload in bzz jb2 iw44; do
+            valgrind --tool=callgrind --callgrind-out-file="target/callgrind.${workload}" \
+              target/release/examples/callgrind_workload "$workload"
+          done
       - name: Upload Callgrind results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: callgrind-${{ github.sha }}
-          path: target/iai/
+          path: target/callgrind.*
           if-no-files-found: warn
           retention-days: 30
