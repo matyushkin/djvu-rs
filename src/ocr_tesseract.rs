@@ -188,6 +188,34 @@ fn extract_inner_text(html: &str) -> String {
     result.trim().to_string()
 }
 
+/// Compute bounding rect of a set of zones.
+fn bounding_rect(zones: &[TextZone]) -> Rect {
+    if zones.is_empty() {
+        return Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+    }
+    let mut x1 = u32::MAX;
+    let mut y1 = u32::MAX;
+    let mut x2 = 0u32;
+    let mut y2 = 0u32;
+    for z in zones {
+        x1 = x1.min(z.rect.x);
+        y1 = y1.min(z.rect.y);
+        x2 = x2.max(z.rect.x + z.rect.width);
+        y2 = y2.max(z.rect.y + z.rect.height);
+    }
+    Rect {
+        x: x1,
+        y: y1,
+        width: x2.saturating_sub(x1),
+        height: y2.saturating_sub(y1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,33 +392,5 @@ mod tests {
         assert_eq!(r.y, 0);
         assert_eq!(r.width, 80); // max x2=80, min x1=0
         assert_eq!(r.height, 15); // max y2=15, min y1=0
-    }
-}
-
-/// Compute bounding rect of a set of zones.
-fn bounding_rect(zones: &[TextZone]) -> Rect {
-    if zones.is_empty() {
-        return Rect {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        };
-    }
-    let mut x1 = u32::MAX;
-    let mut y1 = u32::MAX;
-    let mut x2 = 0u32;
-    let mut y2 = 0u32;
-    for z in zones {
-        x1 = x1.min(z.rect.x);
-        y1 = y1.min(z.rect.y);
-        x2 = x2.max(z.rect.x + z.rect.width);
-        y2 = y2.max(z.rect.y + z.rect.height);
-    }
-    Rect {
-        x: x1,
-        y: y1,
-        width: x2.saturating_sub(x1),
-        height: y2.saturating_sub(y1),
     }
 }

@@ -781,7 +781,8 @@ fn cmd_ocr(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use djvu_rs::ocr::OcrOptions;
 
-    let ocr_backend = build_ocr_backend(backend, model_path)?;
+    // Fail early on a misconfigured backend before any per-page work.
+    let ocr_backend = build_ocr_backend(backend.clone(), model_path)?;
 
     let data = std::fs::read(path)?;
     let mut doc_mut = djvu_rs::djvu_mut::DjVuDocumentMut::from_bytes(&data)?;
@@ -794,10 +795,18 @@ fn cmd_ocr(
 
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
 
-    // OCR each page and inject the recognized text layer.
+    // OCR each page and inject the recognized text layer. Pages are
+    // independent and OCR dominates wall-clock, so with the `parallel`
+    // feature the render+recognize fan out over rayon (#573) — one backend
+    // instance per task (`recognize` builds a fresh Tesseract per call, so
+    // instances never cross threads); text layers are injected sequentially
+    // in page order afterwards, keeping the output bytes identical to the
+    // sequential path.
     let count = doc.page_count();
-    for i in 0..count {
-        let page = doc.page(i)?;
+    let ocr_one = |i: usize,
+                   be: &dyn djvu_rs::ocr::OcrBackend|
+     -> Result<djvu_rs::text::TextLayer, String> {
+        let page = doc.page(i).map_err(|e| e.to_string())?;
         let w = page.width() as u32;
         let h = page.height() as u32;
         let opts = djvu_rs::djvu_render::RenderOptions {
@@ -805,17 +814,37 @@ fn cmd_ocr(
             height: h,
             ..Default::default()
         };
-        let pixmap = djvu_rs::djvu_render::render_pixmap(page, &opts)?;
-        let text_layer = ocr_backend.recognize(&pixmap, &options)?;
+        let pixmap = djvu_rs::djvu_render::render_pixmap(page, &opts).map_err(|e| e.to_string())?;
+        be.recognize(&pixmap, &options).map_err(|e| e.to_string())
+    };
 
+    #[cfg(feature = "parallel")]
+    let layers: Vec<djvu_rs::text::TextLayer> = {
+        use rayon::prelude::*;
+        drop(ocr_backend);
+        let model_path = model_path.map(Path::to_path_buf);
+        (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let be = build_ocr_backend(backend.clone(), model_path.as_deref())
+                    .map_err(|e| e.to_string())?;
+                ocr_one(i, be.as_ref())
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    #[cfg(not(feature = "parallel"))]
+    let layers: Vec<djvu_rs::text::TextLayer> = (0..count)
+        .map(|i| ocr_one(i, ocr_backend.as_ref()))
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for (i, text_layer) in layers.iter().enumerate() {
         eprintln!(
             "Page {}: {} chars, {} zones",
             i + 1,
             text_layer.text.len(),
             text_layer.zones.len()
         );
-
-        doc_mut.page_mut(i)?.set_text_layer(&text_layer)?;
+        doc_mut.page_mut(i)?.set_text_layer(text_layer)?;
     }
 
     if let Some(parent) = output.parent()
