@@ -11049,3 +11049,62 @@ preserved. Determinism/structure covered by 3 new unit tests.
 
 **Decision.** Kept. Decision rule (≥2× at 4 threads, byte-identical) exceeded. CBZ export is
 now also available as a library API (`djvu_rs::cbz`), not just a CLI path.
+## Perf round 60 (2026-07-11) — PDF_MASK_VISIBILITY: restore lost/invisible foreground masks in PDF export (#620, #621)
+
+### #620 + #621 — shared-dict mask restoration, black-not-white bilevel stencils, FG44 stencil policy — **Fixed** (2026-07-11)
+
+**Issues.** Two defects that made PDF export silently drop or hide the entire text layer:
+1. (#620) `collect_mask_stream` decoded the JB2 mask with the *inline* Djbz only, so
+   shared-dictionary (DJVI) documents emitted no mask streams at all — `malliavin.djvu`'s
+   baseline PDF was 62 KB of blank pages, `problem_page.djvu`'s was 608 B.
+2. (#621) The bilevel-only page path painted its `/Im0` ImageMask with `1 1 1 rg` — white
+   fill on a white page. Every bilevel-only page rendered blank; confirmed independently
+   with poppler `pdftoppm`, Ghostscript, and macOS Quick Look on baseline exports. Prior
+   validation missed it because it was structural (`/ImageMask` present) or
+   variant-vs-variant (PDF_G4's G4-vs-Deflate rasterizations were both blank, hence
+   "pixel-identical").
+
+**Approach.** Route `collect_mask_stream` and the palette path's black fallback through
+`DjVuPage::extract_mask` (inline Djbz first, shared dict fallback; also adds Smmr masks).
+Paint the bilevel `/Im0` stencil `0 0 0 rg`. Third finding handled along the way: with
+shared-dict masks restored, FG44-coloured pages (`history.djvu` gold-on-navy cover) would
+now get a *black* stencil stamped over continuous-tone coloured text — the FG44 analogue of
+#559. Policy: sample the FG44 colour under the mask; if near-uniform (per-channel spread
+≤ 48/255 — the common scanned-book near-black case) paint the single stencil in the mean
+FG44 colour, else skip the stencil and let the composited `/Im0` carry the multi-coloured
+text (fidelity over edge crispness; true-MRC stencilling is #563).
+
+**Platform / commands.** macOS 26.5.0, Apple Silicon, Rust 1.92.0; poppler 25.x, Ghostscript,
+`examples/pdf_fg_color_probe.rs` (round 59).
+
+```sh
+cargo run --release --features pdf --example pdf_fg_color_probe tests/fixtures/<doc>.djvu
+make check
+```
+
+**Numbers.** Rasterized-PDF vs our renderer:
+- `boy_jb2.djvu`, `ccitt_2.djvu` (bilevel): blank → **pixel-perfect** (ΔE 0.000, SSIM 1.0).
+- `malliavin.djvu` (115 pp, shared dict, bilevel): blank → full text (visual check clean);
+  62 KB → 13.6 MB — that *is* the restored content (~118 KB/page of 1-bit masks).
+- `problem_page.djvu`: blank 608 B → 84 KB with text.
+- `watchmaker.djvu` (FG44, near-black uniform): stencil kept in mean FG44 colour, ΔE mean
+  ≈ 0.2–2.0, luma SSIM 0.95–0.99; `ccitt_g4` size win preserved (regression test passes).
+- `carte.djvu` (multi-colour FG44): black stencil ΔE 20.3 → skip 17.7; −29% file size.
+- `colorbook.djvu` (multi-colour FG44): skip beats black stencil on ΔE_max (≈95→80) and
+  chroma SSIM on nearly every page; −28.5% file size.
+- Byte-identical: all fixtures without any Sjbz/Smmr mask (big-scanned-page, boy, chicken,
+  czech¹, slow). ¹czech is an indirect doc whose DJVI lives in external files — no mask is
+  decodable from the bundle alone; unchanged, pre-existing limitation.
+
+**Perf follow-up (same PR).** The CI benchmark gate flagged `export/pdf_flatdecode` +8.2%:
+the FG44 heuristic decoded the mask and FG44 a second time even though the page's own /Im0
+render had just decoded and cached both. Stencil building now reuses the page cache
+(`decoded_mask`/`decoded_fg44`); local re-measure: old main 1.254 s → fixed branch 1.097 s
+(the pre-existing double mask decode in `collect_mask_stream` is gone too). Output verified
+byte-identical to the branch's pre-refactor PDFs across all 20 fixtures.
+
+**Decision.** Fixed/Kept. Every changed fixture is a strict fidelity win (restored or
+recoloured text) or a measured ΔE improvement with a size reduction. Regression tests:
+`fg44_page_skips_mask_stencil`, updated `mixed_page_has_both_image_and_mask_xobject`
+(irish, the palette path), plus round-59's FGbz tests still green. Follow-up candidates:
+per-region FG44 stencils (true MRC, #563); external-DJVI resolution for indirect docs.
