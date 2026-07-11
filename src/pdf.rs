@@ -342,12 +342,12 @@ fn render_rgb_for_pdf(
 /// `adaptive_raster` (round 28), so enabling it can never regress a page's mask
 /// size. Default (`ccitt_g4: false`) is byte-identical to the pre-existing
 /// Deflate-only behaviour.
+///
+/// Decodes via [`DjVuPage::extract_mask`] so shared-dictionary (DJVI `Djbz`)
+/// pages get their mask too — the previous inline-Djbz-only decode silently
+/// dropped the whole foreground overlay for such documents (#620).
 fn collect_mask_stream(page: &DjVuPage, opts: &PdfOptions) -> Option<Vec<u8>> {
-    let sjbz = page.find_chunk(b"Sjbz")?;
-    let dict = page
-        .find_chunk(b"Djbz")
-        .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
-    let bitmap = crate::jb2::decode(sjbz, dict.as_ref()).ok()?;
+    let bitmap = page.extract_mask().ok()??;
     Some(mask_body_from_bitmap(&bitmap, opts.ccitt_g4))
 }
 
@@ -404,7 +404,23 @@ fn collect_mask_layers(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
 
     let pal = match palette {
         Some(pal) => pal,
-        None => return black_mask_layer(page, opts),
+        None => {
+            // FG44/FGjp foreground: the text colour is continuous-tone, so a
+            // flat black stencil can flatten it (the FG44 analogue of #559).
+            // If the FG44 colour under the mask is near-uniform (the common
+            // scanned-book case: near-black text), keep a single stencil
+            // painted in that colour — crisp full-res edges, correct colour.
+            // Otherwise skip the stencil and let the composited /Im0 carry the
+            // multi-coloured text (colour fidelity over edge crispness; true
+            // MRC stencilling of FG44 pages is #563).
+            if !page.fg44_chunks().is_empty() || page.find_chunk(b"FGjp").is_some() {
+                return match uniform_fg_color(page) {
+                    Some(rgb) => single_stencil_layer(page, opts, rgb),
+                    None => Vec::new(),
+                };
+            }
+            return black_mask_layer(page, opts);
+        }
     };
 
     let Ok(Some((mask, blit_map))) = page.extract_mask_indexed() else {
@@ -492,22 +508,67 @@ fn collect_mask_layers(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
 
 /// The historical single black stencil (pages without a colour palette).
 fn black_mask_layer(page: &DjVuPage, opts: &PdfOptions) -> Vec<MaskLayer> {
-    let Some(sjbz) = page.find_chunk(b"Sjbz") else {
-        return Vec::new();
-    };
-    let dict = page
-        .find_chunk(b"Djbz")
-        .and_then(|djbz| crate::jb2::decode_dict(djbz, None).ok());
-    let Ok(bitmap) = crate::jb2::decode(sjbz, dict.as_ref()) else {
+    single_stencil_layer(page, opts, (0, 0, 0))
+}
+
+/// A single full-mask stencil painted in `rgb`.
+fn single_stencil_layer(page: &DjVuPage, opts: &PdfOptions, rgb: (u8, u8, u8)) -> Vec<MaskLayer> {
+    let Ok(Some(bitmap)) = page.extract_mask() else {
         return Vec::new();
     };
     let dims = (bitmap.width, bitmap.height);
     vec![MaskLayer {
-        rgb: (0, 0, 0),
+        rgb,
         bbox: (0, 0, dims.0, dims.1),
         mask_dims: dims,
         body: mask_body_from_bitmap(&bitmap, opts.ccitt_g4),
     }]
+}
+
+/// Per-channel spread (max−min) above which the FG44 foreground colour under
+/// the mask counts as multi-coloured and the flat stencil is skipped.
+const FG44_UNIFORM_SPREAD: u8 = 48;
+
+/// The page's FG44/FGjp foreground colour, if near-uniform under the mask.
+///
+/// Samples the (subsampled) foreground pixmap at every marked mask pixel and
+/// returns the mean colour when every channel's spread stays within
+/// [`FG44_UNIFORM_SPREAD`]; `None` when the foreground is multi-coloured (or
+/// either layer fails to decode).
+fn uniform_fg_color(page: &DjVuPage) -> Option<(u8, u8, u8)> {
+    let fg = page.extract_foreground().ok()??;
+    let mask = page.extract_mask().ok()??;
+    if fg.width == 0 || fg.height == 0 || mask.width == 0 || mask.height == 0 {
+        return None;
+    }
+    let mut min = [255u8; 3];
+    let mut max = [0u8; 3];
+    let mut sum = [0u64; 3];
+    let mut n = 0u64;
+    for y in 0..mask.height {
+        let fy = (y as u64 * fg.height as u64 / mask.height as u64).min(fg.height as u64 - 1);
+        for x in 0..mask.width {
+            if !mask.get(x, y) {
+                continue;
+            }
+            let fx = (x as u64 * fg.width as u64 / mask.width as u64).min(fg.width as u64 - 1);
+            let pi = (fy * fg.width as u64 + fx) as usize * 4;
+            let px = &fg.data[pi..pi + 3];
+            for c in 0..3 {
+                min[c] = min[c].min(px[c]);
+                max[c] = max[c].max(px[c]);
+                sum[c] += u64::from(px[c]);
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    if (0..3).any(|c| max[c] - min[c] > FG44_UNIFORM_SPREAD) {
+        return None;
+    }
+    Some(((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8))
 }
 
 /// Format one colour component for a PDF `rg` operator (0..255 → 0..1).
@@ -583,7 +644,11 @@ fn emit_page_objects(
     if data.is_bilevel_only {
         // img0 may still be None if JB2 decode failed at render time — render gracefully.
         if img_id.is_some() {
-            content.push_str("1 1 1 rg\n");
+            // /Im0 is an ImageMask stencil: marked samples paint in the current
+            // fill colour, so it must be black. The historical `1 1 1 rg` here
+            // painted white-on-white — every bilevel-only page rendered blank
+            // (#621).
+            content.push_str("0 0 0 rg\n");
             content.push_str(&format!("q {pt_w:.4} 0 0 {pt_h:.4} 0 0 cm /Im0 Do Q\n"));
         }
     } else {
@@ -1894,9 +1959,10 @@ mod tests {
 
     /// A page with both Sjbz (foreground mask) and BG44 (background) must
     /// embed both an /Im0 image and a /Mask0 ImageMask XObject.
+    /// (irish.djvu: Sjbz+BG44+FGbz — the palette path emits /Mask0, /Mask1, …)
     #[test]
     fn mixed_page_has_both_image_and_mask_xobject() {
-        let doc = load_doc("colorbook.djvu"); // Sjbz+BG44
+        let doc = load_doc("irish.djvu"); // Sjbz+BG44+FGbz
         let pdf = djvu_to_pdf(&doc).unwrap();
         let has_im0 = pdf.windows(4).any(|w| w == b"Im0 ");
         let has_mask0 = pdf.windows(5).any(|w| w == b"Mask0");
@@ -1904,6 +1970,22 @@ mod tests {
         assert!(
             has_mask0,
             "mixed page must reference /Mask0 foreground mask"
+        );
+    }
+
+    /// A page whose foreground colour is continuous-tone (FG44, no FGbz
+    /// palette) must NOT get a stencil: a black stencil would flatten the
+    /// coloured text, and the composited /Im0 already carries it (#620).
+    #[test]
+    fn fg44_page_skips_mask_stencil() {
+        let doc = load_doc("colorbook.djvu"); // Sjbz+BG44+FG44, no FGbz
+        let pdf = djvu_to_pdf(&doc).unwrap();
+        let has_im0 = pdf.windows(4).any(|w| w == b"Im0 ");
+        let has_mask0 = pdf.windows(5).any(|w| w == b"Mask0");
+        assert!(has_im0, "FG44 page must reference /Im0 background");
+        assert!(
+            !has_mask0,
+            "FG44 page must not paint a flat stencil over continuous-tone text"
         );
     }
 
