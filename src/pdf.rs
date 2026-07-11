@@ -271,6 +271,23 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         // Bilevel fast path: embed the 1-bit JB2 mask as the sole XObject.
         let mask = collect_mask_stream(page, opts);
         (mask, Vec::new())
+    } else if opts.mrc
+        && let layers = collect_mask_layers(page, opts)
+        && !layers.is_empty()
+        && let Ok(Some(bg)) = page.extract_background()
+        && bg.width > 0
+        && bg.height > 0
+    {
+        // True MRC (#563): the stencils fully cover the foreground, so embed
+        // the background layer alone at its native (subsampled) resolution —
+        // the page `cm` scales it to the MediaBox. Smaller (no upsampling, no
+        // glyph edges in the raster) and cleaner (no JPEG ringing halos).
+        let (rw, rh) = (bg.width, bg.height);
+        let mut rgb = Vec::with_capacity(rw as usize * rh as usize * 3);
+        for px in bg.data.chunks_exact(4) {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        (Some(encode_img0_body(&rgb, rw, rh, opts)), layers)
     } else {
         let (rw, rh) = render_dims(page, opts.output_dpi);
         // Set only the output size: the render pipeline derives the IW44 decode
@@ -284,35 +301,10 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         };
         let rgb = render_rgb_for_pdf(page, &render_opts, rw, rh)?;
 
-        let img_dict = format!(
-            " /Type /XObject /Subtype /Image /Width {rw} /Height {rh}\
-             /ColorSpace /DeviceRGB /BitsPerComponent 8"
-        );
-        let img_body = match opts.jpeg_quality {
-            Some(quality) => {
-                let jpeg = encode_rgb_to_jpeg(&rgb, rw, rh, quality);
-                if jpeg.is_empty() {
-                    make_deflate_stream(&img_dict, &rgb)
-                } else if opts.adaptive_raster {
-                    // PDF_ADAPTIVE_RASTER: encode both, keep the smaller. Only one
-                    // page's worth of both encodings is ever live at once (the
-                    // loser is dropped here, before returning), so this doesn't
-                    // regress the O(1)-per-page streaming from #449.
-                    let dct_body = make_dct_stream(&img_dict, &jpeg);
-                    let deflate_body = make_deflate_stream(&img_dict, &rgb);
-                    if deflate_body.len() < dct_body.len() {
-                        deflate_body
-                    } else {
-                        dct_body
-                    }
-                } else {
-                    make_dct_stream(&img_dict, &jpeg)
-                }
-            }
-            None => make_deflate_stream(&img_dict, &rgb),
-        };
-
-        (Some(img_body), collect_mask_layers(page, opts))
+        (
+            Some(encode_img0_body(&rgb, rw, rh, opts)),
+            collect_mask_layers(page, opts),
+        )
     };
 
     let text_ops = build_text_content(page, dpi, pt_h);
@@ -327,6 +319,35 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         text_ops,
         link_annot_bodies,
     })
+}
+
+/// Encode packed RGB rows into the `/Im0` XObject body per the raster policy
+/// (`jpeg_quality`, `adaptive_raster` — PDF_ADAPTIVE_RASTER's "encode both,
+/// keep smaller"; only one page's pair of encodings is live at once, #449).
+fn encode_img0_body(rgb: &[u8], rw: u32, rh: u32, opts: &PdfOptions) -> Vec<u8> {
+    let img_dict = format!(
+        " /Type /XObject /Subtype /Image /Width {rw} /Height {rh}\
+         /ColorSpace /DeviceRGB /BitsPerComponent 8"
+    );
+    match opts.jpeg_quality {
+        Some(quality) => {
+            let jpeg = encode_rgb_to_jpeg(rgb, rw, rh, quality);
+            if jpeg.is_empty() {
+                make_deflate_stream(&img_dict, rgb)
+            } else if opts.adaptive_raster {
+                let dct_body = make_dct_stream(&img_dict, &jpeg);
+                let deflate_body = make_deflate_stream(&img_dict, rgb);
+                if deflate_body.len() < dct_body.len() {
+                    deflate_body
+                } else {
+                    dct_body
+                }
+            } else {
+                make_dct_stream(&img_dict, &jpeg)
+            }
+        }
+        None => make_deflate_stream(&img_dict, rgb),
+    }
 }
 
 fn render_rgb_for_pdf(
@@ -1104,6 +1125,20 @@ pub struct PdfOptions {
     /// normally already-segmented text/line-art) G4's run-length model can
     /// lose to Deflate; the per-mask min guards against that.
     pub ccitt_g4: bool,
+
+    /// Opt-in true-MRC layering (default `false`).
+    ///
+    /// The default mixed-page path embeds `/Im0` as the **composited** render
+    /// (background WITH text) at `output_dpi`, then repaints the text via the
+    /// stencils anyway — the raster layer wastes bits on high-frequency glyph
+    /// edges (JPEG ringing halos) and is stored upsampled relative to the
+    /// background's native BG44 resolution. With `mrc: true`, pages whose
+    /// foreground is fully covered by stencils embed the **background layer
+    /// only** (no composited text) at its native subsampled resolution; the
+    /// stencils carry the text (coloured per the FGbz/uniform-FG44 policy).
+    /// Pages where the stencil is skipped (multi-colour FG44), photo-only
+    /// pages, and bilevel pages fall back to the default path unchanged.
+    pub mrc: bool,
 }
 
 impl Default for PdfOptions {
@@ -1113,6 +1148,7 @@ impl Default for PdfOptions {
             output_dpi: 150,
             adaptive_raster: false,
             ccitt_g4: false,
+            mrc: false,
         }
     }
 }
@@ -1125,6 +1161,7 @@ impl PdfOptions {
             output_dpi: 0,
             adaptive_raster: false,
             ccitt_g4: false,
+            mrc: false,
         }
     }
 }
@@ -1567,6 +1604,7 @@ mod tests {
                 output_dpi: 150,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .expect("DCT conversion must succeed");
@@ -1577,6 +1615,7 @@ mod tests {
                 output_dpi: 150,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .expect("FlateDecode conversion must succeed");
@@ -1599,6 +1638,7 @@ mod tests {
                 output_dpi: 150,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .unwrap();
@@ -1617,6 +1657,7 @@ mod tests {
                 output_dpi: 150,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .unwrap();
@@ -1636,6 +1677,7 @@ mod tests {
                 output_dpi: 150,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .unwrap();
@@ -2075,6 +2117,7 @@ mod tests {
                 output_dpi: 0,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .unwrap();
@@ -2085,6 +2128,7 @@ mod tests {
                 output_dpi: 50,
                 adaptive_raster: false,
                 ccitt_g4: false,
+                mrc: false,
             },
         )
         .unwrap();
