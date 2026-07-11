@@ -219,7 +219,7 @@ enum RotateArg {
     Ccw90,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 enum EncodeQualityArg {
     /// Pixel-exact bilevel JB2 (`INFO + Sjbz`).
     Lossless,
@@ -230,6 +230,9 @@ enum EncodeQualityArg {
     /// Mask-less continuous-tone profile (DjVuPhoto): INFO + BG44 only.
     /// For photographs and grayscale scans.
     Photo,
+    /// Detect the content type per input (bilevel text / layered document /
+    /// photo) and pick the profile automatically (#570).
+    Auto,
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -1063,7 +1066,7 @@ fn cmd_encode(
 
     let q = match quality {
         EncodeQualityArg::Lossless => EncodeQuality::Lossless,
-        EncodeQualityArg::Quality => EncodeQuality::Quality,
+        EncodeQualityArg::Quality | EncodeQualityArg::Auto => EncodeQuality::Quality,
         EncodeQualityArg::Archival => EncodeQuality::Archival,
         EncodeQualityArg::Photo => EncodeQuality::Photo,
     };
@@ -1071,6 +1074,33 @@ fn cmd_encode(
 
     if input.is_dir() {
         let entries = directory_image_entries(input)?;
+
+        // --quality auto on a directory (#570): classify every page; the
+        // bundle writer supports lossless-bilevel or layered bundles, so the
+        // decision is bundle-wide — all pages bilevel → Lossless, anything
+        // else → Quality (a Photo-classified page inside a bundle also goes
+        // layered; per-page mixed bundles are the recorded follow-up).
+        let quality = if matches!(quality, EncodeQualityArg::Auto) {
+            let mut all_bilevel = true;
+            for path in &entries {
+                let pm = djvu_rs::png_io::decode_image_to_pixmap(path)?;
+                if djvu_rs::djvu_encode::classify_content(&pm)
+                    != djvu_rs::djvu_encode::EncodeQuality::Lossless
+                {
+                    all_bilevel = false;
+                    break;
+                }
+            }
+            let picked = if all_bilevel {
+                EncodeQualityArg::Lossless
+            } else {
+                EncodeQualityArg::Quality
+            };
+            eprintln!("auto profile (bundle): {picked:?}");
+            picked
+        } else {
+            quality
+        };
 
         if matches!(quality, EncodeQualityArg::Lossless) {
             let mut masks = Vec::with_capacity(entries.len());
@@ -1118,6 +1148,15 @@ fn cmd_encode(
     }
 
     let pixmap = djvu_rs::png_io::decode_image_to_pixmap(input)?;
+
+    // --quality auto (#570): pick the profile from cheap pixel statistics.
+    let q = if matches!(quality, EncodeQualityArg::Auto) {
+        let detected = djvu_rs::djvu_encode::classify_content(&pixmap);
+        eprintln!("auto profile: {detected:?}");
+        detected
+    } else {
+        q
+    };
 
     let bytes = match q {
         EncodeQuality::Lossless => {
