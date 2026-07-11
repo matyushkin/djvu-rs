@@ -652,21 +652,46 @@ fn encode_djvm_layered_shared_impl(
     }
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
 
-    // Segment every page once (mask + background), then cluster the masks.
-    // Segmentation is per-page independent (Sauvola + IW44 background build); with
-    // the `parallel` feature the pages segment concurrently on rayon.
+    // Pass 1 (#565): segment each page, immediately encode its background
+    // (BG44) and optional thumbnail (TH44), and DROP the segmented background
+    // pixmap. Between the passes only the 1-bit masks and the already-
+    // compressed chunk bodies are retained — previously every page's
+    // subsampled RGBA background pixmap plus a full clone of every mask
+    // survived until the end of the encode. Per-page independent; with the
+    // `parallel` feature the pages run concurrently on rayon. The emitted
+    // bytes are unchanged: same inputs, same options, same chunk order.
+    struct PreparedPage {
+        mask: Bitmap,
+        bg44: Vec<Vec<u8>>,
+        th44: Vec<Vec<u8>>,
+    }
+    let prepare = |pm: &Pixmap| -> PreparedPage {
+        let seg = segment_page(pm, &opts);
+        let bg44 = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
+        let th44 = if with_thumbnails {
+            crate::thumbnail::encode_th44_color(pm)
+        } else {
+            Vec::new()
+        };
+        PreparedPage {
+            mask: seg.mask,
+            bg44,
+            th44,
+        }
+    };
     #[cfg(feature = "parallel")]
-    let segs: Vec<_> = {
+    let prepared: Vec<PreparedPage> = {
         use rayon::prelude::*;
-        pixmaps
-            .par_iter()
-            .map(|pm| segment_page(pm, &opts))
-            .collect()
+        pixmaps.par_iter().map(prepare).collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let segs: Vec<_> = pixmaps.iter().map(|pm| segment_page(pm, &opts)).collect();
-    let masks: Vec<Bitmap> = segs.iter().map(|s| s.mask.clone()).collect();
-    let shared = jb2_encode::cluster_shared_symbols(&masks, shared_dict_page_threshold);
+    let prepared: Vec<PreparedPage> = pixmaps.iter().map(prepare).collect();
+
+    // Cluster over borrowed masks — no per-mask clone (#565).
+    let mask_refs: Vec<&Bitmap> = prepared.iter().map(|p| &p.mask).collect();
+    let shared =
+        jb2_encode::cluster_shared_symbols_from_refs(&mask_refs, shared_dict_page_threshold);
+    drop(mask_refs);
     let has_shared = !shared.is_empty();
 
     let dict_id = "dict0001.djvi";
@@ -686,7 +711,7 @@ fn encode_djvm_layered_shared_impl(
     // Order is preserved by the indexed collect.
     let build_page = |idx: usize,
                       pm: &Pixmap,
-                      seg: &crate::segment::SegmentedPage|
+                      prep: &PreparedPage|
      -> Result<(Vec<u8>, bool, String), EncodeError> {
         let w = u16::try_from(pm.width)
             .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
@@ -695,7 +720,7 @@ fn encode_djvm_layered_shared_impl(
 
         let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
         let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits(
-            &seg.mask,
+            &prep.mask,
             shared_for_encode,
             &Jb2EncodeOptions::default(),
         );
@@ -704,8 +729,7 @@ fn encode_djvm_layered_shared_impl(
         // the blit shapes equal the decoded ones. `Exact` here (not threaded
         // from a caller option yet): the bundle path is out of scope for
         // FGBZ_MEDIANCUT and stays byte-identical.
-        let fgbz = foreground_fgbz_from_blits(pm, &seg.mask, &blits, FgbzPaletteOptions::Exact);
-        let bg44_chunks = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
+        let fgbz = foreground_fgbz_from_blits(pm, &prep.mask, &blits, FgbzPaletteOptions::Exact);
 
         let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
         chunks.push((*b"INFO", encode_info(w, h, dpi)));
@@ -713,21 +737,18 @@ fn encode_djvm_layered_shared_impl(
             chunks.push((*b"INCL", dict_id.as_bytes().to_vec()));
         }
         chunks.push((*b"Sjbz", sjbz));
-        for body in bg44_chunks {
-            chunks.push((*b"BG44", body));
+        for body in &prep.bg44 {
+            chunks.push((*b"BG44", body.clone()));
         }
         if let Some(chunk) = fgbz
             && let Chunk::Leaf { id, data } = chunk.into_leaf()
         {
             chunks.push((id, data));
         }
-        // Optionally embed a TH44 color thumbnail.  TH44 chunks sit inside the
-        // page's FORM:DJVU body (after FGbz); the reader collects all of them.
-        if with_thumbnails {
-            let th44_payloads = crate::thumbnail::encode_th44_color(pm);
-            for payload in th44_payloads {
-                chunks.push((*b"TH44", payload));
-            }
+        // TH44 colour thumbnails sit inside the page's FORM:DJVU body (after
+        // FGbz); encoded in pass 1, placed here in the same position.
+        for payload in &prep.th44 {
+            chunks.push((*b"TH44", payload.clone()));
         }
         let body = jb2_encode::build_form_body(b"DJVU", &chunks);
         Ok((body, true, format!("p{:04}.djvu", idx + 1)))
@@ -738,18 +759,19 @@ fn encode_djvm_layered_shared_impl(
         use rayon::prelude::*;
         pixmaps
             .par_iter()
-            .zip(&segs)
+            .zip(&prepared)
             .enumerate()
-            .map(|(idx, (pm, seg))| build_page(idx, pm, seg))
+            .map(|(idx, (pm, prep))| build_page(idx, pm, prep))
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
     let page_comps: Vec<(Vec<u8>, bool, String)> = pixmaps
         .iter()
-        .zip(&segs)
+        .zip(&prepared)
         .enumerate()
-        .map(|(idx, (pm, seg))| build_page(idx, pm, seg))
+        .map(|(idx, (pm, prep))| build_page(idx, pm, prep))
         .collect::<Result<Vec<_>, _>>()?;
+    drop(prepared);
     comps.extend(page_comps);
 
     Ok(jb2_encode::assemble_djvm_bundle(comps))
