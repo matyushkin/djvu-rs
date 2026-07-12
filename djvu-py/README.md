@@ -8,15 +8,21 @@ For conversion (PDF/EPUB/TIFF) and encoding, see the
 
 ## Install
 
+Not published to PyPI yet — build from the repository checkout (requires a
+Rust toolchain):
+
 ```bash
-pip install djvu-rs
+pip install ./djvu-py
+# or, for development:
+pip install maturin
+cd djvu-py && maturin develop --release
 ```
 
 ## Version policy
 
-The Python package follows the Rust crate version. For example, Python package
-`djvu-rs==0.18.0` is built from the `djvu-rs` Rust workspace at version
-`0.18.0`. There is no separate Python release train.
+The Python package follows the Rust crate version: it is built from the
+`djvu-rs` Rust workspace at the same version, with no separate Python release
+train. The same policy will apply once the package is published to PyPI.
 
 ## Usage
 
