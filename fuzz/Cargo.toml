@@ -63,3 +63,9 @@ name = "fuzz_g4"
 path = "fuzz_targets/fuzz_g4.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_metadata"
+path = "fuzz_targets/fuzz_metadata.rs"
+test = false
+doc = false
