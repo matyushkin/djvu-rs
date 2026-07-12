@@ -70,7 +70,7 @@ mod support;
 
 use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
 use djvu_rs::djvu_render::render_pixmap;
-use support::{diff_stats, native_opts, parse_ppm};
+use support::{DiffStats, diff_stats, native_opts, parse_ppm};
 
 // ── Deterministic PRNG (splitmix64) — no external `rand` dependency needed,
 //    keeps the harness self-contained like `interop_pixdiff`/`interop_encode`. ──
@@ -248,14 +248,16 @@ fn walk_chunks(
 
 // ── Mutation operators ──────────────────────────────────────────────────────
 
-/// Returns the mutated bytes, a human-readable description of what was done,
-/// and the page index that mutation lands in (`None` → render page 0, the
-/// harness default, since the mutation was document-global).
-fn apply_mutation(
-    base: &[u8],
-    chunks: &[ChunkSpan],
-    rng: &mut Rng,
-) -> (Vec<u8>, String, Option<usize>) {
+struct Mutation {
+    bytes: Vec<u8>,
+    desc: String,
+    chunk: String,
+    page_index: Option<usize>,
+}
+
+/// Returns the mutated bytes plus enough structured metadata to bucket later
+/// render divergences by the chunk kind that was touched.
+fn apply_mutation(base: &[u8], chunks: &[ChunkSpan], rng: &mut Rng) -> Mutation {
     if chunks.is_empty() {
         // No parseable IFF structure (shouldn't happen for real corpus files)
         // — fall back to a generic whole-file bit-flip so the harness still
@@ -265,7 +267,12 @@ fn apply_mutation(
             let i = rng.gen_range(v.len());
             v[i] ^= 1 << rng.gen_range(8);
         }
-        return (v, "generic-bitflip".to_string(), None);
+        return Mutation {
+            bytes: v,
+            desc: "generic-bitflip".to_string(),
+            chunk: "<whole-file>".to_string(),
+            page_index: None,
+        };
     }
 
     let c = chunks[rng.gen_range(chunks.len())];
@@ -327,7 +334,12 @@ fn apply_mutation(
             (v, format!("resize-length-of-{id_str}->{new_len}"))
         }
     };
-    (mutant, desc, c.page_index)
+    Mutation {
+        bytes: mutant,
+        desc,
+        chunk: id_str,
+        page_index: c.page_index,
+    }
 }
 
 // ── Our-side attempt (thread + channel timeout; panics caught) ─────────────
@@ -927,6 +939,7 @@ struct Finding {
     file_stem: String,
     mutant_idx: usize,
     mutation_desc: String,
+    mutation_chunk: String,
     page_idx: usize,
     detail: String,
 }
@@ -938,11 +951,69 @@ fn save_finding(out_dir: &Path, mutant: &[u8], f: &Finding) {
     let txt_path = out_dir.join(format!("{base}.txt"));
     if std::fs::write(&djvu_path, mutant).is_ok() {
         let note = format!(
-            "class: {}\nsource file: {}\nmutant index: {}\nmutation: {}\ntarget page (0-based): {}\ndetail: {}\n",
-            f.class_label, f.file_stem, f.mutant_idx, f.mutation_desc, f.page_idx, f.detail,
+            "class: {}\nsource file: {}\nmutant index: {}\nmutation: {}\nmutated chunk: {}\ntarget page (0-based): {}\ndetail: {}\n",
+            f.class_label,
+            f.file_stem,
+            f.mutant_idx,
+            f.mutation_desc,
+            f.mutation_chunk,
+            f.page_idx,
+            f.detail,
         );
         let _ = std::fs::write(&txt_path, note);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RenderRejectBucket {
+    chunk: String,
+    their_error: String,
+}
+
+#[derive(Default)]
+struct RenderRejectBucketStats {
+    count: usize,
+    examples: Vec<String>,
+    pixel_samples: usize,
+    max_mean_abs: f64,
+    max_abs: u8,
+    max_pct_gt8: f64,
+    max_pct_gt32: f64,
+}
+
+fn our_decode_path(our: &OurOutcome) -> String {
+    match our {
+        OurOutcome::StructReject(e) => format!("struct-reject({e})"),
+        OurOutcome::RenderFailed(e) => format!("render-failed({e})"),
+        OurOutcome::Rendered { w, h, .. } => format!("rendered {w}x{h}"),
+        OurOutcome::Panicked(e) => format!("panic({e})"),
+        OurOutcome::Timeout => "timeout".to_string(),
+    }
+}
+
+fn ddjvu_error_class(stderr: &str) -> String {
+    let mut fallback = None;
+    for line in stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix("ddjvu: ").unwrap_or(line))
+    {
+        if line.starts_with("Cannot decode page ") {
+            fallback = Some("Cannot decode page");
+        } else {
+            return line.trim_end_matches('.').to_string();
+        }
+    }
+    fallback.unwrap_or("<no stderr>").to_string()
+}
+
+fn diff_stats_rgba(w: usize, h: usize, lhs_rgba: &[u8], rhs_rgba: &[u8]) -> DiffStats {
+    let mut rhs_rgb = Vec::with_capacity(w * h * 3);
+    for pixel in rhs_rgba.chunks_exact(4) {
+        rhs_rgb.extend_from_slice(&pixel[..3]);
+    }
+    diff_stats(w, h, lhs_rgba, &rhs_rgb)
 }
 
 // ── CLI / config ─────────────────────────────────────────────────────────────
@@ -1128,6 +1199,10 @@ fn main() {
         std::collections::BTreeMap::new();
     let mut meta_findings_saved: std::collections::BTreeMap<(&'static str, MetaClass), usize> =
         std::collections::BTreeMap::new();
+    let mut render_reject_buckets: std::collections::BTreeMap<
+        RenderRejectBucket,
+        RenderRejectBucketStats,
+    > = std::collections::BTreeMap::new();
     let mut saved_paths: Vec<PathBuf> = Vec::new();
     let mut ran_out_of_time = false;
 
@@ -1162,6 +1237,10 @@ fn main() {
         // mutant. Computed lazily for the pages mutations actually target.
         let mut meta_baseline: std::collections::HashMap<usize, [MetaClass; 3]> =
             std::collections::HashMap::new();
+        let mut clean_render_baseline: std::collections::HashMap<
+            usize,
+            Option<(u32, u32, Vec<u8>)>,
+        > = std::collections::HashMap::new();
 
         for m in 0..cfg.mutants_per_file {
             if overall_start.elapsed() > budget {
@@ -1179,15 +1258,15 @@ fn main() {
                 hasher_seed = 1;
             }
             let mut rng = Rng::new(hasher_seed);
-            let (mutant, mutation_desc, target_page) = apply_mutation(&base, &chunks, &mut rng);
-            let page_idx = target_page.unwrap_or(0);
+            let mutation = apply_mutation(&base, &chunks, &mut rng);
+            let page_idx = mutation.page_index.unwrap_or(0);
 
             let mutant_path = tmp_dir.join(format!("{file_stem}_{m:05}.djvu"));
-            if std::fs::write(&mutant_path, &mutant).is_err() {
+            if std::fs::write(&mutant_path, &mutation.bytes).is_err() {
                 continue;
             }
 
-            let our = our_attempt(mutant.clone(), page_idx, cfg.our_timeout);
+            let our = our_attempt(mutation.bytes.clone(), page_idx, cfg.our_timeout);
 
             // our_level: 0 = structural reject, 1 = struct-ok but render failed,
             // 2 = fully rendered. Computed unconditionally except for the
@@ -1299,16 +1378,66 @@ fn main() {
 
             *totals.entry(class).or_insert(0) += 1;
 
+            let render_reject_stderr =
+                if class == Class::OurRendersWhatTheyReject && !solo_mode && have_ddjvu {
+                    let scratch_ppm = tmp_dir.join(format!("{file_stem}_{m:05}_bucket.ppm"));
+                    let stderr = ddjvu_stderr(
+                        &cfg.ddjvu_bin,
+                        &mutant_path,
+                        page_idx + 1,
+                        &scratch_ppm,
+                        cfg.ref_timeout,
+                    );
+                    let _ = std::fs::remove_file(&scratch_ppm);
+                    let bucket_stats = render_reject_buckets
+                        .entry(RenderRejectBucket {
+                            chunk: mutation.chunk.clone(),
+                            their_error: ddjvu_error_class(&stderr),
+                        })
+                        .or_default();
+                    bucket_stats.count += 1;
+                    if bucket_stats.examples.len() < 3 {
+                        bucket_stats.examples.push(format!(
+                            "{}_{m:05}: {} | ours {}",
+                            file_stem,
+                            mutation.desc,
+                            our_decode_path(&our)
+                        ));
+                    }
+                    if let OurOutcome::Rendered { w, h, rgba } = &our {
+                        let baseline = clean_render_baseline.entry(page_idx).or_insert_with(|| {
+                            match our_attempt(base.clone(), page_idx, cfg.our_timeout) {
+                                OurOutcome::Rendered { w, h, rgba } => Some((w, h, rgba)),
+                                _ => None,
+                            }
+                        });
+                        match baseline {
+                            Some((baseline_w, baseline_h, baseline_rgba))
+                                if baseline_w == w && baseline_h == h =>
+                            {
+                                let diff =
+                                    diff_stats_rgba(*w as usize, *h as usize, rgba, baseline_rgba);
+                                bucket_stats.pixel_samples += 1;
+                                bucket_stats.max_mean_abs =
+                                    bucket_stats.max_mean_abs.max(diff.mean_abs);
+                                bucket_stats.max_abs = bucket_stats.max_abs.max(diff.max_abs);
+                                bucket_stats.max_pct_gt8 =
+                                    bucket_stats.max_pct_gt8.max(diff.pct_gt8);
+                                bucket_stats.max_pct_gt32 =
+                                    bucket_stats.max_pct_gt32.max(diff.pct_gt32);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(stderr)
+                } else {
+                    None
+                };
+
             if class.is_finding() {
                 let saved_count = findings_saved.entry(class).or_insert(0);
                 if *saved_count < cfg.findings_cap || class == Class::OurCrash {
-                    let detail = match &our {
-                        OurOutcome::StructReject(e) => e.clone(),
-                        OurOutcome::RenderFailed(e) => e.clone(),
-                        OurOutcome::Panicked(e) => format!("panic: {e}"),
-                        OurOutcome::Timeout => "our-side timed out".to_string(),
-                        OurOutcome::Rendered { w, h, .. } => format!("rendered {w}x{h}"),
-                    };
+                    let detail = our_decode_path(&our);
                     let detail = if !solo_mode
                         && matches!(
                             class,
@@ -1327,16 +1456,27 @@ fn main() {
                                 | Class::PixelMismatch
                         )
                     {
-                        let scratch_ppm = tmp_dir.join(format!("{file_stem}_{m:05}_finding.ppm"));
-                        let their_stderr = ddjvu_stderr(
-                            &cfg.ddjvu_bin,
-                            &mutant_path,
-                            page_idx + 1,
-                            &scratch_ppm,
-                            cfg.ref_timeout,
-                        );
-                        let _ = std::fs::remove_file(&scratch_ppm);
-                        format!("{detail}\nddjvu stderr: {their_stderr}")
+                        let their_stderr = match &render_reject_stderr {
+                            Some(stderr) => stderr.clone(),
+                            None => {
+                                let scratch_ppm =
+                                    tmp_dir.join(format!("{file_stem}_{m:05}_finding.ppm"));
+                                let stderr = ddjvu_stderr(
+                                    &cfg.ddjvu_bin,
+                                    &mutant_path,
+                                    page_idx + 1,
+                                    &scratch_ppm,
+                                    cfg.ref_timeout,
+                                );
+                                let _ = std::fs::remove_file(&scratch_ppm);
+                                stderr
+                            }
+                        };
+                        let their_error = ddjvu_error_class(&their_stderr);
+                        format!(
+                            "{detail}\nour decode path: {}\nddjvu error class: {their_error}\nddjvu stderr: {their_stderr}",
+                            our_decode_path(&our)
+                        )
                     } else {
                         detail
                     };
@@ -1344,11 +1484,12 @@ fn main() {
                         class_label: class.label().to_string(),
                         file_stem: file_stem.clone(),
                         mutant_idx: m,
-                        mutation_desc: mutation_desc.clone(),
+                        mutation_desc: mutation.desc.clone(),
+                        mutation_chunk: mutation.chunk.clone(),
                         page_idx,
                         detail,
                     };
-                    save_finding(&cfg.out_dir, &mutant, &finding);
+                    save_finding(&cfg.out_dir, &mutation.bytes, &finding);
                     saved_paths.push(cfg.out_dir.join(format!(
                         "{}_{:05}_{}.djvu",
                         file_stem,
@@ -1386,7 +1527,7 @@ fn main() {
                     cls
                 });
 
-                let ours = our_meta(mutant.clone(), page_idx, cfg.our_timeout);
+                let ours = our_meta(mutation.bytes.clone(), page_idx, cfg.our_timeout);
                 let theirs = their_meta(&cfg.djvused_bin, &mutant_path, page_idx, cfg.ref_timeout);
                 for (i, plane) in META_PLANES.iter().enumerate() {
                     let mcls = meta_class(&ours[i], &theirs[i]);
@@ -1399,7 +1540,8 @@ fn main() {
                                 class_label: label.clone(),
                                 file_stem: file_stem.clone(),
                                 mutant_idx: m,
-                                mutation_desc: mutation_desc.clone(),
+                                mutation_desc: mutation.desc.clone(),
+                                mutation_chunk: mutation.chunk.clone(),
                                 page_idx,
                                 detail: format!(
                                     "baseline: {}\nours:   {}\ntheirs: {}",
@@ -1408,7 +1550,7 @@ fn main() {
                                     plane_side_brief(&theirs[i])
                                 ),
                             };
-                            save_finding(&cfg.out_dir, &mutant, &finding);
+                            save_finding(&cfg.out_dir, &mutation.bytes, &finding);
                             saved_paths
                                 .push(cfg.out_dir.join(format!("{file_stem}_{m:05}_{label}.djvu")));
                             *saved += 1;
@@ -1445,6 +1587,34 @@ fn main() {
     println!("total mutants classified: {total}");
     for (class, count) in &totals {
         println!("  {:<18} {:>6}", class.label(), count);
+    }
+    if !render_reject_buckets.is_empty() {
+        let mut ranked: Vec<_> = render_reject_buckets.iter().collect();
+        ranked.sort_by(|(left_key, left_stats), (right_key, right_stats)| {
+            right_stats
+                .count
+                .cmp(&left_stats.count)
+                .then_with(|| left_key.chunk.cmp(&right_key.chunk))
+                .then_with(|| left_key.their_error.cmp(&right_key.their_error))
+        });
+        println!("our-renders-what-they-reject buckets (chunk × ddjvu error):");
+        for (rank, (bucket, stats)) in ranked.iter().take(10).enumerate() {
+            println!(
+                "  #{:<2} {:<8} {:>5}  {}  pixel-samples={} max_mean={:.3} max_abs={} max_gt8={:.3}% max_gt32={:.3}%",
+                rank + 1,
+                bucket.chunk,
+                stats.count,
+                bucket.their_error,
+                stats.pixel_samples,
+                stats.max_mean_abs,
+                stats.max_abs,
+                stats.max_pct_gt8,
+                stats.max_pct_gt32
+            );
+            for example in &stats.examples {
+                println!("       example: {example}");
+            }
+        }
     }
     if !meta_totals.is_empty() {
         println!("metadata planes (#597, per plane × class):");

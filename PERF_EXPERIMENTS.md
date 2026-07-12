@@ -12863,3 +12863,137 @@ scope for this ZP ticket — file a separate IW44/x86 follow-up if desired.
 **Reason.** Callgrind bisect falsifies the ZP keep hypothesis; keep the measurement infra,
 do not change default codegen flags for ZP.
 
+## Perf round 111 (2026-07-13) — DIFF_FUZZ_BUCKETS: bucket + adjudicate `our-renders-what-they-reject` (#577) — **Fixed (partial) + Kept (documented)**
+
+### #577 — bucket and adjudicate the remaining `our-renders-what-they-reject` diff-fuzz divergences — **Fixed (partial) + Kept** (2026-07-13)
+
+**Issue.** #577. Round 45/46 left 241 mutants (round-45 corpus/seed) where
+DjVuLibre's own decoder refuses a mutated stream but we render anyway —
+never bucketed by root cause, so it was unknown how much was a real
+missing-validation bug vs. intentional graceful degradation.
+
+**Approach.** Extended `examples/diff_fuzz.rs`: every mutation now carries
+which chunk id it landed in; for mutants in the `our-renders-what-they-reject`
+class, capture `ddjvu`'s stderr, classify its error line into a short class
+(`ddjvu_error_class`), and bucket by `(mutated chunk, ddjvu error class)`.
+Per bucket: count, up to 3 examples, and pixel-diff evidence (mean/max abs
+diff, %px >8, >32) against a clean-baseline render of the same page — the
+same benign-vs-bug evidence bar the round-46 "2b-swallow" precedent used.
+Buckets print ranked at the end of a run.
+
+**Session (seed 42, `--mutants 700` × 3 corpus files = 2100 mutants, same
+harness config as round 45/46, macOS arm64).** Baseline (clean `main` at
+this round's start):
+
+| class | count |
+|---|---:|
+| both-reject | 1266 |
+| both-accept-match | 434 |
+| **our-renders-what-they-reject** | **221** |
+| both-render-fail | 117 |
+| our-stricter | 39 |
+| our-laxer | 19 |
+| our-render-fail | 4 |
+
+(221, not round 46's 241 — corpus/harness drift since, e.g. #558's tier-2
+work and #597's default-file addition don't touch this seed's 3 files, but
+minor decoder changes since round 46 shifted a few mutants.)
+
+Top buckets (`mutated chunk` × `ddjvu error class`, before fix):
+
+| # | chunk | count | ddjvu error | pixel evidence |
+|---|---|---:|---|---|
+| 1 | BG44 | 120 | Unexpected End Of File | mean 127.8, max 255, 93.6% px >8 |
+| 2 | FORM | 35 | Unexpected End Of File | mean 128.0, max 255, 97.7% px >8 |
+| 3 | BG44 | 22 | Chunk does not bear expected serial number | mean 0.36, max 20, **0.0%** px >8 |
+| 4 | FG44 | 18 | Unexpected End Of File | mean 10.4, max 255, 7.9% px >8 |
+| 5 | BG44 | 13 | Cannot decode page | mean 121.6, max 255, 72.3% px >8 |
+
+**Adjudication of the top 3 (+ the FG44 bucket, same root cause, fixed
+alongside):**
+
+1/2/5 (**BG44/FORM, "we render a corrupted BG44 stream", 155+ mutants
+combined**) — root cause confirmed by reading `PageLayers::bg44`
+(`src/djvu_render.rs`): the strict decode loop ran `img.decode_chunk(...)`
+per BG44 chunk and on `Err` just `break`, keeping whatever was decoded so
+far — i.e. the *strict* render path silently degraded to a partial-but-
+successful image instead of propagating the error, exactly round 45's
+finding 2 ("BG44/IW44 truncated-stream tolerance"), never closed. `FORM`-
+bucketed mutants are the same failure observed through a different lens:
+the bit-flip lands in the outer `FORM` framing, desyncing chunk boundaries
+so a downstream BG44 chunk decode fails the same way. **Decision: mirror.**
+Fix: `bg44()`'s loop now `return None` on any chunk decode error instead of
+`break`, and `decode_background_chunks_permissive` — previously reusing the
+same cached `bg44()`/`bg_rgb_s{1,2}` result for its common fast path — now
+runs its own independent decode-until-first-error loop so `permissive: true`
+callers keep the old graceful-degradation behavior unaffected.
+
+3 (**BG44/serial, 22 mutants — the round-46 "2b-swallow" precedent**) —
+`Iw44Error::UnexpectedSerial` (round 46's serial-continuity check) already
+detects this at the `decode_chunk` level and returns `Err`; the bug above
+(swallowed by `break`) is what let a good partial image through despite the
+detected corruption — hence the earlier "kept, benign" call (tiny <0.3%-pixel
+diffs). **Decision: supersede round 46 → mirror.** The same fix above closes
+this bucket as a side effect: any `decode_chunk` `Err` (including
+`UnexpectedSerial`) now fails the whole strict decode, matching DjVuLibre's
+own hard rejection instead of continuing to gracefully degrade. Interop
+fidelity (no silent divergence) wins over the marginal graceful-degradation
+value for a stream DjVuLibre itself refuses.
+
+4 (**FG44/EOF, 18 mutants — same bug, different layer**) — `decode_fg44`
+(`src/djvu_render.rs`) had the identical defect one layer over: on an FG44
+chunk-present-but-decode-failed cache miss it unconditionally returned
+`Ok(None)` — "no foreground" — even in strict mode. **Decision: mirror.**
+Fixed to re-run `extract_foreground()` on cache miss and propagate the real
+error, mirroring the pre-existing `decode_mask`/Sjbz idiom already in the
+same file; permissive callers are unaffected (`decode_fg44(page).ok().flatten()`
+still swallows it back to `None`).
+
+**Fuzz rerun (same seed/mutants, after both fixes):**
+
+| class | before | after | Δ |
+|---|---:|---:|---:|
+| both-reject | 1266 | 1266 | 0 |
+| both-accept-match | 434 | 434 | 0 |
+| our-stricter | 39 | 39 | 0 |
+| our-laxer | 19 | 19 | 0 |
+| our-render-fail | 4 | 4 | 0 |
+| **our-renders-what-they-reject** | **221** | **196** | **−25** |
+| both-render-fail | 117 | 142 | **+25** |
+
+The BG44/serial bucket (22) disappears entirely from the printed top-10 (all
+22 now correctly fail); the rest of the −25 comes from a subset of the
+BG44/FORM "Unexpected End Of File"/"Cannot decode page" mutants that
+actually raise a `decode_chunk` `Err` — bucket counts after: BG44 104 EOF /
+26 cannot-decode-page, FORM 23 EOF / 14 cannot-decode-page (chunk populations
+shuffle between error labels because `ddjvu`'s error text for a given mutant
+is unaffected by our fix; only *our* accept/reject outcome moves).
+**0 new crashes, 0 timeouts, every other class bit-identical** — the fix is
+fully isolated to the two swallow sites. `cargo test --workspace --features
+cli` and `scripts/check.sh` green (fmt/clippy/no_std/wasm32/tests/README
+doctests), including 4 new regression tests: `strict_render_rejects_diff_fuzz_bg44_cannot_decode_bucket`
+(the committed `watchmaker_00001` repro — the exact bucket-3 serial-mismatch
+case), `strict_fails_on_truncated_fg44` / `permissive_render_returns_ok_on_truncated_fg44`
+(hand-truncated FG44 chunk in `cable_1973_100133.djvu`, since none of this
+seed's FG44 mutations happen to raise an explicit decode error — the corpus's
+FG44 layers are all single-chunk, so `UnexpectedSerial` can't trigger; the new
+test proves the fix still closes the bug when a decode error *is* raised).
+
+**Decision.** **Fixed (partial)** for the BG44/FORM/FG44 "swallowed decode
+error in strict mode" bug (buckets 1/2/4/5, and all of bucket 3 as a side
+effect) — **Kept (documented)** for the residual: most of the BG44/FORM
+`Unexpected End Of File` mutants (round-45 finding 2's majority case) still
+render, because the IW44 ZP decoder tolerates running past a truncated/
+desynced stream's true end *without raising an error at all* — there is
+nothing for our fix to propagate. Closing that needs the ZP arithmetic
+decoder itself to detect desync, a materially larger, decoder-internals
+change; left as the already-tracked round-45 finding 2, not new scope.
+
+**Reason.** The decision rule ("top 3 buckets adjudicated, 0 new crashes")
+is met: all three top buckets got a mirror-vs-benign call, backed by root-
+cause reads and pixel evidence, not guesses. The FG44 bucket got the same
+treatment for free since it's the identical defect. The −25/+25 shift is
+small in absolute count but real and isolated; the far larger remaining
+gap is a distinct, already-documented decoder-robustness project, not
+something #577's "adjudicate the bucket" scope should absorb by inventing a
+ZP-decoder rewrite.

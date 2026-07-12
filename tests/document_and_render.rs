@@ -500,6 +500,197 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
     );
 }
 
+fn assert_strict_native_render_rejects(data: &[u8], page_idx: usize) {
+    let doc = DjVuDocument::parse(data).expect("mutant should remain structurally parseable");
+    let page = doc.page(page_idx).expect("mutant target page should exist");
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: false,
+        ..RenderOptions::default()
+    };
+    assert!(
+        render_pixmap(page, &opts).is_err(),
+        "strict native render must reject corrupted background data"
+    );
+}
+
+#[test]
+fn strict_render_rejects_diff_fuzz_bg44_cannot_decode_bucket() {
+    let data = std::fs::read(
+        "fuzz/corpus-regressions/diff_fuzz/watchmaker_00001_our-renders-what-they-reject.djvu",
+    )
+    .expect("round 577 BG44 cannot-decode repro");
+    assert_strict_native_render_rejects(&data, 2);
+}
+
+// ── FG44 strict-decode propagation (round 577, mirrors the BG44 fix above) ──
+
+/// Find the first chunk with id `target_id` anywhere in the IFF chunk tree
+/// (recursing into nested `FORM`s), returning its `(header_offset, content_len)`.
+fn find_chunk_recursive(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    target_id: &[u8; 4],
+) -> (usize, usize) {
+    let mut p = start;
+    while p + 8 <= end {
+        let id: [u8; 4] = data[p..p + 4].try_into().unwrap();
+        let len = u32::from_be_bytes(data[p + 4..p + 8].try_into().unwrap()) as usize;
+        let content_start = p + 8;
+        let content_end = (content_start + len).min(end);
+        if &id == target_id {
+            return (p, len);
+        }
+        if &id == b"FORM" && content_end >= content_start + 4 {
+            let found = find_chunk_recursive(data, content_start + 4, content_end, target_id);
+            if found.1 != 0 || found.0 != 0 {
+                // A zero-length chunk at offset 0 cannot legally occur here
+                // (offset 0 is always `AT&T`), so `(0, 0)` unambiguously means
+                // "not found in this subtree".
+                return found;
+            }
+        }
+        p = content_end + (len % 2);
+    }
+    (0, 0)
+}
+
+/// Truncate the first chunk with id `target_id` (searched recursively, so this
+/// works on both plain `FORM:DJVU` files and bundled `FORM:DJVM` documents) down
+/// to approximately `min_keep_bytes`, fixing up every enclosing `FORM`'s length
+/// field so the file stays structurally valid IFF.
+///
+/// The reduction is rounded to keep an even byte count so no enclosing `FORM`'s
+/// length-parity (and therefore IFF pad-byte placement) changes — only the
+/// target chunk's own content shrinks, everything else is copied byte-for-byte.
+fn shrink_first_chunk(data: &[u8], target_id: &[u8; 4], min_keep_bytes: usize) -> Vec<u8> {
+    let (chunk_pos, old_len) = find_chunk_recursive(data, 16, data.len(), target_id);
+    assert!(chunk_pos != 0 || old_len != 0, "target chunk id not found");
+    let keep_bytes = if old_len.abs_diff(min_keep_bytes) % 2 == 0 {
+        min_keep_bytes
+    } else {
+        min_keep_bytes + 1
+    };
+    let reduction = old_len - keep_bytes;
+    assert!(
+        reduction > 0,
+        "keep_bytes must be smaller than the original chunk length"
+    );
+
+    fn rewrite(
+        data: &[u8],
+        start: usize,
+        end: usize,
+        chunk_pos: usize,
+        reduction: usize,
+        keep_bytes: usize,
+        out: &mut Vec<u8>,
+    ) {
+        let mut p = start;
+        while p + 8 <= end {
+            let id: [u8; 4] = data[p..p + 4].try_into().unwrap();
+            let len = u32::from_be_bytes(data[p + 4..p + 8].try_into().unwrap()) as usize;
+            let content_start = p + 8;
+            let content_end = (content_start + len).min(end);
+            let pad = len % 2;
+            if p == chunk_pos {
+                out.extend_from_slice(&id);
+                out.extend_from_slice(&(keep_bytes as u32).to_be_bytes());
+                out.extend_from_slice(&data[content_start..content_start + keep_bytes]);
+                if keep_bytes % 2 == 1 {
+                    out.push(0);
+                }
+            } else if &id == b"FORM" && chunk_pos >= content_start && chunk_pos < content_end {
+                out.extend_from_slice(&id);
+                out.extend_from_slice(&((len - reduction) as u32).to_be_bytes());
+                out.extend_from_slice(&data[content_start..content_start + 4]);
+                rewrite(
+                    data,
+                    content_start + 4,
+                    content_end,
+                    chunk_pos,
+                    reduction,
+                    keep_bytes,
+                    out,
+                );
+                if pad == 1 {
+                    out.push(data[content_end]);
+                }
+            } else {
+                out.extend_from_slice(&data[p..content_end]);
+                if pad == 1 {
+                    out.push(data[content_end]);
+                }
+            }
+            p = content_end + pad;
+        }
+    }
+
+    let top_len = u32::from_be_bytes(data[8..12].try_into().unwrap()) as usize;
+    let mut out = data[..8].to_vec();
+    out.extend_from_slice(&((top_len - reduction) as u32).to_be_bytes());
+    out.extend_from_slice(&data[12..16]);
+    rewrite(
+        data,
+        16,
+        data.len(),
+        chunk_pos,
+        reduction,
+        keep_bytes,
+        &mut out,
+    );
+    out
+}
+
+/// `cable_1973_100133.djvu` (bundled `FORM:DJVM`) page 0 carries an FG44
+/// foreground layer — truncate it aggressively so `Iw44Image::decode_chunk`
+/// definitely errors.
+fn make_truncated_fg44_djvu() -> Vec<u8> {
+    let data = std::fs::read("tests/corpus/cable_1973_100133.djvu").unwrap();
+    shrink_first_chunk(&data, b"FG44", 4)
+}
+
+/// Strict mode must return an error when the FG44 foreground layer is present
+/// but fails to decode — previously `decode_fg44` silently treated any decode
+/// failure the same as "no foreground chunks", swallowing the error even in
+/// strict mode (the same class of bug fixed for BG44 above).
+#[test]
+fn strict_fails_on_truncated_fg44() {
+    let corrupted = make_truncated_fg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).expect("mutant must remain structurally parseable");
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: false,
+        ..RenderOptions::default()
+    };
+    assert!(
+        render_pixmap(page, &opts).is_err(),
+        "strict mode must return Err on corrupted FG44"
+    );
+}
+
+/// Permissive mode must still return Ok on the same corrupted file (falls back
+/// to "no foreground", matching the pre-577 behavior for the permissive path).
+#[test]
+fn permissive_render_returns_ok_on_truncated_fg44() {
+    let corrupted = make_truncated_fg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).expect("mutant must remain structurally parseable");
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: true,
+        ..RenderOptions::default()
+    };
+    let pm =
+        render_pixmap(page, &opts).expect("permissive mode must return Ok even for corrupted FG44");
+    assert!(!pm.data.is_empty(), "pixmap must not be empty");
+}
+
 // ── INFO/BG44 dimension cross-check (round 46, INTEROP_STREAMS finding 2a) ──
 
 /// Corrupt `boy.djvu`'s INFO chunk so its declared page height (256) becomes
