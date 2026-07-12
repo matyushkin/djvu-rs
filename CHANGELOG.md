@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0](https://github.com/matyushkin/djvu-rs/compare/v0.26.2...v0.27.0) (2026-07-12)
+
+
+### Features
+
+* **cli:** expose TH44 thumbnail embedding via djvu encode --thumbnails ([#590](https://github.com/matyushkin/djvu-rs/issues/590)) ([#653](https://github.com/matyushkin/djvu-rs/issues/653)) ([51ff48d](https://github.com/matyushkin/djvu-rs/commit/51ff48d4f3513e4ab54c7445f9de25d7121ea82c))
+* **encode:** automatic content-type detection for the encode profile ([#570](https://github.com/matyushkin/djvu-rs/issues/570)) ([#648](https://github.com/matyushkin/djvu-rs/issues/648)) ([4ac02e0](https://github.com/matyushkin/djvu-rs/commit/4ac02e02ef1690b99577fd94988fbe493bb47776))
+* **encode:** DjVuPhoto profile -- mask-less BG44-only encode with grayscale path ([#571](https://github.com/matyushkin/djvu-rs/issues/571)) ([#647](https://github.com/matyushkin/djvu-rs/issues/647)) ([29c747c](https://github.com/matyushkin/djvu-rs/commit/29c747c5de305eeea3e63ddf51d9f2a7ae1eae06))
+* **py:** region/tile render and progressive decode in djvu-py ([#583](https://github.com/matyushkin/djvu-rs/issues/583)) ([#650](https://github.com/matyushkin/djvu-rs/issues/650)) ([2c364ab](https://github.com/matyushkin/djvu-rs/commit/2c364ab75df8676a7d2b32d51058488cf22c78a2))
+* **segment:** opt-in projection-profile deskew -- skew costs +150-384% Sjbz at 1 degree ([#592](https://github.com/matyushkin/djvu-rs/issues/592)) ([#663](https://github.com/matyushkin/djvu-rs/issues/663)) ([c3995ce](https://github.com/matyushkin/djvu-rs/commit/c3995ce45f6f32c127f62991940f3c9f9117a3d8))
+* **wasm:** lazy Range-based document open -- WasmLazyDocument, 11-19x TTFP in Chrome ([#588](https://github.com/matyushkin/djvu-rs/issues/588)) ([#652](https://github.com/matyushkin/djvu-rs/issues/652)) ([6358073](https://github.com/matyushkin/djvu-rs/commit/63580737fed702f3703da469dc9d9f27b3382cfc))
+
+
+### Bug Fixes
+
+* **bench:** fail closed on missing Criterion results ([#616](https://github.com/matyushkin/djvu-rs/issues/616)) ([7e123bf](https://github.com/matyushkin/djvu-rs/commit/7e123bfb2d90c853fac65b71af81355d444d1d87))
+* **bench:** measure both sides of the suspect re-check back-to-back ([#636](https://github.com/matyushkin/djvu-rs/issues/636)) ([3795fc5](https://github.com/matyushkin/djvu-rs/commit/3795fc558cd716246cc929dbd1b7ef056d43b5f0))
+* **bench:** re-check flagged regressions against the merge base on the same runner ([#634](https://github.com/matyushkin/djvu-rs/issues/634)) ([63a471d](https://github.com/matyushkin/djvu-rs/commit/63a471da5183315ef880bd6f6386349f9e2b4303))
+* **decode:** resolve the shared dictionary across all INCL chunks -- czech.djvu masks restored ([#624](https://github.com/matyushkin/djvu-rs/issues/624)) ([#661](https://github.com/matyushkin/djvu-rs/issues/661)) ([644d9bb](https://github.com/matyushkin/djvu-rs/commit/644d9bbd253e8f47842fc1f23ca7db8ce514acb7))
+* **djvm:** DjVuLibre-clean DIRM for merge/split -- fill offsets/sizes, write directory version 1 ([#657](https://github.com/matyushkin/djvu-rs/issues/657)) ([#659](https://github.com/matyushkin/djvu-rs/issues/659)) ([2c822d8](https://github.com/matyushkin/djvu-rs/commit/2c822d8abc6941829240e94aa90f2c968fafa83a))
+* **iw44:** decode v1.2 chroma at full resolution ([#614](https://github.com/matyushkin/djvu-rs/issues/614)) ([4ae4435](https://github.com/matyushkin/djvu-rs/commit/4ae44357f42d7d76397b76130921c37fd60d889c))
+* **pdf:** paint FGbz-coloured foreground text with per-colour stencils ([#559](https://github.com/matyushkin/djvu-rs/issues/559)) ([#619](https://github.com/matyushkin/djvu-rs/issues/619)) ([d24c9fa](https://github.com/matyushkin/djvu-rs/commit/d24c9fadb29501889e199fdd5c6143bef3499b9b))
+* **pdf:** restore lost and invisible foreground masks in PDF export ([#620](https://github.com/matyushkin/djvu-rs/issues/620), [#621](https://github.com/matyushkin/djvu-rs/issues/621)) ([#622](https://github.com/matyushkin/djvu-rs/issues/622)) ([d0598ac](https://github.com/matyushkin/djvu-rs/commit/d0598ac39590404993483a48f6998f34bf0bd385))
+
+
+### Performance Improvements
+
+* **async:** index bundled DJVM from the DIRM size table -- 103x TTFP over HTTP Range ([#584](https://github.com/matyushkin/djvu-rs/issues/584)) ([#651](https://github.com/matyushkin/djvu-rs/issues/651)) ([ad041b5](https://github.com/matyushkin/djvu-rs/commit/ad041b50e38eafb26c2ccb6554774e482c0b9c6a))
+* **cache:** preserve the 1/4-res JB2 mask across render-cache downgrade ([#607](https://github.com/matyushkin/djvu-rs/issues/607)) ([#627](https://github.com/matyushkin/djvu-rs/issues/627)) ([9355aa6](https://github.com/matyushkin/djvu-rs/commit/9355aa69dd12ff3a364f62eb77f3a6593231af47))
+* **cli:** parallelize CBZ export via a new cbz library module ([#598](https://github.com/matyushkin/djvu-rs/issues/598)) ([#625](https://github.com/matyushkin/djvu-rs/issues/625)) ([ddfd111](https://github.com/matyushkin/djvu-rs/commit/ddfd11101611e67ca35020e9cc7c690bb8499b9f))
+* **encode:** build the FGbz palette from encoder blit metadata ([#612](https://github.com/matyushkin/djvu-rs/issues/612)) ([#626](https://github.com/matyushkin/djvu-rs/issues/626)) ([238ae11](https://github.com/matyushkin/djvu-rs/commit/238ae1169b07ba54fbfbe83fca96edf4199ce8a5))
+* **encode:** two-pass layered bundle encode drops backgrounds and mask clones ([#565](https://github.com/matyushkin/djvu-rs/issues/565)) ([#637](https://github.com/matyushkin/djvu-rs/issues/637)) ([344efc6](https://github.com/matyushkin/djvu-rs/commit/344efc673876adf6633e4561f9ee4233d612a700))
+* **export:** render whole-document exports on cold page clones -- 504-page PDF peak RSS 2.24 GB -&gt; 45 MB ([#629](https://github.com/matyushkin/djvu-rs/issues/629)) ([#654](https://github.com/matyushkin/djvu-rs/issues/654)) ([037c9fc](https://github.com/matyushkin/djvu-rs/commit/037c9fc457f30e8172a0e32deb107d6b872cb90b))
+* **iw44:** resume full decode from the cached first-chunk state ([#608](https://github.com/matyushkin/djvu-rs/issues/608)) ([#643](https://github.com/matyushkin/djvu-rs/issues/643)) ([2c4b269](https://github.com/matyushkin/djvu-rs/commit/2c4b2690d7f25fb429c784d7bbc6051fcea8ddea))
+* **metadata:** cache decoded TXTz and ANTz layers per page ([#605](https://github.com/matyushkin/djvu-rs/issues/605)) ([#635](https://github.com/matyushkin/djvu-rs/issues/635)) ([6d4141f](https://github.com/matyushkin/djvu-rs/commit/6d4141f1848c94403af27914c2aceb13ea2fb047))
+* **mut:** incremental byte-range save for bundled DJVM -- same-size edits write 1 byte instead of the file ([#595](https://github.com/matyushkin/djvu-rs/issues/595)) ([#658](https://github.com/matyushkin/djvu-rs/issues/658)) ([2990793](https://github.com/matyushkin/djvu-rs/commit/2990793189824703fc9d5a8f93b7c28d9c7af2fd))
+* **ocr:** parallelize OCR across pages in the CLI ([#573](https://github.com/matyushkin/djvu-rs/issues/573)) ([#645](https://github.com/matyushkin/djvu-rs/issues/645)) ([9520458](https://github.com/matyushkin/djvu-rs/commit/9520458486160360eb128ae9290bd4e9e5aa79f1))
+* **pdf:** stream PDF objects to a writer to bound serialization memory ([#606](https://github.com/matyushkin/djvu-rs/issues/606)) ([#630](https://github.com/matyushkin/djvu-rs/issues/630)) ([a63b680](https://github.com/matyushkin/djvu-rs/commit/a63b680ba15a6f43ec2c0153444c03b2161a477d))
+* **render:** LRU tile-cache eviction + hit-rate telemetry and budget sweep ([#576](https://github.com/matyushkin/djvu-rs/issues/576)) ([#644](https://github.com/matyushkin/djvu-rs/issues/644)) ([17f7d95](https://github.com/matyushkin/djvu-rs/commit/17f7d953ef14ba462ba0fb216120ddcd66175d59))
+* **segment:** parallelize the Sauvola threshold pass ([#575](https://github.com/matyushkin/djvu-rs/issues/575)) ([#623](https://github.com/matyushkin/djvu-rs/issues/623)) ([5b24f50](https://github.com/matyushkin/djvu-rs/commit/5b24f50939690d2e2ca100919e6407f1e47917e5))
+* **wasm:** coarse-grained batch page rendering ([#610](https://github.com/matyushkin/djvu-rs/issues/610)) ([#642](https://github.com/matyushkin/djvu-rs/issues/642)) ([db65a1a](https://github.com/matyushkin/djvu-rs/commit/db65a1a492177657c9acfafb20466cbf94f56fcd))
+* **wasm:** open documents through the lazy shared backing ([#609](https://github.com/matyushkin/djvu-rs/issues/609)) ([#632](https://github.com/matyushkin/djvu-rs/issues/632)) ([8b81993](https://github.com/matyushkin/djvu-rs/commit/8b8199314199b212a1a37751b9b0fce26a477d80))
+* **wasm:** reusable Rust-owned pixel buffer with zero-copy view ([#611](https://github.com/matyushkin/djvu-rs/issues/611)) ([#631](https://github.com/matyushkin/djvu-rs/issues/631)) ([dea47a5](https://github.com/matyushkin/djvu-rs/commit/dea47a56de03c8246e0e9ab2199948c37d57b332))
+* **wasm:** ship simd128 package variant ([1b2e4db](https://github.com/matyushkin/djvu-rs/commit/1b2e4dbe80866b5a489c003c338242868936f8dc))
+* **wasm:** ship simd128 package variant ([#581](https://github.com/matyushkin/djvu-rs/issues/581)) ([81acb78](https://github.com/matyushkin/djvu-rs/commit/81acb7824dff6f8eef1d36a56ae86f429d55c8f2))
+
 ## [0.26.2](https://github.com/matyushkin/djvu-rs/compare/v0.26.1...v0.26.2) (2026-07-10)
 
 
