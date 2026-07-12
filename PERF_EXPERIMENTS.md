@@ -11966,3 +11966,43 @@ the parallel residual is the O(chunk) rendered bodies by design (#606).
 **Reason.** Exports are one-shot page walks — caching for a revisit that never
 comes was the entire 2 GB. A cold clone per page is a 6-line-per-exporter fix
 that reuses the existing Clone contract instead of adding eviction machinery.
+
+## Perf round 89 (2026-07-12) — ALLOC_PROFILE: dhat allocation-profiling harness + baseline map (#600)
+
+**Issue.** #600 — no allocation profiling existed anywhere in the repo; every
+allocation win so far (COW_BG/COW_FG, JB2 scratch pool, LAZY_PAGE_CONSTRUCT)
+was found ad hoc inside unrelated investigations. Decision rule: the harness
+lands as infra; each individual fix stands or falls on its own ≥3% numbers.
+
+**Approach.** New dev-only `alloc-profile` feature (`dep:dhat`) + committed
+`examples/alloc_profile.rs`: dhat as the global allocator, one scenario per
+process (cold-open, warm-render ×10, thumbnail sweep, 12-page layered encode,
+whole-doc PDF export), writing `dhat-<scenario>.json` for the DHAT viewer.
+Never part of default builds or CI gates.
+
+**Numbers (baseline map, watchmaker).** Totals: cold-open 14.0 MB / 1.6 k
+blocks; warm-render 98.5 MB (10 × 8.42 MB output pixmaps — the documented
+`render_pixmap` owned-return; `render_into` already offers reuse); thumbnails
+47.0 MB / 15.1 k; 12-page encode **786.6 MB** / 90 k (t-gmax 514 MB); PDF export
+180.2 MB / 20 k. Top sites: encode = `render_pixmap` inputs 404 MB +
+`jb2::extract_ccs` unpacked byte grid **193.6 MB in 23 calls** (8.4 MB/page/pass)
++ `to_rgb_subsample` 44.9 MB; PDF = `render_page_data` 75.8 MB + `make_stream`
+14 MB; thumbnails = `PlaneDecoder::new` 23.2 MB + a 12.6 MB-total
+`extract_mask` that the thumbnail path arguably shouldn't need (follow-up
+candidate).
+
+**Fix attempt (rejected).** Thread-local scratch reuse for the top site
+(`extract_ccs`' w×h grid): output byte-identical, but interleaved 6-pair A/B on
+a 12-page 300-dpi CLI encode read old 0.99 s vs new 0.98 s user (~−1.5%), below
+the 3% bar — macOS `calloc` hands back lazily-zeroed pages cheaply, so the
+allocation traffic is not a wall-clock cost here. Reverted; the map entry
+stands for platforms where the allocator is less forgiving.
+
+**Decision.** Kept (infra): harness + baseline map. No individual fix met the
+bar this round; candidates recorded (thumbnail-path `extract_mask`,
+`PlaneDecoder` full-plane allocation for sub-decodes).
+
+**Reason.** The map is the deliverable the issue asked for — it already
+attributes every heavy scenario to a handful of named sites, and the one
+"obvious" fix measurably doesn't pay on this platform, which is exactly the
+kind of negative the ≥3% discipline exists to catch.
