@@ -333,8 +333,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 bg_inpaint,
             },
             bg_bpp,
-            shared_dict_pages,
-            thumbnails,
+            EncodeBundleArgs {
+                shared_dict_pages,
+                thumbnails,
+            },
         ),
     }
 }
@@ -1064,9 +1066,12 @@ fn cmd_encode(
     quality: EncodeQualityArg,
     segment_args: EncodeSegmentArgs,
     bg_bpp: Option<f32>,
-    shared_dict_pages: usize,
-    thumbnails: bool,
+    bundle_args: EncodeBundleArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let EncodeBundleArgs {
+        shared_dict_pages,
+        thumbnails,
+    } = bundle_args;
     use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
     use djvu_rs::iw44_encode::{Iw44EncodeOptions, Iw44Target};
     use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
@@ -1211,6 +1216,13 @@ fn cmd_encode(
         bytes.len(),
     );
     Ok(())
+}
+
+/// Multi-page-bundle options of `djvu encode` (single-page paths ignore them).
+#[derive(Clone, Copy)]
+struct EncodeBundleArgs {
+    shared_dict_pages: usize,
+    thumbnails: bool,
 }
 
 #[derive(Clone, Copy)]
