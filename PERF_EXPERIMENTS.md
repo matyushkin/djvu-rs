@@ -12044,3 +12044,42 @@ the #562 text-vs-photo block classifier; filed as the follow-up direction on
 loop specific to continuous-tone content, which is exactly what the issue's
 "binarization instability" suspicion predicted; text pages behave as a
 contraction mapping and photos as an expansion.
+
+## Perf round 91 (2026-07-12) — INCR_SAVE: byte-range patched save for bundled DJVM (#595)
+
+**Issue.** #595 — every `DjVuMut` edit re-serializes and rewrites the whole
+document; #302's byte-range patching covered only single-page `FORM:DJVU`.
+Decision rule: metadata-edit saves ≥5× cheaper (bytes written / wall-clock) on
+a big bundle, externally validated; record the same-size hit-rate either way.
+
+**Approach.** New `DjVuDocumentMut::save_patched(&mut File) -> SavePatchStats`:
+computes the new serialization in memory (same bytes as `try_into_bytes`),
+diffs it against the retained original, and writes only the changed span —
+common prefix always skipped, common suffix too when the total length is
+unchanged (offset-shift makes suffix reuse unsound otherwise), then
+truncate/extend. Cheap target check (length + head bytes) fails closed with
+the new `PatchTargetMismatch` before anything is written; clean documents
+write 0 bytes. Unit test covers clean/same-size/size-changing/wrong-target;
+probe `examples/incremental_save_probe.rs` measures on real bundles.
+
+**Numbers.** pathogenic_bacteria_1896.djvu (26.6 MB, 572 components):
+same-size INFO edit → **1 byte written** (2.7·10⁷× fewer) vs a 26.6 MB full
+rewrite, wall 27.5 ms vs 49.4 ms (1.8×; floor = in-memory emit + O(n) diff +
+fsync). Size-changing bookmark edit → no byte win (NAVM/DIRM live at the head,
+so everything after the first shifted byte rewrites; 2.3× wall from skipping
+only the head). big504 fixture: same picture (1 B vs 7.7 MB; 3.4×).
+`djvudump` + `ddjvu` accept the patched outputs (page renders verified).
+**Hit-rate statistic:** the win is binary — same-size component edits get the
+full O(1) write; any size-changing edit degrades to ~full rewrite because the
+DIRM offset table sits at byte ~16. Drive-by: `djvu merge` outputs are
+rejected by DjVuLibre's DjVmDir validation (pre-existing, unrelated) → #657.
+
+**Decision.** Kept. The ≥5× bar is met on the bytes-written axis for the
+same-size class (by 7 orders of magnitude); wall-clock alone would not have
+cleared it (1.8–3.4×). Tail-shift saves (issue idea 3) are pointless for
+head-resident metadata and redundant with the diff for tail edits — declined.
+
+**Reason.** The diff-write needs no DIRM surgery, inherits `try_into_bytes`'
+exact bytes (so it can never produce a different document), and turns the
+dominant archival edit (same-size in-place metadata/flag tweaks) into a
+constant-byte disk operation.
