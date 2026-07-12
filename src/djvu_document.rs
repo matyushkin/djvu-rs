@@ -2510,7 +2510,7 @@ mod tests {
     fn parse_bundled_djvm_with_short_sub_form_returns_malformed() {
         use crate::dirm::DirmPayload;
         // Bundled DIRM with 1 Page entry (flags=0x80 = bundled, flag=0x01=Page)
-        let dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p0001.djvu".to_string()]);
+        let dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p0001.djvu".to_string()], &[]);
         let dirm = crate::iff::Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -3319,7 +3319,7 @@ mod tests {
 
         // Build a bundled DIRM with one Page entry but set its offset to a value
         // far beyond the end of the file so the byte-range lookup fails.
-        let mut dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p.djvu".to_string()]);
+        let mut dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p.djvu".to_string()], &[]);
         dirm_payload.offsets[0] = 0xFFFF_FFFF; // points well outside the file
         let dirm_data = dirm_payload.encode();
 

@@ -3060,6 +3060,7 @@ mod tests {
             2,
             &[0x01, 0x01],
             &["p1.djvu".to_string(), "p2.djvu".to_string()],
+            &[],
         );
         let dirm_data = dirm_payload.encode();
         let mut root = Chunk::Form {

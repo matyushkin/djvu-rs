@@ -12083,3 +12083,39 @@ head-resident metadata and redundant with the diff for tail edits — declined.
 exact bytes (so it can never produce a different document), and turns the
 dominant archival edit (same-size in-place metadata/flag tweaks) into a
 constant-byte disk operation.
+## Perf round 92 (2026-07-12) — MERGE_DIRM_INTEROP: djvu merge/split output rejected by DjVuLibre (#657)
+
+**Issue.** #657 (filed during round 91) — bundles produced by `djvu merge` (and
+`split`) failed DjVuLibre's DjVmDir validation ("no indirect entries allowed in
+bundled document"), and our own lazy async loader would mis-index them.
+Decision rule: djvudump + ddjvu accept merge output; interop test added.
+
+**Approach / root cause.** Three defects in `djvm.rs`'s DIRM writer, all fixed
+in `DirmPayload`/`build_djvm`: (1) the **offset table was left zeroed**
+("readers fall back to FORM boundaries" — DjVuLibre doesn't: `offset==0` is its
+indirect-entry marker, hence the error); (2) the **DIRM version byte was 0x80**
+(bundled + directory version 0), whereas version 0 has a different plain-section
+layout in DjVuLibre — every real-world DIRM observed writes **0x81**; (3) the
+24-bit **size table was zeroed**, which also starved the #584 lazy indexer into
+its per-component probing fallback. `build_djvm` now uses the documented
+two-pass `partial_emit_with_offsets` shape (the same pattern
+`encode_djvm_bundle_jb2` already used — only merge/split had the broken
+writer); `build_bundled` takes the size table and writes `0x81`;
+`build_indirect` writes version 1 as well.
+
+**Numbers / validation.** 42-way watchmaker merge (504 components):
+`djvudump` now prints the directory ("bundled, 504 files 504 pages") and
+`ddjvu` renders pages — both errored before. `split 5–8` output likewise
+clean. Lazy-loader synergy: merged bundles now carry real sizes, so
+`from_async_reader_lazy` indexes them with zero component probes (the #584
+fast path). New regression test
+`merge_dirm_offsets_sizes_and_version_are_djvulibre_clean` (version byte,
+non-zero offsets hitting `FORM` tags, size table == component spans); full lib
+suite green (679).
+
+**Decision.** Fixed. Every DJVM writer in the crate now emits
+DjVuLibre-acceptable directories.
+
+**Reason.** The comment-era assumption "readers fall back to FORM boundaries"
+was true of our reader only; the reference implementation treats a zero offset
+as a structural error, and directory version 0 as a different wire format.

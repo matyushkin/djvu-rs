@@ -779,7 +779,8 @@ mod tests {
         use crate::iff::{self as iff_mod, Chunk, EmitPart};
 
         // Build a bundled DIRM with 1 Shared entry (flag=0x00 = Shared)
-        let dirm_payload = DirmPayload::build_bundled(1, &[0x00], &["shared.djvi".to_string()]);
+        let dirm_payload =
+            DirmPayload::build_bundled(1, &[0x00], &["shared.djvi".to_string()], &[]);
         let dirm = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -986,7 +987,8 @@ mod tests {
         // After index_bundled_djvm returns empty pages, lines 164-165 fire.
         use crate::dirm::DirmPayload;
         use crate::iff::{self as iff_djvm, Chunk as IffChunk, EmitPart as IffEmitPart};
-        let dirm_payload = DirmPayload::build_bundled(1, &[0u8], &["shared".to_string()]).encode();
+        let dirm_payload =
+            DirmPayload::build_bundled(1, &[0u8], &["shared".to_string()], &[]).encode();
         let dirm_chunk = IffChunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload,
