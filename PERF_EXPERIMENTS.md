@@ -12623,3 +12623,40 @@ Memoized OCR not implemented.
 the duplication the issue hoped for is at the symbol level, not the word-image level the
 probe measures. Per-symbol classification remains a separate (riskier) follow-up if ever
 revisited.
+## Perf round 105 (2026-07-13) — PDF_JBIG2_GENERIC: generic-region mask encoder (#568) — **Rejected**
+
+### #568 — minimal JBIG2 generic-region PDF masks fail the 0.5× G4 gate — **Rejected** (2026-07-13)
+
+**Issue.** #568 asked whether a minimal PDF `/JBIG2Decode` mask encoder can
+beat the existing `PdfOptions::ccitt_g4` path enough to justify shipping it:
+keep only if externally validated mask streams are **≤ 0.5× G4** on the text
+corpus; otherwise revert and record.
+
+**Approach.** Implemented a minimal encoder prototype in-tree, then reverted it:
+one page-information segment plus one immediate generic-region segment,
+arithmetic coded with a fresh MQ coder (JBIG2, not DjVu ZP), template 0, no
+symbol dictionary or text region. Wired locally behind `PdfOptions::jbig2` using
+the same encode-both-keep-smaller pattern as G4, and measured the produced PDF
+ImageMask stream bodies against Deflate and G4 on the target corpus.
+
+**Numbers.** Release probe over watchmaker/cable/irish/pathogenic:
+
+| document | pages | Deflate | G4 | JBIG2 generic | JBIG2/G4 | decision |
+|---|---:|---:|---:|---:|---:|---|
+| watchmaker | 12 | 1,243,109 | 720,415 | 465,673 | 0.646 | Reject |
+| cable_1973_100133 | 2 | 64,830 | 40,652 | 29,519 | 0.726 | Reject |
+| irish | 1 | 76,937 | 79,025 | 34,160 | 0.432 | Keep |
+| pathogenic_bacteria_1896 | 517 | 94,757,321 | 60,812,194 | 41,513,012 | 0.683 | Reject |
+| TOTAL | 532 | 96,142,197 | 61,652,286 | 42,042,364 | 0.682 | Reject |
+
+**Decision.** **Rejected and reverted.** The minimal generic-region encoder beats
+G4 in absolute bytes, but misses the required **≤ 0.5× G4** gate on the combined
+corpus and on all three target text documents (watchmaker/cable/pathogenic).
+External render validation was not promoted to a keep gate because the size gate
+failed first. A future JBIG2 attempt would need the real compression lever:
+symbol dictionary plus text-region coding, not page-sized generic regions.
+
+**Reason.** The generic-region path leaves too much glyph repetition on the
+table. Shipping it would add a new arithmetic coder and PDF filter path while
+failing the issue's explicit acceptance threshold.
+
