@@ -11935,3 +11935,34 @@ per-page IW44 at thumbnail resolution; small text bundles pay the most).
 **Reason.** The capability gap is closed where the user chooses the trade-off;
 flipping the default would silently inflate typical text-heavy bundles for a
 viewer-side win that only materialises in thumbnail-grid UIs.
+## Perf round 88 (2026-07-12) — EXPORT_COLD_CLONE: per-page render caches no longer accumulate across whole-document exports (#629)
+
+**Issue.** #629 — after the #606 streaming writer, peak RSS of a 504-page PDF
+export was still ~2.2 GB: every rendered page left its decode caches
+(`PageLayers`: masks, background pixmaps, ~4.3 MB/page) on the document, and
+exporters take `&DjVuDocument`, so nothing could evict. Decision rule: peak RSS
+< 500 MB on the 504-page fixture, output bytes unchanged, wall-clock within
+noise, sequential and parallel.
+
+**Approach.** The cheapest of the issue's three ideas turned out to be already
+designed in: `DjVuPage::clone()` deliberately does not clone the render cache.
+All whole-document exporters (PDF both paths, EPUB, CBZ, TIFF colour/bilevel/G4)
+now render each page on a cold clone — the caches fill on the clone and die
+with it at the end of the page; the document's own pages stay cold. Shared-dict
+decodes still live in the `shared_djbz` Arc, so nothing is re-decoded. No API
+change, no interior-mutability redesign.
+
+**Numbers.** 504-page watchmaker bundle (`djvu render --format pdf --all`),
+`/usr/bin/time -l`: sequential peak RSS **2.243 GB → 44.7 MB (50×)**, wall
+30.05 → 29.84 s; parallel **2.336 GB → 240.7 MB (9.7×)**, wall 4.97 → 4.71 s.
+PDF outputs byte-identical (`cmp`, both paths); CBZ byte-identical
+(watchmaker, colorbook); EPUB identical except the mandated
+`dcterms:modified` generation timestamp (verified per-file via unzip diff);
+TIFF covered by the determinism suite.
+
+**Decision.** Kept. The <500 MB bar is beaten 11× (sequential) / 2× (parallel);
+the parallel residual is the O(chunk) rendered bodies by design (#606).
+
+**Reason.** Exports are one-shot page walks — caching for a revisit that never
+comes was the entire 2 GB. A cold clone per page is a 6-line-per-exporter fix
+that reuses the existing Clone contract instead of adding eviction machinery.

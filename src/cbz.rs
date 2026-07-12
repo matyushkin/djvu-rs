@@ -82,19 +82,21 @@ pub fn write_pages<W: Write + std::io::Seek>(
 
     let entry_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
+    // #629: pages render on cold clones so decode caches drop per page
+    // instead of accumulating O(pages) on the document.
     #[cfg(feature = "parallel")]
     let pngs: Vec<Vec<u8>> = {
         use rayon::prelude::*;
         indices
             .par_iter()
-            .map(|&i| build_page_png(doc.page(i)?, opts))
+            .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
             .collect::<Result<Vec<_>, CbzError>>()?
     };
 
     #[cfg(not(feature = "parallel"))]
     let pngs: Vec<Vec<u8>> = indices
         .iter()
-        .map(|&i| build_page_png(doc.page(i)?, opts))
+        .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
         .collect::<Result<Vec<_>, CbzError>>()?;
 
     for (n, png) in pngs.iter().enumerate() {
