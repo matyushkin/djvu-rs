@@ -81,12 +81,21 @@ fn main() {
     if args.first().map(String::as_str) == Some("--corpus") {
         // A representative spread: bilevel, colour, palette, large.
         let files = [
+            // Tier 1
             ("tests/corpus/watchmaker.djvu", 1),
             ("tests/corpus/cable_1973_100133.djvu", 1),
             ("references/djvujs/library/assets/colorbook.djvu", 1),
             ("references/djvujs/library/assets/navm_fgbz.djvu", 1),
             ("references/djvujs/library/assets/boy.djvu", 1),
             ("references/djvujs/library/assets/carte.djvu", 1),
+            // Tier 2 (#558): newspaper, mixed layout, map, CJK, Cyrillic, photo
+            ("tests/corpus/war_1812.djvu", 1),
+            ("tests/corpus/war_1812.djvu", 3),
+            ("tests/corpus/goody_twoshoes.djvu", 1),
+            ("tests/corpus/map_atlas_sample.djvu", 1),
+            ("tests/corpus/chinese_cookbook_sample.djvu", 2),
+            ("tests/corpus/cyrillic_simonovich_co2.djvu", 1),
+            ("tests/corpus/big_scanned_page.djvu", 1),
         ];
         println!(
             "{:28} {:11}  {:11}  {:23} tail (% channels over)",
@@ -98,8 +107,15 @@ fn main() {
                 continue;
             }
             match compare_page(&path, page) {
-                Ok(s) => print_row(path.file_name().and_then(|s| s.to_str()).unwrap_or(rel), &s),
-                Err(e) => println!("{rel:28} SKIP: {e}"),
+                Ok(s) => {
+                    let label = format!(
+                        "{}#{}",
+                        path.file_name().and_then(|s| s.to_str()).unwrap_or(rel),
+                        page
+                    );
+                    print_row(&label, &s);
+                }
+                Err(e) => println!("{rel:28} page={page} SKIP: {e}"),
             }
         }
         return;
