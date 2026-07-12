@@ -19,6 +19,21 @@ Results require `tests/corpus/` files for document and corpus benchmarks. See `C
 CI benchmarks run automatically on every release tag via [`.github/workflows/bench.yml`](.github/workflows/bench.yml).
 Full Criterion HTML reports are uploaded as workflow artifacts (90-day retention).
 
+### WASM scalar vs simd128
+
+The local Node.js harness builds two `wasm-pack --target nodejs` bundles and
+compares scalar wasm32 against `RUSTFLAGS="-C target-feature=+simd128"`:
+
+```sh
+ITERATIONS=50 WARMUP=10 DPI=150 ./scripts/bench_wasm_simd128.sh
+```
+
+The script uses `tests/fixtures/boy.djvu` by default and reports parse,
+full-render, cached-render, and first progressive-render timings. CI
+syntax-checks the harness and build-checks both wasm targets, but does not run
+timing comparisons because hosted runner variance is too high for stable
+regression gates.
+
 This file is the broad baseline table. Smaller issue-driven experiments and
 kept/reverted decisions are recorded in [`PERF_EXPERIMENTS.md`](PERF_EXPERIMENTS.md),
 including recent async lazy loading and x86-64-v3 AVX2 validation results.
