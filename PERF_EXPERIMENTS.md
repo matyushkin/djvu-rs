@@ -12433,3 +12433,46 @@ exist (Photo profile), the ZP-slice-ordered coefficient floor dominates the
 streaming peak and caps strip-wise at 1.5×. Follow-up recorded on the issue:
 the only >2× lever is compressing the coefficient floor itself (out of scope —
 would break the interoperable slice-ordered wire format).
+## Perf round 101 (2026-07-12) — FG44_FOREGROUND: continuous-tone FG44 foreground model (#591) — **Rejected (loses to FGbz on fidelity AND bytes)**
+
+**Issue.** #591 — the encoder only ever emits the FGbz palette foreground; a
+k-colour palette cannot represent continuous-tone ink (stamps, highlighter,
+faded/gradient seals). Wire a `PageEncoder` `ForegroundModel::{Fgbz, Fg44}`
+option and keep FG44 if it wins the gradient-ink cases at comparable bytes.
+
+**Approach.** Implemented the full encode path: `ForegroundModel` option,
+`foreground_fg44_image` (per-cell mean of inked pixels at spec reduction 12,
+harmonic Jacobi diffusion for ink-free cells to keep the wavelet cheap),
+`encode_iw44_color` into a **single** FG44 chunk (multiple chunks are rejected
+by DjVuLibre as "Duplicate foreground color info" — fixed to one chunk).
+Interop gate passes: `ddjvu` renders our FG44 pages. Probe
+`examples/fg44_probe.rs` compared FG44 vs FGbz (Exact + median-cut k∈{4..64})
+on synthetic gradient-ink text, a radial-gradient rubber stamp, and a
+full-page all-masked gradient; also swept FG44 reduction ∈ {1,3,6,12}.
+
+**Numbers (dE_mean vs source, lower better; FGbz baseline in parens).**
+- Gradient-ink text: FG44 **8.31 / 1370 B** vs FGbz Exact 2.13 / 772 B.
+- Radial stamp (one blit → FGbz gives it one flat colour): FG44 **9.52 / 2714 B**
+  vs FGbz 4.91 / 2210 B — FG44 is worse than a *single flat colour* despite
+  encoding the gradient.
+- Reduction sweep on the stamp: red=1 dE 10.0 / 16 KB, red=3 10.6, red=6 10.7,
+  red=12 9.5 — **finer reduction is worse**, ruling out "too coarse".
+- All-masked pure gradient: FG44 **18.48** vs FGbz 7.41; the green channel is
+  crushed toward 0 on dark ink (src (26,15,36) → decoded (24,0,44)), and
+  **`ddjvu` decodes the identical wrong values** — so it is the FG44 encoding,
+  not our compositor.
+
+**Decision.** Rejected; code reverted (interop finding preserved: FG44 must be
+a single chunk). FGbz — especially `Exact`, which is near-lossless per blit —
+dominates because real foreground ink is *piecewise-near-constant per connected
+component*, exactly what a palette captures. FG44's only structural advantage
+(continuous tone *within* one component) is more than offset by the
+reduction-12 blur, the IW44 wavelet quantisation, and YCbCr chroma loss that
+crushes dark ink — and it costs more bytes at every operating point.
+
+**Reason.** The palette-failure premise assumed foreground colour varies
+continuously; measured, it varies *between* components (which FGbz Exact nails
+losslessly) far more than *within* one. The auto-switch follow-up the issue
+anticipated has no domain to switch into: FG44 did not win a single tested
+case. If a genuine within-component continuous-tone-ink corpus surfaces (#558),
+re-open with the dark-ink chroma-crush as the first thing to fix.
