@@ -153,6 +153,11 @@ enum Cmd {
         /// distinct pages. Default: 2.
         #[arg(long, default_value = "2")]
         shared_dict_pages: usize,
+        /// (Multi-page layered only.) Embed a TH44 colour thumbnail in each
+        /// page — thumbnail grids decode 2–15× faster (TH44_GRID) at a small
+        /// size cost.
+        #[arg(long)]
+        thumbnails: bool,
     },
     /// Extract the text layer from a DjVu document.
     Text {
@@ -315,6 +320,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             bg_inpaint,
             bg_bpp,
             shared_dict_pages,
+            thumbnails,
         } => cmd_encode(
             &input,
             &output,
@@ -327,7 +333,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 bg_inpaint,
             },
             bg_bpp,
-            shared_dict_pages,
+            EncodeBundleArgs {
+                shared_dict_pages,
+                thumbnails,
+            },
         ),
     }
 }
@@ -1057,8 +1066,12 @@ fn cmd_encode(
     quality: EncodeQualityArg,
     segment_args: EncodeSegmentArgs,
     bg_bpp: Option<f32>,
-    shared_dict_pages: usize,
+    bundle_args: EncodeBundleArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let EncodeBundleArgs {
+        shared_dict_pages,
+        thumbnails,
+    } = bundle_args;
     use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
     use djvu_rs::iw44_encode::{Iw44EncodeOptions, Iw44Target};
     use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
@@ -1103,6 +1116,9 @@ fn cmd_encode(
         };
 
         if matches!(quality, EncodeQualityArg::Lossless) {
+            if thumbnails {
+                eprintln!("--thumbnails is ignored for lossless (JB2-only) bundles");
+            }
             let mut masks = Vec::with_capacity(entries.len());
             for path in &entries {
                 let pixmap = djvu_rs::png_io::decode_image_to_pixmap(path)?;
@@ -1127,26 +1143,31 @@ fn cmd_encode(
         for path in &entries {
             pixmaps.push(djvu_rs::png_io::decode_image_to_pixmap(path)?);
         }
-        let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared(
+        let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared_with_thumbnails(
             &pixmaps,
             q,
             dpi,
             segment_options,
             shared_dict_pages,
+            thumbnails,
         )
         .map_err(|e| format!("layered encode: {e}"))?;
         std::fs::write(output, &bytes)?;
         eprintln!(
-            "{} pages → {} ({} bytes, layered {:?}, shared-dict threshold = {})",
+            "{} pages → {} ({} bytes, layered {:?}, shared-dict threshold = {}, thumbnails = {})",
             entries.len(),
             output.display(),
             bytes.len(),
             q,
             shared_dict_pages,
+            thumbnails,
         );
         return Ok(());
     }
 
+    if thumbnails {
+        eprintln!("--thumbnails applies to multi-page bundles only — ignored");
+    }
     let pixmap = djvu_rs::png_io::decode_image_to_pixmap(input)?;
 
     // --quality auto (#570): pick the profile from cheap pixel statistics.
@@ -1195,6 +1216,13 @@ fn cmd_encode(
         bytes.len(),
     );
     Ok(())
+}
+
+/// Multi-page-bundle options of `djvu encode` (single-page paths ignore them).
+#[derive(Clone, Copy)]
+struct EncodeBundleArgs {
+    shared_dict_pages: usize,
+    thumbnails: bool,
 }
 
 #[derive(Clone, Copy)]

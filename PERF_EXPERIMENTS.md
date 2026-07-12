@@ -11907,3 +11907,31 @@ one page exactly; `from_bytes` unchanged by construction.
 **Reason.** The browser is where TTFP matters most (djvu.js comparison target);
 the JS-callback seam reuses the entire native lazy stack — index, shared-DJVI
 resolution, page cache — with ~200 lines of adapter and no new decode paths.
+
+## Perf round 87 (2026-07-12) — CLI_TH44: expose TH44 thumbnail embedding (--thumbnails) and measure cost/benefit (#590)
+
+**Issue.** #590 — TH44 embedding existed
+(`encode_djvm_layered_shared_with_thumbnails`) but was unreachable: the CLI had
+no flag and the default path hard-codes `with_thumbnails: false`, so TH44_GRID's
+fast thumbnail path (round 44) never fired on our own encodes. Decision rule:
+the flag lands regardless; the default flips only if overhead < ~1% of typical
+bundle size.
+
+**Approach.** `djvu encode --thumbnails` (multi-page layered paths), routed to
+the existing `_with_thumbnails` encoder; warnings for the paths it can't apply
+to (single-page, lossless JB2-only bundles). New probe
+`examples/th44_grid_probe.rs`: byte cost of the TH44 chunks + median
+`Document::thumbnails(128×128)` grid time on with/without bundles.
+
+**Numbers.** watchmaker-derived 12-page text bundle: +43.4 KB = **+33.1%**
+(3.6 KB/page), grid 98.4 → 6.6 ms (**15.0×**). colorbook-derived 12-page colour
+bundle: +28.1 KB = **+7.3%** (2.3 KB/page), grid 205.0 → 4.6 ms (**44.3×**).
+DjVuLibre `ddjvu` decodes the with-thumbnails bundles cleanly (interop ✓).
+
+**Decision.** Kept as opt-in; default NOT flipped. Overhead is 7–33% of the
+bundle on real 12-page encodes — orders of magnitude above the <1% bar (TH44 is
+per-page IW44 at thumbnail resolution; small text bundles pay the most).
+
+**Reason.** The capability gap is closed where the user chooses the trade-off;
+flipping the default would silently inflate typical text-heavy bundles for a
+viewer-side win that only materialises in thumbnail-grid UIs.
