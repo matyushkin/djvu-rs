@@ -51,6 +51,9 @@
 //!   --out-dir <path>         where findings are saved
 //!   --ddjvu <path>           path to ddjvu (else $DIFF_FUZZ_DDJVU or PATH)
 //!   --djvudump <path>        path to djvudump (else $DIFF_FUZZ_DJVUDUMP or PATH)
+//!   --djvused <path>         path to djvused (else $DIFF_FUZZ_DJVUSED or PATH);
+//!                            enables the #597 metadata-plane differential
+//!                            (txt/ant/outline extraction vs ours)
 //!
 //! With no positional files, mutates three representative corpus files
 //! spanning a bundled multi-page bilevel doc, a small bundled doc, and a
@@ -65,7 +68,7 @@ use std::time::{Duration, Instant};
 #[path = "support/mod.rs"]
 mod support;
 
-use djvu_rs::djvu_document::DjVuDocument;
+use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
 use djvu_rs::djvu_render::render_pixmap;
 use support::{diff_stats, native_opts, parse_ppm};
 
@@ -520,6 +523,335 @@ fn ddjvu_stderr(
     )
 }
 
+// ── Metadata planes (#597): djvused differential ────────────────────────────
+//
+// The render ladder above is blind to the metadata planes: a mutant whose
+// TXTz/ANTz/NAVM we read differently from DjVuLibre still renders identical
+// pixels. For mutants where at least one side structurally accepts, both
+// sides additionally run text / annotation / outline extraction (our
+// `page.text()` / `page.annotations()` / `doc.bookmarks()` vs `djvused
+// print-pure-txt / print-ant / print-outline`) and each plane is classified
+// accept / reject / content-divergence. Comparison signatures are
+// deliberately coarse (whitespace-insensitive text, maparea count, bookmark
+// title+url multiset with djvused's octal escapes decoded) — enough to flag a
+// divergence for adjudication without re-implementing djvused's printer.
+// A per-(page, plane) baseline on the *unmutated* file gates findings, so a
+// pre-existing normalization gap is reported once, not per mutant.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlaneSide {
+    /// Extraction errored (parse failure, subprocess failure, or timeout).
+    Reject(String),
+    /// Extraction succeeded and the plane is absent/empty.
+    Empty,
+    /// Extraction succeeded; normalized comparison signature.
+    Content(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum MetaClass {
+    BothReject,
+    BothEmpty,
+    Match,
+    /// Both extract content, signatures differ — the headline divergence.
+    Diverge,
+    /// We extract content where djvused rejects or sees nothing.
+    OursOnly,
+    /// djvused extracts content where we reject or see nothing.
+    TheirsOnly,
+    /// One side rejects while the other sees an empty plane — a lenient/strict
+    /// acceptance gap with no content at stake (tallied, not saved).
+    AcceptMismatch,
+}
+
+impl MetaClass {
+    fn label(self) -> &'static str {
+        match self {
+            MetaClass::BothReject => "both-reject",
+            MetaClass::BothEmpty => "both-empty",
+            MetaClass::Match => "match",
+            MetaClass::Diverge => "content-diverge",
+            MetaClass::OursOnly => "ours-only",
+            MetaClass::TheirsOnly => "theirs-only",
+            MetaClass::AcceptMismatch => "accept-mismatch",
+        }
+    }
+
+    fn is_finding(self) -> bool {
+        matches!(
+            self,
+            MetaClass::Diverge | MetaClass::OursOnly | MetaClass::TheirsOnly
+        )
+    }
+}
+
+const META_PLANES: [&str; 3] = ["txt", "ant", "outline"];
+
+fn meta_class(ours: &PlaneSide, theirs: &PlaneSide) -> MetaClass {
+    use PlaneSide::*;
+    match (ours, theirs) {
+        (Reject(_), Reject(_)) => MetaClass::BothReject,
+        (Empty, Empty) => MetaClass::BothEmpty,
+        (Content(a), Content(b)) => {
+            if a == b {
+                MetaClass::Match
+            } else {
+                MetaClass::Diverge
+            }
+        }
+        (Content(_), _) => MetaClass::OursOnly,
+        (_, Content(_)) => MetaClass::TheirsOnly,
+        (Reject(_), Empty) | (Empty, Reject(_)) => MetaClass::AcceptMismatch,
+    }
+}
+
+/// Whitespace- and control-character-insensitive text signature: our text
+/// layer keeps DjVu's zone-separator control bytes and djvused's pure-txt
+/// prints its own line-break convention, so only the character content is
+/// comparable.
+fn text_signature(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect()
+}
+
+fn flatten_bookmarks(marks: &[DjVuBookmark], out: &mut Vec<String>) {
+    for m in marks {
+        out.push(text_signature(&m.title));
+        out.push(text_signature(&m.url));
+        flatten_bookmarks(&m.children, out);
+    }
+}
+
+fn bookmarks_signature(marks: &[DjVuBookmark]) -> Option<String> {
+    if marks.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    flatten_bookmarks(marks, &mut parts);
+    parts.sort();
+    Some(parts.join("|"))
+}
+
+/// Extract the quoted strings from djvused s-expression output, decoding its
+/// escapes (`\"`, `\\`, and octal `\NNN` byte escapes for non-ASCII).
+fn sexpr_quoted_strings(raw: &str) -> Vec<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut cur: Vec<u8> = Vec::new();
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                let c = bytes[i + 1];
+                if c.is_ascii_digit() {
+                    let mut val = 0u32;
+                    let mut n = 0;
+                    while n < 3 && i + 1 + n < bytes.len() && bytes[i + 1 + n].is_ascii_digit() {
+                        val = val * 8 + u32::from(bytes[i + 1 + n] - b'0');
+                        n += 1;
+                    }
+                    cur.push((val & 0xFF) as u8);
+                    i += 1 + n;
+                } else {
+                    let decoded = match c {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'r' => b'\r',
+                        other => other,
+                    };
+                    cur.push(decoded);
+                    i += 2;
+                }
+            } else {
+                cur.push(bytes[i]);
+                i += 1;
+            }
+        }
+        i += 1; // closing quote
+        out.push(String::from_utf8_lossy(&cur).into_owned());
+    }
+    out
+}
+
+/// Our-side metadata extraction, panic-caught and time-bounded like
+/// `our_attempt`. A document parse failure rejects all three planes — that
+/// asymmetry vs djvused (which may still print planes of a file whose other
+/// chunks are damaged) is exactly a divergence worth surfacing.
+fn our_meta(mutant: Vec<u8>, page_idx: usize, timeout: Duration) -> [PlaneSide; 3] {
+    let (tx, rx) = mpsc::channel();
+    let builder = std::thread::Builder::new()
+        .name("diff-fuzz-meta".into())
+        .stack_size(8 * 1024 * 1024);
+    let spawned = builder.spawn(move || {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| -> [PlaneSide; 3] {
+            let doc = match DjVuDocument::parse(&mutant) {
+                Ok(d) => d,
+                Err(e) => {
+                    let r = PlaneSide::Reject(format!("parse: {e}"));
+                    return [r.clone(), r.clone(), r];
+                }
+            };
+            let outline = match bookmarks_signature(doc.bookmarks()) {
+                Some(sig) => PlaneSide::Content(sig),
+                None => PlaneSide::Empty,
+            };
+            let (txt, ant) = match doc.page(page_idx) {
+                Ok(page) => {
+                    let txt = match page.text() {
+                        Ok(Some(t)) if !text_signature(&t).is_empty() => {
+                            PlaneSide::Content(text_signature(&t))
+                        }
+                        Ok(_) => PlaneSide::Empty,
+                        Err(e) => PlaneSide::Reject(format!("text: {e}")),
+                    };
+                    let ant = match page.annotations() {
+                        Ok(Some((_ann, areas))) => {
+                            PlaneSide::Content(format!("maparea:{}", areas.len()))
+                        }
+                        Ok(None) => PlaneSide::Empty,
+                        Err(e) => PlaneSide::Reject(format!("ant: {e}")),
+                    };
+                    (txt, ant)
+                }
+                Err(e) => {
+                    let r = PlaneSide::Reject(format!("page: {e}"));
+                    (r.clone(), r)
+                }
+            };
+            [txt, ant, outline]
+        }));
+        let _ = tx.send(result);
+    });
+    if spawned.is_err() {
+        let r = PlaneSide::Reject("failed to spawn worker thread".into());
+        return [r.clone(), r.clone(), r];
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(planes)) => planes,
+        Ok(Err(payload)) => {
+            let r = PlaneSide::Reject(format!("panic: {}", panic_payload_to_string(payload)));
+            [r.clone(), r.clone(), r]
+        }
+        Err(_) => {
+            let r = PlaneSide::Reject("timeout".into());
+            [r.clone(), r.clone(), r]
+        }
+    }
+}
+
+/// Run one `djvused -e '<script>'` and capture stdout with a kill-on-timeout
+/// guard. `None` = spawn failure or timeout (caller records a Reject).
+fn command_stdout(bin: &str, args: &[&str], timeout: Duration) -> Option<(bool, String)> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break None,
+        }
+    };
+    let out = child.wait_with_output().ok()?;
+    let status = status?;
+    Some((
+        status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}
+
+fn their_meta(
+    djvused_bin: &str,
+    path: &Path,
+    page_idx: usize,
+    timeout: Duration,
+) -> [PlaneSide; 3] {
+    let page_no = page_idx + 1; // djvused select is 1-based
+    let path_str = path.to_string_lossy();
+
+    let run = |script: String| -> PlaneSide {
+        match command_stdout(djvused_bin, &[path_str.as_ref(), "-e", &script], timeout) {
+            None => PlaneSide::Reject("djvused spawn/timeout".into()),
+            Some((false, _)) => PlaneSide::Reject("djvused nonzero exit".into()),
+            Some((true, out)) => {
+                if out.trim().is_empty() {
+                    PlaneSide::Empty
+                } else {
+                    PlaneSide::Content(out)
+                }
+            }
+        }
+    };
+
+    let txt = match run(format!("select {page_no}; print-pure-txt")) {
+        PlaneSide::Content(out) => {
+            let sig = text_signature(&out);
+            if sig.is_empty() {
+                PlaneSide::Empty
+            } else {
+                PlaneSide::Content(sig)
+            }
+        }
+        other => other,
+    };
+
+    let ant = match run(format!("select {page_no}; print-ant")) {
+        PlaneSide::Content(out) => {
+            PlaneSide::Content(format!("maparea:{}", out.matches("(maparea").count()))
+        }
+        other => other,
+    };
+
+    let outline = match run("print-outline".to_string()) {
+        PlaneSide::Content(out) => {
+            let mut parts: Vec<String> = sexpr_quoted_strings(&out)
+                .iter()
+                .map(|s| text_signature(s))
+                .collect();
+            if parts.is_empty() {
+                PlaneSide::Empty
+            } else {
+                parts.sort();
+                PlaneSide::Content(parts.join("|"))
+            }
+        }
+        other => other,
+    };
+
+    [txt, ant, outline]
+}
+
+fn plane_side_brief(p: &PlaneSide) -> String {
+    match p {
+        PlaneSide::Reject(e) => format!("reject({e})"),
+        PlaneSide::Empty => "empty".to_string(),
+        PlaneSide::Content(sig) => {
+            let mut s = sig.clone();
+            if s.chars().count() > 160 {
+                s = s.chars().take(160).collect::<String>() + "…";
+            }
+            format!("content[{s}]")
+        }
+    }
+}
+
 // ── Classification & findings ───────────────────────────────────────────────
 
 // Both sides are modeled with the same three-level acceptance ladder:
@@ -589,7 +921,9 @@ impl Class {
 }
 
 struct Finding {
-    class: Class,
+    /// `Class::label()` for render-ladder findings, or `meta-<plane>-<class>`
+    /// for metadata-plane findings.
+    class_label: String,
     file_stem: String,
     mutant_idx: usize,
     mutation_desc: String,
@@ -599,18 +933,13 @@ struct Finding {
 
 fn save_finding(out_dir: &Path, mutant: &[u8], f: &Finding) {
     let _ = std::fs::create_dir_all(out_dir);
-    let base = format!("{}_{:05}_{}", f.file_stem, f.mutant_idx, f.class.label());
+    let base = format!("{}_{:05}_{}", f.file_stem, f.mutant_idx, f.class_label);
     let djvu_path = out_dir.join(format!("{base}.djvu"));
     let txt_path = out_dir.join(format!("{base}.txt"));
     if std::fs::write(&djvu_path, mutant).is_ok() {
         let note = format!(
             "class: {}\nsource file: {}\nmutant index: {}\nmutation: {}\ntarget page (0-based): {}\ndetail: {}\n",
-            f.class.label(),
-            f.file_stem,
-            f.mutant_idx,
-            f.mutation_desc,
-            f.page_idx,
-            f.detail,
+            f.class_label, f.file_stem, f.mutant_idx, f.mutation_desc, f.page_idx, f.detail,
         );
         let _ = std::fs::write(&txt_path, note);
     }
@@ -628,6 +957,7 @@ struct Config {
     out_dir: PathBuf,
     ddjvu_bin: String,
     djvudump_bin: String,
+    djvused_bin: String,
     /// Cap on saved findings per (file, class) — avoids flooding the
     /// regressions directory with near-duplicate repros of one root cause.
     findings_cap: usize,
@@ -642,6 +972,9 @@ fn default_files(manifest: &Path) -> Vec<PathBuf> {
         "tests/corpus/watchmaker.djvu",
         "tests/corpus/cable_1973_100133.djvu",
         "tests/fixtures/boy.djvu",
+        // NAVM + ANTz coverage for the metadata planes (#597) — the corpus
+        // scans above only carry TXTz.
+        "tests/fixtures/navm_fgbz.djvu",
     ]
     .iter()
     .map(|p| manifest.join(p))
@@ -662,6 +995,7 @@ fn parse_args() -> Config {
         ddjvu_bin: std::env::var("DIFF_FUZZ_DDJVU").unwrap_or_else(|_| "ddjvu".to_string()),
         djvudump_bin: std::env::var("DIFF_FUZZ_DJVUDUMP")
             .unwrap_or_else(|_| "djvudump".to_string()),
+        djvused_bin: std::env::var("DIFF_FUZZ_DJVUSED").unwrap_or_else(|_| "djvused".to_string()),
         findings_cap: 5,
     };
 
@@ -699,6 +1033,10 @@ fn parse_args() -> Config {
             "--djvudump" => {
                 i += 1;
                 cfg.djvudump_bin = args[i].clone();
+            }
+            "--djvused" => {
+                i += 1;
+                cfg.djvused_bin = args[i].clone();
             }
             other => cfg.files.push(PathBuf::from(other)),
         }
@@ -743,6 +1081,13 @@ fn main() {
         .stderr(Stdio::null())
         .status()
         .is_ok();
+    let have_djvused = Command::new(&cfg.djvused_bin)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
     let solo_mode = !have_djvudump;
 
     println!("DIFF_FUZZ — corpus-mutation differential fuzzer");
@@ -763,6 +1108,12 @@ fn main() {
              pixel comparison is skipped for mutants both sides accept."
         );
     }
+    if !have_djvused {
+        println!(
+            "  djvused not found — metadata planes (#597: txt/ant/outline) are\n\
+             not compared. Install DjVuLibre or pass --djvused."
+        );
+    }
 
     let tmp_dir = std::env::temp_dir().join(format!("diff_fuzz_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -772,6 +1123,10 @@ fn main() {
 
     let mut totals: std::collections::BTreeMap<Class, usize> = std::collections::BTreeMap::new();
     let mut findings_saved: std::collections::BTreeMap<Class, usize> =
+        std::collections::BTreeMap::new();
+    let mut meta_totals: std::collections::BTreeMap<(&'static str, MetaClass), usize> =
+        std::collections::BTreeMap::new();
+    let mut meta_findings_saved: std::collections::BTreeMap<(&'static str, MetaClass), usize> =
         std::collections::BTreeMap::new();
     let mut saved_paths: Vec<PathBuf> = Vec::new();
     let mut ran_out_of_time = false;
@@ -800,6 +1155,13 @@ fn main() {
             chunks.len(),
             n_pages,
         );
+
+        // Per-(page) metadata baseline on the unmutated file: findings are
+        // gated on differing from it, so a pre-existing normalization gap
+        // between our extraction and djvused surfaces once per file, not per
+        // mutant. Computed lazily for the pages mutations actually target.
+        let mut meta_baseline: std::collections::HashMap<usize, [MetaClass; 3]> =
+            std::collections::HashMap::new();
 
         for m in 0..cfg.mutants_per_file {
             if overall_start.elapsed() > budget {
@@ -979,7 +1341,7 @@ fn main() {
                         detail
                     };
                     let finding = Finding {
-                        class,
+                        class_label: class.label().to_string(),
                         file_stem: file_stem.clone(),
                         mutant_idx: m,
                         mutation_desc: mutation_desc.clone(),
@@ -994,6 +1356,64 @@ fn main() {
                         class.label()
                     )));
                     *saved_count += 1;
+                }
+            }
+
+            // ── Metadata planes (#597): txt / ant / outline vs djvused ──
+            // Skipped when our side is unstable on this mutant (crash /
+            // timeout) or when both sides already rejected structurally —
+            // djvused has nothing meaningful to print for those.
+            if have_djvused
+                && !matches!(
+                    class,
+                    Class::BothReject | Class::OurCrash | Class::OurTimeout | Class::SoloReject
+                )
+            {
+                let baseline = *meta_baseline.entry(page_idx).or_insert_with(|| {
+                    let bo = our_meta(base.clone(), page_idx, cfg.our_timeout);
+                    let bt = their_meta(&cfg.djvused_bin, file, page_idx, cfg.ref_timeout);
+                    let cls = [
+                        meta_class(&bo[0], &bt[0]),
+                        meta_class(&bo[1], &bt[1]),
+                        meta_class(&bo[2], &bt[2]),
+                    ];
+                    println!(
+                        "  metadata baseline (page {page_idx}): txt={} ant={} outline={}",
+                        cls[0].label(),
+                        cls[1].label(),
+                        cls[2].label()
+                    );
+                    cls
+                });
+
+                let ours = our_meta(mutant.clone(), page_idx, cfg.our_timeout);
+                let theirs = their_meta(&cfg.djvused_bin, &mutant_path, page_idx, cfg.ref_timeout);
+                for (i, plane) in META_PLANES.iter().enumerate() {
+                    let mcls = meta_class(&ours[i], &theirs[i]);
+                    *meta_totals.entry((plane, mcls)).or_insert(0) += 1;
+                    if mcls.is_finding() && mcls != baseline[i] {
+                        let saved = meta_findings_saved.entry((plane, mcls)).or_insert(0);
+                        if *saved < cfg.findings_cap {
+                            let label = format!("meta-{}-{}", plane, mcls.label());
+                            let finding = Finding {
+                                class_label: label.clone(),
+                                file_stem: file_stem.clone(),
+                                mutant_idx: m,
+                                mutation_desc: mutation_desc.clone(),
+                                page_idx,
+                                detail: format!(
+                                    "baseline: {}\nours:   {}\ntheirs: {}",
+                                    baseline[i].label(),
+                                    plane_side_brief(&ours[i]),
+                                    plane_side_brief(&theirs[i])
+                                ),
+                            };
+                            save_finding(&cfg.out_dir, &mutant, &finding);
+                            saved_paths
+                                .push(cfg.out_dir.join(format!("{file_stem}_{m:05}_{label}.djvu")));
+                            *saved += 1;
+                        }
+                    }
                 }
             }
 
@@ -1025,6 +1445,12 @@ fn main() {
     println!("total mutants classified: {total}");
     for (class, count) in &totals {
         println!("  {:<18} {:>6}", class.label(), count);
+    }
+    if !meta_totals.is_empty() {
+        println!("metadata planes (#597, per plane × class):");
+        for ((plane, mcls), count) in &meta_totals {
+            println!("  {:<8} {:<16} {:>6}", plane, mcls.label(), count);
+        }
     }
     if saved_paths.is_empty() {
         println!("no findings saved (out-dir: {})", cfg.out_dir.display());
