@@ -498,6 +498,32 @@ jobs:
             target/criterion/
           retention-days: 90
 
+
+  # ── #566: bisect which x86-64-v3 features move ZP decode (Callgrind Ir) ──
+  x86-feature-bisect:
+    name: x86 feature bisect (Callgrind, #566)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: callgrind-x86-bisect
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install --yes valgrind
+      - name: Bisect target features
+        run: bash scripts/x86_feature_callgrind.sh
+      - name: Upload bisect results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-feature-bisect-${{ github.sha }}
+          path: target/x86-feature-bisect/
+          if-no-files-found: warn
+          retention-days: 30
+
   instruction-count:
     name: Instruction counts (Callgrind)
     runs-on: ubuntu-latest
