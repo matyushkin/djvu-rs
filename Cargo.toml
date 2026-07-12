@@ -247,6 +247,10 @@ required-features = ["std"]
 name = "iw44_band_probe"
 required-features = ["iw44-probe"]
 
+[[example]]
+name = "iw44_forward_transform_probe"
+required-features = ["iw44-probe"]
+
 [[bench]]
 name = "codecs"
 harness = false
