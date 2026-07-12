@@ -1144,6 +1144,42 @@ mod tests {
         bm
     }
 
+    /// #601: the bilevel Lossless path is a provable fixed point — decode →
+    /// re-encode reproduces the mask bit-for-bit, and a second cycle
+    /// reproduces the container bytes too. Guards against generation loss on
+    /// the one profile that promises none.
+    #[test]
+    fn lossless_bilevel_reencode_is_idempotent() {
+        for fixture in ["tests/fixtures/boy_jb2.djvu", "tests/fixtures/ccitt_2.djvu"] {
+            let data = std::fs::read(fixture).unwrap();
+            let doc = crate::djvu_document::DjVuDocument::parse(&data).unwrap();
+            let page = doc.page(0).unwrap();
+            let dpi = page.dpi() as u16;
+            let mask0 = page
+                .extract_mask()
+                .unwrap()
+                .expect("bilevel fixture has a mask");
+
+            let gen1 = PageEncoder::from_bitmap(&mask0)
+                .with_dpi(dpi)
+                .encode()
+                .unwrap();
+            let doc1 = crate::djvu_document::DjVuDocument::parse(&gen1).unwrap();
+            let mask1 = doc1.page(0).unwrap().extract_mask().unwrap().unwrap();
+            assert_eq!(
+                (mask0.width, mask0.height, &mask0.data),
+                (mask1.width, mask1.height, &mask1.data),
+                "{fixture}: generation-1 mask must be bit-identical"
+            );
+
+            let gen2 = PageEncoder::from_bitmap(&mask1)
+                .with_dpi(dpi)
+                .encode()
+                .unwrap();
+            assert_eq!(gen1, gen2, "{fixture}: generation 2 must be a fixed point");
+        }
+    }
+
     #[test]
     fn default_segment_options_maps_archival_to_dense_background() {
         // Single source of truth for the quality → segmentation mapping: only
