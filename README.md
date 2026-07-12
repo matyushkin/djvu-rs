@@ -192,18 +192,26 @@ and extract the text layer. See [`djvu-py/README.md`](djvu-py/README.md).
 
 ## WebAssembly
 
-Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
+Build the browser package with [wasm-pack](https://rustwasm.github.io/wasm-pack/)
+through the checked-in wrapper:
 
 ```sh
-wasm-pack build --target bundler --features wasm
+make wasm
 ```
+
+This produces `examples/wasm/pkg/` with one JavaScript entry point, a scalar
+fallback `.wasm`, and a `simd128` `.wasm`. At runtime the loader validates a
+tiny WebAssembly SIMD probe and selects the faster `simd128` artifact when the
+browser supports it, otherwise it loads the scalar artifact.
 
 Then use in JavaScript/TypeScript:
 
 ```js
-import init, { WasmDocument } from './pkg/djvu_rs.js';
+import init, { WasmDocument, selectedWasmVariant } from './pkg/djvu_rs.js';
 
 await init();
+console.log(`djvu-rs wasm variant: ${selectedWasmVariant()}`);
+
 const doc = WasmDocument.from_bytes(new Uint8Array(arrayBuffer));
 console.log(doc.page_count());
 
@@ -220,8 +228,8 @@ the index plus the pages actually opened.
 
 The generated npm package follows the Rust crate version; there is no separate
 WASM release train. The local `pkg/` directory is ignored wasm-pack output, so
-regenerate it from the checked-in `Cargo.toml` before publishing instead of
-editing generated `pkg/package.json` by hand.
+regenerate it with `make wasm` from the checked-in `Cargo.toml` before
+publishing instead of editing generated `pkg/package.json` by hand.
 
 ## Advanced usage
 
