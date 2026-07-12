@@ -198,21 +198,40 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
 fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Vec<u8>, DjvmError> {
     let n = components.len();
 
-    // Build DIRM chunk (bundled; offset slots zeroed — readers fall back to
-    // FORM boundaries, matching prior behavior).
-    let dirm = iff::Chunk::Leaf {
-        id: *b"DIRM",
-        data: DirmPayload::build_bundled(n, flags, ids).encode(),
+    // Each component includes the AT&T prefix — strip it for embedding. Its
+    // remaining length (FORM header + payload) is the DIRM size-table entry.
+    let stripped: Vec<&[u8]> = components.iter().map(|c| strip_att(c)).collect();
+    let sizes: Vec<u32> = stripped
+        .iter()
+        .map(|s| u32::try_from(s.len()).unwrap_or(0))
+        .collect();
+
+    // Two-pass emission (the `partial_emit_with_offsets` contract): pass 1
+    // learns where each component lands, pass 2 re-emits with the DIRM offset
+    // table filled in. The offset table is fixed-width and the size table is
+    // final from pass 1, so the layout cannot shift between passes. A zeroed
+    // offset table is rejected by DjVuLibre's DjVmDir ("no indirect entries
+    // allowed in bundled document", #657).
+    let mut payload = DirmPayload::build_bundled(n, flags, ids, &sizes);
+    let emit = |payload: &DirmPayload| -> Result<(Vec<u8>, Vec<usize>), DjvmError> {
+        let dirm = iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: payload.encode(),
+        };
+        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
+        parts.push(iff::EmitPart::Chunk(&dirm));
+        parts.extend(stripped.iter().map(|s| iff::EmitPart::Verbatim(s)));
+        iff::partial_emit_with_offsets(*b"DJVM", &parts).ok_or(DjvmError::OutputTooLarge)
     };
 
-    // Each component includes the AT&T prefix — strip it for embedding.
-    let stripped: Vec<&[u8]> = components.iter().map(|c| strip_att(c)).collect();
-
-    let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
-    parts.push(iff::EmitPart::Chunk(&dirm));
-    parts.extend(stripped.iter().map(|s| iff::EmitPart::Verbatim(s)));
-
-    iff::partial_emit(*b"DJVM", &parts).ok_or(DjvmError::OutputTooLarge)
+    let (_, offsets) = emit(&payload)?;
+    payload.offsets = offsets[1..] // parts[0] is the DIRM itself
+        .iter()
+        .map(|&o| u32::try_from(o).map_err(|_| DjvmError::OutputTooLarge))
+        .collect::<Result<_, _>>()?;
+    let (bytes, second_offsets) = emit(&payload)?;
+    debug_assert_eq!(offsets, second_offsets, "two-pass layout must be stable");
+    Ok(bytes)
 }
 
 /// Create an indirect (non-bundled) DJVM index file that references pages as
@@ -262,6 +281,41 @@ mod tests {
     fn merge_empty_returns_error() {
         let result = merge(&[]);
         assert!(result.is_err());
+    }
+
+    /// #657: merged bundles must carry a DjVuLibre-acceptable DIRM — version
+    /// byte 0x81 (bundled, directory version 1), every offset non-zero and
+    /// pointing at a component `FORM` tag, and the 24-bit size table matching
+    /// each component's actual byte span. A zeroed offset table or version 0
+    /// is rejected by DjVmDir ("no indirect entries allowed in bundled
+    /// document").
+    #[test]
+    fn merge_dirm_offsets_sizes_and_version_are_djvulibre_clean() {
+        let a = std::fs::read(fixture_path("navm_fgbz.djvu")).unwrap();
+        let bytes = merge(&[&a, &a]).unwrap();
+
+        assert_eq!(&bytes[16..20], b"DIRM");
+        let dirm_len = u32::from_be_bytes(bytes[20..24].try_into().unwrap()) as usize;
+        let payload = &bytes[24..24 + dirm_len];
+        assert_eq!(payload[0], 0x81, "bundled bit + directory version 1");
+
+        let nfiles = u16::from_be_bytes(payload[1..3].try_into().unwrap()) as usize;
+        assert!(nfiles > 0);
+        let dirm = DirmPayload::decode(payload).unwrap();
+        let components = dirm.components();
+        assert_eq!(components.len(), nfiles);
+        for (c, &off) in components.iter().zip(&dirm.offsets) {
+            assert_ne!(off, 0, "component {} has a zeroed offset", c.id);
+            let off = off as usize;
+            assert_eq!(&bytes[off..off + 4], b"FORM", "offset must hit a FORM tag");
+            let form_len = u32::from_be_bytes(bytes[off + 4..off + 8].try_into().unwrap()) as u64;
+            assert_eq!(
+                c.size as u64,
+                form_len + 8,
+                "size table must match component {}'s FORM span",
+                c.id
+            );
+        }
     }
 
     #[test]
