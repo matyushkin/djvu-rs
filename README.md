@@ -257,9 +257,14 @@ let doc = DjVuDocument::parse_from_dir(&index, "/path/to/pages")?;
 println!("{} pages", doc.page_count());
 ```
 
-Mutation of indirect DJVM documents is not supported by `DjVuDocumentMut` yet.
-The current strategy decision is to add a resolver-backed rebundling path first;
-see [`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
+Two mutation paths cover indirect documents:
+`DjVuDocumentMut::from_indirect_resolved` resolves the component files and
+rebundles them into a mutable bundled document, and `IndirectRewritePlan`
+rewrites individual component files on disk while keeping the document
+indirect (each file is renamed atomically, but the multi-file commit as a
+whole is not transactional). Opening an indirect index directly with
+`DjVuDocumentMut::from_bytes` and calling `page_mut` remains unsupported; see
+[`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
 
 ## CLI
 
@@ -269,49 +274,65 @@ The `djvu` binary is enabled by the `cli` feature.
 # Install
 cargo install djvu-rs --features cli
 
-# Document info
+# Document info (--json for machine-readable output, --count for page count only)
 djvu info file.djvu
 
 # Render page 1 to PNG at 200 DPI
 djvu render file.djvu --dpi 200 --output page1.png
 
-# Render all pages to a PDF
+# Render all pages to a PDF, EPUB, or CBZ
 djvu render file.djvu --all --format pdf --output out.pdf
-
-# Export all pages to CBZ
+djvu render file.djvu --all --format epub --output out.epub
 djvu render file.djvu --all --format cbz --output out.cbz
 
-# Extract text from page 2
+# Render a single layer (mask, foreground, background), with optional rotation
+djvu render file.djvu --layer mask --rotate cw90 --output mask.png
+
+# Extract text from page 2 (plain), or from all pages as hOCR / ALTO XML
 djvu text file.djvu --page 2
+djvu text file.djvu --all --format hocr --output out.hocr
 
-# Extract text from all pages
-djvu text file.djvu --all
+# Merge documents into a bundled DJVM / extract a page range
+djvu merge a.djvu b.djvu --output merged.djvu
+djvu split book.djvu --pages 10-25 --output chapter.djvu
 
-# Encode a PNG image into a single-page DjVu (bilevel JB2, lossless)
+# Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
 
-# Encode a PNG image into a layered lossy DjVu (JB2 mask + IW44 background + FGbz foreground color)
-djvu encode scan.png --quality quality --output scan.djvu --dpi 300
+# Encode into a layered lossy DjVu (JB2 mask + IW44 background + FGbz foreground color)
+djvu encode scan.jpg --quality quality --output scan.djvu --dpi 300
 
-# Use the conservative archival color profile for a single PNG
+# Use the conservative archival color profile
 djvu encode scan.png --quality archival --output scan.djvu --dpi 300
 
 # Opt into adaptive mask segmentation for uneven scans
 djvu encode scan.png --quality quality --binarization sauvola --bg-inpaint --output scan.djvu
 
-# Encode a directory of PNGs into a bundled DJVM with shared Djbz
+# Cap the IW44 background at a bits-per-pixel budget (smaller file, lower quality)
+djvu encode scan.jpg --quality quality --bg-bpp 0.8 --output scan.djvu
+
+# Encode a directory of images into a bundled DJVM with shared Djbz
 djvu encode pages/ --output book.djvu --shared-dict-pages 2
+
+# Embed TH44 color thumbnails while bundling (multi-page layered)
+djvu encode pages/ --quality quality --thumbnails --output book.djvu
+
+# Raw BZZ compression utilities
+djvu bzz-encode notes.txt --output notes.bzz
+djvu bzz-decode notes.bzz --output notes.txt
 ```
 
-For single PNG input, `--quality lossless` luminance-thresholds the image into a
-JB2 mask and writes `INFO + Sjbz`; `--quality quality` uses the layered encoder
-(`INFO + Sjbz + BG44...` plus `FGbz` when colored foreground is detected) for
-color input. `--quality archival` uses the same layered shape with a denser
-background sample grid. Directory input supports all three profiles: `lossless`
-keeps the shared-Djbz multi-page JB2 path, while `quality` / `archival` bundle
-independently encoded layered pages so each page keeps its own `Sjbz`, `BG44`,
-and optional `FGbz` chunks. The `--shared-dict-pages` knob only affects the
-lossless directory path.
+For single image input (PNG, JPEG, or TIFF), `--quality lossless`
+luminance-thresholds the image into a JB2 mask and writes `INFO + Sjbz`;
+`--quality quality` uses the layered encoder (`INFO + Sjbz + BG44...` plus
+`FGbz` when colored foreground is detected) for color input. `--quality
+archival` uses the same layered shape with a denser background sample grid.
+Directory input supports all three profiles, and both directory paths share a
+Djbz symbol dictionary across pages: `lossless` uses the shared-Djbz
+multi-page JB2 path, while `quality` / `archival` bundle layered pages that
+keep their own `Sjbz`, `BG44`, and optional `FGbz` chunks on top of the shared
+dictionary. `--shared-dict-pages` sets the page-count threshold for promoting
+a symbol into the shared dictionary on either path.
 
 Layered `quality` / `archival` encodes default to fixed BT.601 thresholding.
 `--binarization sauvola` opts into adaptive local thresholding for mixed or
@@ -341,18 +362,22 @@ std::fs::write("output.xml", alto)?;
 ## OCR recognition backends
 
 The supported OCR recognition path is the `ocr-tesseract` feature, which uses a
-system Tesseract installation and tessdata files:
+system Tesseract installation and tessdata files. Recognized text is embedded
+into the output document as a compressed `TXTz` text layer, page by page:
 
 ```sh
 cargo build --features cli,ocr-tesseract
 # Requires Tesseract + the requested language data, e.g. eng.traineddata.
-# Text-layer injection is still pending; the CLI reports recognized text chunks
-# and writes a copy of the input file for now.
-djvu ocr scanned.djvu --backend tesseract --lang eng --output copy.djvu
+djvu ocr scanned.djvu --backend tesseract --lang eng --output with-text.djvu
 ```
 
-`ocr-onnx` is an experimental library-level CTC helper; the CLI does not treat it
-as a stable backend because no specific model family, preprocessing contract, or
+Library callers can attach recognized text at encode time instead, via
+`PageEncoder::with_ocr_text_layer` (or `with_text_layer` for an existing
+`TextLayer`).
+
+`ocr-onnx` is an experimental library-level CTC helper; the CLI accepts
+`--backend onnx --model <path>` but does not treat it as a stable backend
+because no specific model family, preprocessing contract, or
 fixture is guaranteed yet. `ocr-neural` is a placeholder only: `CandleBackend` now
 returns a clear unsupported-backend error instead of constructing a backend that
 always fails at recognition time. The compatibility feature name
@@ -464,16 +489,26 @@ regression gates.
 |------|---------|-------------|
 | `std` | enabled | `DjVuDocument`, file I/O, rendering — the decode-only surface |
 | `pdf` | disabled | PDF export via `djvu_to_pdf` (owns `miniz_oxide` + `jpeg-encoder`) |
-| `cli` | disabled | Build the `djvu` command-line binary (implies `pdf`) |
+| `cli` | disabled | Build the `djvu` command-line binary (implies `pdf` and `cbz`) |
+| `cbz` | disabled | CBZ (comic-book ZIP) export — backs `render --format cbz` (owns `zip`) |
 | `tiff` | disabled | TIFF export via the `tiff` crate |
 | `async` | disabled | Async render API and lazy `AsyncRead + AsyncSeek` document loading |
 | `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
 | `jpeg` | disabled | Standalone JPEG decode without full `std` (JPEG is included in `std` by default) |
-| `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`DjVuDocument::from_mmap`) |
+| `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`MmapDocument::open`) |
 | `serde` | disabled | `Serialize` + `Deserialize` for all public data types |
 | `image` | disabled | `image::ImageDecoder` impl via `DjVuDecoder` — integrates with the `image` crate |
 | `epub` | disabled | EPUB 3 export via `djvu_to_epub` — page images, text overlay, bookmarks as nav (owns `zip`) |
 | `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`) |
+| `wasm-lazy` | disabled | Lazy Range-based document loading in the browser: a JS `(offset, len)` reader fetches only the pages you open |
+| `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
+| `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
+| `ocr-onnx` | disabled | Experimental ONNX CTC recognition helper via `tract-onnx`; no stable model contract |
+| `ocr-neural` | disabled | Placeholder backend only — `CandleBackend::load` returns a clear unsupported error |
+| `ocr-neural-candle` | disabled | Deprecated no-op alias for `ocr-neural` |
+| `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |
+| `iw44-probe` | disabled | IW44 encoder diagnostics probe (dev-only) |
+| `alloc-profile` | disabled | dhat allocation-profiling harness for `examples/alloc_profile.rs` (dev-only) |
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
