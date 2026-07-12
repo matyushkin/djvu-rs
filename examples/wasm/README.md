@@ -9,7 +9,7 @@ Browser-based DjVu viewer powered by djvu-rs compiled to WebAssembly.
 curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
 # From the repo root — builds pkg/ inside this directory:
-wasm-pack build --target web --out-dir examples/wasm/pkg
+make wasm
 
 # Serve locally (any static file server works):
 python3 -m http.server 8080 --directory examples/wasm
@@ -66,10 +66,17 @@ For a hand-rolled reader instead of the binding, `range_lazy.md` shows the
 
 ```sh
 # Publish to npm (requires npm login):
-wasm-pack build --target web --out-dir examples/wasm/pkg --release
+make wasm
 cd examples/wasm/pkg
 npm publish
 ```
+
+`make wasm` emits a dual package: `pkg/djvu_rs.js` is the only entry point,
+`pkg/scalar/djvu_rs_bg.wasm` is the fallback artifact, and
+`pkg/simd128/djvu_rs_bg.wasm` is selected at runtime when
+`WebAssembly.validate()` accepts the SIMD probe. Use `OUT=...` to write the
+generated package elsewhere and `FEATURES=wasm-lazy` when publishing the lazy
+Range-loading bindings.
 
 ## Threaded rendering (`wasm-threads`, opt-in, experimental)
 
