@@ -68,14 +68,26 @@ while IFS='|' read -r filename sha url; do
 done <<< "$MANIFEST"
 
 echo
-echo "Checked-in extracts (not auto-fetched; see README for rebuild notes):"
-for f in map_atlas_sample.djvu chinese_cookbook_sample.djvu big_scanned_page.djvu; do
-  if [[ -f "$CORPUS_DIR/$f" ]]; then
-    echo "  present: $f"
+echo "Checked-in extracts (verify-only; rebuild notes in README):"
+EXTRACTS=$(cat <<'EOF'
+map_atlas_sample.djvu|6ed70710bf7650bc7b311dc08b1265e81f1e0a9eefd85c3965d01ec79c63d45b
+chinese_cookbook_sample.djvu|ea6c0e80fc8c4f238dc5e4af1a5e9572cc585ab1a7b502f6e0caeb301c6d1ad1
+big_scanned_page.djvu|200f9bcaf891f12014fe39bd9e119f1f4560566abd8bea9b67a21eb198567594
+EOF
+)
+while IFS='|' read -r filename sha; do
+  [[ -z "$filename" ]] && continue
+  dest="$CORPUS_DIR/$filename"
+  if [[ -f "$dest" ]]; then
+    if verify_sha "$dest" "$sha"; then
+      echo "  ok: $filename"
+    else
+      echo "  MISMATCH: $filename" >&2
+    fi
   else
-    echo "  MISSING: $f"
+    echo "  MISSING: $filename"
   fi
-done
+done <<< "$EXTRACTS"
 
 echo
 echo "Done. Corpus contents:"
