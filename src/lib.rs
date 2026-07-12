@@ -56,6 +56,23 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+// Compile every ```rust block in README.md as a doctest, so the README cannot
+// drift from the public API (the `from_mmap` class of staleness). Gated on the
+// feature union the README examples need; exercised by
+// `cargo test --doc --features cli,tiff,async,serde,image,epub`
+// in scripts/check.sh and CI (nextest does not run doctests).
+#[cfg(all(
+    doctest,
+    feature = "pdf",
+    feature = "tiff",
+    feature = "async",
+    feature = "serde",
+    feature = "image",
+    feature = "epub"
+))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 // ---- Phase-1 modules -------------------------------------------------------
 //
 // Clean-room implementations written from the DjVu spec.
