@@ -68,6 +68,16 @@ pub struct SegmentOptions {
     /// despeckle this intentionally changes output pixels, so it is an
     /// enhancement lever, not a fidelity-preserving one.
     pub deskew: bool,
+    /// Opt-in block-level text-vs-photo classification (#562). Mixed layouts
+    /// (text + continuous-tone photos on one page) shred photo areas into
+    /// mask speckle under per-pixel binarization: Sjbz bloats with noise
+    /// components and the photo loses continuous tone. When `true`, 32×32
+    /// blocks whose statistics say "photo" (mid-tone-dominated, few sharp
+    /// luma edges — the per-block analogue of `classify_content`, #570) are
+    /// removed from the mask so the region routes wholly to the background
+    /// layer. Pure-text pages classify all-text and produce byte-identical
+    /// output. Default `false`.
+    pub block_classify: bool,
 }
 
 impl Default for SegmentOptions {
@@ -80,6 +90,7 @@ impl Default for SegmentOptions {
             bg_inpaint: false,
             bg_diffuse: false,
             deskew: false,
+            block_classify: false,
         }
     }
 }
@@ -333,6 +344,113 @@ fn rotate_small(src: &Pixmap, deg: f32) -> Pixmap {
     out
 }
 
+/// Block edge length for the #562 text-vs-photo classifier.
+const CLASSIFY_BLOCK: usize = 32;
+
+/// Classify `CLASSIFY_BLOCK`-sized blocks as photo (continuous-tone) and clear
+/// the mask inside them (#562).
+///
+/// Per-block features mirror the page-level `classify_content` (#570), whose
+/// corpus calibration showed photos at ~0.04% sharp horizontal luma edges vs
+/// ≥0.36% for text, and mid-tone domination for continuous tone: a block is
+/// "photo" when non-white pixels (luma ≤ 223) exceed 60% of the block while sharp
+/// neighbour deltas (>64) stay under 1.5% of pairs — the continuous-tone
+/// signature — **or** when the binarized mask flips ink↔paper on more than a
+/// quarter of horizontal neighbour pairs, the halftone-dot signature (dot
+/// grids shred into transitions every 1–2 px; text edges flip an order of
+/// magnitude less). The block map is smoothed with a 3×3 majority vote so
+/// isolated misclassifications (a photo block of large type, a textured photo
+/// corner) don't punch holes either way.
+fn clear_photo_blocks(mask: &mut Bitmap, rgba: &Pixmap) {
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let bw = w.div_ceil(CLASSIFY_BLOCK);
+    let bh = h.div_ceil(CLASSIFY_BLOCK);
+    if bw == 0 || bh == 0 {
+        return;
+    }
+
+    let mut photo = vec![false; bw * bh];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let x0 = bx * CLASSIFY_BLOCK;
+            let y0 = by * CLASSIFY_BLOCK;
+            let x1 = (x0 + CLASSIFY_BLOCK).min(w);
+            let y1 = (y0 + CLASSIFY_BLOCK).min(h);
+            let mut midtone = 0u32;
+            let mut sharp = 0u32;
+            let mut flips = 0u32;
+            let mut pairs = 0u32;
+            let mut n = 0u32;
+            for y in y0..y1 {
+                let row = &rgba.data[y * w * 4..(y * w + w) * 4];
+                let mut prev: Option<u32> = None;
+                let mut prev_ink: Option<bool> = None;
+                for x in x0..x1 {
+                    let p = &row[x * 4..x * 4 + 3];
+                    let l = luminance(p[0], p[1], p[2]) as u32;
+                    if l <= 223 {
+                        midtone += 1;
+                    }
+                    let ink = mask.get(x as u32, y as u32);
+                    if let Some(pl) = prev {
+                        pairs += 1;
+                        if pl.abs_diff(l) > 64 {
+                            sharp += 1;
+                        }
+                        if prev_ink == Some(!ink) {
+                            flips += 1;
+                        }
+                    }
+                    prev = Some(l);
+                    prev_ink = Some(ink);
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let pairs = pairs.max(1);
+            let continuous = midtone * 5 > n * 3 && sharp * 200 < pairs * 3;
+            let halftone = flips * 4 > pairs;
+            photo[by * bw + bx] = continuous || halftone;
+        }
+    }
+
+    // 3×3 majority smoothing.
+    let smoothed: Vec<bool> = (0..bw * bh)
+        .map(|i| {
+            let (bx, by) = (i % bw, i / bw);
+            let mut yes = 0u32;
+            let mut total = 0u32;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let (nx, ny) = (bx as i32 + dx, by as i32 + dy);
+                    if nx >= 0 && ny >= 0 && (nx as usize) < bw && (ny as usize) < bh {
+                        total += 1;
+                        if photo[ny as usize * bw + nx as usize] {
+                            yes += 1;
+                        }
+                    }
+                }
+            }
+            yes * 2 > total
+        })
+        .collect();
+
+    for by in 0..bh {
+        for bx in 0..bw {
+            if !smoothed[by * bw + bx] {
+                continue;
+            }
+            let x1 = ((bx + 1) * CLASSIFY_BLOCK).min(w);
+            let y1 = ((by + 1) * CLASSIFY_BLOCK).min(h);
+            for y in (by * CLASSIFY_BLOCK)..y1 {
+                for x in (bx * CLASSIFY_BLOCK)..x1 {
+                    mask.set(x as u32, y as u32, false);
+                }
+            }
+        }
+    }
+}
+
 /// Minimum estimated skew worth correcting; below it the resampling blur
 /// costs more than the alignment recovers.
 const DESKEW_MIN_DEG: f32 = 0.15;
@@ -370,6 +488,12 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
             let luma = luminance_plane(rgba);
             fill_sauvola_mask(&mut mask, &luma, w, h, window, k);
         }
+    }
+
+    // #562: block-level text-vs-photo classification — photo blocks leave the
+    // mask entirely so their continuous tone survives in the background.
+    if opts.block_classify {
+        clear_photo_blocks(&mut mask, rgba);
     }
 
     // #569: content-adaptive background subsample — measured detail of the
@@ -893,6 +1017,60 @@ mod tests {
         let a = segment_page(&upright, &opts_plain).mask;
         let b = segment_page(&upright, &opts_deskew).mask;
         assert_eq!(a.data, b.data, "deskew must be a no-op on an upright page");
+    }
+
+    /// #562: a page with a text half and a continuous-tone gradient half —
+    /// `block_classify` must clear the mask in the gradient region and keep
+    /// the text mask bit-identical.
+    #[test]
+    fn block_classify_clears_photo_keeps_text() {
+        let mut pm = Pixmap::white(256, 256);
+        // Text-ish bars in the top half.
+        for y in (16..112).step_by(16) {
+            for yy in y..y + 5 {
+                for x in 16..240 {
+                    pm.set_rgb(x, yy, 0, 0, 0);
+                }
+            }
+        }
+        // Continuous-tone diagonal gradient in the bottom half (mid-tones,
+        // no sharp edges).
+        for y in 128..256 {
+            for x in 0..256 {
+                let v = (60 + (x + y) / 4) as u8;
+                pm.set_rgb(x, y, v, v, v);
+            }
+        }
+
+        let plain = segment_page(&pm, &SegmentOptions::default()).mask;
+        let classified = segment_page(
+            &pm,
+            &SegmentOptions {
+                block_classify: true,
+                ..SegmentOptions::default()
+            },
+        )
+        .mask;
+
+        let ink = |m: &Bitmap, y0: u32, y1: u32| -> u64 {
+            (y0..y1)
+                .map(|y| (0..256).filter(|&x| m.get(x, y)).count() as u64)
+                .sum()
+        };
+        // Text half identical.
+        for y in 0..112 {
+            for x in 0..256 {
+                assert_eq!(
+                    plain.get(x, y),
+                    classified.get(x, y),
+                    "text mask must be untouched at ({x},{y})"
+                );
+            }
+        }
+        // Photo half: plain claims ink (gradient dips below the threshold),
+        // classified clears it.
+        assert!(ink(&plain, 128, 256) > 0, "gradient must binarize to ink");
+        assert_eq!(ink(&classified, 128, 256), 0, "photo half must be cleared");
     }
 
     fn fill(pm: &mut Pixmap, r: u8, g: u8, b: u8) {

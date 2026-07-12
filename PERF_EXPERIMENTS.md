@@ -12267,3 +12267,45 @@ halftone content documented as the cases where it may not pay.
 this whole series (+150…384% at 1°), and the corrector recovers most of it
 where it matters; sub-0.5° precision is bounded by the projection metric
 itself, not the implementation.
+
+## Perf round 97 (2026-07-12) — BLOCK_CLASSIFY: text-vs-photo block classifier for mixed layouts (#562)
+
+**Issue.** #562 — segmentation is purely per-pixel; on mixed layouts photo
+areas shred into mask speckle (Sjbz bloat, lost continuous tone). Decision
+rule: keep if Sjbz shrinks ≥20% on mixed fixtures AND colour fidelity
+improves, with byte-identical output on pure text.
+
+**Approach.** Opt-in `SegmentOptions::block_classify`: 32×32 blocks classified
+by two signatures — *continuous tone* (non-white luma ≤223 over 60% of the
+block AND sharp horizontal deltas <1.5% of pairs; the per-block analogue of
+#570's `classify_content` calibration) **or** *halftone* (binarized mask flips
+ink↔paper on >25% of neighbour pairs — dot grids flip every 1–2 px, text an
+order of magnitude less). 3×3 majority smoothing; photo blocks are cleared
+from the mask so the region routes wholly to BG. Probe
+`examples/block_classify_probe.rs` builds two synthetic mixed pages
+(watchmaker text + a darkened boy.djvu photo patch; same patch Bayer-dithered
+for the newspaper-halftone case) — real mixed-scan fixtures remain #558.
+
+**Numbers.** **Halftone page (the issue's motivating case):** whole-page Sjbz
+23 580 → 15 385 B (**−35%**; the patch's own contribution −74%), and against
+the *true* continuous photo the decoded region goes from ΔE 38.6 / ssim 0.018
+(crisp dots — unreadable as a photo) to **ΔE 7.2 / ssim 0.659** — the
+classifier descreens, which is exactly what archival MRC pipelines do.
+Continuous-tone page: photo ink −99% (fixed) / −86% (Sauvola), Sjbz −5…−10%,
+page-level ΔE improves under Sauvola (0.485→0.463) but the fixed-threshold
+variant trades crisp mask edges for BG-12 blur (vs-true-photo ΔE 3.9→4.7) —
+smooth photos binarize into few large blobs, so they never bloated JB2 to
+begin with. **Pure text: masks bit-identical on all three corpus checks**
+(graceful degradation holds). `adaptive_bg_subsample` did not engage on the
+synthetic (detailed cells stay under its 5% page-fraction gate) — pairing
+them stays a #558 follow-up.
+
+**Decision.** Kept (opt-in, default off). The ≥20%-Sjbz + fidelity bar is met
+where the issue aimed — halftone/newspaper content — and the classifier is
+provably inert on pure text; smooth-photo pages are documented as roughly
+neutral (route-to-BG trades edge crispness for tone continuity).
+
+**Reason.** The Sjbz-bloat premise is halftone-specific: dot grids are what
+explode into thousands of components. The flip-density feature catches
+exactly that signature, and clearing those blocks simultaneously shrinks the
+mask and reconstructs a photo readers can actually see.
