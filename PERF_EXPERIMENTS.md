@@ -5,6 +5,73 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### WASM_DJVUJS_COMPARE (#596) — browser wasm decode/render vs djvu.js — **Kept (diagnostic)** (2026-07-12)
+
+**Issue.** The wasm decode/render work had scalar and simd128 self-comparisons,
+but no browser head-to-head against the incumbent JavaScript DjVu decoder. The
+repo shares corpus assets with djvu.js under `references/djvujs`, so the missing
+baseline was a diagnostic/adoption gap.
+
+**Approach.** Added `scripts/bench_wasm_djvujs.mjs`: a dependency-free Node
+harness that optionally builds wasm scalar/simd128 packages with `wasm-pack`,
+serves the repo root, launches headless Chrome through CDP, and runs the same
+100 dpi corpus pages through:
+
+- `djvu-rs` wasm scalar (`wasm-pack build --features wasm`);
+- `djvu-rs` wasm simd128 (`RUSTFLAGS=-C target-feature=+simd128`);
+- `djvu.js` 0.5.4 (`djvujs-dist` built locally from the npm tarball).
+
+The checked-in `references/djvujs` tree contains shared assets, not the runtime
+bundle, so the harness accepts `--djvujs` and auto-detects the local
+`target/bench-djvujs/package/library/dist/djvu.js` or `node_modules` copy. The
+djvu.js path renders native `ImageData` and scales through Canvas to the same
+target dpi; wasm renders directly at target dpi. Command:
+
+```sh
+npm pack djvujs-dist --pack-destination target/bench-djvujs
+mkdir -p target/bench-djvujs/package
+tar -xzf target/bench-djvujs/djvujs-dist-0.5.4.tgz \
+  -C target/bench-djvujs/package --strip-components=1
+(cd target/bench-djvujs/package/library && npm install && npm run build)
+node scripts/bench_wasm_djvujs.mjs --build-wasm \
+  --iterations 5 --warmup 2 --json > target/bench-djvujs/issue-596.json
+```
+
+**Platform.** macOS Darwin 25.5.0 / Apple M1 Max host, HeadlessChrome
+150.0.0.0, Node.js v26.4.0, Rust 1.88-compatible crate build via wasm-pack
+0.13.1. Chrome reported `simd128` support. Wasm linear memory reached 446.8 MiB
+by the end of the corpus run; Chrome `performance.memory` heap deltas were
+recorded in the raw JSON but are GC-noisy and not treated as peaks.
+
+**Numbers (selected corpus page, median ms, full decode + render at 100 dpi):**
+
+| Fixture | Class | wasm scalar | wasm simd128 | djvu.js | simd vs djvu.js |
+|---|---|---:|---:|---:|---:|
+| `big_scanned_page.djvu` | photo | 849.5 | 617.7 | 6588.2 | 10.7x |
+| `map_atlas_sample.djvu` | line-art | 67.9 | 65.6 | 441.6 | 6.7x |
+| `goody_twoshoes.djvu` | mixed | 35.5 | 30.8 | 269.4 | 8.7x |
+| `chinese_cookbook_sample.djvu` | cjk | 18.9 | 14.6 | 196.3 | 13.4x |
+| `cyrillic_simonovich_co2.djvu` | cyrillic | 2.4 | 2.4 | 21.3 | 8.9x |
+| `war_1812.djvu` | newspaper | 52.2 | 46.0 | 346.0 | 7.5x |
+| `colorbook.djvu` | iw44-color | 26.8 | 22.2 | 250.0 | 11.3x |
+| `carte.djvu` | carte | 74.5 | 66.8 | 497.5 | 7.4x |
+| `boy_jb2.djvu` | jb2-small | 0.3 | 0.3 | 4.6 | 15.3x |
+
+First-page latency is effectively the same ordering: simd128 is 6.8-23.0x
+faster than djvu.js across the fixture set (11.3x on the large photo page,
+13.6x on CJK, 11.2x on colorbook).
+
+**Decision. Kept (diagnostic).**
+
+**Reason.** No follow-up performance bug is indicated by the head-to-head:
+browser wasm is already far ahead of djvu.js on every measured content class,
+including the large maskless photo page, JB2-heavy line art, CJK/Cyrillic text,
+IW44 colorbook, and the `carte` interop fixture. The simd128 build gives the
+expected extra margin on IW44/photo-heavy pages; small JB2 pages are timer-floor
+limited but still comfortably faster. The harness is checked in so future wasm
+changes can re-run the comparison and publish updated tables.
+
+
 ### PAR_SEGMENT — parallel BG-cell fill in `segment_page` — **Kept** (2026-07-02)
 
 **Issue.** `segment_page` (`src/segment.rs`) builds the sub-sampled background by
