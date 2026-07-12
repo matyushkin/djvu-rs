@@ -2,7 +2,6 @@
 
 [![Crates.io](https://badgen.net/crates/v/djvu-rs)](https://crates.io/crates/djvu-rs)
 [![docs.rs](https://docs.rs/djvu-rs/badge.svg)](https://docs.rs/djvu-rs)
-[![PyPI](https://img.shields.io/pypi/v/djvu-rs)](https://pypi.org/project/djvu-rs/)
 [![CI](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-dashboard-blue)](https://matyushkin.github.io/djvu-rs/dev/bench/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -17,7 +16,7 @@ from the public DjVu v3 specification.
 | Extract text (plain, hOCR, ALTO XML) | [`djvu text`](#cli) or [`page.text()`](#text-extraction), [`to_hocr` / `to_alto`](#hocr-and-alto-xml-export) |
 | Render pages to RGBA pixels | [`render_pixmap`](#quick-start) — sync, [async](#async-render), or [parallel](#feature-flags) |
 | Show DjVu in the browser | [WebAssembly bindings](#webassembly), incl. lazy HTTP-Range loading |
-| Read DjVu from Python | [`pip install djvu-rs`](#python) |
+| Read DjVu from Python | [PyO3 bindings, built from source](#python) |
 | Create DjVu from images (PNG/JPEG/TIFF) | [`djvu encode`](#cli) or [`PageEncoder`](#encoding--low-level-api) |
 | Add an OCR text layer to a scan | [`djvu ocr`](#ocr-recognition-backends) (Tesseract) |
 | Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DjVuDocumentMut` |
@@ -166,11 +165,12 @@ Library callers can use the same controls with `PageEncoder::with_segment_option
 
 ## Python
 
-Published on PyPI; the package version follows the Rust crate — there is no
-separate Python release train.
+PyO3 bindings live in [`djvu-py/`](djvu-py/). They are **not published to PyPI
+yet** — build them from the repository (requires a Rust toolchain):
 
 ```sh
-pip install djvu-rs
+pip install ./djvu-py
+# or, for development: pip install maturin && cd djvu-py && maturin develop --release
 ```
 
 ```python
@@ -575,6 +575,8 @@ Honest boundaries, so you can decide fast:
 
 - **Library + CLI, not a viewer.** There is no GUI; the WASM demo is the
   closest thing to one.
+- **Python bindings are source-only for now.** The `djvu-py` package is not
+  published to PyPI yet — install it from the repository checkout.
 - **Indirect DJVM mutation is indirect-only via two paths.**
   `DjVuDocumentMut::from_bytes` + `page_mut` on an indirect index errors;
   use `from_indirect_resolved` (rebundles) or `IndirectRewritePlan` (rewrites
