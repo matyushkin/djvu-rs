@@ -207,6 +207,10 @@ name = "ocr_input_ab"
 required-features = ["ocr-tesseract"]
 
 [[example]]
+name = "ocr_preset_grid"
+required-features = ["ocr-tesseract"]
+
+[[example]]
 name = "encode_quality_djbz"
 required-features = ["experimental"]
 
