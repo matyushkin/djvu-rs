@@ -203,12 +203,17 @@ where
             .get_or_try_init(|| async move {
                 let bytes = self.read_page_bytes(page.range).await?;
                 let form = parse_form(&bytes)?;
-                let shared_djbz = if let Some(incl) = form.chunks.iter().find(|c| &c.id == b"INCL")
-                {
-                    Some(self.shared_djbz(incl.data).await?)
-                } else {
-                    None
-                };
+                // A page may INCL several components (shared annotations AND
+                // the symbol dictionary, #624) — take the first include that
+                // resolves to a DJVI actually holding a Djbz, skipping the
+                // rest instead of failing on them.
+                let mut shared_djbz = None;
+                for incl in form.chunks.iter().filter(|c| &c.id == b"INCL") {
+                    if let Ok(dict) = self.shared_djbz(incl.data).await {
+                        shared_djbz = Some(dict);
+                        break;
+                    }
+                }
                 let page = DjVuDocument::parse_single_page_with_shared(&bytes, index, shared_djbz)?;
                 Ok(Arc::new(page))
             })
@@ -675,6 +680,24 @@ mod tests {
         let sync_page = sync_doc.page(0).expect("sync page");
         assert_eq!(page_a.width(), sync_page.width());
         assert_eq!(page_a.height(), sync_page.height());
+    }
+
+    /// #624: a lazy page with several `INCL` chunks (shared annotations +
+    /// symbol dictionaries) must skip includes without a `Djbz` instead of
+    /// failing on the first one.
+    #[tokio::test]
+    async fn lazy_document_multi_incl_page_resolves_shared_dict() {
+        let path = assets_path().join("czech.djvu");
+        let bytes = std::fs::read(&path).expect("read czech fixture");
+        let lazy = from_async_reader_lazy(std::io::Cursor::new(bytes))
+            .await
+            .expect("lazy index");
+        let page = lazy.page_async(1).await.expect("multi-INCL page loads");
+        let mask = page
+            .extract_mask()
+            .expect("mask decode must succeed")
+            .expect("page 1 has an Sjbz mask");
+        assert_eq!((mask.width, mask.height), (1095, 1750));
     }
 
     /// `LazyDocument` indexes bundled DJVM ranges up front and can fetch a
