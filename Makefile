@@ -1,5 +1,5 @@
 # Local developer gates mirroring CI. `make hooks` once to enable the pre-push hook.
-.PHONY: check hooks pgo wasm-threads-check
+.PHONY: check hooks pgo wasm wasm-threads-check
 
 ## Run the same deterministic gates CI enforces (fmt, clippy, no_std, wasm, tests).
 check:
@@ -14,6 +14,12 @@ hooks:
 ## "PGO" entry in PERF_EXPERIMENTS.md. Needs the llvm-tools-preview component.
 pgo:
 	@scripts/pgo.sh
+
+## Build the shipped browser WASM package: scalar fallback + simd128 variant
+## selected at runtime via WebAssembly.validate. Pass OUT=... or FEATURES=...
+## to override the generated package directory or wasm feature set.
+wasm:
+	@bash scripts/build_wasm_dual.sh
 
 ## Opt-in wasm32 thread-pool build check (`wasm-threads` feature, rayon via
 ## wasm-bindgen-rayon). Needs nightly + `-Z build-std` — NOT a required CI gate
