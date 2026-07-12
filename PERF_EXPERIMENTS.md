@@ -12156,3 +12156,33 @@ documents; Sauvola re-binarization helps nothing and hurts halftones.
 **Reason.** Tesseract's internal binarization on our clean renders is at
 least as good as any mask we can hand it — where the inputs differ at all,
 the mask variants only ever lose information (colour text, halftone strokes).
+## Perf round 94 (2026-07-12) — MULTI_INCL: czech.djvu masks restored — scan all INCLs for the shared dictionary (#624)
+
+**Issue.** #624 — every czech.djvu mask decode failed with
+`Jb2(MissingSharedDict)`; all exports carried background only. The issue
+hypothesized missing *external* DJVI files. Decision rule: czech renders/
+exports masks correctly; bundled documents unaffected.
+
+**Approach / root cause.** The hypothesis was wrong: czech is a normal
+*bundled* DJVM and both symbol dictionaries are present. Its pages carry
+**three** `INCL` chunks — `shared_anno.iff` (ANTz only), `dict0085.iff`, and
+`slovnik` (both Djbz, byte-identical) — and both the bundled parser and the
+lazy async loader resolved only the *first* INCL. `shared_anno.iff` has no
+Djbz, so `shared_djbz` came back `None` (sync) or the whole page errored
+(lazy). Fix: scan all INCLs and take the first include whose target actually
+holds a Djbz; the lazy loader skips non-Djbz includes instead of failing.
+No external-file machinery needed — that remains genuinely out of scope for
+single-file bundles.
+
+**Validation.** czech page 1 mask now decodes 1095×1750 with 308 624 black
+pixels — **byte-identical to `ddjvu -mode=mask` output** (P4 compare). Two
+permanent regression tests (sync `multi_incl_page_resolves_shared_dict`,
+lazy `lazy_document_multi_incl_page_resolves_shared_dict`). Bundled fixtures
+unaffected (suite green — single-INCL pages hit the same map lookup).
+
+**Decision.** Fixed. The issue's fixture-hunting item is moot; issue closed
+by the resolution-order fix.
+
+**Reason.** Real-world encoders attach shared annotations as a DJVI include
+*before* the symbol dictionary; INCL order is not a dictionary pointer, so
+"first INCL" was never a valid resolution rule.

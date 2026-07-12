@@ -1266,20 +1266,19 @@ impl DjVuDocument {
                         ))?;
                         let sub_chunks = parse_sub_form(sub_form.data)?;
 
-                        // Resolve INCL reference to a shared DJVI dictionary.
-                        #[cfg(feature = "std")]
+                        // Resolve the page's INCL references to a shared DJVI
+                        // dictionary. A page may include several components
+                        // (e.g. a shared-annotation DJVI *and* the symbol
+                        // dictionary — czech.djvu carries three INCLs, #624),
+                        // so scan them all and take the first whose target
+                        // actually holds a Djbz.
                         let shared_djbz = sub_chunks
                             .iter()
-                            .find(|c| &c.id == b"INCL")
-                            .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
-                            .and_then(|name| djvi_djbz.get(name))
-                            .cloned();
-                        #[cfg(not(feature = "std"))]
-                        let shared_djbz = sub_chunks
-                            .iter()
-                            .find(|c| &c.id == b"INCL")
-                            .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
-                            .and_then(|name| djvi_djbz.get(name))
+                            .filter(|c| &c.id == b"INCL")
+                            .filter_map(|incl| {
+                                core::str::from_utf8(incl.data.trim_ascii_end()).ok()
+                            })
+                            .find_map(|name| djvi_djbz.get(name))
                             .cloned();
 
                         let page = parse_page_from_chunks(&sub_chunks, page_idx, shared_djbz)?;
@@ -2102,6 +2101,34 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #624: a page may carry several `INCL` chunks (czech.djvu: shared
+    /// annotations + two symbol-dictionary includes). Resolution must scan
+    /// them all and pick the include that actually holds a `Djbz` — taking
+    /// only the first INCL left every czech mask undecodable
+    /// (`MissingSharedDict`). The expected mask is byte-identical to
+    /// DjVuLibre's `ddjvu -mode=mask` output.
+    #[test]
+    fn multi_incl_page_resolves_shared_dict() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/czech.djvu");
+        let data = std::fs::read(path).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let mask = doc
+            .page(1)
+            .unwrap()
+            .extract_mask()
+            .expect("mask decode must succeed")
+            .expect("page 1 has an Sjbz mask");
+        assert_eq!((mask.width, mask.height), (1095, 1750));
+        let black: u64 = (0..mask.height)
+            .map(|y| (0..mask.width).filter(|&x| mask.get(x, y)).count() as u64)
+            .sum();
+        assert_eq!(
+            black, 308_624,
+            "mask content must match the ddjvu reference"
+        );
+    }
 
     /// A NAVM bookmark chain nested far deeper than `MAX_NAVM_DEPTH` must error,
     /// not recurse until the stack overflows (security finding). Drives the
