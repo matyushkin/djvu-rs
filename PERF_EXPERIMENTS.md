@@ -12381,3 +12381,55 @@ future classes (#558 corpus).
 the scan threshold 3× (its glyphs are large; near-twins stay safe far past
 2%) and *defended* the text preset against the looser point a smaller sample
 suggested.
+
+## Perf round 100 (2026-07-12) — STRIPWISE_IW44: gigapixel export memory (#594) — **Rejected (coefficient floor dominates the streaming peak)**
+
+**Issue.** #594 — native-resolution IW44 decode of a gigapixel page has a
+"~12 B/px transient, ~7 GB for 600 MP" profile; hypothesis: strip-wise
+reconstruction feeding the row-streaming exporters halves-to-thirds peak RSS.
+Decision rule: keep if peak RSS drops ≥2× with byte-identical output; if the
+overlap bookkeeping / coefficient floor dominates, record the floor and close
+with the analysis.
+
+**Measurement first (the issue's step 1).** Two content classes, native and
+2× export, `ru_maxrss` high-water:
+- **Standard layered DjVu (subsampled BG44 — carte, the map class the issue
+  names):** PDF export is **flat 25 MB** at 10.7 MP *and* 42.9 MP (2× area).
+  Already O(one output row): the streaming path reconstructs the *subsampled*
+  background once (small) and upsamples it per output row via
+  `composite_rows`, so nothing page-area-sized is materialised. PNG (which
+  materialises the full output by contract) scales, 79→221 MB. **The issue's
+  premise does not apply to standard DjVu pages** — they already stream.
+- **Full-resolution IW44 (Photo profile, subsample=1 — synthetic 4000×4000):**
+  peak **15.28 B/px** (244 MB / 16 MP via `to_rgb`) — this reproduces the
+  issue's model. Phase-isolated: **coeff floor 5.73 B/px** (91.7 MB, all ZP
+  blocks resident — the issue's acknowledged irreducible floor), recon+RGBA
+  transient 9.55 B/px. Streaming PDF export = **9.1 B/px** (146 MB); PNG =
+  19.9 B/px (319 MB).
+
+**Why strip-wise misses the bar.** Two peaks, two verdicts:
+- *to_rgb / PNG (materialised):* the 15.28 → 5.73 B/px removal is 2.67×, but
+  PNG must hold the full output RGBA by contract — a strip-wise reconstruct
+  that then re-materialises a `Pixmap` saves nothing. No streaming consumer,
+  no benefit.
+- *PDF / TIFF (streaming — the exporters the decision rule measures):* the
+  full OUTPUT RGBA is already streamed away; the 9.1 B/px peak is
+  `coeff floor (5.73) + planes + bg_rgb_s1`. Strip-wise reconstruction can
+  drop the planes and the full-page background pixmap, reaching
+  `coeff floor + one strip ≈ 6 B/px` → **1.5×**, short of the ≥2× bar. The
+  coefficient storage (5.73 B/px, slice-ordered ZP → every block resident for
+  every slice) is **> half the streaming peak** and cannot be crossed.
+
+**Decision.** Rejected — no strip-wise IDWT. The invasive, high-regression-risk
+rewrite of the SIMD-optimised inverse wavelet transform (per-scale overlap
+bands across scales 16→1, ~93-row vertical support) would deliver 1.5× on the
+narrow Photo-profile / full-res-IW44 case only, while standard DjVu already
+streams at O(row). The decision rule's floor-analysis branch applies verbatim.
+
+**Reason.** The 12 B/px model assumed a full-resolution IW44 foreground at page
+res; real DjVu encodes backgrounds *subsampled* and foregrounds as JB2 masks,
+so the streaming exporters are already O(row). Where a full-res IW44 page does
+exist (Photo profile), the ZP-slice-ordered coefficient floor dominates the
+streaming peak and caps strip-wise at 1.5×. Follow-up recorded on the issue:
+the only >2× lever is compressing the coefficient floor itself (out of scope —
+would break the interoperable slice-ordered wire format).
