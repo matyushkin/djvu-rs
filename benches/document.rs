@@ -3,6 +3,10 @@
 //! Uses the public domain corpus file `pathogenic_bacteria_1896.djvu` (520 pages, 25 MB)
 //! to measure real-world performance on a large mixed-content document.
 
+// Tier-2 render benches build `RenderOptions` literals that still name the
+// deprecated `scale` field (ignored by the pipeline; see #377).
+#![allow(deprecated)]
+
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -488,6 +492,68 @@ fn bench_thumbnails_render_only_grid_color(c: &mut Criterion) {
     });
 }
 
+/// Tier-2 corpus (#558): one native-dpi render per content class (skip if absent).
+fn bench_tier2_corpus_render(c: &mut Criterion) {
+    let cases = [
+        ("tier2_newspaper", "war_1812.djvu", 0usize),
+        ("tier2_mixed_layout", "goody_twoshoes.djvu", 0),
+        ("tier2_map", "map_atlas_sample.djvu", 0),
+        ("tier2_cjk", "chinese_cookbook_sample.djvu", 1),
+        ("tier2_cyrillic", "cyrillic_simonovich_co2.djvu", 0),
+        ("tier2_photo", "big_scanned_page.djvu", 0),
+    ];
+    let mut group = c.benchmark_group("tier2_corpus_render");
+    for (name, file, page_idx) in cases {
+        let path = corpus_path().join(file);
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {name}: {file} not found");
+                continue;
+            }
+        };
+        let doc = match djvu_rs::Document::from_bytes(data) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skipping {name}: parse failed");
+                continue;
+            }
+        };
+        let page = match doc.page(page_idx) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping {name}: page {page_idx} missing");
+                continue;
+            }
+        };
+        let (w, h) = (page.width(), page.height());
+        // Cap the gigapixel photo page so the bench stays useful locally.
+        let (rw, rh) = if w > 3000 || h > 4000 {
+            (w / 4, h / 4)
+        } else {
+            (w, h)
+        };
+        let opts = djvu_rs::djvu_render::RenderOptions {
+            width: rw,
+            height: rh,
+            scale: 1.0,
+            bold: 0,
+            aa: false,
+            rotation: djvu_rs::djvu_render::UserRotation::None,
+            permissive: false,
+            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
+            mask_aa: false,
+        };
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let pm = page.render_with(&opts).expect("tier2 render");
+                black_box(pm);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_multipage,
@@ -503,5 +569,6 @@ criterion_group!(
     bench_thumbnails_render_only_grid_bilevel,
     bench_thumbnails_th44_only_grid_color,
     bench_thumbnails_render_only_grid_color,
+    bench_tier2_corpus_render,
 );
 criterion_main!(benches);

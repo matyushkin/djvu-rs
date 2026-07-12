@@ -12538,3 +12538,63 @@ extract metadata, the content agrees. Local libFuzzer soak remains blocked on
 this machine (round-64 dyld hang, re-confirmed today); substitutes are the
 committed deterministic soaks (green in `make check`) and the weekly CI fuzz
 job with corpus persistence, per the round-64 precedent.
+
+## Perf round 103 (2026-07-12) — CORPUS_DIVERSITY: tier-2 fixtures (#558) — **Kept (infra)**
+
+### #558 — diversify fixtures (newspaper, mixed layout, map, CJK, Cyrillic, photo) — **Kept (infra)** (2026-07-12)
+
+**Issue.** #558. Experiment verdicts rest on Latin-script book scans; missing
+halftone-newspaper, mixed-layout, map/line-art, non-Latin, photo, and a second
+chroma-half file. Blocking dependency for #562/#569–#571/#603.
+
+**Approach.** Curate a checked-in tier-2 under `tests/corpus/` (≤3.3 MB total new
+blobs), provenance in `tests/corpus/README.md`, SHA-256 + fetch for whole-document
+sources in `scripts/fetch_corpus.sh`. Wire into `interop_pixdiff --corpus`,
+`ocr_qa` (CJK/Cyrillic feeds), `examples/corpus_tier2_baseline.rs`, and
+`benches/document.rs` (`tier2_corpus_render/*`).
+
+**Substitutions vs the wishlist.**
+- Second "chroma-half": superseded by #561 — valid IW44 v1.2 is always full-res
+  chroma. Shipped `big_scanned_page.djvu` (maskless full-res BG44) as the missing
+  photo class instead; `carte.djvu` stays the short-INFO/v1.2 control.
+- Born-digital: no clearly licensed small DjVu found; tier-1 watchmaker/cable remain
+  the anchors.
+
+**Fixtures (SHA-256).**
+| file | class | bytes |
+|---|---|---|
+| war_1812.djvu | newspaper | 919707 |
+| goody_twoshoes.djvu | mixed layout | 1060487 |
+| map_atlas_sample.djvu | map/line-art (atlas pp.28–29) | 413070 |
+| chinese_cookbook_sample.djvu | CJK (5 pp extract) | 218742 |
+| cyrillic_simonovich_co2.djvu | Cyrillic | 171563 |
+| big_scanned_page.djvu | photo / maskless | 584365 |
+
+**Numbers (macOS darwin, release, `corpus_tier2_baseline` + `interop_pixdiff --corpus`).**
+
+Baseline vs ddjvu (native, PSNR/SSIM luma):
+| page | PSNR | SSIM | cold render ms |
+|---|---|---|---|
+| war_1812 p0 (photo-heavy) | 26.97 | 0.740 | 95.4 |
+| war_1812 p2 (text) | 40.82 | 0.990 | 113.0 |
+| goody_twoshoes p0 | 47.10 | 0.997 | 70.6 |
+| map_atlas_sample p0 | 32.28 | 0.984 | 89.7 |
+| chinese_cookbook p1 | 50.69 | 0.999 | 57.4 |
+| cyrillic_simonovich p0 | inf | 1.000 | 1.2 |
+| big_scanned_page (timed @1/4; native interop byte-match) | inf | 1.000 | 259.5 |
+
+`interop_pixdiff --corpus`: all tier-2 pages render; Cyrillic + photo mean |Δ|=0;
+CJK mean 0.19; mixed 0.54; map mean 2.94; newspaper photo-heavy mean 8.88 (known
+soft gap on continuous-tone BG — recorded, not a harness failure).
+
+Criterion `tier2_corpus_render` (warm, sample-size 10): newspaper 3.90 ms, mixed
+40.6 ms, map 35.7 ms, CJK 35.9 ms, Cyrillic 128 µs, photo@1/4 17.8 ms.
+
+**Decision.** **Kept (infra).** Decision rule met: fixtures green through
+interop/quality/bench harnesses with baselines recorded. Unblocks content-class
+experiments that cited #558.
+
+**Reason.** Bounded weight (extracts, not 25 MB atlas / 234-page cookbook);
+provenance + checksums; harness wiring makes regressions on the new classes
+visible. The newspaper photo-heavy PSNR gap is a useful stress case for future
+BG/photo work, not a reason to withhold the tier.
