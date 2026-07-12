@@ -23,7 +23,7 @@ enum Cmd {
         #[arg(short, long)]
         json: bool,
     },
-    /// Render pages to PNG, PDF, or CBZ.
+    /// Render pages to PNG, PDF, CBZ, or EPUB.
     Render {
         /// Path to the DjVu file.
         file: PathBuf,
@@ -109,16 +109,17 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Encode an image (PNG) into a single-page DjVu file, or a
-    /// directory of PNGs into a multi-page DJVM bundle.
+    /// Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu file,
+    /// or a directory of images into a multi-page DJVM bundle.
     ///
-    /// Single PNG input supports lossless bilevel JB2 plus layered
+    /// Single-image input supports lossless bilevel JB2 plus layered
     /// quality/archival color profiles (`INFO + Sjbz + BG44 + FGbz`).
-    /// Multi-page directory input supports the same profiles: lossless keeps a
-    /// shared Djbz dictionary, while layered profiles keep per-page masks.
+    /// Multi-page directory input supports the same profiles; both the
+    /// lossless and layered paths share a Djbz dictionary across pages
+    /// (see --shared-dict-pages).
     Encode {
-        /// Input PNG path, or a directory of PNGs (sorted by file name)
-        /// for multi-page encoding.
+        /// Input image path (PNG, JPEG, or TIFF), or a directory of images
+        /// (sorted by file name) for multi-page encoding.
         input: PathBuf,
         /// Output DjVu file path.
         #[arg(short, long)]
