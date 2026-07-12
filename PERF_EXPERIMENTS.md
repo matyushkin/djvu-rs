@@ -12186,3 +12186,38 @@ by the resolution-order fix.
 **Reason.** Real-world encoders attach shared annotations as a DJVI include
 *before* the symbol dictionary; INCL order is not a dictionary pointer, so
 "first INCL" was never a valid resolution rule.
+
+## Perf round 95 (2026-07-12) — PGO_ARTIFACTS: would PGO'd release binaries help end users? (#586)
+
+**Issue.** #586 — round-5 kept PGO as a local opt-in (−15% in-process cold
+render via `make pgo`); whether a PGO'd *release artifact* helps end users, and
+whether BOLT stacks, was never measured. Decision rule: ship artifacts only if
+the win holds ≥8% on held-out content on ≥2 platforms; record the BOLT verdict
+either way.
+
+**Approach.** A/B of the actual shipped thing — the CLI binary (fat-LTO release
+vs `scripts/pgo.sh` build, same commit), measured with hyperfine (10 runs,
+warmup) on held-out documents (conquete_paix, carte — not in the training set)
+and trained ones (watchmaker, pathogenic), across single-page renders, a
+300-dpi render, and a whole-document PDF export.
+
+**Numbers (M1, CLI wall-clock).** Single-page renders: **±1–2% = noise** on
+held-out AND trained docs (conquete 85.5→84.7 ms; carte 91.8→93.6 ms — pgo
+*slower*; watchmaker 29.1→29.7 ms; pathogenic p100 @300dpi 36.9→37.1 ms).
+Whole-doc PDF export (watchmaker ×12): **697.2 → 730.3 ms — PGO 5% SLOWER**
+(the export/deflate paths aren't in the training profile, and profile-use
+de-prioritizes what the profile never saw). The round-5 −15% was an
+*in-process* cold-render effect measured under criterion; at CLI-artifact
+granularity process startup, I/O and untrained paths erase or invert it.
+
+**Decision.** Rejected: no PGO release artifacts. Gate 1 of the decision rule
+(≥8% held-out) fails by an order of magnitude on platform 1, so the
+second-platform (x86) run and the BOLT spike were not reached — BOLT verdict
+recorded as *moot at artifact level* (it post-link-optimizes a PGO win that
+does not exist here; also Linux-only). `make pgo` stays documented as a local
+opt-in for render-heavy embedders whose workload matches the training driver.
+
+**Reason.** A profile trained on decode/render generalizes poorly to a CLI
+whose heaviest user-visible jobs (exports) exercise encoder/serialization
+paths the profile marks cold; shipping such binaries would trade a noise-level
+render win for a real export regression.
