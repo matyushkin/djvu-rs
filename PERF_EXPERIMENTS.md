@@ -12006,3 +12006,41 @@ bar this round; candidates recorded (thumbnail-path `extract_mask`,
 attributes every heavy scenario to a handful of named sites, and the one
 "obvious" fix measurably doesn't pay on this platform, which is exactly the
 kind of negative the ≥3% discipline exists to catch.
+## Perf round 90 (2026-07-12) — GENERATION_LOSS: drift across repeated decode→re-encode cycles (#601)
+
+**Issue.** #601 — archival reality is decode → edit → re-encode, repeatedly, and
+generation loss had never been measured. Decision rule: diagnostic Kept when
+drift curves are recorded and guidance documented; the lossless-bilevel
+idempotence test lands regardless.
+
+**Approach.** Committed harness `examples/generation_loss.rs`: per profile
+(Quality/Archival), 5 generations of render-at-native → re-encode → parse,
+recording ΔE/ssim_y vs gen-0 and vs the previous generation, output bytes, and
+Sjbz payload bytes (mask-instability proxy). New permanent regression test
+`lossless_bilevel_reencode_is_idempotent` (boy_jb2, ccitt_2): generation-1 mask
+bit-identical, generation-2 container bytes a fixed point.
+
+**Numbers.** Text scans **converge to a fixed point by gen-2**: watchmaker
+Quality gen1 ΔE 0.147 → vs-prev ΔE 0.000/ssim 1.0000 from gen3 on, Sjbz bytes
+frozen; cable similar (vs-prev ΔE ≤0.011, monotonically shrinking). The
+picture-heavy page **diverges**: colorbook Quality ΔE vs gen0 8.4 → 14.3 →
+29.5 → 58.8 → **86.6** by gen5 (Archival: → 85.0), with vs-prev ΔE *growing*
+(8 → 30) — no convergence. Dominant cause isolated with a follow-up probe:
+foreground mean colour is stable, but the **mask grows 275.7k → 462.0k px
+(+68%)** across 5 generations — Sauvola re-binarization of the rendered
+composite claims ever more continuous-tone pixels as ink each cycle, and the
+BG diffusion then re-fills the growing holes with drifting colours.
+
+**Decision.** Kept (diagnostic). Guidance: Lossless bilevel is provably safe
+(test-enforced); Quality/Archival on *text* pages are safe to re-encode
+(one-time ΔE ≈0.15, fixed point by gen-2); Quality/Archival on *picture*
+pages must not be round-tripped — one generation costs ΔE ≈8 and it compounds
+without bound. The systemic fix is mask reuse on re-encode (encode API that
+accepts the source document's existing Sjbz instead of re-segmenting) plus
+the #562 text-vs-photo block classifier; filed as the follow-up direction on
+#601's close-out comment.
+
+**Reason.** The drift is not encoder noise — it is a re-segmentation feedback
+loop specific to continuous-tone content, which is exactly what the issue's
+"binarization instability" suspicion predicted; text pages behave as a
+contraction mapping and photos as an expansion.
