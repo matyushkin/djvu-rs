@@ -803,11 +803,6 @@ fn cmd_ocr(
     let mut doc_mut = djvu_rs::djvu_mut::DjVuDocumentMut::from_bytes(&data)?;
     let _ = doc_mut.page_mut(0)?;
 
-    let options = OcrOptions {
-        languages: lang.to_string(),
-        dpi: 300,
-    };
-
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
 
     // OCR each page and inject the recognized text layer. Pages are
@@ -830,6 +825,13 @@ fn cmd_ocr(
             ..Default::default()
         };
         let pixmap = djvu_rs::djvu_render::render_pixmap(page, &opts).map_err(|e| e.to_string())?;
+        // The render above is at the page's native resolution — tell the
+        // recognizer the true dpi (#603: a hard-coded 300 mis-scaled OCR on
+        // 400/600-dpi scans; Tesseract's segmentation is dpi-sensitive).
+        let options = OcrOptions {
+            languages: lang.to_string(),
+            dpi: page.dpi() as u32,
+        };
         be.recognize(&pixmap, &options).map_err(|e| e.to_string())
     };
 
