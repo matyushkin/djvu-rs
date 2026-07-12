@@ -149,6 +149,11 @@ predicates = "3"
 tempfile = "3"
 serde_json = "1"
 futures = "0.3"
+# README doctests: the lazy-loading example opens files with tokio::fs, and the
+# async examples declare #[tokio::main]. The `async` feature's tokio stays
+# minimal (rt/macros/io-util/sync) — consumers bring their own tokio; only the
+# doc-sync gate needs `fs` here.
+tokio = { version = "1", features = ["fs", "rt", "macros", "io-util", "sync"] }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 # Backend for the dev zip's deflate — mirrors the normal-deps trick so test
 # builds without the `epub` feature still give flate2 a backend.

@@ -31,4 +31,9 @@ else
   run cargo test --workspace --exclude djvu-py --features cli
 fi
 
+# README doctests — nextest skips doctests; this compiles every rust block in
+# README.md via the ReadmeDoctests include in src/lib.rs (doc-sync gate,
+# mirrors the "README doctests" CI step).
+run cargo test --doc --features cli,tiff,async,serde,image,epub
+
 printf '\n\xe2\x9c\x93 local CI gates passed\n'

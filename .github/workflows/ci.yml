@@ -82,6 +82,11 @@ jobs:
           cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
+      # nextest does not run doctests; this compiles every ```rust block in
+      # README.md via the ReadmeDoctests include in src/lib.rs (doc-sync gate).
+      - name: README doctests
+        run: cargo test --doc --features cli,tiff,async,serde,image,epub
+
       - name: Build (no_std check)
         run: cargo build --no-default-features
 
