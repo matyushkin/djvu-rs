@@ -11872,3 +11872,38 @@ reproducible benchmark.
 **Reason.** The per-component probe was the entire cost of lazy open; DjVuLibre
 and IA files populate the DIRM size table, so trusting it (with FORM-boundary
 fallback for zeroed tables) removes the seek storm without a format risk.
+
+## Perf round 86 (2026-07-12) — WASM_LAZY_OPEN: lazy Range-based document open in the browser (#588)
+
+**Issue.** #588 — bring the native `LazyDocument` machinery to the wasm binding
+so a browser viewer renders page 1 after fetching ~index + one page instead of
+downloading the whole bundle. Decision rule: keep if TTFP improves ≥5× at
+realistic bandwidth with bytes ≈ index + first page, without regressing plain
+`from_bytes`.
+
+**Approach.** New opt-in `wasm-lazy` feature (`wasm` + `async` +
+`wasm-bindgen-futures`). `JsRangeReader` implements `AsyncRead + AsyncSeek`
+over a JS `(offset, len) → Promise<Uint8Array>` callback: 64 KiB blocks, 64-block
+LRU, the pending `JsFuture` is polled inside `poll_read` (single in-flight fetch,
+task woken by the promise). `WasmLazyDocument` (open / page_count / page_info /
+render_page / render_page_progressive) drives the existing
+`from_async_reader_lazy_local` — the #584 DIRM size-table indexing is what makes
+the open cost one block. Bench page `examples/wasm/bench_lazy_open.html` +
+throttled Range server `examples/wasm/serve_lazy_bench.py`; measured in a real
+Chrome tab. Plain `from_bytes` path untouched (feature is additive; default
+`wasm` pkg has zero diff). New `wasm-lazy` cargo-check gates added to
+scripts/check.sh and the CI wasm32 job.
+
+**Numbers.** pathogenic_bacteria_1896.djvu (25.3 MiB, 520 pages) at 12.5 MiB/s
+in Chrome: full-download + open + render p0 = 3.86–3.95 s vs lazy = 0.20–0.34 s
+(**11.5–19×**), open itself 1 GET / 64 KiB (0.25% of the file), pixels
+byte-identical to the full open. Page 50: 3 GETs / 192 KiB (232 ms); page 200:
+2 GETs / 128 KiB (192 ms). Progressive first paint: coarse (chunk=1) at 47 ms →
+full 77 ms on the same fetched bytes.
+
+**Decision.** Kept (opt-in feature). ≥5× bar beaten 2–4× over; bytes = index +
+one page exactly; `from_bytes` unchanged by construction.
+
+**Reason.** The browser is where TTFP matters most (djvu.js comparison target);
+the JS-callback seam reuses the entire native lazy stack — index, shared-DJVI
+resolution, page cache — with ~200 lines of adapter and no new decode paths.
