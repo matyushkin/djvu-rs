@@ -12660,3 +12660,55 @@ symbol dictionary plus text-region coding, not page-sized generic regions.
 table. Shipping it would add a new arithmetic coder and PDF filter path while
 failing the issue's explicit acceptance threshold.
 
+## Perf round 106 (2026-07-13) — IW44_FWD_TRANSFORM: validate band-0/DC coefficient hypothesis (#578) — **Rejected**
+
+### #578 — forward DWT does not explain the IW44 band-0/DC size gap vs c44 — **Rejected** (2026-07-13)
+
+**Issue.** IW44_ENTROPY_PROBE localized the worst `colorbook.djvu` size gap vs
+`c44` to band 0/DC on small pages and left one unvalidated root-cause
+hypothesis: DjVuLibre's forward IW44 transform might produce different
+coefficient values than ours.
+
+**Approach.** Fetched DjVuLibre's `IW44EncodeCodec.cpp` / `IW44Image.cpp`
+reference formulas (DjVuLibre 3.5 source mirror) and added an
+`iw44-probe`-only diagnostic path plus `examples/iw44_forward_transform_probe.rs`.
+The probe decodes each page's real BG44 background, builds the same Y/Cb/Cr input
+planes as `encode_iw44_color`, runs both the production forward DWT and a
+separate DjVuLibre-compatible scalar filter schedule on those identical planes,
+then counts coefficient deltas by IW44 band before comparing the same pixmap
+against local `c44` (DjVuLibre 3.5.29).
+
+**Platform / command.** macOS darwin arm64 (Apple Silicon), release build,
+local `c44` 3.5.29:
+
+```text
+cargo run --release --features="iw44-probe,cli" --example iw44_forward_transform_probe
+```
+
+**Numbers.** Worst pages from IW44_ENTROPY_PROBE (`tests/fixtures/colorbook.djvu`,
+zero-based page indexes 61, 2, 59, 1, 60):
+
+| page | BG pixmap | ours BG44 | c44 | gap | production-vs-DjVuLibre DWT deltas |
+|---:|---:|---:|---:|---:|---:|
+| 61 | 746×1213 | 2,791 B | 2,231 B | 560 B | Y/Cb/Cr all 0 changed coeffs; band 0 all 0 |
+| 2 | 739×1213 | 2,617 B | 2,139 B | 478 B | Y/Cb/Cr all 0 changed coeffs; band 0 all 0 |
+| 59 | 746×1213 | 3,958 B | 3,420 B | 538 B | Y/Cb/Cr all 0 changed coeffs; band 0 all 0 |
+| 1 | 739×1213 | 4,703 B | 4,132 B | 571 B | Y/Cb/Cr all 0 changed coeffs; band 0 all 0 |
+| 60 | 739×1223 | 4,414 B | 3,924 B | 490 B | Y/Cb/Cr all 0 changed coeffs; band 0 all 0 |
+
+Per-plane sample counts: pages 61/2/59/1 each compared 933,888 coefficients per
+plane; page 60 compared 958,464 coefficients per plane. Every plane reported
+`changed=0`, `sum_abs_delta=0`, `max_abs_delta=0`, `band0_changed=0`.
+
+**Decision.** Rejected. The forward-transform hypothesis explains **0 B** of the
+478–571 B worst-page gaps, i.e. **0.0%** versus the issue's ">= half the
+worst-page gap" keep/follow-up bar.
+
+**Reason.** On identical input planes, the production DWT and the independent
+DjVuLibre-compatible scalar schedule are coefficient-identical through all
+Y/Cb/Cr planes and band 0. There is no transform-side coefficient delta to feed
+into `PlaneEncoder`, so no port/adoption follow-up is justified. This closes the
+IW44 band-0/DC size-gap thread as entropy-coding-complete for the zero-PSNR
+levers already examined by IW44_ENTROPY_PROBE.
+>>>>>>> a1d1d8f (quality(iw44): reject forward-transform size-gap hypothesis (#578))
+
