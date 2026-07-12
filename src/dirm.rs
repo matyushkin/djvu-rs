@@ -208,14 +208,20 @@ impl DirmPayload {
 
     /// Build a bundled `DIRM` (offset table present, zero-initialized) from
     /// component descriptors. Offsets are filled in by the caller once the final
-    /// byte layout is known; readers fall back to `FORM` boundaries meanwhile.
+    /// byte layout is known (a zeroed table is rejected by DjVuLibre's DjVmDir,
+    /// #657). `sizes` are the per-component byte lengths (`FORM` header
+    /// included) for the 24-bit metadata size table; pass `&[]` to zero it
+    /// (readers then fall back to `FORM` boundaries).
     #[cfg(feature = "std")]
-    pub fn build_bundled(count: usize, flags: &[u8], ids: &[String]) -> Self {
+    pub fn build_bundled(count: usize, flags: &[u8], ids: &[String], sizes: &[u32]) -> Self {
         Self {
-            flags: 0x80,
+            // Bundled bit + directory version 1: version 0 has a different
+            // plain-section layout in DjVuLibre's DjVmDir and is rejected in
+            // practice (#657); every real-world DIRM observed writes 0x81.
+            flags: BUNDLED_FLAG | 1,
             nfiles: count as u16,
             offsets: vec![0; count],
-            metadata: build_metadata(count, flags, ids),
+            metadata: build_metadata(count, flags, ids, sizes),
         }
     }
 
@@ -223,24 +229,27 @@ impl DirmPayload {
     #[cfg(feature = "std")]
     pub fn build_indirect(count: usize, flags: &[u8], ids: &[String]) -> Self {
         Self {
-            flags: 0x00,
+            // Directory version 1 (see build_bundled), bundled bit clear.
+            flags: 0x01,
             nfiles: count as u16,
             offsets: Vec::new(),
-            metadata: build_metadata(count, flags, ids),
+            metadata: build_metadata(count, flags, ids, &[]),
         }
     }
 }
 
 /// Build the BZZ-compressed DIRM metadata tail from component descriptors.
 ///
-/// Layout: sizes(3b × N, zeroed — readers use `FORM` boundaries), flags(1b × N),
-/// ids(null-terminated), names(null-terminated, mirrors ids), and titles
-/// (N empty, null-terminated strings).
+/// Layout: sizes(3b × N — component byte lengths, or zeroed when unknown so
+/// readers use `FORM` boundaries), flags(1b × N), ids(null-terminated),
+/// names(null-terminated, mirrors ids), and titles (N empty, null-terminated
+/// strings).
 #[cfg(feature = "std")]
-fn build_metadata(count: usize, flags: &[u8], ids: &[String]) -> Vec<u8> {
+fn build_metadata(count: usize, flags: &[u8], ids: &[String], sizes: &[u32]) -> Vec<u8> {
     let mut meta = Vec::new();
-    for _ in 0..count {
-        meta.extend_from_slice(&[0, 0, 0]);
+    for i in 0..count {
+        let size = sizes.get(i).copied().unwrap_or(0).min(0xff_ffff);
+        meta.extend_from_slice(&size.to_be_bytes()[1..]);
     }
     for &f in flags {
         meta.push(f);
@@ -383,7 +392,7 @@ mod tests {
     fn build_bundled_components_roundtrip() {
         let ids = vec!["page1".to_string(), "dict".to_string()];
         let flags = vec![1u8, 0u8]; // page, shared
-        let p = DirmPayload::build_bundled(2, &flags, &ids);
+        let p = DirmPayload::build_bundled(2, &flags, &ids, &[]);
         assert!(p.is_bundled());
         assert_eq!(p.nfiles, 2);
         assert_eq!(p.offsets, vec![0, 0]);
@@ -408,8 +417,9 @@ mod tests {
         assert!(!p.is_bundled());
         assert!(p.offsets.is_empty());
         let bytes = p.encode();
-        // Byte 0 is the indirect flags byte; no offset table follows nfiles.
-        assert_eq!(bytes[0], 0x00);
+        // Byte 0 is version 1 with the bundled bit clear; no offset table
+        // follows nfiles (#657: version 0 layouts are rejected by DjVuLibre).
+        assert_eq!(bytes[0], 0x01);
         let comps = p.components();
         assert_eq!(
             comps.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
