@@ -371,6 +371,18 @@ fn main() {
         &scan_points,
         ocr_pages,
     );
+    // Tier-2 multi-script feeds (#558). Structural Sjbz/SSIM columns always run;
+    // OCR-agreement needs matching Tesseract language data (rus / chi_sim).
+    run(
+        "tests/corpus/cyrillic_simonovich_co2.djvu",
+        &text_points,
+        ocr_pages.min(4),
+    );
+    run(
+        "tests/corpus/chinese_cookbook_sample.djvu",
+        &text_points,
+        ocr_pages.min(4),
+    );
 }
 
 // ---- unit tests: harness logic against a deterministic mock backend -------

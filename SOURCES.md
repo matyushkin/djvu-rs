@@ -22,3 +22,9 @@ All code is written from scratch based on these documents:
 
 This implementation is written entirely from the public specification documents listed above.
 The crate is licensed under MIT.
+
+## Test corpus provenance
+
+Public-domain DjVu fixtures used for benchmarks and integration tests are
+documented in [`tests/corpus/README.md`](tests/corpus/README.md) (tier 1 +
+tier 2). Fetch/verify helpers live in `scripts/fetch_corpus.sh`.
