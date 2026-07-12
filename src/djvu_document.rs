@@ -587,9 +587,9 @@ impl DjVuPage {
 
     /// Return the fully decoded BG44 wavelet image, decoding and caching on first call.
     ///
-    /// Returns `None` if the page has no BG44 chunks.  On decode error the error
-    /// is swallowed and `None` is returned (same semantics as the permissive render
-    /// path), so this method is infallible.
+    /// Returns `None` if the page has no BG44 chunks or if strict decoding fails.
+    /// This method is infallible; callers that need tolerant recovery should use
+    /// a permissive render path instead.
     ///
     /// The result is computed once (all ZP arithmetic decode + block assembly) and
     /// then cached in the page's render-tier layer cache.  Subsequent

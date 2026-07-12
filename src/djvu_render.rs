@@ -1375,9 +1375,8 @@ impl PageLayers {
     }
 
     /// The fully decoded BG44 wavelet image (all chunks), decoding on first
-    /// call. `None` when the page has no BG44 chunks. Decode errors are
-    /// swallowed (the partial image so far is kept, matching the permissive
-    /// render path). The wavelet inverse-transform / YCbCr→RGB conversion is
+    /// call. `None` when the page has no BG44 chunks or when any chunk fails
+    /// strict decoding. The wavelet inverse-transform / YCbCr→RGB conversion is
     /// *not* cached here — it runs per render at the requested subsample.
     pub(crate) fn bg44(&self, page: &DjVuPage) -> Option<&Iw44Image> {
         self.bg44
@@ -1403,8 +1402,10 @@ impl PageLayers {
                     img = Iw44Image::new();
                 }
                 for chunk_data in &chunks[start.min(chunks.len())..] {
+                    #[cfg(test)]
+                    count_bg44_chunk_decode();
                     if img.decode_chunk(chunk_data).is_err() {
-                        break;
+                        return None;
                     }
                 }
                 if img.width == 0 {
@@ -1793,14 +1794,6 @@ fn decode_background_chunks_permissive<'a>(
 ) -> Option<Cow<'a, Pixmap>> {
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
-        // For the all-chunks, sub=1 case reuse the same RGB Pixmap cache as the
-        // strict path so repeated permissive renders don't re-run the conversion.
-        if max_chunks == usize::MAX && subsample == 1 {
-            return page.decoded_bg_rgb_s1().map(Cow::Borrowed);
-        }
-        if max_chunks == usize::MAX && subsample == 2 {
-            return page.decoded_bg_rgb_s2().map(Cow::Borrowed);
-        }
         let mut img = Iw44Image::new();
         for chunk_data in bg44_chunks.iter().take(max_chunks) {
             if img.decode_chunk(chunk_data).is_err() {
@@ -1885,7 +1878,21 @@ fn decode_fg_palette_full(page: &DjVuPage) -> Result<Option<FgbzPalette>, Render
 fn decode_fg44<'a>(page: &'a DjVuPage) -> Result<Option<Cow<'a, Pixmap>>, RenderError> {
     let fg44_chunks = page.fg44_chunks();
     if !fg44_chunks.is_empty() {
-        return Ok(page.decoded_fg44().map(Cow::Borrowed));
+        return match page.decoded_fg44() {
+            Some(pm) => Ok(Some(Cow::Borrowed(pm))),
+            // `decoded_fg44()` is a shared cache used by both strict and
+            // permissive callers, so it swallows the underlying decode error
+            // and returns `None`. With chunks present, a cache miss can only
+            // mean decode failed (never "no foreground") — re-run the decode
+            // for the real error and propagate it (mirrors `decode_mask`'s
+            // Sjbz handling below, round 577). Permissive callers already wrap
+            // this call in `.ok().flatten()`, recovering the old "no
+            // foreground" behavior.
+            None => page
+                .extract_foreground()
+                .map_err(RenderError::from)
+                .map(|opt| opt.map(Cow::Owned)),
+        };
     }
 
     // Fall back to JPEG-encoded foreground if present.
