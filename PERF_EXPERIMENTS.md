@@ -12712,3 +12712,116 @@ IW44 band-0/DC size-gap thread as entropy-coding-complete for the zero-PSNR
 levers already examined by IW44_ENTROPY_PROBE.
 >>>>>>> a1d1d8f (quality(iw44): reject forward-transform size-gap hypothesis (#578))
 
+## Perf round 107 (2026-07-13) — QUALITY_METRIC_GATE: MS-SSIM as lossy quality gate (#585) — **Rejected**
+
+### #585 — MS-SSIM did not improve the lossy gate vs OCR agreement — **Rejected** (2026-07-13)
+
+**Issue.** OCR_QA showed the current SSIM gate can disagree with the actual
+ground truth for lossy JB2 decisions: clean text can lose OCR agreement while
+SSIM remains high, and noisy-scan operating points can look like a structural
+warning even when OCR agreement stays 100%. The experiment asked for an
+SSIMULACRA2-class metric, or a cheaper MS-SSIM / butteraugli-lite candidate, and
+to adopt it as a harness column only if it strictly reduces metric-vs-ground-
+truth inversions on recorded sweeps.
+
+**Approach.** Prototyped a clean-room, std-only `f64` MS-SSIM implementation in
+`src/quality.rs`:
+
+- reused the existing windowed SSIM statistics but exposed the contrast/
+  structure term;
+- built a 2x low-pass image pyramid over luma/gray planes;
+- used the standard five MS-SSIM scale weights with renormalization for tiny
+  images;
+- temporarily printed `MS-SSIM` beside `SSIM` in `ocr_preset_grid`, `ocr_qa`,
+  `quality_harness`, `mask_aa_quality`, and `fgbz_mediancut_harness`.
+
+No external code was copied or vendored. The prototype was removed after the
+decision because it did not satisfy the adoption rule.
+
+**Platform / commands.** macOS Darwin 25.5.0, release build, system Tesseract via
+the existing `ocr-tesseract` feature:
+
+```text
+cargo fmt && cargo test quality::tests
+OCR_PAGES=4 cargo run --release --features ocr-tesseract --example ocr_preset_grid
+cargo run --release --example fgbz_mediancut_harness -- --synthetic 0 2,4,6,32
+cargo run --release --example mask_aa_quality -- tests/corpus/watchmaker.djvu 0 2 4
+```
+
+**OCR grid numbers (4 pages/class).**
+
+Text (`tests/corpus/watchmaker.djvu`, lossless Sjbz 45,472 B; despeckle is a
+no-op on this clean corpus, so all d=off/4/8/16 rows were identical):
+
+| Threshold | Sjbz delta | SSIM | MS-SSIM | min-char-agree |
+|---:|---:|---:|---:|---:|
+| 2% | -22.48% | 0.99902 | 0.99977 | 100.000% |
+| 4% | -23.44% | 0.99873 | 0.99966 | 100.000% |
+| 6% | -23.98% | 0.99864 | 0.99961 | 99.926% |
+| 8% | -24.22% | 0.99838 | 0.99951 | 99.926% |
+| 10% | -24.86% | 0.99826 | 0.99945 | 99.816% |
+
+Scan (`tests/corpus/pathogenic_bacteria_1896.djvu`, lossless Sjbz 74,552 B):
+
+| Threshold / despeckle | Sjbz delta | SSIM | MS-SSIM | min-char-agree |
+|---|---:|---:|---:|---:|
+| 2% / off | -0.03% | 1.00000 | 1.00000 | 100.000% |
+| 4% / off | -0.09% | 1.00000 | 1.00000 | 100.000% |
+| 6% / off | -0.63% | 0.99987 | 0.99995 | 100.000% |
+| 8% / off | -4.37% | 0.99871 | 0.99949 | 100.000% |
+| 10% / off | -10.70% | 0.99659 | 0.99860 | 99.848% |
+| 2% / d=8 | -0.10% | 0.99999 | 1.00000 | 100.000% |
+| 4% / d=8 | -0.16% | 0.99999 | 1.00000 | 100.000% |
+| 6% / d=8 | -0.70% | 0.99986 | 0.99995 | 100.000% |
+| 8% / d=8 | -4.44% | 0.99870 | 0.99949 | 100.000% |
+| 10% / d=8 | -10.75% | 0.99659 | 0.99860 | 99.848% |
+| 2% / d=16 | -0.11% | 0.99999 | 0.99999 | 100.000% |
+| 4% / d=16 | -0.17% | 0.99999 | 0.99999 | 100.000% |
+| 6% / d=16 | -0.71% | 0.99986 | 0.99994 | 100.000% |
+| 8% / d=16 | -4.45% | 0.99870 | 0.99949 | 100.000% |
+| 10% / d=16 | -10.76% | 0.99658 | 0.99860 | 99.848% |
+
+The omitted d=4 scan rows matched the same shape: 2/4/6/8% stayed at 100% OCR,
+10% dropped to 99.848%, and MS-SSIM remained more compressed than SSIM.
+
+**Inversion study.** On the recorded OCR grid, counting strict pairwise
+inversions only where ground-truth OCR agreement differs:
+
+| Corpus | SSIM inversions | MS-SSIM inversions |
+|---|---:|---:|
+| text | 0 | 0 |
+| scan | 0 | 0 |
+
+Equal-OCR pairs expose the original calibration complaint (the metric can
+"over-warn" among several 100% OCR operating points), but they are not strict
+rank inversions because the ground truth is tied. MS-SSIM does not fix that
+calibration problem: it remains near 1.0 and is even less separated than SSIM.
+From the best to worst text points, SSIM drops 0.00076 while MS-SSIM drops only
+0.00032; on scan off-threshold 2% to 10%, SSIM drops 0.00341 while MS-SSIM drops
+0.00140. It therefore does not catch the OCR cliff earlier than SSIM.
+
+**Colour / crop and mask-AA checks.** The attempted colour and mask-AA harness
+runs on this checkout did not produce usable correlation rows:
+
+```text
+fgbz_mediancut_harness --synthetic 0 2,4,6,32
+# panicked: render candidate: Iw44(Invalid)
+
+mask_aa_quality tests/corpus/watchmaker.djvu 0 2 4
+# panicked: native reference render should succeed: Iw44(Invalid)
+```
+
+These render failures are outside this metric prototype and were not
+root-caused here. They also supply no evidence that MS-SSIM dominates the
+existing `compare_color` / ΔE path for colour judgements.
+
+**Decision.** Rejected. No `src/quality.rs` API, no harness column, and no lossy
+quality-gate behaviour was kept.
+
+**Reason.** The issue's adoption rule is strict: add a harness column only if
+the candidate reduces inversions vs ground truth. MS-SSIM tied SSIM at 0
+strict inversions on the OCR grid and gave a more compressed near-1.0 scale, so
+it does not improve the gate. Closing #585 as an evaluated reject keeps the
+existing SSIM + OCR agreement + colour ΔE workflow until a genuinely stronger
+metric has evidence.
+
