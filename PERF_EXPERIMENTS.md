@@ -12309,3 +12309,38 @@ neutral (route-to-BG trades edge crispness for tone continuity).
 explode into thousands of components. The flip-density feature catches
 exactly that signature, and clearing those blocks simultaneously shrinks the
 mask and reconstructs a photo readers can actually see.
+## Perf round 98 (2026-07-12) — FLATTEN_BG: flat-field background normalization (#593) — **Rejected**
+
+**Issue.** #593 — the BG44 layer keeps stains/shadows/yellowing; hypothesis:
+the wavelet "spends coefficients on the illumination gradient" (by analogy
+with BG_DIFFUSE's −52…97%), so flattening paper toward white should shrink
+BG44 ≥10% on stained scans. Decision rule: keep opt-in only at ≥10% BG44
+shrink with clean crops and zero OCR regression.
+
+**Approach.** Implemented `SegmentOptions::flatten_background`: per-channel
+mask-excluded SAT box-mean illumination field (window ≈ min(w,h)/8), gains
+`target95/field` clamped to [1, 1.8] (lighten-only), first per-pixel, then —
+after the first negative — re-implemented as a coarse-grid field with
+bilinear gain interpolation (smooth by construction). Probe: real scans
+(conquete_paix, pathogenic, malliavin) + a synthetic stained watchmaker
+(vignette + diagonal shadow + bottom-yellowing).
+
+**Numbers.** Real scans: **±0.0% BG44** — their illumination fields are
+uniform, gain ≈ 1 everywhere, nothing to flatten. Synthetic stained scan:
+visual whitening is dramatic (crop mean RGB 193/194/186 → **255/255/199**),
+but BG44 **+12.3%** (2528 → 2839 B) with BOTH field implementations, Sjbz
+unchanged. Mechanism: smooth illumination gradients are *low-frequency* —
+IW44 encodes them nearly free (the whole stained background is 2.5 KB at
+subsample 12) — while a >1 gain multiplies the paper *grain* amplitude, and
+grain is exactly what costs wavelet coefficients. The BG_DIFFUSE analogy does
+not transfer: diffusion removed high-frequency ink-fallback surprises;
+flattening amplifies high-frequency noise.
+
+**Decision.** Rejected; code reverted (numbers preserved here). The aesthetic
+goal (white paper in viewers) is better served on the *viewer/export* side —
+a display-time white-balance costs zero encoded bytes and is lossless w.r.t.
+the archived scan; noted on the issue as the recommended direction.
+
+**Reason.** The premise inverted under measurement: illumination is cheap,
+amplified grain is expensive. An encoder-side flatten pays +12% BG44 for what
+a viewer-side transform does for free.
