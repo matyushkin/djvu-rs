@@ -11812,3 +11812,27 @@ colour fidelity. Unit test: flat → ceiling, noisy → 3, noise fully under ink
 **Decision.** Kept as opt-in. Decision rule ("auto dominates both fixed settings on the
 mixed corpus") met. Wiring it into profile defaults belongs with #570's auto profile once
 corpus diversity (#558) gives more photo-background pages.
+## Perf round 84 (2026-07-12) — PY_REGION: region/tile render and progressive decode in djvu-py (#583)
+
+### #583 — `render_region` / `render_coarse` / `render_progressive` bindings — **Kept** (2026-07-12)
+
+**Issue.** djvu-py exposed only full-page `render(dpi)`: Python viewers had to render whole
+pages to show a crop — the O(page)-instead-of-O(viewport) waste the core already avoids.
+
+**Approach.** New public high-level `Page` methods in djvu_rs (`render_region` — routed
+through the composited-tile cache, `render_coarse`, `render_progressive`,
+`bg44_chunk_count`), mirrored in djvu-py with the established binding patterns: `py.detach`
+GIL release (PY_GIL_DETACH) and the existing buffer-protocol pixmap. pytest coverage in the
+PY_CI suite: region == byte-exact crop of the full render; last progressive stage ==
+byte-identical full render at native resolution (at downscaled DPI the progressive
+compositor legitimately takes a different resampling route — recorded, shape-checked);
+coarse returns `None` on bilevel pages.
+
+**Numbers** (colorbook, 2× zoom, 1200×900 viewport, 8-step pan, medians):
+- Region pan ×8: **19.8 ms** vs full-page ×8: 1,286.6 ms — **64×** (tile cache + viewport
+  scope).
+- Thread scaling (GIL released): 1 thread 20.4 ms → 4 threads **9.9 ms** (2.1×).
+- pytest: 44/44 green (3 new tests).
+
+**Decision.** Kept (additive API). The measured region-vs-full ratio and thread scaling are
+the experiment's deliverable per the issue.
