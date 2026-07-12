@@ -21,20 +21,19 @@ fn info_gamma_edit(doc: &mut DjVuDocumentMut, page_no: usize) {
             children,
             ..
         }) = doc.chunk_at_path(&[i])
+            && secondary_id == b"DJVU"
         {
-            if secondary_id == b"DJVU" {
-                if seen == page_no {
-                    let j = children
-                        .iter()
-                        .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"INFO"))
-                        .expect("page has INFO");
-                    let mut info = doc.chunk_at_path(&[i, j]).unwrap().data().to_vec();
-                    info[7] ^= 1; // same length, real edit
-                    doc.replace_leaf(&[i, j], info).unwrap();
-                    return;
-                }
-                seen += 1;
+            if seen == page_no {
+                let j = children
+                    .iter()
+                    .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"INFO"))
+                    .expect("page has INFO");
+                let mut info = doc.chunk_at_path(&[i, j]).unwrap().data().to_vec();
+                info[7] ^= 1; // same length, real edit
+                doc.replace_leaf(&[i, j], info).unwrap();
+                return;
             }
+            seen += 1;
         }
     }
     panic!("page {page_no} not found");
