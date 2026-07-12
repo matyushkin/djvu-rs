@@ -1,6 +1,10 @@
 # djvu-rs Python bindings
 
-Python bindings for [djvu-rs](https://github.com/matyushkin/djvu-rs), a pure-Rust DjVu decoder.
+Python bindings for [djvu-rs](https://github.com/matyushkin/djvu-rs), a
+pure-Rust DjVu decoder and encoder. The bindings cover the reading surface:
+open documents, render pages (to PIL or numpy), and extract the text layer.
+For conversion (PDF/EPUB/TIFF) and encoding, see the
+[main project README](https://github.com/matyushkin/djvu-rs#readme).
 
 ## Install
 
