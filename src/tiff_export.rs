@@ -160,8 +160,9 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
         let images: Vec<PageImage> = indices
             .par_iter()
             .map(|&i| {
-                let page = doc.page(i)?;
-                build_page_image(page, opts)
+                // #629: cold clone — decode caches drop with the page.
+                let page = doc.page(i)?.clone();
+                build_page_image(&page, opts)
             })
             .collect::<Result<Vec<_>, TiffError>>()?;
         for img in &images {
@@ -171,10 +172,11 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
 
     #[cfg(not(feature = "parallel"))]
     for &i in &indices {
-        let page = doc.page(i)?;
+        // #629: cold clone — decode caches drop with the page.
+        let page = doc.page(i)?.clone();
         match opts.mode {
-            TiffMode::Color => write_color_page(&mut encoder, page, opts.scale)?,
-            TiffMode::Bilevel => write_bilevel_page(&mut encoder, page)?,
+            TiffMode::Color => write_color_page(&mut encoder, &page, opts.scale)?,
+            TiffMode::Bilevel => write_bilevel_page(&mut encoder, &page)?,
         }
     }
     Ok(())
@@ -420,7 +422,8 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Resul
     // Encode every page's G4 payload first (parallel when available) — the
     // IFD chain needs strip offsets, so sizes must be known before layout.
     let encode_one = |i: usize| -> Result<(u32, u32, u32, Vec<u8>), TiffError> {
-        let page = doc.page(i)?;
+        // #629: cold clone — the mask decode cache drops with the page.
+        let page = doc.page(i)?.clone();
         let pw = page.width() as u32;
         let ph = page.height() as u32;
         let dpi = page.dpi().max(1) as u32;

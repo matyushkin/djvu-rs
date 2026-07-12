@@ -142,8 +142,9 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
         let artifacts: Vec<PageArtifacts> = indices
             .par_iter()
             .map(|&i| {
-                let page = doc.page(i)?;
-                build_page_artifacts(page, i, opts)
+                // #629: cold clone — decode caches drop with the page.
+                let page = doc.page(i)?.clone();
+                build_page_artifacts(&page, i, opts)
             })
             .collect::<Result<Vec<_>, EpubError>>()?;
         for art in &artifacts {
@@ -154,8 +155,9 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
 
     #[cfg(not(feature = "parallel"))]
     for &i in &indices {
-        let page = doc.page(i)?;
-        let art = build_page_artifacts(page, i, opts)?;
+        // #629: cold clone — decode caches drop with the page.
+        let page = doc.page(i)?.clone();
+        let art = build_page_artifacts(&page, i, opts)?;
         write_page_artifacts(&mut zip, &art)?;
         image_names.push(art.img_name.clone());
     }

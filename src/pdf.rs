@@ -1279,9 +1279,12 @@ fn djvu_to_pdf_impl<W: std::io::Write>(
             let rendered_pages: Vec<Option<RenderedPage>> = (start..end)
                 .into_par_iter()
                 .map(|i| {
+                    // #629: render on a cold clone so the decode caches die
+                    // with it — the export never revisits a page, and caching
+                    // on the document made peak RSS grow O(pages).
                     doc.page(i)
                         .ok()
-                        .and_then(|p| render_page_data(p, opts).ok())
+                        .and_then(|p| render_page_data(&p.clone(), opts).ok())
                 })
                 .collect();
             for (off, rendered) in rendered_pages.into_iter().enumerate() {
@@ -1296,10 +1299,11 @@ fn djvu_to_pdf_impl<W: std::io::Write>(
     // bodies first (peak RSS O(pages × body) → O(1 page); mirrors TIFF_STREAM).
     #[cfg(not(feature = "parallel"))]
     for i in 0..page_count {
+        // #629: render on a cold clone — see the parallel path above.
         let rendered = doc
             .page(i)
             .ok()
-            .and_then(|p| render_page_data(p, opts).ok());
+            .and_then(|p| render_page_data(&p.clone(), opts).ok());
         page_obj_ids.push(emit_one(&mut w, i, rendered)?);
     }
 
