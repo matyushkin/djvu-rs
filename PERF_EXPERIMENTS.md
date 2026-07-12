@@ -12221,3 +12221,49 @@ opt-in for render-heavy embedders whose workload matches the training driver.
 whose heaviest user-visible jobs (exports) exercise encoder/serialization
 paths the profile marks cold; shipping such binaries would trade a noise-level
 render win for a real export regression.
+## Perf round 96 (2026-07-12) — DESKEW: skew sensitivity quantified + opt-in projection-profile deskew (#592)
+
+**Issue.** #592 — nothing corrects page skew, and its cost to JB2/OCR was
+unmeasured. Decision rule: proceed only if skew measurably costs bytes or
+accuracy; keep the corrector if it recovers ≥ half the measured loss at 100%
+OCR safety.
+
+**Step 1 — sensitivity (probe `examples/deskew_probe.rs`).** Synthetic
+rotation (bilinear, white fill) before binarization, with a 0.02° control
+angle to isolate the pure resampling cost (that control matters: +4.8…+43.2%
+Sjbz comes from resampling alone). Skew proper is *very* expensive for JB2:
+at 1° Sjbz is **+36% (cable) / +150% (watchmaker) / +384% (DjVu3Spec)**; even
+0.3° costs +20/+102/+241%. OCR is nearly insensitive (char agreement
+99.2–100% up to 3° — Tesseract deskews internally), so the case for deskew is
+compression, not accuracy.
+
+**Step 2 — corrector.** `SegmentOptions::deskew` (opt-in, default off — an
+enhancement lever like despeckle): `estimate_skew` maximizes the sharpness
+(Σ of squared adjacent-row differences) of the ink projection profile over a
+coarse-to-fine ±5° sweep (0.5° → 0.1° → 0.02° + parabolic peak refinement),
+then a small-angle bilinear rotation uprights the source before binarization
+when |correction| ≥ 0.15°. Two estimator defects found and fixed along the
+way: strided row sampling created a comb that pinned every estimate to ~0°,
+and score plateaus on small pages broke ties at the plateau edge instead of
+its centre (both now unit-tested with a non-periodic synthetic page —
+periodic bars alias the projection metric, which is itself a recorded
+gotcha).
+
+**Numbers (net of the resampling floor).** watchmaker: recovery **92–96%**
+at 0.3/1/3°, 70% at 2°, but only 29% at 0.5°; DjVu3Spec: 85/78/91% at
+0.3/2/3° but ~4–36% at 0.5–1°; cable (halftone): marginal everywhere (its
+skew cost is small and blur hurts its dots). The weak pocket traces to a
+±0.02° estimator bias at specific angles — and a 0.02° *residual* after
+double resampling measurably costs more than it recovers (manual check:
+correcting a 0.5° skew by exactly −0.50° → 19.5 KB vs −0.52° → 26.9 KB).
+OCR safety: agreement ≥99.9% on deskewed pages.
+
+**Decision.** Kept (opt-in, default off). Sensitivity is proven (step-1 bar
+cleared by an order of magnitude); recovery clears the ≥50% bar at most
+angles ≥1° — the realistic scan-skew regime — with the ~0.5° pocket and
+halftone content documented as the cases where it may not pay.
+
+**Reason.** Skew is one of the largest single JB2 size levers measured in
+this whole series (+150…384% at 1°), and the corrector recovers most of it
+where it matters; sub-0.5° precision is bounded by the projection metric
+itself, not the implementation.

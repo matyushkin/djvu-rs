@@ -60,6 +60,14 @@ pub struct SegmentOptions {
     /// their value is invisible; smoothing them is a pure encoder-side size win.
     /// Takes precedence over `bg_inpaint` when both are set.
     pub bg_diffuse: bool,
+    /// Opt-in skew correction (#592). Estimates the page's small-angle skew
+    /// (projection-profile sharpness maximization over ±5°) and, when it
+    /// exceeds ~0.15°, rotates the source upright (bilinear, white fill)
+    /// before binarization. Skew is expensive for JB2 — measured +36…+384%
+    /// Sjbz at 1° — while OCR is nearly insensitive. Off by default: like
+    /// despeckle this intentionally changes output pixels, so it is an
+    /// enhancement lever, not a fidelity-preserving one.
+    pub deskew: bool,
 }
 
 impl Default for SegmentOptions {
@@ -71,6 +79,7 @@ impl Default for SegmentOptions {
             binarization: Binarization::Fixed,
             bg_inpaint: false,
             bg_diffuse: false,
+            deskew: false,
         }
     }
 }
@@ -194,10 +203,156 @@ fn luminance(r: u8, g: u8, b: u8) -> u8 {
     (((r as u32) * 306 + (g as u32) * 601 + (b as u32) * 117) >> 10) as u8
 }
 
+/// Estimate the page's small-angle skew in degrees (#592).
+///
+/// Projection-profile sharpness maximization: binarize a strided luminance
+/// sample, then for each candidate angle accumulate ink counts into sheared
+/// row buckets (`row = y + x·tanθ`) and score the profile by the sum of
+/// squared adjacent-row differences — sharpest when text baselines align
+/// with the projection. Coarse-to-fine sweep over ±5° (0.5° → 0.1° → 0.02°).
+///
+/// Returns the **correction angle**: rotating the page by the returned value
+/// (via the internal small-angle rotation) aligns the text baselines.
+pub fn estimate_skew(rgba: &Pixmap) -> f32 {
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    if w < 64 || h < 64 {
+        return 0.0;
+    }
+    // Dark-pixel sample: every row (row resolution is the estimator's angular
+    // sensitivity — striding rows would plateau the score for small angles),
+    // strided columns for cost.
+    let stride = 2usize;
+    let mut ink: Vec<(u32, u32)> = Vec::new();
+    for y in 0..h {
+        let row = &rgba.data[y * w * 4..(y * w + w) * 4];
+        for x in (0..w).step_by(stride) {
+            let p = &row[x * 4..x * 4 + 3];
+            if luminance(p[0], p[1], p[2]) < 128 {
+                ink.push((x as u32, y as u32));
+            }
+        }
+    }
+    if ink.len() < 256 {
+        return 0.0; // not enough ink for a meaningful profile
+    }
+
+    let score = |deg: f32| -> f64 {
+        let t = deg.to_radians().tan();
+        let bins = h + (w as f32 * t.abs()) as usize + 2;
+        let mut hist = vec![0u32; bins];
+        let last = bins - 1;
+        let off = if t < 0.0 { w as f32 * -t } else { 0.0 };
+        for &(x, y) in &ink {
+            let r = (y as f32 + x as f32 * t + off) as usize;
+            hist[r.min(last)] += 1;
+        }
+        hist.windows(2)
+            .map(|p| {
+                let d = p[1] as f64 - p[0] as f64;
+                d * d
+            })
+            .sum()
+    };
+
+    // Ties (score plateaus happen on small pages where a sub-bucket shear
+    // moves nothing) resolve to the plateau centre, not its first edge.
+    let sweep = |centre: f32, half: f32, step: f32| -> f32 {
+        let mut best = f64::MIN;
+        let (mut first, mut last_a) = (centre, centre);
+        let mut a = centre - half;
+        while a <= centre + half + 1e-6 {
+            let sc = score(a);
+            if sc > best {
+                best = sc;
+                first = a;
+                last_a = a;
+            } else if sc == best {
+                last_a = a;
+            }
+            a += step;
+        }
+        (first + last_a) / 2.0
+    };
+
+    let c = sweep(0.0, 5.0, 0.5);
+    let c = sweep(c, 0.5, 0.1);
+    let c = sweep(c, 0.1, 0.02);
+
+    // Sub-step refinement: a residual of even 0.02° after correction costs
+    // more than the alignment recovers (double resampling + micro-shear), so
+    // interpolate the score peak with a parabola through the final three
+    // sweep points instead of stopping at the grid.
+    let step = 0.02f32;
+    let (sl, sc, sr) = (score(c - step), score(c), score(c + step));
+    let denom = sl - 2.0 * sc + sr;
+    if denom.abs() > f64::EPSILON {
+        let shift = 0.5 * (sl - sr) / denom;
+        c + step * (shift as f32).clamp(-1.0, 1.0)
+    } else {
+        c
+    }
+}
+
+/// Rotate `src` by `deg` degrees around its centre (bilinear inverse mapping,
+/// white fill) — the small-angle correction used by
+/// [`SegmentOptions::deskew`].
+fn rotate_small(src: &Pixmap, deg: f32) -> Pixmap {
+    let rad = deg.to_radians();
+    let (sn, cs) = rad.sin_cos();
+    let (w, h) = (src.width as i32, src.height as i32);
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let mut out = Pixmap::white(src.width, src.height);
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let sx = cs * dx + sn * dy + cx;
+            let sy = -sn * dx + cs * dy + cy;
+            let x0f = sx.floor();
+            let y0f = sy.floor();
+            if x0f < 0.0 || y0f < 0.0 || x0f as i32 + 1 >= w || y0f as i32 + 1 >= h {
+                continue; // white fill
+            }
+            let (fx, fy) = (sx - x0f, sy - y0f);
+            let (x0, y0) = (x0f as usize, y0f as usize);
+            let idx = |xx: usize, yy: usize| (yy * src.width as usize + xx) * 4;
+            let di = (y as usize * src.width as usize + x as usize) * 4;
+            for ch in 0..3 {
+                let p00 = src.data[idx(x0, y0) + ch] as f32;
+                let p10 = src.data[idx(x0 + 1, y0) + ch] as f32;
+                let p01 = src.data[idx(x0, y0 + 1) + ch] as f32;
+                let p11 = src.data[idx(x0 + 1, y0 + 1) + ch] as f32;
+                let v = p00 * (1.0 - fx) * (1.0 - fy)
+                    + p10 * fx * (1.0 - fy)
+                    + p01 * (1.0 - fx) * fy
+                    + p11 * fx * fy;
+                out.data[di + ch] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Minimum estimated skew worth correcting; below it the resampling blur
+/// costs more than the alignment recovers.
+const DESKEW_MIN_DEG: f32 = 0.15;
+
 /// Segment an RGBA page into a bilevel mask + sub-sampled background.
 ///
 /// Empty input (`width == 0` or `height == 0`) returns empty outputs.
 pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
+    // #592: opt-in skew correction — estimate, and re-run on the rotated
+    // source when the page is measurably skewed.
+    if opts.deskew {
+        let correction = estimate_skew(rgba);
+        if correction.abs() >= DESKEW_MIN_DEG {
+            let upright = rotate_small(rgba, correction);
+            let mut inner = *opts;
+            inner.deskew = false; // single correction pass
+            return segment_page(&upright, &inner);
+        }
+    }
+
     let w = rgba.width;
     let h = rgba.height;
 
@@ -656,6 +811,89 @@ fn inpaint_block_mean(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Synthetic text-like page: horizontal word-ish bars with pseudo-random
+    /// (deterministic LCG) line spacing, word lengths and gaps — a strictly
+    /// periodic pattern would alias the projection-profile estimator. Rotated
+    /// by `deg` via the deskew rotation helper itself.
+    fn striped_page(deg: f32) -> Pixmap {
+        let mut pm = Pixmap::white(512, 512);
+        let mut rng = 0x2545_F491u32;
+        let mut next = move |m: u32| {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (rng >> 16) % m
+        };
+        let mut y = 24u32;
+        while y + 10 < 488 {
+            let mut x = 24 + next(20);
+            while x + 12 < 488 {
+                let wlen = 12 + next(40);
+                for yy in y..y + 6 {
+                    for xx in x..(x + wlen).min(488) {
+                        pm.set_rgb(xx, yy, 0, 0, 0);
+                    }
+                }
+                x += wlen + 6 + next(12);
+            }
+            y += 20 + next(9);
+        }
+        if deg == 0.0 {
+            pm
+        } else {
+            rotate_small(&pm, deg)
+        }
+    }
+
+    /// #592: the estimator recovers a synthetic 1° skew to within ±0.06° and
+    /// reports ~0 on the upright page.
+    #[test]
+    fn estimate_skew_finds_synthetic_rotation() {
+        assert!(estimate_skew(&striped_page(0.0)).abs() <= 0.06);
+        let est = estimate_skew(&striped_page(1.0));
+        assert!(
+            (est + 1.0).abs() <= 0.06,
+            "1° skew must estimate a ≈−1° correction, got {est}"
+        );
+    }
+
+    /// #592: `deskew: true` on a skewed page yields a mask much closer to the
+    /// upright mask than segmenting the skewed page directly; on an upright
+    /// page it is a no-op (below the correction threshold).
+    #[test]
+    fn deskew_option_corrects_synthetic_skew() {
+        let upright = striped_page(0.0);
+        let skewed = striped_page(1.0);
+        let opts_plain = SegmentOptions::default();
+        let opts_deskew = SegmentOptions {
+            deskew: true,
+            ..SegmentOptions::default()
+        };
+
+        let ref_mask = segment_page(&upright, &opts_plain).mask;
+        let diff = |m: &Bitmap| -> u64 {
+            let mut d = 0u64;
+            for y in 0..m.height {
+                for x in 0..m.width {
+                    if m.get(x, y) != ref_mask.get(x, y) {
+                        d += 1;
+                    }
+                }
+            }
+            d
+        };
+
+        let skewed_diff = diff(&segment_page(&skewed, &opts_plain).mask);
+        let fixed_diff = diff(&segment_page(&skewed, &opts_deskew).mask);
+        assert!(
+            fixed_diff * 2 < skewed_diff,
+            "deskew must recover most of the skew: skewed {skewed_diff}, deskewed {fixed_diff}"
+        );
+
+        // Upright page: below the threshold → identical to the plain path.
+        let a = segment_page(&upright, &opts_plain).mask;
+        let b = segment_page(&upright, &opts_deskew).mask;
+        assert_eq!(a.data, b.data, "deskew must be a no-op on an upright page");
+    }
 
     fn fill(pm: &mut Pixmap, r: u8, g: u8, b: u8) {
         for y in 0..pm.height {
