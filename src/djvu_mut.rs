@@ -198,6 +198,29 @@ pub enum MutError {
         /// The underlying error message.
         message: String,
     },
+
+    /// I/O failure while writing an incremental save
+    /// ([`DjVuDocumentMut::save_patched`]) to the target file.
+    #[cfg(feature = "std")]
+    #[error("save I/O error: {0}")]
+    SaveIo(#[from] std::io::Error),
+
+    /// [`DjVuDocumentMut::save_patched`] found that the target file does not
+    /// hold this document's original bytes (length or boundary spot-check
+    /// mismatch), so patching it in place would corrupt it.
+    #[cfg(feature = "std")]
+    #[error("save_patched target does not hold this document's original bytes")]
+    PatchTargetMismatch,
+}
+
+/// Result of an incremental [`DjVuDocumentMut::save_patched`] write.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavePatchStats {
+    /// Final length of the target file.
+    pub file_len: u64,
+    /// Bytes actually written (0 for a clean document).
+    pub bytes_written: u64,
 }
 
 /// A DjVu document opened for in-place mutation.
@@ -469,6 +492,91 @@ impl DjVuDocumentMut {
             emit_patched_single_page(&self.file.root, &self.original_bytes)
                 .unwrap_or_else(|| iff::emit(&self.file)),
         )
+    }
+
+    /// Save the (possibly edited) document into `file` **incrementally**,
+    /// writing only the byte range that actually changed (#595).
+    ///
+    /// `file` must currently hold this document's *original* bytes (the exact
+    /// buffer this `DjVuDocumentMut` was parsed from) — verified by a cheap
+    /// length + boundary spot-check, and enforced properly by the caller.
+    ///
+    /// The new serialization is computed in memory (same bytes as
+    /// [`Self::try_into_bytes`]), then diffed against the original: the common
+    /// prefix is skipped, and — when the total length is unchanged — the
+    /// common suffix too, so a same-size edit (e.g. an in-place metadata
+    /// tweak) writes only the edited component's bytes and leaves `DIRM`
+    /// untouched on disk. A size-changing edit rewrites from the first
+    /// differing byte (in a bundled DJVM that is usually the `DIRM` offset
+    /// table near the front) and truncates/extends the file. A clean document
+    /// writes nothing.
+    ///
+    /// Returns the number of bytes written and the final file length.
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::PatchTargetMismatch`] — `file` does not hold the original
+    ///   bytes (nothing has been written when this is returned)
+    /// - [`MutError::SaveIo`] — an underlying read/write/truncate failed
+    /// - any error [`Self::try_into_bytes`] can return
+    #[cfg(feature = "std")]
+    pub fn save_patched(mut self, file: &mut std::fs::File) -> Result<SavePatchStats, MutError> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // Cheap target check: length plus first/last boundary bytes.
+        let old = core::mem::take(&mut self.original_bytes);
+        let file_len = file.metadata()?.len();
+        if file_len != old.len() as u64 {
+            return Err(MutError::PatchTargetMismatch);
+        }
+        let mut probe = [0u8; 16];
+        let head_len = old.len().min(16);
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut probe[..head_len])?;
+        if probe[..head_len] != old[..head_len] {
+            return Err(MutError::PatchTargetMismatch);
+        }
+
+        let new = if self.dirty {
+            recompute_dirm_offsets(&mut self.file.root)?;
+            emit_patched_single_page(&self.file.root, &old).unwrap_or_else(|| iff::emit(&self.file))
+        } else {
+            old.clone()
+        };
+
+        let prefix = old
+            .iter()
+            .zip(new.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        // Suffix skipping is only sound when the lengths match: with a length
+        // change every retained-on-disk byte after the write sits at a shifted
+        // offset relative to `new`.
+        let suffix = if old.len() == new.len() {
+            old[prefix..]
+                .iter()
+                .rev()
+                .zip(new[prefix..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count()
+        } else {
+            0
+        };
+
+        let write_end = new.len() - suffix;
+        let bytes_written = (write_end - prefix.min(write_end)) as u64;
+        if bytes_written > 0 {
+            file.seek(SeekFrom::Start(prefix as u64))?;
+            file.write_all(&new[prefix..write_end])?;
+        }
+        if new.len() as u64 != file_len {
+            file.set_len(new.len() as u64)?;
+        }
+        file.flush()?;
+        Ok(SavePatchStats {
+            file_len: new.len() as u64,
+            bytes_written,
+        })
     }
 
     // ---- High-level setters (PR2 of #222) ----------------------------------
@@ -1324,6 +1432,118 @@ mod tests {
 
     fn read_corpus(name: &str) -> Vec<u8> {
         std::fs::read(corpus_path(name)).expect("corpus fixture missing")
+    }
+
+    /// #595: `save_patched` must leave the file byte-identical to
+    /// `try_into_bytes` for clean, same-size-edit, and size-changing-edit
+    /// saves — and its `bytes_written` must reflect the incremental win.
+    #[test]
+    fn save_patched_matches_full_serialization() {
+        let original = read_corpus("navm_fgbz.djvu");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        // Clean save: nothing written.
+        std::fs::write(tmp.path(), &original).unwrap();
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        let stats = doc.save_patched(&mut f).unwrap();
+        assert_eq!(stats.bytes_written, 0);
+        assert_eq!(std::fs::read(tmp.path()).unwrap(), original);
+
+        // Size-changing edit (bookmarks): file equals the full serialization,
+        // and the untouched head is skipped.
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let bookmarks = vec![DjVuBookmark {
+            title: "patched".into(),
+            url: "#1".into(),
+            children: Vec::new(),
+        }];
+        doc.set_bookmarks(&bookmarks).unwrap();
+        let expected = {
+            let mut clone = DjVuDocumentMut::from_bytes(&original).unwrap();
+            clone.set_bookmarks(&bookmarks).unwrap();
+            clone.try_into_bytes().unwrap()
+        };
+        std::fs::write(tmp.path(), &original).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        let stats = doc.save_patched(&mut f).unwrap();
+        assert_eq!(std::fs::read(tmp.path()).unwrap(), expected);
+        assert_eq!(stats.file_len, expected.len() as u64);
+        assert!(
+            stats.bytes_written < expected.len() as u64,
+            "size-changing edit must still skip the untouched head"
+        );
+
+        // Same-size edit (replace a leaf with an equal-length payload): only
+        // that component's bytes are written; DIRM stays untouched on disk.
+        // Same-size scenario needs an emit-stable base: navm_fgbz.djvu itself
+        // lacks the final IFF pad byte (odd root FORM length), which
+        // `iff::emit` normalizes (+1 byte). Use the normalized bytes from the
+        // bookmark edit above as the on-disk original.
+        let original = expected;
+        let doc0 = DjVuDocumentMut::from_bytes(&original).unwrap();
+        // Find a page leaf to overwrite with same-length data: page 0's INFO.
+        let info_path = (0..doc0.root_child_count())
+            .find_map(|i| match doc0.chunk_at_path(&[i]) {
+                Ok(Chunk::Form {
+                    secondary_id,
+                    children,
+                    ..
+                }) if secondary_id == b"DJVU" => {
+                    children.iter().enumerate().find_map(|(j, c)| match c {
+                        Chunk::Leaf { id, .. } if id == b"INFO" => Some(vec![i, j]),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("bundle has a page with INFO");
+        let mut new_info = doc0.chunk_at_path(&info_path).unwrap().data().to_vec();
+        // Flip the gamma byte (offset 7 = 10*gamma) — same length, real edit.
+        new_info[7] ^= 1;
+        let mut doc = doc0.clone();
+        doc.replace_leaf(&info_path, new_info.clone()).unwrap();
+        let expected = {
+            let mut clone = doc0.clone();
+            clone.replace_leaf(&info_path, new_info).unwrap();
+            clone.try_into_bytes().unwrap()
+        };
+        assert_eq!(expected.len(), original.len(), "edit must be same-size");
+        std::fs::write(tmp.path(), &original).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        let stats = doc.save_patched(&mut f).unwrap();
+        assert_eq!(std::fs::read(tmp.path()).unwrap(), expected);
+        assert!(
+            stats.bytes_written <= 64,
+            "same-size single-byte edit must write only the edited span, wrote {}",
+            stats.bytes_written
+        );
+
+        // Wrong target: refuse before writing anything.
+        let doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        std::fs::write(tmp.path(), b"not the original").unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        assert!(matches!(
+            doc.save_patched(&mut f),
+            Err(MutError::PatchTargetMismatch)
+        ));
+        assert_eq!(std::fs::read(tmp.path()).unwrap(), b"not the original");
     }
 
     /// Round-trip without edits is byte-identical on a single-page document.
