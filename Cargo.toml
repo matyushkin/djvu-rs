@@ -156,6 +156,10 @@ name = "async_lazy_first_page"
 required-features = ["async"]
 
 [[example]]
+name = "async_http_first_page"
+required-features = ["async"]
+
+[[example]]
 name = "pdf_memory_probe"
 required-features = ["pdf"]
 

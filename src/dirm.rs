@@ -54,6 +54,12 @@ pub(crate) struct DirmComponent {
     pub kind: DirmComponentKind,
     /// Directory entry id (resolver key / first metadata string field).
     pub id: String,
+    /// Component byte length from the DIRM size table (`FORM` header included),
+    /// or 0 when the writer left the table zeroed (readers then fall back to
+    /// the component's own `FORM` boundaries). Consumed by the async lazy
+    /// loader only.
+    #[cfg_attr(not(feature = "async"), allow(dead_code))]
+    pub size: u32,
 }
 
 /// Owned, round-trippable model of a `DIRM` chunk payload.
@@ -174,13 +180,14 @@ impl DirmPayload {
                 .map(|i| DirmComponent {
                     kind: DirmComponentKind::Page,
                     id: format!("p{i:04}"),
+                    size: 0,
                 })
                 .collect();
         }
 
         let mut out = Vec::with_capacity(n);
         let mut pos = flags_start + n;
-        for &flag in &meta[flags_start..flags_start + n] {
+        for (i, &flag) in meta[flags_start..flags_start + n].iter().enumerate() {
             let kind = match flag & 0x3f {
                 1 => DirmComponentKind::Page,
                 2 => DirmComponentKind::Thumbnail,
@@ -193,7 +200,8 @@ impl DirmPayload {
             if flag & 0x40 != 0 {
                 let _ = read_nt_string(&meta, &mut pos);
             }
-            out.push(DirmComponent { kind, id });
+            let size = u32::from_be_bytes([0, meta[i * 3], meta[i * 3 + 1], meta[i * 3 + 2]]);
+            out.push(DirmComponent { kind, id, size });
         }
         out
     }
@@ -270,6 +278,56 @@ mod tests {
         // offset 0x10, size 0x1234 → 0x10 .. 0x10 + 8 + 0x1234.
         let r = form_byte_range(0x10, [0x00, 0x00, 0x12, 0x34]);
         assert_eq!(r, 0x10..(0x10 + 8 + 0x1234));
+    }
+
+    /// The lazy async loader trusts the DIRM size table to equal each
+    /// component's `FORM` span (header + payload) whenever the writer filled
+    /// it in — verify that equivalence across the bundled corpus/fixtures.
+    #[test]
+    #[cfg(feature = "std")]
+    fn dirm_size_table_matches_form_boundaries() {
+        let mut checked = 0usize;
+        for dir in ["tests/corpus", "tests/fixtures"] {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "djvu") {
+                    continue;
+                }
+                let data = std::fs::read(&path).unwrap();
+                if data.len() < 24 || &data[12..16] != b"DJVM" || &data[16..20] != b"DIRM" {
+                    continue;
+                }
+                let dlen = u32::from_be_bytes(data[20..24].try_into().unwrap()) as usize;
+                let Ok(payload) = DirmPayload::decode(&data[24..24 + dlen]) else {
+                    continue;
+                };
+                if !payload.is_bundled() {
+                    continue;
+                }
+                for (c, &off) in payload.components().iter().zip(&payload.offsets) {
+                    if c.size == 0 {
+                        continue; // zeroed table — loader probes FORM headers
+                    }
+                    let off = off as usize;
+                    let form = u32::from_be_bytes(data[off + 4..off + 8].try_into().unwrap());
+                    assert_eq!(
+                        c.size as u64,
+                        form as u64 + 8,
+                        "{}: component {} size table disagrees with FORM header",
+                        path.display(),
+                        c.id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no bundled fixtures with populated size tables"
+        );
     }
 
     #[test]
