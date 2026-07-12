@@ -44,7 +44,7 @@
 <div id="error"></div>
 
 <script type="module">
-import init, { WasmDocument } from './pkg/djvu_rs.js';
+import init, { WasmDocument, selectedWasmVariant } from './pkg/djvu_rs.js';
 
 let doc = null;
 let currentPage = 0;
@@ -52,7 +52,8 @@ let currentDpi = 150;
 
 async function setup() {
   await init();
-  document.getElementById('status').textContent = 'djvu-rs loaded — drop a file to begin.';
+  document.getElementById('status').textContent =
+    `djvu-rs loaded (${selectedWasmVariant()} wasm) — drop a file to begin.`;
 }
 
 async function loadBytes(bytes) {

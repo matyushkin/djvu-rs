@@ -12598,3 +12598,57 @@ experiments that cited #558.
 provenance + checksums; harness wiring makes regressions on the new classes
 visible. The newspaper photo-heavy PSNR gap is a useful stress case for future
 BG/photo work, not a reason to withhold the tier.
+
+## Perf round 105 (2026-07-13) — WASM_SIMD128_SHIP: dual wasm package with runtime detection (#581) — **Kept**
+
+### #581 — ship simd128 wasm build variant with scalar fallback — **Kept** (2026-07-13)
+
+**Issue.** The IW44 wasm kernels already had `cfg(target_feature = "simd128")`
+paths and the local WASM_SIMD harness measured render wins, but the documented
+browser package still shipped only the scalar wasm artifact unless users knew to
+set `RUSTFLAGS="-C target-feature=+simd128"` themselves.
+
+**Approach.** Added `scripts/build_wasm_dual.sh` and `make wasm`. The shipped
+browser package is now generated as one JS entry point plus two wasm artifacts:
+`scalar/djvu_rs_bg.wasm` and `simd128/djvu_rs_bg.wasm`. The entry point runs
+`WebAssembly.validate()` on a tiny `v128.const` probe, initializes the simd128
+artifact on capable engines, and otherwise initializes the scalar artifact. The
+loader keeps the existing `await init(); WasmDocument...` usage shape and adds
+`selectedWasmVariant()` / `wasmSimd128Supported()` for diagnostics. README and
+`examples/wasm/README.md` now document this packaging layout; generated `pkg/`
+remains ignored and is regenerated before npm publish.
+
+**Platform / commands.** macOS darwin arm64, Node.js v26.4.0, wasm-pack 0.13.1:
+
+```text
+make wasm
+node --input-type=module -e '... await init(simd wasm bytes); ...'
+ITERATIONS=50 WARMUP=10 DPI=150 ./scripts/bench_wasm_simd128.sh
+for run in 1 2 3 4 5; do
+  node scripts/bench_wasm_simd128.mjs \
+    --scalar target/wasm-bench/scalar \
+    --simd target/wasm-bench/simd128 \
+    --fixture tests/fixtures/boy.djvu \
+    --iterations 80 --warmup 20 --dpi 150
+done
+```
+
+**Numbers.** Direct script run: `render_150dpi_fresh_doc` 2.609 -> 2.454 ms
+(**-5.9%**), `render_150dpi_cached_page` 1.414 -> 1.426 ms (+0.9%),
+`progressive_150dpi_chunk0` 2.737 -> 3.154 ms (+15.2%), `parse_document`
+0.003 -> 0.003 ms (-11.5%). Because these are millisecond-scale Node wasm
+timings, repeated already-built harness runs were noisy. Median deltas across
+five 80-iteration repeats: fresh render **-16.0%** (runs -10.7%, -26.5%,
+-16.0%, +10.0%, -16.1%), cached page +2.6% (runs +13.4%, -2.4%, -1.5%,
++12.7%, +2.6%), progressive **-10.3%** (runs +6.9%, -16.4%, -20.0%, +19.9%,
+-10.3%). The dual-package smoke test selected `simd128` under Node's wasm
+engine and parsed `tests/fixtures/boy.djvu` successfully (`page_count=1`).
+
+**Decision.** Kept.
+
+**Reason.** The shipped story now matches the measured artifact: supporting
+engines get a real `+simd128` build automatically, and unsupported engines keep
+the scalar fallback. The primary fresh-render path clears the >=5% bar in the
+direct run and in the repeated-run median; progressive also trends positive
+across repeats. Cached-page timings are neutral/noisy rather than a reliable
+win, so this is not claimed as an across-the-board speedup.
