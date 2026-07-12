@@ -12476,3 +12476,65 @@ losslessly) far more than *within* one. The auto-switch follow-up the issue
 anticipated has no domain to switch into: FG44 did not win a single tested
 case. If a genuine within-component continuous-tone-ink corpus surfaces (#558),
 re-open with the dark-ink chroma-crush as the first thing to fix.
+
+## Perf round 102 (2026-07-12) — METADATA_PLANES: TXTz/NAVM/ANT round-trip fuzzing + djvused differential (#597)
+
+### #597 — metadata-plane fuzz/interop blind spot closed, zero content divergence — **Kept (infra)** (2026-07-12)
+
+**Issue.** The metadata planes were a fuzz/interop blind spot: `fuzz_encode`
+covers pixel codecs only; TXTz/NAVM/ANT serialization had no round-trip
+fuzzing, and `diff_fuzz` classified only structural/render outcomes — a
+mutant whose text/annotations/outline we read differently from DjVuLibre was
+invisible. The family has history (#368 depth guard, #524/#553 lenient
+decode).
+
+**Approach.**
+- `tests/metadata_roundtrip.rs` (committed earlier on this branch):
+  deterministic LCG soaks — 300 TextLayer→TXTz, 200 bookmark-tree→NAVM (full
+  document path), 300 annotation/maparea→ANT cases, multi-byte edge-case
+  strings from the #524/#551 population, structural equivalence asserts.
+- New `fuzz_metadata` libFuzzer target mirroring the same assertion bodies
+  with byte-driven structured generation (deeper nesting than the soaks:
+  zones 5, bookmarks 8 — pressing the #368 class). Wired into
+  `.github/workflows/fuzz.yml` and `oss-fuzz/build.sh`; seed corpus:
+  CP1252/UTF-8 text, deep-nesting NAVM, quote-heavy ANT.
+- `diff_fuzz` gains the #597 metadata differential: for every mutant at least
+  one side structurally accepts, both sides run text/annotation/outline
+  extraction (`page.text()`/`page.annotations()`/`doc.bookmarks()` vs
+  `djvused print-pure-txt / print-ant / print-outline`), classified per plane
+  as match / both-empty / both-reject / ours-only / theirs-only /
+  accept-mismatch / content-diverge. Signatures are whitespace-insensitive
+  (text), maparea-count (ant), and title+url multiset with djvused octal
+  escapes decoded (outline). A per-(page, plane) baseline on the unmutated
+  file gates findings, so pre-existing normalization gaps surface once, not
+  per mutant. `navm_fgbz.djvu` joins the default file set (NAVM+ANTz; the
+  corpus scans only carry TXTz).
+
+**Adjudication (the #577 way).** Every non-match class traced to a known,
+documented acceptance-ladder difference — no metadata parser bug:
+- `theirs-only` (txt/outline): INFO-version bit-flips → we reject the whole
+  document (`unsupported DjVu format version N`), while djvused prints
+  metadata without validating INFO at all (its metadata ops decode no pages).
+  Benign: strictness difference, not content difference.
+- `ours-only` (txt/ant): DIRM/NAVM bit-flips → djvused exits nonzero on the
+  whole file, while our documented lenient decode (#553) keeps reading the
+  undamaged planes. Benign: the leniency is intentional and recorded.
+- `accept-mismatch`: the same two phenomena on mutants where the surviving
+  side sees an empty plane — no content at stake.
+
+**Numbers.** Soak: `--seed 597597597 --mutants 5000` over the four default
+files — **20,000 mutants in 1712 s**, zero crashes, zero timeouts. Per plane
+(match / both-empty / both-reject / ours-only / theirs-only /
+accept-mismatch / **content-diverge**): txt 2847 / 3775 / 474 / 60 / 84 /
+237 / **0**; ant 382 / 6583 / 121 / 7 / 6 / 378 / **0**; outline 1670 /
+5355 / 30 / 1 / 55 / 366 / **0**. An independent short pilot (default seed,
+500 mutants/file) matched: 0 content-diverge. The soak also tallied 9
+`pixel-mismatch` render-ladder mutants — a pre-existing class, reproducible
+from the seed, out of #597's scope.
+
+**Decision.** Kept (infra). Round-trip targets green; the differential sweep
+produced **zero `content-diverge`** across all three planes — when both sides
+extract metadata, the content agrees. Local libFuzzer soak remains blocked on
+this machine (round-64 dyld hang, re-confirmed today); substitutes are the
+committed deterministic soaks (green in `make check`) and the weekly CI fuzz
+job with corpus persistence, per the round-64 precedent.
