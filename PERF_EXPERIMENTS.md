@@ -12344,3 +12344,40 @@ the archived scan; noted on the issue as the recommended direction.
 **Reason.** The premise inverted under measurement: illumination is cheap,
 amplified grain is expensive. An encoder-side flatten pays +12% BG44 for what
 a viewer-side transform does for free.
+
+## Perf round 99 (2026-07-12) — LOSSY_PRESET_CAL: OCR-calibrated lossy presets (#572)
+
+**Issue.** #572 — `lossy_text()` (t=2%) and `lossy_scan()` (despeckle=8 +
+t=2%) were hand-picked; derive them from measured OCR agreement instead.
+Decision rule: keep if derived presets beat shipped on ≥1 class without
+regressing any other.
+
+**Approach.** New grid harness `examples/ocr_preset_grid.rs`:
+`lossy_threshold {2,4,6,8,10}% × despeckle {off,4,8,16}` per content class
+(text = watchmaker, scan = pathogenic 600 dpi), scoring each cell by Sjbz
+bytes and the **minimum** per-page Tesseract char agreement vs the lossless
+mask (the derivation wants 100% across ALL pages, not an average).
+Derivation rule: highest fully-agreeing setting, backed off one grid step.
+A 2-page pilot suggested t=6% for both classes; the 4-page run overrode it —
+more pages, stricter minimum.
+
+**Numbers (4 pages/class).** *Text*: 100% agreement holds only through t=4%
+(−23.44%) and breaks at 6% (99.926%) → derived point = **2% — exactly the
+shipped preset** (validated, not changed; despeckle is byte-identical no-op
+on clean text at every level). *Scan*: 100% holds through t=8% (−4.37%,
+d=8: −4.44%) and breaks at 10% (99.85%) → derived point = **6%**:
+`lossy_scan` moves t 0.02 → 0.06, −0.70% vs −0.10% Sjbz at equal measured
+100% agreement. Grid also quantifies the cliff shape: scan Sjbz barely moves
+below 8% (near-twin population thin until then), text saves 22–24% across
+the whole range.
+
+**Decision.** Kept: `lossy_scan` re-derived to t=0.06 (beats shipped on the
+scan class); `lossy_text` confirmed optimal at 0.02 by the same rule (the
+2-page pilot's 6% was a small-sample artifact — recorded as a methodology
+note: preset derivation needs the min over ≥4 pages). Harness committed for
+future classes (#558 corpus).
+
+**Reason.** The instrument beats intuition in both directions: it *raised*
+the scan threshold 3× (its glyphs are large; near-twins stay safe far past
+2%) and *defended* the text preset against the looser point a smaller sample
+suggested.

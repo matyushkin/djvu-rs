@@ -1283,13 +1283,17 @@ impl Default for Jb2EncodeOptions {
 impl Jb2EncodeOptions {
     /// Recommended **lossy** preset for text documents: `lossy_threshold = 0.02`.
     ///
-    /// Measured on `watchmaker` (round 19): **≈ −22 % Sjbz** at SSIM 0.9993 —
-    /// a large size reduction at near-imperceptible loss, the sweet spot of the
-    /// [`lossy_threshold`](Self::lossy_threshold) curve and roughly DjVuLibre
-    /// `cjb2`'s default lossy operating point. Opt-in: the encoder stays lossless
-    /// unless you choose this (or set `lossy_threshold` yourself). Best for text
-    /// scans; on noisy photo scans the near-twin population is thin so it saves
-    /// little.
+    /// Originally hand-picked (round 19: ≈ −22% Sjbz at SSIM 0.9993) and since
+    /// **OCR-validated as the derived optimum** (#572, round 99): a
+    /// `threshold × despeckle` grid scored by the *minimum* per-page Tesseract
+    /// char agreement vs the lossless mask over 4 text pages holds 100% only
+    /// through `0.04` (breaking to 99.93% at `0.06`), and the derivation rule
+    /// — highest fully-agreeing setting backed off one grid step — lands
+    /// exactly here. Opt-in: the encoder stays lossless unless you choose this
+    /// (or set [`lossy_threshold`](Self::lossy_threshold) yourself). Best for
+    /// text scans; on noisy photo scans the near-twin population is thin so it
+    /// saves little — see [`lossy_scan`](Self::lossy_scan), whose calibrated
+    /// threshold is looser.
     pub fn lossy_text() -> Self {
         Self::with_lossy_threshold(0.02)
     }
@@ -1339,7 +1343,13 @@ impl Jb2EncodeOptions {
     pub fn lossy_scan() -> Self {
         Self {
             despeckle: Some(8),
-            lossy_threshold: 0.02,
+            // OCR-calibrated (#572, round 99): over 4 scan pages the minimum
+            // per-page char agreement holds 100% through 0.08 (where Sjbz
+            // finally moves: −4.4%) and breaks at 0.10, so the derived point —
+            // highest fully-agreeing setting backed off one step — is 0.06
+            // (−0.70% vs −0.10% at the historical hand-picked 0.02). The text
+            // corpus is stricter (breaks at 0.06); use `lossy_text` there.
+            lossy_threshold: 0.06,
             ..Self::default()
         }
     }
@@ -2926,9 +2936,10 @@ mod tests {
 
     #[test]
     fn lossy_text_preset_is_lossy_and_smaller() {
-        // The lossy_text() preset sets the 0.02 operating point and, on a page
-        // with same-size near-twin glyphs, must produce a strictly smaller stream
-        // than the lossless default (it substitutes near-twins as rec-7 copies).
+        // The lossy_text() preset sets the OCR-validated 0.02 operating point
+        // (#572) and, on a page with same-size near-twin glyphs, must produce a
+        // strictly smaller stream than the lossless default (it substitutes
+        // near-twins as rec-7 copies).
         assert_eq!(Jb2EncodeOptions::lossy_text().lossy_threshold, 0.02);
         assert_eq!(
             Jb2EncodeOptions::with_lossy_threshold(0.07).lossy_threshold,
@@ -3103,7 +3114,7 @@ mod tests {
     fn lossy_scan_preset_values() {
         let preset = Jb2EncodeOptions::lossy_scan();
         assert_eq!(preset.despeckle, Some(8));
-        assert_eq!(preset.lossy_threshold, 0.02);
+        assert_eq!(preset.lossy_threshold, 0.06);
     }
 
     #[test]
