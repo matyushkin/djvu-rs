@@ -12119,3 +12119,40 @@ DjVuLibre-acceptable directories.
 **Reason.** The comment-era assumption "readers fall back to FORM boundaries"
 was true of our reader only; the reference implementation treats a zero offset
 as a structural error, and directory version 0 as a different wire format.
+
+## Perf round 93 (2026-07-12) — OCR_INPUT_AB: raw render vs Sauvola mask vs decoded JB2 mask as the recognizer input (#603)
+
+**Issue.** #603 — encode-time and post-hoc OCR feed Tesseract the raw pixmap;
+we already compute a Sauvola binarization, and for existing documents the JB2
+mask IS the text. Which input recognizes best had never been A/B'd. Decision
+rule: switch the default only if a variant strictly dominates (accuracy AND
+speed) on both corpora; otherwise document guidance.
+
+**Approach.** New harness `examples/ocr_input_ab.rs` (`ocr-tesseract`):
+per fixture, OCR page 0 three ways — (A) raw composite render at native
+resolution (today's default), (B) Sauvola segmentation mask, (C) decoded JB2
+mask — and score char/word agreement (OCR_QA Levenshtein method) against the
+document's embedded text layer as reference, plus wall-clock.
+
+**Numbers.** Bilevel text scans (watchmaker, DjVu3Spec): **A = B = C exactly**
+(char 98.06/98.44%) — the render is visually the mask, wall-clock within ±1%.
+Halftone scan (cable): A = C 95.30% char, **B drops to 88.26%** (−7 п.п.;
+word −15 п.п.) — re-binarizing an already-binarized-and-rendered page loses
+strokes. Colour pages: colorbook A 74.32% > B 73.33% > **C 52.03%** (colour
+text lives outside the JB2 mask; C is 36% faster but misses half the
+reference); conquete A = C 54.27% > B 52.99%; carte (map) is noise for all
+three. No variant strictly dominates → **default (A) stands**.
+
+**Fix (drive-by, kept).** `cmd_ocr` hard-coded `dpi: 300` in `OcrOptions`
+while rendering at the page's native resolution — a 400/600-dpi scan lied to
+Tesseract about its scale (its layout analysis is dpi-sensitive). Now the
+per-page options carry `page.dpi()`. Encode-path `with_ocr_text_layer` takes
+caller options and already documents the contract.
+
+**Decision.** Kept (diagnostic + the dpi fix). Guidance recorded: leave the
+raw render as the OCR input; never feed the JB2 mask alone for colour
+documents; Sauvola re-binarization helps nothing and hurts halftones.
+
+**Reason.** Tesseract's internal binarization on our clean renders is at
+least as good as any mask we can hand it — where the inputs differ at all,
+the mask variants only ever lose information (colour text, halftone strokes).
