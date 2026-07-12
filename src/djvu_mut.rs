@@ -1494,15 +1494,16 @@ mod tests {
         let info_path = (0..doc0.root_child_count())
             .find_map(|i| match doc0.chunk_at_path(&[i]) {
                 Ok(Chunk::Form {
-                    secondary_id,
+                    secondary_id: [b'D', b'J', b'V', b'U'],
                     children,
                     ..
-                }) if secondary_id == b"DJVU" => {
-                    children.iter().enumerate().find_map(|(j, c)| match c {
-                        Chunk::Leaf { id, .. } if id == b"INFO" => Some(vec![i, j]),
-                        _ => None,
-                    })
-                }
+                }) => children.iter().enumerate().find_map(|(j, c)| match c {
+                    Chunk::Leaf {
+                        id: [b'I', b'N', b'F', b'O'],
+                        ..
+                    } => Some(vec![i, j]),
+                    _ => None,
+                }),
                 _ => None,
             })
             .expect("bundle has a page with INFO");
