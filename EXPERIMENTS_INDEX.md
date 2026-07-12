@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| X86_V3_FEATURE_BISECT (#566) | 2026-07-13 | ZP decode (x86 Callgrind feature bisect) | **X** | ubuntu Callgrind Ir vs default: JB2/ZP best case **bmi2 −1.91%** / **bmi1+bmi2 −2.02%** / **x86-64-v3 −1.71%** — nowhere near the claimed −4..−28% ZP win; BMI1 alone **+2.12%** (regression). IW44 sees v3 **−7.46%** Ir but that is outside the ZP-scoped keep gate. | Infra kept (`scripts/x86_feature_callgrind.sh` + `workflow_dispatch` job). No RUSTFLAGS / target-cpu shipping for ZP. Round-110 |
 | QUALITY_METRIC_GATE (#585) | 2026-07-13 | quality metrics (lossy gates) | **X** | Clean-room std-only `f64` MS-SSIM prototype did **not** strictly reduce inversions vs OCR ground truth: OCR grid pairwise inversions stayed **0 vs 0** (SSIM vs MS-SSIM) on unequal-agreement pairs; MS-SSIM was more compressed near 1.0 and did not catch OCR cliffs earlier. | Prototype/harness columns reverted; no `src/quality.rs` API or harness column adopted. OCR grid: text 100% holds through 4%, breaks at 6%; scan 100% holds through 8%, breaks at 10%. Colour/mask harness attempts on this checkout hit pre-existing `Iw44(Invalid)` render failures, so they supplied no adoption evidence. Round-107 |
 | OCR_WORD_DUP (#602) | 2026-07-13 | OCR (JB2 word memoization) | **X** | unique-word 98.9%/80.9% on pathogenic/watchmaker → bound 1.01×/1.24× ≪ 5× keep bar | CHEAP probe only (`ocr_word_dup_probe`); no OCR. Round-104 |
 | IW44_FWD_TRANSFORM (#578) | 2026-07-13 | IW44 encoder (forward DWT diagnostic) | **X** | worst colorbook pages 61/2/59/1/60: ours-c44 gaps **478–571 B**, but production-vs-DjVuLibre forward DWT deltas are **0 changed coeffs** across every Y/Cb/Cr plane and band 0; transform explains **0 B / 0.0%** of the gap | Added `iw44-probe` coefficient-diff diagnostic plus `examples/iw44_forward_transform_probe.rs`; fetched DjVuLibre scalar schedule and compared on identical encoder input planes. Rejects the unvalidated IW44_ENTROPY_PROBE root-cause hypothesis and closes the band-0/DC size-gap thread as entropy-coding-complete for zero-PSNR levers. Round-106 |
@@ -345,7 +346,6 @@ the **full log** (not just this index), 43 remain open — highlights: P1 #561 (
 chroma noise — see ENCODER_INTEROP_FIX for the sharpened header-interpretation
 hypothesis), #562 (text-vs-photo segmentation classifier); P2 #557 (iai-callgrind
 instruction-count channel), #559/#563 (PDF stencil colour / true-MRC), #565 (streaming
-bundle encode), #566 (ZP x86 codegen flags — revalidate first, see ZP_U64 noise),
 #567 (encoder fuzz gaps), #588 (wasm lazy Range open), #589 (resource-ceiling audit).
 Closed same-day as already answered by entries this index was missing: **#587**
 (chroma_half interop → ENCODER_INTEROP_FIX), **#574** (within-plane forward DWT →
@@ -361,7 +361,6 @@ step under bash `-e` before `regression_exit` is written, so "Fail on regression
 empty current results return 0 — found in the wild by ZP_U64, round 55). Priority moves:
 #559 P2→P1 (PDF flattens coloured foreground to black — silent fidelity loss), #562 P1→P2
 (blocked on mixed-layout fixtures), #558 P3→P2 (now gates #562/#569–#571/#591–#593/#603),
-#575/#598 P3→P2 (parallel quick wins), #566 P2→P3 (undecidable below the round-55 noise floor;
 waits on #557, which itself waits on the #88 repair). Scope split: #599 owns EPUB/CBZ PNG
 colour-type payloads (RGB + Gray8), #580 keeps adaptive PNG/JPEG only. New experiment issue:
 #612 — build the FGbz palette from encoder blit metadata instead of `foreground_fgbz`'s

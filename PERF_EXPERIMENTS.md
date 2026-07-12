@@ -12825,3 +12825,41 @@ it does not improve the gate. Closing #585 as an evaluated reject keeps the
 existing SSIM + OCR agreement + colour ΔE workflow until a genuinely stronger
 metric has evidence.
 
+## Perf round 110 (2026-07-13) — X86_V3_FEATURE_BISECT: isolate x86-64-v3 features for ZP decode (#566) — **Rejected**
+
+### #566 — x86-64-v3 feature bisect does not reproduce a ZP Keep-bar win — **Rejected** (2026-07-13)
+
+**Issue.** Prior x86-64-v3 notes claimed roughly **−4..−28%** on ZP decode. #566 asked which discrete
+features (BMI1/BMI2/LZCNT/POPCNT / combinations / full `x86-64-v3`) actually move ZP, and to ship only
+the ones that clear a keep bar safely.
+
+**Approach.** Added `scripts/x86_feature_callgrind.sh` plus a `workflow_dispatch` job
+`x86-feature-bisect` in `.github/workflows/bench.yml`. Each variant rebuilds
+`examples/callgrind_workload` under a different `RUSTFLAGS` and records Callgrind **Ir** for
+`bzz` / `jb2` / `iw44` workloads on `ubuntu-latest` (x86_64 + Valgrind).
+
+**Platform / artifact.** GitHub Actions `ubuntu-latest`, workflow run of
+`x86-feature-bisect` on `perf/566-x86-v3-features`, artifact `summary.csv`
+(Callgrind Ir totals).
+
+**Numbers (Ir; Δ% vs `default`):**
+
+| variant | bzz | jb2 (ZP-heavy) | iw44 |
+|---|---:|---:|---:|
+| default | 783,872 | 2,314,014 | 5,311,122 |
+| bmi1 | 791,698 (**+1.00%**) | 2,363,182 (**+2.12%**) | 5,323,546 (**+0.23%**) |
+| bmi2 | 788,542 (**+0.60%**) | 2,269,761 (**−1.91%**) | 5,294,382 (**−0.32%**) |
+| lzcnt | 781,324 (**−0.32%**) | 2,306,003 (**−0.35%**) | 5,268,635 (**−0.80%**) |
+| popcnt | 786,346 (**+0.32%**) | 2,316,488 (**+0.11%**) | 5,313,586 (**+0.05%**) |
+| bmi1+bmi2 | 786,082 (**+0.28%**) | 2,267,304 (**−2.02%**) | 5,291,936 (**−0.36%**) |
+| x86-64-v3 | 799,887 (**+2.04%**) | 2,274,455 (**−1.71%**) | 4,915,068 (**−7.46%**) |
+
+**Decision.** **Rejected** for ZP feature shipping. Best ZP/JB2 delta is about **−2% Ir**
+(`bmi2` / `bmi1+bmi2`), far short of the issue's **−4..−28%** claim and too thin to justify
+forcing BMI/LZCNT/POPCNT (or `target-cpu=x86-64-v3`) on the ZP path. Full `x86-64-v3` even
+**regresses BZZ Ir (+2.0%)**. The **−7.5% IW44 Ir** under `x86-64-v3` is real but out of
+scope for this ZP ticket — file a separate IW44/x86 follow-up if desired.
+
+**Reason.** Callgrind bisect falsifies the ZP keep hypothesis; keep the measurement infra,
+do not change default codegen flags for ZP.
+
