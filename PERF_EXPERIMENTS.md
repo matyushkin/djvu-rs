@@ -12598,3 +12598,28 @@ experiments that cited #558.
 provenance + checksums; harness wiring makes regressions on the new classes
 visible. The newspaper photo-heavy PSNR gap is a useful stress case for future
 BG/photo work, not a reason to withhold the tier.
+
+## Perf round 104 (2026-07-13) — OCR_WORD_DUP: symbol/word OCR memoization CHEAP probe (#602) — **Rejected**
+
+### #602 — symbol-level OCR propagation through the JB2 dictionary — **Rejected** (2026-07-13)
+
+**Issue.** #602. Word-level memoization over blit-id sequences could cut OCR cost on
+symbol-dense corpora if unique-word ratio is low.
+
+**Approach.** CHEAP probe only (`examples/ocr_word_dup_probe.rs`): decode indexed JB2
+masks, cluster blits into geometric words, hash glyph-shape id sequences, report
+`total_words/unique_words` as the theoretical memoized-OCR bound. No OCR invoked.
+
+**Numbers (release, macOS arm64).**
+| corpus | pages | words | unique | uniq% | bound |
+|---|---|---|---|---|---|
+| pathogenic_bacteria_1896 | 520 | 153059 | 151437 | 98.94% | **1.01×** |
+| watchmaker | 12 | 2071 | 1676 | 80.93% | **1.24×** |
+
+**Decision.** **Rejected.** Bound ≪ the ≥5× keep bar (needs ~≤20% unique-word ratio).
+Memoized OCR not implemented.
+
+**Reason.** Real dictionaries re-blit glyphs, but word-level *sequences* barely repeat —
+the duplication the issue hoped for is at the symbol level, not the word-image level the
+probe measures. Per-symbol classification remains a separate (riskier) follow-up if ever
+revisited.
