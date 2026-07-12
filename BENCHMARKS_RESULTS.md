@@ -99,6 +99,47 @@ Notes:
   coverage, and a future benchmark artifact is needed before filling those
   cells.
 
+### Browser wasm vs djvu.js head-to-head (#596)
+
+Headless Chrome 150.0.0.0 on macOS/Darwin 25.5, same machine, 100 dpi output,
+5 measured iterations after 2 warmups. Harness:
+`node scripts/bench_wasm_djvujs.mjs --iterations 5 --warmup 2 --json`.
+`djvu.js` is `djvujs-dist` 0.5.4 built locally from the npm tarball because this
+repo vendors only the shared djvu.js assets under `references/djvujs`, not the
+runtime bundle. `simd128` was supported by Chrome. The djvu.js path renders at
+native resolution and scales through Canvas to the target dpi; wasm renders
+directly at the target dpi. Wasm linear memory reached 446.8 MiB by the end of
+the corpus run; Chrome `performance.memory` heap deltas were noisy and are kept
+in the raw JSON artifact rather than used as a peak claim.
+
+Selected corpus page, full decode + render:
+
+| Fixture | Class | Output MiB | wasm scalar ms | wasm simd128 ms | djvu.js ms | scalar speedup | simd speedup |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `tests/corpus/big_scanned_page.djvu` | photo | 36.7 | 849.5 | 617.7 | 6588.2 | 7.8x | 10.7x |
+| `tests/corpus/map_atlas_sample.djvu` | line-art | 2.5 | 67.9 | 65.6 | 441.6 | 6.5x | 6.7x |
+| `tests/corpus/goody_twoshoes.djvu` | mixed | 1.2 | 35.5 | 30.8 | 269.4 | 7.6x | 8.7x |
+| `tests/corpus/chinese_cookbook_sample.djvu` | cjk | 1.2 | 18.9 | 14.6 | 196.3 | 10.4x | 13.4x |
+| `tests/corpus/cyrillic_simonovich_co2.djvu` | cyrillic | 1.9 | 2.4 | 2.4 | 21.3 | 8.9x | 8.9x |
+| `tests/corpus/war_1812.djvu` | newspaper | 3.5 | 52.2 | 46.0 | 346.0 | 6.6x | 7.5x |
+| `references/djvujs/library/assets/colorbook.djvu` | iw44-color | 2.0 | 26.8 | 22.2 | 250.0 | 9.3x | 11.3x |
+| `references/djvujs/library/assets/carte.djvu` | carte | 4.6 | 74.5 | 66.8 | 497.5 | 6.7x | 7.4x |
+| `references/djvujs/library/assets/boy_jb2.djvu` | jb2-small | 0.0 | 0.3 | 0.3 | 4.6 | 15.3x | 15.3x |
+
+First-page latency on the same fixtures:
+
+| Fixture | wasm scalar ms | wasm simd128 ms | djvu.js ms | scalar speedup | simd speedup |
+|---|---:|---:|---:|---:|---:|
+| `tests/corpus/big_scanned_page.djvu` | 853.8 | 583.8 | 6610.5 | 7.7x | 11.3x |
+| `tests/corpus/map_atlas_sample.djvu` | 67.7 | 64.9 | 443.0 | 6.5x | 6.8x |
+| `tests/corpus/goody_twoshoes.djvu` | 35.8 | 31.1 | 266.8 | 7.5x | 8.6x |
+| `tests/corpus/chinese_cookbook_sample.djvu` | 18.6 | 14.6 | 198.8 | 10.7x | 13.6x |
+| `tests/corpus/cyrillic_simonovich_co2.djvu` | 2.3 | 2.4 | 21.2 | 9.2x | 8.8x |
+| `tests/corpus/war_1812.djvu` | 54.0 | 44.7 | 345.0 | 6.4x | 7.7x |
+| `references/djvujs/library/assets/colorbook.djvu` | 27.0 | 22.3 | 250.5 | 9.3x | 11.2x |
+| `references/djvujs/library/assets/carte.djvu` | 74.2 | 66.8 | 495.1 | 6.7x | 7.4x |
+| `references/djvujs/library/assets/boy_jb2.djvu` | 0.3 | 0.3 | 6.9 | 23.0x | 23.0x |
+
 ---
 
 ## Codec benchmarks (`cargo bench --bench codecs`)
