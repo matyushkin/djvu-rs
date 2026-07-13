@@ -117,6 +117,12 @@ djvu text file.djvu --all --format hocr --output out.hocr
 djvu merge a.djvu b.djvu --output merged.djvu
 djvu split book.djvu --pages 10-25 --output chapter.djvu
 
+# Preview safe cleanup as machine-readable JSON, or write an optimized copy
+djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup --dry-run
+djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup
+djvu optimize book.djvu --output optimized.djvu --preset archival --target-size 26214400
+djvu optimize book.djvu --output optimized.djvu --max-ssim-loss 0.001
+
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
 
@@ -600,6 +606,11 @@ Honest boundaries, so you can decide fast:
   IW44 color output vs `c44`, and the JB2 encoder lacks same-size record-6
   refinement vs `cjb2`. A size gap, not a fidelity gap; tracked in
   [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
+- **Document optimization is conservative in the first slice.** `djvu optimize`
+  currently removes only semantically inert `FREE` padding and reports unmet
+  size targets; archival codec search, progress callbacks, and cancellation
+  remain planned. See [`docs/optimizer.md`](docs/optimizer.md); it always writes
+  a separate output file.
 - **OCR: Tesseract is the only supported recognition backend.** `OcrOptions`
   (languages, dpi) are honored by Tesseract only; `ocr-onnx` is experimental
   and `ocr-neural` is a placeholder that returns an error.

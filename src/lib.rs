@@ -210,6 +210,10 @@ pub mod djvu_document;
 #[cfg(feature = "std")]
 pub mod djvu_mut;
 
+/// High-level document optimization planning and safe structural cleanup.
+#[cfg(feature = "std")]
+pub mod optimizer;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,

@@ -367,6 +367,12 @@ impl DjVuDocumentMut {
         self.file.root.children().len()
     }
 
+    /// Borrow the parsed root chunk for crate-internal structural planning.
+    #[doc(hidden)]
+    pub(crate) fn root_chunk(&self) -> &Chunk {
+        &self.file.root
+    }
+
     /// Return the 4-byte FORM type of the root (e.g. `b"DJVU"`, `b"DJVM"`).
     /// Returns `None` if the root is somehow a leaf — should never happen on
     /// a well-formed input that survived `from_bytes`.
@@ -399,6 +405,47 @@ impl DjVuDocumentMut {
             }
             Chunk::Form { .. } => Err(MutError::NotALeaf),
         }
+    }
+
+    /// Remove the leaf chunk reached by `path`.
+    ///
+    /// The path uses the same root-relative child indices as
+    /// [`Self::replace_leaf`]. Removing a leaf marks the document dirty, so a
+    /// later [`Self::try_into_bytes`] re-emits the IFF tree and recomputes any
+    /// bundled-DJVM directory offsets. FORM containers cannot be removed by
+    /// this method; callers that need to change document topology must use a
+    /// higher-level operation that can preserve the surrounding format
+    /// invariants.
+    pub fn remove_leaf(&mut self, path: &[usize]) -> Result<(), MutError> {
+        if path.is_empty() {
+            return Err(MutError::EmptyPath);
+        }
+        let _ = self.chunk_at_path(path)?;
+
+        let parent_path = &path[..path.len() - 1];
+        let child_index = path[path.len() - 1];
+        {
+            let mut current = &mut self.file.root;
+            for &idx in parent_path {
+                match current {
+                    Chunk::Form { children, .. } => {
+                        current = &mut children[idx];
+                    }
+                    Chunk::Leaf { .. } => unreachable!("validated by chunk_at_path"),
+                }
+            }
+            match current {
+                Chunk::Form { children, .. } => {
+                    if !matches!(children[child_index], Chunk::Leaf { .. }) {
+                        return Err(MutError::NotALeaf);
+                    }
+                    children.remove(child_index);
+                }
+                Chunk::Leaf { .. } => unreachable!("validated by chunk_at_path"),
+            }
+        }
+        self.dirty = true;
+        Ok(())
     }
 
     /// Return the chunk at `path` for inspection (without mutation).

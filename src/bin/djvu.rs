@@ -71,6 +71,28 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Plan or apply safe document-level optimization.
+    Optimize {
+        /// Path to the input DjVu file.
+        file: PathBuf,
+        /// Output file path. Required even for --dry-run so scripts can use
+        /// one stable invocation shape; dry-run never creates it.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Optimization policy.
+        #[arg(short, long, default_value = "lossless-cleanup", value_enum)]
+        preset: OptimizePresetArg,
+        /// Maximum output size in bytes. Safe cleanup reports when it cannot
+        /// meet the target without lossy re-encoding.
+        #[arg(long)]
+        target_size: Option<u64>,
+        /// Maximum permitted SSIM loss.
+        #[arg(long)]
+        max_ssim_loss: Option<f32>,
+        /// Print the machine-readable plan without writing the output.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Run OCR on pages and write the text layer back into the file.
     #[cfg(any(
         feature = "ocr-tesseract",
@@ -198,6 +220,14 @@ enum TextFormat {
     Alto,
 }
 
+#[derive(Clone, ValueEnum)]
+enum OptimizePresetArg {
+    /// Remove semantically inert IFF FREE padding.
+    LosslessCleanup,
+    /// Prefer archival fidelity; this slice remains pixel-exact.
+    Archival,
+}
+
 #[cfg(any(
     feature = "ocr-tesseract",
     feature = "ocr-onnx",
@@ -303,6 +333,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pages,
             output,
         } => cmd_split(&file, page, pages.as_deref(), &output),
+        Cmd::Optimize {
+            file,
+            output,
+            preset,
+            target_size,
+            max_ssim_loss,
+            dry_run,
+        } => cmd_optimize(&file, &output, preset, target_size, max_ssim_loss, dry_run),
         Cmd::Text {
             file,
             page,
@@ -340,6 +378,91 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         ),
     }
+}
+
+// ── optimize ─────────────────────────────────────────────────────────────────
+
+fn cmd_optimize(
+    input: &Path,
+    output: &Path,
+    preset: OptimizePresetArg,
+    target_size: Option<u64>,
+    max_ssim_loss: Option<f32>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let input_bytes = std::fs::read(input)?;
+    if equivalent_paths(input, output)? {
+        return Err(
+            "optimizer refuses to replace the input file; choose a different --output".into(),
+        );
+    }
+
+    let preset = match preset {
+        OptimizePresetArg::LosslessCleanup => {
+            djvu_rs::optimizer::OptimizationPreset::LosslessCleanup
+        }
+        OptimizePresetArg::Archival => djvu_rs::optimizer::OptimizationPreset::Archival,
+    };
+    let mut request = djvu_rs::optimizer::OptimizationRequest::new(preset);
+    if let Some(target) = target_size {
+        request = request.with_target_size(target);
+    }
+    if let Some(loss) = max_ssim_loss {
+        request = request.with_max_ssim_loss(loss);
+    }
+
+    let optimizer = djvu_rs::optimizer::Optimizer::new(request);
+    if dry_run {
+        println!("{}", optimizer.plan(&input_bytes)?.to_json());
+        return Ok(());
+    }
+
+    let result = optimizer.optimize(&input_bytes)?;
+    write_atomic(output, &result.bytes)?;
+    println!("{}", result.report.to_json());
+    Ok(())
+}
+
+fn equivalent_paths(input: &Path, output: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let input = std::fs::canonicalize(input)?;
+    let output = if output.exists() {
+        std::fs::canonicalize(output)?
+    } else {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::canonicalize(parent)?.join(output.file_name().ok_or("--output must name a file")?)
+    };
+    Ok(input == output)
+}
+
+fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .ok_or("--output must name a file")?
+        .to_string_lossy();
+    let temp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.into());
+        }
+    }
+    if let Err(error) = std::fs::rename(&temp, output) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 // ── merge ─────────────────────────────────────────────────────────────────────
