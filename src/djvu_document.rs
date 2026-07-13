@@ -14,6 +14,8 @@
 //! ## Document kinds
 //!
 //! - **FORM:DJVU** — single-page document
+//! - **FORM:BM44** / **FORM:PM44** — legacy standalone IW44 photo documents
+//!   (grayscale / color); exposed as one-page documents without an INFO chunk
 //! - **FORM:DJVM + DIRM** — bundled multi-page document with an in-file page index
 //! - **FORM:DJVM + DIRM (indirect)** — components live in separate files; the
 //!   typed [`ComponentResolver`] contract identifies each page, shared, or
@@ -651,8 +653,20 @@ impl DjVuPage {
     }
 
     /// Return all BG44 background chunk data slices, in order.
+    ///
+    /// Legacy standalone `FORM:BM44` / `FORM:PM44` documents store the same
+    /// IW44 bitstream under `BM44` / `PM44` chunk ids; those are returned here
+    /// so the existing render pipeline can decode them without a separate path.
     pub fn bg44_chunks(&self) -> Vec<&[u8]> {
-        self.find_chunks(b"BG44")
+        let bg44 = self.find_chunks(b"BG44");
+        if !bg44.is_empty() {
+            return bg44;
+        }
+        let bm44 = self.find_chunks(b"BM44");
+        if !bm44.is_empty() {
+            return bm44;
+        }
+        self.find_chunks(b"PM44")
     }
 
     /// The render-tier layer cache for this page (decoded on first render).
@@ -1401,6 +1415,17 @@ impl DjVuDocument {
                     pages: vec![page],
                     bookmarks: vec![],
                     global_chunks,
+                    page_byte_ranges,
+                })
+            }
+            b"BM44" | b"PM44" => {
+                let page = parse_legacy_iw44_page(&form.form_type, &form.chunks, 0)?;
+                #[allow(clippy::single_range_in_vec_init)]
+                let page_byte_ranges = vec![0u64..(data.len() as u64)];
+                Ok(DjVuDocument {
+                    pages: vec![page],
+                    bookmarks: vec![],
+                    global_chunks: Vec::new(),
                     page_byte_ranges,
                 })
             }
@@ -2203,6 +2228,116 @@ fn parse_page_from_chunks(
         shared_djbz,
         render_layers: std::sync::OnceLock::new(),
     })
+}
+
+/// Build [`PageInfo`] from the first IW44 chunk header of a legacy BM44/PM44
+/// document (no INFO chunk). DjVuLibre reports 100 dpi for these photo forms.
+fn page_info_from_iw44_first_chunk(
+    form_type: &[u8; 4],
+    payload: &[u8],
+) -> Result<PageInfo, DocError> {
+    if payload.len() < 9 {
+        return Err(DocError::Malformed(
+            "legacy IW44 first chunk header truncated",
+        ));
+    }
+    let serial = payload[0];
+    if serial != 0 {
+        return Err(DocError::Malformed(
+            "legacy IW44 first chunk must have serial 0",
+        ));
+    }
+    let majver = payload[2];
+    let is_grayscale = (majver >> 7) != 0;
+    match (form_type, is_grayscale) {
+        (b"BM44", true) | (b"PM44", false) => {}
+        (b"BM44", false) => {
+            return Err(DocError::Malformed(
+                "FORM:BM44 requires a grayscale IW44 bitstream",
+            ));
+        }
+        (b"PM44", true) => {
+            return Err(DocError::Malformed(
+                "FORM:PM44 requires a color IW44 bitstream",
+            ));
+        }
+        _ => {
+            return Err(DocError::Malformed("unexpected legacy IW44 form type"));
+        }
+    }
+    let width = u16::from_be_bytes([payload[4], payload[5]]);
+    let height = u16::from_be_bytes([payload[6], payload[7]]);
+    if width == 0 || height == 0 {
+        return Err(DocError::Malformed("legacy IW44 zero dimension"));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > 64 * 1024 * 1024 {
+        return Err(DocError::Malformed("legacy IW44 image too large"));
+    }
+    Ok(PageInfo {
+        width,
+        height,
+        dpi: 100,
+        gamma: 2.2,
+        rotation: crate::info::Rotation::None,
+    })
+}
+
+/// Parse a legacy standalone `FORM:BM44` or `FORM:PM44` page.
+fn parse_legacy_iw44_page(
+    form_type: &[u8; 4],
+    chunks: &[IffChunk<'_>],
+    index: usize,
+) -> Result<DjVuPage, DocError> {
+    let expected_id = match form_type {
+        b"BM44" => *b"BM44",
+        b"PM44" => *b"PM44",
+        _ => {
+            return Err(DocError::Malformed(
+                "parse_legacy_iw44_page requires BM44 or PM44",
+            ));
+        }
+    };
+    if chunks.is_empty() {
+        return Err(DocError::MissingChunk(match form_type {
+            b"BM44" => "BM44",
+            _ => "PM44",
+        }));
+    }
+    for chunk in chunks {
+        if chunk.id != expected_id {
+            return Err(DocError::Malformed(
+                "legacy IW44 form contains unexpected chunk id",
+            ));
+        }
+    }
+    let info = page_info_from_iw44_first_chunk(form_type, chunks[0].data)?;
+    let raw_chunks: Vec<RawChunk> = chunks
+        .iter()
+        .map(|c| RawChunk {
+            id: c.id,
+            data: c.data.to_vec(),
+        })
+        .collect();
+    #[cfg(feature = "std")]
+    {
+        Ok(DjVuPage {
+            info,
+            chunks: ChunkStore::Eager(raw_chunks),
+            index,
+            shared_djbz: None,
+            render_layers: std::sync::OnceLock::new(),
+        })
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        Ok(DjVuPage {
+            info,
+            chunks: raw_chunks,
+            index,
+            shared_djbz: None,
+        })
+    }
 }
 
 #[cfg(not(feature = "std"))]
@@ -3716,5 +3851,75 @@ mod tests {
             doc.page_byte_range(0).is_none(),
             "page_byte_range must be None when DIRM offset is out of bounds"
         );
+    }
+
+    /// Legacy FORM:BM44 parses as a one-page grayscale IW44 document (#683).
+    #[test]
+    fn legacy_bm44_parses_as_one_page() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/legacy_bm44.djvu"),
+        )
+        .expect("legacy_bm44.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("BM44 must parse");
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.dimensions(), (32, 32));
+        assert_eq!(page.dpi(), 100);
+        assert_eq!(page.bg44_chunks().len(), 3);
+    }
+
+    /// Legacy FORM:PM44 parses as a one-page color IW44 document (#683).
+    #[test]
+    fn legacy_pm44_parses_as_one_page() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/legacy_pm44.djvu"),
+        )
+        .expect("legacy_pm44.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("PM44 must parse");
+        assert_eq!(doc.page_count(), 1);
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.dimensions(), (181, 240));
+        assert_eq!(page.dpi(), 100);
+        assert!(!page.bg44_chunks().is_empty());
+    }
+
+    /// Empty BM44 body is a typed missing-chunk error, not a panic.
+    #[test]
+    fn legacy_bm44_empty_is_typed_error() {
+        let data = crate::iff::partial_emit(*b"BM44", &[]).expect("fits within u32");
+        let err = DjVuDocument::parse(&data).expect_err("empty BM44 must fail");
+        assert!(matches!(err, DocError::MissingChunk("BM44")), "got {err:?}");
+    }
+
+    /// Truncated first IW44 header fails closed.
+    #[test]
+    fn legacy_bm44_truncated_header_is_typed_error() {
+        use crate::iff::{Chunk, EmitPart};
+        let chunk = Chunk::Leaf {
+            id: *b"BM44",
+            data: vec![0, 1, 0x81],
+        };
+        let data = crate::iff::partial_emit(*b"BM44", &[EmitPart::Chunk(&chunk)])
+            .expect("fits within u32");
+        let err = DjVuDocument::parse(&data).expect_err("truncated BM44 must fail");
+        assert!(matches!(err, DocError::Malformed(_)), "got {err:?}");
+    }
+
+    /// FORM:BM44 with a color IW44 bitstream is rejected.
+    #[test]
+    fn legacy_bm44_rejects_color_bitstream() {
+        use crate::iff::{Chunk, EmitPart};
+        // Color major byte 0x01, 8x8.
+        let payload = vec![0, 1, 0x01, 2, 0, 8, 0, 8, 0];
+        let chunk = Chunk::Leaf {
+            id: *b"BM44",
+            data: payload,
+        };
+        let data = crate::iff::partial_emit(*b"BM44", &[EmitPart::Chunk(&chunk)])
+            .expect("fits within u32");
+        let err = DjVuDocument::parse(&data).expect_err("color BM44 must fail");
+        assert!(matches!(err, DocError::Malformed(_)), "got {err:?}");
     }
 }
