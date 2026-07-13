@@ -2,7 +2,12 @@
 
 This document records the per-codec tolerance thresholds used by the
 `diff_djvulibre` harness (`examples/diff_djvulibre.rs`) and the CI
-workflow `.github/workflows/diff.yml`. Tracked under #192.
+workflow `.github/workflows/diff.yml`. The versioned corpus manifest and
+machine-enforced coverage contract live in `conformance/corpus.json`; the
+public history is published at
+https://matyushkin.github.io/djvu-rs/dev/conformance/. Tracked under #192 and
+#682. See `docs/conformance.md` for the complete local reproduction and
+artifact contract.
 
 ## Harness
 
@@ -67,6 +72,15 @@ The CI corpus is the subset of `tests/fixtures/*.djvu` that is
 bit-perfect or comfortably within the strict native-resolution ceilings today
 (see the empirical table above). Any future regression above those ceilings
 fails the gate.
+
+The gate is fail-closed: every document/page declared in the manifest must
+produce exactly one result. A missing fixture, missing `ddjvu`, parse/render
+failure, malformed JSONL record, duplicate record, or silently skipped page
+fails report generation. Each published `summary.json` records the Git commit,
+pinned DjVuLibre identity, input SHA-256 digests, corpus digest, render policy,
+and schema version so historical results remain attributable. The same gate
+compares normalized text, annotation map-area counts, and bookmark trees with
+`djvused`; a missing or divergent semantic plane also fails closed.
 
 ## Known divergences (excluded from CI gate, tracked separately)
 
