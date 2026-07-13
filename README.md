@@ -662,9 +662,13 @@ Honest boundaries, so you can decide fast:
   build a bundled document with `djvu merge` when pages share a dictionary.
 - **Legacy standalone `FORM:BM44` / `FORM:PM44` files (pre-v3 DjVu) do not
   parse** — they fail with a clean `NotDjVu` error rather than decoding.
-- **Encoded files run larger than DjVuLibre's encoders** — measured ~14% on
-  IW44 color output vs `c44`, and the JB2 encoder lacks same-size record-6
-  refinement vs `cjb2`. A size gap, not a fidelity gap; tracked in
+- **Encoder size parity is corpus- and profile-dependent.** Run the
+  reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
+  the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
+  `PageEncoder` profiles. The 2026-07-13 snapshot ranges from 1.040–1.345×
+  `c44` for IW44 photo pages and 0.952–2.100× `cjb2` for the public direct JB2
+  lossless profile; every measured output passed its interop/fidelity gate.
+  Same-size record-6 and lossy rec-7 remain experimental and are tracked in
   [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
 - **Document optimization is conservative in the first slice.** `djvu optimize`
   currently removes only semantically inert `FREE` padding and reports unmet
