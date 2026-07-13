@@ -225,6 +225,19 @@ pub struct DjVuBookmark {
     pub children: Vec<DjVuBookmark>,
 }
 
+/// One entry from a document `DIRM` directory (or a synthesized single-page view).
+///
+/// Kind letters follow DjVuLibre `djvused ls`: `P` page, `I` shared/include,
+/// `T` thumbnail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentDirectoryEntry {
+    /// Component classification letter (`P`, `I`, or `T`).
+    pub kind: char,
+    /// Resolver / directory id string.
+    pub id: String,
+}
+
 // ---- Page -------------------------------------------------------------------
 
 /// A raw chunk extracted from a page FORM:DJVU.
@@ -1827,6 +1840,30 @@ impl DjVuDocument {
             Some(bytes) => Ok(Some(crate::metadata::parse_metadata(&bytes)?)),
             None => Ok(None),
         }
+    }
+
+    /// Component directory from the document `DIRM` chunk.
+    ///
+    /// Returns an empty vector when no `DIRM` is present (typical single-page
+    /// `FORM:DJVU`). Kind letters match DjVuLibre `djvused ls`: `P` page,
+    /// `I` shared/include, `T` thumbnail.
+    pub fn component_directory(&self) -> Result<Vec<ComponentDirectoryEntry>, DocError> {
+        let Some(data) = self.raw_chunk(b"DIRM") else {
+            return Ok(Vec::new());
+        };
+        let payload = DirmPayload::decode(data).map_err(DocError::Malformed)?;
+        Ok(payload
+            .components()
+            .into_iter()
+            .map(|component| ComponentDirectoryEntry {
+                kind: match component.kind {
+                    DirmComponentKind::Page => 'P',
+                    DirmComponentKind::Thumbnail => 'T',
+                    DirmComponentKind::Shared => 'I',
+                },
+                id: component.id,
+            })
+            .collect())
     }
 
     /// Return the raw bytes of the first document-level chunk with the given

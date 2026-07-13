@@ -4,6 +4,7 @@
 [![docs.rs](https://docs.rs/djvu-rs/badge.svg)](https://docs.rs/djvu-rs)
 [![CI](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-dashboard-blue)](https://matyushkin.github.io/djvu-rs/dev/bench/)
+[![Conformance](https://img.shields.io/badge/conformance-dashboard-blue)](https://matyushkin.github.io/djvu-rs/dev/conformance/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Read, render, convert, and create DjVu files. Pure-Rust library with a CLI,
@@ -116,6 +117,12 @@ djvu text file.djvu --all --format hocr --output out.hocr
 # Merge documents into a bundled DJVM / extract a page range
 djvu merge a.djvu b.djvu --output merged.djvu
 djvu split book.djvu --pages 10-25 --output chapter.djvu
+
+# Preview safe cleanup as machine-readable JSON, or write an optimized copy
+djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup --dry-run
+djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup
+djvu optimize book.djvu --output optimized.djvu --preset archival --target-size 26214400
+djvu optimize book.djvu --output optimized.djvu --max-ssim-loss 0.001
 
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
@@ -653,10 +660,19 @@ Honest boundaries, so you can decide fast:
   error.
 - **`create_indirect` does not emit shared `DJVI` dictionary components** —
   build a bundled document with `djvu merge` when pages share a dictionary.
-- **Encoded files run larger than DjVuLibre's encoders** — measured ~14% on
-  IW44 color output vs `c44`, and the JB2 encoder lacks same-size record-6
-  refinement vs `cjb2`. A size gap, not a fidelity gap; tracked in
+- **Encoder size parity is corpus- and profile-dependent.** Run the
+  reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
+  the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
+  `PageEncoder` profiles. The 2026-07-13 snapshot ranges from 1.040–1.345×
+  `c44` for IW44 photo pages and 0.952–2.100× `cjb2` for the public direct JB2
+  lossless profile; every measured output passed its interop/fidelity gate.
+  Same-size record-6 and lossy rec-7 remain experimental and are tracked in
   [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
+- **Document optimization is conservative in the first slice.** `djvu optimize`
+  currently removes only semantically inert `FREE` padding and reports unmet
+  size targets; archival codec search, progress callbacks, and cancellation
+  remain planned. See [`docs/optimizer.md`](docs/optimizer.md); it always writes
+  a separate output file.
 - **OCR: Tesseract is the only supported recognition backend.** `OcrOptions`
   (languages, dpi) are honored by Tesseract only; `ocr-onnx` is experimental
   and `ocr-neural` is a placeholder that returns an error.

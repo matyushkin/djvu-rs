@@ -211,6 +211,10 @@ pub mod djvu_document;
 #[cfg(feature = "std")]
 pub mod djvu_mut;
 
+/// High-level document optimization planning and safe structural cleanup.
+#[cfg(feature = "std")]
+pub mod optimizer;
+
 /// Versioned, typed document editing operations with validation and atomic
 /// output handoff.
 #[cfg(feature = "std")]
@@ -409,8 +413,8 @@ pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
 // Re-export new phase-3 document model
 pub use djvu_document::{
-    ComponentId, ComponentKind, ComponentResolveError, ComponentResolver, DjVuBookmark,
-    DjVuDocument, DjVuPage, DocError,
+    ComponentDirectoryEntry, ComponentId, ComponentKind, ComponentResolveError, ComponentResolver,
+    DjVuBookmark, DjVuDocument, DjVuPage, DocError,
 };
 
 // Re-export the validated editor entry points for callers that do not need to
