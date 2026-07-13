@@ -19,7 +19,7 @@ from the public DjVu v3 specification.
 | Read DjVu from Python | [PyO3 bindings, built from source](#python) |
 | Create DjVu from images (PNG/JPEG/TIFF) | [`djvu encode`](#cli) or [`PageEncoder`](#encoding--low-level-api) |
 | Add an OCR text layer to a scan | [`djvu ocr`](#ocr-recognition-backends) (Tesseract) |
-| Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DjVuDocumentMut` |
+| Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DocumentEditor`, `DjVuDocumentMut` |
 | Stream huge books page-by-page | [Lazy async loading](#lazy-async-loading) — first pixel after ~29 KB of a 100 MB file |
 
 Every Rust example below is a complete program, compiled as a doctest on every
@@ -120,6 +120,9 @@ djvu split book.djvu --pages 10-25 --output chapter.djvu
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
 djvu encode scan.png --output scan.djvu --dpi 300
 
+# Opt into a DjVuLibre-compatible G4/MMR mask for fax/scanner workflows
+djvu encode scan.png --quality lossless --bilevel-codec smmr --output scan.djvu
+
 # Encode into a layered lossy DjVu (JB2 mask + IW44 background + FGbz foreground color)
 djvu encode scan.jpg --quality quality --output scan.djvu --dpi 300
 
@@ -144,7 +147,11 @@ djvu bzz-decode notes.bzz --output notes.txt
 ```
 
 For single image input (PNG, JPEG, or TIFF), `--quality lossless`
-luminance-thresholds the image into a JB2 mask and writes `INFO + Sjbz`;
+luminance-thresholds the image into a JB2 mask and writes `INFO + Sjbz`.
+`--bilevel-codec smmr` is an explicit single-image opt-in that writes a
+DjVuLibre-compatible `Smmr` G4/MMR mask instead; it preserves the default JB2
+path and is not available for directory bundles. The Smmr path is intended for
+fax/scanner interoperability and is usually larger than JB2.
 `--quality quality` uses the layered encoder (`INFO + Sjbz + BG44...` plus
 `FGbz` when colored foreground is detected) for color input. `--quality
 archival` uses the same layered shape with a denser background sample grid.
@@ -162,6 +169,10 @@ uneven lighting; tune it with `--sauvola-window` and `--sauvola-k`.
 pixels, which can reduce dark boxes under heavy text strokes. These knobs are
 opt-in, only affect layered profiles, and do not change lossless JB2 defaults.
 Library callers can use the same controls with `PageEncoder::with_segment_options`.
+For newly encoded pages, `PageEncoder::with_metadata` emits a `METz` chunk;
+for existing documents, `DjVuDocumentMut::page_mut(...).set_metadata(...)`
+performs a mutation while preserving untouched chunks. These are deliberately
+separate fresh-encode and mutation APIs.
 
 ## Python
 
@@ -496,6 +507,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Applications that need the full DIRM component identity can use
+`DjVuDocument::parse_with_component_resolver`. Its
+`ComponentResolver` receives a `ComponentId` containing both the external name
+and its `ComponentKind` (`Page`, `Shared`, or `Thumbnail`), and is called for
+every directory entry. Page/shared/thumbnail FORM mismatches and resolver
+failures surface as typed errors; shared `Djbz` dictionaries referenced by
+`INCL` are connected to the parsed pages. See
+[`docs/indirect-djvm-resolver.md`](docs/indirect-djvm-resolver.md).
+
 Two mutation paths cover indirect documents:
 `DjVuDocumentMut::from_indirect_resolved` resolves the component files and
 rebundles them into a mutable bundled document, and `IndirectRewritePlan`
@@ -504,6 +524,42 @@ indirect (each file is renamed atomically, but the multi-file commit as a
 whole is not transactional). Opening an indirect index directly with
 `DjVuDocumentMut::from_bytes` and calling `page_mut` remains unsupported; see
 [`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
+
+### Typed document editing
+
+`DocumentEditor` provides a versioned, typed operation list with a semantic
+dry-run plan and validation of every operation before bytes are emitted. The
+current schema covers page text, page annotations, page/document METa/METz
+metadata, and bundled-document NAVM bookmarks:
+
+```rust,no_run
+use djvu_rs::{DocumentEditor, EditOperation, EditRequest};
+use djvu_rs::metadata::DjVuMetadata;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = std::fs::read("book.djvu")?;
+    let request = EditRequest::new(vec![EditOperation::SetDocumentMetadata {
+        metadata: DjVuMetadata {
+            title: Some("Updated title".into()),
+            ..Default::default()
+        },
+    }]);
+
+    let plan = DocumentEditor::plan(&input, &request)?;
+    println!("{} operation(s), {} page(s)", plan.operations.len(), plan.page_count);
+    let edited = DocumentEditor::apply(&input, &request)?;
+    std::fs::write("edited.djvu", edited)?;
+    Ok(())
+}
+```
+
+`DocumentEditor::apply_to_path` stages output beside the destination and
+renames it only after validation, serialization, and sync succeed. The first
+slice intentionally does not yet cover the declarative CLI, XMP, thumbnails,
+page insertion/deletion/reordering/extraction, semantic diff, or multi-file
+indirect-DJVM commits; those require separate operation and commit contracts.
+With the `serde` feature, requests and plans are JSON-serializable using the
+versioned schema.
 
 ### Low-level IFF access
 
@@ -551,12 +607,15 @@ always fails at recognition time. The compatibility feature name
 Chunk-level coverage of the DjVu v3 format, for readers who need to know
 exactly what decodes and what encodes:
 
+The fresh-encode versus existing-document mutation contract is expanded in
+[`docs/writer-coverage.md`](docs/writer-coverage.md).
+
 | Format element | Decode | Encode |
 |----------------|--------|--------|
 | IFF container (`FORM:DJVU`, `FORM:DJVM`) | ✓ zero-copy parser | ✓ |
 | JB2 bilevel images (`Sjbz`), shared dictionaries (`Djbz` via `INCL`) | ✓ ZP arithmetic coding + symbol dictionary | ✓ incl. multi-page shared Djbz |
 | IW44 wavelet images (`BG44` / `FG44`) | ✓ planar YCbCr, multiple refinement chunks | ✓ color and grayscale |
-| G4/MMR fax images (`Smmr`, ITU-T T.6) | ✓ | — |
+| G4/MMR fax images (`Smmr`, ITU-T T.6) | ✓ | ✓ (explicit `BilevelCodec::Smmr` / `--bilevel-codec smmr`) |
 | JPEG background/foreground (`BGjp` / `FGjp`) | ✓ | — (encoder emits IW44) |
 | Foreground palette (`FGbz`) | ✓ | ✓ (layered encoder) |
 | BZZ compression (BWT + MTF + ZP) | ✓ | ✓ |
@@ -565,7 +624,7 @@ exactly what decodes and what encodes:
 | Bookmarks (`NAVM`) | ✓ | ✓ |
 | Multi-page directory (`DIRM`), bundled and indirect | ✓ | ✓ (DjVuLibre-clean directory v1) |
 | Thumbnails (`TH44`) | ✓ | ✓ (`--thumbnails`) |
-| Metadata (`METa` / `METz`) | ✓ | — |
+| Metadata (`METa` / `METz`) | ✓ | ✓ (`PageEncoder::with_metadata`; `PageMut::set_metadata`) |
 | Legacy standalone `FORM:BM44` / `FORM:PM44` files | — (clean `NotDjVu` error) | — |
 | Unknown chunk IDs | preserved byte-exact for round-trip | n/a |
 
