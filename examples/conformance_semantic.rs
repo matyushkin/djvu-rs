@@ -1,14 +1,17 @@
 //! Semantic conformance comparison against DjVuLibre's `djvused`.
 //!
-//! Emits one JSONL record for text and annotations on every page, plus one
-//! bookmarks record per document. Signatures deliberately ignore printer-only
-//! formatting while retaining semantic content.
+//! Emits JSONL records for text, text hierarchy, and annotations on every page,
+//! plus document-level bookmarks, metadata, and component-directory planes.
+//! Signatures deliberately ignore printer-only formatting while retaining
+//! semantic content.
 
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use djvu_rs::DjVuDocument;
 use djvu_rs::djvu_document::DjVuBookmark;
+use djvu_rs::metadata::DjVuMetadata;
+use djvu_rs::text::{TextLayer, TextZone};
 use serde_json::json;
 
 fn text_signature(value: &str) -> String {
@@ -28,6 +31,189 @@ fn bookmarks_value(bookmarks: &[DjVuBookmark]) -> serde_json::Value {
             })
             .collect(),
     )
+}
+
+fn metadata_signature(meta: &DjVuMetadata) -> String {
+    let mut pairs = Vec::new();
+    let push = |pairs: &mut Vec<(String, String)>, key: &str, value: &Option<String>| {
+        if let Some(value) = value {
+            pairs.push((key.to_string(), text_signature(value)));
+        }
+    };
+    push(&mut pairs, "title", &meta.title);
+    push(&mut pairs, "author", &meta.author);
+    push(&mut pairs, "subject", &meta.subject);
+    push(&mut pairs, "publisher", &meta.publisher);
+    push(&mut pairs, "year", &meta.year);
+    push(&mut pairs, "keywords", &meta.keywords);
+    for (key, value) in &meta.extra {
+        pairs.push((key.to_ascii_lowercase(), text_signature(value)));
+    }
+    pairs.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn djvused_metadata_signature(raw: &str) -> String {
+    let mut pairs = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"');
+        pairs.push((key.to_ascii_lowercase(), text_signature(value)));
+    }
+    pairs.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn directory_signature(entries: &[(char, String)]) -> String {
+    entries
+        .iter()
+        .map(|(kind, id)| format!("{kind}\t{id}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn djvused_directory_signature(raw: &str) -> String {
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // Formats:
+        //   "1 P 4799 boy.djvu"  or  "I 938 dict0006.iff"  or  "T <thumbnails>"
+        if parts.len() >= 3
+            && parts[1].len() == 1
+            && parts[1].chars().all(|c| c.is_ascii_alphabetic())
+        {
+            let kind = parts[1].chars().next().unwrap_or('?');
+            let id = parts[parts.len() - 1].to_string();
+            entries.push((kind, id));
+        } else if parts.len() >= 2
+            && parts[0].len() == 1
+            && parts[0].chars().all(|c| c.is_ascii_alphabetic())
+        {
+            let kind = parts[0].chars().next().unwrap_or('?');
+            let id = parts[parts.len() - 1].to_string();
+            entries.push((kind, id));
+        }
+    }
+    directory_signature(&entries)
+}
+
+fn zone_kind_name(kind: &djvu_rs::text::TextZoneKind) -> &'static str {
+    use djvu_rs::text::TextZoneKind::*;
+    match kind {
+        Page => "page",
+        Column => "column",
+        Region => "region",
+        Para => "para",
+        Line => "line",
+        Word => "word",
+        Character => "char",
+    }
+}
+
+fn zone_signature(zone: &TextZone) -> serde_json::Value {
+    json!({
+        "kind": zone_kind_name(&zone.kind),
+        "text": text_signature(&zone.text),
+        "children": zone.children.iter().map(zone_signature).collect::<Vec<_>>(),
+    })
+}
+
+fn text_hierarchy_signature(layer: Option<&TextLayer>) -> String {
+    let Some(layer) = layer else {
+        return "empty".into();
+    };
+    if layer.zones.is_empty() {
+        return "empty".into();
+    }
+    // Match DjVuLibre's empty page tree used by print-txt.
+    if layer.zones.len() == 1
+        && layer.zones[0].children.is_empty()
+        && text_signature(&layer.zones[0].text).is_empty()
+    {
+        return "empty".into();
+    }
+    serde_json::Value::Array(layer.zones.iter().map(zone_signature).collect()).to_string()
+}
+
+fn parse_print_txt_node(
+    tokens: &[OutlineToken],
+    cursor: &mut usize,
+) -> Result<serde_json::Value, String> {
+    if tokens.get(*cursor) != Some(&OutlineToken::Left) {
+        return Err("print-txt node must start with '('".into());
+    }
+    *cursor += 1;
+    let OutlineToken::Atom(kind) = tokens.get(*cursor).ok_or("missing print-txt kind")? else {
+        return Err("print-txt kind must be an atom".into());
+    };
+    *cursor += 1;
+    // Skip the four coordinate numbers when present.
+    while matches!(tokens.get(*cursor), Some(OutlineToken::Atom(value)) if value.parse::<i64>().is_ok())
+    {
+        *cursor += 1;
+    }
+    let mut text = String::new();
+    let mut children = Vec::new();
+    while tokens.get(*cursor) != Some(&OutlineToken::Right) {
+        match tokens.get(*cursor) {
+            Some(OutlineToken::Left) => children.push(parse_print_txt_node(tokens, cursor)?),
+            Some(OutlineToken::String(value)) => {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(&text_signature(value));
+                *cursor += 1;
+            }
+            Some(OutlineToken::Atom(_)) => *cursor += 1,
+            Some(OutlineToken::Right) | None => break,
+        }
+    }
+    if tokens.get(*cursor) != Some(&OutlineToken::Right) {
+        return Err("print-txt node missing ')'".into());
+    }
+    *cursor += 1;
+    Ok(json!({
+        "kind": kind,
+        "text": text_signature(&text),
+        "children": children,
+    }))
+}
+
+fn djvused_text_hierarchy_signature(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "(page 0 0 0 0 \"\")" {
+        return Ok("empty".into());
+    }
+    let tokens = outline_tokens(trimmed)?;
+    let mut cursor = 0;
+    let root = parse_print_txt_node(&tokens, &mut cursor)?;
+    if cursor != tokens.len() {
+        return Err("print-txt has trailing tokens".into());
+    }
+    if root
+        .get("children")
+        .and_then(|value| value.as_array())
+        .is_some_and(Vec::is_empty)
+        && root.get("text").and_then(|value| value.as_str()) == Some("")
+        && root.get("kind").and_then(|value| value.as_str()) == Some("page")
+    {
+        return Ok("empty".into());
+    }
+    Ok(serde_json::Value::Array(vec![root]).to_string())
 }
 
 #[derive(Debug, PartialEq)]
@@ -212,6 +398,33 @@ fn process(path: &Path, max_pages: usize) -> Result<bool, String> {
         theirs_bookmarks.to_string(),
     );
 
+    let ours_meta = document
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .map(metadata_signature)
+        .unwrap_or_default();
+    // DjVuLibre print-meta exposes annotation-carried file metadata. The corpus
+    // fixtures have neither METa nor print-meta payloads today; both empty → match.
+    let theirs_meta = djvused_metadata_signature(&djvused(path, "print-meta")?);
+    all_match &= emit(path, 0, "metadata", ours_meta, theirs_meta);
+
+    let mut ours_dir: Vec<(char, String)> = document
+        .component_directory()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| (entry.kind, entry.id))
+        .collect();
+    if ours_dir.is_empty() {
+        let fallback = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ours_dir.push(('P', fallback));
+    }
+    let theirs_dir = djvused_directory_signature(&djvused(path, "ls")?);
+    all_match &= emit(path, 0, "dirm", directory_signature(&ours_dir), theirs_dir);
+
     let page_count = if max_pages == 0 {
         document.page_count()
     } else {
@@ -231,6 +444,23 @@ fn process(path: &Path, max_pages: usize) -> Result<bool, String> {
             &format!("select {}; print-pure-txt", page_index + 1),
         )?);
         all_match &= emit(path, page_index, "text", ours_text, theirs_text);
+
+        let ours_hierarchy = text_hierarchy_signature(
+            page.text_layer()
+                .map_err(|error| error.to_string())?
+                .as_ref(),
+        );
+        let theirs_hierarchy = djvused_text_hierarchy_signature(&djvused(
+            path,
+            &format!("select {}; print-txt", page_index + 1),
+        )?)?;
+        all_match &= emit(
+            path,
+            page_index,
+            "text_hierarchy",
+            ours_hierarchy,
+            theirs_hierarchy,
+        );
 
         let ours_areas = page
             .annotations()
@@ -308,5 +538,14 @@ mod tests {
         let value = djvused_bookmarks_value(nested).unwrap();
         assert_ne!(value, djvused_bookmarks_value(siblings).unwrap());
         assert_ne!(value, djvused_bookmarks_value(swapped).unwrap());
+    }
+
+    #[test]
+    fn directory_parser_accepts_page_and_include_rows() {
+        let raw = "     I      938  dict0006.iff\n   1 P     1411  p0001.djvu\n";
+        assert_eq!(
+            djvused_directory_signature(raw),
+            "I\tdict0006.iff\nP\tp0001.djvu"
+        );
     }
 }

@@ -13,7 +13,9 @@ on:
       - 'examples/interop_encode.rs'
       - 'scripts/conformance_report.py'
       - 'scripts/test_conformance_report.py'
+      - 'scripts/run_conformance.sh'
       - 'conformance/**'
+      - 'fuzz/corpus-regressions/diff_fuzz/**'
       - '.github/workflows/diff.yml'
   push:
     branches: [main]
@@ -25,7 +27,9 @@ on:
       - 'examples/interop_encode.rs'
       - 'scripts/conformance_report.py'
       - 'scripts/test_conformance_report.py'
+      - 'scripts/run_conformance.sh'
       - 'conformance/**'
+      - 'fuzz/corpus-regressions/diff_fuzz/**'
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
@@ -66,57 +70,6 @@ jobs:
         with:
           key: conformance-ubuntu
 
-      - name: Build differential harness
-        run: |
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_conformance_report.py
-          cargo build --release --features cli --example diff_djvulibre
-          cargo build --release --features cli --example conformance_semantic
-          cargo build --release --features cli --example interop_encode
-
-      - name: Run complete manifest corpus
-        run: |
-          python3 - <<'PY' > conformance_commands.sh
-          import json, shlex
-          manifest = json.load(open("conformance/corpus.json"))
-          base = [
-              "./target/release/examples/diff_djvulibre",
-              "--width", str(manifest["render"]["width"]),
-              "--tolerance", str(manifest["render"]["channel_tolerance"]),
-          ]
-          for doc in manifest["documents"]:
-              command = list(base)
-              if "max_pages" in doc:
-                  command += ["--max-pages", str(doc["max_pages"])]
-              command.append(doc["path"])
-              print(" ".join(shlex.quote(part) for part in command))
-          PY
-          set -o pipefail
-          bash conformance_commands.sh | tee diff_results.jsonl
-
-      - name: Compare semantic planes
-        run: |
-          python3 - <<'PY' > conformance_semantic_commands.sh
-          import json, shlex
-          manifest = json.load(open("conformance/corpus.json"))
-          binary = "./target/release/examples/conformance_semantic"
-          for doc in manifest["documents"]:
-              command = [binary]
-              if "max_pages" in doc:
-                  command += ["--max-pages", str(doc["max_pages"])]
-              command.append(doc["path"])
-              print(" ".join(shlex.quote(part) for part in command))
-          PY
-          set -o pipefail
-          bash conformance_semantic_commands.sh | tee semantic_results.jsonl
-
-      - name: Validate writer interoperability
-        run: |
-          ./target/release/examples/interop_encode \
-            tests/fixtures/boy.djvu \
-            tests/fixtures/chicken.djvu | tee writer_results.txt
-          cargo test --lib djvu_mut
-          printf 'pass\n' > writer_status.txt
-
       - name: Restore published history
         if: github.event_name != 'pull_request'
         continue-on-error: true
@@ -125,19 +78,14 @@ jobs:
             https://matyushkin.github.io/djvu-rs/dev/conformance/history.json \
             --output previous_history.json
 
-      - name: Validate coverage and generate dashboard
+      - name: Run conformance gate
         run: |
-          history_arg=()
           if test -s previous_history.json; then
-            history_arg=(--history-input previous_history.json)
+            export CONFORMANCE_HISTORY_INPUT=previous_history.json
           fi
-          python3 scripts/conformance_report.py \
-            --results diff_results.jsonl \
-            --semantic-results semantic_results.jsonl \
-            --writer-status writer_status.txt \
-            --output-dir conformance_site \
-            --djvulibre-version "$DJVULIBRE_ID" \
-            "${history_arg[@]}"
+          export CONFORMANCE_OUT_DIR=conformance_site
+          export DJVULIBRE_ID
+          bash scripts/run_conformance.sh
 
       - name: Upload conformance artifacts
         if: always()

@@ -16,13 +16,20 @@ import html
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HISTORY_LIMIT = 100
+SEMANTIC_PAGE_PLANES = frozenset({"text", "text_hierarchy", "annotations"})
+SEMANTIC_DOC_PLANES = frozenset({"bookmarks", "metadata", "dirm"})
+DIFF_FUZZ_CLASS_RE = re.compile(
+    r"_(pixel-mismatch|dim-mismatch|our-stricter|our-laxer|"
+    r"our-render-fail|our-renders-what-they-reject)\.txt$"
+)
 
 
 def sha256(path: Path) -> str:
@@ -163,13 +170,15 @@ def validate_semantic(
 ) -> list[str]:
     expected = set()
     for document in manifest["documents"]:
-        expected.add((document["path"], 0, "bookmarks"))
+        for plane in SEMANTIC_DOC_PLANES:
+            expected.add((document["path"], 0, plane))
         for page in range(document["pages"]):
-            expected.add((document["path"], page, "text"))
-            expected.add((document["path"], page, "annotations"))
+            for plane in SEMANTIC_PAGE_PLANES:
+                expected.add((document["path"], page, plane))
     seen: set[tuple[str, int, str]] = set()
     failures: list[str] = []
     required = {"file", "page", "plane", "status", "ours", "djvulibre"}
+    allowed_planes = SEMANTIC_PAGE_PLANES | SEMANTIC_DOC_PLANES
     for row in rows:
         missing = sorted(required - row.keys())
         if missing:
@@ -182,7 +191,7 @@ def validate_semantic(
             )
             or type(row["page"]) is not int
             or row["page"] < 0
-            or row["plane"] not in {"text", "annotations", "bookmarks"}
+            or row["plane"] not in allowed_planes
             or row["status"] not in {"match", "diverge"}
         ):
             failures.append(f"semantic result has invalid types/values: {row!r}")
@@ -191,7 +200,11 @@ def validate_semantic(
         if key in seen:
             failures.append(f"duplicate semantic result for {key}")
         seen.add(key)
-        if row["status"] != "match":
+        # text_hierarchy is covered and published, but zone trees still diverge
+        # across implementations (parent text fill + OCR segmentation). Treat
+        # those divergences as observational until the trees align; other planes
+        # remain fail-closed.
+        if row["status"] != "match" and row["plane"] != "text_hierarchy":
             failures.append(f"semantic divergence for {key[0]} page {key[1]} {key[2]}")
         if (row["status"] == "match") != (row["ours"] == row["djvulibre"]):
             failures.append(f"semantic status/payload contradiction for {key}")
@@ -200,6 +213,123 @@ def validate_semantic(
     for key in sorted(seen - expected):
         failures.append(f"unexpected semantic result for {key}")
     return failures
+
+
+def parse_writer_results(path: Path) -> dict[str, Any]:
+    """Parse interop_encode stdout into a structured writer validation object."""
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read writer results {path}: {exc}") from exc
+    cases: list[dict[str, Any]] = []
+    rejected = 0
+    dim_mismatches = 0
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("page"):
+            continue
+        if "REJECT" in line:
+            rejected += 1
+            cases.append({"line": line.strip(), "status": "reject"})
+        elif "DIMS!" in line:
+            dim_mismatches += 1
+            cases.append({"line": line.strip(), "status": "dims"})
+        elif re.search(r"\bok\b", line):
+            cases.append({"line": line.strip(), "status": "ok"})
+    summary_match = re.search(r"(\d+)\s+checked,\s+(\d+)\s+failed", text)
+    checked = int(summary_match.group(1)) if summary_match else len(cases)
+    failed = int(summary_match.group(2)) if summary_match else rejected + dim_mismatches
+    status = "pass" if failed == 0 and rejected == 0 and dim_mismatches == 0 else "fail"
+    return {
+        "status": status,
+        "checked": checked,
+        "failed": failed,
+        "rejected": rejected,
+        "dim_mismatches": dim_mismatches,
+        "cases": cases,
+    }
+
+
+def load_accepted_differences(path: Path | None) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    if not path.exists():
+        raise RuntimeError(f"accepted differences registry missing: {path}")
+    data = load_json(path)
+    if not isinstance(data, dict) or "differences" not in data:
+        raise RuntimeError(f"accepted differences {path} must contain 'differences'")
+    differences = data["differences"]
+    if not isinstance(differences, list):
+        raise RuntimeError(f"accepted differences {path} 'differences' must be a list")
+    return [item for item in differences if isinstance(item, dict)]
+
+
+def load_diff_fuzz_registry(directory: Path | None) -> dict[str, Any]:
+    if directory is None:
+        return {"categories": {}, "fixtures": []}
+    if not directory.is_dir():
+        raise RuntimeError(f"diff_fuzz registry directory missing: {directory}")
+    categories: dict[str, int] = {}
+    fixtures: list[dict[str, str]] = []
+    for path in sorted(directory.glob("*.txt")):
+        match = DIFF_FUZZ_CLASS_RE.search(path.name)
+        if not match:
+            raise RuntimeError(f"unclassified diff_fuzz fixture: {path.name}")
+        category = match.group(1)
+        categories[category] = categories.get(category, 0) + 1
+        fixtures.append({"path": str(path), "category": category})
+    if not fixtures:
+        raise RuntimeError(f"diff_fuzz registry is empty: {directory}")
+    return {
+        "directory": str(directory),
+        "fixture_count": len(fixtures),
+        "categories": dict(sorted(categories.items())),
+        "fixtures": fixtures,
+    }
+
+
+def baseline_delta(
+    current: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    if previous is None:
+        return {
+            "has_baseline": False,
+            "status_changed": False,
+            "mismatch_pct_delta": None,
+            "pages_delta": None,
+            "new_failure_count": len(current.get("failures", [])),
+            "resolved_failure_count": 0,
+            "regression": False,
+            "improvement": False,
+        }
+    prev_failures = set(previous.get("failures", []))
+    curr_failures = set(current.get("failures", []))
+    new_failures = sorted(curr_failures - prev_failures)
+    resolved = sorted(prev_failures - curr_failures)
+    mismatch_delta = float(current.get("max_mismatch_pct", 0)) - float(
+        previous.get("max_mismatch_pct", 0)
+    )
+    status_changed = previous.get("status") != current.get("status")
+    regression = (previous.get("status") == "pass" and current.get("status") == "fail") or (
+        mismatch_delta > 0 and current.get("status") == "fail"
+    )
+    improvement = (previous.get("status") == "fail" and current.get("status") == "pass") or (
+        mismatch_delta < 0 and not new_failures
+    )
+    return {
+        "has_baseline": True,
+        "previous_commit": previous.get("commit"),
+        "previous_status": previous.get("status"),
+        "status_changed": status_changed,
+        "mismatch_pct_delta": mismatch_delta,
+        "pages_delta": int(current.get("pages_compared", 0))
+        - int(previous.get("pages_compared", 0)),
+        "new_failures": new_failures,
+        "resolved_failures": resolved,
+        "new_failure_count": len(new_failures),
+        "resolved_failure_count": len(resolved),
+        "regression": regression,
+        "improvement": improvement,
+    }
 
 
 def load_history(path: Path | None) -> list[dict[str, Any]]:
@@ -241,6 +371,40 @@ def render_html(summary: dict[str, Any], history: list[dict[str, Any]]) -> str:
         "</tr>"
         for row in summary["semantic_results"]
     )
+    delta = summary.get("baseline_delta", {})
+    if delta.get("has_baseline"):
+        delta_html = (
+            f"<p>Previous <code>{html.escape(str(delta.get('previous_commit', '?'))[:12])}</code> "
+            f"({html.escape(str(delta.get('previous_status', '?')).upper())}) · "
+            f"Δ mismatch {delta.get('mismatch_pct_delta', 0):+.4f}% · "
+            f"new failures {delta.get('new_failure_count', 0)} · "
+            f"resolved {delta.get('resolved_failure_count', 0)} · "
+            f"{'REGRESSION' if delta.get('regression') else ('IMPROVEMENT' if delta.get('improvement') else 'stable')}</p>"
+        )
+    else:
+        delta_html = "<p>No previous baseline in history.</p>"
+    writer = summary.get("writer_validation", {})
+    if isinstance(writer, dict):
+        writer_html = (
+            f"<p>status <code>{html.escape(str(writer.get('status')))}</code> · "
+            f"checked {writer.get('checked', 0)} · failed {writer.get('failed', 0)} · "
+            f"rejected {writer.get('rejected', 0)} · dims {writer.get('dim_mismatches', 0)}</p>"
+        )
+    else:
+        writer_html = f"<p><code>{html.escape(str(writer))}</code></p>"
+    fuzz = summary.get("diff_fuzz_registry", {})
+    fuzz_rows = "".join(
+        f"<tr><td>{html.escape(category)}</td><td>{count}</td></tr>"
+        for category, count in (fuzz.get("categories") or {}).items()
+    )
+    accepted = "".join(
+        "<tr>"
+        f"<td>{html.escape(item.get('id', ''))}</td>"
+        f"<td>{html.escape(item.get('category', ''))}</td>"
+        f"<td>{html.escape(item.get('rationale', ''))}</td>"
+        "</tr>"
+        for item in summary.get("accepted_differences", [])
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>djvu-rs conformance</title>
@@ -249,9 +413,13 @@ def render_html(summary: dict[str, Any], history: list[dict[str, Any]]) -> str:
 <h2 class="{status.lower()}">{status}</h2>
 <p>Commit <code>{html.escape(summary["commit"])}</code> · {html.escape(summary["timestamp"])}</p>
 <p>{summary["pages_compared"]} pages · corpus <code>{summary["corpus_digest"][:16]}</code> · {html.escape(summary["tools"]["djvulibre"])}</p>
+<h2>Baseline delta</h2>{delta_html}
 <h2>Failures</h2><ul>{failures or "<li>None</li>"}</ul>
 <h2>Render differential</h2><table><thead><tr><th>Document</th><th>Page</th><th>Size</th><th>Mismatch</th><th>Mean Δ</th><th>Max Δ</th></tr></thead><tbody>{rows}</tbody></table>
 <h2>Semantic differential</h2><table><thead><tr><th>Document</th><th>Page</th><th>Plane</th><th>Status</th></tr></thead><tbody>{semantic}</tbody></table>
+<h2>Writer validation</h2>{writer_html}
+<h2>Diff-fuzz classification registry</h2><table><thead><tr><th>Category</th><th>Fixtures</th></tr></thead><tbody>{fuzz_rows or "<tr><td colspan=2>None</td></tr>"}</tbody></table>
+<h2>Accepted differences</h2><table><thead><tr><th>Id</th><th>Category</th><th>Rationale</th></tr></thead><tbody>{accepted or "<tr><td colspan=3>None</td></tr>"}</tbody></table>
 <h2>Recent runs</h2><table><thead><tr><th>Time</th><th>Commit</th><th>Status</th><th>Pages</th><th>Worst mismatch</th></tr></thead><tbody>{trend}</tbody></table>
 <p>Machine-readable: <a href="summary.json">summary.json</a> · <a href="history.json">history.json</a></p>
 </body></html>"""
@@ -265,6 +433,9 @@ def main() -> int:
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--semantic-results", type=Path, required=True)
     parser.add_argument("--writer-status", type=Path, required=True)
+    parser.add_argument("--writer-results", type=Path)
+    parser.add_argument("--accepted-differences", type=Path)
+    parser.add_argument("--diff-fuzz-registry", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--history-input", type=Path)
     parser.add_argument("--commit", default=os.environ.get("GITHUB_SHA"))
@@ -281,6 +452,17 @@ def main() -> int:
             failures.append(
                 f"writer validation status is {writer_status!r}, expected 'pass'"
             )
+        if args.writer_results is not None:
+            writer_validation: Any = parse_writer_results(args.writer_results)
+            if writer_validation["status"] != "pass":
+                failures.append(
+                    "writer interop_encode reported "
+                    f"{writer_validation['failed']} failure(s)"
+                )
+        else:
+            writer_validation = writer_status
+        accepted = load_accepted_differences(args.accepted_differences)
+        diff_fuzz = load_diff_fuzz_registry(args.diff_fuzz_registry)
         commit = args.commit or command_version(["git", "rev-parse", "HEAD"])
         djvulibre = args.djvulibre_version or djvulibre_version()
         timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -295,6 +477,8 @@ def main() -> int:
             inputs.append(
                 {"path": document["path"], "sha256": digest, "pages": document["pages"]}
             )
+        history = load_history(args.history_input)
+        previous = history[-1] if history else None
         summary = {
             "schema_version": SCHEMA_VERSION,
             "timestamp": timestamp,
@@ -311,9 +495,24 @@ def main() -> int:
             "failures": failures,
             "render_results": rows,
             "semantic_results": semantic_rows,
-            "writer_validation": writer_status,
+            "writer_validation": writer_validation,
+            "accepted_differences": accepted,
+            "diff_fuzz_registry": {
+                key: diff_fuzz[key]
+                for key in ("directory", "fixture_count", "categories")
+                if key in diff_fuzz
+            },
         }
-        history = load_history(args.history_input)
+        summary["baseline_delta"] = baseline_delta(
+            {
+                "status": summary["status"],
+                "commit": summary["commit"],
+                "pages_compared": summary["pages_compared"],
+                "max_mismatch_pct": summary["max_mismatch_pct"],
+                "failures": summary["failures"],
+            },
+            previous,
+        )
         history.append(
             {
                 key: summary[key]
@@ -324,6 +523,7 @@ def main() -> int:
                     "pages_compared",
                     "max_mismatch_pct",
                     "corpus_digest",
+                    "failures",
                 )
             }
         )
