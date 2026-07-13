@@ -566,7 +566,7 @@ exactly what decodes and what encodes:
 | Multi-page directory (`DIRM`), bundled and indirect | ✓ | ✓ (DjVuLibre-clean directory v1) |
 | Thumbnails (`TH44`) | ✓ | ✓ (`--thumbnails`) |
 | Metadata (`METa` / `METz`) | ✓ | — |
-| Legacy standalone `FORM:BM44` / `FORM:PM44` files | — (clean `NotDjVu` error) | — |
+| Legacy standalone `FORM:BM44` / `FORM:PM44` files | ✓ | — |
 | Unknown chunk IDs | preserved byte-exact for round-trip | n/a |
 
 The codec internals are also published as standalone workspace crates for
@@ -594,8 +594,6 @@ Honest boundaries, so you can decide fast:
   error.
 - **`create_indirect` does not emit shared `DJVI` dictionary components** —
   build a bundled document with `djvu merge` when pages share a dictionary.
-- **Legacy standalone `FORM:BM44` / `FORM:PM44` files (pre-v3 DjVu) do not
-  parse** — they fail with a clean `NotDjVu` error rather than decoding.
 - **Encoded files run larger than DjVuLibre's encoders** — measured ~14% on
   IW44 color output vs `c44`, and the JB2 encoder lacks same-size record-6
   refinement vs `cjb2`. A size gap, not a fidelity gap; tracked in
