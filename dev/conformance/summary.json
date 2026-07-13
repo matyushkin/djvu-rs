@@ -1,0 +1,845 @@
+{
+  "accepted_differences": [
+    {
+      "category": "render-tolerance",
+      "id": "native-render-channel-tolerance-4",
+      "rationale": "IW44 / YCbCr rounding and filter differences versus DjVuLibre at native resolution; documented in tests/diff_tolerance.md and enforced by conformance/corpus.json.",
+      "threshold": {
+        "channel_tolerance": 4,
+        "max_mean_abs_diff": 0.2,
+        "max_mismatch_pct": 0.8
+      }
+    },
+    {
+      "category": "render-tolerance",
+      "fixture": "tests/fixtures/colorbook.djvu",
+      "id": "colorbook-page0-ubuntu-3.5.28",
+      "page": 0,
+      "rationale": "Pinned Ubuntu DjVuLibre 3.5.28 reports ~0.75% mismatch on colorbook page 0; the gate uses max_mismatch_pct 0.8 so the published baseline stays fail-closed without silent skips."
+    },
+    {
+      "category": "semantic-tolerance",
+      "id": "text-hierarchy-observational",
+      "rationale": "text_hierarchy plane is required and published, but zone-tree equality is not yet a fail-closed gate: parent-text fill and word/char segmentation still diverge versus DjVuLibre print-txt on OCR pages (ccitt_2, colorbook)."
+    },
+    {
+      "category": "semantic-source",
+      "id": "metadata-meta-vs-print-meta",
+      "rationale": "djvu-rs metadata() reads METa/METz; DjVuLibre print-meta exposes annotation-carried file metadata. The conformance corpus currently has neither payload, so both signatures are empty and match. Divergences outside that contract must be filed separately."
+    }
+  ],
+  "baseline_delta": {
+    "has_baseline": false,
+    "improvement": false,
+    "mismatch_pct_delta": null,
+    "new_failure_count": 0,
+    "pages_delta": null,
+    "regression": false,
+    "resolved_failure_count": 0,
+    "status_changed": false
+  },
+  "commit": "d0666fdea2e6cc9cc99950c12412495996d8d5b2",
+  "corpus_digest": "18484443086b73f299d8ba13486d97508dab6dff8e44af6aa7a6ac1e05e0c6fd",
+  "diff_fuzz_registry": {
+    "categories": {
+      "dim-mismatch": 1,
+      "our-laxer": 5,
+      "our-render-fail": 4,
+      "our-renders-what-they-reject": 5,
+      "our-stricter": 4,
+      "pixel-mismatch": 4
+    },
+    "directory": "fuzz/corpus-regressions/diff_fuzz",
+    "fixture_count": 23
+  },
+  "failures": [],
+  "inputs": [
+    {
+      "pages": 1,
+      "path": "tests/fixtures/boy.djvu",
+      "sha256": "8cde44879f3b961d0f3f317500fbfbf8a8f4fd07e030f39b04a0a472e5c17982"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/boy_jb2.djvu",
+      "sha256": "1e4c23fc5c2f8e5c73a4ad76ef873991419e3e975f79f595b55bef030e72162f"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/chicken.djvu",
+      "sha256": "4e0a0370e63776198dbfb32a191248fafe258d35b4d09758a6e0fabd513d2ad3"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/ccitt_2.djvu",
+      "sha256": "2ed36f779976393e451106d24e92f22b18ad38f457b49909eb91e67ced46af73"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/links.djvu",
+      "sha256": "3d7740439e20ae48366f62740a64f9ab67fb2062a6a7afb726e30dee81e4403f"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/problem_page.djvu",
+      "sha256": "53b7bedd02b53bb31334be839989a0f72ec9f769198c62637836c3267a4432a2"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/big-scanned-page.djvu",
+      "sha256": "200f9bcaf891f12014fe39bd9e119f1f4560566abd8bea9b67a21eb198567594"
+    },
+    {
+      "pages": 6,
+      "path": "tests/fixtures/navm_fgbz.djvu",
+      "sha256": "aec189aa8a165580a87725f291e0da5ba9a16e25295b4e1e4aea162115d2d084"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/colorbook.djvu",
+      "sha256": "915d0f30e232f76e635ed6a9c4b85a2fac355d98f51eaa276ce0e39a309d28c0"
+    }
+  ],
+  "max_mismatch_pct": 0.7488,
+  "pages_compared": 14,
+  "render_policy": {
+    "channel_tolerance": 4,
+    "max_mean_abs_diff": 0.2,
+    "max_mismatch_pct": 0.8,
+    "width": 99999
+  },
+  "render_results": [
+    {
+      "file": "tests/fixtures/boy.djvu",
+      "height": 256,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 49152,
+      "width": 192
+    },
+    {
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "height": 256,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 49152,
+      "width": 192
+    },
+    {
+      "file": "tests/fixtures/chicken.djvu",
+      "height": 240,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 43440,
+      "width": 181
+    },
+    {
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "height": 2376,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 4105728,
+      "width": 1728
+    },
+    {
+      "file": "tests/fixtures/links.djvu",
+      "height": 256,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 49152,
+      "width": 192
+    },
+    {
+      "file": "tests/fixtures/problem_page.djvu",
+      "height": 5050,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 16604400,
+      "width": 3288
+    },
+    {
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "height": 9148,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 62023440,
+      "width": 6780
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 1,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 2,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 17,
+      "mean_abs_diff": 0.001,
+      "mismatch_pct": 0.001,
+      "mismatched_px": 80,
+      "page": 3,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 19,
+      "mean_abs_diff": 0.003,
+      "mismatch_pct": 0.0271,
+      "mismatched_px": 2283,
+      "page": 4,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "height": 3300,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 5,
+      "total_px": 8415000,
+      "width": 2550
+    },
+    {
+      "file": "tests/fixtures/colorbook.djvu",
+      "height": 3669,
+      "max_abs_diff": 46,
+      "mean_abs_diff": 0.139,
+      "mismatch_pct": 0.7488,
+      "mismatched_px": 62093,
+      "page": 0,
+      "total_px": 8291940,
+      "width": 2260
+    }
+  ],
+  "schema_version": 2,
+  "semantic_results": [
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tboy.djvu",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "P\tboy.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/boy.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tboy_jb2.djvu",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "P\tboy_jb2.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/boy_jb2.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tchicken.djvu",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "P\tchicken.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/chicken.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tccitt_2.djvu",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "P\tccitt_2.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "\"$ 32\u3006\u4e3b s\u03c9\u633d\u30934 Vs +V 32\u03bc IOOpF\u6709F \u2022 p\ufffd\u5224 \u03c9w\u3077. -\u30fb\u30fb\u30fb\u5703\u30fb -\u5703\u30fb\u30fb \u30fb- \u30fb\u56fa \u30fb. \u30c5\u3093\uff0cu\u03c9\ufffd\ufffd\u2026\u03c9t . .(l).J / 22\u30fc\u30f2\u30fc71",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "\"$ 32\u3006\u4e3b s\u03c9\u633d\u30934 Vs +V 32\u03bc IOOpF\u6709F \u2022 p\ufffd\u5224 \u03c9w\u3077. -\u30fb\u30fb\u30fb\u5703\u30fb -\u5703\u30fb\u30fb \u30fb- \u30fb\u56fa \u30fb. \u30c5\u3093\uff0cu\u03c9\ufffd\ufffd\u2026\u03c9t . .(l).J / 22\u30fc\u30f2\u30fc71",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\\\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"$\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"3\"},{\"children\":[],\"kind\":\"char\",\"text\":\"2\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u3006\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u4e3b\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"s\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u03c9\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u633d\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u3093\"},{\"children\":[],\"kind\":\"char\",\"text\":\"4\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"V\"},{\"children\":[],\"kind\":\"char\",\"text\":\"s\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"+\"},{\"children\":[],\"kind\":\"char\",\"text\":\"V\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"3\"},{\"children\":[],\"kind\":\"char\",\"text\":\"2\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u03bc\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"I\"},{\"children\":[],\"kind\":\"char\",\"text\":\"O\"},{\"children\":[],\"kind\":\"char\",\"text\":\"O\"},{\"children\":[],\"kind\":\"char\",\"text\":\"p\"},{\"children\":[],\"kind\":\"char\",\"text\":\"F\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u6709\"},{\"children\":[],\"kind\":\"char\",\"text\":\"F\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u2022\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"p\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\ufffd\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u5224\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u03c9\"},{\"children\":[],\"kind\":\"char\",\"text\":\"w\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u3077\"},{\"children\":[],\"kind\":\"char\",\"text\":\".\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"-\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u5703\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"-\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u5703\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"-\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u56fa\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fb\"},{\"children\":[],\"kind\":\"char\",\"text\":\".\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\u30c5\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u3093\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\uff0c\"},{\"children\":[],\"kind\":\"char\",\"text\":\"u\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u03c9\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\ufffd\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\ufffd\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u2026\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u03c9\"},{\"children\":[],\"kind\":\"char\",\"text\":\"t\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\".\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\".(l\"},{\"children\":[],\"kind\":\"char\",\"text\":\").J\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"/\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"2\"},{\"children\":[],\"kind\":\"char\",\"text\":\"2\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fc\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30f2\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\u30fc\"},{\"children\":[],\"kind\":\"char\",\"text\":\"7\"},{\"children\":[],\"kind\":\"char\",\"text\":\"1\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"page\",\"text\":\"\"}]",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\\\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\\\"$\"},{\"children\":[],\"kind\":\"word\",\"text\":\"3\"}],\"kind\":\"line\",\"text\":\"\\\"$\"}],\"kind\":\"para\",\"text\":\"\\\"$\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"},{\"children\":[],\"kind\":\"char\",\"text\":\"\"}],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"page\",\"text\":\"\\\"$ 32\u3006\u4e3b s\u03c9\u633d\u30934 Vs +V 32\u03bc IOOpF\u6709F \u2022 p\ufffd\u5224 \u03c9w\u3077. -\u30fb\u30fb\u30fb\u5703\u30fb -\u5703\u30fb\u30fb \u30fb- \u30fb\u56fa \u30fb. \u30c5\u3093\uff0cu\u03c9\ufffd\ufffd\u2026\u03c9t . .(l).J / 22\u30fc\u30f2\u30fc71\"}]",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "diverge"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/ccitt_2.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[{\"children\":[],\"title\":\"Relative Link\",\"url\":\"colorbook.djvu\"},{\"children\":[],\"title\":\"Absolute Link\",\"url\":\"https://djvu.js.org/assets/djvu_examples/DjVu3Spec.djvu\"}]",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "[{\"children\":[],\"title\":\"Relative Link\",\"url\":\"colorbook.djvu\"},{\"children\":[],\"title\":\"Absolute Link\",\"url\":\"https://djvu.js.org/assets/djvu_examples/DjVu3Spec.djvu\"}]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tboy_jb2.djvu",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "P\tboy_jb2.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/links.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "I\t010_0001.djbz\nP\t003_0001.djvu",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "I\t010_0001.djbz\nP\t003_0001.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/problem_page.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tbig-scanned-page.djvu",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "P\tbig-scanned-page.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/big-scanned-page.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[{\"children\":[],\"title\":\"Links\",\"url\":\"#1\"},{\"children\":[],\"title\":\"Ink, Rectangles, Ellipses, Lines\",\"url\":\"#2\"},{\"children\":[{\"children\":[],\"title\":\"Stamps - Faces\",\"url\":\"#4\"},{\"children\":[],\"title\":\"Stamps - Pointers\",\"url\":\"#5\"}],\"title\":\"Stamps\",\"url\":\"#3\"},{\"children\":[],\"title\":\"Last Page\",\"url\":\"#6\"}]",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "[{\"children\":[],\"title\":\"Links\",\"url\":\"#1\"},{\"children\":[],\"title\":\"Ink, Rectangles, Ellipses, Lines\",\"url\":\"#2\"},{\"children\":[{\"children\":[],\"title\":\"Stamps - Faces\",\"url\":\"#4\"},{\"children\":[],\"title\":\"Stamps - Pointers\",\"url\":\"#5\"}],\"title\":\"Stamps\",\"url\":\"#3\"},{\"children\":[],\"title\":\"Last Page\",\"url\":\"#6\"}]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "I\tdict0006.iff\nP\tp0001.djvu\nP\tp0002.djvu\nP\tp0003.djvu\nP\tp0004.djvu\nP\tp0005.djvu\nP\tp0006.djvu",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "I\tdict0006.iff\nP\tp0001.djvu\nP\tp0002.djvu\nP\tp0003.djvu\nP\tp0004.djvu\nP\tp0005.djvu\nP\tp0006.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "20",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "20",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 1,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 1,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "0",
+      "page": 1,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 2,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 2,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "0",
+      "page": 2,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 3,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 3,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "0",
+      "page": 3,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 4,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 4,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "0",
+      "page": 4,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "",
+      "page": 5,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "empty",
+      "page": 5,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/navm_fgbz.djvu",
+      "ours": "0",
+      "page": 5,
+      "plane": "annotations",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tmcguff1steclprimer01mcguf_0005.djvu\nP\tmcguff1steclprimer01mcguf_0006.djvu\nP\tmcguff1steclprimer01mcguf_0007.djvu\nP\tmcguff1steclprimer01mcguf_0008.djvu\nP\tmcguff1steclprimer01mcguf_0009.djvu\nP\tmcguff1steclprimer01mcguf_0010.djvu\nP\tmcguff1steclprimer01mcguf_0011.djvu\nP\tmcguff1steclprimer01mcguf_0012.djvu\nP\tmcguff1steclprimer01mcguf_0013.djvu\nP\tmcguff1steclprimer01mcguf_0014.djvu\nP\tmcguff1steclprimer01mcguf_0015.djvu\nP\tmcguff1steclprimer01mcguf_0016.djvu\nP\tmcguff1steclprimer01mcguf_0017.djvu\nP\tmcguff1steclprimer01mcguf_0018.djvu\nP\tmcguff1steclprimer01mcguf_0019.djvu\nP\tmcguff1steclprimer01mcguf_0020.djvu\nP\tmcguff1steclprimer01mcguf_0021.djvu\nP\tmcguff1steclprimer01mcguf_0022.djvu\nP\tmcguff1steclprimer01mcguf_0023.djvu\nP\tmcguff1steclprimer01mcguf_0024.djvu\nP\tmcguff1steclprimer01mcguf_0025.djvu\nP\tmcguff1steclprimer01mcguf_0026.djvu\nP\tmcguff1steclprimer01mcguf_0027.djvu\nP\tmcguff1steclprimer01mcguf_0028.djvu\nP\tmcguff1steclprimer01mcguf_0029.djvu\nP\tmcguff1steclprimer01mcguf_0030.djvu\nP\tmcguff1steclprimer01mcguf_0031.djvu\nP\tmcguff1steclprimer01mcguf_0032.djvu\nP\tmcguff1steclprimer01mcguf_0033.djvu\nP\tmcguff1steclprimer01mcguf_0034.djvu\nP\tmcguff1steclprimer01mcguf_0035.djvu\nP\tmcguff1steclprimer01mcguf_0036.djvu\nP\tmcguff1steclprimer01mcguf_0037.djvu\nP\tmcguff1steclprimer01mcguf_0038.djvu\nP\tmcguff1steclprimer01mcguf_0039.djvu\nP\tmcguff1steclprimer01mcguf_0040.djvu\nP\tmcguff1steclprimer01mcguf_0041.djvu\nP\tmcguff1steclprimer01mcguf_0042.djvu\nP\tmcguff1steclprimer01mcguf_0043.djvu\nP\tmcguff1steclprimer01mcguf_0044.djvu\nP\tmcguff1steclprimer01mcguf_0045.djvu\nP\tmcguff1steclprimer01mcguf_0046.djvu\nP\tmcguff1steclprimer01mcguf_0047.djvu\nP\tmcguff1steclprimer01mcguf_0048.djvu\nP\tmcguff1steclprimer01mcguf_0049.djvu\nP\tmcguff1steclprimer01mcguf_0050.djvu\nP\tmcguff1steclprimer01mcguf_0051.djvu\nP\tmcguff1steclprimer01mcguf_0052.djvu\nP\tmcguff1steclprimer01mcguf_0053.djvu\nP\tmcguff1steclprimer01mcguf_0054.djvu\nP\tmcguff1steclprimer01mcguf_0055.djvu\nP\tmcguff1steclprimer01mcguf_0056.djvu\nP\tmcguff1steclprimer01mcguf_0057.djvu\nP\tmcguff1steclprimer01mcguf_0058.djvu\nP\tmcguff1steclprimer01mcguf_0059.djvu\nP\tmcguff1steclprimer01mcguf_0060.djvu\nP\tmcguff1steclprimer01mcguf_0061.djvu\nP\tmcguff1steclprimer01mcguf_0062.djvu\nP\tmcguff1steclprimer01mcguf_0063.djvu\nP\tmcguff1steclprimer01mcguf_0064.djvu\nP\tmcguff1steclprimer01mcguf_0065.djvu\nP\tmcguff1steclprimer01mcguf_0066.djvu",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "P\tmcguff1steclprimer01mcguf_0005.djvu\nP\tmcguff1steclprimer01mcguf_0006.djvu\nP\tmcguff1steclprimer01mcguf_0007.djvu\nP\tmcguff1steclprimer01mcguf_0008.djvu\nP\tmcguff1steclprimer01mcguf_0009.djvu\nP\tmcguff1steclprimer01mcguf_0010.djvu\nP\tmcguff1steclprimer01mcguf_0011.djvu\nP\tmcguff1steclprimer01mcguf_0012.djvu\nP\tmcguff1steclprimer01mcguf_0013.djvu\nP\tmcguff1steclprimer01mcguf_0014.djvu\nP\tmcguff1steclprimer01mcguf_0015.djvu\nP\tmcguff1steclprimer01mcguf_0016.djvu\nP\tmcguff1steclprimer01mcguf_0017.djvu\nP\tmcguff1steclprimer01mcguf_0018.djvu\nP\tmcguff1steclprimer01mcguf_0019.djvu\nP\tmcguff1steclprimer01mcguf_0020.djvu\nP\tmcguff1steclprimer01mcguf_0021.djvu\nP\tmcguff1steclprimer01mcguf_0022.djvu\nP\tmcguff1steclprimer01mcguf_0023.djvu\nP\tmcguff1steclprimer01mcguf_0024.djvu\nP\tmcguff1steclprimer01mcguf_0025.djvu\nP\tmcguff1steclprimer01mcguf_0026.djvu\nP\tmcguff1steclprimer01mcguf_0027.djvu\nP\tmcguff1steclprimer01mcguf_0028.djvu\nP\tmcguff1steclprimer01mcguf_0029.djvu\nP\tmcguff1steclprimer01mcguf_0030.djvu\nP\tmcguff1steclprimer01mcguf_0031.djvu\nP\tmcguff1steclprimer01mcguf_0032.djvu\nP\tmcguff1steclprimer01mcguf_0033.djvu\nP\tmcguff1steclprimer01mcguf_0034.djvu\nP\tmcguff1steclprimer01mcguf_0035.djvu\nP\tmcguff1steclprimer01mcguf_0036.djvu\nP\tmcguff1steclprimer01mcguf_0037.djvu\nP\tmcguff1steclprimer01mcguf_0038.djvu\nP\tmcguff1steclprimer01mcguf_0039.djvu\nP\tmcguff1steclprimer01mcguf_0040.djvu\nP\tmcguff1steclprimer01mcguf_0041.djvu\nP\tmcguff1steclprimer01mcguf_0042.djvu\nP\tmcguff1steclprimer01mcguf_0043.djvu\nP\tmcguff1steclprimer01mcguf_0044.djvu\nP\tmcguff1steclprimer01mcguf_0045.djvu\nP\tmcguff1steclprimer01mcguf_0046.djvu\nP\tmcguff1steclprimer01mcguf_0047.djvu\nP\tmcguff1steclprimer01mcguf_0048.djvu\nP\tmcguff1steclprimer01mcguf_0049.djvu\nP\tmcguff1steclprimer01mcguf_0050.djvu\nP\tmcguff1steclprimer01mcguf_0051.djvu\nP\tmcguff1steclprimer01mcguf_0052.djvu\nP\tmcguff1steclprimer01mcguf_0053.djvu\nP\tmcguff1steclprimer01mcguf_0054.djvu\nP\tmcguff1steclprimer01mcguf_0055.djvu\nP\tmcguff1steclprimer01mcguf_0056.djvu\nP\tmcguff1steclprimer01mcguf_0057.djvu\nP\tmcguff1steclprimer01mcguf_0058.djvu\nP\tmcguff1steclprimer01mcguf_0059.djvu\nP\tmcguff1steclprimer01mcguf_0060.djvu\nP\tmcguff1steclprimer01mcguf_0061.djvu\nP\tmcguff1steclprimer01mcguf_0062.djvu\nP\tmcguff1steclprimer01mcguf_0063.djvu\nP\tmcguff1steclprimer01mcguf_0064.djvu\nP\tmcguff1steclprimer01mcguf_0065.djvu\nP\tmcguff1steclprimer01mcguf_0066.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "ECLECTIC EDUCATIONAL SERIES, \u001f\u001d MCGUFFEY'S \u001f\u001d ECLECTIC PRIMER \u001f\u001d REVISED EDITION. \u001f\u001d NEW YORK \u2022:\u2022 CINCINNATI \u2022:\u2022 CHICAGO \u001fAMERICAN BOOK COMPANY \u001f\u001d \u0000",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "ECLECTIC EDUCATIONAL SERIES, \u001f\u001d MCGUFFEY'S \u001f\u001d ECLECTIC PRIMER \u001f\u001d REVISED EDITION. \u001f\u001d NEW YORK \u2022:\u2022 CINCINNATI \u2022:\u2022 CHICAGO \u001fAMERICAN BOOK COMPANY \u001f\u001d \u0000",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"ECLECTIC\"},{\"children\":[],\"kind\":\"word\",\"text\":\"EDUCATIONAL\"},{\"children\":[],\"kind\":\"word\",\"text\":\"SERIES,\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"MCGUFFEY'S\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"ECLECTIC\"},{\"children\":[],\"kind\":\"word\",\"text\":\"PRIMER\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"REVISED\"},{\"children\":[],\"kind\":\"word\",\"text\":\"EDITION.\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"NEW\"},{\"children\":[],\"kind\":\"word\",\"text\":\"YORK\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\u2022:\u2022\"},{\"children\":[],\"kind\":\"word\",\"text\":\"CINCINNATI\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\u2022:\u2022\"},{\"children\":[],\"kind\":\"word\",\"text\":\"CHICAGO\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"AMERICAN\"},{\"children\":[],\"kind\":\"word\",\"text\":\"BOOK\"},{\"children\":[],\"kind\":\"word\",\"text\":\"COMPANY\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"}],\"kind\":\"page\",\"text\":\"\"}]",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"ECLECTIC\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\\u001f\\u001d MCGUFFEY'\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\\u001f\\u001d MCGUF\"}],\"kind\":\"line\",\"text\":\"ECLECTIC EDUCATIONAL SERIES,\"}],\"kind\":\"para\",\"text\":\"ECLECTIC EDUCATIONAL SERIES, \\u001f\"}],\"kind\":\"region\",\"text\":\"ECLECTIC EDUCATIONAL SERIES, \\u001f\\u001d\"}],\"kind\":\"column\",\"text\":\"ECLECTIC EDUCATIONAL SERIES, \\u001f\\u001d\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"},{\"children\":[],\"kind\":\"column\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"},{\"children\":[{\"children\":[{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"},{\"children\":[],\"kind\":\"word\",\"text\":\"\"}],\"kind\":\"line\",\"text\":\"\"}],\"kind\":\"para\",\"text\":\"\"}],\"kind\":\"region\",\"text\":\"\"}],\"kind\":\"column\",\"text\":\"\"}],\"kind\":\"page\",\"text\":\"ECLECTIC EDUCATIONAL SERIES, \\u001f\\u001d MCGUFFEY'S \\u001f\\u001d ECLECTIC PRIMER \\u001f\\u001d REVISED EDITION. \\u001f\\u001d NEW YORK \u2022:\u2022 CINCINNATI \u2022:\u2022 CHICAGO \\u001fAMERICAN BOOK COMPANY \\u001f\\u001d \\u0000\"}]",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "diverge"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/colorbook.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
+    }
+  ],
+  "status": "pass",
+  "timestamp": "2026-07-13T15:00:48+00:00",
+  "tools": {
+    "djvu_rs": "d0666fdea2e6cc9cc99950c12412495996d8d5b2",
+    "djvulibre": "DDJVU --- DjVuLibre-3.5.28 (Ubuntu 3.5.28-2ubuntu0.24.04.2)"
+  },
+  "writer_validation": {
+    "cases": [
+      {
+        "line": "boy                              594 ok     mean30.695 p99=128 max145 mean9.41 >8:26.1%",
+        "status": "ok"
+      },
+      {
+        "line": "chicken                         2572 ok     mean4.637 p99=45 max61   mean26.75 >8:78.2%",
+        "status": "ok"
+      }
+    ],
+    "checked": 2,
+    "dim_mismatches": 0,
+    "failed": 0,
+    "rejected": 0,
+    "status": "pass"
+  }
+}
