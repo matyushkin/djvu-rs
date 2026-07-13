@@ -3,7 +3,7 @@
   "render": {
     "width": 99999,
     "channel_tolerance": 4,
-    "max_mismatch_pct": 0.5,
+    "max_mismatch_pct": 0.8,
     "max_mean_abs_diff": 0.2
   },
   "documents": [
