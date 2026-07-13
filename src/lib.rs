@@ -166,8 +166,9 @@ pub mod fgbz_encode;
 /// complete `FORM:DJVU` page.
 ///
 /// Provides [`djvu_encode::PageEncoder`] (builder-style entry point),
-/// [`djvu_encode::EncodeQuality`] (Lossless / Quality / Archival
-/// profiles), and [`djvu_encode::EncodeError`].
+/// [`djvu_encode::EncodeQuality`] (Lossless / Quality / Archival / Photo
+/// profiles), [`djvu_encode::BilevelCodec`] (JB2 or explicit Smmr), and
+/// [`djvu_encode::EncodeError`].
 #[cfg(feature = "std")]
 pub mod djvu_encode;
 
