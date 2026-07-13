@@ -12,6 +12,12 @@ fn corpus(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
 // --- happy path ---
 
 #[test]
@@ -56,6 +62,19 @@ fn info_single_page_doc_shows_one_page() {
         .assert()
         .success()
         .stdout(predicate::str::contains("1"));
+}
+
+#[test]
+fn info_accepts_legacy_iw44_forms() {
+    for name in ["legacy_bm44.iw4", "legacy_pm44.iw4"] {
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args(["info", fixture(name).to_str().unwrap()])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("181 x 240"))
+            .stdout(predicate::str::contains("100 dpi"));
+    }
 }
 
 #[test]

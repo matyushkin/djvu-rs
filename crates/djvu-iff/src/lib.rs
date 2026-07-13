@@ -11,7 +11,7 @@
 //! ## DjVu IFF layout
 //!
 //! ```text
-//! [4] magic   = "AT&T"
+//! [4] magic   = "AT&T" (optional for standalone BM44/PM44 files)
 //! [4] id      = "FORM"
 //! [4] length  (big-endian u32, covers form_type + all chunks)
 //! [4] form_type = "DJVU" | "DJVM" | "BM44" | "PM44"
@@ -561,37 +561,47 @@ pub struct Form<'a> {
 /// # Errors
 ///
 /// Returns [`IffError`] if:
-/// - The data does not begin with the `AT&T` magic bytes
+/// - The data does not begin with the `AT&T` magic bytes or a bare `FORM`
 /// - The FORM chunk header is missing or malformed
 /// - Any chunk extends beyond the available data
 pub fn parse_form(data: &[u8]) -> Result<Form<'_>, IffError> {
-    // Need at least: magic(4) + FORM id(4) + length(4) + form_type(4) = 16 bytes
-    if data.len() < 16 {
+    // Need at least: FORM id(4) + length(4) + form_type(4) = 12 bytes.
+    // The optional AT&T prefix adds four bytes.
+    if data.len() < 12 {
         return Err(IffError::TooShort);
     }
 
-    // Verify AT&T magic prefix
-    let magic = read_4(data, 0)?;
-    if &magic != b"AT&T" {
-        return Err(IffError::BadMagic { got: magic });
-    }
+    // DjVuLibre's standalone BM44/PM44 extractor emits a bare FORM without
+    // the optional AT&T prefix.  Keep accepting the canonical prefix while
+    // also accepting that valid legacy IW44 representation.
+    let prefix = read_4(data, 0)?;
+    let form_offset = if &prefix == b"AT&T" {
+        4
+    } else if &prefix == b"FORM" {
+        0
+    } else {
+        return Err(IffError::BadMagic { got: prefix });
+    };
 
     // Read FORM chunk id
-    let form_id = read_4(data, 4)?;
+    let form_id = read_4(data, form_offset)?;
     if &form_id != b"FORM" {
         return Err(IffError::Truncated);
     }
 
     // Read FORM length (big-endian u32)
-    let form_len = read_u32_be(data, 8)? as usize;
+    let form_len = read_u32_be(data, form_offset + 4)? as usize;
 
-    // FORM data starts at byte 12 and must fit within the buffer
-    let form_data_end = 12_usize.checked_add(form_len).ok_or(IffError::Truncated)?;
+    // FORM data starts after the FORM header and must fit within the buffer.
+    let form_data_start = form_offset + 8;
+    let form_data_end = form_data_start
+        .checked_add(form_len)
+        .ok_or(IffError::Truncated)?;
     if form_data_end > data.len() {
         return Err(IffError::ChunkTooLong {
             id: *b"FORM",
             claimed: form_len as u32,
-            available: data.len().saturating_sub(12),
+            available: data.len().saturating_sub(form_data_start),
         });
     }
 
@@ -599,10 +609,15 @@ pub fn parse_form(data: &[u8]) -> Result<Form<'_>, IffError> {
     if form_len < 4 {
         return Err(IffError::Truncated);
     }
-    let form_type = read_4(data, 12)?;
+    let form_type = read_4(data, form_data_start)?;
+    if form_offset == 0 && !matches!(&form_type, b"BM44" | b"PM44") {
+        return Err(IffError::BadMagic { got: prefix });
+    }
 
     // Parse chunks from the FORM body (after form_type)
-    let body = data.get(16..form_data_end).ok_or(IffError::Truncated)?;
+    let body = data
+        .get(form_data_start + 4..form_data_end)
+        .ok_or(IffError::Truncated)?;
 
     let chunks = parse_form_body(body)?;
 
@@ -1177,6 +1192,25 @@ mod tests {
         assert!(!form.chunks.is_empty(), "must have at least one chunk");
         assert_eq!(&form.chunks[0].id, b"INFO");
         assert!(form.chunks[0].data.len() >= 10);
+    }
+
+    #[test]
+    fn bare_form_legacy_iw44_parses() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/legacy_pm44.iw4");
+        let data = std::fs::read(path).expect("legacy_pm44.iw4 must exist");
+        let form = parse_form(&data).expect("bare FORM:PM44 should parse");
+
+        assert_eq!(&form.form_type, b"PM44");
+        assert_eq!(form.chunks.len(), 3);
+        assert!(form.chunks.iter().all(|chunk| &chunk.id == b"PM44"));
+    }
+
+    #[test]
+    fn bare_form_normal_djvu_is_rejected() {
+        let data = minimal_djvu_bytes();
+        let error = parse_form(&data[4..]).expect_err("bare FORM:DJVU must stay rejected");
+        assert_eq!(error, IffError::BadMagic { got: *b"FORM" });
     }
 
     #[test]

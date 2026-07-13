@@ -52,6 +52,8 @@ Empirical results, `--width 600 --tolerance 4`:
 | `chicken.djvu`       | JB2+IW44 | 0.000% | 0  | 0.00 |
 | `colorbook.djvu`     | IW44     | < 1%   | 22 | 0.20 |
 | `watchmaker.djvu` †  | IW44     | 0.03%  | 22 | 0.05 |
+| `legacy_bm44.iw4`     | BM44     | 0.000% | 0  | 0.000 |
+| `legacy_pm44.iw4`     | PM44     | 0.000% | 0  | 0.000 |
 
 † `watchmaker.djvu` not in fixtures; see `references/djvujs/library/assets/`.
 

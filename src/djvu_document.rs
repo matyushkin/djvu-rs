@@ -13,10 +13,11 @@
 //!
 //! ## Document kinds
 //!
-//! - **FORM:DJVU** — single-page document
+//! - **FORM:DJVU** — single-page compound document
 //! - **FORM:DJVM + DIRM** — bundled multi-page document with an in-file page index
 //! - **FORM:DJVM + DIRM (indirect)** — pages live in separate files; a resolver
 //!   callback `fn(name: &str) -> Result<Vec<u8>, DocError>` is required
+//! - **FORM:BM44 / FORM:PM44** — standalone one-page grayscale/color IW44 image
 //!
 //! ## Lazy decoding contract
 //!
@@ -36,7 +37,7 @@ use crate::{
     dirm::{DirmComponentKind, DirmPayload},
     error::{BzzError, IffError, Iw44Error, Jb2Error},
     iff::{IffChunk, parse_form, parse_form_body},
-    info::PageInfo,
+    info::{PageInfo, Rotation},
     iw44::Iw44Image,
     jb2::Jb2Dict,
     metadata::{DjVuMetadata, MetadataError},
@@ -137,7 +138,7 @@ pub struct DjVuBookmark {
 
 // ---- Page -------------------------------------------------------------------
 
-/// A raw chunk extracted from a page FORM:DJVU.
+/// A raw chunk extracted from a page form.
 #[derive(Debug, Clone)]
 struct RawChunk {
     id: [u8; 4],
@@ -549,9 +550,17 @@ impl DjVuPage {
         )?)
     }
 
-    /// Return all BG44 background chunk data slices, in order.
+    /// Return all IW44 background chunk data slices, in order.
+    ///
+    /// Standard page backgrounds use `BG44`; standalone legacy IW44 forms use
+    /// `BM44` (grayscale) or `PM44` (color).  All three chunk types share the
+    /// same progressive decoder and render pipeline.
     pub fn bg44_chunks(&self) -> Vec<&[u8]> {
-        self.find_chunks(b"BG44")
+        self.chunk_slice()
+            .iter()
+            .filter(|chunk| matches!(&chunk.id, b"BG44" | b"BM44" | b"PM44"))
+            .map(|chunk| chunk.data.as_slice())
+            .collect()
     }
 
     /// The render-tier layer cache for this page (decoded on first render).
@@ -1005,8 +1014,9 @@ pub struct CacheBudgetOptions {
 
 /// An opened DjVu document.
 ///
-/// Supports single-page FORM:DJVU, bundled multi-page FORM:DJVM, and indirect
-/// multi-page FORM:DJVM (via resolver callback).
+/// Supports single-page FORM:DJVU, standalone FORM:BM44/PM44 IW44 images,
+/// bundled multi-page FORM:DJVM, and indirect multi-page FORM:DJVM (via
+/// resolver callback).
 #[derive(Debug)]
 pub struct DjVuDocument {
     /// All pages, indexed by 0-based page number.
@@ -1175,6 +1185,25 @@ impl DjVuDocument {
                     .collect();
                 let page = parse_page_from_chunks(&form.chunks, 0, None)?;
                 // Single-page document spans the entire buffer.
+                #[allow(clippy::single_range_in_vec_init)]
+                let page_byte_ranges = vec![0u64..(data.len() as u64)];
+                Ok(DjVuDocument {
+                    pages: vec![page],
+                    bookmarks: vec![],
+                    global_chunks,
+                    page_byte_ranges,
+                })
+            }
+            b"BM44" | b"PM44" => {
+                let page = parse_standalone_iw44_page(&form.chunks, form.form_type, 0)?;
+                let global_chunks: Vec<RawChunk> = form
+                    .chunks
+                    .iter()
+                    .map(|c| RawChunk {
+                        id: c.id,
+                        data: c.data.to_vec(),
+                    })
+                    .collect();
                 #[allow(clippy::single_range_in_vec_init)]
                 let page_byte_ranges = vec![0u64..(data.len() as u64)];
                 Ok(DjVuDocument {
@@ -1970,6 +1999,100 @@ fn parse_page_from_chunks(
         chunks: raw_chunks,
         index,
         shared_djbz,
+    })
+}
+
+/// Parse a standalone legacy `FORM:BM44` or `FORM:PM44` IW44 image as one
+/// document page.  These forms have no INFO chunk: the first BM44/PM44 chunk
+/// carries the image dimensions in its IW44 header, while the remaining chunks
+/// carry progressive refinements of the same image.
+fn parse_standalone_iw44_page(
+    chunks: &[IffChunk<'_>],
+    form_type: [u8; 4],
+    index: usize,
+) -> Result<DjVuPage, DocError> {
+    let (chunk_name, expects_grayscale) = if form_type == *b"BM44" {
+        ("BM44", true)
+    } else if form_type == *b"PM44" {
+        ("PM44", false)
+    } else {
+        return Err(DocError::Malformed("unsupported standalone IW44 form"));
+    };
+
+    if chunks.is_empty() {
+        return Err(DocError::MissingChunk(chunk_name));
+    }
+    if chunks.iter().any(|chunk| chunk.id != form_type) {
+        return Err(DocError::Malformed(
+            "standalone IW44 form contains an unexpected chunk",
+        ));
+    }
+
+    // Validate the cheap, attacker-controlled framing fields without decoding
+    // the wavelet payload.  Full arithmetic decoding remains lazy and happens
+    // through the ordinary strict/permissive render paths.
+    for (serial, chunk) in chunks.iter().enumerate() {
+        if chunk.data.len() < 2 {
+            return Err(Iw44Error::ChunkTooShort.into());
+        }
+        if serial > u8::MAX as usize || chunk.data[0] != serial as u8 {
+            return Err(Iw44Error::UnexpectedSerial.into());
+        }
+    }
+
+    let first = chunks.first().ok_or(DocError::MissingChunk(chunk_name))?;
+    if first.data.len() < 9 {
+        return Err(Iw44Error::HeaderTooShort.into());
+    }
+
+    let is_grayscale = first.data[2] & 0x80 != 0;
+    if is_grayscale != expects_grayscale {
+        return Err(if expects_grayscale {
+            DocError::Malformed("BM44 form contains a color IW44 stream")
+        } else {
+            DocError::Malformed("PM44 form contains a grayscale IW44 stream")
+        });
+    }
+
+    let width = u16::from_be_bytes([first.data[4], first.data[5]]);
+    let height = u16::from_be_bytes([first.data[6], first.data[7]]);
+    if width == 0 || height == 0 {
+        return Err(Iw44Error::ZeroDimension.into());
+    }
+    if (width as u64) * (height as u64) > 64 * 1024 * 1024 {
+        return Err(Iw44Error::ImageTooLarge.into());
+    }
+
+    let info = PageInfo {
+        width,
+        height,
+        // DjVuLibre assigns standalone IW44 images their historical default
+        // resolution and display gamma because there is no INFO chunk.
+        dpi: 100,
+        gamma: 2.2,
+        rotation: Rotation::None,
+    };
+    let raw_chunks: Vec<RawChunk> = chunks
+        .iter()
+        .map(|chunk| RawChunk {
+            id: chunk.id,
+            data: chunk.data.to_vec(),
+        })
+        .collect();
+
+    Ok(DjVuPage {
+        info,
+        #[cfg(feature = "std")]
+        chunks: ChunkStore::Eager(raw_chunks),
+        #[cfg(not(feature = "std"))]
+        chunks: raw_chunks,
+        index,
+        #[cfg(feature = "std")]
+        shared_djbz: None,
+        #[cfg(not(feature = "std"))]
+        shared_djbz: None,
+        #[cfg(feature = "std")]
+        render_layers: std::sync::OnceLock::new(),
     })
 }
 

@@ -2,12 +2,12 @@
 //!
 //! Uses both the low-level `DjVuDocument` and the high-level `Document` wrapper.
 
-use djvu_rs::IffError;
 use djvu_rs::djvu_document::{DjVuDocument, DocError};
 use djvu_rs::djvu_render::{
     RenderOptions, render_coarse, render_gray8, render_pixmap, render_progressive,
 };
 use djvu_rs::iff::parse_form;
+use djvu_rs::{IffError, Iw44Error};
 
 // ── DjVuDocument — parse ──────────────────────────────────────────────────────
 
@@ -17,6 +17,145 @@ fn djvu_document_parse_single_page() {
     let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).expect("boy.djvu must parse without error");
     assert_eq!(doc.page_count(), 1);
+}
+
+/// A standalone colour IW44 file must enter the normal one-page document API.
+#[test]
+fn legacy_pm44_parses_as_one_page() {
+    let data = std::fs::read("tests/fixtures/legacy_pm44.iw4").unwrap();
+    let doc = DjVuDocument::parse(&data).expect("legacy PM44 must parse");
+    assert_eq!(doc.page_count(), 1);
+
+    let page = doc.page(0).expect("legacy PM44 must expose page 0");
+    assert_eq!(page.dimensions(), (181, 240));
+    assert_eq!(page.dpi(), 100);
+    assert_eq!(page.bg44_chunks().len(), 3);
+    assert!(page.chunk_ids().into_iter().all(|id| id == *b"PM44"));
+}
+
+/// A standalone grayscale IW44 file must expose the same page contract.
+#[test]
+fn legacy_bm44_parses_as_one_page() {
+    let data = std::fs::read("tests/fixtures/legacy_bm44.iw4").unwrap();
+    let doc = DjVuDocument::parse(&data).expect("legacy BM44 must parse");
+    let page = doc.page(0).expect("legacy BM44 must expose page 0");
+
+    assert_eq!(page.dimensions(), (181, 240));
+    assert_eq!(page.dpi(), 100);
+    assert_eq!(page.bg44_chunks().len(), 3);
+    assert!(page.chunk_ids().into_iter().all(|id| id == *b"BM44"));
+}
+
+/// Legacy IW44 pages must use the ordinary background and composite renderers.
+#[test]
+fn legacy_iw44_renders_at_native_resolution() {
+    for path in [
+        "tests/fixtures/legacy_bm44.iw4",
+        "tests/fixtures/legacy_pm44.iw4",
+    ] {
+        let data = std::fs::read(path).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..RenderOptions::default()
+        };
+
+        let rendered = render_pixmap(page, &opts)
+            .unwrap_or_else(|e| panic!("{path}: native render failed: {e}"));
+        assert_eq!(
+            (rendered.width, rendered.height),
+            (page.width() as u32, page.height() as u32)
+        );
+        assert_eq!(
+            rendered.data.len(),
+            (rendered.width * rendered.height * 4) as usize
+        );
+
+        let background = page
+            .extract_background()
+            .unwrap_or_else(|e| panic!("{path}: background extraction failed: {e}"))
+            .expect("legacy IW44 page must have a background");
+        assert_eq!(
+            (background.width, background.height),
+            (page.width() as u32, page.height() as u32)
+        );
+    }
+}
+
+/// Legacy IW44 refinement chunks must drive the same progressive API as BG44.
+#[test]
+fn legacy_iw44_progressive_render_reaches_full_frame() {
+    for path in [
+        "tests/fixtures/legacy_bm44.iw4",
+        "tests/fixtures/legacy_pm44.iw4",
+    ] {
+        let data = std::fs::read(path).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            ..RenderOptions::default()
+        };
+        let full = render_pixmap(page, &opts).unwrap();
+
+        for chunk_n in 0..page.bg44_chunks().len() {
+            let frame = render_progressive(page, &opts, chunk_n)
+                .unwrap_or_else(|e| panic!("{path}: progressive frame {chunk_n}: {e}"));
+            assert_eq!(frame.width, full.width);
+            assert_eq!(frame.height, full.height);
+        }
+        let final_frame =
+            render_progressive(page, &opts, page.bg44_chunks().len().saturating_sub(1)).unwrap();
+        assert_eq!(final_frame.data, full.data, "{path}: final frame differs");
+    }
+}
+
+fn truncate_legacy_iw44_first_chunk(data: &[u8], payload_len: u32) -> Vec<u8> {
+    // Bare FORM layout: FORM + length + form type + chunk id + length + data.
+    let mut out = data[..20 + payload_len as usize].to_vec();
+    let form_len = 4u32 + 8 + payload_len;
+    out[4..8].copy_from_slice(&form_len.to_be_bytes());
+    out[16..20].copy_from_slice(&payload_len.to_be_bytes());
+    out
+}
+
+/// A legacy IW44 stream with a short first header fails with a typed error.
+#[test]
+fn legacy_iw44_rejects_truncated_first_header() {
+    let data = std::fs::read("tests/fixtures/legacy_pm44.iw4").unwrap();
+    let truncated = truncate_legacy_iw44_first_chunk(&data, 4);
+    let error = DjVuDocument::parse(&truncated).unwrap_err();
+    assert!(matches!(error, DocError::Iw44(Iw44Error::HeaderTooShort)));
+}
+
+/// Legacy IW44 dimensions are bounded before any wavelet allocation occurs.
+#[test]
+fn legacy_iw44_rejects_zero_and_oversized_dimensions() {
+    let original = std::fs::read("tests/fixtures/legacy_pm44.iw4").unwrap();
+
+    let mut zero = original.clone();
+    zero[24..26].copy_from_slice(&0u16.to_be_bytes());
+    let error = DjVuDocument::parse(&zero).unwrap_err();
+    assert!(matches!(error, DocError::Iw44(Iw44Error::ZeroDimension)));
+
+    let mut oversized = original;
+    oversized[24..26].copy_from_slice(&u16::MAX.to_be_bytes());
+    oversized[26..28].copy_from_slice(&u16::MAX.to_be_bytes());
+    let error = DjVuDocument::parse(&oversized).unwrap_err();
+    assert!(matches!(error, DocError::Iw44(Iw44Error::ImageTooLarge)));
+}
+
+/// The bare FORM exception is limited to standalone legacy IW44 images.
+#[test]
+fn bare_normal_djvu_is_still_rejected() {
+    let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
+    assert_eq!(&data[..4], b"AT&T");
+
+    let error = DjVuDocument::parse(&data[4..]).unwrap_err();
+    assert!(matches!(error, DocError::Iff(IffError::BadMagic { .. })));
 }
 
 /// Parsing a multi-page DJVM document must yield the correct page count.

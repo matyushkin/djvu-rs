@@ -10,6 +10,12 @@ fn corpus(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
 // --- happy path ---
 
 #[test]
@@ -32,6 +38,29 @@ fn render_default_creates_png() {
     // PNG magic bytes: 0x89 0x50 0x4E 0x47
     let bytes = std::fs::read(&out).unwrap();
     assert_eq!(&bytes[..4], b"\x89PNG", "output is not a valid PNG");
+}
+
+#[test]
+fn render_accepts_legacy_iw44_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["legacy_bm44.iw4", "legacy_pm44.iw4"] {
+        let out = dir.path().join(format!("{name}.png"));
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "render",
+                fixture(name).to_str().unwrap(),
+                "--dpi",
+                "100",
+                "--output",
+                out.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..4], b"\x89PNG", "{name} output is not PNG");
+    }
 }
 
 #[test]
