@@ -166,8 +166,9 @@ pub mod fgbz_encode;
 /// complete `FORM:DJVU` page.
 ///
 /// Provides [`djvu_encode::PageEncoder`] (builder-style entry point),
-/// [`djvu_encode::EncodeQuality`] (Lossless / Quality / Archival
-/// profiles), and [`djvu_encode::EncodeError`].
+/// [`djvu_encode::EncodeQuality`] (Lossless / Quality / Archival / Photo
+/// profiles), [`djvu_encode::BilevelCodec`] (JB2 or explicit Smmr), and
+/// [`djvu_encode::EncodeError`].
 #[cfg(feature = "std")]
 pub mod djvu_encode;
 
@@ -209,6 +210,11 @@ pub mod djvu_document;
 /// preserving the bytes of every chunk that wasn't touched.
 #[cfg(feature = "std")]
 pub mod djvu_mut;
+
+/// Versioned, typed document editing operations with validation and atomic
+/// output handoff.
+#[cfg(feature = "std")]
+pub mod editor;
 
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
@@ -402,7 +408,18 @@ pub mod ffi;
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
 // Re-export new phase-3 document model
-pub use djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError};
+pub use djvu_document::{
+    ComponentId, ComponentKind, ComponentResolveError, ComponentResolver, DjVuBookmark,
+    DjVuDocument, DjVuPage, DocError,
+};
+
+// Re-export the validated editor entry points for callers that do not need to
+// distinguish the module from the rest of the high-level API.
+#[cfg(feature = "std")]
+pub use editor::{
+    DocumentEditor, EDIT_SCHEMA_VERSION, EditError, EditOperation, EditOperationKind, EditPlan,
+    EditRequest, EditTarget, PlannedEdit,
+};
 
 // Re-export new phase-1 page info types
 pub use info::{PageInfo, Rotation};

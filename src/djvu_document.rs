@@ -17,8 +17,9 @@
 //! - **FORM:BM44** / **FORM:PM44** — legacy standalone IW44 photo documents
 //!   (grayscale / color); exposed as one-page documents without an INFO chunk
 //! - **FORM:DJVM + DIRM** — bundled multi-page document with an in-file page index
-//! - **FORM:DJVM + DIRM (indirect)** — pages live in separate files; a resolver
-//!   callback `fn(name: &str) -> Result<Vec<u8>, DocError>` is required
+//! - **FORM:DJVM + DIRM (indirect)** — components live in separate files; the
+//!   typed [`ComponentResolver`] contract identifies each page, shared, or
+//!   thumbnail component
 //!
 //! ## Lazy decoding contract
 //!
@@ -35,7 +36,7 @@ use alloc::{
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},
     bzz::bzz_decode,
-    dirm::{DirmComponentKind, DirmPayload},
+    dirm::{DirmComponent, DirmComponentKind, DirmPayload},
     error::{BzzError, IffError, Iw44Error, Jb2Error},
     iff::{IffChunk, parse_form, parse_form_body},
     info::PageInfo,
@@ -48,6 +49,78 @@ use crate::{
 
 #[cfg(feature = "std")]
 use std::sync::Arc;
+
+/// The kind of an external component listed by an indirect `FORM:DJVM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ComponentKind {
+    /// A renderable `FORM:DJVU` page.
+    Page,
+    /// A shared `FORM:DJVI` component, such as a JB2 symbol dictionary.
+    Shared,
+    /// A `FORM:THUM` thumbnail component.
+    Thumbnail,
+}
+
+/// Stable identity of one component in an indirect `FORM:DJVM` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentId {
+    /// Resolver key from the DIRM directory.
+    pub name: String,
+    /// DIRM classification for this component.
+    pub kind: ComponentKind,
+}
+
+impl ComponentId {
+    /// Construct a component identity from its resolver key and DIRM kind.
+    pub fn new(name: impl Into<String>, kind: ComponentKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
+/// Typed failures returned by a [`ComponentResolver`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ComponentResolveError {
+    /// The requested component is not available to the resolver.
+    #[error("indirect component {component:?} is missing")]
+    Missing {
+        /// Identity of the missing component.
+        component: ComponentId,
+    },
+
+    /// The resolver could not read or construct the requested component.
+    #[error("failed to resolve indirect component {component:?}: {reason}")]
+    Failed {
+        /// Identity of the component that could not be resolved.
+        component: ComponentId,
+        /// Human-readable resolver detail.
+        reason: String,
+    },
+}
+
+/// Synchronous resolver contract for indirect DJVM components.
+///
+/// The resolver is called once for every DIRM entry, including pages, shared
+/// components, and thumbnails. The typed [`ComponentId`] keeps the component
+/// identity and its DIRM classification together so sync, async, and mutable
+/// adapters can share the same vocabulary as they are added.
+pub trait ComponentResolver {
+    /// Return the complete IFF bytes for one external component.
+    fn resolve(&self, component: &ComponentId) -> Result<Vec<u8>, ComponentResolveError>;
+}
+
+impl<F> ComponentResolver for F
+where
+    F: Fn(&ComponentId) -> Result<Vec<u8>, ComponentResolveError>,
+{
+    fn resolve(&self, component: &ComponentId) -> Result<Vec<u8>, ComponentResolveError> {
+        self(component)
+    }
+}
 
 // ---- Error type -------------------------------------------------------------
 
@@ -85,6 +158,21 @@ pub enum DocError {
     /// An indirect page reference could not be resolved.
     #[error("failed to resolve indirect page '{0}'")]
     IndirectResolve(String),
+
+    /// A typed resolver could not provide one indirect component.
+    #[error("component resolution failed: {0}")]
+    ComponentResolve(#[from] ComponentResolveError),
+
+    /// A resolved component's FORM type disagrees with its DIRM classification.
+    #[error("indirect component {component:?} has FORM:{found:?}, expected kind {expected:?}")]
+    ComponentKindMismatch {
+        /// Identity from the DIRM entry.
+        component: ComponentId,
+        /// FORM type found in the resolved bytes.
+        found: [u8; 4],
+        /// FORM type required by the DIRM kind.
+        expected: ComponentKind,
+    },
 
     /// Page index is out of range.
     #[error("page index {index} is out of range (document has {count} pages)")]
@@ -1166,6 +1254,125 @@ impl DjVuDocument {
         })
     }
 
+    /// Parse a DjVu document using the typed sync component resolver contract.
+    ///
+    /// For an indirect `FORM:DJVM`, the resolver is called once for every DIRM
+    /// entry in declaration order. That includes `Page`, `Shared`, and
+    /// `Thumbnail` components; shared `Djbz` dictionaries referenced by page
+    /// `INCL` chunks are attached to the resulting pages just as they are for
+    /// bundled documents. Single-page and bundled documents do not call the
+    /// resolver.
+    ///
+    /// The older [`Self::parse_with_resolver`] API remains available for
+    /// callers whose resolver is keyed only by a string page name.
+    pub fn parse_with_component_resolver<R>(data: &[u8], resolver: &R) -> Result<Self, DocError>
+    where
+        R: ComponentResolver + ?Sized,
+    {
+        let form = parse_form(data)?;
+        if form.form_type != *b"DJVM" {
+            // Preserve the existing single-page and non-DjVu behavior. The
+            // resolver is intentionally unused for a standalone FORM:DJVU.
+            return Self::parse(data);
+        }
+
+        let dirm_chunk = form
+            .chunks
+            .iter()
+            .find(|c| &c.id == b"DIRM")
+            .ok_or(DocError::MissingChunk("DIRM"))?;
+        let payload = DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
+        if payload.is_bundled() {
+            // Bundled components are already in the index bytes and therefore
+            // do not need an external resolver.
+            return Self::parse(data);
+        }
+
+        let entries = payload.components();
+        let bookmarks = parse_navm_bookmarks(&form.chunks)?;
+        let global_chunks: Vec<RawChunk> = form
+            .chunks
+            .iter()
+            .filter(|c| &c.id != b"FORM")
+            .map(|c| RawChunk {
+                id: c.id,
+                data: c.data.to_vec(),
+            })
+            .collect();
+
+        #[cfg(not(feature = "std"))]
+        use alloc::collections::BTreeMap;
+        #[cfg(feature = "std")]
+        use std::collections::BTreeMap;
+
+        #[cfg(feature = "std")]
+        let mut shared_djbz: BTreeMap<String, Arc<SharedDict>> = BTreeMap::new();
+        #[cfg(not(feature = "std"))]
+        let mut shared_djbz: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut page_components: Vec<(ComponentId, Vec<u8>)> = Vec::new();
+
+        for entry in &entries {
+            let component = component_id_from_dirm(entry);
+            let component_kind = component.kind;
+            let resolved = resolver
+                .resolve(&component)
+                .map_err(DocError::ComponentResolve)?;
+            let resolved_form = parse_form(&resolved)?;
+            let expected = expected_component_form(component_kind);
+            if resolved_form.form_type != expected {
+                return Err(DocError::ComponentKindMismatch {
+                    component,
+                    found: resolved_form.form_type,
+                    expected: component_kind,
+                });
+            }
+
+            match component_kind {
+                ComponentKind::Page => page_components.push((component, resolved)),
+                ComponentKind::Shared => {
+                    // A DJVI may contain annotations or other shared data that
+                    // this page model does not consume yet. Keep the resolver
+                    // contract broad, but index the Djbz form when present.
+                    if let Some(djbz) = resolved_form.chunks.iter().find(|c| &c.id == b"Djbz") {
+                        #[cfg(feature = "std")]
+                        shared_djbz.insert(
+                            component.name,
+                            Arc::new(SharedDict::new(djbz.data.to_vec())),
+                        );
+                        #[cfg(not(feature = "std"))]
+                        shared_djbz.insert(component.name, djbz.data.to_vec());
+                    }
+                }
+                ComponentKind::Thumbnail => {}
+            }
+        }
+
+        let mut pages = Vec::with_capacity(page_components.len());
+        for (page_idx, (_component, resolved)) in page_components.iter().enumerate() {
+            let page_form = parse_form(resolved)?;
+            let shared_for_page = page_form
+                .chunks
+                .iter()
+                .filter(|c| &c.id == b"INCL")
+                .filter_map(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
+                .find_map(|name| shared_djbz.get(name))
+                .cloned();
+            pages.push(parse_page_from_chunks(
+                &page_form.chunks,
+                page_idx,
+                shared_for_page,
+            )?);
+        }
+
+        Ok(DjVuDocument {
+            pages,
+            bookmarks,
+            global_chunks,
+            // Indirect component bytes live outside the index buffer.
+            page_byte_ranges: Vec::new(),
+        })
+    }
+
     /// Parse a DjVu document with an optional resolver for indirect pages.
     ///
     /// The resolver receives the `name` field from each INCL chunk and must
@@ -1901,6 +2108,23 @@ impl core::ops::Deref for MmapDocument {
 }
 
 // ---- Internal parsing helpers -----------------------------------------------
+
+fn component_id_from_dirm(component: &DirmComponent) -> ComponentId {
+    let kind = match component.kind {
+        DirmComponentKind::Page => ComponentKind::Page,
+        DirmComponentKind::Shared => ComponentKind::Shared,
+        DirmComponentKind::Thumbnail => ComponentKind::Thumbnail,
+    };
+    ComponentId::new(component.id.clone(), kind)
+}
+
+fn expected_component_form(kind: ComponentKind) -> [u8; 4] {
+    match kind {
+        ComponentKind::Page => *b"DJVU",
+        ComponentKind::Shared => *b"DJVI",
+        ComponentKind::Thumbnail => *b"THUM",
+    }
+}
 
 /// Parse a `DjVuPage` from the chunks of a FORM:DJVU.
 ///
@@ -3415,6 +3639,89 @@ mod tests {
         assert_eq!(doc.page_count(), 1);
         let page = doc.page(0).unwrap();
         assert_eq!(page.width(), 181);
+    }
+
+    /// The typed resolver sees shared entries as well as pages, and a resolved
+    /// DJVI dictionary is connected to the page through its INCL reference.
+    #[test]
+    fn typed_indirect_resolver_loads_shared_djvi_component() {
+        use std::cell::RefCell;
+
+        use crate::dirm::DirmPayload;
+        use crate::iff::{Chunk, EmitPart};
+
+        let chicken_data =
+            std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu exists");
+
+        // Add an INCL reference to the otherwise ordinary fixture page.
+        let mut page_file = crate::iff::parse(&chicken_data).expect("parse page fixture");
+        match &mut page_file.root {
+            Chunk::Form {
+                secondary_id,
+                children,
+                ..
+            } if secondary_id == b"DJVU" => {
+                children.insert(
+                    1,
+                    Chunk::Leaf {
+                        id: *b"INCL",
+                        data: b"shared.djvi".to_vec(),
+                    },
+                );
+            }
+            _ => panic!("fixture must be FORM:DJVU"),
+        }
+        let page_bytes = crate::iff::emit(&page_file);
+
+        let dict_chunk = Chunk::Leaf {
+            id: *b"Djbz",
+            data: vec![0x01, 0x02],
+        };
+        let shared_bytes = crate::iff::partial_emit(*b"DJVI", &[EmitPart::Chunk(&dict_chunk)])
+            .expect("shared component fits");
+        let thumbnail_bytes = crate::iff::partial_emit(*b"THUM", &[]).expect("thumbnail fits");
+
+        let dirm = DirmPayload::build_indirect(
+            3,
+            &[0x00, 0x01, 0x02],
+            &[
+                "shared.djvi".to_string(),
+                "page.djvu".to_string(),
+                "thumb.thum".to_string(),
+            ],
+        );
+        let dirm_chunk = Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm.encode(),
+        };
+        let djvm = crate::iff::partial_emit(*b"DJVM", &[EmitPart::Chunk(&dirm_chunk)])
+            .expect("index fits");
+
+        let seen = RefCell::new(Vec::new());
+        let resolver = |component: &ComponentId| {
+            seen.borrow_mut().push(component.clone());
+            match component.name.as_str() {
+                "shared.djvi" => Ok(shared_bytes.clone()),
+                "page.djvu" => Ok(page_bytes.clone()),
+                "thumb.thum" => Ok(thumbnail_bytes.clone()),
+                _ => Err(ComponentResolveError::Missing {
+                    component: component.clone(),
+                }),
+            }
+        };
+
+        let doc = DjVuDocument::parse_with_component_resolver(&djvm, &resolver)
+            .expect("typed indirect parse");
+        assert_eq!(doc.page_count(), 1);
+        assert!(doc.pages[0].shared_djbz.is_some());
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[
+                ComponentId::new("shared.djvi", ComponentKind::Shared),
+                ComponentId::new("page.djvu", ComponentKind::Page),
+                ComponentId::new("thumb.thum", ComponentKind::Thumbnail),
+            ]
+        );
     }
 
     /// parse_from_dir with a DIRM component named as an absolute path (line 1040).

@@ -3,10 +3,16 @@
 //! ## Chunk layout
 //!
 //! ```text
-//! u16be   ncols   — image width in pixels
-//! u16be   nrows   — image height in pixels
-//! <data>          — raw G4/MMR bitstream (MSB first, no EOL between rows)
+//! bytes[3]         "MMR"
+//! byte             0x00 | flags (bit 1 = striped, bit 0 = inverted)
+//! u16be            image width in pixels
+//! u16be            image height in pixels
+//! <data>           raw G4/MMR bitstream (MSB first, no EOL between rows)
 //! ```
+//!
+//! The eight-byte header is the DjVuLibre-compatible `Smmr` header. The
+//! decoder also accepts the historical four-byte header used by early
+//! djvu-rs releases and by the low-level test oracle.
 //!
 //! ## API
 //!
@@ -23,6 +29,8 @@ use crate::bitmap::Bitmap;
 #[derive(Debug)]
 pub enum SmmrError {
     TooShort,
+    BadHeader,
+    UnsupportedStriped,
     BadCode,
     UnexpectedEof,
     ImageTooLarge,
@@ -32,6 +40,8 @@ impl core::fmt::Display for SmmrError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             SmmrError::TooShort => write!(f, "Smmr chunk too short"),
+            SmmrError::BadHeader => write!(f, "invalid Smmr header"),
+            SmmrError::UnsupportedStriped => write!(f, "striped Smmr data is not supported"),
             SmmrError::BadCode => write!(f, "invalid G4 MMR code"),
             SmmrError::UnexpectedEof => write!(f, "G4 bitstream truncated"),
             SmmrError::ImageTooLarge => write!(f, "Smmr declared dimensions exceed the limit"),
@@ -39,9 +49,9 @@ impl core::fmt::Display for SmmrError {
     }
 }
 
-/// Maximum Smmr (G4) bitmap area. A 4-byte header can declare up to 65535×65535
-/// (~4.3 G pixels ≈ 537 MB packed) — far beyond any real DjVu page mask. Bound it
-/// so a tiny crafted chunk can't trigger a huge allocation.
+/// Maximum Smmr (G4) bitmap area. An 8-byte header can declare up to
+/// 65535×65535 (~4.3 G pixels ≈ 537 MB packed) — far beyond any real DjVu page
+/// mask. Bound it so a tiny crafted chunk can't trigger a huge allocation.
 const MAX_SMMR_PIXELS: usize = 256 * 1024 * 1024;
 
 // ---- Huffman tables (ITU-T T.4) --------------------------------------------
@@ -521,8 +531,33 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
     if data.len() < 4 {
         return Err(SmmrError::TooShort);
     }
-    let ncols = u16::from_be_bytes([data[0], data[1]]) as usize;
-    let nrows = u16::from_be_bytes([data[2], data[3]]) as usize;
+    let (ncols, nrows, body, inverted) = if data.starts_with(b"MMR") {
+        if data.len() < 8 {
+            return Err(SmmrError::TooShort);
+        }
+        let flags = data[3];
+        if flags & 0xfc != 0 {
+            return Err(SmmrError::BadHeader);
+        }
+        if flags & 0x02 != 0 {
+            return Err(SmmrError::UnsupportedStriped);
+        }
+        (
+            u16::from_be_bytes([data[4], data[5]]) as usize,
+            u16::from_be_bytes([data[6], data[7]]) as usize,
+            &data[8..],
+            flags & 0x01 != 0,
+        )
+    } else {
+        // Keep accepting the pre-interoperability four-byte form so callers
+        // can still decode payloads produced by older djvu-rs releases.
+        (
+            u16::from_be_bytes([data[0], data[1]]) as usize,
+            u16::from_be_bytes([data[2], data[3]]) as usize,
+            &data[4..],
+            false,
+        )
+    };
     if ncols.saturating_mul(nrows) > MAX_SMMR_PIXELS {
         return Err(SmmrError::ImageTooLarge);
     }
@@ -531,7 +566,7 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
         return Ok(bm);
     }
 
-    let mut br = BitReader::new(&data[4..]);
+    let mut br = BitReader::new(body);
     let mut prev = vec![false; ncols]; // all-white reference
 
     for row in 0..nrows {
@@ -540,7 +575,7 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
         }
         let pixels = decode_row_pixels(&mut br, &prev, ncols)?;
         for (col, &px) in pixels.iter().enumerate() {
-            if px {
+            if px ^ inverted {
                 bm.set(col as u32, row as u32, true);
             }
         }
@@ -595,9 +630,10 @@ fn emit_black(bits: &mut Vec<bool>, mut run: usize) {
 /// Encode a [`Bitmap`] as an Smmr (G4/MMR) chunk payload, decodable by
 /// [`decode_smmr`].
 ///
-/// Output layout matches the chunk header described at the top of this
-/// module: `u16be ncols`, `u16be nrows`, then the raw G4 bitstream
-/// (MSB-first within each byte, no EOL between rows).
+/// Output layout matches the DjVuLibre-compatible chunk header described at
+/// the top of this module: `MMR`, the regular/non-inverted zero flags byte, `u16be
+/// ncols`, `u16be nrows`, then the raw G4 bitstream (MSB-first within each
+/// byte, no EOL between rows).
 ///
 /// # Trade-offs vs [`crate::jb2_encode::encode_jb2`]
 ///
@@ -656,14 +692,16 @@ pub fn encode_smmr(bm: &Bitmap) -> Vec<u8> {
     push_bits(&mut bits, 0b000000000001, 12);
 
     let nbytes = bits.len().div_ceil(8);
-    let mut data = vec![0u8; 4 + nbytes];
-    data[0] = (ncols >> 8) as u8;
-    data[1] = ncols as u8;
-    data[2] = (nrows >> 8) as u8;
-    data[3] = nrows as u8;
+    let mut data = vec![0u8; 8 + nbytes];
+    data[0..3].copy_from_slice(b"MMR");
+    data[3] = 0x00; // regular MMR, non-inverted
+    data[4] = (ncols >> 8) as u8;
+    data[5] = ncols as u8;
+    data[6] = (nrows >> 8) as u8;
+    data[7] = nrows as u8;
     for (i, &b) in bits.iter().enumerate() {
         if b {
-            data[4 + i / 8] |= 0x80 >> (i % 8);
+            data[8 + i / 8] |= 0x80 >> (i % 8);
         }
     }
     data
@@ -1383,8 +1421,10 @@ mod tests {
     fn encode_output_has_correct_header() {
         let bm = make_bm(200, 3, |_, _| false);
         let data = encode_smmr(&bm);
-        let ncols = u16::from_be_bytes([data[0], data[1]]) as u32;
-        let nrows = u16::from_be_bytes([data[2], data[3]]) as u32;
+        assert_eq!(&data[..3], b"MMR");
+        assert_eq!(data[3], 0x00);
+        let ncols = u16::from_be_bytes([data[4], data[5]]) as u32;
+        let nrows = u16::from_be_bytes([data[6], data[7]]) as u32;
         assert_eq!(ncols, 200);
         assert_eq!(nrows, 3);
     }
@@ -1530,7 +1570,7 @@ mod tests {
         let bm = make_bm(400, 300, |x, y| {
             (50..350).contains(&x) && (y % 40) < 20 && (x % 30) < 18
         });
-        let h_only = encode_smmr(&bm).len() - 4; // strip header
+        let h_only = encode_smmr(&bm).len() - 8; // strip DjVuLibre header
         let full_2d = encode_g4(&bm).len();
         assert!(
             full_2d < h_only,

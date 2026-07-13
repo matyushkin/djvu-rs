@@ -130,6 +130,9 @@ enum Cmd {
         /// Encoding profile.
         #[arg(short, long, default_value = "lossless", value_enum)]
         quality: EncodeQualityArg,
+        /// Bilevel mask codec for single-image lossless encodes. Default: jb2.
+        #[arg(long, default_value = "jb2", value_enum)]
+        bilevel_codec: BilevelCodecArg,
         /// Mask binarization for layered quality/archival encodes.
         #[arg(long, default_value = "fixed", value_enum)]
         binarization: BinarizationArg,
@@ -227,7 +230,7 @@ enum RotateArg {
 
 #[derive(Clone, Debug, ValueEnum)]
 enum EncodeQualityArg {
-    /// Pixel-exact bilevel JB2 (`INFO + Sjbz`).
+    /// Pixel-exact bilevel JB2 (`INFO + Sjbz`), unless `--bilevel-codec smmr`.
     Lossless,
     /// Layered FG/BG with lossy IW44 BG.
     Quality,
@@ -239,6 +242,14 @@ enum EncodeQualityArg {
     /// Detect the content type per input (bilevel text / layered document /
     /// photo) and pick the profile automatically (#570).
     Auto,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum BilevelCodecArg {
+    /// JB2 arithmetic-coded mask (`Sjbz`), the compatibility default.
+    Jb2,
+    /// G4/MMR mask (`Smmr`) for explicit single-page bilevel encoding.
+    Smmr,
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -315,6 +326,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output,
             dpi,
             quality,
+            bilevel_codec,
             binarization,
             sauvola_window,
             sauvola_k,
@@ -326,7 +338,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &input,
             &output,
             dpi,
-            quality,
+            EncodeProfileArgs {
+                quality,
+                bilevel_codec,
+            },
             EncodeSegmentArgs {
                 binarization,
                 sauvola_window,
@@ -1066,16 +1081,20 @@ fn cmd_encode(
     input: &Path,
     output: &Path,
     dpi: u16,
-    quality: EncodeQualityArg,
+    profile_args: EncodeProfileArgs,
     segment_args: EncodeSegmentArgs,
     bg_bpp: Option<f32>,
     bundle_args: EncodeBundleArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let EncodeProfileArgs {
+        quality,
+        bilevel_codec,
+    } = profile_args;
     let EncodeBundleArgs {
         shared_dict_pages,
         thumbnails,
     } = bundle_args;
-    use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
+    use djvu_rs::djvu_encode::{BilevelCodec, EncodeQuality, PageEncoder};
     use djvu_rs::iw44_encode::{Iw44EncodeOptions, Iw44Target};
     use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
     use djvu_rs::segment::{SegmentOptions, segment_page};
@@ -1087,6 +1106,10 @@ fn cmd_encode(
         EncodeQualityArg::Photo => EncodeQuality::Photo,
     };
     let segment_options = segment_args.to_options(q)?;
+
+    if input.is_dir() && bilevel_codec != BilevelCodecArg::Jb2 {
+        return Err("--bilevel-codec smmr is supported only for single-image input".into());
+    }
 
     if input.is_dir() {
         let entries = directory_image_entries(input)?;
@@ -1185,9 +1208,14 @@ fn cmd_encode(
     let bytes = match q {
         EncodeQuality::Lossless => {
             let seg = segment_page(&pixmap, &SegmentOptions::default());
+            let codec = match bilevel_codec {
+                BilevelCodecArg::Jb2 => BilevelCodec::Jb2,
+                BilevelCodecArg::Smmr => BilevelCodec::Smmr,
+            };
             PageEncoder::from_bitmap(&seg.mask)
                 .with_dpi(dpi)
                 .with_quality(EncodeQuality::Lossless)
+                .with_bilevel_codec(codec)
                 .encode()
         }
         EncodeQuality::Quality | EncodeQuality::Archival | EncodeQuality::Photo => {
@@ -1226,6 +1254,12 @@ fn cmd_encode(
 struct EncodeBundleArgs {
     shared_dict_pages: usize,
     thumbnails: bool,
+}
+
+#[derive(Clone)]
+struct EncodeProfileArgs {
+    quality: EncodeQualityArg,
+    bilevel_codec: BilevelCodecArg,
 }
 
 #[derive(Clone, Copy)]
