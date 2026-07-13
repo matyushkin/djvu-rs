@@ -39,8 +39,9 @@ pub struct OptimizationRequest {
     /// Optional maximum output size in bytes. The first slice reports an
     /// unmet target when safe cleanup alone cannot reach it.
     pub target_size: Option<u64>,
-    /// Optional maximum permitted SSIM loss. Lossless cleanup has zero pixel
-    /// loss, so a valid non-negative bound is always satisfied.
+    /// Optional maximum permitted SSIM loss. Reserved for archival re-encode;
+    /// the current FREE-cleanup path is pixel-exact by construction and does
+    /// not measure SSIM (it warns when this bound is set).
     pub max_ssim_loss: Option<f32>,
 }
 
@@ -222,6 +223,9 @@ impl Optimizer {
 
         let output = apply_rewrites(&document, &rewritten_components)?;
         let output_bytes = output.len();
+        // FREE removal is pixel-exact by construction. SSIM measurement applies
+        // only once archival re-encode exists; keep the floor "met" here and
+        // warn when the caller supplied a threshold expecting a future gate.
         let quality_floor_met = true;
         let target_size_met = self
             .request
@@ -229,6 +233,11 @@ impl Optimizer {
             .is_none_or(|target| output_bytes as u64 <= target);
         let target_met = target_size_met && quality_floor_met;
         let mut warnings = Vec::new();
+        if self.request.max_ssim_loss.is_some() {
+            warnings.push(
+                "max_ssim_loss is reserved for archival re-encode; lossless FREE cleanup is pixel-exact by construction and does not measure SSIM".to_string(),
+            );
+        }
         if matches!(self.request.preset, OptimizationPreset::Archival) {
             warnings.push(
                 "archival codec re-encode, quality search, and progress/cancellation are not yet selected; output remains pixel-exact".to_string(),

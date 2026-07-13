@@ -102,6 +102,23 @@ fn archival_request_is_typed_and_reports_unmet_target_without_lossy_reencode() {
 }
 
 #[test]
+fn max_ssim_loss_warns_and_does_not_pretend_to_gate_lossless_cleanup() {
+    let input = page_with_free_and_unknown_chunk();
+    let request = OptimizationRequest::lossless_cleanup().with_max_ssim_loss(0.001);
+    let optimizer = Optimizer::new(request);
+
+    let plan = optimizer.plan(&input).unwrap();
+    assert!(plan.quality_floor_met);
+    assert!(
+        plan.warnings
+            .iter()
+            .any(|warning| warning.contains("does not measure SSIM")),
+        "expected SSIM-reservation warning, got {:?}",
+        plan.warnings
+    );
+}
+
+#[test]
 fn plan_and_report_have_machine_readable_json() {
     let input = page_with_free_and_unknown_chunk();
     let optimizer = Optimizer::new(OptimizationRequest::lossless_cleanup());

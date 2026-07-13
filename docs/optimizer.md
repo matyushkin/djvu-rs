@@ -17,6 +17,12 @@ claim that a target size was reached. If `--target-size` cannot be met by
 removing padding, the JSON plan/report sets `target_met` to `false` and names
 the reason.
 
+`--max-ssim-loss` is accepted for forward compatibility with archival
+re-encode, but the current FREE-cleanup path is pixel-exact by construction and
+does **not** measure SSIM. When the flag is set, the plan/report keeps
+`quality_floor_met: true` and emits an explicit warning so callers cannot
+mistake the threshold for an active gate.
+
 The CLI always requires a separate `--output` path, rejects input/output path
 aliasing, stages the result beside the destination, syncs it, and renames it
 into place only after the optimizer succeeds. This keeps the input untouched
