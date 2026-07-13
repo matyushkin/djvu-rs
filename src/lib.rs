@@ -413,8 +413,8 @@ pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
 // Re-export new phase-3 document model
 pub use djvu_document::{
-    ComponentId, ComponentKind, ComponentResolveError, ComponentResolver, DjVuBookmark,
-    DjVuDocument, DjVuPage, DocError,
+    ComponentDirectoryEntry, ComponentId, ComponentKind, ComponentResolveError, ComponentResolver,
+    DjVuBookmark, DjVuDocument, DjVuPage, DocError,
 };
 
 // Re-export the validated editor entry points for callers that do not need to

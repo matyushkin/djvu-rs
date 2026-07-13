@@ -4,6 +4,7 @@
 [![docs.rs](https://docs.rs/djvu-rs/badge.svg)](https://docs.rs/djvu-rs)
 [![CI](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/matyushkin/djvu-rs/actions/workflows/ci.yml)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-dashboard-blue)](https://matyushkin.github.io/djvu-rs/dev/bench/)
+[![Conformance](https://img.shields.io/badge/conformance-dashboard-blue)](https://matyushkin.github.io/djvu-rs/dev/conformance/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Read, render, convert, and create DjVu files. Pure-Rust library with a CLI,

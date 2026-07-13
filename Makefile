@@ -1,5 +1,5 @@
 # Local developer gates mirroring CI. `make hooks` once to enable the pre-push hook.
-.PHONY: check hooks pgo wasm wasm-threads-check
+.PHONY: check hooks pgo wasm wasm-threads-check conformance
 
 ## Run the same deterministic gates CI enforces (fmt, clippy, no_std, wasm, tests).
 check:
@@ -27,3 +27,7 @@ wasm:
 ## PERF_EXPERIMENTS.md. Pass `ARGS=--build` for a full release build+link.
 wasm-threads-check:
 	@scripts/wasm_threads_check.sh $(ARGS)
+
+## Reproduce the DjVuLibre conformance gate and write conformance_site/ (#682).
+conformance:
+	@bash scripts/run_conformance.sh
