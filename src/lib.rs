@@ -211,6 +211,10 @@ pub mod djvu_document;
 #[cfg(feature = "std")]
 pub mod djvu_mut;
 
+/// High-level document optimization planning and safe structural cleanup.
+#[cfg(feature = "std")]
+pub mod optimizer;
+
 /// Versioned, typed document editing operations with validation and atomic
 /// output handoff.
 #[cfg(feature = "std")]
