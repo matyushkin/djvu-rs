@@ -41,7 +41,9 @@
 //!
 //! # Status
 //!
-//! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz`. Pixel-exact.
+//! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz` by default. Call
+//!   [`PageEncoder::with_bilevel_codec`] with [`BilevelCodec::Smmr`] for an
+//!   explicit DjVuLibre-compatible `Smmr` G4/MMR mask. Both are pixel-exact.
 //! - `Quality` from a [`Pixmap`]: ships `INFO + Sjbz + BG44… + FGbz`
 //!   when foreground ink is detected. Lossy by codec definition; output
 //!   is decodable end-to-end.
@@ -51,6 +53,9 @@
 //! - `Lossless` from a [`Pixmap`] / `Quality` from a [`Bitmap`] are
 //!   rejected: the combinations are mathematically meaningless
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
+//! - [`PageEncoder::with_metadata`] adds fresh-document `METz` metadata;
+//!   mutation of existing chunks remains the responsibility of
+//!   [`crate::djvu_mut::PageMut::set_metadata`].
 
 use crate::bitmap::Bitmap;
 use crate::bzz_encode::bzz_encode;
@@ -59,9 +64,11 @@ use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use crate::jb2_encode::{self, Jb2EncodeOptions};
+use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
 use crate::segment::{SegmentOptions, segment_page};
+use crate::smmr::encode_smmr;
 use crate::text::TextLayer;
 use crate::text_encode::encode_text_layer;
 
@@ -258,6 +265,22 @@ pub enum EncodeQuality {
     Photo,
 }
 
+/// Codec used for an explicitly requested bilevel page encoding.
+///
+/// [`BilevelCodec::Jb2`] is the default and keeps the historical `Sjbz`
+/// output. [`BilevelCodec::Smmr`] emits a standalone `Smmr` G4/MMR mask;
+/// it is useful for fax-style pages and consumers that prefer the simpler
+/// run-length codec. The choice is opt-in because JB2 is usually smaller on
+/// text-heavy pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BilevelCodec {
+    /// JB2 arithmetic-coded mask (`Sjbz`), the compatibility default.
+    #[default]
+    Jb2,
+    /// G4/MMR mask (`Smmr`), selected explicitly for bilevel input.
+    Smmr,
+}
+
 /// Classify a source image into the most appropriate [`EncodeQuality`]
 /// profile from cheap pixel statistics (#570).
 ///
@@ -423,11 +446,13 @@ pub struct PageEncoder<'a> {
     source: Source<'a>,
     dpi: u16,
     quality: EncodeQuality,
+    bilevel_codec: BilevelCodec,
     segment_options: Option<SegmentOptions>,
     iw44_options: Option<Iw44EncodeOptions>,
     jb2_options: Option<Jb2EncodeOptions>,
     fgbz_options: FgbzPaletteOptions,
     text_layer: Option<TextLayer>,
+    metadata: Option<DjVuMetadata>,
 }
 
 impl<'a> PageEncoder<'a> {
@@ -437,11 +462,13 @@ impl<'a> PageEncoder<'a> {
             source: Source::Bitmap(bitmap),
             dpi: 300,
             quality: EncodeQuality::Lossless,
+            bilevel_codec: BilevelCodec::Jb2,
             segment_options: None,
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
             text_layer: None,
+            metadata: None,
         }
     }
 
@@ -453,11 +480,13 @@ impl<'a> PageEncoder<'a> {
             source: Source::Pixmap(pixmap),
             dpi: 300,
             quality: EncodeQuality::Quality,
+            bilevel_codec: BilevelCodec::Jb2,
             segment_options: None,
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
             text_layer: None,
+            metadata: None,
         }
     }
 
@@ -474,6 +503,17 @@ impl<'a> PageEncoder<'a> {
     /// per-variant trade-offs and current support status.
     pub fn with_quality(mut self, quality: EncodeQuality) -> Self {
         self.quality = quality;
+        self
+    }
+
+    /// Select the codec for a bilevel [`EncodeQuality::Lossless`] page.
+    ///
+    /// The default is [`BilevelCodec::Jb2`]. Selecting [`BilevelCodec::Smmr`]
+    /// emits an `Smmr` chunk and is rejected for colour sources because a
+    /// standalone MMR mask cannot carry the layered encoder's foreground
+    /// dictionary and palette semantics.
+    pub fn with_bilevel_codec(mut self, codec: BilevelCodec) -> Self {
+        self.bilevel_codec = codec;
         self
     }
 
@@ -535,6 +575,15 @@ impl<'a> PageEncoder<'a> {
         self
     }
 
+    /// Attach metadata to a newly encoded page as a BZZ-compressed `METz`
+    /// chunk. An empty [`DjVuMetadata`] is omitted. This is independent from
+    /// [`crate::djvu_mut::PageMut::set_metadata`], which replaces metadata in
+    /// an existing document while preserving untouched chunks.
+    pub fn with_metadata(mut self, metadata: DjVuMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
     /// Run `backend` over the page image and attach the resulting OCR text
     /// layer (see [`with_text_layer`](Self::with_text_layer)) — the standard
     /// "searchable scan" workflow in one step.
@@ -572,21 +621,34 @@ impl<'a> PageEncoder<'a> {
         let h = u16::try_from(h).map_err(|_| {
             EncodeError::Unsupported("page height exceeds INFO chunk limit (65 535 px)")
         })?;
+        if matches!(&self.source, Source::Pixmap(_)) && self.bilevel_codec != BilevelCodec::Jb2 {
+            return Err(EncodeError::Unsupported(
+                "Smmr bilevel codec requires Bitmap input",
+            ));
+        }
         let info = encode_info(w, h, self.dpi);
 
         match (&self.source, self.quality) {
             (Source::Bitmap(bm), EncodeQuality::Lossless) => {
+                let mask = match self.bilevel_codec {
+                    BilevelCodec::Jb2 => Chunk::Leaf {
+                        id: *b"Sjbz",
+                        data: jb2_encode::encode_jb2(bm),
+                    },
+                    BilevelCodec::Smmr => Chunk::Leaf {
+                        id: *b"Smmr",
+                        data: encode_smmr(bm),
+                    },
+                };
                 let mut chunks = vec![
                     Chunk::Leaf {
                         id: *b"INFO",
                         data: info,
                     },
-                    Chunk::Leaf {
-                        id: *b"Sjbz",
-                        data: jb2_encode::encode_jb2(bm),
-                    },
+                    mask,
                 ];
                 self.push_text_layer_chunk(&mut chunks, h as u32);
+                self.push_metadata_chunk(&mut chunks);
                 Ok(encode_form_djvu(chunks))
             }
             (Source::Pixmap(pm), EncodeQuality::Quality | EncodeQuality::Archival) => {
@@ -641,6 +703,7 @@ impl<'a> PageEncoder<'a> {
                     chunks.push(chunk.into_leaf());
                 }
                 self.push_text_layer_chunk(&mut chunks, h as u32);
+                self.push_metadata_chunk(&mut chunks);
                 Ok(encode_form_djvu(chunks))
             }
             (Source::Pixmap(pm), EncodeQuality::Photo) => {
@@ -668,6 +731,7 @@ impl<'a> PageEncoder<'a> {
                     });
                 }
                 self.push_text_layer_chunk(&mut chunks, h as u32);
+                self.push_metadata_chunk(&mut chunks);
                 Ok(encode_form_djvu(chunks))
             }
             (Source::Bitmap(_), EncodeQuality::Photo) => Err(EncodeError::Unsupported(
@@ -697,6 +761,20 @@ impl<'a> PageEncoder<'a> {
                 id: *b"TXTz",
                 data: compressed,
             });
+        }
+    }
+
+    /// Append the BZZ-compressed `METz` chunk for new-document metadata, if
+    /// metadata was attached and contains at least one populated field.
+    fn push_metadata_chunk(&self, chunks: &mut Vec<Chunk>) {
+        if let Some(metadata) = &self.metadata {
+            let compressed = encode_metadata_bzz(metadata);
+            if !compressed.is_empty() {
+                chunks.push(Chunk::Leaf {
+                    id: *b"METz",
+                    data: compressed,
+                });
+            }
         }
     }
 }
@@ -1304,6 +1382,47 @@ mod tests {
                 assert_eq!(decoded.get(x, y), bm.get(x, y), "mismatch at ({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn explicit_smmr_bilevel_round_trips_without_sjbz() {
+        let bm = checkerboard(64, 48);
+        let bytes = PageEncoder::from_bitmap(&bm)
+            .with_bilevel_codec(BilevelCodec::Smmr)
+            .encode()
+            .expect("encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        assert!(page.raw_chunk(b"Smmr").is_some());
+        assert!(page.raw_chunk(b"Sjbz").is_none());
+
+        let decoded = page
+            .extract_mask()
+            .expect("decode mask")
+            .expect("mask present");
+        assert_eq!((decoded.width, decoded.height), (bm.width, bm.height));
+        assert_eq!(decoded.data, bm.data);
+    }
+
+    #[test]
+    fn fresh_page_metadata_round_trips_as_metz() {
+        let bm = Bitmap::new(32, 24);
+        let meta = crate::metadata::DjVuMetadata {
+            title: Some("Fresh document".into()),
+            author: Some("djvu-rs".into()),
+            extra: vec![("language".into(), "en".into())],
+            ..crate::metadata::DjVuMetadata::default()
+        };
+        let bytes = PageEncoder::from_bitmap(&bm)
+            .with_metadata(meta.clone())
+            .encode()
+            .expect("encode");
+
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        assert!(page.raw_chunk(b"METz").is_some());
+        assert_eq!(doc.metadata().expect("metadata"), Some(meta));
     }
 
     #[test]

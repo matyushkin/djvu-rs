@@ -5,6 +5,97 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### ENCODER_PARITY_SCORECARD (#684) — reproducible c44/cjb2 baseline — **Kept (diagnostic)** (2026-07-13)
+
+**Issue.** The encoder-size issue needs a versioned comparison of bytes, time,
+memory, quality, and text readability before any new IW44 or JB2 mechanism is
+promoted. Existing one-off probes answer individual questions but do not leave
+one rerunnable scorecard.
+
+**Approach.** Added `examples/encoder_parity_scorecard.rs`. For each selected
+corpus page it renders the same input raster through `ddjvu`, measures
+DjVuLibre's `c44`/`cjb2` and the matching `PageEncoder::Photo`/
+`PageEncoder::Lossless` profile, then decodes both outputs with `ddjvu`. The
+harness records repository SHA, tool versions, encoded bytes, median wall time,
+child peak RSS, dimensions, PSNR/SSIM or pixel-exact JB2 Hamming, and an
+optional Tesseract character/word count. The baseline and djvu-rs encoders run
+in separate child processes; the latter reports its own `getrusage` peak and a
+small external runner reports the former's child peak. No lossy or
+`experimental` option is enabled.
+
+**Platform / command.** macOS Darwin 25.5 arm64 / Apple Silicon, Rust 1.92.0,
+DjVuLibre 3.5.29, djvu-rs SHA `94636e5`:
+
+```text
+cargo run --release --example encoder_parity_scorecard -- \
+  --case watchmaker-color --case goody-twoshoes-color \
+  --case cable-bilevel --case map-atlas-bilevel \
+  --case chinese-cookbook-bilevel --no-ocr --repeats 3 \
+  --output target/encoder-parity-2026-07-13.json
+```
+
+**Numbers.** Size ratios are djvu-rs over the corresponding DjVuLibre tool;
+times are median milliseconds, RSS is KiB. IW44 quality is PSNR dB / combined
+SSIM against the source PPM; JB2 is pixel-exact against the source PBM.
+
+| Case | Mode | Baseline B | ours B | ratio | baseline/ours ms | baseline/ours RSS | fidelity |
+|------|------|-----------:|-------:|------:|-----------------:|------------------:|----------|
+| watchmaker | IW44 / `c44` | 665,625 | 692,182 | 1.040× | 481.4 / 269.3 | 145,712 / 161,600 | 45.28 / 38.73 dB; 0.9950 / 0.9899 SSIM |
+| goody two-shoes | IW44 / `c44` | 327,798 | 440,864 | 1.345× | 367.3 / 375.0 | 135,648 / 265,408 | 40.83 / 26.39 dB; 0.9808 / 0.9142 SSIM |
+| cable | JB2 / `cjb2` | 2,248 | 4,720 | 2.100× | 27.2 / 16.6 | 17,088 / 7,824 | exact / exact |
+| map atlas | JB2 / `cjb2` | 145,592 | 138,672 | 0.952× | 348.6 / 29.6 | 33,792 / 6,736 | exact / exact |
+| Chinese cookbook | JB2 / `cjb2` | 67 | 140 | 2.090× | 23.1 / 14.1 | 15,104 / 6,320 | exact / exact |
+
+The default `big_scanned_page` case is 62,023,440 pixels and is recorded as
+skipped by the 20M-pixel safety bound. With Tesseract 5.5.2, source/baseline/
+ours counts stayed equal on cable (245 chars / 42 words), map atlas
+(1,399 / 681), and the selected Chinese page (0 / 0).
+
+**Decision.** **Kept (diagnostic infrastructure); no codec change.** The
+snapshot makes the current gap reproducible and shows it is content/profile
+dependent: IW44 is 1.040–1.345× and the public direct JB2 lossless path is
+0.952–2.100× on this slice. Every measured output passed DjVuLibre's decode
+gate and the mode-specific fidelity check. Same-size rec-6 and lossy rec-7
+remain experimental with their own real-byte/OCR evidence; the IW44 forward
+transform hypothesis is separately rejected. The scorecard therefore closes
+the measurement/attribution part of #684 without pretending that a safe
+default compression win has been found.
+### WRITER_SMMR_METADATA (#685) — explicit Smmr writer and fresh METz metadata — **Kept (opt-in)** (2026-07-13)
+
+**Issue.** The writer had a tested Smmr codec primitive and metadata serializer,
+but the high-level page/CLI paths did not expose either representation. The
+default JB2 writer and the existing-document mutation API must remain stable.
+
+**Approach.** Added `BilevelCodec::{Jb2,Smmr}` to `PageEncoder`, with JB2 as
+the default and an explicit `--bilevel-codec smmr` single-image CLI option.
+Corrected the Smmr payload to use DjVuLibre's regular `MMR` header and added
+`PageEncoder::with_metadata` for fresh `METz` emission. `PageMut::set_metadata`
+remains the separate mutation path. The Smmr encoder stays horizontal-mode
+only; it is a compatibility/interoperability profile, not a default size
+optimisation.
+
+**Platform / command.** macOS Darwin 25.5.0 arm64, Rust 1.92.0, DjVuLibre
+3.5.29. Five warm `hyperfine` runs of the release CLI on the `ccitt_2.djvu`
+raster rendered to 1728×2376 pixels:
+
+| Profile | Output | Mean encode time |
+|---|---:|---:|
+| Default JB2 | 8,530 B | 38.0 ms |
+| Explicit Smmr | 39,530 B (**4.63×**, +363.42%) | 34.6 ms |
+
+Both outputs passed `djvudump` and `ddjvu`; their PBM renders were byte-
+identical. A separate Smmr + METz probe also passed both tools, and the
+metadata chunk was reported by `djvudump`.
+
+**Decision. Kept (opt-in).**
+
+**Reason.** The new writer surface closes the concrete format-coverage gap and
+is pixel-exact/interoperable, while the 4.63× size penalty is far above any
+default-policy threshold. JB2 remains the compatibility default; Smmr is
+documented for fax/scanner workflows. Fresh metadata is opt-in and is kept
+separate from byte-preserving mutation semantics. JPEG `BGjp`/`FGjp` emission
+remains out of scope for this slice and stays decode-only.
+
 ### WASM_DJVUJS_COMPARE (#596) — browser wasm decode/render vs djvu.js — **Kept (diagnostic)** (2026-07-12)
 
 **Issue.** The wasm decode/render work had scalar and simd128 self-comparisons,
@@ -12777,7 +12868,6 @@ Y/Cb/Cr planes and band 0. There is no transform-side coefficient delta to feed
 into `PlaneEncoder`, so no port/adoption follow-up is justified. This closes the
 IW44 band-0/DC size-gap thread as entropy-coding-complete for the zero-PSNR
 levers already examined by IW44_ENTROPY_PROBE.
->>>>>>> a1d1d8f (quality(iw44): reject forward-transform size-gap hypothesis (#578))
 
 ## Perf round 107 (2026-07-13) — QUALITY_METRIC_GATE: MS-SSIM as lossy quality gate (#585) — **Rejected**
 

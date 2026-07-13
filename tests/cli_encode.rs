@@ -136,6 +136,35 @@ fn encode_creates_djvu_file() {
 }
 
 #[test]
+fn encode_explicit_smmr_bilevel_codec() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.png");
+    let output = dir.path().join("out.djvu");
+    write_test_png(&input, 64, 48);
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "lossless",
+            "--bilevel-codec",
+            "smmr",
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
+    let page = doc.page(0).unwrap();
+    assert!(page.raw_chunk(b"Smmr").is_some());
+    assert!(page.raw_chunk(b"Sjbz").is_none());
+}
+
+#[test]
 fn encode_default_dpi_is_300() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.png");
