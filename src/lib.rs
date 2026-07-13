@@ -210,6 +210,11 @@ pub mod djvu_document;
 #[cfg(feature = "std")]
 pub mod djvu_mut;
 
+/// Versioned, typed document editing operations with validation and atomic
+/// output handoff.
+#[cfg(feature = "std")]
+pub mod editor;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
@@ -405,6 +410,14 @@ pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 pub use djvu_document::{
     ComponentId, ComponentKind, ComponentResolveError, ComponentResolver, DjVuBookmark,
     DjVuDocument, DjVuPage, DocError,
+};
+
+// Re-export the validated editor entry points for callers that do not need to
+// distinguish the module from the rest of the high-level API.
+#[cfg(feature = "std")]
+pub use editor::{
+    DocumentEditor, EDIT_SCHEMA_VERSION, EditError, EditOperation, EditOperationKind, EditPlan,
+    EditRequest, EditTarget, PlannedEdit,
 };
 
 // Re-export new phase-1 page info types

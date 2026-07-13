@@ -19,7 +19,7 @@ from the public DjVu v3 specification.
 | Read DjVu from Python | [PyO3 bindings, built from source](#python) |
 | Create DjVu from images (PNG/JPEG/TIFF) | [`djvu encode`](#cli) or [`PageEncoder`](#encoding--low-level-api) |
 | Add an OCR text layer to a scan | [`djvu ocr`](#ocr-recognition-backends) (Tesseract) |
-| Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DjVuDocumentMut` |
+| Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DocumentEditor`, `DjVuDocumentMut` |
 | Stream huge books page-by-page | [Lazy async loading](#lazy-async-loading) — first pixel after ~29 KB of a 100 MB file |
 
 Every Rust example below is a complete program, compiled as a doctest on every
@@ -513,6 +513,42 @@ indirect (each file is renamed atomically, but the multi-file commit as a
 whole is not transactional). Opening an indirect index directly with
 `DjVuDocumentMut::from_bytes` and calling `page_mut` remains unsupported; see
 [`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
+
+### Typed document editing
+
+`DocumentEditor` provides a versioned, typed operation list with a semantic
+dry-run plan and validation of every operation before bytes are emitted. The
+current schema covers page text, page annotations, page/document METa/METz
+metadata, and bundled-document NAVM bookmarks:
+
+```rust,no_run
+use djvu_rs::{DocumentEditor, EditOperation, EditRequest};
+use djvu_rs::metadata::DjVuMetadata;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = std::fs::read("book.djvu")?;
+    let request = EditRequest::new(vec![EditOperation::SetDocumentMetadata {
+        metadata: DjVuMetadata {
+            title: Some("Updated title".into()),
+            ..Default::default()
+        },
+    }]);
+
+    let plan = DocumentEditor::plan(&input, &request)?;
+    println!("{} operation(s), {} page(s)", plan.operations.len(), plan.page_count);
+    let edited = DocumentEditor::apply(&input, &request)?;
+    std::fs::write("edited.djvu", edited)?;
+    Ok(())
+}
+```
+
+`DocumentEditor::apply_to_path` stages output beside the destination and
+renames it only after validation, serialization, and sync succeed. The first
+slice intentionally does not yet cover the declarative CLI, XMP, thumbnails,
+page insertion/deletion/reordering/extraction, semantic diff, or multi-file
+indirect-DJVM commits; those require separate operation and commit contracts.
+With the `serde` feature, requests and plans are JSON-serializable using the
+versioned schema.
 
 ### Low-level IFF access
 
