@@ -5,6 +5,42 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### WRITER_SMMR_METADATA (#685) — explicit Smmr writer and fresh METz metadata — **Kept (opt-in)** (2026-07-13)
+
+**Issue.** The writer had a tested Smmr codec primitive and metadata serializer,
+but the high-level page/CLI paths did not expose either representation. The
+default JB2 writer and the existing-document mutation API must remain stable.
+
+**Approach.** Added `BilevelCodec::{Jb2,Smmr}` to `PageEncoder`, with JB2 as
+the default and an explicit `--bilevel-codec smmr` single-image CLI option.
+Corrected the Smmr payload to use DjVuLibre's regular `MMR` header and added
+`PageEncoder::with_metadata` for fresh `METz` emission. `PageMut::set_metadata`
+remains the separate mutation path. The Smmr encoder stays horizontal-mode
+only; it is a compatibility/interoperability profile, not a default size
+optimisation.
+
+**Platform / command.** macOS Darwin 25.5.0 arm64, Rust 1.92.0, DjVuLibre
+3.5.29. Five warm `hyperfine` runs of the release CLI on the `ccitt_2.djvu`
+raster rendered to 1728×2376 pixels:
+
+| Profile | Output | Mean encode time |
+|---|---:|---:|
+| Default JB2 | 8,530 B | 38.0 ms |
+| Explicit Smmr | 39,530 B (**4.63×**, +363.42%) | 34.6 ms |
+
+Both outputs passed `djvudump` and `ddjvu`; their PBM renders were byte-
+identical. A separate Smmr + METz probe also passed both tools, and the
+metadata chunk was reported by `djvudump`.
+
+**Decision. Kept (opt-in).**
+
+**Reason.** The new writer surface closes the concrete format-coverage gap and
+is pixel-exact/interoperable, while the 4.63× size penalty is far above any
+default-policy threshold. JB2 remains the compatibility default; Smmr is
+documented for fax/scanner workflows. Fresh metadata is opt-in and is kept
+separate from byte-preserving mutation semantics. JPEG `BGjp`/`FGjp` emission
+remains out of scope for this slice and stays decode-only.
+
 ### WASM_DJVUJS_COMPARE (#596) — browser wasm decode/render vs djvu.js — **Kept (diagnostic)** (2026-07-12)
 
 **Issue.** The wasm decode/render work had scalar and simd128 self-comparisons,
@@ -12777,7 +12813,6 @@ Y/Cb/Cr planes and band 0. There is no transform-side coefficient delta to feed
 into `PlaneEncoder`, so no port/adoption follow-up is justified. This closes the
 IW44 band-0/DC size-gap thread as entropy-coding-complete for the zero-PSNR
 levers already examined by IW44_ENTROPY_PROBE.
->>>>>>> a1d1d8f (quality(iw44): reject forward-transform size-gap hypothesis (#578))
 
 ## Perf round 107 (2026-07-13) — QUALITY_METRIC_GATE: MS-SSIM as lossy quality gate (#585) — **Rejected**
 
