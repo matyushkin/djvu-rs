@@ -496,6 +496,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Applications that need the full DIRM component identity can use
+`DjVuDocument::parse_with_component_resolver`. Its
+`ComponentResolver` receives a `ComponentId` containing both the external name
+and its `ComponentKind` (`Page`, `Shared`, or `Thumbnail`), and is called for
+every directory entry. Page/shared/thumbnail FORM mismatches and resolver
+failures surface as typed errors; shared `Djbz` dictionaries referenced by
+`INCL` are connected to the parsed pages. See
+[`docs/indirect-djvm-resolver.md`](docs/indirect-djvm-resolver.md).
+
 Two mutation paths cover indirect documents:
 `DjVuDocumentMut::from_indirect_resolved` resolves the component files and
 rebundles them into a mutable bundled document, and `IndirectRewritePlan`

@@ -402,7 +402,10 @@ pub mod ffi;
 pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
 
 // Re-export new phase-3 document model
-pub use djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError};
+pub use djvu_document::{
+    ComponentId, ComponentKind, ComponentResolveError, ComponentResolver, DjVuBookmark,
+    DjVuDocument, DjVuPage, DocError,
+};
 
 // Re-export new phase-1 page info types
 pub use info::{PageInfo, Rotation};
