@@ -1062,24 +1062,32 @@ fn forward_wavelet_transform(data: &mut [i16], width: usize, height: usize, stri
 
 /// Convert one RGB pixel to IW44 YCbCr.
 ///
-/// Uses the same integer approximation as DjVuLibre:
+/// Uses DjVuLibre's fixed-point Pigeon transform:
 /// ```text
-/// Y  = (r + 2·g + b) / 4 - 128
-/// Cb = b - g
-/// Cr = r - g
+/// Y  = ( 7·r + 14·g +  2·b) / 23 - 128
+/// Cb = (-4·r -  8·g + 12·b) / 23
+/// Cr = (32·r - 28·g -  4·b) / 69
 /// ```
+///
+/// These components are the inverse-domain of the decoder's Pigeon
+/// `YCbCr_to_RGB` transform.  Simple `B-G` / `R-G` differences are not: they
+/// introduce a large colour error even before wavelet quantization.
 #[inline(always)]
 fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (i16, i16, i16) {
     let r = r as i32;
     let g = g as i32;
     let b = b as i32;
-    let y = (r + (g << 1) + b) / 4 - 128;
-    let cb = b - g;
-    let cr = r - g;
+    // These are `int(component * 65536)` from DjVuLibre's `rgb_to_ycc`
+    // float table.  Keep the same rounding (`+32768 >> 16`) and clamping as
+    // `IW44Image::Transform::Encode::{RGB_to_Y,RGB_to_Cb,RGB_to_Cr}` so an
+    // IW44 stream produced here has the same colour coordinate system as c44.
+    let y = ((19_945 * r + 39_891 * g + 5_698 * b + 32_768) >> 16) - 128;
+    let cb = (-11_397 * r - 22_795 * g + 34_192 * b + 32_768) >> 16;
+    let cr = (30_393 * r - 26_594 * g - 3_799 * b + 32_768) >> 16;
     (
         y.clamp(-128, 127) as i16,
-        cb.clamp(-256, 255) as i16,
-        cr.clamp(-256, 255) as i16,
+        cb.clamp(-128, 127) as i16,
+        cr.clamp(-128, 127) as i16,
     )
 }
 
@@ -2456,6 +2464,18 @@ mod tests {
     use super::*;
     use crate::Iw44Image;
     use djvu_pixmap::{GrayPixmap, Pixmap};
+
+    #[test]
+    fn rgb_to_ycbcr_matches_djvulibre_pigeon_transform() {
+        // Expected values are from DjVuLibre's `rgb_to_ycc` fixed-point table
+        // (`component * 65536`, `+32768 >> 16`), including chroma saturation.
+        assert_eq!(rgb_to_ycbcr(0, 0, 0), (-128, 0, 0));
+        assert_eq!(rgb_to_ycbcr(255, 255, 255), (127, 0, 0));
+        assert_eq!(rgb_to_ycbcr(255, 0, 0), (-50, -44, 118));
+        assert_eq!(rgb_to_ycbcr(0, 255, 0), (27, -89, -103));
+        assert_eq!(rgb_to_ycbcr(0, 0, 255), (-106, 127, -15));
+        assert_eq!(rgb_to_ycbcr(12, 34, 56), (-99, 15, -11));
+    }
 
     /// The default must encode full-resolution chroma. Our `chroma_half` stores
     /// Cb/Cr at half *spatial* resolution, which DjVuLibre's IWPixmap decoder (it
