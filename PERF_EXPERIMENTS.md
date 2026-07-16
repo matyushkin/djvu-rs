@@ -5,6 +5,44 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### JB2_REC6_DECISION (#684) — same-size record-6 refinement: guarded experimental, not default — **Reverted as default / Kept as guarded experimental lever** (2026-07-16)
+
+**Issue.** #684 requires that same-size JB2 record-6 refinement is "either
+productionized with guards or rejected with measured evidence." This entry
+records the final decision on the real-byte, round-trip evidence.
+
+**Approach.** Re-ran the Phase-A2 real-byte harness
+(`examples/jb2_same_size_a2.rs`, `--features experimental`) that emits actual
+`Sjbz` bytes with same-size lossless record-6 refinement and requires a
+pixel-exact round-trip. Two corpora: `watchmaker` (12-page text, Sjbz-heavy) and
+`pathogenic_bacteria_1896` (517-page scan). Compared against cross-size rec-6
+(#322, separately rejected) and the shipped lossy `lossy_text()` opt-in
+(Branch B).
+
+**Numbers (real emitted `Sjbz`, refinement fraction = flipped-pixel budget).**
+
+| Corpus | baseline Sjbz | frac 2% | frac 5% | frac 8% | round-trip |
+|--------|--------------:|--------:|--------:|--------:|-----------|
+| watchmaker (text) | 130,036 B | **−11.67%** | −11.20% | −10.65% | 12/12 exact |
+| pathogenic_bacteria (517 pp) | 34,254,905 B | +0.00% | +0.02% | +0.53% | 517/517 exact |
+
+**Decision.** **Rejected as a default and as a shipped stable opt-in; kept as a
+guarded, density-auto experimental lever.** The mechanism is lossless and
+interop-safe (every round-trip pixel-exact, unlike cross-size rec-6 which #322
+rejected at +4.37%). But the win is **corpus-dependent**: −11.67% on dense
+same-size-twin text, but ~0% to +0.53% on a large archival scan, because rec-6
+is blit-only and *poisons* the future rec-7 exact-copy hits of any glyph it
+refines. It therefore stays behind the `experimental` cargo feature with the
+`Jb2EncodeOptions::same_size_rec6_auto` density-probe guard (fires only when the
+near-twin density clears `SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD`; tested by
+`same_size_rec6_auto_{fires_on_dense_near_twins,stays_off_on_sparse_input}` and
+`same_size_rec6_off_is_byte_identical`). Archival-safe defaults stay
+byte-identical; users wanting larger text savings use the already-shipped lossy
+`lossy_text()` opt-in (−22% at SSIM ≥ 0.999). This closes the #684 "same-size
+JB2 refinement" acceptance criterion with measured evidence; the residual
+small-page `Sjbz` overhead (e.g. `cable` 2.1×) is fixed per-page header cost, a
+separate lever tracked in `docs/jb2-size-gap-plan.md`.
+
 ### IW44_LUMA_PLATEAU (#684) — activation threshold stranded dense-page coefficients — **Kept** (2026-07-16)
 
 **Issue.** The scorecard flagged `goody two-shoes` as `1.345×` size at only
