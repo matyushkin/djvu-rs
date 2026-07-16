@@ -104,6 +104,38 @@ byte-interop with DjVuLibre preserved (our decoder and `ddjvu` produce
 byte-identical output after the fix), `cargo test -p djvu-iw44` green with no
 golden updates, no size or quality regression on any measured page.
 
+### IW44_PIGEON_COLOR (#684) — encoder colour transform did not match the decoder — **Kept** (2026-07-16)
+
+**Issue.** After `IW44_LUMA_PLATEAU`, goody colour still encoded at `355,238 B`
+with `Y/Cb/Cr/RGB = 34.18/29.15/29.21/25.09 dB`, versus c44's
+`40.70/46.60/47.07/39.37 dB` at `327,798 B`. The colour path also trailed the
+same grayscale input's `41.33 dB` luma result.
+
+**Approach.** Replaced `encode.rs:rgb_to_ycbcr`'s unrelated
+`(R+2G+B)/4-128`, `B-G`, `R-G` components with DjVuLibre's fixed-point Pigeon
+forward matrix (including its `+32768 >> 16` rounding and signed-chroma clamp).
+This is the coordinate system consumed by the existing Pigeon
+`YCbCr_to_RGB` decoder; the chunk schedule and `crcbdelay=10` were already
+matched and need no change.
+
+**Numbers.** Native-resolution Photo CLI input, decoded by `ddjvu`; component
+PSNR is in Pigeon's Y/Cb/Cr space:
+
+| Page | Before bytes / Y Cb Cr RGB dB | After bytes / Y Cb Cr RGB dB | c44 bytes / Y Cb Cr RGB dB |
+|------|-------------------------------:|------------------------------:|----------------------------:|
+| goody colour | 355,238 / 34.18 29.15 29.21 25.09 | **340,872 / 41.00 46.61 47.04 39.57** | 327,798 / 40.70 46.60 47.07 39.37 |
+| watchmaker Photo | 682,598 / 45.96 inf inf 45.96 | **682,598 / 45.96 inf inf 45.96** | 665,625 / 45.28 inf inf 45.28 |
+
+`watchmaker`'s source raster is achromatic, so the Photo path correctly emits
+grayscale and Cb/Cr PSNR is infinite. The grayscale controls remain goody
+`41.33 dB / 315,966 B` and watchmaker `45.96 dB / 682,598 B`.
+
+**Decision.** **Kept.** The c44 forward transform is the root cause of both
+the chroma loss and colour-only luma drop: goody chroma reaches c44 parity,
+RGB exceeds c44 by `0.20 dB`, and the output is only `1.04×` c44. `ddjvu`
+successfully decodes both outputs; `cargo test -p djvu-iw44` passes with no
+encoder size-golden update.
+
 ### ENCODER_PARITY_SCORECARD (#684) — reproducible c44/cjb2 baseline — **Kept (diagnostic)** (2026-07-13)
 
 **Issue.** The encoder-size issue needs a versioned comparison of bytes, time,
