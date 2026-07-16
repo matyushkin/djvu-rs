@@ -9,7 +9,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::dirm::{BUNDLED_FLAG, DirmPayload};
+use crate::dirm::{BUNDLED_FLAG, DirmComponentKind, DirmPayload};
 use crate::error::IffError;
 use crate::iff;
 use crate::{ComponentGraph, ComponentNodeKind};
@@ -70,6 +70,173 @@ pub struct IndirectDocument {
     /// One resolver-keyed standalone component file per `DIRM` entry, in
     /// directory order.
     pub components: Vec<(String, Vec<u8>)>,
+}
+
+/// The result of [`dedup_shared_components`].
+pub struct ComponentDedup {
+    /// The deduplicated bundled document.
+    pub document: Vec<u8>,
+    /// `(dropped_id, surviving_id)` for every merged duplicate, in DIRM order.
+    pub merged: Vec<(String, String)>,
+}
+
+/// Merge byte-identical shared `FORM:DJVI` components in a bundled document,
+/// redirecting `INCL` references to the surviving component. Pages and
+/// thumbnails are never merged; only exact byte-for-byte duplicate shared
+/// components are.
+pub fn dedup_shared_components(bundled: &[u8]) -> Result<ComponentDedup, DjvmError> {
+    let form = iff::parse_form(bundled)?;
+    if form.form_type != *b"DJVM" {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let dirm_data = form
+        .chunks
+        .iter()
+        .find(|chunk| chunk.id == *b"DIRM")
+        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
+        .data;
+    let dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
+    if !dirm.is_bundled() {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let directory = dirm.components();
+    let component_forms = form
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.id == *b"FORM")
+        .collect::<Vec<_>>();
+    if component_forms.len() != directory.len() {
+        return Err(DjvmError::DirmComponentCountMismatch {
+            dirm: directory.len(),
+            children: component_forms.len(),
+        });
+    }
+
+    // A BTreeMap makes this grouping deterministic, while the first entry seen
+    // for each byte payload is necessarily its lowest DIRM index.
+    let mut survivor_by_payload = std::collections::BTreeMap::<Vec<u8>, usize>::new();
+    let mut keep = vec![true; directory.len()];
+    let mut merged = Vec::new();
+    let mut dropped_to_survivor = std::collections::BTreeMap::new();
+
+    for (index, (entry, component)) in directory.iter().zip(&component_forms).enumerate() {
+        // Do not infer shareability from the FORM type alone: a malformed DIRM
+        // could label a page or thumbnail as DJVI. Only a directory-declared
+        // shared component with a DJVI body is eligible.
+        if entry.kind != DirmComponentKind::Shared || !component.data.starts_with(b"DJVI") {
+            continue;
+        }
+
+        if let Some(&survivor) = survivor_by_payload.get(component.data) {
+            keep[index] = false;
+            let surviving_id = directory[survivor].id.clone();
+            merged.push((entry.id.clone(), surviving_id.clone()));
+            dropped_to_survivor.insert(entry.id.clone(), surviving_id);
+        } else {
+            survivor_by_payload.insert(component.data.to_vec(), index);
+        }
+    }
+
+    // Besides avoiding unnecessary DIRM metadata rewrites, this preserves the
+    // source byte-for-byte when no duplicate is found.
+    if merged.is_empty() {
+        return Ok(ComponentDedup {
+            document: bundled.to_vec(),
+            merged,
+        });
+    }
+
+    let mut components = Vec::new();
+    let mut ids = Vec::new();
+    let mut flags = Vec::new();
+    for (index, (entry, component)) in directory.iter().zip(component_forms).enumerate() {
+        if !keep[index] {
+            continue;
+        }
+
+        let body = if component.data.starts_with(b"DJVU") || component.data.starts_with(b"DJVI") {
+            rewrite_component_incls(component.data, &dropped_to_survivor)?
+        } else {
+            component.data.to_vec()
+        };
+        components.push(wrap_sub_form(&body));
+        ids.push(entry.id.clone());
+        flags.push(dirm_kind_flag(entry.kind));
+    }
+
+    let document_chunks = form
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+        .map(|chunk| iff::Chunk::Leaf {
+            id: chunk.id,
+            data: chunk.data.to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let document = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)?;
+
+    Ok(ComponentDedup { document, merged })
+}
+
+/// Rewrite INCL leaf payloads that name dropped components and return the
+/// component FORM body. Unchanged forms retain their original body verbatim.
+fn rewrite_component_incls(
+    form_data: &[u8],
+    dropped_to_survivor: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<u8>, DjvmError> {
+    let form_type = form_data
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(DjvmError::DirmMalformed("component FORM body is too short"))?;
+    let body = &form_data[4..];
+    let chunks = iff::parse_form_body(body)?;
+    let mut changed = false;
+    let mut emitted_chunks = Vec::with_capacity(chunks.len());
+
+    for chunk in chunks {
+        let mut data = chunk.data.to_vec();
+        if chunk.id == *b"INCL" {
+            let id_end = data
+                .iter()
+                .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+                .map_or(0, |index| index + 1);
+            if let Ok(id) = core::str::from_utf8(&data[..id_end])
+                && let Some(survivor) = dropped_to_survivor.get(id)
+            {
+                let mut rewritten = survivor.as_bytes().to_vec();
+                rewritten.extend_from_slice(&data[id_end..]);
+                data = rewritten;
+                changed = true;
+            }
+        }
+        emitted_chunks.push(iff::Chunk::Leaf { id: chunk.id, data });
+    }
+
+    if !changed {
+        return Ok(form_data.to_vec());
+    }
+
+    let parts = emitted_chunks
+        .iter()
+        .map(iff::EmitPart::Chunk)
+        .collect::<Vec<_>>();
+    let emitted = iff::partial_emit(form_type, &parts).ok_or(DjvmError::OutputTooLarge)?;
+    let length = u32::from_be_bytes(
+        emitted[8..12]
+            .try_into()
+            .expect("IFF emitter always writes a FORM length"),
+    ) as usize;
+    Ok(emitted[12..12 + length].to_vec())
+}
+
+fn dirm_kind_flag(kind: DirmComponentKind) -> u8 {
+    match kind {
+        DirmComponentKind::Shared => 0,
+        DirmComponentKind::Page => 1,
+        DirmComponentKind::Thumbnail => 2,
+    }
 }
 
 /// Re-serialize a sub-FORM child — the raw `data` of a `FORM` chunk, which
@@ -385,6 +552,17 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
 /// a re-framed [`iff::Chunk`]; each component is copied verbatim (its AT&T magic
 /// stripped, since it is embedded, not a standalone file).
 fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Vec<u8>, DjvmError> {
+    build_djvm_with_document_chunks(components, ids, flags, &[])
+}
+
+/// Build a bundled DJVM, retaining the supplied document-level chunks between
+/// the rebuilt DIRM and embedded component FORMs.
+fn build_djvm_with_document_chunks(
+    components: &[Vec<u8>],
+    ids: &[String],
+    flags: &[u8],
+    document_chunks: &[iff::Chunk],
+) -> Result<Vec<u8>, DjvmError> {
     let n = components.len();
 
     // Each component includes the AT&T prefix — strip it for embedding. Its
@@ -407,14 +585,15 @@ fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Ve
             id: *b"DIRM",
             data: payload.encode(),
         };
-        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
+        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + document_chunks.len() + n);
         parts.push(iff::EmitPart::Chunk(&dirm));
+        parts.extend(document_chunks.iter().map(iff::EmitPart::Chunk));
         parts.extend(stripped.iter().map(|s| iff::EmitPart::Verbatim(s)));
         iff::partial_emit_with_offsets(*b"DJVM", &parts).ok_or(DjvmError::OutputTooLarge)
     };
 
     let (_, offsets) = emit(&payload)?;
-    payload.offsets = offsets[1..] // parts[0] is the DIRM itself
+    payload.offsets = offsets[1 + document_chunks.len()..] // preceding parts are DIRM + document chunks
         .iter()
         .map(|&o| u32::try_from(o).map_err(|_| DjvmError::OutputTooLarge))
         .collect::<Result<_, _>>()?;
@@ -507,6 +686,13 @@ mod tests {
     }
 
     fn split_bundled_fixture(components: Vec<SplitFixtureComponent>) -> Vec<u8> {
+        split_bundled_fixture_with_document_chunks(components, vec![])
+    }
+
+    fn split_bundled_fixture_with_document_chunks(
+        components: Vec<SplitFixtureComponent>,
+        document_chunks: Vec<([u8; 4], Vec<u8>)>,
+    ) -> Vec<u8> {
         let bodies = components
             .iter()
             .map(split_component_body)
@@ -524,6 +710,10 @@ mod tests {
             .map(|body| u32::try_from(8 + body.len()).unwrap())
             .collect::<Vec<_>>();
         let mut dirm = DirmPayload::build_bundled(components.len(), &flags, &ids, &sizes);
+        let document_chunks = document_chunks
+            .into_iter()
+            .map(|(id, data)| iff::Chunk::Leaf { id, data })
+            .collect::<Vec<_>>();
 
         let emit = |dirm: &DirmPayload| {
             let dirm_chunk = iff::Chunk::Leaf {
@@ -531,12 +721,13 @@ mod tests {
                 data: dirm.encode(),
             };
             let mut parts = vec![iff::EmitPart::Chunk(&dirm_chunk)];
+            parts.extend(document_chunks.iter().map(iff::EmitPart::Chunk));
             parts.extend(bodies.iter().map(|body| iff::EmitPart::Form(body)));
             iff::partial_emit_with_offsets(*b"DJVM", &parts).expect("small bundled fixture")
         };
 
         let (_, offsets) = emit(&dirm);
-        dirm.offsets = offsets[1..]
+        dirm.offsets = offsets[1 + document_chunks.len()..]
             .iter()
             .map(|&offset| u32::try_from(offset).unwrap())
             .collect();
@@ -551,6 +742,158 @@ mod tests {
             split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
             split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![3])]),
         ])
+    }
+
+    #[test]
+    fn dedup_shared_components_merges_identical_dicts_and_redirects_incls() {
+        let bundled = split_bundled_fixture_with_document_chunks(
+            vec![
+                split_component("page0.djvu", 1, *b"DJVU", vec![split_incl(b"dictA.djvi")]),
+                split_component("dictA.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+                split_component("page1.djvu", 1, *b"DJVU", vec![split_incl(b"dictB.djvi")]),
+                split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+                split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
+            ],
+            vec![(*b"NAVM", vec![1, 2, 3])],
+        );
+        let original_graph = ComponentGraph::parse(&bundled).expect("parse source graph");
+
+        let result = dedup_shared_components(&bundled).expect("deduplicate bundled fixture");
+        assert_eq!(
+            result.merged,
+            vec![("dictB.djvi".to_string(), "dictA.djvi".to_string())],
+            "the first matching DIRM component survives"
+        );
+
+        let graph = ComponentGraph::parse(&result.document).expect("parse deduplicated graph");
+        assert!(graph.node("dictA.djvi").is_some());
+        assert!(graph.node("dictB.djvi").is_none());
+        assert!(graph.node("dictC.djvi").is_some());
+        for page in ["page0.djvu", "page1.djvu"] {
+            assert_eq!(
+                graph
+                    .includes(page)
+                    .into_iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["dictA.djvi"],
+                "{page} now includes the surviving dictionary"
+            );
+        }
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "redirected INCL edges have no missing targets"
+        );
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            original_graph
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            "deduplication does not change the page count"
+        );
+
+        let document_chunks = iff::parse_form(&result.document)
+            .expect("parse deduplicated document")
+            .chunks
+            .into_iter()
+            .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+            .map(|chunk| (chunk.id, chunk.data.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(document_chunks, vec![(*b"NAVM", vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn dedup_shared_components_never_merges_different_dicts() {
+        let bundled = split_bundled_fixture(vec![
+            split_component("page0.djvu", 1, *b"DJVU", vec![split_incl(b"dictA.djvi")]),
+            split_component("dictA.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+            split_component("page1.djvu", 1, *b"DJVU", vec![split_incl(b"dictB.djvi")]),
+            split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
+        ]);
+
+        let result = dedup_shared_components(&bundled).expect("deduplicate bundled fixture");
+        assert!(result.merged.is_empty());
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert!(graph.node("dictA.djvi").is_some());
+        assert!(graph.node("dictB.djvi").is_some());
+        assert_eq!(
+            graph
+                .includes("page0.djvu")
+                .into_iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dictA.djvi"]
+        );
+        assert_eq!(
+            graph
+                .includes("page1.djvu")
+                .into_iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dictB.djvi"]
+        );
+    }
+
+    #[test]
+    fn dedup_shared_components_is_a_byte_preserving_no_op_without_duplicates() {
+        let bundled = split_bundled_fixture(vec![
+            split_component("page0.djvu", 1, *b"DJVU", vec![split_incl(b"dictA.djvi")]),
+            split_component("dictA.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+            split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
+        ]);
+
+        let result = dedup_shared_components(&bundled).expect("deduplicate bundled fixture");
+        assert!(result.merged.is_empty());
+        assert_eq!(
+            result.document, bundled,
+            "duplicate-free bundles are unchanged"
+        );
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. }))
+        );
+    }
+
+    #[test]
+    fn dedup_shared_components_round_trips_bundled_fixture() {
+        let bundled =
+            std::fs::read(fixture_path("DjVu3Spec_bundled.djvu")).expect("bundled fixture exists");
+        let original = ComponentGraph::parse(&bundled).expect("parse source graph");
+
+        let result = dedup_shared_components(&bundled).expect("deduplicate fixture");
+        let rewritten = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert_eq!(
+            rewritten
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            original
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            "deduplication preserves fixture page count"
+        );
+        assert!(
+            rewritten
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "deduplicated fixture has no dangling INCL edges"
+        );
     }
 
     #[test]
