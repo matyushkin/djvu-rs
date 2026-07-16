@@ -40,6 +40,33 @@ pub enum DjvmError {
         count: usize,
     },
 
+    /// A page-removal index is out of bounds.
+    #[error("page index {index} is out of bounds (document has {count} pages)")]
+    PageIndexOutOfBounds {
+        /// The requested page index.
+        index: usize,
+        /// Number of pages in the document.
+        count: usize,
+    },
+
+    /// A page-removal index was supplied more than once.
+    #[error("page index {index} was specified more than once")]
+    DuplicatePageIndex {
+        /// The duplicate page index.
+        index: usize,
+    },
+
+    /// Removing the requested pages would leave the document empty.
+    #[error("cannot remove all {count} pages from a document")]
+    AllPagesRemoved {
+        /// Number of pages in the document.
+        count: usize,
+    },
+
+    /// The bundled component graph could not be built.
+    #[error("component graph error: {0}")]
+    ComponentGraph(String),
+
     /// The assembled document's FORM payload would exceed `u32::MAX` (4 GiB).
     #[error("merged document exceeds the 4 GiB IFF FORM limit")]
     OutputTooLarge,
@@ -78,6 +105,160 @@ pub struct ComponentDedup {
     pub document: Vec<u8>,
     /// `(dropped_id, surviving_id)` for every merged duplicate, in DIRM order.
     pub merged: Vec<(String, String)>,
+}
+
+/// Policy for shared components that become unreachable after page removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreachablePolicy {
+    /// Keep unreachable shared components in the output.
+    Preserve,
+    /// Drop shared components no longer reachable from any surviving page.
+    GarbageCollect,
+}
+
+/// Result of removing pages from a bundled document.
+pub struct PageRemoval {
+    /// The rebuilt bundled document.
+    pub document: Vec<u8>,
+    /// Ids of shared components that became unreachable from the surviving
+    /// pages, in DIRM order. These are dropped from `document` iff the policy
+    /// was `GarbageCollect`; otherwise they are reported but retained.
+    pub unreachable: Vec<String>,
+}
+
+/// Remove the pages at the given 0-based page indices (page order = DIRM order
+/// of `Page` components) from a bundled `FORM:DJVM`, applying `policy` to shared
+/// components that no longer have any including page.
+pub fn remove_pages(
+    bundled: &[u8],
+    pages_to_remove: &[usize],
+    policy: UnreachablePolicy,
+) -> Result<PageRemoval, DjvmError> {
+    let form = iff::parse_form(bundled)?;
+    if form.form_type != *b"DJVM" {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let dirm_data = form
+        .chunks
+        .iter()
+        .find(|chunk| chunk.id == *b"DIRM")
+        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
+        .data;
+    let dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
+    if !dirm.is_bundled() {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let graph = ComponentGraph::parse(bundled)
+        .map_err(|error| DjvmError::ComponentGraph(format!("{error:?}")))?;
+    let directory = dirm.components();
+    let component_forms = form
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.id == *b"FORM")
+        .collect::<Vec<_>>();
+    if component_forms.len() != directory.len() {
+        return Err(DjvmError::DirmComponentCountMismatch {
+            dirm: directory.len(),
+            children: component_forms.len(),
+        });
+    }
+
+    let pages = graph
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == ComponentNodeKind::Page)
+        .collect::<Vec<_>>();
+    let mut removed = vec![false; pages.len()];
+    for &index in pages_to_remove {
+        if index >= pages.len() {
+            return Err(DjvmError::PageIndexOutOfBounds {
+                index,
+                count: pages.len(),
+            });
+        }
+        if removed[index] {
+            return Err(DjvmError::DuplicatePageIndex { index });
+        }
+        removed[index] = true;
+    }
+    if removed.iter().all(|removed| *removed) {
+        return Err(DjvmError::AllPagesRemoved { count: pages.len() });
+    }
+
+    let surviving_pages = pages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, page)| (!removed[index]).then_some(*page))
+        .collect::<Vec<_>>();
+    let roots = surviving_pages
+        .iter()
+        .map(|page| page.id.as_str())
+        .collect::<Vec<_>>();
+    let closure = graph.transitive_closure(&roots);
+    let mut reachable = vec![false; graph.nodes().len()];
+    for index in closure {
+        reachable[index] = true;
+    }
+
+    let unreachable = graph
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                ComponentNodeKind::Dictionary
+                    | ComponentNodeKind::Annotation
+                    | ComponentNodeKind::SharedOther
+            ) && !reachable[node.dirm_index]
+        })
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+
+    let mut removed_dirm_entries = vec![false; graph.nodes().len()];
+    for (index, page) in pages.iter().enumerate() {
+        removed_dirm_entries[page.dirm_index] = removed[index];
+    }
+
+    let mut components = Vec::new();
+    let mut ids = Vec::new();
+    let mut flags = Vec::new();
+    for node in graph.nodes() {
+        let keep = match node.kind {
+            ComponentNodeKind::Page => !removed_dirm_entries[node.dirm_index],
+            ComponentNodeKind::Dictionary
+            | ComponentNodeKind::Annotation
+            | ComponentNodeKind::SharedOther => {
+                policy == UnreachablePolicy::Preserve || reachable[node.dirm_index]
+            }
+            // Thumbnail-to-page association is not represented by INCL, so this
+            // slice deliberately retains all thumbnails under both policies.
+            ComponentNodeKind::Thumbnail => true,
+        };
+        if keep {
+            let component = component_forms[node.dirm_index];
+            components.push(wrap_sub_form(component.data));
+            ids.push(directory[node.dirm_index].id.clone());
+            flags.push(dirm_kind_flag(directory[node.dirm_index].kind));
+        }
+    }
+
+    let document_chunks = form
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+        .map(|chunk| iff::Chunk::Leaf {
+            id: chunk.id,
+            data: chunk.data.to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let document = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)?;
+
+    Ok(PageRemoval {
+        document,
+        unreachable,
+    })
 }
 
 /// Merge byte-identical shared `FORM:DJVI` components in a bundled document,
@@ -742,6 +923,191 @@ mod tests {
             split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
             split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![3])]),
         ])
+    }
+
+    #[test]
+    fn remove_pages_garbage_collects_newly_and_already_unreachable_shared_components() {
+        let bundled = split_bundled_fixture_with_document_chunks(
+            vec![
+                split_component("page0.djvu", 1, *b"DJVU", vec![split_incl(b"dictA.djvi")]),
+                split_component("dictA.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+                split_component("page1.djvu", 1, *b"DJVU", vec![split_incl(b"dictB.djvi")]),
+                split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
+                split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![3])]),
+            ],
+            vec![(*b"NAVM", vec![1, 2, 3])],
+        );
+
+        let result = remove_pages(&bundled, &[1], UnreachablePolicy::GarbageCollect)
+            .expect("remove second page and garbage collect");
+        assert_eq!(
+            result.unreachable,
+            vec!["dictB.djvi".to_string(), "dictC.djvi".to_string()]
+        );
+
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["page0.djvu", "dictA.djvi"]
+        );
+        assert_eq!(
+            graph
+                .includes("page0.djvu")
+                .into_iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dictA.djvi"],
+            "the surviving page's INCL still resolves"
+        );
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "the result has no dangling INCL targets"
+        );
+
+        let document_chunks = iff::parse_form(&result.document)
+            .expect("parse result document")
+            .chunks
+            .into_iter()
+            .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+            .map(|chunk| (chunk.id, chunk.data.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(document_chunks, vec![(*b"NAVM", vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn remove_pages_preserves_unreachable_shared_components_when_requested() {
+        let result = remove_pages(
+            &split_dependency_fixture(),
+            &[1],
+            UnreachablePolicy::Preserve,
+        )
+        .expect("remove second page while preserving shared components");
+        assert_eq!(
+            result.unreachable,
+            vec!["dictB.djvi".to_string(), "dictC.djvi".to_string()]
+        );
+
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["page0.djvu", "dictA.djvi", "dictB.djvi", "dictC.djvi"]
+        );
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "preserving unreachable components keeps all INCL targets valid"
+        );
+    }
+
+    #[test]
+    fn remove_pages_can_garbage_collect_orphans_without_removing_pages() {
+        let bundled = split_dependency_fixture();
+        let result = remove_pages(&bundled, &[], UnreachablePolicy::GarbageCollect)
+            .expect("garbage collect without removing pages");
+        assert_eq!(result.unreachable, vec!["dictC.djvi".to_string()]);
+
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["page0.djvu", "dictA.djvi", "page1.djvu", "dictB.djvi"]
+        );
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            2,
+            "every page survives when no page index is removed"
+        );
+    }
+
+    #[test]
+    fn remove_pages_rejects_removing_every_page() {
+        let result = remove_pages(
+            &split_dependency_fixture(),
+            &[0, 1],
+            UnreachablePolicy::GarbageCollect,
+        );
+        assert!(matches!(
+            result,
+            Err(DjvmError::AllPagesRemoved { count: 2 })
+        ));
+    }
+
+    #[test]
+    fn remove_pages_rejects_out_of_range_indices() {
+        let result = remove_pages(
+            &split_dependency_fixture(),
+            &[2],
+            UnreachablePolicy::GarbageCollect,
+        );
+        assert!(matches!(
+            result,
+            Err(DjvmError::PageIndexOutOfBounds { index: 2, count: 2 })
+        ));
+    }
+
+    #[test]
+    fn remove_pages_rejects_duplicate_indices() {
+        let result = remove_pages(
+            &split_dependency_fixture(),
+            &[0, 0],
+            UnreachablePolicy::GarbageCollect,
+        );
+        assert!(matches!(
+            result,
+            Err(DjvmError::DuplicatePageIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn remove_pages_garbage_collect_round_trips_real_bundled_fixture() {
+        let bundled =
+            std::fs::read(fixture_path("DjVu3Spec_bundled.djvu")).expect("read bundled fixture");
+        let original = ComponentGraph::parse(&bundled).expect("parse source graph");
+        let original_page_count = original
+            .nodes()
+            .iter()
+            .filter(|node| node.kind == ComponentNodeKind::Page)
+            .count();
+        assert!(
+            original_page_count > 1,
+            "fixture must contain multiple pages"
+        );
+
+        let result = remove_pages(&bundled, &[0], UnreachablePolicy::GarbageCollect)
+            .expect("remove one fixture page");
+        let graph = ComponentGraph::parse(&result.document).expect("parse result graph");
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .filter(|node| node.kind == ComponentNodeKind::Page)
+                .count(),
+            original_page_count - 1
+        );
+        assert!(
+            graph.validate().is_empty(),
+            "the rebuilt fixture graph validates"
+        );
     }
 
     #[test]
