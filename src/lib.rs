@@ -220,6 +220,10 @@ pub mod optimizer;
 #[cfg(feature = "std")]
 pub mod editor;
 
+/// Validated dependency graph for bundled `FORM:DJVM` components.
+#[cfg(feature = "std")]
+pub mod component_graph;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
@@ -424,6 +428,11 @@ pub use editor::{
     DocumentEditor, EDIT_SCHEMA_VERSION, EditError, EditOperation, EditOperationKind, EditPlan,
     EditRequest, EditTarget, PlannedEdit,
 };
+
+// Re-export the bundled component-graph API for callers that do not need to
+// distinguish the module from the rest of the high-level document API.
+#[cfg(feature = "std")]
+pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
 
 // Re-export new phase-1 page info types
 pub use info::{PageInfo, Rotation};
