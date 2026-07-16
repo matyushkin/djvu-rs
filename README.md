@@ -663,11 +663,16 @@ Honest boundaries, so you can decide fast:
 - **Encoder size parity is corpus- and profile-dependent.** Run the
   reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
   the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
-  `PageEncoder` profiles. The 2026-07-13 snapshot ranges from 1.040–1.345×
-  `c44` for IW44 photo pages and 0.952–2.100× `cjb2` for the public direct JB2
-  lossless profile; every measured output passed its interop/fidelity gate.
-  Same-size record-6 and lossy rec-7 remain experimental and are tracked in
-  [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
+  `PageEncoder` profiles. The 2026-07-16 snapshot ranges from 1.025–1.040×
+  `c44` for IW44 photo pages — at matched-or-better fidelity (decoded PSNR/SSIM
+  meet or exceed `c44` on the measured pages) — and 0.952–2.100× `cjb2` for the
+  public direct JB2 lossless profile; every measured output passed its
+  interop/fidelity gate. The earlier IW44 gap (up to 1.345×, and lower fidelity)
+  came from two encoder bugs since fixed: an activation threshold that stranded
+  dense-page coefficients (`IW44_LUMA_PLATEAU`) and a colour transform that did
+  not match the decoder's Pigeon `YCbCr` basis (`IW44_PIGEON_COLOR`); see
+  `PERF_EXPERIMENTS.md`. Same-size record-6 and lossy rec-7 remain experimental
+  and are tracked in [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
 - **Document optimization is conservative in the first slice.** `djvu optimize`
   currently removes only semantically inert `FREE` padding and reports unmet
   size targets; archival codec search, progress callbacks, and cancellation

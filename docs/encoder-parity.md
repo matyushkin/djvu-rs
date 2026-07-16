@@ -52,16 +52,37 @@ For the text-heavy JB2 cases, the optional Tesseract 5.5.2 probe produced the
 same counts for source, DjVuLibre, and djvu-rs: cable `245 chars / 42 words`,
 map atlas `1,399 / 681`, and the selected Chinese page `0 / 0`.
 
+## 2026-07-16 snapshot (post IW44 fixes)
+
+Two IW44 encoder bugs the 2026-07-13 snapshot exposed were fixed:
+`IW44_LUMA_PLATEAU` (activation threshold `|V| > 11s/16` → `|V| >= s`) and
+`IW44_PIGEON_COLOR` (encoder `rgb_to_ycbcr` switched to DjVuLibre's Pigeon
+basis). Same platform/DjVuLibre version; decoded PSNR/SSIM vs source.
+
+| Case | Mode | DjVuLibre B | djvu-rs B | Size ratio | djvu-rs PSNR / c44 | SSIM (ours) |
+|------|------|------------:|----------:|-----------:|-------------------:|------------:|
+| watchmaker | IW44 photo / `c44` | 665,625 | 682,598 | 1.025× | 45.96 / 45.28 dB | 0.9950 |
+| goody two-shoes | IW44 photo / `c44` | 327,798 | 340,872 | 1.040× | 41.14 / 40.83 dB | 0.9811 |
+| cable | JB2 lossless / `cjb2` | 2,248 | 4,720 | 2.100× | pixel-exact | — |
+| map atlas | JB2 lossless / `cjb2` | 145,592 | 138,672 | 0.952× | pixel-exact | — |
+| Chinese cookbook | JB2 lossless / `cjb2` | 67 | 140 | 2.090× | pixel-exact | — |
+
+IW44 photo is now 1.025–1.040× `c44` at **matched-or-better fidelity** — decoded
+PSNR and SSIM meet or exceed `c44` on both measured pages (previously up to
+1.345× *and* far lower fidelity). The JB2 lossless path is unchanged by these
+fixes.
+
 ## Decision boundary
 
-This scorecard is diagnostic infrastructure and does not change the default
-bitstream. The snapshot confirms that the gap is content- and profile-dependent:
-IW44 ranges from near parity to a 1.345× size ratio, while the public direct
-JB2 lossless profile ranges from 0.952× to 2.100×. All measured outputs were
-accepted by DjVuLibre and passed their fidelity gate.
+The scorecard is the measurement harness; the two IW44 fixes above were promoted
+to the default bitstream only after this scorecard, byte-exact `ddjvu` interop,
+and the full test suite confirmed them (recorded Kept in `PERF_EXPERIMENTS.md`).
+IW44 photo now sits at 1.025–1.040× `c44` at matched-or-better fidelity; the
+public direct JB2 lossless profile still ranges from 0.952× to 2.100×.
 
 Same-size JB2 record-6 and lossy rec-7 remain explicit experimental options;
-their real-byte, round-trip, and OCR evidence stays in
-`PERF_EXPERIMENTS.md`. The IW44 transform hypothesis is rejected there after
-coefficient-identical production-vs-DjVuLibre DWT measurements. No candidate
+their real-byte, round-trip, and OCR evidence stays in `PERF_EXPERIMENTS.md`.
+The IW44 forward-transform hypothesis is rejected there after
+coefficient-identical production-vs-DjVuLibre DWT measurements (the gap was in
+the coefficient coding and colour transform, not the DWT). No further candidate
 is promoted to the default archival/lossless path by the scorecard alone.
