@@ -5,6 +5,105 @@ numbers, decision, reason. Referenced from issue templates ("Record result
 in `PERF_EXPERIMENTS.md` (Kept or Reverted + reason)") and from
 `.github/workflows/bench.yml`.
 
+### IW44_LUMA_PLATEAU (#684) — activation threshold stranded dense-page coefficients — **Kept** (2026-07-16)
+
+**Issue.** The scorecard flagged `goody two-shoes` as `1.345×` size at only
+`26.39 dB` luma PSNR against `c44`'s `40.83 dB`. A profile that is both larger
+*and* much lower fidelity is a Pareto loss, not a size/quality trade — worth
+attributing before any coding change.
+
+**Approach.** Reproduced the scorecard's Photo path byte-for-byte through the
+`djvu encode --quality photo` CLI (identical `440,864 B` output), decoded with
+`ddjvu`, and measured per-component PSNR against the source raster. Then
+isolated the cause by elimination: (a) re-ran the same page as **pure
+grayscale** (`encode_iw44_gray`, no Cb/Cr at all); (b) leaned on the already
+recorded coefficient-identical forward-DWT result (IW44 transform hypothesis is
+rejected, see the scorecard entry and the DWT parity note); (c) swept five
+colour corpus pages to separate content classes.
+
+**Numbers.** Photo profile vs `c44` default, luma PSNR against source:
+
+| Page | Content | ours / c44 bytes | ours / c44 luma PSNR |
+|------|---------|-----------------:|---------------------:|
+| watchmaker | light gray scan | 692,182 / 665,625 | 38.73 / 45.28 dB ✅ |
+| conquete_paix | near-gray | 585,422 / 544,993 | 42.35 / — dB ✅ |
+| goody two-shoes | colour, 500 dpi | 440,864 / 327,798 | 26.39 / 40.83 dB ❌ |
+| war_1812 | colour | 761,436 / 498,210 | 25.90 / — dB ❌ |
+| map_atlas | colour | 1,696,114 / 1,445,273 | 26.85 / — dB ❌ |
+
+Grayscale-only control (`goody`, no chroma): ours `390,102 B / 27.62 dB` vs
+`c44` `302,863 B / 41.00 dB` — the failure reproduces with luma alone, so it is
+**not** a Cb/Cr desync. Spatial error is roughly uniform; luma stays pinned near
+`~27 dB` even at the full 100-slice budget (10 chunks × 10 slices, no rate
+control) where near-lossless is expected.
+
+**Further isolation (2026-07-16, same session).** With temporary probes (all
+reverted; no source change landed):
+
+- **Transform ruled out.** Forward (`i16`) → inverse (decoder) round-trip on the
+  raw plane is **bit-exact** for both goody and watchmaker (`plane-RMSE = 0.00`,
+  maxdiff 0). The DWT is a perfect reconstruction pair, so the earlier
+  "coefficient-identical DWT" claim also holds on high-energy content.
+- **Decoder ruled out.** Our decoder and `ddjvu` decode our output
+  **byte-identically** (MSE 0.0, both 27.62 dB) — no interop / stream divergence.
+- **Not a budget.** Raising the slice budget to 250 gives `27.91 dB` at
+  `7.4 MB` — quality **plateaus** while size explodes ~19×. Extra slices emit
+  bytes that do not converge the reconstruction.
+- **Not simple i16 overflow.** Post-transform coefficient range is
+  goody `[-12311, 17764]`, watchmaker `[-27652, 32213]` — both inside `i16`, and
+  the *working* page has the *larger* coefficients.
+- **Coefficient importance, not magnitude.** goody's coefficients are denser
+  across all bands; its error concentrates where inverse-transform gain is
+  highest (low-frequency bands). Per-band `recon`-vs-true-`blocks` RMSE at 100
+  slices leaves band 0 (`b0≈313` goody) well above its quant floor, i.e. even
+  the DC band is under-refined.
+- **Lead (needs an i32-safe re-probe).** Inverse-transforming the encoder's own
+  `recon` mirror scored `~27 dB` for *both* pages while the real decode is
+  `27.6` / `38.7 dB`. That hints the encoder's `recon` model may diverge from the
+  decoder's running reconstruction — but the probe cast `recon` (`i32`) to `i16`,
+  which can corrupt watchmaker's near-`i16`-limit values, so treat this as a
+  hypothesis to confirm with an overflow-safe probe, not a settled fact.
+
+**Root cause.** The three IW44 significance gates in
+`crates/djvu-iw44/src/encode.rs` — the `any_unk_activates` predictor
+(`~1427`), the `is_new` bucket predictor (`~1475`), and the real activation
+decision in `newly_active_encoding_pass` (`~1517`) — used `|V| > (11s/16).max(1)`
+instead of the IW44 encoder significance threshold `|V| >= s`. The `11s/16` value
+is the *decoder's* midpoint decision boundary, not the *encoder's* significance
+test. Activating at `11s/16` starts a coefficient one bit-plane too early: the
+decoder then reconstructs it at `11s/8`, which overshoots any true value in
+`(11s/16, s)`, and later refinement (bounded by the geometric `s/2 + s/4 + …`
+tail) cannot pull it back down on dense pages. The `.max(1)` floor also stranded
+genuine `±1` coefficients at `s=1` (where `11·1/16` truncates to 0). Sparse pages
+(mostly-white scans) hid the defect because they have few significant
+high-frequency coefficients; dense illustrations exposed it as a hard `~27 dB`
+plateau. This supersedes the earlier `#iw44-1` change, which had switched these
+gates to `11s/16` believing it matched the activation pass — it did match the
+*wrong* threshold. DjVuLibre's `IW44EncodeCodec.cpp` uses `>= s`.
+
+**Fix.** All three gates now use `|V| >= s`. Two unit regression tests
+(`encode.rs` ~2288, ~2314) assert the encoder `recon` and the decoder `blocks`
+agree that a `±1` coefficient survives to `s=1` and that a mid-magnitude
+coefficient waits for its significance step. Diff is `encode.rs`-only.
+
+**Numbers (Kept).** Grayscale (pure luma) and colour, decoded PSNR vs source:
+
+| Page | Before bytes / dB | After bytes / dB | c44 ref |
+|------|------------------:|-----------------:|--------:|
+| goody gray | 390,102 / 27.62 | **315,966 / 41.33** | 302,863 / 41.00 |
+| watchmaker gray | 692,182 / 38.73 | **682,598 / 45.96** | — |
+| goody colour | 440,864 / 25.97 | **355,238 / 32.79** | — |
+
+Scorecard size ratio (ours ÷ c44) after the fix: `goody-twoshoes-color`
+**1.345× → 1.084×**, `watchmaker-color` `1.040× → 1.025×`; all fidelity gates
+pass. The bilevel/JB2 cases are unchanged (IW44-only fix). goody grayscale is now
+at parity with `c44` (marginally larger, higher PSNR).
+
+**Decision.** **Kept.** Fixes a Pareto loss (was larger *and* lower fidelity),
+byte-interop with DjVuLibre preserved (our decoder and `ddjvu` produce
+byte-identical output after the fix), `cargo test -p djvu-iw44` green with no
+golden updates, no size or quality regression on any measured page.
+
 ### ENCODER_PARITY_SCORECARD (#684) — reproducible c44/cjb2 baseline — **Kept (diagnostic)** (2026-07-13)
 
 **Issue.** The encoder-size issue needs a versioned comparison of bytes, time,
