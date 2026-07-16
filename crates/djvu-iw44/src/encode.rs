@@ -1427,12 +1427,11 @@ impl PlaneEncoder {
                     step_hi
                 };
                 let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                // #iw44-1: predict activation with the SAME threshold the activation
-                // pass actually uses (|V| > 11s/16, line ~1096). The old `s/2` is too
-                // low: coefficients in (s/2, 11s/16] were announced as block/bucket-NEW
-                // but never activated, emitting wasted ZP bits with no reconstruction
-                // change. Matching the gate removes that overhead (PSNR-neutral).
-                if v > (s * 11 / 16).max(1) {
+                // Significance must use the encoder's `|V| >= s` threshold.
+                // Activating at the decoder's lower 11s/16 decision boundary starts
+                // a coefficient one bitplane too early; its reconstruction is then
+                // too large for later refinement to bring back down on dense pages.
+                if v >= s {
                     return true;
                 }
             }
@@ -1476,7 +1475,7 @@ impl PlaneEncoder {
                     step_hi
                 };
                 let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                v > (s * 11 / 16).max(1) // #iw44-1: match the real activation gate (see any_unk_activates)
+                v >= s // Match `any_unk_activates` and the coefficient gate below.
             });
             if is_new {
                 self.bucketstate[boff] |= NEW;
@@ -1518,10 +1517,9 @@ impl PlaneEncoder {
                     let coef_idx = if self.curband == 0 { k } else { (i << 4) | k };
                     let true_val = self.blocks[block_idx][coef_idx] as i32;
                     let s = step as i32;
-                    // Activate if true value exceeds half the decoded activation value.
-                    // Decoded value = sign*(s + s/2 - s/8) = sign*11s/8.
-                    // Threshold for activation: |V| > 11s/16.
-                    let is_active = true_val.unsigned_abs() as i32 > (s * 11 / 16).max(1);
+                    // The IW44 encoder makes a coefficient significant once its
+                    // magnitude reaches this bitplane's quantization step.
+                    let is_active = true_val.unsigned_abs() as i32 >= s;
                     zp.encode_bit(&mut self.ctx_activate_coef[shift + ip], is_active);
                     #[cfg(feature = "iw44-probe")]
                     probe::record_activate(self.curband, is_active);
@@ -2285,6 +2283,57 @@ mod loss_diagnostics {
             enc.encode_slice(&mut zp);
         }
         let _ = zp.finish();
+    }
+
+    #[test]
+    fn unit_coefficient_activates_at_final_quant_step() {
+        // At s=1, 11*s/16 truncates to zero, so a nonzero unit coefficient
+        // must activate. Keeping a floor of one permanently strands it at zero.
+        let mut enc = PlaneEncoder::new(32, 32);
+        let coefficient = 48 * 16; // first coefficient in high-frequency band 9
+        enc.blocks[0][coefficient] = 1;
+
+        let mut zp_enc = ZpEncoder::new();
+        for _ in 0..250 {
+            enc.encode_slice(&mut zp_enc);
+        }
+        let mut zp_data = zp_enc.finish();
+        zp_data.resize(zp_data.len().max(2), 0xff);
+
+        let mut dec = crate::PlaneDecoder::new(32, 32);
+        let mut zp_dec = djvu_zp::ZpDecoder::new(&zp_data).unwrap();
+        for _ in 0..250 {
+            dec.decode_slice(&mut zp_dec);
+        }
+
+        assert_eq!(enc.recon[0][coefficient], 1);
+        assert_eq!(dec.blocks[0][coefficient], 1);
+    }
+
+    #[test]
+    fn coefficient_waits_for_its_significance_step() {
+        // Band 9 first becomes usable at s=16384. A value of 12000 must wait
+        // for s=8192 rather than activating at the decoder's 11s/16 boundary.
+        let mut enc = PlaneEncoder::new(32, 32);
+        let coefficient = 48 * 16;
+        enc.blocks[0][coefficient] = 12_000;
+
+        let mut zp_enc = ZpEncoder::new();
+        for _ in 0..70 {
+            enc.encode_slice(&mut zp_enc);
+        }
+        let mut zp_data = zp_enc.finish();
+        zp_data.resize(zp_data.len().max(2), 0xff);
+
+        let mut dec = crate::PlaneDecoder::new(32, 32);
+        let mut zp_dec = djvu_zp::ZpDecoder::new(&zp_data).unwrap();
+        for _ in 0..70 {
+            dec.decode_slice(&mut zp_dec);
+        }
+
+        // s=8192 activation reconstruction: s + s/2 - s/8 = 11264.
+        assert_eq!(enc.recon[0][coefficient], 11_264);
+        assert_eq!(dec.blocks[0][coefficient], 11_264);
     }
 
     // ---- Tests ---------------------------------------------------------------
