@@ -9,7 +9,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::dirm::DirmPayload;
+use crate::dirm::{BUNDLED_FLAG, DirmPayload};
 use crate::error::IffError;
 use crate::iff;
 use crate::{ComponentGraph, ComponentNodeKind};
@@ -17,7 +17,7 @@ use crate::{ComponentGraph, ComponentNodeKind};
 #[cfg(test)]
 use crate::djvu_document::DjVuDocument;
 
-/// Error type for merge/split operations.
+/// Error type for DJVM merge, split, and conversion operations.
 #[derive(Debug, thiserror::Error)]
 pub enum DjvmError {
     /// IFF container parse error.
@@ -43,6 +43,33 @@ pub enum DjvmError {
     /// The assembled document's FORM payload would exceed `u32::MAX` (4 GiB).
     #[error("merged document exceeds the 4 GiB IFF FORM limit")]
     OutputTooLarge,
+
+    /// The input is not a bundled `FORM:DJVM` document.
+    #[error("to_indirect requires a bundled FORM:DJVM document")]
+    NotBundledDjvm,
+
+    /// The `DIRM` payload is malformed or missing a required field.
+    #[error("DIRM chunk is malformed: {0}")]
+    DirmMalformed(&'static str),
+
+    /// The bundled `DIRM` and embedded component count disagree.
+    #[error("DIRM component count {dirm} does not match bundle child count {children}")]
+    DirmComponentCountMismatch {
+        /// Component count declared by `DIRM`.
+        dirm: usize,
+        /// Direct `FORM` children in the bundle.
+        children: usize,
+    },
+}
+
+/// An indirect `FORM:DJVM` index and the external component files it resolves.
+pub struct IndirectDocument {
+    /// The indirect `FORM:DJVM` index file bytes (`DIRM` has no bundled bit or
+    /// offset table; document-level chunks such as `NAVM` are retained).
+    pub index: Vec<u8>,
+    /// One resolver-keyed standalone component file per `DIRM` entry, in
+    /// directory order.
+    pub components: Vec<(String, Vec<u8>)>,
 }
 
 /// Re-serialize a sub-FORM child — the raw `data` of a `FORM` chunk, which
@@ -71,6 +98,93 @@ fn strip_att(form: &[u8]) -> &[u8] {
     } else {
         form
     }
+}
+
+/// Convert a bundled `FORM:DJVM` into its indirect index and standalone
+/// component files.
+///
+/// The returned index retains each document-level non-`FORM` chunk (including
+/// `NAVM`). Its `DIRM` is the source directory with only the bundled bit and
+/// offset table removed: the BZZ-compressed metadata tail is retained verbatim,
+/// so component ids, names, titles, and flags remain stable. Each returned
+/// component is a complete `AT&T`-prefixed `FORM:DJVU`, `FORM:DJVI`, or
+/// `FORM:THUM` file suitable for [`crate::djvu_document::ComponentResolver`].
+pub fn to_indirect(bundled: &[u8]) -> Result<IndirectDocument, DjvmError> {
+    let form = iff::parse_form(bundled)?;
+    if form.form_type != *b"DJVM" {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let dirm_data = form
+        .chunks
+        .iter()
+        .find(|chunk| chunk.id == *b"DIRM")
+        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
+        .data;
+    let mut dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
+    if !dirm.is_bundled() {
+        return Err(DjvmError::NotBundledDjvm);
+    }
+
+    let component_forms = form
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.id == *b"FORM")
+        .collect::<Vec<_>>();
+    let expected_count = dirm.nfiles as usize;
+    if component_forms.len() != expected_count {
+        return Err(DjvmError::DirmComponentCountMismatch {
+            dirm: expected_count,
+            children: component_forms.len(),
+        });
+    }
+
+    // The BZZ metadata tail is opaque here. Decoding it only supplies the
+    // resolver keys; the re-emitted DIRM carries the original metadata bytes.
+    let components = dirm
+        .components()
+        .into_iter()
+        .zip(component_forms)
+        .map(|(component, form)| (component.id, wrap_sub_form(form.data)))
+        .collect();
+
+    // Bundled DIRM layout is [flags][nfiles][offset table][BZZ metadata].
+    // Clear only the bit that selects that layout; `encode` then omits the
+    // table while preserving the metadata blob byte-for-byte.
+    dirm.flags &= !BUNDLED_FLAG;
+    dirm.offsets.clear();
+    let indirect_dirm = dirm.encode();
+
+    // Preserve document-level chunks (NAVM and any extensions) in their
+    // original order while removing all embedded component FORMs. Re-frame
+    // leaves through the IFF emission seam so length and padding are correct.
+    let mut index_chunks = Vec::with_capacity(form.chunks.len() - expected_count);
+    let mut replaced_dirm = false;
+    for chunk in &form.chunks {
+        match chunk.id {
+            id if id == *b"FORM" => {}
+            id if id == *b"DIRM" && !replaced_dirm => {
+                index_chunks.push(iff::Chunk::Leaf {
+                    id: *b"DIRM",
+                    data: indirect_dirm.clone(),
+                });
+                replaced_dirm = true;
+            }
+            id if id == *b"DIRM" => {}
+            id => index_chunks.push(iff::Chunk::Leaf {
+                id,
+                data: chunk.data.to_vec(),
+            }),
+        }
+    }
+    debug_assert!(replaced_dirm, "the DIRM was found above");
+    let index_parts = index_chunks
+        .iter()
+        .map(iff::EmitPart::Chunk)
+        .collect::<Vec<_>>();
+    let index = iff::partial_emit(*b"DJVM", &index_parts).ok_or(DjvmError::OutputTooLarge)?;
+
+    Ok(IndirectDocument { index, components })
 }
 
 /// Merge multiple DjVu documents (raw bytes) into a single bundled DJVM.
@@ -437,6 +551,181 @@ mod tests {
             split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
             split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![3])]),
         ])
+    }
+
+    #[test]
+    fn to_indirect_round_trips_graph_dirm_metadata_and_shared_dictionaries() {
+        use crate::djvu_document::{ComponentId, ComponentResolveError};
+
+        let bundled = std::fs::read(fixture_path("DjVu3Spec_bundled.djvu"))
+            .expect("DjVu3Spec_bundled fixture exists");
+        let original_form = iff::parse_form(&bundled).expect("parse bundled fixture");
+        let original_dirm = DirmPayload::decode(
+            original_form
+                .chunks
+                .iter()
+                .find(|chunk| chunk.id == *b"DIRM")
+                .expect("bundled fixture has DIRM")
+                .data,
+        )
+        .expect("decode bundled DIRM");
+        let original_ids = original_dirm
+            .components()
+            .into_iter()
+            .map(|component| component.id)
+            .collect::<Vec<_>>();
+        let original_graph =
+            ComponentGraph::parse(&bundled).expect("build bundled component graph");
+        assert_eq!(
+            original_graph
+                .nodes()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            original_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the graph follows DIRM order"
+        );
+        assert!(
+            original_graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "the source bundle has no dangling INCL edges"
+        );
+
+        let original_document = DjVuDocument::parse(&bundled).expect("parse bundled fixture");
+        let pages_with_shared_dict = (0..original_document.page_count())
+            .filter(|&index| {
+                original_document
+                    .page(index)
+                    .expect("valid source page")
+                    .decoded_shared_dict()
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !pages_with_shared_dict.is_empty(),
+            "fixture must exercise shared DJVI resolution"
+        );
+
+        let indirect = to_indirect(&bundled).expect("convert bundled fixture");
+        let index_form = iff::parse_form(&indirect.index).expect("parse indirect index");
+        assert_eq!(&index_form.form_type, b"DJVM");
+        assert!(
+            index_form.chunks.iter().all(|chunk| chunk.id != *b"FORM"),
+            "indirect index contains no embedded component forms"
+        );
+        let index_dirm = DirmPayload::decode(
+            index_form
+                .chunks
+                .iter()
+                .find(|chunk| chunk.id == *b"DIRM")
+                .expect("indirect index has DIRM")
+                .data,
+        )
+        .expect("decode indirect DIRM");
+        assert!(!index_dirm.is_bundled(), "bundled bit is cleared");
+        assert!(index_dirm.offsets.is_empty(), "offset table is removed");
+        assert_eq!(index_dirm.nfiles, original_dirm.nfiles);
+        assert_eq!(
+            index_dirm.flags,
+            original_dirm.flags & !BUNDLED_FLAG,
+            "only the bundled bit changes"
+        );
+        assert_eq!(
+            index_dirm.metadata, original_dirm.metadata,
+            "the BZZ metadata blob, including ids/names/titles/component flags, is verbatim"
+        );
+        assert_eq!(
+            indirect
+                .components
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            original_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "one resolver-keyed file per DIRM entry, in DIRM order"
+        );
+        assert_eq!(indirect.components.len(), original_dirm.nfiles as usize);
+
+        let original_document_chunks = original_form
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+            .map(|chunk| (chunk.id, chunk.data))
+            .collect::<Vec<_>>();
+        let index_document_chunks = index_form
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+            .map(|chunk| (chunk.id, chunk.data))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index_document_chunks, original_document_chunks,
+            "NAVM and every other document-level chunk survive in the index"
+        );
+
+        let component_map = indirect
+            .components
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for node in original_graph.nodes() {
+            let component = component_map
+                .get(&node.id)
+                .expect("every graph node has an extracted component");
+            assert!(component.starts_with(b"AT&T"));
+            let component_form =
+                iff::parse_form(component).expect("component is a standalone FORM");
+            let includes = component_form
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.id == *b"INCL")
+                .map(|chunk| {
+                    core::str::from_utf8(chunk.data.trim_ascii_end())
+                        .expect("fixture INCL ids are UTF-8")
+                })
+                .collect::<Vec<_>>();
+            let expected_includes = node
+                .includes
+                .iter()
+                .map(|&target| original_graph.nodes()[target].id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                includes, expected_includes,
+                "INCL edges survive for {}",
+                node.id
+            );
+        }
+
+        let resolver = |component: &ComponentId| {
+            component_map.get(&component.name).cloned().ok_or_else(|| {
+                ComponentResolveError::Missing {
+                    component: component.clone(),
+                }
+            })
+        };
+        let resolved = DjVuDocument::parse_with_component_resolver(&indirect.index, &resolver)
+            .expect("parse converted indirect document");
+        assert_eq!(resolved.page_count(), original_document.page_count());
+        for index in pages_with_shared_dict {
+            assert!(
+                resolved
+                    .page(index)
+                    .expect("valid resolved page")
+                    .decoded_shared_dict()
+                    .is_some(),
+                "page {index}'s INCL still resolves its shared dictionary"
+            );
+        }
+    }
+
+    #[test]
+    fn to_indirect_rejects_an_indirect_djvm() {
+        let indirect = create_indirect(&["page.djvu"]).expect("build indirect index");
+        assert!(matches!(
+            to_indirect(&indirect),
+            Err(DjvmError::NotBundledDjvm)
+        ));
     }
 
     #[test]
