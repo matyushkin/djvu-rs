@@ -12,6 +12,7 @@ use alloc::{format, string::String, vec, vec::Vec};
 use crate::dirm::DirmPayload;
 use crate::error::IffError;
 use crate::iff;
+use crate::{ComponentGraph, ComponentNodeKind};
 
 #[cfg(test)]
 use crate::djvu_document::DjVuDocument;
@@ -158,7 +159,60 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
         }
     }
 
-    // Multiple pages: build a new DJVM bundle with the requested range
+    // Multiple pages: when the bundled component graph is available, retain
+    // just the selected pages and their transitive INCL dependencies.  DIRM
+    // identities must survive this rewrite: INCL chunks name those ids.
+    if let Ok(graph) = ComponentGraph::parse(doc_data) {
+        let pages = graph
+            .nodes()
+            .iter()
+            .filter(|node| node.kind == ComponentNodeKind::Page)
+            .collect::<Vec<_>>();
+
+        // `count` is intentionally derived from the FORM walk above for
+        // compatibility.  If a graph that otherwise parses has a different
+        // page count, keep the established extraction path below.
+        if pages.len() == count {
+            let roots = pages[start..end]
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>();
+            let closure = graph.transitive_closure(&roots);
+            let mut selected = vec![false; graph.nodes().len()];
+            for node_index in closure {
+                let node = &graph.nodes()[node_index];
+                // Thumbnails are deliberately excluded from split output.
+                if node.kind != ComponentNodeKind::Thumbnail {
+                    selected[node_index] = true;
+                }
+            }
+
+            let component_forms = form
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.id == *b"FORM")
+                .collect::<Vec<_>>();
+            let mut components = Vec::new();
+            let mut component_ids = Vec::new();
+            let mut component_flags = Vec::new();
+
+            // The graph and reader both correlate DIRM entry i with embedded
+            // FORM child i.  Iterating nodes keeps the output in DIRM order.
+            for node in graph.nodes() {
+                if selected[node.dirm_index] {
+                    let component = component_forms[node.dirm_index];
+                    components.push(wrap_sub_form(component.data));
+                    component_ids.push(node.id.clone());
+                    component_flags.push(u8::from(node.kind == ComponentNodeKind::Page));
+                }
+            }
+
+            return build_djvm(&components, &component_ids, &component_flags);
+        }
+    }
+
+    // Fallback for indirect, malformed, and otherwise non-graph DJVMs: keep
+    // the historical FORM-based extraction behaviour.
     let mut components: Vec<Vec<u8>> = Vec::new();
     let mut component_ids: Vec<String> = Vec::new();
     let mut component_flags: Vec<u8> = Vec::new();
@@ -275,6 +329,93 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    struct SplitFixtureComponent {
+        id: &'static str,
+        dirm_flag: u8,
+        form: [u8; 4],
+        chunks: Vec<([u8; 4], Vec<u8>)>,
+    }
+
+    fn split_component(
+        id: &'static str,
+        dirm_flag: u8,
+        form: [u8; 4],
+        chunks: Vec<([u8; 4], Vec<u8>)>,
+    ) -> SplitFixtureComponent {
+        SplitFixtureComponent {
+            id,
+            dirm_flag,
+            form,
+            chunks,
+        }
+    }
+
+    fn split_incl(id: &[u8]) -> ([u8; 4], Vec<u8>) {
+        (*b"INCL", id.to_vec())
+    }
+
+    fn split_component_body(component: &SplitFixtureComponent) -> Vec<u8> {
+        let chunks = component
+            .chunks
+            .iter()
+            .map(|(id, data)| iff::Chunk::Leaf {
+                id: *id,
+                data: data.clone(),
+            })
+            .collect::<Vec<_>>();
+        let parts = chunks.iter().map(iff::EmitPart::Chunk).collect::<Vec<_>>();
+        let bytes = iff::partial_emit(component.form, &parts).expect("small fixture FORM");
+        let length = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        bytes[12..12 + length].to_vec()
+    }
+
+    fn split_bundled_fixture(components: Vec<SplitFixtureComponent>) -> Vec<u8> {
+        let bodies = components
+            .iter()
+            .map(split_component_body)
+            .collect::<Vec<_>>();
+        let ids = components
+            .iter()
+            .map(|component| component.id.to_string())
+            .collect::<Vec<_>>();
+        let flags = components
+            .iter()
+            .map(|component| component.dirm_flag)
+            .collect::<Vec<_>>();
+        let sizes = bodies
+            .iter()
+            .map(|body| u32::try_from(8 + body.len()).unwrap())
+            .collect::<Vec<_>>();
+        let mut dirm = DirmPayload::build_bundled(components.len(), &flags, &ids, &sizes);
+
+        let emit = |dirm: &DirmPayload| {
+            let dirm_chunk = iff::Chunk::Leaf {
+                id: *b"DIRM",
+                data: dirm.encode(),
+            };
+            let mut parts = vec![iff::EmitPart::Chunk(&dirm_chunk)];
+            parts.extend(bodies.iter().map(|body| iff::EmitPart::Form(body)));
+            iff::partial_emit_with_offsets(*b"DJVM", &parts).expect("small bundled fixture")
+        };
+
+        let (_, offsets) = emit(&dirm);
+        dirm.offsets = offsets[1..]
+            .iter()
+            .map(|&offset| u32::try_from(offset).unwrap())
+            .collect();
+        emit(&dirm).0
+    }
+
+    fn split_dependency_fixture() -> Vec<u8> {
+        split_bundled_fixture(vec![
+            split_component("page0.djvu", 1, *b"DJVU", vec![split_incl(b"dictA.djvi")]),
+            split_component("dictA.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![1])]),
+            split_component("page1.djvu", 1, *b"DJVU", vec![split_incl(b"dictB.djvi")]),
+            split_component("dictB.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![2])]),
+            split_component("dictC.djvi", 0, *b"DJVI", vec![(*b"Djbz", vec![3])]),
+        ])
     }
 
     #[test]
@@ -495,6 +636,67 @@ mod tests {
             .filter(|c| &c.id == b"FORM" && c.data.len() >= 4 && &c.data[..4] == b"DJVU")
             .count();
         assert_eq!(page_count, 2);
+    }
+
+    #[test]
+    fn split_bundled_djvm_keeps_transitive_dependencies_and_dirm_ids() {
+        let extracted = split(&split_dependency_fixture(), 0, 2).expect("split range");
+        let graph = ComponentGraph::parse(&extracted).expect("parse extracted graph");
+        let ids = graph
+            .nodes()
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec!["page0.djvu", "dictA.djvi", "page1.djvu", "dictB.djvi"]
+        );
+        assert!(
+            graph.node("dictA.djvi").is_some(),
+            "original id is retained"
+        );
+        assert!(
+            graph.node("dictC.djvi").is_none(),
+            "unreferenced shared component is omitted"
+        );
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "the retained page INCLs resolve within the extracted bundle"
+        );
+    }
+
+    #[test]
+    fn split_bundled_djvm_single_page_keeps_existing_fast_path() {
+        let extracted = split(&split_dependency_fixture(), 0, 1).expect("split page");
+        let form = iff::parse_form(&extracted).expect("parse extracted page");
+
+        assert_eq!(&form.form_type, b"DJVU");
+    }
+
+    #[test]
+    fn split_djvm_without_a_component_graph_uses_legacy_fallback() {
+        let page0 = split_component_body(&split_component("page0.djvu", 1, *b"DJVU", vec![]));
+        let page1 = split_component_body(&split_component("page1.djvu", 1, *b"DJVU", vec![]));
+        let doc = iff::partial_emit(
+            *b"DJVM",
+            &[iff::EmitPart::Form(&page0), iff::EmitPart::Form(&page1)],
+        )
+        .expect("small DIRM-less fixture");
+
+        let extracted = split(&doc, 0, 2).expect("split through fallback");
+        let form = iff::parse_form(&extracted).expect("parse fallback output");
+        assert_eq!(&form.form_type, b"DJVM");
+        assert_eq!(
+            form.chunks
+                .iter()
+                .filter(|chunk| chunk.id == *b"FORM" && chunk.data.starts_with(b"DJVU"))
+                .count(),
+            2
+        );
     }
 
     #[test]
