@@ -146,15 +146,36 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
         return Ok(doc_data.to_vec());
     }
 
-    // For a single page extraction from a multi-page document
+    // For a single page extraction from a multi-page document with no shared
+    // dependencies, return the standalone `FORM:DJVU`. If the page INCLs shared
+    // components, fall through to the graph closure path below so it is bundled
+    // with its dependencies — a bare page would carry dangling INCL references.
     if end - start == 1 && &form.form_type == b"DJVM" {
-        let mut page_idx = 0;
-        for chunk in &form.chunks {
-            if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
-                if page_idx == start {
-                    return Ok(wrap_sub_form(chunk.data));
+        let standalone = ComponentGraph::parse(doc_data)
+            .ok()
+            .and_then(|graph| {
+                let pages = graph
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.kind == ComponentNodeKind::Page)
+                    .collect::<Vec<_>>();
+                // Only trust the graph when its page count agrees with the FORM
+                // walk; otherwise keep the historical standalone behaviour.
+                (pages.len() == count)
+                    .then(|| pages.get(start).map(|page| page.includes.is_empty()))
+                    .flatten()
+            })
+            .unwrap_or(true);
+
+        if standalone {
+            let mut page_idx = 0;
+            for chunk in &form.chunks {
+                if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
+                    if page_idx == start {
+                        return Ok(wrap_sub_form(chunk.data));
+                    }
+                    page_idx += 1;
                 }
-                page_idx += 1;
             }
         }
     }
@@ -670,10 +691,39 @@ mod tests {
     }
 
     #[test]
-    fn split_bundled_djvm_single_page_keeps_existing_fast_path() {
+    fn split_single_page_with_dependencies_bundles_its_closure() {
+        // page0 INCLs dictA, so extracting it alone must produce a self-contained
+        // bundle (page0 + dictA) rather than a bare page with a dangling INCL.
         let extracted = split(&split_dependency_fixture(), 0, 1).expect("split page");
-        let form = iff::parse_form(&extracted).expect("parse extracted page");
+        let form = iff::parse_form(&extracted).expect("parse extracted bundle");
+        assert_eq!(&form.form_type, b"DJVM");
 
+        let graph = ComponentGraph::parse(&extracted).expect("parse extracted graph");
+        let ids = graph
+            .nodes()
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["page0.djvu", "dictA.djvi"]);
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "the retained page INCL resolves within the extracted bundle"
+        );
+    }
+
+    #[test]
+    fn split_single_page_without_dependencies_returns_standalone_form_djvu() {
+        // A page that references no shared component keeps the standalone fast
+        // path. Extracting index 1 also covers the `page_idx += 1` skip.
+        let doc = split_bundled_fixture(vec![
+            split_component("page0.djvu", 1, *b"DJVU", vec![]),
+            split_component("page1.djvu", 1, *b"DJVU", vec![]),
+        ]);
+        let extracted = split(&doc, 1, 2).expect("split page");
+        let form = iff::parse_form(&extracted).expect("parse extracted page");
         assert_eq!(&form.form_type, b"DJVU");
     }
 
@@ -722,7 +772,18 @@ mod tests {
         }
         let result = split(&data, 1, 2).expect("split page 1");
         let form = iff::parse_form(&result).expect("parse split page");
-        assert_eq!(&form.form_type, b"DJVU");
+        // Page index 1 (p0002) INCLs the shared dict0020.iff, so its standalone
+        // extraction is now a self-contained bundle rather than a bare page with
+        // a dangling INCL. Its INCL must resolve within the extracted bundle.
+        assert_eq!(&form.form_type, b"DJVM");
+        let graph = ComponentGraph::parse(&result).expect("parse extracted graph");
+        assert!(
+            graph
+                .validate()
+                .iter()
+                .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            "the extracted page's INCL resolves within its bundle"
+        );
     }
 
     #[test]
