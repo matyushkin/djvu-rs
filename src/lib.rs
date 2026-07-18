@@ -289,6 +289,10 @@ mod export_common;
 #[cfg(feature = "std")]
 pub mod export_control;
 
+/// Test-only sinks for exercising streaming exporter failure contracts.
+#[cfg(all(test, feature = "std"))]
+pub(crate) mod export_test_support;
+
 /// DjVu to PDF converter — phase 6.
 ///
 /// Converts DjVu documents to PDF preserving structure: rasterized page images,
@@ -338,6 +342,10 @@ pub mod tiff_export;
 /// [`djvu_async::load_document_async_streaming`].
 #[cfg(feature = "async")]
 pub mod djvu_async;
+
+/// Async adapters for the synchronous PDF and DJVM streaming writers.
+#[cfg(feature = "async")]
+pub mod export_async;
 
 /// `image::ImageDecoder` integration — allows DjVu pages to be used as
 /// first-class image sources in the `image` crate ecosystem.

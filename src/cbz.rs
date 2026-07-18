@@ -73,7 +73,9 @@ pub fn djvu_to_cbz(doc: &DjVuDocument, opts: &CbzOptions) -> Result<Vec<u8>, Cbz
 /// Write every requested page into `zip` as `page_%04d.png` entries.
 ///
 /// Exposed crate-internally so the CLI can stream straight to a file instead
-/// of buffering the archive.
+/// of buffering the archive. On error, the ZIP sink may contain a partial
+/// archive; the library does not clean it up or provide atomic replacement
+/// (that policy belongs to the CLI/application layer).
 pub fn write_pages<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     doc: &DjVuDocument,
@@ -89,6 +91,10 @@ pub fn write_pages<W: Write + Seek>(
 /// With the `parallel` feature, cancellation is polled before each bounded
 /// render batch. Work already scheduled in the current batch may complete
 /// before the cancellation is observed.
+///
+/// On error, the ZIP's inner sink may contain a partial archive; the library
+/// does not clean it up or provide atomic replacement (that policy belongs to
+/// the CLI/application layer).
 pub fn write_pages_with_observer<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     doc: &DjVuDocument,
@@ -369,6 +375,22 @@ mod tests {
         let observed_bytes = observed_zip.finish().unwrap().into_inner();
 
         assert_eq!(observed_bytes, default_bytes);
+    }
+
+    #[test]
+    fn cbz_writer_failing_sink_returns_io_error() {
+        let doc = load_doc("chicken.djvu");
+        let mut zip = ZipWriter::new(crate::export_test_support::FailingWriter::after(2));
+
+        let error = write_pages(&mut zip, &doc, &CbzOptions::default())
+            .expect_err("injected sink failure must be returned");
+
+        assert!(
+            matches!(
+                error,
+                CbzError::Io(ref error) if error.kind() == std::io::ErrorKind::Other
+            ) || matches!(error, CbzError::Zip(zip::result::ZipError::Io(_)))
+        );
     }
 
     /// Page subset and rotation options are honoured.

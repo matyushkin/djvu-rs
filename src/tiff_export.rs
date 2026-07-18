@@ -144,6 +144,12 @@ pub fn djvu_to_tiff(doc: &DjVuDocument, opts: &TiffOptions) -> Result<Vec<u8>, T
 /// its strip and IFD. This keeps only one G4 payload active at a time, at the
 /// cost of doubling G4 render-and-encode CPU. Progress for that mode is
 /// reported only during the second, writing pass.
+///
+/// # Errors
+///
+/// On error, `writer` may contain a partial TIFF; the library does not clean it
+/// up or provide atomic replacement (that policy belongs to the CLI/application
+/// layer).
 pub fn djvu_to_tiff_writer<W: Write + Seek>(
     doc: &DjVuDocument,
     opts: &TiffOptions,
@@ -158,6 +164,10 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
 /// With the `parallel` feature, cancellation is polled before the parallel
 /// image-build batch. Work already scheduled in that batch may complete before
 /// the cancellation is observed.
+///
+/// On error, `writer` may contain a partial TIFF; the library does not clean it
+/// up or provide atomic replacement (that policy belongs to the CLI/application
+/// layer).
 pub fn djvu_to_tiff_writer_with_observer<W: Write + Seek>(
     doc: &DjVuDocument,
     opts: &TiffOptions,
@@ -903,6 +913,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(observed_cursor.into_inner(), default_cursor.into_inner());
+    }
+
+    #[test]
+    fn tiff_writer_failing_sink_returns_io_error() {
+        let doc = load_fixture_doc("chicken.djvu");
+        let error = djvu_to_tiff_writer(
+            &doc,
+            &TiffOptions::default(),
+            crate::export_test_support::FailingWriter::after(2),
+        )
+        .expect_err("injected sink failure must be returned");
+
+        assert!(
+            matches!(error, TiffError::Encode(message) if message.contains("injected sink failure"))
+        );
     }
 
     fn decode_first_tiff_rgb(tiff_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
