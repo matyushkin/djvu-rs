@@ -18,7 +18,7 @@
 //! std::fs::write("book.epub", epub_bytes).unwrap();
 //! ```
 
-use std::io::Write;
+use std::io::{Seek, Write};
 
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
@@ -108,9 +108,28 @@ impl Default for EpubOptions {
 ///
 /// Returns [`EpubError`] if page rendering or ZIP writing fails.
 pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, EpubError> {
-    let buf = Vec::new();
-    let cursor = std::io::Cursor::new(buf);
-    let mut zip = ZipWriter::new(cursor);
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    djvu_to_epub_writer(doc, opts, &mut cursor)?;
+    Ok(cursor.into_inner())
+}
+
+/// Convert a DjVu document to EPUB 3 and write it directly to `sink`.
+///
+/// `sink` must implement [`Seek`] because ZIP writes its central directory
+/// after the file entries. The generated EPUB is otherwise streamed directly
+/// to the sink, retaining only the active page's artifacts (or one bounded
+/// parallel batch) in memory.
+///
+/// # Errors
+///
+/// Returns [`EpubError`] if page rendering or ZIP writing fails. On error,
+/// `sink` may contain a partial EPUB.
+pub fn djvu_to_epub_writer<W: Write + Seek>(
+    doc: &DjVuDocument,
+    opts: &EpubOptions,
+    sink: W,
+) -> Result<(), EpubError> {
+    let mut zip = ZipWriter::new(sink);
 
     // 1. mimetype — MUST be first and STORED (no compression), per EPUB spec
     zip.start_file(
@@ -129,32 +148,37 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
     // 3. Per-page content. Building a page's artifacts (render → PNG encode →
     //    text overlay → XHTML) is independent per page and CPU-heavy; only the
     //    ZIP writing must be serial (a single `ZipWriter`, not `Send`). With the
-    //    `parallel` feature, build every page's artifacts concurrently via rayon,
-    //    then write them in index order — mirrors the PDF parallel exporter
+    //    `parallel` feature, build bounded batches concurrently via rayon, then
+    //    write each batch in index order — mirrors the PDF parallel exporter
     //    (#298). Output bytes are identical to the sequential path.
     let page_count = doc.page_count();
-    let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
 
-    let mut image_names: Vec<String> = Vec::with_capacity(indices.len());
+    let mut image_names: Vec<String> = Vec::with_capacity(page_count);
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let artifacts: Vec<PageArtifacts> = indices
-            .par_iter()
-            .map(|&i| {
-                // #629: cold clone — decode caches drop with the page.
-                let page = doc.page(i)?.clone();
-                build_page_artifacts(&page, i, opts)
-            })
-            .collect::<Result<Vec<_>, EpubError>>()?;
-        for art in &artifacts {
-            write_page_artifacts(&mut zip, art)?;
-            image_names.push(art.img_name.clone());
+        let chunk = rayon::current_num_threads().max(1) * 8;
+        let mut start = 0;
+        while start < page_count {
+            let end = (start + chunk).min(page_count);
+            let artifacts: Vec<PageArtifacts> = (start..end)
+                .into_par_iter()
+                .map(|i| {
+                    // #629: cold clone — decode caches drop with the page.
+                    let page = doc.page(i)?.clone();
+                    build_page_artifacts(&page, i, opts)
+                })
+                .collect::<Result<_, EpubError>>()?;
+            for art in &artifacts {
+                write_page_artifacts(&mut zip, art)?;
+                image_names.push(art.img_name.clone());
+            }
+            start = end;
         }
     }
 
     #[cfg(not(feature = "parallel"))]
-    for &i in &indices {
+    for i in 0..page_count {
         // #629: cold clone — decode caches drop with the page.
         let page = doc.page(i)?.clone();
         let art = build_page_artifacts(&page, i, opts)?;
@@ -178,8 +202,8 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
     )?;
     zip.write_all(opf.as_bytes())?;
 
-    let cursor = zip.finish()?;
-    Ok(cursor.into_inner())
+    zip.finish()?;
+    Ok(())
 }
 
 // ── Per-page writer ───────────────────────────────────────────────────────────
@@ -199,8 +223,8 @@ struct PageArtifacts {
 
 /// Write one page's pre-built artifacts into the ZIP, in the same order and with
 /// the same compression methods the old inline writer used.
-fn write_page_artifacts(
-    zip: &mut ZipWriter<std::io::Cursor<Vec<u8>>>,
+fn write_page_artifacts<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
     art: &PageArtifacts,
 ) -> Result<(), EpubError> {
     zip.start_file(

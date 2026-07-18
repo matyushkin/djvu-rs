@@ -820,8 +820,12 @@ fn render_epub_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std:
 
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-    let epub = djvu_rs::epub::djvu_to_epub(&doc, &djvu_rs::epub::EpubOptions::default())?;
-    std::fs::write(output, epub)?;
+    // Stream straight to the file — the whole EPUB is never buffered.
+    let file = std::fs::File::create(output)?;
+    let mut writer = std::io::BufWriter::new(file);
+    djvu_rs::epub::djvu_to_epub_writer(&doc, &djvu_rs::epub::EpubOptions::default(), &mut writer)?;
+    use std::io::Write;
+    writer.flush()?;
     Ok(())
 }
 

@@ -3,12 +3,12 @@
 //! A CBZ is a ZIP of page images. Pages are rendered to RGBA, PNG-encoded and
 //! stored uncompressed (PNG is already deflated). Building a page's PNG is
 //! independent per page and CPU-heavy; only the ZIP writing must be serial (a
-//! single `ZipWriter`). With the `parallel` feature every page's PNG is built
-//! concurrently via rayon and written in index order — the same
+//! single `ZipWriter`). With the `parallel` feature bounded batches of PNGs are
+//! built concurrently via rayon and written in index order — the same
 //! render-parallel/write-serial split as the EPUB and PDF exporters (#298,
 //! #598). Output bytes are identical to the sequential path.
 
-use std::io::Write;
+use std::io::{Seek, Write};
 
 use zip::CompressionMethod;
 use zip::ZipWriter;
@@ -70,39 +70,78 @@ pub fn djvu_to_cbz(doc: &DjVuDocument, opts: &CbzOptions) -> Result<Vec<u8>, Cbz
 ///
 /// Exposed crate-internally so the CLI can stream straight to a file instead
 /// of buffering the archive.
-pub fn write_pages<W: Write + std::io::Seek>(
+pub fn write_pages<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     doc: &DjVuDocument,
     opts: &CbzOptions,
 ) -> Result<(), CbzError> {
-    let indices: Vec<usize> = match &opts.pages {
-        Some(p) => p.clone(),
-        None => (0..doc.page_count()).collect(),
-    };
-
     let entry_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
     // #629: pages render on cold clones so decode caches drop per page
     // instead of accumulating O(pages) on the document.
     #[cfg(feature = "parallel")]
-    let pngs: Vec<Vec<u8>> = {
+    {
         use rayon::prelude::*;
-        indices
-            .par_iter()
-            .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
-            .collect::<Result<Vec<_>, CbzError>>()?
-    };
+        // Keep the parallel speedup while retaining only one bounded batch of
+        // rendered PNGs. The ZIP writer remains serial, so each batch is
+        // written in page order before the next batch is rendered.
+        let chunk = rayon::current_num_threads().max(1) * 8;
+        match &opts.pages {
+            Some(indices) => {
+                for (chunk_index, indices) in indices.chunks(chunk).enumerate() {
+                    let pngs: Vec<Vec<u8>> = indices
+                        .par_iter()
+                        .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
+                        .collect::<Result<_, CbzError>>()?;
+                    for (offset, png) in pngs.iter().enumerate() {
+                        write_page_png(zip, chunk_index * chunk + offset + 1, png, entry_opts)?;
+                    }
+                }
+            }
+            None => {
+                let page_count = doc.page_count();
+                let mut start = 0;
+                while start < page_count {
+                    let end = (start + chunk).min(page_count);
+                    let pngs: Vec<Vec<u8>> = (start..end)
+                        .into_par_iter()
+                        .map(|i| build_page_png(&doc.page(i)?.clone(), opts))
+                        .collect::<Result<_, CbzError>>()?;
+                    for (offset, png) in pngs.iter().enumerate() {
+                        write_page_png(zip, start + offset + 1, png, entry_opts)?;
+                    }
+                    start = end;
+                }
+            }
+        }
+    }
 
     #[cfg(not(feature = "parallel"))]
-    let pngs: Vec<Vec<u8>> = indices
-        .iter()
-        .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
-        .collect::<Result<Vec<_>, CbzError>>()?;
-
-    for (n, png) in pngs.iter().enumerate() {
-        zip.start_file(format!("page_{:04}.png", n + 1), entry_opts)?;
-        zip.write_all(png)?;
+    match &opts.pages {
+        Some(indices) => {
+            for (index, &page_index) in indices.iter().enumerate() {
+                let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
+                write_page_png(zip, index + 1, &png, entry_opts)?;
+            }
+        }
+        None => {
+            for page_index in 0..doc.page_count() {
+                let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
+                write_page_png(zip, page_index + 1, &png, entry_opts)?;
+            }
+        }
     }
+    Ok(())
+}
+
+fn write_page_png<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    number: usize,
+    png: &[u8],
+    entry_opts: SimpleFileOptions,
+) -> Result<(), CbzError> {
+    zip.start_file(format!("page_{number:04}.png"), entry_opts)?;
+    zip.write_all(png)?;
     Ok(())
 }
 
@@ -191,6 +230,20 @@ mod tests {
         let a = djvu_to_cbz(&doc, &CbzOptions::default()).unwrap();
         let b = djvu_to_cbz(&doc, &CbzOptions::default()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cbz_vec_and_writer_exports_are_byte_identical() {
+        let doc = load_doc("boy.djvu");
+        let opts = CbzOptions::default();
+        let expected = djvu_to_cbz(&doc, &opts).unwrap();
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(cursor);
+        write_pages(&mut zip, &doc, &opts).unwrap();
+        let actual = zip.finish().unwrap().into_inner();
+
+        assert_eq!(actual, expected);
     }
 
     /// Page subset and rotation options are honoured.
