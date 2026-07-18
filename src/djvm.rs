@@ -17,6 +17,13 @@ use crate::{ComponentGraph, ComponentNodeKind};
 #[cfg(test)]
 use crate::djvu_document::DjVuDocument;
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SPOOL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Error type for DJVM merge, split, and conversion operations.
 #[derive(Debug, thiserror::Error)]
 pub enum DjvmError {
@@ -87,6 +94,329 @@ pub enum DjvmError {
         /// Direct `FORM` children in the bundle.
         children: usize,
     },
+
+    /// A streaming sink or temporary spool could not be read or written.
+    #[error("stream I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    /// The component, id, and flag slices passed to a convenience builder disagree.
+    #[error(
+        "component descriptor count mismatch (components: {components}, ids: {ids}, flags: {flags})"
+    )]
+    ComponentDescriptorCountMismatch {
+        /// Number of component byte slices.
+        components: usize,
+        /// Number of component ids.
+        ids: usize,
+        /// Number of component flags.
+        flags: usize,
+    },
+
+    /// More than `u16::MAX` components were supplied for one bundled DIRM.
+    #[error("bundled DIRM supports at most 65535 components (got {count})")]
+    TooManyComponents {
+        /// Number of requested components.
+        count: usize,
+    },
+}
+
+/// Storage policy for [`DjvmStreamWriter`] component bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DjvmSpool {
+    /// Spool into an in-memory buffer (bounded by total component bytes; use
+    /// only for modest documents).
+    Memory,
+    /// Spool into a temporary file in [`std::env::temp_dir`]. The writer holds
+    /// only the component currently passed to [`DjvmStreamWriter::add_component`]
+    /// in RAM; the file is removed when the writer finishes or is dropped.
+    TempFile,
+}
+
+struct SpoolComponent {
+    id: String,
+    flag: u8,
+    /// Length of the embedded component before its enclosing-DJVM alignment pad.
+    size: u32,
+}
+
+enum SpoolStorage {
+    Memory(Vec<u8>),
+    TempFile(TempFileSpool),
+}
+
+impl SpoolStorage {
+    fn new(spool: DjvmSpool) -> Result<Self, DjvmError> {
+        match spool {
+            DjvmSpool::Memory => Ok(Self::Memory(Vec::new())),
+            DjvmSpool::TempFile => Ok(Self::TempFile(TempFileSpool::create()?)),
+        }
+    }
+
+    fn write_component(&mut self, bytes: &[u8]) -> Result<(), DjvmError> {
+        match self {
+            Self::Memory(buffer) => {
+                buffer.extend_from_slice(bytes);
+                if bytes.len() % 2 == 1 {
+                    buffer.push(0);
+                }
+            }
+            Self::TempFile(spool) => {
+                spool.file_mut()?.write_all(bytes)?;
+                if bytes.len() % 2 == 1 {
+                    spool.file_mut()?.write_all(&[0])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_to<W: Write>(&mut self, sink: &mut W) -> Result<(), DjvmError> {
+        match self {
+            Self::Memory(buffer) => sink.write_all(buffer)?,
+            Self::TempFile(spool) => {
+                let file = spool.file_mut()?;
+                file.seek(SeekFrom::Start(0))?;
+                io::copy(file, sink)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A temporary component spool which is removed on every exit path.
+///
+/// The path remains linked while the writer is active so creation failures and
+/// cleanup are observable on every supported platform. Drop closes the file
+/// first, then removes the path; that is the Windows-compatible fallback for
+/// platforms which cannot unlink an open file.
+struct TempFileSpool {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl TempFileSpool {
+    fn create() -> Result<Self, DjvmError> {
+        let directory = std::env::temp_dir();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        for _ in 0..128 {
+            let counter = SPOOL_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(
+                "djvu-rs-djvm-spool-{}-{timestamp}-{counter}",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        file: Some(file),
+                        path,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not create a unique DJVM spool file",
+        )
+        .into())
+    }
+
+    fn file_mut(&mut self) -> Result<&mut File, DjvmError> {
+        self.file.as_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "DJVM spool file was closed before streaming completed",
+            )
+            .into()
+        })
+    }
+}
+
+impl Drop for TempFileSpool {
+    fn drop(&mut self) {
+        // Windows cannot remove an open file. Taking it here closes the handle
+        // before the best-effort deletion; Unix follows the same cleanup path.
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Incrementally builds a bundled `FORM:DJVM` document into a [`Write`] sink.
+///
+/// [`Self::add_component`] accepts either a complete standalone `AT&T`-prefixed
+/// component file or the same component with only that four-byte `AT&T` prefix
+/// removed (a bare `FORM` sub-FORM). Components are embedded unchanged after
+/// stripping only the optional magic. `flag` is the DIRM kind: `0` shared,
+/// `1` page, or `2` thumbnail.
+pub struct DjvmStreamWriter<W: Write> {
+    sink: W,
+    spool: SpoolStorage,
+    components: Vec<SpoolComponent>,
+    document_chunks: Vec<iff::Chunk>,
+}
+
+impl<W: Write> DjvmStreamWriter<W> {
+    /// Start a bundled DJVM writer using the chosen component spool policy.
+    pub fn new(sink: W, spool: DjvmSpool) -> Result<Self, DjvmError> {
+        Ok(Self {
+            sink,
+            spool: SpoolStorage::new(spool)?,
+            components: Vec::new(),
+            document_chunks: Vec::new(),
+        })
+    }
+
+    /// Append one standalone `AT&T` component or bare `FORM` sub-FORM.
+    ///
+    /// The supplied bytes are spooled immediately. In [`DjvmSpool::TempFile`]
+    /// mode, the writer retains only this borrowed component while this call is
+    /// running; the recorded directory data is just id, flag, and byte length.
+    pub fn add_component(&mut self, id: &str, flag: u8, bytes: &[u8]) -> Result<(), DjvmError> {
+        if self.components.len() == usize::from(u16::MAX) {
+            return Err(DjvmError::TooManyComponents {
+                count: self.components.len() + 1,
+            });
+        }
+
+        let component = strip_att(bytes);
+        let size = u32::try_from(component.len()).map_err(|_| DjvmError::OutputTooLarge)?;
+        self.spool.write_component(component)?;
+        self.components.push(SpoolComponent {
+            id: id.to_string(),
+            flag,
+            size,
+        });
+        Ok(())
+    }
+
+    /// Append a document-level leaf chunk (for example `NAVM`) after `DIRM`
+    /// and before the bundled component FORMs.
+    pub fn add_document_chunk(&mut self, chunk_id: [u8; 4], data: &[u8]) -> Result<(), DjvmError> {
+        self.document_chunks.push(iff::Chunk::Leaf {
+            id: chunk_id,
+            data: data.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// Add an already-parsed document chunk for the vector convenience API.
+    ///
+    /// This retains the canonical IFF re-framing behavior for unusual document
+    /// chunks which are themselves `FORM`s. The public API intentionally
+    /// exposes only leaf chunks because DJVM document chunks such as `NAVM`
+    /// are leaf payloads.
+    fn add_document_iff_chunk(&mut self, chunk: &iff::Chunk) {
+        self.document_chunks.push(chunk.clone());
+    }
+
+    /// Write the final header, DIRM, document chunks, and spooled components,
+    /// returning the sink.
+    pub fn finish(self) -> Result<W, DjvmError> {
+        let Self {
+            mut sink,
+            mut spool,
+            components,
+            document_chunks,
+        } = self;
+        let component_count = components.len();
+        let ids = components
+            .iter()
+            .map(|component| component.id.clone())
+            .collect::<Vec<_>>();
+        let flags = components
+            .iter()
+            .map(|component| component.flag)
+            .collect::<Vec<_>>();
+        let sizes = components
+            .iter()
+            .map(|component| component.size)
+            .collect::<Vec<_>>();
+        let mut dirm = DirmPayload::build_bundled(component_count, &flags, &ids, &sizes);
+
+        // The offset table is fixed-width and comes before the BZZ metadata.
+        // Its final contents cannot affect the DIRM chunk's framed size, so all
+        // component starts are known before any component is copied to `sink`.
+        let provisional_dirm_chunk = iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm.encode(),
+        };
+        let dirm_size = iff::emitted_size(&provisional_dirm_chunk);
+        let document_chunk_size = document_chunks.iter().try_fold(0usize, |total, chunk| {
+            total
+                .checked_add(iff::emitted_size(chunk))
+                .ok_or(DjvmError::OutputTooLarge)
+        })?;
+        let mut offset = 16usize
+            .checked_add(dirm_size)
+            .and_then(|total| total.checked_add(document_chunk_size))
+            .ok_or(DjvmError::OutputTooLarge)?;
+        dirm.offsets = components
+            .iter()
+            .map(|component| {
+                let current = u32::try_from(offset).map_err(|_| DjvmError::OutputTooLarge)?;
+                let component_size =
+                    usize::try_from(component.size).map_err(|_| DjvmError::OutputTooLarge)?;
+                offset = offset
+                    .checked_add(component_size)
+                    .and_then(|total| total.checked_add(component_size % 2))
+                    .ok_or(DjvmError::OutputTooLarge)?;
+                Ok(current)
+            })
+            .collect::<Result<Vec<_>, DjvmError>>()?;
+        let dirm_chunk = iff::Chunk::Leaf {
+            id: *b"DIRM",
+            data: dirm.encode(),
+        };
+        debug_assert_eq!(
+            iff::emitted_size(&dirm_chunk),
+            dirm_size,
+            "fixed-width DIRM offsets must not change the layout"
+        );
+
+        // `partial_emit_with_offsets` starts every part after AT&T + FORM +
+        // length + DJVM (16 bytes). `offset` is therefore exactly the final
+        // outer FORM payload length plus its 12-byte prologue.
+        let form_payload_length = offset.checked_sub(12).ok_or(DjvmError::OutputTooLarge)?;
+        let form_payload_length =
+            u32::try_from(form_payload_length).map_err(|_| DjvmError::OutputTooLarge)?;
+
+        // Obtain the canonical AT&T/FORM/DJVM prologue from the IFF emission
+        // seam, patch only its already-reserved length field, then stream each
+        // child. This avoids hand-rolling IFF framing outside `djvu-iff`.
+        let mut header = iff::partial_emit(*b"DJVM", &[]).ok_or(DjvmError::OutputTooLarge)?;
+        debug_assert_eq!(header.len(), 16, "empty DJVM emission is its prologue");
+        header[8..12].copy_from_slice(&form_payload_length.to_be_bytes());
+        sink.write_all(&header)?;
+        write_emitted_chunk(&mut sink, &dirm_chunk)?;
+        for chunk in &document_chunks {
+            write_emitted_chunk(&mut sink, chunk)?;
+        }
+        spool.write_to(&mut sink)?;
+        drop(spool);
+        Ok(sink)
+    }
+}
+
+/// Write one child chunk using the IFF emission seam, omitting its temporary
+/// root prologue. The remaining bytes are exactly the child framing that
+/// `iff::partial_emit_with_offsets` would place in a DJVM payload.
+fn write_emitted_chunk<W: Write>(sink: &mut W, chunk: &iff::Chunk) -> Result<(), DjvmError> {
+    let emitted = iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(chunk)])
+        .ok_or(DjvmError::OutputTooLarge)?;
+    debug_assert_eq!(emitted.len() - 16, iff::emitted_size(chunk));
+    sink.write_all(&emitted[16..])?;
+    Ok(())
 }
 
 /// An indirect `FORM:DJVM` index and the external component files it resolves.
@@ -744,43 +1074,25 @@ fn build_djvm_with_document_chunks(
     flags: &[u8],
     document_chunks: &[iff::Chunk],
 ) -> Result<Vec<u8>, DjvmError> {
-    let n = components.len();
+    if components.len() != ids.len() || components.len() != flags.len() {
+        return Err(DjvmError::ComponentDescriptorCountMismatch {
+            components: components.len(),
+            ids: ids.len(),
+            flags: flags.len(),
+        });
+    }
 
-    // Each component includes the AT&T prefix — strip it for embedding. Its
-    // remaining length (FORM header + payload) is the DIRM size-table entry.
-    let stripped: Vec<&[u8]> = components.iter().map(|c| strip_att(c)).collect();
-    let sizes: Vec<u32> = stripped
-        .iter()
-        .map(|s| u32::try_from(s.len()).unwrap_or(0))
-        .collect();
-
-    // Two-pass emission (the `partial_emit_with_offsets` contract): pass 1
-    // learns where each component lands, pass 2 re-emits with the DIRM offset
-    // table filled in. The offset table is fixed-width and the size table is
-    // final from pass 1, so the layout cannot shift between passes. A zeroed
-    // offset table is rejected by DjVuLibre's DjVmDir ("no indirect entries
-    // allowed in bundled document", #657).
-    let mut payload = DirmPayload::build_bundled(n, flags, ids, &sizes);
-    let emit = |payload: &DirmPayload| -> Result<(Vec<u8>, Vec<usize>), DjvmError> {
-        let dirm = iff::Chunk::Leaf {
-            id: *b"DIRM",
-            data: payload.encode(),
-        };
-        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + document_chunks.len() + n);
-        parts.push(iff::EmitPart::Chunk(&dirm));
-        parts.extend(document_chunks.iter().map(iff::EmitPart::Chunk));
-        parts.extend(stripped.iter().map(|s| iff::EmitPart::Verbatim(s)));
-        iff::partial_emit_with_offsets(*b"DJVM", &parts).ok_or(DjvmError::OutputTooLarge)
-    };
-
-    let (_, offsets) = emit(&payload)?;
-    payload.offsets = offsets[1 + document_chunks.len()..] // preceding parts are DIRM + document chunks
-        .iter()
-        .map(|&o| u32::try_from(o).map_err(|_| DjvmError::OutputTooLarge))
-        .collect::<Result<_, _>>()?;
-    let (bytes, second_offsets) = emit(&payload)?;
-    debug_assert_eq!(offsets, second_offsets, "two-pass layout must be stable");
-    Ok(bytes)
+    // Keep every convenience API on the streaming implementation. The memory
+    // spool preserves the Vec-returning surface while the TempFile spool is
+    // available to callers whose documents cannot fit in a component Vec.
+    let mut writer = DjvmStreamWriter::new(Vec::new(), DjvmSpool::Memory)?;
+    for ((component, id), &flag) in components.iter().zip(ids).zip(flags) {
+        writer.add_component(id, flag, component)?;
+    }
+    for chunk in document_chunks {
+        writer.add_document_iff_chunk(chunk);
+    }
+    writer.finish()
 }
 
 /// Create an indirect (non-bundled) DJVM index file that references pages as
@@ -913,6 +1225,195 @@ mod tests {
             .map(|&offset| u32::try_from(offset).unwrap())
             .collect();
         emit(&dirm).0
+    }
+
+    fn stream_writer_fixture() -> (Vec<Vec<u8>>, Vec<String>, Vec<u8>, Vec<iff::Chunk>) {
+        let page = std::fs::read(fixture_path("chicken.djvu")).expect("read page fixture");
+        let navm_source = std::fs::read(fixture_path("navm_fgbz.djvu")).expect("read NAVM fixture");
+        let navm = iff::parse_form(&navm_source)
+            .expect("parse NAVM fixture")
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == *b"NAVM")
+            .expect("NAVM fixture contains NAVM")
+            .data
+            .to_vec();
+        let shared = wrap_sub_form(&split_component_body(&split_component(
+            "dict.djvi",
+            0,
+            *b"DJVI",
+            vec![(*b"Djbz", vec![1, 2, 3])],
+        )));
+        let thumbnail = wrap_sub_form(&split_component_body(&split_component(
+            "page.thum",
+            2,
+            *b"THUM",
+            vec![],
+        )));
+        (
+            vec![page, shared, thumbnail],
+            vec![
+                "page.djvu".to_string(),
+                "dict.djvi".to_string(),
+                "page.thum".to_string(),
+            ],
+            vec![1, 0, 2],
+            vec![iff::Chunk::Leaf {
+                id: *b"NAVM",
+                data: navm,
+            }],
+        )
+    }
+
+    /// Reference the established `partial_emit_with_offsets` implementation so
+    /// the streaming path is checked against the old canonical framing rather
+    /// than merely against its Vec convenience wrapper.
+    fn two_pass_djvm_reference(
+        components: &[Vec<u8>],
+        ids: &[String],
+        flags: &[u8],
+        document_chunks: &[iff::Chunk],
+    ) -> Vec<u8> {
+        let stripped = components
+            .iter()
+            .map(|component| strip_att(component))
+            .collect::<Vec<_>>();
+        let sizes = stripped
+            .iter()
+            .map(|component| u32::try_from(component.len()).expect("small fixture component"))
+            .collect::<Vec<_>>();
+        let mut dirm = DirmPayload::build_bundled(components.len(), flags, ids, &sizes);
+        let emit = |dirm: &DirmPayload| {
+            let dirm_chunk = iff::Chunk::Leaf {
+                id: *b"DIRM",
+                data: dirm.encode(),
+            };
+            let mut parts = Vec::with_capacity(1 + document_chunks.len() + stripped.len());
+            parts.push(iff::EmitPart::Chunk(&dirm_chunk));
+            parts.extend(document_chunks.iter().map(iff::EmitPart::Chunk));
+            parts.extend(
+                stripped
+                    .iter()
+                    .map(|component| iff::EmitPart::Verbatim(component)),
+            );
+            iff::partial_emit_with_offsets(*b"DJVM", &parts).expect("small reference DJVM")
+        };
+
+        let (_, offsets) = emit(&dirm);
+        dirm.offsets = offsets[1 + document_chunks.len()..]
+            .iter()
+            .map(|&offset| u32::try_from(offset).expect("small fixture offset"))
+            .collect();
+        emit(&dirm).0
+    }
+
+    fn temp_spool_path<W: Write>(writer: &DjvmStreamWriter<W>) -> PathBuf {
+        match &writer.spool {
+            SpoolStorage::TempFile(spool) => spool.path.clone(),
+            SpoolStorage::Memory(_) => panic!("expected a tempfile spool"),
+        }
+    }
+
+    #[test]
+    fn stream_writer_matches_vec_builder_and_parses_for_both_spools() {
+        let (components, ids, flags, document_chunks) = stream_writer_fixture();
+        let reference = two_pass_djvm_reference(&components, &ids, &flags, &document_chunks);
+        let expected = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)
+            .expect("build through vector convenience API");
+        assert_eq!(expected, reference, "Vec API must preserve old IFF framing");
+
+        for spool in [DjvmSpool::Memory, DjvmSpool::TempFile] {
+            let mut writer = DjvmStreamWriter::new(std::io::Cursor::new(Vec::new()), spool)
+                .expect("create stream writer");
+            for (index, ((component, id), &flag)) in
+                components.iter().zip(&ids).zip(&flags).enumerate()
+            {
+                // The public writer accepts both forms. Use a bare `FORM` for
+                // the shared component and standalone AT&T files for the rest.
+                let bytes = if index == 1 {
+                    &component[4..]
+                } else {
+                    component
+                };
+                writer
+                    .add_component(id, flag, bytes)
+                    .expect("spool component");
+            }
+            for chunk in &document_chunks {
+                let iff::Chunk::Leaf { id, data } = chunk else {
+                    panic!("fixture document chunks are leaves");
+                };
+                writer
+                    .add_document_chunk(*id, data)
+                    .expect("add NAVM chunk");
+            }
+            let actual = writer.finish().expect("finish stream writer").into_inner();
+
+            assert_eq!(actual, expected, "{spool:?} output must be byte-identical");
+            assert_eq!(actual, reference, "{spool:?} must match two-pass framing");
+            let document = DjVuDocument::parse(&actual).expect("parse streamed DJVM");
+            assert_eq!(document.page_count(), 1);
+            let graph = ComponentGraph::parse(&actual).expect("parse streamed component graph");
+            assert!(graph.validate().is_empty(), "streamed graph must validate");
+        }
+    }
+
+    #[test]
+    fn tempfile_spool_is_removed_after_finish_and_drop() {
+        let component = std::fs::read(fixture_path("chicken.djvu")).expect("read component");
+
+        let mut writer = DjvmStreamWriter::new(std::io::sink(), DjvmSpool::TempFile)
+            .expect("create tempfile writer");
+        let finished_path = temp_spool_path(&writer);
+        assert!(finished_path.exists(), "tempfile spool must be created");
+        writer
+            .add_component("page.djvu", 1, &component)
+            .expect("spool component");
+        writer.finish().expect("finish tempfile writer");
+        assert!(
+            !finished_path.exists(),
+            "finishing must close and remove the tempfile spool"
+        );
+
+        let dropped_path = {
+            let mut writer = DjvmStreamWriter::new(std::io::sink(), DjvmSpool::TempFile)
+                .expect("create tempfile writer");
+            let path = temp_spool_path(&writer);
+            writer
+                .add_component("page.djvu", 1, &component)
+                .expect("spool component");
+            assert!(path.exists(), "tempfile spool must remain until drop");
+            path
+        };
+        assert!(
+            !dropped_path.exists(),
+            "dropping an unfinished writer must remove the tempfile spool"
+        );
+    }
+
+    #[test]
+    fn tempfile_spool_keeps_large_component_stream_out_of_memory() {
+        let mut writer = DjvmStreamWriter::new(std::io::sink(), DjvmSpool::TempFile)
+            .expect("create tempfile writer");
+        let path = temp_spool_path(&writer);
+        let mut component = vec![0x5a; 100_000];
+        component[..4].copy_from_slice(b"FORM");
+
+        for index in 0..200 {
+            writer
+                .add_component(&format!("page-{index:04}.djvu"), 1, &component)
+                .expect("spool synthetic component");
+        }
+
+        assert!(matches!(&writer.spool, SpoolStorage::TempFile(_)));
+        assert_eq!(writer.components.len(), 200);
+        assert_eq!(
+            std::fs::metadata(&path).expect("inspect spool file").len(),
+            20_000_000,
+            "all synthetic component bytes reside in the tempfile spool"
+        );
+        writer.finish().expect("stream synthetic document to sink");
+        assert!(!path.exists(), "finishing removes the large spool file");
     }
 
     fn split_dependency_fixture() -> Vec<u8> {
