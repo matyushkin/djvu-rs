@@ -224,6 +224,14 @@ pub mod editor;
 #[cfg(feature = "std")]
 pub mod component_graph;
 
+/// Layered, non-rendering DjVu document validation.
+///
+/// Structural, dependency, and codec checks are available now. Semantic and
+/// resource layers are reserved for later validator slices so callers can rely
+/// on a stable finding schema from the first release.
+#[cfg(feature = "std")]
+pub mod validate;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
@@ -445,6 +453,13 @@ pub use editor::{
 // distinguish the module from the rest of the high-level document API.
 #[cfg(feature = "std")]
 pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
+
+/// Re-export the layered validation API for callers that prefer the crate root.
+#[cfg(feature = "std")]
+pub use validate::{
+    Finding, Layer as ValidationLayer, Severity, ValidateOptions, ValidationReport,
+    ValidationSummary,
+};
 
 /// Shared export progress and cancellation types.
 #[cfg(feature = "std")]

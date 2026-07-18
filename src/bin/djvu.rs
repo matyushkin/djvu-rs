@@ -4,7 +4,11 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
-use djvu_rs::{ComponentGraph, ComponentNodeKind, Document, iff::ChunkRecord};
+use djvu_rs::{
+    ComponentGraph, ComponentNodeKind, Document,
+    iff::ChunkRecord,
+    validate::{Layer as ValidationLayer, ValidateOptions, ValidationReport},
+};
 use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
@@ -47,6 +51,23 @@ enum Cmd {
         /// Output stable machine-readable JSON.
         #[arg(short, long)]
         json: bool,
+    },
+    /// Validate document structure, dependencies, and codec streams without rendering.
+    ///
+    /// Exits 0 when no errors are found; with --strict, warnings also exit 1.
+    /// Exits 1 for validation findings and 2 when the input file cannot be read.
+    Validate {
+        /// Path to the DjVu file.
+        file: PathBuf,
+        /// Treat warnings as a failing result for the process exit code.
+        #[arg(long)]
+        strict: bool,
+        /// Output stable machine-readable JSON.
+        #[arg(short, long)]
+        json: bool,
+        /// Decode IW44 coefficients and JB2 symbols, without RGB rendering.
+        #[arg(long)]
+        decode_pages: bool,
     },
     /// Render pages to PNG, PDF, CBZ, or EPUB.
     Render {
@@ -330,6 +351,12 @@ enum Layer {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
+        if let Some(exit) = e.downcast_ref::<ValidateExit>() {
+            if !exit.silent {
+                eprintln!("error: {exit}");
+            }
+            std::process::exit(exit.code);
+        }
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -339,6 +366,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Cmd::Info { file, count, json } => cmd_info(&file, count, json),
         Cmd::Inspect { file, json } => cmd_inspect(&file, json),
+        Cmd::Validate {
+            file,
+            strict,
+            json,
+            decode_pages,
+        } => cmd_validate(&file, strict, json, decode_pages),
         Cmd::Render {
             file,
             page,
@@ -420,6 +453,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 }
+
+#[derive(Debug)]
+struct ValidateExit {
+    code: i32,
+    silent: bool,
+    message: String,
+}
+
+impl std::fmt::Display for ValidateExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ValidateExit {}
 
 // ── optimize ─────────────────────────────────────────────────────────────────
 
@@ -671,6 +719,111 @@ fn cmd_inspect(path: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>
     }
 
     Ok(())
+}
+
+// ── validate ────────────────────────────────────────────────────────────────
+
+fn cmd_validate(
+    path: &Path,
+    strict: bool,
+    json: bool,
+    decode_pages: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read(path).map_err(|error| ValidateExit {
+        code: 2,
+        silent: false,
+        message: format!("cannot read {}: {error}", path.display()),
+    })?;
+    let options = ValidateOptions {
+        strict,
+        decode_pages,
+    };
+    let report = djvu_rs::validate::validate(&data, &options);
+    let summary = report.summary();
+
+    if json {
+        println!("{}", serde_json::to_string(&validate_json(path, &report))?);
+    } else {
+        print_validate_human(&report);
+    }
+
+    if !report.is_valid() || (strict && summary.warnings > 0) {
+        return Err(Box::new(ValidateExit {
+            code: 1,
+            silent: true,
+            message: String::new(),
+        }));
+    }
+    Ok(())
+}
+
+fn print_validate_human(report: &ValidationReport) {
+    for layer in [
+        ValidationLayer::Structural,
+        ValidationLayer::Dependency,
+        ValidationLayer::Codec,
+        ValidationLayer::Semantic,
+        ValidationLayer::Resource,
+    ] {
+        let findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.layer == layer)
+            .collect::<Vec<_>>();
+        if findings.is_empty() {
+            continue;
+        }
+        println!("{}:", layer.as_str());
+        for finding in findings {
+            let location = match (&finding.component, &finding.chunk, finding.offset) {
+                (Some(component), Some(chunk), Some(offset)) => {
+                    format!(" [{component} {chunk} @ {offset}]")
+                }
+                (Some(component), Some(chunk), None) => format!(" [{component} {chunk}]"),
+                (Some(component), None, Some(offset)) => format!(" [{component} @ {offset}]"),
+                (None, Some(chunk), Some(offset)) => format!(" [{chunk} @ {offset}]"),
+                (Some(component), None, None) => format!(" [{component}]"),
+                (None, Some(chunk), None) => format!(" [{chunk}]"),
+                (None, None, Some(offset)) => format!(" [@ {offset}]"),
+                (None, None, None) => String::new(),
+            };
+            println!(
+                "  {} {}{}: {}",
+                finding.severity.as_str().to_uppercase(),
+                finding.code,
+                location,
+                finding.message
+            );
+        }
+    }
+    let summary = report.summary();
+    println!(
+        "{} errors, {} warnings, {} tolerated, {} recovery",
+        summary.errors, summary.warnings, summary.tolerated, summary.recovery
+    );
+}
+
+fn validate_json(path: &Path, report: &ValidationReport) -> Value {
+    let summary = report.summary();
+    json!({
+        "file": path.display().to_string(),
+        "valid": report.is_valid(),
+        "summary": {
+            "errors": summary.errors,
+            "warnings": summary.warnings,
+            "tolerated": summary.tolerated,
+            "recovery": summary.recovery,
+        },
+        "findings": report.findings.iter().map(|finding| json!({
+            "severity": finding.severity.as_str(),
+            "layer": finding.layer.as_str(),
+            "code": finding.code,
+            "component": &finding.component,
+            "chunk": &finding.chunk,
+            "offset": finding.offset,
+            "message": &finding.message,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn inspect_components(data: &[u8], chunks: &[ChunkRecord]) -> Option<InspectComponents> {
