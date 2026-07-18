@@ -285,6 +285,10 @@ mod lenient_text;
 #[cfg(feature = "std")]
 mod export_common;
 
+/// Shared progress reporting and cooperative cancellation for export writers.
+#[cfg(feature = "std")]
+pub mod export_control;
+
 /// DjVu to PDF converter — phase 6.
 ///
 /// Converts DjVu documents to PDF preserving structure: rasterized page images,
@@ -433,6 +437,10 @@ pub use editor::{
 // distinguish the module from the rest of the high-level document API.
 #[cfg(feature = "std")]
 pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
+
+/// Shared export progress and cancellation types.
+#[cfg(feature = "std")]
+pub use export_control::{ExportObserver, NoOpObserver};
 
 // Re-export new phase-1 page info types
 pub use info::{PageInfo, Rotation};

@@ -450,6 +450,21 @@ fn equivalent_paths(input: &Path, output: &Path) -> Result<bool, Box<dyn std::er
 }
 
 fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    write_atomic_with(output, |mut file| {
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })
+}
+
+/// Write an output through a sibling temporary path, committing it only after
+/// `write` succeeds. The temporary path is always removed when `write` or the
+/// final rename fails, so an existing destination is left untouched on error.
+fn write_atomic_with<F>(output: &Path, write: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce(std::fs::File) -> Result<(), Box<dyn std::error::Error>>,
+{
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -461,17 +476,13 @@ fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::E
         .ok_or("--output must name a file")?
         .to_string_lossy();
     let temp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-    {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err(error.into());
-        }
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)?;
+    if let Err(error) = write(file) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
     }
     if let Err(error) = std::fs::rename(&temp, output) {
         let _ = std::fs::remove_file(&temp);
@@ -793,40 +804,48 @@ fn render_png(
 }
 
 fn render_pdf_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-    // Stream straight to the file (#606) — the whole PDF is never buffered.
-    let file = std::fs::File::create(output)?;
-    let mut writer = std::io::BufWriter::new(file);
-    djvu_rs::pdf::djvu_to_pdf_to_writer(&doc, &djvu_rs::pdf::PdfOptions::default(), &mut writer)?;
-    use std::io::Write;
-    writer.flush()?;
-    Ok(())
+    // Stream straight to a sibling temp file (#606), then atomically commit
+    // only a complete PDF — the whole document is never buffered.
+    write_atomic_with(output, |file| {
+        let mut writer = std::io::BufWriter::new(file);
+        djvu_rs::pdf::djvu_to_pdf_to_writer(
+            &doc,
+            &djvu_rs::pdf::PdfOptions::default(),
+            &mut writer,
+        )?;
+        use std::io::Write;
+        writer.flush()?;
+        writer
+            .into_inner()
+            .map_err(|error| error.into_error())?
+            .sync_all()?;
+        Ok(())
+    })
 }
 
 #[cfg(feature = "epub")]
 fn render_epub_structured(path: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-    // Stream straight to the file — the whole EPUB is never buffered.
-    let file = std::fs::File::create(output)?;
-    let mut writer = std::io::BufWriter::new(file);
-    djvu_rs::epub::djvu_to_epub_writer(&doc, &djvu_rs::epub::EpubOptions::default(), &mut writer)?;
-    use std::io::Write;
-    writer.flush()?;
-    Ok(())
+    // Stream straight to a sibling temp file, then atomically commit only a
+    // complete EPUB — the whole document is never buffered.
+    write_atomic_with(output, |file| {
+        let mut writer = std::io::BufWriter::new(file);
+        djvu_rs::epub::djvu_to_epub_writer(
+            &doc,
+            &djvu_rs::epub::EpubOptions::default(),
+            &mut writer,
+        )?;
+        use std::io::Write;
+        writer.flush()?;
+        writer
+            .into_inner()
+            .map_err(|error| error.into_error())?
+            .sync_all()?;
+        Ok(())
+    })
 }
 
 fn render_cbz(
@@ -844,12 +863,6 @@ fn render_cbz(
         Some(vec![page_idx(page, count)?])
     };
 
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
     let opts = djvu_rs::cbz::CbzOptions {
@@ -858,11 +871,12 @@ fn render_cbz(
         pages,
     };
 
-    let file = std::fs::File::create(output)?;
-    let mut zip = zip::ZipWriter::new(file);
-    djvu_rs::cbz::write_pages(&mut zip, &doc, &opts)?;
-    zip.finish()?;
-    Ok(())
+    write_atomic_with(output, |file| {
+        let mut zip = zip::ZipWriter::new(file);
+        djvu_rs::cbz::write_pages(&mut zip, &doc, &opts)?;
+        zip.finish()?.sync_all()?;
+        Ok(())
+    })
 }
 
 /// Parallel PNG rendering: renders all pages concurrently using rayon, then
@@ -1458,4 +1472,29 @@ fn directory_image_entries(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
         .into());
     }
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_stream_failure_preserves_destination_and_cleans_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("export.pdf");
+        std::fs::write(&output, b"original destination").unwrap();
+        let temp = dir
+            .path()
+            .join(format!(".export.pdf.{}.tmp", std::process::id()));
+
+        let result = write_atomic_with(&output, |mut staged| {
+            use std::io::Write;
+            staged.write_all(b"partial export")?;
+            Err(std::io::Error::other("cancelled export").into())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"original destination");
+        assert!(!temp.exists(), "failed export must not leave a temp file");
+    }
 }
