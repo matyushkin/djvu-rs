@@ -26,6 +26,7 @@ use crate::{
     annotation::MapArea,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{RenderError, RenderOptions},
+    export_control::{ExportObserver, NoOpObserver},
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -45,6 +46,9 @@ pub enum EpubError {
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Export was cancelled by its observer.
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 // ── Options ───────────────────────────────────────────────────────────────────
@@ -129,6 +133,22 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
     opts: &EpubOptions,
     sink: W,
 ) -> Result<(), EpubError> {
+    let mut observer = NoOpObserver;
+    djvu_to_epub_writer_with_observer(doc, opts, sink, &mut observer)
+}
+
+/// Convert a DjVu document to EPUB 3 while reporting progress through
+/// `observer`.
+///
+/// With the `parallel` feature, cancellation is polled before each bounded
+/// render batch. Work already scheduled in the current batch may complete
+/// before the cancellation is observed.
+pub fn djvu_to_epub_writer_with_observer<W: Write + Seek>(
+    doc: &DjVuDocument,
+    opts: &EpubOptions,
+    sink: W,
+    observer: &mut dyn ExportObserver,
+) -> Result<(), EpubError> {
     let mut zip = ZipWriter::new(sink);
 
     // 1. mimetype — MUST be first and STORED (no compression), per EPUB spec
@@ -160,6 +180,9 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
         let chunk = rayon::current_num_threads().max(1) * 8;
         let mut start = 0;
         while start < page_count {
+            if observer.cancelled() {
+                return finish_cancelled_epub(zip);
+            }
             let end = (start + chunk).min(page_count);
             let artifacts: Vec<PageArtifacts> = (start..end)
                 .into_par_iter()
@@ -169,9 +192,13 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
                     build_page_artifacts(&page, i, opts)
                 })
                 .collect::<Result<_, EpubError>>()?;
-            for art in &artifacts {
+            for (offset, art) in artifacts.iter().enumerate() {
+                if observer.cancelled() {
+                    return finish_cancelled_epub(zip);
+                }
                 write_page_artifacts(&mut zip, art)?;
                 image_names.push(art.img_name.clone());
+                observer.on_progress(start + offset + 1, page_count);
             }
             start = end;
         }
@@ -179,11 +206,15 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
 
     #[cfg(not(feature = "parallel"))]
     for i in 0..page_count {
+        if observer.cancelled() {
+            return finish_cancelled_epub(zip);
+        }
         // #629: cold clone — decode caches drop with the page.
         let page = doc.page(i)?.clone();
         let art = build_page_artifacts(&page, i, opts)?;
         write_page_artifacts(&mut zip, &art)?;
         image_names.push(art.img_name.clone());
+        observer.on_progress(i + 1, page_count);
     }
 
     // 4. Navigation document
@@ -204,6 +235,13 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
 
     zip.finish()?;
     Ok(())
+}
+
+/// Finish the ZIP central directory so callers can inspect the valid partial
+/// archive produced before cancellation, then report cancellation.
+fn finish_cancelled_epub<W: Write + Seek>(zip: ZipWriter<W>) -> Result<(), EpubError> {
+    zip.finish()?;
+    Err(EpubError::Cancelled)
 }
 
 // ── Per-page writer ───────────────────────────────────────────────────────────
@@ -770,6 +808,104 @@ const CONTAINER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        progress: Vec<(usize, usize)>,
+        cancel_after: Option<usize>,
+    }
+
+    impl ExportObserver for RecordingObserver {
+        fn on_progress(&mut self, done: usize, total: usize) {
+            self.progress.push((done, total));
+        }
+
+        fn cancelled(&self) -> bool {
+            self.cancel_after
+                .is_some_and(|after| self.progress.len() >= after)
+        }
+    }
+
+    fn load_doc(name: &str) -> DjVuDocument {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name),
+        )
+        .unwrap();
+        DjVuDocument::parse(&data).unwrap()
+    }
+
+    #[test]
+    fn epub_writer_observer_reports_each_page_in_order() {
+        let doc = load_doc("vega.djvu");
+        let total = doc.page_count();
+        let opts = EpubOptions {
+            modified: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..EpubOptions::default()
+        };
+        let mut observer = RecordingObserver::default();
+
+        djvu_to_epub_writer_with_observer(
+            &doc,
+            &opts,
+            std::io::Cursor::new(Vec::new()),
+            &mut observer,
+        )
+        .expect("observer export must succeed");
+
+        assert_eq!(
+            observer.progress,
+            (1..=total).map(|done| (done, total)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn epub_writer_cancellation_leaves_only_completed_pages() {
+        let doc = load_doc("vega.djvu");
+        assert!(doc.page_count() > 1, "fixture must contain multiple pages");
+        let opts = EpubOptions {
+            modified: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..EpubOptions::default()
+        };
+        let mut observer = RecordingObserver {
+            cancel_after: Some(1),
+            ..RecordingObserver::default()
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+
+        let error = djvu_to_epub_writer_with_observer(&doc, &opts, &mut cursor, &mut observer)
+            .expect_err("observer must cancel the export");
+        assert!(matches!(error, EpubError::Cancelled));
+        assert_eq!(observer.progress.len(), 1);
+
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(cursor.into_inner()))
+            .expect("partial archive must remain readable");
+        let page_images = archive
+            .file_names()
+            .filter(|name| name.starts_with("OEBPS/images/"))
+            .count();
+        assert!(page_images <= 1, "no additional page may be written");
+    }
+
+    #[test]
+    fn epub_default_writer_delegates_to_noop_observer() {
+        let doc = load_doc("vega.djvu");
+        let opts = EpubOptions {
+            modified: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..EpubOptions::default()
+        };
+
+        let mut default_cursor = std::io::Cursor::new(Vec::new());
+        djvu_to_epub_writer(&doc, &opts, &mut default_cursor).unwrap();
+
+        let mut observed_cursor = std::io::Cursor::new(Vec::new());
+        let mut observer = NoOpObserver;
+        djvu_to_epub_writer_with_observer(&doc, &opts, &mut observed_cursor, &mut observer)
+            .unwrap();
+
+        assert_eq!(observed_cursor.into_inner(), default_cursor.into_inner());
+    }
 
     #[test]
     fn xml_escape_basic() {

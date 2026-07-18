@@ -16,6 +16,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
 use crate::djvu_render::{RenderError, RenderOptions, UserRotation, render_pixmap};
+use crate::export_control::{ExportObserver, NoOpObserver};
 
 /// Errors during CBZ conversion.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +36,9 @@ pub enum CbzError {
     /// PNG encoding error.
     #[error("png encode error: {0}")]
     Png(String),
+    /// Export was cancelled by its observer.
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 /// Options for CBZ conversion.
@@ -75,7 +79,27 @@ pub fn write_pages<W: Write + Seek>(
     doc: &DjVuDocument,
     opts: &CbzOptions,
 ) -> Result<(), CbzError> {
+    let mut observer = NoOpObserver;
+    write_pages_with_observer(zip, doc, opts, &mut observer)
+}
+
+/// Write every requested page into `zip` while reporting progress through
+/// `observer`.
+///
+/// With the `parallel` feature, cancellation is polled before each bounded
+/// render batch. Work already scheduled in the current batch may complete
+/// before the cancellation is observed.
+pub fn write_pages_with_observer<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    doc: &DjVuDocument,
+    opts: &CbzOptions,
+    observer: &mut dyn ExportObserver,
+) -> Result<(), CbzError> {
     let entry_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let total = opts
+        .pages
+        .as_ref()
+        .map_or_else(|| doc.page_count(), Vec::len);
 
     // #629: pages render on cold clones so decode caches drop per page
     // instead of accumulating O(pages) on the document.
@@ -89,12 +113,19 @@ pub fn write_pages<W: Write + Seek>(
         match &opts.pages {
             Some(indices) => {
                 for (chunk_index, indices) in indices.chunks(chunk).enumerate() {
+                    if observer.cancelled() {
+                        return Err(CbzError::Cancelled);
+                    }
                     let pngs: Vec<Vec<u8>> = indices
                         .par_iter()
                         .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
                         .collect::<Result<_, CbzError>>()?;
                     for (offset, png) in pngs.iter().enumerate() {
+                        if observer.cancelled() {
+                            return Err(CbzError::Cancelled);
+                        }
                         write_page_png(zip, chunk_index * chunk + offset + 1, png, entry_opts)?;
+                        observer.on_progress(chunk_index * chunk + offset + 1, total);
                     }
                 }
             }
@@ -102,13 +133,20 @@ pub fn write_pages<W: Write + Seek>(
                 let page_count = doc.page_count();
                 let mut start = 0;
                 while start < page_count {
+                    if observer.cancelled() {
+                        return Err(CbzError::Cancelled);
+                    }
                     let end = (start + chunk).min(page_count);
                     let pngs: Vec<Vec<u8>> = (start..end)
                         .into_par_iter()
                         .map(|i| build_page_png(&doc.page(i)?.clone(), opts))
                         .collect::<Result<_, CbzError>>()?;
                     for (offset, png) in pngs.iter().enumerate() {
+                        if observer.cancelled() {
+                            return Err(CbzError::Cancelled);
+                        }
                         write_page_png(zip, start + offset + 1, png, entry_opts)?;
+                        observer.on_progress(start + offset + 1, total);
                     }
                     start = end;
                 }
@@ -120,14 +158,22 @@ pub fn write_pages<W: Write + Seek>(
     match &opts.pages {
         Some(indices) => {
             for (index, &page_index) in indices.iter().enumerate() {
+                if observer.cancelled() {
+                    return Err(CbzError::Cancelled);
+                }
                 let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
                 write_page_png(zip, index + 1, &png, entry_opts)?;
+                observer.on_progress(index + 1, total);
             }
         }
         None => {
             for page_index in 0..doc.page_count() {
+                if observer.cancelled() {
+                    return Err(CbzError::Cancelled);
+                }
                 let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
                 write_page_png(zip, page_index + 1, &png, entry_opts)?;
+                observer.on_progress(page_index + 1, total);
             }
         }
     }
@@ -190,6 +236,23 @@ fn build_page_png(page: &DjVuPage, opts: &CbzOptions) -> Result<Vec<u8>, CbzErro
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingObserver {
+        progress: Vec<(usize, usize)>,
+        cancel_after: Option<usize>,
+    }
+
+    impl ExportObserver for RecordingObserver {
+        fn on_progress(&mut self, done: usize, total: usize) {
+            self.progress.push((done, total));
+        }
+
+        fn cancelled(&self) -> bool {
+            self.cancel_after
+                .is_some_and(|after| self.progress.len() >= after)
+        }
+    }
+
     fn load_doc(name: &str) -> DjVuDocument {
         let data = std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -244,6 +307,68 @@ mod tests {
         let actual = zip.finish().unwrap().into_inner();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cbz_writer_observer_reports_each_page_in_order() {
+        let doc = load_doc("vega.djvu");
+        let total = doc.page_count();
+        let mut observer = RecordingObserver::default();
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(cursor);
+
+        write_pages_with_observer(&mut zip, &doc, &CbzOptions::default(), &mut observer)
+            .expect("observer export must succeed");
+
+        assert_eq!(
+            observer.progress,
+            (1..=total).map(|done| (done, total)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cbz_writer_cancellation_leaves_only_completed_pages() {
+        let doc = load_doc("vega.djvu");
+        assert!(doc.page_count() > 1, "fixture must contain multiple pages");
+        let mut observer = RecordingObserver {
+            cancel_after: Some(1),
+            ..RecordingObserver::default()
+        };
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(cursor);
+
+        let error =
+            write_pages_with_observer(&mut zip, &doc, &CbzOptions::default(), &mut observer)
+                .expect_err("observer must cancel the export");
+        assert!(matches!(error, CbzError::Cancelled));
+        assert_eq!(observer.progress.len(), 1);
+
+        let bytes = zip
+            .finish()
+            .expect("partial archive must finish")
+            .into_inner();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .expect("partial archive must remain readable");
+        assert!(archive.len() <= 1, "no additional page may be written");
+    }
+
+    #[test]
+    fn cbz_default_writer_delegates_to_noop_observer() {
+        let doc = load_doc("vega.djvu");
+        let opts = CbzOptions::default();
+
+        let default_cursor = std::io::Cursor::new(Vec::new());
+        let mut default_zip = ZipWriter::new(default_cursor);
+        write_pages(&mut default_zip, &doc, &opts).unwrap();
+        let default_bytes = default_zip.finish().unwrap().into_inner();
+
+        let observed_cursor = std::io::Cursor::new(Vec::new());
+        let mut observed_zip = ZipWriter::new(observed_cursor);
+        let mut observer = NoOpObserver;
+        write_pages_with_observer(&mut observed_zip, &doc, &opts, &mut observer).unwrap();
+        let observed_bytes = observed_zip.finish().unwrap().into_inner();
+
+        assert_eq!(observed_bytes, default_bytes);
     }
 
     /// Page subset and rotation options are honoured.

@@ -36,6 +36,7 @@ use tiff::tags::ResolutionUnit;
 use crate::{
     djvu_document::{DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderError, RenderOptions},
+    export_control::{ExportObserver, NoOpObserver},
 };
 
 // ---- Error ------------------------------------------------------------------
@@ -54,6 +55,10 @@ pub enum TiffError {
     /// TIFF encoding error.
     #[error("TIFF encoding error: {0}")]
     Encode(String),
+
+    /// Export was cancelled by its observer.
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 impl From<tiff::TiffError> for TiffError {
@@ -139,11 +144,27 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
     opts: &TiffOptions,
     writer: W,
 ) -> Result<(), TiffError> {
+    let mut observer = NoOpObserver;
+    djvu_to_tiff_writer_with_observer(doc, opts, writer, &mut observer)
+}
+
+/// Convert a DjVu document to TIFF while reporting progress through `observer`.
+///
+/// With the `parallel` feature, cancellation is polled before the parallel
+/// image-build batch. Work already scheduled in that batch may complete before
+/// the cancellation is observed.
+pub fn djvu_to_tiff_writer_with_observer<W: Write + Seek>(
+    doc: &DjVuDocument,
+    opts: &TiffOptions,
+    writer: W,
+    observer: &mut dyn ExportObserver,
+) -> Result<(), TiffError> {
     if opts.mode == TiffMode::Bilevel && opts.bilevel_compression == TiffBilevelCompression::G4 {
-        return write_bilevel_g4_tiff(doc, writer);
+        return write_bilevel_g4_tiff(doc, writer, observer);
     }
     let mut encoder = TiffEncoder::new(writer)?;
     let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
+    let total = indices.len();
 
     // Building a page's pixel buffer (color: render → RGB; bilevel: JB2 decode →
     // Gray8) is independent and CPU-heavy per page; only appending IFDs to the
@@ -157,6 +178,9 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
+        if observer.cancelled() {
+            return Err(TiffError::Cancelled);
+        }
         let images: Vec<PageImage> = indices
             .par_iter()
             .map(|&i| {
@@ -165,19 +189,27 @@ pub fn djvu_to_tiff_writer<W: Write + Seek>(
                 build_page_image(&page, opts)
             })
             .collect::<Result<Vec<_>, TiffError>>()?;
-        for img in &images {
+        for (done, img) in images.iter().enumerate() {
+            if observer.cancelled() {
+                return Err(TiffError::Cancelled);
+            }
             write_page_image(&mut encoder, img)?;
+            observer.on_progress(done + 1, total);
         }
     }
 
     #[cfg(not(feature = "parallel"))]
-    for &i in &indices {
+    for (done, &i) in indices.iter().enumerate() {
+        if observer.cancelled() {
+            return Err(TiffError::Cancelled);
+        }
         // #629: cold clone — decode caches drop with the page.
         let page = doc.page(i)?.clone();
         match opts.mode {
             TiffMode::Color => write_color_page(&mut encoder, &page, opts.scale)?,
             TiffMode::Bilevel => write_bilevel_page(&mut encoder, &page)?,
         }
+        observer.on_progress(done + 1, total);
     }
     Ok(())
 }
@@ -416,7 +448,11 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
 // `smmr::encode_g4` T.6 payload (1 strip per page). Photometric is
 // min-is-white (0), matching T.6's white-first run convention and our mask's
 // 1 = black.
-fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Result<(), TiffError> {
+fn write_bilevel_g4_tiff<W: Write + Seek>(
+    doc: &DjVuDocument,
+    mut w: W,
+    observer: &mut dyn ExportObserver,
+) -> Result<(), TiffError> {
     let indices: Vec<usize> = crate::export_common::page_indices(doc, None).collect();
 
     // Encode every page's G4 payload first (parallel when available) — the
@@ -437,16 +473,25 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Resul
     #[cfg(feature = "parallel")]
     let pages: Vec<(u32, u32, u32, Vec<u8>)> = {
         use rayon::prelude::*;
+        if observer.cancelled() {
+            return Err(TiffError::Cancelled);
+        }
         indices
             .par_iter()
             .map(|&i| encode_one(i))
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let pages: Vec<(u32, u32, u32, Vec<u8>)> = indices
-        .iter()
-        .map(|&i| encode_one(i))
-        .collect::<Result<Vec<_>, _>>()?;
+    let pages: Vec<(u32, u32, u32, Vec<u8>)> = {
+        let mut pages = Vec::with_capacity(indices.len());
+        for &i in &indices {
+            if observer.cancelled() {
+                return Err(TiffError::Cancelled);
+            }
+            pages.push(encode_one(i)?);
+        }
+        pages
+    };
 
     let io = |e: std::io::Error| TiffError::Encode(e.to_string());
 
@@ -481,6 +526,9 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Resul
     for (idx, ((pw, ph, dpi, g4), &(strip_off, rat_off, ifd_off))) in
         pages.iter().zip(&layout).enumerate()
     {
+        if observer.cancelled() {
+            return Err(TiffError::Cancelled);
+        }
         debug_assert_eq!(pos, strip_off);
         w.write_all(g4).map_err(io)?;
         pos += g4.len() as u32;
@@ -520,6 +568,7 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(doc: &DjVuDocument, mut w: W) -> Resul
         };
         w.write_all(&next.to_le_bytes()).map_err(io)?;
         pos = ifd_off + ifd_size;
+        observer.on_progress(idx + 1, pages.len());
     }
     w.flush().map_err(io)?;
     Ok(())
@@ -605,6 +654,90 @@ mod tests {
         let data = std::fs::read(assets_path().join(filename))
             .unwrap_or_else(|_| panic!("{filename} must exist"));
         DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"))
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        progress: Vec<(usize, usize)>,
+        cancel_after: Option<usize>,
+    }
+
+    impl ExportObserver for RecordingObserver {
+        fn on_progress(&mut self, done: usize, total: usize) {
+            self.progress.push((done, total));
+        }
+
+        fn cancelled(&self) -> bool {
+            self.cancel_after
+                .is_some_and(|after| self.progress.len() >= after)
+        }
+    }
+
+    fn load_fixture_doc(filename: &str) -> DjVuDocument {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(filename),
+        )
+        .unwrap();
+        DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"))
+    }
+
+    #[test]
+    fn tiff_writer_observer_reports_each_page_in_order() {
+        let doc = load_fixture_doc("vega.djvu");
+        let total = doc.page_count();
+        let mut observer = RecordingObserver::default();
+
+        djvu_to_tiff_writer_with_observer(
+            &doc,
+            &TiffOptions::default(),
+            std::io::Cursor::new(Vec::new()),
+            &mut observer,
+        )
+        .expect("observer export must succeed");
+
+        assert_eq!(
+            observer.progress,
+            (1..=total).map(|done| (done, total)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tiff_writer_cancellation_stops_after_completed_page() {
+        let doc = load_fixture_doc("vega.djvu");
+        assert!(doc.page_count() > 1, "fixture must contain multiple pages");
+        let mut observer = RecordingObserver {
+            cancel_after: Some(1),
+            ..RecordingObserver::default()
+        };
+
+        let error = djvu_to_tiff_writer_with_observer(
+            &doc,
+            &TiffOptions::default(),
+            std::io::Cursor::new(Vec::new()),
+            &mut observer,
+        )
+        .expect_err("observer must cancel the export");
+
+        assert!(matches!(error, TiffError::Cancelled));
+        assert_eq!(observer.progress.len(), 1);
+    }
+
+    #[test]
+    fn tiff_default_writer_delegates_to_noop_observer() {
+        let doc = load_fixture_doc("vega.djvu");
+        let opts = TiffOptions::default();
+
+        let mut default_cursor = std::io::Cursor::new(Vec::new());
+        djvu_to_tiff_writer(&doc, &opts, &mut default_cursor).unwrap();
+
+        let mut observed_cursor = std::io::Cursor::new(Vec::new());
+        let mut observer = NoOpObserver;
+        djvu_to_tiff_writer_with_observer(&doc, &opts, &mut observed_cursor, &mut observer)
+            .unwrap();
+
+        assert_eq!(observed_cursor.into_inner(), default_cursor.into_inner());
     }
 
     fn decode_first_tiff_rgb(tiff_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
