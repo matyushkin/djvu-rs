@@ -314,8 +314,10 @@ fn validate_structural(data: &[u8], records: &[ChunkRecord], findings: &mut Vec<
                 None,
                 None,
                 None,
-                "indirect FORM:DJVM was structurally checked without resolving external components"
-                    .to_string(),
+                format!(
+                    "indirect FORM:DJVM was structurally checked without resolving \
+                     external components (document parse without a resolver: {error})"
+                ),
             ))
         }
         Err(error) => {
