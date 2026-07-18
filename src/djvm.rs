@@ -322,6 +322,10 @@ impl<W: Write> DjvmStreamWriter<W> {
 
     /// Write the final header, DIRM, document chunks, and spooled components,
     /// returning the sink.
+    ///
+    /// On error the sink may contain a partial DJVM. The library does not
+    /// clean it up or provide atomic replacement (that policy belongs to the
+    /// CLI/application layer).
     pub fn finish(self) -> Result<W, DjvmError> {
         let Self {
             mut sink,
@@ -1414,6 +1418,24 @@ mod tests {
         );
         writer.finish().expect("stream synthetic document to sink");
         assert!(!path.exists(), "finishing removes the large spool file");
+    }
+
+    #[test]
+    fn djvm_stream_writer_failing_sink_returns_io_error() {
+        let component = std::fs::read(fixture_path("chicken.djvu")).expect("read component");
+        let mut writer = DjvmStreamWriter::new(
+            crate::export_test_support::FailingWriter::after(2),
+            DjvmSpool::Memory,
+        )
+        .expect("construct stream writer");
+        writer
+            .add_component("page.djvu", 1, &component)
+            .expect("spool component before sink writes");
+
+        let error = writer
+            .finish()
+            .expect_err("injected sink failure must be returned");
+        assert!(matches!(error, DjvmError::Io(error) if error.kind() == io::ErrorKind::Other));
     }
 
     fn split_dependency_fixture() -> Vec<u8> {

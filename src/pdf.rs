@@ -1193,7 +1193,9 @@ pub fn djvu_to_pdf_with_options(
 /// # Errors
 ///
 /// Returns `PdfError` if page rendering, text layer parsing, or writing to
-/// `sink` fails. On error the sink is left with a partial PDF.
+/// `sink` fails. On error the sink may contain a partial PDF; the library does
+/// not clean it up or provide atomic replacement (that policy belongs to the
+/// CLI/application layer).
 pub fn djvu_to_pdf_to_writer<W: std::io::Write>(
     doc: &DjVuDocument,
     opts: &PdfOptions,
@@ -1208,6 +1210,10 @@ pub fn djvu_to_pdf_to_writer<W: std::io::Write>(
 /// With the `parallel` feature, cancellation is polled before each bounded
 /// render batch. Work already scheduled in the current batch may complete
 /// before the cancellation is observed.
+///
+/// On error, `sink` may contain a partial PDF; the library does not clean it
+/// up or provide atomic replacement (that policy belongs to the CLI/application
+/// layer).
 pub fn djvu_to_pdf_to_writer_with_observer<W: std::io::Write>(
     doc: &DjVuDocument,
     opts: &PdfOptions,
@@ -1678,6 +1684,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(observed_cursor.into_inner(), default_cursor.into_inner());
+    }
+
+    #[test]
+    fn pdf_writer_failing_sink_returns_io_error() {
+        let doc = load_fixture_doc("chicken.djvu");
+        let error = djvu_to_pdf_to_writer(
+            &doc,
+            &PdfOptions::default(),
+            crate::export_test_support::FailingWriter::after(2),
+        )
+        .expect_err("injected sink failure must be returned");
+
+        assert!(matches!(error, PdfError::Io(error) if error.kind() == std::io::ErrorKind::Other));
+    }
+
+    #[test]
+    #[ignore = "renders 100 synthetic pages to exercise the streaming sink path"]
+    fn large_synthetic_export_streams_through_counting_sink() {
+        const PAGE_COUNT: usize = 100;
+
+        let component = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/chicken.djvu"),
+        )
+        .expect("read source page");
+        let mut bundle =
+            crate::djvm::DjvmStreamWriter::new(Vec::new(), crate::djvm::DjvmSpool::Memory)
+                .expect("create synthetic bundle writer");
+        for page in 0..PAGE_COUNT {
+            bundle
+                .add_component(&format!("page_{page:04}.djvu"), 1, &component)
+                .expect("add synthetic page");
+        }
+        let bundled = bundle.finish().expect("finish synthetic bundle");
+        let doc =
+            crate::djvu_document::DjVuDocument::parse(&bundled).expect("parse synthetic bundle");
+        let mut observer = RecordingObserver::default();
+        let mut sink = crate::export_test_support::CountingWriter::default();
+
+        djvu_to_pdf_to_writer_with_observer(&doc, &PdfOptions::default(), &mut sink, &mut observer)
+            .expect("stream synthetic export into counting sink");
+
+        assert!(
+            sink.bytes_written() > 0,
+            "counting sink must receive output"
+        );
+        assert_eq!(
+            observer.progress,
+            (1..=PAGE_COUNT)
+                .map(|done| (done, PAGE_COUNT))
+                .collect::<Vec<_>>(),
+            "every synthetic page must complete before the export returns"
+        );
     }
 
     /// `PdfOptions::default()` uses jpeg_quality = Some(80).

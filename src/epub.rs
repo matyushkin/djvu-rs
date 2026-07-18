@@ -127,7 +127,9 @@ pub fn djvu_to_epub(doc: &DjVuDocument, opts: &EpubOptions) -> Result<Vec<u8>, E
 /// # Errors
 ///
 /// Returns [`EpubError`] if page rendering or ZIP writing fails. On error,
-/// `sink` may contain a partial EPUB.
+/// `sink` may contain a partial EPUB; the library does not clean it up or
+/// provide atomic replacement (that policy belongs to the CLI/application
+/// layer).
 pub fn djvu_to_epub_writer<W: Write + Seek>(
     doc: &DjVuDocument,
     opts: &EpubOptions,
@@ -143,6 +145,10 @@ pub fn djvu_to_epub_writer<W: Write + Seek>(
 /// With the `parallel` feature, cancellation is polled before each bounded
 /// render batch. Work already scheduled in the current batch may complete
 /// before the cancellation is observed.
+///
+/// On error, `sink` may contain a partial EPUB; the library does not clean it
+/// up or provide atomic replacement (that policy belongs to the CLI/application
+/// layer).
 pub fn djvu_to_epub_writer_with_observer<W: Write + Seek>(
     doc: &DjVuDocument,
     opts: &EpubOptions,
@@ -905,6 +911,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(observed_cursor.into_inner(), default_cursor.into_inner());
+    }
+
+    #[test]
+    fn epub_writer_failing_sink_returns_io_error() {
+        let doc = load_doc("chicken.djvu");
+        let opts = EpubOptions {
+            modified: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..EpubOptions::default()
+        };
+
+        let error = djvu_to_epub_writer(
+            &doc,
+            &opts,
+            crate::export_test_support::FailingWriter::after(2),
+        )
+        .expect_err("injected sink failure must be returned");
+
+        assert!(
+            matches!(
+                error,
+                EpubError::Io(ref error) if error.kind() == std::io::ErrorKind::Other
+            ) || matches!(error, EpubError::Zip(zip::result::ZipError::Io(_)))
+        );
     }
 
     #[test]
