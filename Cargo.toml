@@ -63,6 +63,7 @@ futures-core = { version = "0.3", optional = true }
 rayon = { version = "1", optional = true }
 memmap2 = { version = "0.9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 image = { version = "0.25", default-features = false, optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
@@ -90,7 +91,7 @@ std = ["dep:png", "dep:zune-jpeg", "djvu-zp/std", "djvu-bzz/std", "djvu-iff/std"
 pdf = ["std", "dep:miniz_oxide", "dep:jpeg-encoder"]
 # The CLI also writes CBZ archives, so it owns zip (+ flate2, see the `zip`
 # dependency comment) alongside the PDF writer it exposes.
-cli = ["pdf", "cbz", "dep:clap", "dep:zip", "dep:flate2"]
+cli = ["pdf", "cbz", "dep:clap", "dep:zip", "dep:flate2", "dep:serde_json"]
 jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]

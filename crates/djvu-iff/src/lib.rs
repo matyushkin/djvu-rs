@@ -33,6 +33,7 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
+use core::{fmt::Write as _, str};
 #[cfg(feature = "std")]
 use std::{string::String, vec::Vec};
 
@@ -67,6 +68,13 @@ pub enum IffError {
         id: [u8; 4],
         claimed: u32,
         available: usize,
+    },
+
+    /// A FORM nesting chain exceeded the structural inspection limit.
+    #[error("IFF FORM nesting exceeds the maximum depth of {max}")]
+    DepthLimitExceeded {
+        /// Maximum permitted FORM nesting depth.
+        max: usize,
     },
 
     /// The input ended unexpectedly in the middle of a chunk.
@@ -129,6 +137,30 @@ pub const MAGIC: [u8; 4] = *b"AT&T";
 
 /// A 4-byte chunk identifier (e.g., b"FORM", b"INFO", b"Sjbz").
 pub type ChunkId = [u8; 4];
+
+/// One chunk found by [`walk_chunks`].
+///
+/// `offset` is the absolute byte offset of the 8-byte IFF chunk header,
+/// measured from the start of the `AT&T` magic. `length` is the declared
+/// payload length from that header; for a `FORM`, it includes the four-byte
+/// secondary type. `depth` is zero for the root FORM. `path` is its child-index
+/// path, so the root path is empty and the third child of the root has path
+/// `[2]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRecord {
+    /// The four-byte IFF chunk identifier.
+    pub id: ChunkId,
+    /// The secondary FORM type when `id` is `FORM`.
+    pub form_type: Option<ChunkId>,
+    /// Absolute byte offset of the chunk header.
+    pub offset: usize,
+    /// Declared payload length from the chunk header.
+    pub length: usize,
+    /// FORM nesting depth, with the root FORM at zero.
+    pub depth: usize,
+    /// Zero-based child indexes from the root FORM to this chunk.
+    pub path: Vec<usize>,
+}
 
 /// A parsed IFF chunk — either a FORM container or a leaf data chunk.
 #[derive(Debug, Clone)]
@@ -232,6 +264,117 @@ pub fn parse(data: &[u8]) -> Result<DjvuFile, Error> {
 /// drives `parse_chunk`/`parse_children` into unbounded recursion → stack
 /// overflow on crafted input.
 const MAX_IFF_DEPTH: u32 = 64;
+
+/// Walk every IFF chunk in a DjVu document without constructing a chunk tree.
+///
+/// The walk is pre-order: a `FORM` record appears immediately before its child
+/// records. Offsets are absolute file-byte offsets pointing at each chunk's
+/// four-byte identifier, including the root `FORM` at offset four. The walker
+/// accepts harmless trailing bytes after the root FORM and trailing fragments
+/// shorter than a chunk header inside a FORM, matching the legacy parser's
+/// diagnostic tolerance. It rejects a truncated header or a chunk payload that
+/// exceeds its enclosing FORM.
+///
+/// This API uses only `alloc` and is available in `no_std` builds.
+pub fn walk_chunks(data: &[u8]) -> Result<Vec<ChunkRecord>, IffError> {
+    // Match `parse_form`'s framing requirements and errors for the document
+    // prologue, then use our own recursive walk to retain byte positions.
+    if data.len() < 16 {
+        return Err(IffError::TooShort);
+    }
+
+    let magic = read_4(data, 0)?;
+    if magic != MAGIC {
+        return Err(IffError::BadMagic { got: magic });
+    }
+    if read_4(data, 4)? != *b"FORM" {
+        return Err(IffError::Truncated);
+    }
+
+    let mut records = Vec::new();
+    walk_chunk(data, 4, data.len(), 0, Vec::new(), &mut records)?;
+    Ok(records)
+}
+
+/// Walk one chunk and return the offset immediately following its optional
+/// word-alignment padding.
+fn walk_chunk(
+    data: &[u8],
+    offset: usize,
+    limit: usize,
+    depth: usize,
+    path: Vec<usize>,
+    records: &mut Vec<ChunkRecord>,
+) -> Result<usize, IffError> {
+    if depth > MAX_IFF_DEPTH as usize {
+        return Err(IffError::DepthLimitExceeded {
+            max: MAX_IFF_DEPTH as usize,
+        });
+    }
+
+    let header_end = offset.checked_add(8).ok_or(IffError::Truncated)?;
+    if header_end > limit {
+        return Err(IffError::Truncated);
+    }
+
+    let id = read_4(data, offset)?;
+    let length = read_u32_be(data, offset + 4)? as usize;
+    let payload_end = header_end.checked_add(length).ok_or(IffError::Truncated)?;
+    if payload_end > limit {
+        return Err(IffError::ChunkTooLong {
+            id,
+            claimed: length as u32,
+            available: limit.saturating_sub(header_end),
+        });
+    }
+
+    if id == *b"FORM" && length < 4 {
+        return Err(IffError::Truncated);
+    }
+    let form_type = if id == *b"FORM" {
+        Some(read_4(data, header_end)?)
+    } else {
+        None
+    };
+
+    records.push(ChunkRecord {
+        id,
+        form_type,
+        offset,
+        length,
+        depth,
+        path: path.clone(),
+    });
+
+    if id == *b"FORM" {
+        let mut child_offset = header_end + 4;
+        let mut child_index = 0;
+        while child_offset < payload_end {
+            // Like `parse_children`, preserve the ability to inspect a FORM
+            // that has an unframed trailing fragment while still rejecting a
+            // complete header whose claimed payload extends too far.
+            if payload_end - child_offset < 8 {
+                break;
+            }
+
+            let mut child_path = path.clone();
+            child_path.push(child_index);
+            child_offset = walk_chunk(
+                data,
+                child_offset,
+                payload_end,
+                depth + 1,
+                child_path,
+                records,
+            )?;
+            child_index += 1;
+        }
+    }
+
+    payload_end
+        .checked_add(length & 1)
+        .ok_or(IffError::Truncated)
+}
 
 /// Parse a single chunk starting at `offset` within `data`.
 /// Returns the parsed chunk and the number of bytes consumed (including padding).
@@ -672,34 +815,37 @@ fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, IffError> {
     Ok(u32::from_be_bytes(b))
 }
 
-// ---- Legacy dump helper (tests only) ----------------------------------------
+// ---- Legacy dump helper -----------------------------------------------------
 
 /// Produce a structural dump of the chunk tree.
-#[cfg(test)]
+///
+/// This preserves the established djvudump-like text format used by the golden
+/// tests. Use [`walk_chunks`] when byte offsets are required.
 pub fn dump(file: &DjvuFile) -> String {
     let mut out = String::new();
     dump_chunk(&file.root, 1, &mut out);
     out
 }
 
-#[cfg(test)]
 fn dump_chunk(chunk: &Chunk, depth: usize, out: &mut String) {
-    let indent = "  ".repeat(depth);
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
     match chunk {
         Chunk::Form {
             secondary_id,
             length,
             children,
         } => {
-            let sec = std::str::from_utf8(secondary_id).unwrap_or("????");
-            out.push_str(&format!("{}FORM:{} [{}] \n", indent, sec, length));
+            let sec = str::from_utf8(secondary_id).unwrap_or("????");
+            let _ = writeln!(out, "FORM:{sec} [{length}] ");
             for child in children {
                 dump_chunk(child, depth + 1, out);
             }
         }
         Chunk::Leaf { id, data } => {
-            let id_str = std::str::from_utf8(id).unwrap_or("????");
-            out.push_str(&format!("{}{} [{}] \n", indent, id_str, data.len()));
+            let id_str = str::from_utf8(id).unwrap_or("????");
+            let _ = writeln!(out, "{id_str} [{}] ", data.len());
         }
     }
 }
@@ -744,6 +890,107 @@ mod tests {
         data.extend_from_slice(&u32::MAX.to_be_bytes()); // 4 GiB claimed length
         data.extend_from_slice(b"\x00\x00");
         assert!(parse(&data).is_err());
+    }
+
+    #[test]
+    fn walk_chunks_reports_nested_offsets_lengths_and_paths() {
+        // AT&T + FORM:DJVM containing DIRM and an embedded FORM:DJVU. Every
+        // payload is even-sized so the offsets can be inspected directly from
+        // the framing arithmetic below without depending on padding quirks.
+        let mut data = Vec::from(*b"AT&T");
+        data.extend_from_slice(b"FORM");
+        data.extend_from_slice(&36u32.to_be_bytes());
+        data.extend_from_slice(b"DJVM");
+        data.extend_from_slice(b"DIRM");
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(b"id");
+        data.extend_from_slice(b"FORM");
+        data.extend_from_slice(&14u32.to_be_bytes());
+        data.extend_from_slice(b"DJVU");
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(b"xy");
+
+        let records = walk_chunks(&data).expect("synthetic document walks");
+        let dirm_offset = 16;
+        let nested_form_offset = dirm_offset + 8 + 2;
+        let info_offset = nested_form_offset + 8 + 4;
+
+        assert_eq!(
+            records,
+            vec![
+                ChunkRecord {
+                    id: *b"FORM",
+                    form_type: Some(*b"DJVM"),
+                    offset: 4,
+                    length: 36,
+                    depth: 0,
+                    path: vec![],
+                },
+                ChunkRecord {
+                    id: *b"DIRM",
+                    form_type: None,
+                    offset: dirm_offset,
+                    length: 2,
+                    depth: 1,
+                    path: vec![0],
+                },
+                ChunkRecord {
+                    id: *b"FORM",
+                    form_type: Some(*b"DJVU"),
+                    offset: nested_form_offset,
+                    length: 14,
+                    depth: 1,
+                    path: vec![1],
+                },
+                ChunkRecord {
+                    id: *b"INFO",
+                    form_type: None,
+                    offset: info_offset,
+                    length: 2,
+                    depth: 2,
+                    path: vec![1, 0],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn walk_chunks_offsets_match_real_bundled_fixture() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/DjVu3Spec_bundled.djvu"),
+        )
+        .expect("bundled fixture exists");
+        let parsed = parse_form(&data).expect("fixture parses");
+        let records = walk_chunks(&data).expect("fixture walks");
+
+        let payload_offset = |payload: &[u8]| payload.as_ptr() as usize - data.as_ptr() as usize;
+        let dirm = parsed
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == *b"DIRM")
+            .expect("fixture has DIRM");
+        let component = parsed
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == *b"FORM")
+            .expect("fixture has an embedded component FORM");
+
+        let dirm_record = records
+            .iter()
+            .find(|record| record.id == *b"DIRM")
+            .expect("walk reports DIRM");
+        assert_eq!(dirm_record.offset, payload_offset(dirm.data) - 8);
+        assert_eq!(dirm_record.length, dirm.data.len());
+
+        let component_record = records
+            .iter()
+            .find(|record| record.depth == 1 && record.id == *b"FORM")
+            .expect("walk reports embedded component FORM");
+        assert_eq!(component_record.offset, payload_offset(component.data) - 8);
+        assert_eq!(component_record.length, component.data.len());
+        assert_eq!(component_record.path.len(), 1);
     }
 
     fn assets_path() -> std::path::PathBuf {

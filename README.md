@@ -99,6 +99,9 @@ cargo install djvu-rs --features cli
 # Document info (--json for machine-readable output, --count for page count only)
 djvu info file.djvu
 
+# Inspect IFF chunk identities, offsets, sizes, and bundled component relationships
+djvu inspect book.djvu --json
+
 # Render page 1 to PNG at 200 DPI
 djvu render file.djvu --dpi 200 --output page1.png
 
