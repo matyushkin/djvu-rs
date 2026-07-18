@@ -69,3 +69,9 @@ name = "fuzz_metadata"
 path = "fuzz_targets/fuzz_metadata.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_graph"
+path = "fuzz_targets/fuzz_graph.rs"
+test = false
+doc = false
