@@ -5399,93 +5399,128 @@ mod tests {
     /// re-render consumes it without re-running the JB2 decode — while
     /// producing pixel-identical output. A full-resolution re-render stays
     /// cold and also reproduces the original bytes.
+    ///
+    /// Under `parallel`, `decode_layers` runs the cold full-res path through
+    /// `rayon::join` (#440). The same thread-local counting hazard as
+    /// [`progressive_decoder_chunk_decodes_are_on_not_on_squared`] applies:
+    /// increments land on a global-pool worker, so the test thread reads 0.
+    /// Route the measurement through a dedicated single-worker pool (#721).
     #[test]
     fn downgrade_retains_sub4_mask_and_skips_jb2_decode() {
-        let mut doc = load_doc("colorbook.djvu");
-        let (w, h) = {
-            let p = doc.page(0).unwrap();
-            (p.width() as u32, p.height() as u32)
-        };
-        let opts_s4 = RenderOptions {
-            width: w / 4,
-            height: h / 4,
-            ..Default::default()
-        };
-        let opts_s1 = RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
+        let body = || {
+            let mut doc = load_doc("colorbook.djvu");
+            let (w, h) = {
+                let p = doc.page(0).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts_s4 = RenderOptions {
+                width: w / 4,
+                height: h / 4,
+                ..Default::default()
+            };
+            let opts_s1 = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+
+            // Warm the sub4 tier (this decodes the full mask once and builds
+            // mask_sub4), then downgrade.
+            let first_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+            let first_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+            doc.downgrade_render_caches();
+            assert!(
+                doc.page(0)
+                    .unwrap()
+                    .render_layers()
+                    .mask_sub4_cached()
+                    .is_some(),
+                "downgrade must retain mask_sub4"
+            );
+
+            // Structural proof: the warm sub4 re-render must not invoke the JB2
+            // decoder at all.
+            JB2_MASK_DECODES.with(|c| c.set(0));
+            let second_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+            assert_eq!(
+                JB2_MASK_DECODES.with(|c| c.get()),
+                0,
+                "warm sub4 re-render after downgrade must not re-run the JB2 decode"
+            );
+            assert_eq!(first_s4.data, second_s4.data, "sub=4 output changed");
+
+            // Full-resolution re-render: cold (decodes the mask again), output
+            // unchanged.
+            JB2_MASK_DECODES.with(|c| c.set(0));
+            let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
+            assert!(
+                JB2_MASK_DECODES.with(|c| c.get()) > 0,
+                "full-res re-render after downgrade must cold-decode the mask"
+            );
+            assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
         };
 
-        // Warm the sub4 tier (this decodes the full mask once and builds
-        // mask_sub4), then downgrade.
-        let first_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
-        let first_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
-        doc.downgrade_render_caches();
-        assert!(
-            doc.page(0)
-                .unwrap()
-                .render_layers()
-                .mask_sub4_cached()
-                .is_some(),
-            "downgrade must retain mask_sub4"
-        );
-
-        // Structural proof: the warm sub4 re-render must not invoke the JB2
-        // decoder at all.
-        JB2_MASK_DECODES.with(|c| c.set(0));
-        let second_s4 = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
-        assert_eq!(
-            JB2_MASK_DECODES.with(|c| c.get()),
-            0,
-            "warm sub4 re-render after downgrade must not re-run the JB2 decode"
-        );
-        assert_eq!(first_s4.data, second_s4.data, "sub=4 output changed");
-
-        // Full-resolution re-render: cold (decodes the mask again), output
-        // unchanged.
-        JB2_MASK_DECODES.with(|c| c.set(0));
-        let second_s1 = render_pixmap(doc.page(0).unwrap(), &opts_s1).unwrap();
-        assert!(
-            JB2_MASK_DECODES.with(|c| c.get()) > 0,
-            "full-res re-render after downgrade must cold-decode the mask"
-        );
-        assert_eq!(first_s1.data, second_s1.data, "sub=1 output changed");
+        #[cfg(feature = "parallel")]
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("build single-threaded pool for deterministic thread-local counting");
+            pool.install(body);
+        }
+        #[cfg(not(feature = "parallel"))]
+        body();
     }
 
     /// #607 eligibility guard: bold dilation needs the full-resolution mask,
     /// so a bold sub>=4 render after downgrade must decode it (and match the
     /// pre-downgrade bold render exactly).
+    ///
+    /// Same `parallel` + thread-local counting wrap as
+    /// [`downgrade_retains_sub4_mask_and_skips_jb2_decode`] (#721).
     #[test]
     fn downgraded_sub4_with_bold_still_full_decodes() {
-        let mut doc = load_doc("colorbook.djvu");
-        let (w, h) = {
-            let p = doc.page(0).unwrap();
-            (p.width() as u32, p.height() as u32)
-        };
-        let opts_bold = RenderOptions {
-            width: w / 4,
-            height: h / 4,
-            bold: 1,
-            ..Default::default()
-        };
-        let first = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
-        // Also warm the plain sub4 tier so mask_sub4 survives the downgrade.
-        let opts_s4 = RenderOptions {
-            width: w / 4,
-            height: h / 4,
-            ..Default::default()
-        };
-        let _ = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
-        doc.downgrade_render_caches();
+        let body = || {
+            let mut doc = load_doc("colorbook.djvu");
+            let (w, h) = {
+                let p = doc.page(0).unwrap();
+                (p.width() as u32, p.height() as u32)
+            };
+            let opts_bold = RenderOptions {
+                width: w / 4,
+                height: h / 4,
+                bold: 1,
+                ..Default::default()
+            };
+            let first = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
+            // Also warm the plain sub4 tier so mask_sub4 survives the downgrade.
+            let opts_s4 = RenderOptions {
+                width: w / 4,
+                height: h / 4,
+                ..Default::default()
+            };
+            let _ = render_pixmap(doc.page(0).unwrap(), &opts_s4).unwrap();
+            doc.downgrade_render_caches();
 
-        JB2_MASK_DECODES.with(|c| c.set(0));
-        let second = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
-        assert!(
-            JB2_MASK_DECODES.with(|c| c.get()) > 0,
-            "bold render must not take the retained-sub4 shortcut"
-        );
-        assert_eq!(first.data, second.data, "bold sub=4 output changed");
+            JB2_MASK_DECODES.with(|c| c.set(0));
+            let second = render_pixmap(doc.page(0).unwrap(), &opts_bold).unwrap();
+            assert!(
+                JB2_MASK_DECODES.with(|c| c.get()) > 0,
+                "bold render must not take the retained-sub4 shortcut"
+            );
+            assert_eq!(first.data, second.data, "bold sub=4 output changed");
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("build single-threaded pool for deterministic thread-local counting");
+            pool.install(body);
+        }
+        #[cfg(not(feature = "parallel"))]
+        body();
     }
 
     /// `enforce_cache_budget_with(downgrade_before_drop: true)` honours the same

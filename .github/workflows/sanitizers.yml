@@ -20,7 +20,7 @@ jobs:
   miri:
     name: Miri (undefined behaviour interpreter)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust nightly with Miri
@@ -31,20 +31,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: miri
-      # djvu-iw44 is excluded: its hot paths are hand-written SIMD intrinsics
-      # (NEON/SSE), which Miri does not interpret. Its unsafe surface is
-      # covered by the AddressSanitizer job below instead. djvu-zp carries no
-      # `unsafe`, so it has nothing for Miri to find and is skipped to save
-      # interpreter time. The exhaustive all-byte round-trip tests
-      # (`*_roundtrip_all_bytes`, `*_roundtrip_1kb`) are skipped: under the
-      # interpreter they take tens of minutes for no extra UB coverage over the
-      # smaller cases.
-      - name: Miri test the codec and container crates
+      # Scope: the container/buffer crates whose byte-slice and offset
+      # arithmetic is exactly what Miri's strict-provenance checking validates,
+      # and whose suites finish in under a minute under the interpreter. The
+      # decode-heavy crates (djvu-bzz, djvu-jb2) and the SIMD-heavy djvu-iw44
+      # (which Miri cannot interpret at all) run their unsafe paths tens of
+      # times slower under Miri — for hours — so their unsafe surface is
+      # covered by the native-speed AddressSanitizer job instead. djvu-zp has
+      # no `unsafe` at all.
+      - name: Miri test the container and buffer crates
         run: >
           cargo +nightly miri test
-          -p djvu-bzz -p djvu-iff -p djvu-jb2
-          -p djvu-bitmap -p djvu-pixmap
-          -- --skip roundtrip_all_bytes --skip roundtrip_1kb
+          -p djvu-iff -p djvu-bitmap -p djvu-pixmap
         env:
           # disable-isolation: the crate test suites read checked-in fixture
           # files, which Miri's default isolated mode forbids.
