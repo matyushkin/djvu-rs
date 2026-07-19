@@ -1535,7 +1535,13 @@ impl DjVuDocument {
                         // FORM header.
                         if let Some(off) = comp_offsets.get(comp_idx) {
                             let start = *off as usize;
-                            if let Some(size_bytes) = data.get(start + 4..start + 8) {
+                            // `start` is an untrusted DIRM offset; `start + 8`
+                            // overflows `usize` on 32-bit targets for a crafted
+                            // out-of-bounds offset. Guard the header slice.
+                            if let Some(size_bytes) = start
+                                .checked_add(8)
+                                .and_then(|end| data.get(start + 4..end))
+                            {
                                 let size_be =
                                     [size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
                                 page_byte_ranges.push(crate::dirm::form_byte_range(*off, size_be));

@@ -20,7 +20,7 @@ jobs:
   miri:
     name: Miri (undefined behaviour interpreter)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust nightly with Miri
@@ -33,12 +33,18 @@ jobs:
           key: miri
       # djvu-iw44 is excluded: its hot paths are hand-written SIMD intrinsics
       # (NEON/SSE), which Miri does not interpret. Its unsafe surface is
-      # covered by the AddressSanitizer job below instead.
+      # covered by the AddressSanitizer job below instead. djvu-zp carries no
+      # `unsafe`, so it has nothing for Miri to find and is skipped to save
+      # interpreter time. The exhaustive all-byte round-trip tests
+      # (`*_roundtrip_all_bytes`, `*_roundtrip_1kb`) are skipped: under the
+      # interpreter they take tens of minutes for no extra UB coverage over the
+      # smaller cases.
       - name: Miri test the codec and container crates
         run: >
           cargo +nightly miri test
-          -p djvu-zp -p djvu-bzz -p djvu-iff -p djvu-jb2
+          -p djvu-bzz -p djvu-iff -p djvu-jb2
           -p djvu-bitmap -p djvu-pixmap
+          -- --skip roundtrip_all_bytes --skip roundtrip_1kb
         env:
           # disable-isolation: the crate test suites read checked-in fixture
           # files, which Miri's default isolated mode forbids.
