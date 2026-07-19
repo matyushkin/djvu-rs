@@ -500,6 +500,64 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
     );
 }
 
+/// #696: the permissive render report must name the recovered layer.
+#[test]
+fn permissive_report_records_truncated_bg44_recovery() {
+    use djvu_rs::djvu_render::{RecoveredLayer, render_pixmap_with_report};
+
+    let corrupted = make_truncated_bg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).unwrap();
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: true,
+        ..RenderOptions::default()
+    };
+    let (pm, report) =
+        render_pixmap_with_report(page, &opts).expect("permissive render returns Ok");
+    assert!(!pm.data.is_empty());
+    assert!(
+        report
+            .recoveries
+            .iter()
+            .any(|recovery| recovery.layer == RecoveredLayer::Background),
+        "report must record the recovered background: {:?}",
+        report.recoveries
+    );
+    assert!(
+        report
+            .recoveries
+            .iter()
+            .all(|recovery| !recovery.detail.is_empty()),
+        "every recovery carries a human-readable detail"
+    );
+}
+
+/// A clean page reports no recoveries in either mode.
+#[test]
+fn permissive_report_is_clean_for_intact_page() {
+    use djvu_rs::djvu_render::render_pixmap_with_report;
+
+    let data = std::fs::read("tests/fixtures/boy.djvu").expect("fixture");
+    let doc = DjVuDocument::parse(&data).unwrap();
+    let page = doc.page(0).unwrap();
+    for permissive in [false, true] {
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            permissive,
+            ..RenderOptions::default()
+        };
+        let (_pm, report) = render_pixmap_with_report(page, &opts).expect("intact page renders");
+        assert!(
+            report.is_clean(),
+            "intact page must need no recovery (permissive={permissive}): {:?}",
+            report.recoveries
+        );
+    }
+}
+
 fn assert_strict_native_render_rejects(data: &[u8], page_idx: usize) {
     let doc = DjVuDocument::parse(data).expect("mutant should remain structurally parseable");
     let page = doc.page(page_idx).expect("mutant target page should exist");

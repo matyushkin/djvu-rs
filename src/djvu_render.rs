@@ -36,7 +36,7 @@
 //! progressively higher-quality images.
 
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::Cow, vec, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
@@ -251,6 +251,92 @@ impl Default for RenderOptions {
             permissive: false,
             resampling: Resampling::Bilinear,
             mask_aa: false,
+        }
+    }
+}
+
+/// A document layer a permissive render skipped or fell back on (#696).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveredLayer {
+    /// The IW44 background (`BG44`), possibly truncated at a corrupt chunk.
+    Background,
+    /// The IW44 foreground detail plane (`FG44`).
+    Foreground,
+    /// The JB2 stencil mask (`Sjbz`).
+    Mask,
+    /// The `FGbz` foreground colour palette.
+    ForegroundPalette,
+}
+
+/// One recovery action a permissive render took to keep going (#696).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderRecovery {
+    /// Which layer was affected.
+    pub layer: RecoveredLayer,
+    /// Human-readable explanation of what was skipped or substituted.
+    pub detail: String,
+}
+
+/// Structured record of what a permissive render skipped or recovered (#696).
+///
+/// Returned alongside the pixmap by [`render_pixmap_with_report`]. An empty
+/// report (`is_clean`) means the page decoded fully with no fallbacks.
+#[derive(Debug, Clone, Default)]
+pub struct RenderReport {
+    /// Recovery actions in the order the renderer took them.
+    pub recoveries: Vec<RenderRecovery>,
+}
+
+impl RenderReport {
+    /// Whether the render needed no recovery (every layer decoded cleanly).
+    pub fn is_clean(&self) -> bool {
+        self.recoveries.is_empty()
+    }
+}
+
+#[cfg(feature = "std")]
+thread_local! {
+    /// Active recovery sink. `Some` only while [`render_pixmap_with_report`] is
+    /// on the stack; otherwise `record_recovery` is a no-op, so the ordinary
+    /// [`render_pixmap`] hot path is untouched.
+    static RECOVERY_SINK: core::cell::RefCell<Option<Vec<RenderRecovery>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Record a permissive recovery when a report is being collected.
+#[cfg(feature = "std")]
+fn record_recovery(layer: RecoveredLayer, detail: impl Into<String>) {
+    RECOVERY_SINK.with(|sink| {
+        if let Some(list) = sink.borrow_mut().as_mut() {
+            list.push(RenderRecovery {
+                layer,
+                detail: detail.into(),
+            });
+        }
+    });
+}
+
+/// No-op in `no_std`: the report API requires `std` thread-locals.
+#[cfg(not(feature = "std"))]
+fn record_recovery(_layer: RecoveredLayer, _detail: &str) {}
+
+/// Unwrap a permissive layer decode, recording a recovery on failure.
+fn permissive_layer<T>(result: Result<Option<T>, RenderError>, layer: RecoveredLayer) -> Option<T> {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            record_recovery(layer, {
+                #[cfg(feature = "std")]
+                {
+                    error.to_string()
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    let _ = error;
+                    ""
+                }
+            });
+            None
         }
     }
 }
@@ -1795,9 +1881,28 @@ fn decode_background_chunks_permissive<'a>(
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
         let mut img = Iw44Image::new();
-        for chunk_data in bg44_chunks.iter().take(max_chunks) {
+        let wanted = bg44_chunks.len().min(max_chunks);
+        // `decoded` is the number of chunks decoded before the first error,
+        // which is exactly the failing chunk's `enumerate` index.
+        for (decoded, chunk_data) in bg44_chunks.iter().take(max_chunks).enumerate() {
             if img.decode_chunk(chunk_data).is_err() {
-                break; // stop on first error, use what we have
+                // stop on first error, use what we have
+                record_recovery(RecoveredLayer::Background, {
+                    #[cfg(feature = "std")]
+                    {
+                        format!(
+                            "BG44 truncated at chunk {} of {wanted}; \
+                                 kept {decoded} decoded chunk(s)",
+                            decoded + 1
+                        )
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        let _ = (decoded, wanted);
+                        ""
+                    }
+                });
+                break;
             }
         }
         return img.to_rgb_subsample(subsample).ok().map(Cow::Owned);
@@ -1948,7 +2053,7 @@ fn decode_layers<'a>(
         let (bg, fg44) = if opts.permissive {
             (
                 decode_background_chunks_permissive(page, bg_chunk_limit, bg_subsample),
-                decode_fg44(page).ok().flatten(),
+                permissive_layer(decode_fg44(page), RecoveredLayer::Foreground),
             )
         } else {
             (
@@ -1973,9 +2078,12 @@ fn decode_layers<'a>(
 
     if opts.permissive {
         bg = decode_background_chunks_permissive(page, bg_chunk_limit, bg_subsample);
-        fg_palette = decode_fg_palette_full(page).ok().flatten();
+        fg_palette = permissive_layer(
+            decode_fg_palette_full(page),
+            RecoveredLayer::ForegroundPalette,
+        );
         let indexed = if fg_palette.is_some() {
-            decode_mask_indexed(page).ok().flatten()
+            permissive_layer(decode_mask_indexed(page), RecoveredLayer::Mask)
         } else {
             None
         };
@@ -1983,10 +2091,10 @@ fn decode_layers<'a>(
             mask = Some(bm);
             blit_map = Some(bm_map);
         } else {
-            mask = decode_mask(page).ok().flatten();
+            mask = permissive_layer(decode_mask(page), RecoveredLayer::Mask);
             blit_map = None;
         }
-        fg44 = decode_fg44(page).ok().flatten();
+        fg44 = permissive_layer(decode_fg44(page), RecoveredLayer::Foreground);
     } else {
         // #440: background (BG44 ZP + IDWT) and foreground (JB2 mask + FG44) decode
         // touch disjoint OnceLock fields, so on a cold render they can run on two
@@ -3433,6 +3541,34 @@ where
 /// Strict renders composite directly into the full pixmap. Permissive renders
 /// reuse the row path so decode-error recovery remains shared with
 /// [`render_streaming`].
+/// Render a page and return the pixmap together with a [`RenderReport`] of any
+/// layers a permissive render skipped or recovered (#696).
+///
+/// The pixmap is byte-identical to [`render_pixmap`]. In strict mode the report
+/// is always clean (decode errors propagate instead of being recovered); in
+/// permissive mode it lists each background truncation, dropped mask, or
+/// skipped foreground/palette in the order the renderer took them.
+#[cfg(feature = "std")]
+pub fn render_pixmap_with_report(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+) -> Result<(Pixmap, RenderReport), RenderError> {
+    // Install a per-thread recovery sink; the guard clears it on every exit
+    // path (including panics) so a normal `render_pixmap` never records.
+    struct SinkGuard;
+    impl Drop for SinkGuard {
+        fn drop(&mut self) {
+            RECOVERY_SINK.with(|sink| *sink.borrow_mut() = None);
+        }
+    }
+    RECOVERY_SINK.with(|sink| *sink.borrow_mut() = Some(Vec::new()));
+    let _guard = SinkGuard;
+
+    let pixmap = render_pixmap(page, opts)?;
+    let recoveries = RECOVERY_SINK.with(|sink| sink.borrow_mut().take().unwrap_or_default());
+    Ok((pixmap, RenderReport { recoveries }))
+}
+
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     let w = opts.width;
     let h = opts.height;
