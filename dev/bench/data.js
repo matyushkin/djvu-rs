@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784458926608,
+  "lastUpdate": 1784465213331,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -12082,6 +12082,642 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47341000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec8ea74ff084118cf5ddafd618dbee946db51638",
+          "message": "Merge pull request #732 from matyushkin/issue-696-miri-scope\n\nci(miri): scope Miri to fast container crates so it completes (#696)",
+          "timestamp": "2026-07-19T20:20:54+08:00",
+          "tree_id": "e71a561123a103c1b129c946dcb5b2286926b5b6",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/ec8ea74ff084118cf5ddafd618dbee946db51638"
+        },
+        "date": 1784465211679,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode",
+            "value": 105,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "bzz_encode",
+            "value": 166647,
+            "range": "± 1893",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode",
+            "value": 164020,
+            "range": "± 1267",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_first_chunk",
+            "value": 806911,
+            "range": "± 3809",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_corpus_bilevel",
+            "value": 595443,
+            "range": "± 2648",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_corpus_color",
+            "value": 1373653,
+            "range": "± 33958",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_decode_large_600dpi",
+            "value": 2407,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/rgb_then_gray",
+            "value": 11260251,
+            "range": "± 182204",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/gray_direct",
+            "value": 3914240,
+            "range": "± 15271",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/rgb_then_gray_sub2",
+            "value": 2603772,
+            "range": "± 47242",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/gray_direct_sub2",
+            "value": 957864,
+            "range": "± 6730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/rgb_then_gray_sub4",
+            "value": 676576,
+            "range": "± 4908",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_gray_decode_large/gray_direct_sub4",
+            "value": 245881,
+            "range": "± 1590",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub1_full_decode",
+            "value": 9631151,
+            "range": "± 87730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub4_partial_decode",
+            "value": 585452,
+            "range": "± 3028",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_colorbook/sub2_partial_decode",
+            "value": 2323350,
+            "range": "± 82130",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_color",
+            "value": 3482298,
+            "range": "± 20033",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_large_1024x1024",
+            "value": 60119494,
+            "range": "± 3717526",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode",
+            "value": 160555,
+            "range": "± 297",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode_multitile",
+            "value": 24224579,
+            "range": "± 76078",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "jb2_encode_dict",
+            "value": 10246899,
+            "range": "± 99588",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "segment_page_color",
+            "value": 3015089,
+            "range": "± 23082",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "segment_page_color_sauvola",
+            "value": 13869992,
+            "range": "± 89922",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_color_page_quality",
+            "value": 6661146,
+            "range": "± 46111",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_color_page_quality_bgheavy",
+            "value": 54627736,
+            "range": "± 185677",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_large/encode_color_page_quality_large",
+            "value": 941781587,
+            "range": "± 4384868",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_multipage/encode_djvm_layered_shared",
+            "value": 19743411,
+            "range": "± 69953",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_multipage/encode_djvm_bundle_jb2",
+            "value": 457408393,
+            "range": "± 845333",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "encode_multipage/cluster_shared_symbols_517p",
+            "value": 19146841658,
+            "range": "± 190125324",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_encode_gray_1024x1024",
+            "value": 18333211,
+            "range": "± 278086",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_region_bilevel",
+            "value": 17313154,
+            "range": "± 144396",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/72",
+            "value": 173050,
+            "range": "± 2536",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/144",
+            "value": 974701,
+            "range": "± 2549",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/300",
+            "value": 4222887,
+            "range": "± 7084",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_page/dpi/600",
+            "value": 16996784,
+            "range": "± 59913",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_coarse",
+            "value": 1010907,
+            "range": "± 7738",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook",
+            "value": 10311851,
+            "range": "± 82773",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/full_render",
+            "value": 10271807,
+            "range": "± 24247",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/bg_only_warm",
+            "value": 2,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_stages/mask_decode",
+            "value": 5487568,
+            "range": "± 10216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_colorbook_cold",
+            "value": 26600893,
+            "range": "± 465857",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_color",
+            "value": 90242767,
+            "range": "± 314681",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel",
+            "value": 84374812,
+            "range": "± 238800",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel_dpi/dpi/72",
+            "value": 4114980,
+            "range": "± 21134",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel_dpi/dpi/150",
+            "value": 16399854,
+            "range": "± 62512",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_corpus_bilevel_dpi/dpi/300",
+            "value": 84418125,
+            "range": "± 333337",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_pixmap/watchmaker_color",
+            "value": 90237128,
+            "range": "± 189606",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_into_reuse_buffer/watchmaker_color",
+            "value": 86519078,
+            "range": "± 346947",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_streaming_discard/watchmaker_color",
+            "value": 85823660,
+            "range": "± 139393",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/mask_decode/watchmaker_color",
+            "value": 3564560,
+            "range": "± 14966",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/bg_to_rgb_warm/watchmaker_color",
+            "value": 4396654,
+            "range": "± 13865",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_pixmap/cable_bilevel",
+            "value": 84370444,
+            "range": "± 404307",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_into_reuse_buffer/cable_bilevel",
+            "value": 80682951,
+            "range": "± 72902",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/render_streaming_discard/cable_bilevel",
+            "value": 80099629,
+            "range": "± 184675",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/mask_decode/cable_bilevel",
+            "value": 578718,
+            "range": "± 3380",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_native_stages/bg_to_rgb_warm/cable_bilevel",
+            "value": 4396840,
+            "range": "± 16310",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/color_native_cached",
+            "value": 86333024,
+            "range": "± 72238",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/bilevel_native_cached",
+            "value": 80660952,
+            "range": "± 327620",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/color_downscale_cached",
+            "value": 10060973,
+            "range": "± 775404",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/color_downscale_mixed_cached",
+            "value": 26559178,
+            "range": "± 71408",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/small_color_downscale_cached",
+            "value": 83712,
+            "range": "± 102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_compositor_only/palette_native_cached",
+            "value": 83464737,
+            "range": "± 61054",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/thumbnail_dpi72",
+            "value": 171534,
+            "range": "± 143",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/thumbnail_dpi72",
+            "value": 173392,
+            "range": "± 133",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/thumbnail_half_bilinear",
+            "value": 83570,
+            "range": "± 147",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/thumbnail_half_bilinear",
+            "value": 84590,
+            "range": "± 121",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/colorbook_downscale",
+            "value": 10065110,
+            "range": "± 8699",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/colorbook_downscale",
+            "value": 10284327,
+            "range": "± 19922",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/corpus_color_native",
+            "value": 86350094,
+            "range": "± 56820",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/corpus_color_native",
+            "value": 87775751,
+            "range": "± 65392",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/direct_render_into/corpus_bilevel_native",
+            "value": 80613083,
+            "range": "± 340325",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_row_scratch_ab/row_scratch_copy/corpus_bilevel_native",
+            "value": 82050321,
+            "range": "± 92550",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/bilinear",
+            "value": 84457,
+            "range": "± 224",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_0.5x/lanczos3",
+            "value": 1165231,
+            "range": "± 15034",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_large_colorbook/bilinear",
+            "value": 21251285,
+            "range": "± 105568",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_scaled_large_colorbook/lanczos3",
+            "value": 281900733,
+            "range": "± 458270",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pdf_export_sequential",
+            "value": 1172554208,
+            "range": "± 5378624",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "export/pdf_flatdecode",
+            "value": 1662338682,
+            "range": "± 792062",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse_multipage_520p",
+            "value": 2091323,
+            "range": "± 18641",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iterate_pages_520p",
+            "value": 2272,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "open_and_render_first_page_520p",
+            "value": 20907329,
+            "range": "± 187456",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_first_page",
+            "value": 8437753,
+            "range": "± 130165",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "render_large_doc_mid_page",
+            "value": 8067800,
+            "range": "± 161971",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_large_600dpi",
+            "value": 3260047,
+            "range": "± 19064",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "decode_mask_mid_600dpi",
+            "value": 24218448,
+            "range": "± 827545",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_single_page",
+            "value": 6551,
+            "range": "± 45",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "text_extraction_cold",
+            "value": 226336,
+            "range": "± 11835",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shared_dict_mask_decode_30p",
+            "value": 110539885,
+            "range": "± 362210",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "thumbnails_th44_only_grid_bilevel_20p_128px_cold",
+            "value": 12847470,
+            "range": "± 295590",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "thumbnails_render_only_grid_bilevel_20p_128px_cold",
+            "value": 305293427,
+            "range": "± 1770210",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "thumbnails_th44_only_grid_color_6p_128px_cold",
+            "value": 2613509,
+            "range": "± 9720",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "thumbnails_render_only_grid_color_6p_128px_cold",
+            "value": 34532238,
+            "range": "± 250324",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_newspaper",
+            "value": 5847341,
+            "range": "± 257988",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_mixed_layout",
+            "value": 89439411,
+            "range": "± 337261",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_map",
+            "value": 74256209,
+            "range": "± 218760",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_cjk",
+            "value": 77039362,
+            "range": "± 1100211",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_cyrillic",
+            "value": 164217,
+            "range": "± 643",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tier2_corpus_render/tier2_photo",
+            "value": 26747956,
+            "range": "± 113823",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8242000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49585000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47555000,
             "range": "± 0",
             "unit": "ns/iter"
           }
