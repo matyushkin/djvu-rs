@@ -319,14 +319,21 @@ fn walk_chunk(
 
     let id = read_4(data, offset)?;
     let length = read_u32_be(data, offset + 4)? as usize;
-    let payload_end = header_end.checked_add(length).ok_or(IffError::Truncated)?;
-    if payload_end > limit {
-        return Err(IffError::ChunkTooLong {
-            id,
-            claimed: length as u32,
-            available: limit.saturating_sub(header_end),
-        });
-    }
+    // A length whose payload end overflows `usize` (reachable on 32-bit targets,
+    // where `usize` is only as wide as the u32 length) is just an extreme case
+    // of a chunk claiming more bytes than exist — report it as `ChunkTooLong`
+    // with the chunk's identity intact, not a generic `Truncated`, so the two
+    // pointer widths agree.
+    let payload_end = match header_end.checked_add(length) {
+        Some(payload_end) if payload_end <= limit => payload_end,
+        _ => {
+            return Err(IffError::ChunkTooLong {
+                id,
+                claimed: length as u32,
+                available: limit.saturating_sub(header_end),
+            });
+        }
+    };
 
     if id == *b"FORM" && length < 4 {
         return Err(IffError::Truncated);
@@ -853,6 +860,31 @@ fn dump_chunk(chunk: &Chunk, depth: usize, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chunk length whose payload end overflows `usize` (the failure mode on
+    /// 32-bit targets, where `usize` is only as wide as the u32 length) must be
+    /// reported as `ChunkTooLong` with the chunk identity intact — the same
+    /// outcome as a merely-too-long length on 64-bit — not a bare `Truncated`.
+    #[test]
+    fn overflowing_chunk_length_reports_chunk_too_long_with_identity() {
+        // AT&T + FORM + len + DJVU, then a BG44 chunk claiming u32::MAX bytes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(b"FORM");
+        let inner_len = 4u32 + 8; // "DJVU" + one 8-byte chunk header
+        buf.extend_from_slice(&inner_len.to_be_bytes());
+        buf.extend_from_slice(b"DJVU");
+        buf.extend_from_slice(b"BG44");
+        buf.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        match walk_chunks(&buf) {
+            Err(IffError::ChunkTooLong { id, claimed, .. }) => {
+                assert_eq!(&id, b"BG44");
+                assert_eq!(claimed, u32::MAX);
+            }
+            other => panic!("expected ChunkTooLong, got {other:?}"),
+        }
+    }
 
     /// A chain of FORMs nested far deeper than `MAX_IFF_DEPTH` must be rejected,
     /// not recurse until the stack overflows (security finding).
