@@ -69,6 +69,23 @@ enum Cmd {
         #[arg(long)]
         decode_pages: bool,
     },
+    /// Compare two documents semantically: page properties, text, annotations,
+    /// metadata, bookmarks, and the component graph.
+    ///
+    /// Exits 0 when every compared plane matches, 1 when any plane diverges,
+    /// and 2 when either input cannot be read or parsed.
+    Diff {
+        /// First DjVu file.
+        a: PathBuf,
+        /// Second DjVu file.
+        b: PathBuf,
+        /// Output stable machine-readable JSON.
+        #[arg(short, long)]
+        json: bool,
+        /// Compare only the named planes (repeatable). Default: all planes.
+        #[arg(long = "plane")]
+        planes: Vec<String>,
+    },
     /// Render pages to PNG, PDF, CBZ, or EPUB.
     Render {
         /// Path to the DjVu file.
@@ -372,6 +389,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             json,
             decode_pages,
         } => cmd_validate(&file, strict, json, decode_pages),
+        Cmd::Diff { a, b, json, planes } => cmd_diff(&a, &b, json, &planes),
         Cmd::Render {
             file,
             page,
@@ -748,6 +766,83 @@ fn cmd_validate(
     }
 
     if !report.is_valid() || (strict && summary.warnings > 0) {
+        return Err(Box::new(ValidateExit {
+            code: 1,
+            silent: true,
+            message: String::new(),
+        }));
+    }
+    Ok(())
+}
+
+// ── diff ─────────────────────────────────────────────────────────────────────
+
+fn cmd_diff(
+    a: &Path,
+    b: &Path,
+    json: bool,
+    planes: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|error| ValidateExit {
+            code: 2,
+            silent: false,
+            message: format!("cannot read {}: {error}", path.display()),
+        })
+    };
+    let bytes_a = read(a)?;
+    let bytes_b = read(b)?;
+    let filter = (!planes.is_empty()).then_some(planes);
+    let diff =
+        djvu_rs::semantic_diff::semantic_diff(&bytes_a, &bytes_b, filter).map_err(|error| {
+            ValidateExit {
+                code: 2,
+                silent: false,
+                message: format!("cannot parse inputs: {error}"),
+            }
+        })?;
+
+    if json {
+        let planes_json: Vec<serde_json::Value> = diff
+            .planes
+            .iter()
+            .map(|plane| {
+                serde_json::json!({
+                    "plane": plane.plane,
+                    "status": match plane.status {
+                        djvu_rs::semantic_diff::PlaneStatus::Match => "match",
+                        djvu_rs::semantic_diff::PlaneStatus::Diverge => "diverge",
+                    },
+                    "details": plane.details,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "a": a.display().to_string(),
+                "b": b.display().to_string(),
+                "identical": diff.is_identical(),
+                "planes": planes_json,
+            })
+        );
+    } else {
+        for plane in &diff.planes {
+            match plane.status {
+                djvu_rs::semantic_diff::PlaneStatus::Match => {
+                    println!("{}: match", plane.plane);
+                }
+                djvu_rs::semantic_diff::PlaneStatus::Diverge => {
+                    println!("{}: diverge", plane.plane);
+                    for detail in &plane.details {
+                        println!("  {detail}");
+                    }
+                }
+            }
+        }
+    }
+
+    if !diff.is_identical() {
         return Err(Box::new(ValidateExit {
             code: 1,
             silent: true,

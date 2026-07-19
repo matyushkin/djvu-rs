@@ -232,6 +232,11 @@ pub mod component_graph;
 #[cfg(feature = "std")]
 pub mod validate;
 
+/// Semantic comparison of two documents (#696): page properties, text,
+/// annotations, metadata, bookmarks, and the component graph.
+#[cfg(feature = "std")]
+pub mod semantic_diff;
+
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
 /// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
@@ -453,6 +458,10 @@ pub use editor::{
 // distinguish the module from the rest of the high-level document API.
 #[cfg(feature = "std")]
 pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
+
+/// Re-export the semantic diff API for callers that prefer the crate root.
+#[cfg(feature = "std")]
+pub use semantic_diff::{PlaneDiff, PlaneStatus, SemanticDiff, semantic_diff};
 
 /// Re-export the layered validation API for callers that prefer the crate root.
 #[cfg(feature = "std")]

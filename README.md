@@ -106,6 +106,10 @@ djvu inspect book.djvu --json
 # (--strict makes warnings fail the exit code; --decode-pages adds full codec decodes)
 djvu validate book.djvu --strict --decode-pages --json
 
+# Semantic comparison of two documents: pages, text, annotations, metadata,
+# bookmarks, and the component graph (--plane filters the compared planes)
+djvu diff a.djvu b.djvu --plane text --json
+
 # Render page 1 to PNG at 200 DPI
 djvu render file.djvu --dpi 200 --output page1.png
 
