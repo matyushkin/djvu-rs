@@ -205,6 +205,15 @@ pub enum EditError {
     #[error("editor input and output paths must differ")]
     OutputAliasesInput,
 
+    /// The edited output failed pre-commit validation (#696): applying the
+    /// request produced bytes with error-severity validation findings, so the
+    /// destination was left untouched.
+    #[error("edited output failed pre-commit validation: {summary}")]
+    InvalidPlannedOutput {
+        /// Compact `code` list of the error-severity findings.
+        summary: String,
+    },
+
     /// Filesystem failure while reading or atomically replacing output.
     #[error("editor I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -279,6 +288,16 @@ impl DocumentEditor {
 
         let input_bytes = fs::read(input)?;
         let output_bytes = Self::apply(&input_bytes, request)?;
+        // #696: validate the planned output before touching the destination.
+        // Error-severity findings abort the commit; warnings do not block.
+        if let Err(findings) = crate::validate::validate_planned_output(&output_bytes) {
+            let summary = findings
+                .iter()
+                .map(|finding| finding.code)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(EditError::InvalidPlannedOutput { summary });
+        }
         let parent = output.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
         let temp = create_sibling_temp(output)?;

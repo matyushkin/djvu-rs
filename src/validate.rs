@@ -141,6 +141,26 @@ pub struct ValidateOptions {
     pub decode_pages: bool,
 }
 
+/// Validate a writer's planned output before it is committed (#696).
+///
+/// Runs the cheap validation layers (structural, dependency, codec probes —
+/// never a render or full page decode) over bytes a writer is about to commit
+/// and returns the error-severity findings if any exist. Warnings and
+/// tolerated extensions do not block a commit. Intended to be called between
+/// producing output bytes and atomically replacing the destination, as
+/// `DocumentEditor::apply_to_path` does.
+pub fn validate_planned_output(data: &[u8]) -> Result<(), Vec<Finding>> {
+    let report = validate(data, &ValidateOptions::default());
+    if report.is_valid() {
+        return Ok(());
+    }
+    Err(report
+        .findings
+        .into_iter()
+        .filter(|finding| finding.severity == Severity::Error)
+        .collect())
+}
+
 /// Validate a DjVu byte stream without rendering it.
 pub fn validate(data: &[u8], opts: &ValidateOptions) -> ValidationReport {
     let mut findings = Vec::new();
@@ -1073,6 +1093,49 @@ mod tests {
                 .iter()
                 .any(|finding| finding.code == "codec.jb2-decode-failed")
         );
+    }
+
+    #[test]
+    fn planned_output_helper_accepts_valid_and_rejects_broken_bytes() {
+        // A real fixture is a valid planned output.
+        assert!(validate_planned_output(&fixture("boy.djvu")).is_ok());
+        // Truncated bytes carry error-severity findings and block a commit.
+        let broken = &fixture("boy.djvu")[..32];
+        let findings = validate_planned_output(broken).expect_err("broken bytes rejected");
+        assert!(!findings.is_empty());
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.severity == Severity::Error)
+        );
+    }
+
+    #[test]
+    fn editor_commit_validates_planned_output() {
+        use crate::editor::{DocumentEditor, EditOperation, EditRequest};
+        use crate::metadata::DjVuMetadata;
+
+        let dir = std::env::temp_dir().join(format!("djvu_planned_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let input = dir.join("in.djvu");
+        let output = dir.join("out.djvu");
+        std::fs::write(&input, fixture("boy.djvu")).expect("write input");
+
+        // A valid edit passes pre-commit validation and lands on disk.
+        DocumentEditor::apply_to_path(
+            &input,
+            &output,
+            &EditRequest::new(vec![EditOperation::SetDocumentMetadata {
+                metadata: DjVuMetadata {
+                    title: Some("validated".to_string()),
+                    ..Default::default()
+                },
+            }]),
+        )
+        .expect("valid edit commits");
+        assert!(validate_planned_output(&std::fs::read(&output).expect("read output")).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

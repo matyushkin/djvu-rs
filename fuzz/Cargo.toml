@@ -75,3 +75,9 @@ name = "fuzz_graph"
 path = "fuzz_targets/fuzz_graph.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_validate"
+path = "fuzz_targets/fuzz_validate.rs"
+test = false
+doc = false
