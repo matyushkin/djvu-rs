@@ -102,6 +102,10 @@ djvu info file.djvu
 # Inspect IFF chunk identities, offsets, sizes, and bundled component relationships
 djvu inspect book.djvu --json
 
+# Layered validation: structural, dependency, and codec findings with stable codes
+# (--strict makes warnings fail the exit code; --decode-pages adds full codec decodes)
+djvu validate book.djvu --strict --decode-pages --json
+
 # Render page 1 to PNG at 200 DPI
 djvu render file.djvu --dpi 200 --output page1.png
 
