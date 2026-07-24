@@ -190,10 +190,15 @@ pub mod thumbnail;
 #[cfg(feature = "std")]
 pub mod segment;
 
+/// Encoder ingest policy — alpha, bit-depth down-conversion, and related knobs
+/// (#694). See `docs/encoder-ingestion.md` for the supported input matrix.
+#[cfg(feature = "std")]
+pub mod ingest;
+
 /// PNG file → [`Pixmap`] decoder.
 ///
-/// Provides [`png_io::decode_png_to_pixmap`] for decoding any 8-bit PNG into
-/// the RGBA [`Pixmap`] format used throughout djvu-rs.
+/// Provides [`png_io::decode_png_to_pixmap`] for decoding PNG inputs into the
+/// RGBA [`Pixmap`] format used throughout djvu-rs.
 #[cfg(feature = "std")]
 pub mod png_io;
 

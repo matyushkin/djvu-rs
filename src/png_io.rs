@@ -1,8 +1,9 @@
 //! Image file → [`Pixmap`] decoders.
 //!
 //! Provides:
-//! - [`decode_png_to_pixmap`] — decode any 8-bit PNG into the RGBA [`Pixmap`]
-//!   format used throughout djvu-rs.
+//! - [`decode_png_to_pixmap`] — decode PNG into the RGBA [`Pixmap`] format used
+//!   throughout djvu-rs (8/16-bit, palette, and low bit depths — see
+//!   [`crate::ingest::IngestPolicy`] and `docs/encoder-ingestion.md`).
 //! - [`decode_jpeg_file_to_pixmap`] — decode a JPEG file into [`Pixmap`].
 //! - [`decode_image_to_pixmap`] — unified dispatcher: routes by file extension
 //!   (`png`, `jpg`/`jpeg`, `tif`/`tiff`) and falls back to magic-byte sniffing
@@ -12,62 +13,175 @@
 use std::path::Path;
 
 use crate::Pixmap;
+use crate::ingest::IngestPolicy;
 
-/// Decode an 8-bit PNG file at `path` into a [`Pixmap`].
-///
-/// Supports RGBA, RGB, GrayscaleAlpha, and Grayscale color types.
-/// Returns an error for indexed-color PNGs and for bit depths other than 8.
+/// Decode a PNG file at `path` into a [`Pixmap`] using default ingest policy.
 pub fn decode_png_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    decode_png_to_pixmap_with_policy(path, IngestPolicy::default())
+}
+
+/// Decode a PNG file at `path` with an explicit [`IngestPolicy`].
+pub fn decode_png_to_pixmap_with_policy(
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<Pixmap, Box<dyn std::error::Error>> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    // Expand palette indices and 1/2/4-bit grayscale to 8-bit RGB/RGBA before
+    // we normalize to Pixmap (16-bit stays as-is for policy-controlled downsample).
+    decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info()?;
-    let info = reader.info();
+    let info = reader.info().clone();
+    let (color, depth) = reader.output_color_type();
     let width = info.width;
     let height = info.height;
-    let color = info.color_type;
-    let depth = info.bit_depth;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let frame = reader.next_frame(&mut buf)?;
     buf.truncate(frame.buffer_size());
 
-    if depth != png::BitDepth::Eight {
-        return Err(format!(
-            "{}: unsupported PNG bit depth {:?} (only 8-bit channels supported)",
-            path.display(),
-            depth
-        )
-        .into());
-    }
-
-    let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
-    match color {
-        png::ColorType::Rgba => data.extend_from_slice(&buf),
-        png::ColorType::Rgb => {
-            for chunk in buf.chunks_exact(3) {
-                data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-        }
-        png::ColorType::GrayscaleAlpha => {
-            for chunk in buf.chunks_exact(2) {
-                let g = chunk[0];
-                data.extend_from_slice(&[g, g, g, chunk[1]]);
-            }
-        }
-        png::ColorType::Grayscale => {
-            for &g in &buf {
-                data.extend_from_slice(&[g, g, g, 255]);
-            }
-        }
-        png::ColorType::Indexed => {
-            return Err(format!("{}: indexed PNG not supported", path.display()).into());
-        }
-    }
-
+    let data = expand_png_to_rgba(path, &info, color, depth, &buf, policy)?;
     Ok(Pixmap {
         width,
         height,
         data,
     })
+}
+
+fn expand_png_to_rgba(
+    path: &Path,
+    info: &png::Info,
+    color: png::ColorType,
+    depth: png::BitDepth,
+    buf: &[u8],
+    policy: IngestPolicy,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let pixel_count = info.width as usize * info.height as usize;
+    let mut data = Vec::with_capacity(pixel_count * 4);
+
+    match depth {
+        png::BitDepth::Eight => match color {
+            png::ColorType::Rgba => data.extend_from_slice(buf),
+            png::ColorType::Rgb => {
+                for chunk in buf.chunks_exact(3) {
+                    data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                }
+            }
+            png::ColorType::GrayscaleAlpha => {
+                for chunk in buf.chunks_exact(2) {
+                    let g = chunk[0];
+                    data.extend_from_slice(&[g, g, g, chunk[1]]);
+                }
+            }
+            png::ColorType::Grayscale => {
+                for &g in buf {
+                    data.extend_from_slice(&[g, g, g, 255]);
+                }
+            }
+            png::ColorType::Indexed => expand_indexed_png(info, buf, &mut data, path)?,
+        },
+        png::BitDepth::Sixteen => {
+            expand_png16_to_rgba(color, buf, &mut data, path, policy)?;
+        }
+        other => {
+            return Err(format!("{}: unsupported PNG bit depth {other:?}", path.display()).into());
+        }
+    }
+
+    if data.len() != pixel_count * 4 {
+        return Err(format!(
+            "{}: PNG decode size mismatch (expected {} RGBA bytes, got {})",
+            path.display(),
+            pixel_count * 4,
+            data.len()
+        )
+        .into());
+    }
+    Ok(data)
+}
+
+fn expand_indexed_png(
+    info: &png::Info,
+    indices: &[u8],
+    data: &mut Vec<u8>,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let palette = info
+        .palette
+        .as_deref()
+        .ok_or_else(|| format!("{}: indexed PNG missing PLTE chunk", path.display()))?;
+    let trns = info.trns.as_deref();
+    let entry_count = palette.len() / 3;
+    if entry_count == 0 {
+        return Err(format!("{}: indexed PNG has empty palette", path.display()).into());
+    }
+
+    for &idx in indices {
+        let entry = idx as usize;
+        if entry >= entry_count {
+            return Err(format!(
+                "{}: indexed PNG pixel index {idx} out of palette range (0..{})",
+                path.display(),
+                entry_count
+            )
+            .into());
+        }
+        let base = entry * 3;
+        let r = palette[base];
+        let g = palette[base + 1];
+        let b = palette[base + 2];
+        let a = trns.and_then(|t| t.get(entry).copied()).unwrap_or(255);
+        data.extend_from_slice(&[r, g, b, a]);
+    }
+    Ok(())
+}
+
+fn expand_png16_to_rgba(
+    color: png::ColorType,
+    buf: &[u8],
+    data: &mut Vec<u8>,
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sample = |hi: u8, lo: u8| policy.downsample_u16_be(hi, lo);
+    match color {
+        png::ColorType::Rgb => {
+            for chunk in buf.chunks_exact(6) {
+                data.extend_from_slice(&[
+                    sample(chunk[0], chunk[1]),
+                    sample(chunk[2], chunk[3]),
+                    sample(chunk[4], chunk[5]),
+                    255,
+                ]);
+            }
+        }
+        png::ColorType::Rgba => {
+            for chunk in buf.chunks_exact(8) {
+                data.extend_from_slice(&[
+                    sample(chunk[0], chunk[1]),
+                    sample(chunk[2], chunk[3]),
+                    sample(chunk[4], chunk[5]),
+                    sample(chunk[6], chunk[7]),
+                ]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for chunk in buf.chunks_exact(2) {
+                let g = sample(chunk[0], chunk[1]);
+                data.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for chunk in buf.chunks_exact(4) {
+                let g = sample(chunk[0], chunk[1]);
+                let a = sample(chunk[2], chunk[3]);
+                data.extend_from_slice(&[g, g, g, a]);
+            }
+        }
+        png::ColorType::Indexed => {
+            return Err(format!("{}: 16-bit indexed PNG not supported", path.display()).into());
+        }
+    }
+    Ok(())
 }
 
 /// Decode a JPEG file at `path` into a [`Pixmap`] (RGBA, alpha = 255).
@@ -248,6 +362,7 @@ pub fn decode_image_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::{DepthDownconversion, IngestPolicy};
 
     /// Encode raw pixel bytes into a PNG file and return the path.
     fn write_png(
@@ -256,13 +371,14 @@ mod tests {
         width: u32,
         height: u32,
         color: png::ColorType,
+        depth: png::BitDepth,
         pixels: &[u8],
     ) -> std::path::PathBuf {
         let path = dir.path().join(name);
         let file = std::fs::File::create(&path).unwrap();
         let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_color(color);
-        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_depth(depth);
         let mut writer = encoder.write_header().unwrap();
         writer.write_image_data(pixels).unwrap();
         path
@@ -271,8 +387,15 @@ mod tests {
     #[test]
     fn rgb_adds_alpha_255() {
         let dir = tempfile::tempdir().unwrap();
-        // 1×1 red pixel in RGB
-        let path = write_png(&dir, "rgb.png", 1, 1, png::ColorType::Rgb, &[255, 0, 0]);
+        let path = write_png(
+            &dir,
+            "rgb.png",
+            1,
+            1,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &[255, 0, 0],
+        );
         let pm = decode_png_to_pixmap(&path).unwrap();
         assert_eq!(pm.width, 1);
         assert_eq!(pm.height, 1);
@@ -282,13 +405,13 @@ mod tests {
     #[test]
     fn rgba_passthrough() {
         let dir = tempfile::tempdir().unwrap();
-        // 1×1 semi-transparent blue pixel
         let path = write_png(
             &dir,
             "rgba.png",
             1,
             1,
             png::ColorType::Rgba,
+            png::BitDepth::Eight,
             &[0, 0, 255, 128],
         );
         let pm = decode_png_to_pixmap(&path).unwrap();
@@ -298,8 +421,15 @@ mod tests {
     #[test]
     fn grayscale_expands_to_rgba() {
         let dir = tempfile::tempdir().unwrap();
-        // 1×1 gray=200
-        let path = write_png(&dir, "gray.png", 1, 1, png::ColorType::Grayscale, &[200]);
+        let path = write_png(
+            &dir,
+            "gray.png",
+            1,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            &[200],
+        );
         let pm = decode_png_to_pixmap(&path).unwrap();
         assert_eq!(pm.data, vec![200, 200, 200, 255]);
     }
@@ -307,13 +437,13 @@ mod tests {
     #[test]
     fn grayscale_alpha_expands_to_rgba() {
         let dir = tempfile::tempdir().unwrap();
-        // 1×1 gray=100, alpha=50
         let path = write_png(
             &dir,
             "graya.png",
             1,
             1,
             png::ColorType::GrayscaleAlpha,
+            png::BitDepth::Eight,
             &[100, 50],
         );
         let pm = decode_png_to_pixmap(&path).unwrap();
@@ -323,9 +453,16 @@ mod tests {
     #[test]
     fn dimensions_preserved() {
         let dir = tempfile::tempdir().unwrap();
-        // 3×2 RGB image
         let pixels = vec![0u8; 3 * 2 * 3];
-        let path = write_png(&dir, "dim.png", 3, 2, png::ColorType::Rgb, &pixels);
+        let path = write_png(
+            &dir,
+            "dim.png",
+            3,
+            2,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &pixels,
+        );
         let pm = decode_png_to_pixmap(&path).unwrap();
         assert_eq!(pm.width, 3);
         assert_eq!(pm.height, 2);
@@ -341,22 +478,22 @@ mod tests {
     #[test]
     fn multi_pixel_rgb_row_order() {
         let dir = tempfile::tempdir().unwrap();
-        // 2×1: red then green
         let path = write_png(
             &dir,
             "two.png",
             2,
             1,
             png::ColorType::Rgb,
+            png::BitDepth::Eight,
             &[255, 0, 0, 0, 255, 0],
         );
         let pm = decode_png_to_pixmap(&path).unwrap();
-        assert_eq!(&pm.data[0..4], &[255, 0, 0, 255]); // red pixel
-        assert_eq!(&pm.data[4..8], &[0, 255, 0, 255]); // green pixel
+        assert_eq!(&pm.data[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&pm.data[4..8], &[0, 255, 0, 255]);
     }
 
     #[test]
-    fn sixteen_bit_depth_returns_error() {
+    fn sixteen_bit_depth_truncates_high_byte() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deep.png");
         {
@@ -365,42 +502,106 @@ mod tests {
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Sixteen);
             let mut writer = encoder.write_header().unwrap();
-            writer.write_image_data(&[0u8; 6]).unwrap(); // 1×1 RGB 16-bit = 6 bytes
+            // 16-bit BE: R=0x1234, G=0x0000, B=0xABCD → truncate to 0x12, 0x00, 0xAB
+            writer
+                .write_image_data(&[0x12, 0x34, 0x00, 0x00, 0xAB, 0xCD])
+                .unwrap();
         }
-        let result = decode_png_to_pixmap(&path);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("unsupported") || msg.contains("bit depth") || msg.contains("Sixteen"),
-            "msg={msg}"
-        );
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data, vec![0x12, 0x00, 0xAB, 255]);
     }
 
     #[test]
-    fn indexed_color_returns_error() {
+    fn indexed_color_expands_palette_and_trns() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("indexed.png");
         {
             let file = std::fs::File::create(&path).unwrap();
-            let mut encoder = png::Encoder::new(file, 1, 1);
+            let mut encoder = png::Encoder::new(file, 2, 1);
             encoder.set_color(png::ColorType::Indexed);
             encoder.set_depth(png::BitDepth::Eight);
-            encoder.set_palette(vec![0, 0, 0]); // one-entry palette (black)
+            encoder.set_palette(vec![
+                255, 0, 0, // red
+                0, 255, 0, // green
+            ]);
+            encoder.set_trns(vec![255, 128]);
             let mut writer = encoder.write_header().unwrap();
-            writer.write_image_data(&[0u8]).unwrap(); // index 0
+            writer.write_image_data(&[0, 1]).unwrap();
         }
-        let result = decode_png_to_pixmap(&path);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("indexed") || msg.contains("Indexed"),
-            "msg={msg}"
-        );
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.width, 2);
+        assert_eq!(pm.data, vec![255, 0, 0, 255, 0, 255, 0, 128]);
+    }
+
+    #[test]
+    fn one_bit_grayscale_expands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g1.png");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 8, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::One);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0b10101010]).unwrap();
+        }
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.width, 8);
+        assert_eq!(pm.data.len(), 8 * 4);
+        assert_eq!(pm.data[0], 255);
+        assert_eq!(pm.data[4], 0);
+    }
+
+    #[test]
+    fn two_bit_grayscale_expands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g2.png");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 4, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Two);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0b11100100]).unwrap();
+        }
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.width, 4);
+        // 2-bit samples expand to 0, 85, 170, 255.
+        assert_eq!(pm.data[0], 255);
+        assert_eq!(pm.data[4], 170);
+        assert_eq!(pm.data[8], 85);
+        assert_eq!(pm.data[12], 0);
+    }
+
+    #[test]
+    fn four_bit_grayscale_expands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4.png");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, 2, 1);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Four);
+            let mut writer = encoder.write_header().unwrap();
+            // two 4-bit samples: 0xF and 0x0 nibbles packed in one byte
+            writer.write_image_data(&[0xF0]).unwrap();
+        }
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data[0], 0xFF);
+        assert_eq!(pm.data[4], 0x00);
+    }
+
+    #[test]
+    fn ingest_policy_downsample_matches_default() {
+        let policy = IngestPolicy {
+            depth_downconversion: DepthDownconversion::TruncateHighByte,
+            ..IngestPolicy::default()
+        };
+        assert_eq!(policy.downsample_u16_be(0x12, 0x34), 0x12);
     }
 
     #[test]
     fn write_error_message_contains_path() {
-        // write_png error path uses path.display() in the message
         let path = std::path::Path::new("/no/such/dir/x.png");
         let err = decode_png_to_pixmap(path).unwrap_err();
         assert!(err.to_string().contains("x.png"));

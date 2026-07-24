@@ -562,3 +562,38 @@ fn encode_missing_input_fails() {
         .assert()
         .failure();
 }
+
+/// Indexed PNG with palette + tRNS must encode through the expanded ingest path.
+#[test]
+fn encode_indexed_png_creates_valid_djvu() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("palette.png");
+    {
+        let file = std::fs::File::create(&input).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 32, 32);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_palette(vec![255, 255, 255, 0, 0, 0]);
+        encoder.set_trns(vec![255, 128]);
+        let mut writer = encoder.write_header().unwrap();
+        let pixels = vec![0u8; 32 * 32];
+        writer.write_image_data(&pixels).unwrap();
+    }
+    let output = dir.path().join("out.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--dpi",
+            "100",
+        ])
+        .assert()
+        .success();
+
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[..4], b"AT&T");
+}
