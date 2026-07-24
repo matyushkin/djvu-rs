@@ -73,13 +73,13 @@ jobs:
       # main: all 452 tests in one pass — slow PDF/IW44 run in parallel with fast ones
       - name: Test (all)
         if: github.ref == 'refs/heads/main'
-        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
+        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff
 
       # PR / other branch: fast tests only (~440 tests, skip 200s PDF + large IW44)
       - name: Test (fast — skip slow PDF + IW44)
         if: github.ref != 'refs/heads/main'
         run: >
-          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli
+          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
       # nextest does not run doctests; this compiles every ```rust block in
@@ -384,7 +384,7 @@ jobs:
       # sequentially; nextest runs them in parallel like the Test (stable) job,
       # cutting several minutes off the collect step.
       - name: Collect coverage
-        run: cargo llvm-cov nextest --profile ci --workspace --features cli --no-report
+        run: cargo llvm-cov nextest --profile ci --workspace --features cli,tiff --no-report
 
       - name: Coverage summary
         run: |

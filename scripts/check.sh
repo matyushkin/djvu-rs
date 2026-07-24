@@ -19,6 +19,10 @@ if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown
   run cargo check --target wasm32-unknown-unknown --features wasm
   run cargo check --target wasm32-unknown-unknown --features wasm-lazy  # lazy Range open (#588)
   run cargo build --no-default-features --target wasm32-unknown-unknown
+  run env RUSTFLAGS='-C target-feature=+simd128' \
+    cargo check --target wasm32-unknown-unknown --features wasm
+  run cargo build --manifest-path tests/no_std_smoke/Cargo.toml \
+    --target wasm32-unknown-unknown
 else
   echo "!! wasm32-unknown-unknown not installed — run: rustup target add wasm32-unknown-unknown" >&2
   exit 1
@@ -26,9 +30,9 @@ fi
 
 # tests (nextest if present, else cargo test) — same scope as CI
 if command -v cargo-nextest >/dev/null 2>&1; then
-  run cargo nextest run --workspace --exclude djvu-py --features cli
+  run cargo nextest run --workspace --exclude djvu-py --features cli,tiff
 else
-  run cargo test --workspace --exclude djvu-py --features cli
+  run cargo test --workspace --exclude djvu-py --features cli,tiff
 fi
 
 # README doctests — nextest skips doctests; this compiles every rust block in

@@ -12,7 +12,7 @@ CI failures on `main` are mostly preventable locally. Mirror the deterministic C
 gates with one command:
 
 ```
-make check        # fmt, clippy -D warnings, no_std build, wasm32 (no_std + wasm), tests
+make check        # fmt, clippy -D warnings, no_std build, wasm32 (+ simd128, no_std_smoke), tests (cli,tiff)
 make hooks        # one-time: enable the pre-push hook (core.hooksPath=.githooks)
 ```
 
