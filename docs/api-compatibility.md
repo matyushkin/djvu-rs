@@ -204,10 +204,22 @@ of ceilings lives in [`../SECURITY.md`](../SECURITY.md#decode-time-resource-ceil
 | S-expression (ANTz) depth | 64 | `MAX_SEXPR_DEPTH` |
 | Text-zone (TXTz) depth | 64 | `MAX_ZONE_DEPTH` |
 | Pixmap pixels | 64 MP | `MAX_PIXELS` |
+| Render output pixels | 512 MP | [`DEFAULT_MAX_RENDER_PIXELS`](../../src/validate.rs) |
+
+**Configurable budgets.** Callers may supply a [`ResourceLimits`](../../src/validate.rs)
+budget via [`ParseOptions::limits`](../../src/validate.rs) on
+[`DjVuDocument::parse_with_options`](../../src/djvu_document.rs) /
+[`Document::from_bytes_with_options`](../../src/lib.rs), or via
+[`render_pixmap_with_limits`](../../src/djvu_render.rs) on render entry points.
+Unset fields mean “no limit on this axis”. When render calls omit an explicit
+override, the document inherits limits stored at parse time. When both are
+unset, render output inherits [`DEFAULT_MAX_RENDER_PIXELS`]. Use
+[`ResourceLimits::inherited`] for the documented default render ceiling only.
+Per-render tightening uses [`render_pixmap_with_limits`](../../src/djvu_render.rs).
+The validator and `djvu validate --limits` use the same type.
 
 **Limit failures are typed and identify the operation.** When a ceiling is hit,
-the failing codec returns a typed variant that names the axis, and the
-`DjVuError` wrapper names the codec/operation:
+the failing entry point returns a typed error naming the axis and operation:
 
 | Limit | Typed error | Wrapped as |
 |-------|-------------|------------|
@@ -217,15 +229,13 @@ the failing codec returns a typed variant that names the axis, and the
 | JB2 too many records | `Jb2Error::TooManyRecords` | `DjVuError::Jb2` |
 | IW44 image too large | `Iw44Error::ImageTooLarge` | `DjVuError::Iw44` |
 | BZZ block / output too large | `BzzError::BlockSizeTooLarge(_)` / `OutputTooLarge` | `DjVuError::Bzz` |
+| Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render.rs) |
 
 The `DjVuError` variant (`Iff` / `Jb2` / `Iw44` / `Bzz`) identifies which
-decode stage rejected the input; the inner variant identifies the axis. `IffError::ChunkTooLong` additionally reports the offending chunk `id`.
-
-**Open item (tracked under #695).** These ceilings are compile-time constants
-today; a future slice may expose a caller-supplied `ResourceLimits` budget so
-consumers can tighten (or, for trusted input, relax) them. The *contract* above
-— bounded work, typed operation-identifying errors — is stable regardless of
-whether the numbers become configurable.
+decode stage rejected the input; the inner variant identifies the axis.
+[`ResourceLimitExceeded::operation`] names the public entry point (for example
+`document.parse` or `render_pixmap`). `IffError::ChunkTooLong` additionally
+reports the offending chunk `id`.
 
 ## 8. Experimental-surface consistency (README ↔ docs.rs)
 

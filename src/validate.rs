@@ -114,41 +114,10 @@ pub struct ValidationSummary {
     pub recovery: usize,
 }
 
-/// Configured processing limits checked by the resource layer.
-///
-/// Every field is optional: `None` means "no limit for this dimension". All
-/// limits are compared against the cheap, header-only [`ResourceEstimate`], so
-/// they are evaluated before any per-page decode is attempted. Pixel and byte
-/// counts use [`u64`] so a limit stays meaningful on 32-bit targets where a
-/// single page area can exceed [`u32::MAX`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ResourceLimits {
-    /// Maximum accepted input size in bytes.
-    pub max_file_bytes: Option<u64>,
-    /// Maximum accepted page count.
-    pub max_pages: Option<u64>,
-    /// Maximum accepted embedded component count (bundled documents).
-    pub max_components: Option<u64>,
-    /// Maximum accepted pixel area (`width * height`) of any single page.
-    pub max_page_pixels: Option<u64>,
-    /// Maximum accepted sum of every page's pixel area.
-    pub max_total_pixels: Option<u64>,
-    /// Maximum accepted peak decoded-page memory, in bytes.
-    pub max_decoded_bytes: Option<u64>,
-}
-
-impl ResourceLimits {
-    /// Whether every limit field is unset (the resource layer emits estimates
-    /// but never a violation).
-    pub const fn is_empty(&self) -> bool {
-        self.max_file_bytes.is_none()
-            && self.max_pages.is_none()
-            && self.max_components.is_none()
-            && self.max_page_pixels.is_none()
-            && self.max_total_pixels.is_none()
-            && self.max_decoded_bytes.is_none()
-    }
-}
+pub use crate::resource_limits::{
+    DEFAULT_MAX_RENDER_PIXELS, ParseOptions, ResourceLimitAxis, ResourceLimitExceeded,
+    ResourceLimits,
+};
 
 /// Cheap, pre-decode resource estimates derived from container headers only.
 ///
@@ -693,6 +662,126 @@ fn estimate_resources(data: &[u8], records: &[ChunkRecord]) -> ResourceEstimate 
         .max_page_pixels
         .saturating_mul(DECODED_BYTES_PER_PIXEL);
     estimate
+}
+
+/// Check header-only resource estimates against configured limits.
+///
+/// Returns the first exceeded limit as a typed error naming
+/// `operation` (for example `"document.parse"`). When the IFF walk fails,
+/// returns `Ok(None)` so the caller can surface the structural parse error.
+pub fn check_document_limits(
+    data: &[u8],
+    limits: &ResourceLimits,
+    operation: &'static str,
+) -> Result<Option<ResourceEstimate>, ResourceLimitExceeded> {
+    if limits.is_empty() {
+        return Ok(None);
+    }
+
+    let records = match iff::walk_chunks(data) {
+        Ok(records) => records,
+        Err(_) => return Ok(None),
+    };
+    let estimate = estimate_resources(data, &records);
+    first_resource_violation(data, &records, &estimate, limits, operation)?;
+    Ok(Some(estimate))
+}
+
+/// Return the first configured limit violation, if any.
+fn first_resource_violation(
+    data: &[u8],
+    records: &[ChunkRecord],
+    estimate: &ResourceEstimate,
+    limits: &ResourceLimits,
+    operation: &'static str,
+) -> Result<(), ResourceLimitExceeded> {
+    if let Some(max) = limits.max_file_bytes
+        && estimate.file_bytes > max
+    {
+        return Err(ResourceLimitExceeded {
+            operation,
+            axis: ResourceLimitAxis::FileBytes,
+            found: estimate.file_bytes,
+            limit: max,
+            page_number: None,
+            width: None,
+            height: None,
+        });
+    }
+    if let Some(max) = limits.max_pages
+        && estimate.pages > max
+    {
+        return Err(ResourceLimitExceeded {
+            operation,
+            axis: ResourceLimitAxis::PageCount,
+            found: estimate.pages,
+            limit: max,
+            page_number: None,
+            width: None,
+            height: None,
+        });
+    }
+    if let Some(max) = limits.max_components
+        && estimate.components > max
+    {
+        return Err(ResourceLimitExceeded {
+            operation,
+            axis: ResourceLimitAxis::ComponentCount,
+            found: estimate.components,
+            limit: max,
+            page_number: None,
+            width: None,
+            height: None,
+        });
+    }
+    if let Some(max) = limits.max_page_pixels {
+        let mut page_number = 0usize;
+        for record in records.iter().filter(|record| record.id == *b"INFO") {
+            page_number += 1;
+            let Ok(info) = PageInfo::parse(record_data(data, record)) else {
+                continue;
+            };
+            let pixels = u64::from(info.width) * u64::from(info.height);
+            if pixels > max {
+                return Err(ResourceLimitExceeded {
+                    operation,
+                    axis: ResourceLimitAxis::PagePixels,
+                    found: pixels,
+                    limit: max,
+                    page_number: Some(page_number),
+                    width: Some(u32::from(info.width)),
+                    height: Some(u32::from(info.height)),
+                });
+            }
+        }
+    }
+    if let Some(max) = limits.max_total_pixels
+        && estimate.total_pixels > max
+    {
+        return Err(ResourceLimitExceeded {
+            operation,
+            axis: ResourceLimitAxis::TotalPixels,
+            found: estimate.total_pixels,
+            limit: max,
+            page_number: None,
+            width: None,
+            height: None,
+        });
+    }
+    if let Some(max) = limits.max_decoded_bytes
+        && estimate.peak_decoded_bytes > max
+    {
+        return Err(ResourceLimitExceeded {
+            operation,
+            axis: ResourceLimitAxis::DecodedBytes,
+            found: estimate.peak_decoded_bytes,
+            limit: max,
+            page_number: None,
+            width: None,
+            height: None,
+        });
+    }
+    Ok(())
 }
 
 /// Compare a resource estimate against configured limits, emitting one
@@ -1498,6 +1587,7 @@ mod tests {
                     max_page_pixels: Some(1),
                     max_total_pixels: Some(1),
                     max_decoded_bytes: Some(1),
+                    max_render_pixels: None,
                 }),
                 ..Default::default()
             },
@@ -1544,6 +1634,7 @@ mod tests {
                     max_page_pixels: Some(u64::MAX),
                     max_total_pixels: Some(u64::MAX),
                     max_decoded_bytes: Some(u64::MAX),
+                    max_render_pixels: Some(u64::MAX),
                 }),
                 ..Default::default()
             },
@@ -1583,5 +1674,28 @@ mod tests {
                 .any(|finding| finding.code == "resource.decode-skipped"
                     && finding.severity == Severity::Recovery)
         );
+    }
+
+    #[test]
+    fn check_document_limits_reports_typed_page_pixel_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_page_pixels: Some(1),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.operation, "document.parse");
+        assert_eq!(err.axis, ResourceLimitAxis::PagePixels);
+    }
+
+    #[test]
+    fn inherited_limits_set_render_ceiling_only() {
+        let inherited = ResourceLimits::inherited();
+        assert_eq!(inherited.max_render_pixels, Some(DEFAULT_MAX_RENDER_PIXELS));
+        assert!(inherited.max_pages.is_none());
     }
 }
