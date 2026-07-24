@@ -3,13 +3,23 @@
 Python bindings for [djvu-rs](https://github.com/matyushkin/djvu-rs), a
 pure-Rust DjVu decoder and encoder. The bindings cover the reading surface:
 open documents, render pages (to PIL or numpy), and extract the text layer.
-For conversion (PDF/EPUB/TIFF) and encoding, see the
-[main project README](https://github.com/matyushkin/djvu-rs#readme).
+
+Encode, document mutation, and PDF/EPUB/TIFF/CBZ export are **not** exposed
+here — use the [Rust crate](https://crates.io/crates/djvu-rs) or the `djvu`
+CLI. See [docs/packaging.md](../docs/packaging.md) for the release contract.
 
 ## Install
 
-Not published to PyPI yet — build from the repository checkout (requires a
-Rust toolchain):
+```bash
+pip install djvu-rs
+```
+
+Wheels are published for manylinux/musllinux, macOS, and Windows (CPython
+3.9–3.13). The package version matches the `djvu-rs` crate version.
+
+### Build from source
+
+Requires a Rust toolchain (see repository `rust-version`) and maturin:
 
 ```bash
 pip install ./djvu-py
@@ -20,9 +30,18 @@ cd djvu-py && maturin develop --release
 
 ## Version policy
 
-The Python package follows the Rust crate version: it is built from the
-`djvu-rs` Rust workspace at the same version, with no separate Python release
-train. The same policy will apply once the package is published to PyPI.
+The Python package follows the Rust crate version: maturin reads the version
+from `djvu-py/Cargo.toml`, which must match the workspace crate. There is no
+separate Python release train.
+
+## Typed errors
+
+| Exception | Meaning |
+|-----------|---------|
+| `djvu_rs.Error` | Base class |
+| `djvu_rs.DecodeError` | Parse / decode / render failure |
+| `djvu_rs.IoError` | Filesystem failure from `Document.open` |
+| `djvu_rs.PageIndexError` | Out-of-range page index (also an `IndexError`) |
 
 ## Usage
 

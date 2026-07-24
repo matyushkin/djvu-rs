@@ -195,12 +195,8 @@ separate fresh-encode and mutation APIs.
 
 ## Python
 
-PyO3 bindings live in [`djvu-py/`](djvu-py/). They are **not published to PyPI
-yet** — build them from the repository (requires a Rust toolchain):
-
 ```sh
-pip install ./djvu-py
-# or, for development: pip install maturin && cd djvu-py && maturin develop --release
+pip install djvu-rs
 ```
 
 ```python
@@ -216,28 +212,22 @@ img.save('page.png')
 text = page.text()
 ```
 
-The bindings cover the reading surface: open documents, render pages
-(including region and progressive rendering, with zero-copy numpy/PIL paths),
-and extract the text layer. See [`djvu-py/README.md`](djvu-py/README.md).
+PyO3 bindings live in [`djvu-py/`](djvu-py/). Wheels track the crate version
+(CPython 3.9–3.13 on manylinux/musllinux, macOS, and Windows). The bindings
+cover the reading surface: open documents, render pages (including region and
+progressive rendering, with zero-copy numpy/PIL paths), and extract the text
+layer. Encode, mutation, and PDF/EPUB/TIFF export stay on the Rust crate / CLI
+for now. See [`djvu-py/README.md`](djvu-py/README.md) and
+[`docs/packaging.md`](docs/packaging.md).
 
 ## WebAssembly
 
-Build the browser package with [wasm-pack](https://rustwasm.github.io/wasm-pack/)
-through the checked-in wrapper:
-
 ```sh
-make wasm
+npm install djvu-rs
 ```
 
-This produces `examples/wasm/pkg/` with one JavaScript entry point, a scalar
-fallback `.wasm`, and a `simd128` `.wasm`. At runtime the loader validates a
-tiny WebAssembly SIMD probe and selects the faster `simd128` artifact when the
-browser supports it, otherwise it loads the scalar artifact.
-
-Then use in JavaScript/TypeScript:
-
 ```js
-import init, { WasmDocument, selectedWasmVariant } from './pkg/djvu_rs.js';
+import init, { WasmDocument, selectedWasmVariant } from 'djvu-rs';
 
 await init();
 console.log(`djvu-rs wasm variant: ${selectedWasmVariant()}`);
@@ -251,15 +241,21 @@ const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
 ctx.putImageData(img, 0, 0);
 ```
 
+The npm package ships TypeScript declarations plus scalar and `simd128` wasm
+artifacts; at runtime a tiny `WebAssembly.validate()` probe selects SIMD when
+supported. Package versions match the Rust crate — see
+[`docs/packaging.md`](docs/packaging.md).
+
+To rebuild the package from this repository:
+
+```sh
+make wasm   # → examples/wasm/pkg (dual scalar + simd128 loader)
+```
+
 See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo, and
 [`examples/wasm/range_lazy.md`](examples/wasm/range_lazy.md) for lazy loading
 over HTTP `Range` requests (`wasm-lazy` feature) — the browser fetches only
 the index plus the pages actually opened.
-
-The generated npm package follows the Rust crate version; there is no separate
-WASM release train. The local `pkg/` directory is ignored wasm-pack output, so
-regenerate it with `make wasm` from the checked-in `Cargo.toml` before
-publishing instead of editing generated `pkg/package.json` by hand.
 
 ## Advanced usage
 

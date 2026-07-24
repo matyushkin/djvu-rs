@@ -52,3 +52,9 @@ examples/wasm/pkg/
 /writer_results.txt
 /writer_status.txt
 /previous_history.json
+
+# Local packaging smoke outputs (#692)
+/npm-pkg/
+/npm-dist/
+/target/wheels/
+/node_modules/
