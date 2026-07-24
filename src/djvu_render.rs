@@ -118,6 +118,10 @@ pub enum RenderError {
     #[error("document error: {0}")]
     Doc(#[from] crate::djvu_document::DocError),
 
+    /// A configured resource limit was exceeded during rendering.
+    #[error("{0}")]
+    ResourceLimit(#[from] crate::resource_limits::ResourceLimitExceeded),
+
     /// A render option is incompatible with the chosen entry point.
     ///
     /// Returned by [`render_streaming`] when an option requires post-processing
@@ -253,6 +257,46 @@ impl Default for RenderOptions {
             mask_aa: false,
         }
     }
+}
+
+fn effective_max_render_pixels(
+    page: &crate::djvu_document::DjVuPage,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+) -> u64 {
+    limits
+        .and_then(|limits| limits.max_render_pixels)
+        .or(page
+            .resource_limits()
+            .and_then(|limits| limits.max_render_pixels))
+        .unwrap_or(crate::resource_limits::DEFAULT_MAX_RENDER_PIXELS)
+}
+
+fn check_output_pixels(
+    operation: &'static str,
+    page: &crate::djvu_document::DjVuPage,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+    width: u32,
+    height: u32,
+) -> Result<(), RenderError> {
+    if width == 0 || height == 0 {
+        return Err(RenderError::InvalidDimensions { width, height });
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    let limit = effective_max_render_pixels(page, limits);
+    if pixels > limit {
+        return Err(RenderError::ResourceLimit(
+            crate::resource_limits::ResourceLimitExceeded {
+                operation,
+                axis: crate::resource_limits::ResourceLimitAxis::RenderOutputPixels,
+                found: pixels,
+                limit,
+                page_number: Some(page.index() + 1),
+                width: Some(width),
+                height: Some(height),
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// A document layer a permissive render skipped or fell back on (#696).
@@ -3346,6 +3390,7 @@ fn composite_rows_area_avg_one(
 pub(crate) fn render_rows<F>(
     page: &DjVuPage,
     opts: &RenderOptions,
+    limits: Option<crate::resource_limits::ResourceLimits>,
     sink: F,
 ) -> Result<(), RenderError>
 where
@@ -3354,12 +3399,7 @@ where
     let w = opts.width;
     let h = opts.height;
 
-    if w == 0 || h == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
+    check_output_pixels("render_rows", page, limits, w, h)?;
 
     let gamma_lut = build_gamma_lut(page.gamma());
 
@@ -3414,15 +3454,20 @@ pub fn render_into(
     opts: &RenderOptions,
     buf: &mut [u8],
 ) -> Result<(), RenderError> {
+    render_into_with_limits(page, opts, None, buf)
+}
+
+/// Like [`render_into`], with an optional caller-supplied resource limit override.
+pub fn render_into_with_limits(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+    buf: &mut [u8],
+) -> Result<(), RenderError> {
     let w = opts.width;
     let h = opts.height;
 
-    if w == 0 || h == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
+    check_output_pixels("render_into", page, limits, w, h)?;
 
     let need = (w as usize)
         .checked_mul(h as usize)
@@ -3570,27 +3615,28 @@ pub fn render_pixmap_with_report(
 }
 
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
+    render_pixmap_with_limits(page, opts, None)
+}
+
+/// Render a page to an owned RGBA pixmap with an optional resource limit override.
+///
+/// When `limits` is `None`, limits inherited from the parent document at parse
+/// time apply (see [`ParseOptions::limits`](crate::resource_limits::ParseOptions::limits)).
+/// Per-render overrides use [`render_pixmap_with_limits`] /
+/// [`render_into_with_limits`].
+pub fn render_pixmap_with_limits(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+) -> Result<Pixmap, RenderError> {
     let w = opts.width;
     let h = opts.height;
-
-    if w == 0 || h == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
 
     // Bound the output allocation. `w`/`h` flow from the (untrusted) INFO chunk on
     // a default render; w*h*4 of 65535² is ~17 GB, which either OOMs (64-bit) or
     // wraps `Pixmap::new` to an empty buffer that the permissive copy below then
     // indexes out of bounds. Reject up front.
-    const MAX_RENDER_PIXELS: usize = 512 * 1024 * 1024;
-    if (w as usize).saturating_mul(h as usize) > MAX_RENDER_PIXELS {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
+    check_output_pixels("render_pixmap", page, limits, w, h)?;
 
     let mut pm = Pixmap::white(w, h);
 
@@ -3598,14 +3644,14 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         let row_stride = w as usize * 4;
         // Permissive rendering has its own decode-error recovery path in
         // render_rows; keep that behaviour and copy each recovered row.
-        render_rows(page, opts, |y, row| {
+        render_rows(page, opts, limits, |y, row| {
             let start = y * row_stride;
             pm.data[start..start + row_stride].copy_from_slice(row);
         })?;
     } else {
         // Strict renders can composite directly into the output Pixmap,
         // avoiding the scratch row + row copy used by the streaming adapter.
-        render_into(page, opts, &mut pm.data)?;
+        render_into_with_limits(page, opts, limits, &mut pm.data)?;
     }
 
     if opts.aa {
@@ -3615,7 +3661,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
     // Apply the shared Lanczos-3 post-pass (re-render at native size, then
     // downscale) when requested and scaling actually happened.
     let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
-        render_pixmap(page, native_opts)
+        render_pixmap_with_limits(page, native_opts, limits)
     });
 
     Ok(rotate_pixmap(
@@ -3697,7 +3743,7 @@ where
             "rotation requires a full pixmap; use render_pixmap",
         ));
     }
-    render_rows(page, opts, sink)
+    render_rows(page, opts, None, sink)
 }
 
 /// Render a sub-rectangle of a page into a new [`Pixmap`].
@@ -3720,12 +3766,7 @@ pub fn render_region(
     region: RenderRect,
     opts: &RenderOptions,
 ) -> Result<Pixmap, RenderError> {
-    if region.width == 0 || region.height == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: region.width,
-            height: region.height,
-        });
-    }
+    check_output_pixels("render_region", page, None, region.width, region.height)?;
 
     let full_w = opts.width.max(1);
     let full_h = opts.height.max(1);
@@ -3835,12 +3876,13 @@ pub fn render_region_tiled(
     region: RenderRect,
     opts: &RenderOptions,
 ) -> Result<Pixmap, RenderError> {
-    if region.width == 0 || region.height == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: region.width,
-            height: region.height,
-        });
-    }
+    check_output_pixels(
+        "render_region_tiled",
+        page,
+        None,
+        region.width,
+        region.height,
+    )?;
 
     let full_w = opts.width.max(1);
     let full_h = opts.height.max(1);
@@ -4008,12 +4050,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
     let w = opts.width;
     let h = opts.height;
 
-    if w == 0 || h == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
+    check_output_pixels("render_coarse", page, None, w, h)?;
 
     let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let bg = decode_background_chunks(page, 1, bg_subsample)?;
@@ -4066,12 +4103,7 @@ pub fn render_progressive(
     let w = opts.width;
     let h = opts.height;
 
-    if w == 0 || h == 0 {
-        return Err(RenderError::InvalidDimensions {
-            width: w,
-            height: h,
-        });
-    }
+    check_output_pixels("render_progressive", page, None, w, h)?;
 
     let n_bg44 = page.bg44_chunks().len();
     let max_chunk = n_bg44.saturating_sub(1);
@@ -4197,12 +4229,13 @@ impl<'a> ProgressiveDecoder<'a> {
     /// `opts.permissive` is set (see the type docs); or a decode error from the
     /// foreground.
     pub fn new(page: &'a DjVuPage, opts: &RenderOptions) -> Result<Self, RenderError> {
-        if opts.width == 0 || opts.height == 0 {
-            return Err(RenderError::InvalidDimensions {
-                width: opts.width,
-                height: opts.height,
-            });
-        }
+        check_output_pixels(
+            "render_progressive_decoder",
+            page,
+            None,
+            opts.width,
+            opts.height,
+        )?;
         if opts.resampling != Resampling::Bilinear || opts.permissive {
             return Err(RenderError::UnsupportedOption(
                 "ProgressiveDecoder supports only strict Bilinear rendering; \
@@ -7420,7 +7453,45 @@ mod tests {
         };
         assert!(matches!(
             render_pixmap(page, &opts),
-            Err(RenderError::InvalidDimensions { .. })
+            Err(RenderError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn render_into_rejects_oversized_output_with_typed_limit_error() {
+        let doc = load_doc("czech.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 60_000,
+            height: 60_000,
+            permissive: true,
+            ..Default::default()
+        };
+        let mut buf = vec![0u8; 16];
+        assert!(matches!(
+            render_into(page, &opts, &mut buf),
+            Err(RenderError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn configurable_render_limit_overrides_inherited_ceiling() {
+        let doc = load_doc("czech.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 500,
+            height: 500,
+            permissive: true,
+            ..Default::default()
+        };
+        let limits = crate::resource_limits::ResourceLimits {
+            max_render_pixels: Some(100_000),
+            ..Default::default()
+        };
+        assert!(matches!(
+            render_pixmap_with_limits(page, &opts, Some(limits)),
+            Err(RenderError::ResourceLimit(exceeded)) if exceeded.operation == "render_pixmap"
+                && exceeded.axis == crate::resource_limits::ResourceLimitAxis::RenderOutputPixels
         ));
     }
 

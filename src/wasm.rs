@@ -170,7 +170,11 @@ impl WasmDocument {
     /// Throws a JavaScript `Error` if the bytes are not a valid DjVu file.
     pub fn from_bytes(data: Vec<u8>) -> Result<WasmDocument, JsError> {
         let backing: crate::djvu_document::Backing = Arc::new(data);
-        let doc = DjVuDocument::parse_backed(backing).map_err(|e| JsError::new(&e.to_string()))?;
+        let doc = DjVuDocument::parse_backed_with_options(
+            backing,
+            &crate::resource_limits::ParseOptions::default(),
+        )
+        .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmDocument {
             inner: Arc::new(doc),
         })

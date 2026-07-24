@@ -209,6 +209,10 @@ pub enum DocError {
     /// Metadata parse error.
     #[error("metadata error: {0}")]
     Metadata(#[from] MetadataError),
+
+    /// A configured resource limit was exceeded during document parse/open.
+    #[error("{0}")]
+    ResourceLimit(#[from] crate::resource_limits::ResourceLimitExceeded),
 }
 
 // ---- Bookmark ---------------------------------------------------------------
@@ -436,6 +440,8 @@ pub struct DjVuPage {
     /// Only available when the `std` feature is enabled (`OnceLock` requires std).
     #[cfg(feature = "std")]
     render_layers: std::sync::OnceLock<crate::djvu_render::PageLayers>,
+    /// Resource limits inherited from the parent document at parse time.
+    resource_limits: Option<crate::resource_limits::ResourceLimits>,
 }
 
 impl Clone for DjVuPage {
@@ -450,6 +456,7 @@ impl Clone for DjVuPage {
             // page keeps sharing the single decode (the dict is immutable).
             #[cfg(feature = "std")]
             render_layers: std::sync::OnceLock::new(),
+            resource_limits: self.resource_limits,
         }
     }
 }
@@ -498,6 +505,11 @@ impl DjVuPage {
     /// 0-based page index within the document.
     pub fn index(&self) -> usize {
         self.index
+    }
+
+    /// Resource limits inherited from the parent document at parse time.
+    pub fn resource_limits(&self) -> Option<crate::resource_limits::ResourceLimits> {
+        self.resource_limits
     }
 
     /// Dimensions as `(width, height)`.
@@ -1140,6 +1152,33 @@ pub struct DjVuDocument {
     /// future HTTP-Range fetcher (#196 Phase 3) request exactly the bytes
     /// for a given page.
     page_byte_ranges: Vec<core::ops::Range<u64>>,
+    /// Configurable resource limits supplied at parse/open time.
+    resource_limits: Option<crate::resource_limits::ResourceLimits>,
+}
+
+#[cfg(feature = "std")]
+fn attach_resource_limits(
+    mut document: DjVuDocument,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+) -> DjVuDocument {
+    document.resource_limits = limits;
+    if let Some(limits) = limits {
+        for page in &mut document.pages {
+            page.resource_limits = Some(limits);
+        }
+    }
+    document
+}
+
+#[cfg(feature = "std")]
+fn check_parse_limits(
+    data: &[u8],
+    limits: Option<crate::resource_limits::ResourceLimits>,
+) -> Result<(), DocError> {
+    if let Some(limits) = limits.filter(|limits| !limits.is_empty()) {
+        let _ = crate::validate::check_document_limits(data, &limits, "document.parse")?;
+    }
+    Ok(())
 }
 
 impl DjVuDocument {
@@ -1153,7 +1192,52 @@ impl DjVuDocument {
     /// Returns `DocError::NoResolver` if the document is indirect and no resolver
     /// was provided.
     pub fn parse(data: &[u8]) -> Result<Self, DocError> {
-        Self::parse_with_resolver(data, None::<fn(&str) -> Result<Vec<u8>, DocError>>)
+        #[cfg(feature = "std")]
+        {
+            Self::parse_with_options(data, &crate::resource_limits::ParseOptions::default())
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Self::parse_with_resolver(data, None::<fn(&str) -> Result<Vec<u8>, DocError>>)
+        }
+    }
+
+    /// Parse a DjVu document with configurable resource limits.
+    ///
+    /// When [`ParseOptions::limits`] is set, header-only estimates are checked
+    /// before the document is fully parsed. The same limits are stored on the
+    /// returned document and inherited by subsequent render calls unless
+    /// overridden via [`render_pixmap_with_limits`](crate::djvu_render::render_pixmap_with_limits).
+    #[cfg(feature = "std")]
+    pub fn parse_with_options(
+        data: &[u8],
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, DocError> {
+        Self::parse_with_resolver_and_options(
+            data,
+            None::<fn(&str) -> Result<Vec<u8>, DocError>>,
+            opts,
+        )
+    }
+
+    /// Parse with an optional resolver and configurable resource limits.
+    #[cfg(feature = "std")]
+    pub fn parse_with_resolver_and_options<R>(
+        data: &[u8],
+        resolver: Option<R>,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, DocError>
+    where
+        R: Fn(&str) -> Result<Vec<u8>, DocError>,
+    {
+        check_parse_limits(data, opts.limits)?;
+        let document = Self::parse_with_resolver(data, resolver)?;
+        Ok(attach_resource_limits(document, opts.limits))
+    }
+
+    /// Configurable resource limits supplied at parse/open time, if any.
+    pub fn resource_limits(&self) -> Option<crate::resource_limits::ResourceLimits> {
+        self.resource_limits
     }
 
     /// Parse from an owned, shared backing store (an owned `Vec<u8>` or an
@@ -1171,20 +1255,36 @@ impl DjVuDocument {
     /// is safe to call for any input. Keep the bundled loop below in sync with
     /// the eager one in [`parse_with_resolver`](Self::parse_with_resolver).
     #[cfg(feature = "std")]
-    pub(crate) fn parse_backed(backing: Backing) -> Result<Self, DocError> {
+    pub(crate) fn parse_backed_with_options(
+        backing: Backing,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, DocError> {
+        check_parse_limits(backing_bytes(&backing), opts.limits)?;
         let data = backing_bytes(&backing);
         let form = parse_form(data)?;
         if &form.form_type != b"DJVM" {
-            return Self::parse(data);
+            return Self::parse_with_resolver_and_options(
+                data,
+                None::<fn(&str) -> Result<Vec<u8>, DocError>>,
+                opts,
+            );
         }
         let Some(dirm_chunk) = form.chunks.iter().find(|c| &c.id == b"DIRM") else {
-            return Self::parse(data);
+            return Self::parse_with_resolver_and_options(
+                data,
+                None::<fn(&str) -> Result<Vec<u8>, DocError>>,
+                opts,
+            );
         };
         let payload = DirmPayload::decode(dirm_chunk.data).map_err(DocError::Malformed)?;
         if !payload.is_bundled() {
             // Indirect: needs a resolver — defer to the eager path (which errors
             // consistently with the previous behaviour).
-            return Self::parse(data);
+            return Self::parse_with_resolver_and_options(
+                data,
+                None::<fn(&str) -> Result<Vec<u8>, DocError>>,
+                opts,
+            );
         }
 
         let entries = payload.components();
@@ -1259,12 +1359,16 @@ impl DjVuDocument {
             page_byte_ranges.clear();
         }
 
-        Ok(DjVuDocument {
-            pages,
-            bookmarks,
-            global_chunks,
-            page_byte_ranges,
-        })
+        Ok(attach_resource_limits(
+            DjVuDocument {
+                pages,
+                bookmarks,
+                global_chunks,
+                page_byte_ranges,
+                resource_limits: None,
+            },
+            opts.limits,
+        ))
     }
 
     /// Parse a DjVu document using the typed sync component resolver contract.
@@ -1383,6 +1487,7 @@ impl DjVuDocument {
             global_chunks,
             // Indirect component bytes live outside the index buffer.
             page_byte_ranges: Vec::new(),
+            resource_limits: None,
         })
     }
 
@@ -1416,6 +1521,7 @@ impl DjVuDocument {
                     bookmarks: vec![],
                     global_chunks,
                     page_byte_ranges,
+                    resource_limits: None,
                 })
             }
             b"BM44" | b"PM44" => {
@@ -1427,6 +1533,7 @@ impl DjVuDocument {
                     bookmarks: vec![],
                     global_chunks: Vec::new(),
                     page_byte_ranges,
+                    resource_limits: None,
                 })
             }
             b"DJVM" => {
@@ -1561,6 +1668,7 @@ impl DjVuDocument {
                         bookmarks,
                         global_chunks,
                         page_byte_ranges,
+                        resource_limits: None,
                     })
                 } else {
                     // Indirect: pages must be resolved by name
@@ -1587,6 +1695,7 @@ impl DjVuDocument {
                         // Indirect: per-page bytes live in external files, not the
                         // index buffer — no meaningful range to expose here.
                         page_byte_ranges: Vec::new(),
+                        resource_limits: None,
                     })
                 }
             }
@@ -1940,6 +2049,20 @@ impl DjVuDocument {
         data: &[u8],
         base_dir: impl AsRef<std::path::Path>,
     ) -> Result<Self, DocError> {
+        Self::parse_from_dir_with_options(
+            data,
+            base_dir,
+            &crate::resource_limits::ParseOptions::default(),
+        )
+    }
+
+    /// Parse an indirect document from a directory with configurable resource limits.
+    #[cfg(feature = "std")]
+    pub fn parse_from_dir_with_options(
+        data: &[u8],
+        base_dir: impl AsRef<std::path::Path>,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, DocError> {
         let base = base_dir.as_ref().to_path_buf();
         let resolver = move |name: &str| -> Result<Vec<u8>, DocError> {
             // Strip any "file://" prefix
@@ -1951,7 +2074,7 @@ impl DjVuDocument {
             };
             std::fs::read(&path).map_err(|_| DocError::IndirectResolve(name.to_string()))
         };
-        Self::parse_with_resolver(data, Some(resolver))
+        Self::parse_with_resolver_and_options(data, Some(resolver), opts)
     }
 }
 
@@ -2018,7 +2141,10 @@ impl MmapDocument {
         // ref) for `advise_page_willneed`.
         let mmap = Arc::new(mmap);
         let backing: Backing = mmap.clone();
-        let doc = DjVuDocument::parse_backed(backing.clone())?;
+        let doc = DjVuDocument::parse_backed_with_options(
+            backing.clone(),
+            &crate::resource_limits::ParseOptions::default(),
+        )?;
         Ok(MmapDocument {
             _backing: backing,
             mmap,
@@ -2202,6 +2328,7 @@ fn parse_page_lazy(
         index,
         shared_djbz,
         render_layers: std::sync::OnceLock::new(),
+        resource_limits: None,
     })
 }
 
@@ -2233,6 +2360,7 @@ fn parse_page_from_chunks(
         index,
         shared_djbz,
         render_layers: std::sync::OnceLock::new(),
+        resource_limits: None,
     })
 }
 
@@ -2333,6 +2461,7 @@ fn parse_legacy_iw44_page(
             index,
             shared_djbz: None,
             render_layers: std::sync::OnceLock::new(),
+            resource_limits: None,
         })
     }
     #[cfg(not(feature = "std"))]
@@ -2342,6 +2471,7 @@ fn parse_legacy_iw44_page(
             chunks: raw_chunks,
             index,
             shared_djbz: None,
+            resource_limits: None,
         })
     }
 }
@@ -2372,6 +2502,7 @@ fn parse_page_from_chunks(
         chunks: raw_chunks,
         index,
         shared_djbz,
+        resource_limits: None,
     })
 }
 
@@ -2503,6 +2634,14 @@ fn read_navm_str(data: &[u8], pos: &mut usize) -> Result<String, DocError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/{name}")),
+        )
+        .unwrap_or_else(|_| panic!("fixture {name} should exist"))
+    }
 
     /// #624: a page may carry several `INCL` chunks (czech.djvu: shared
     /// annotations + two symbol-dictionary includes). Resolution must scan
@@ -2711,6 +2850,40 @@ mod tests {
             chunks.push(IffChunk { id: **id, data });
         }
         parse_page_from_chunks(&chunks, 0, None).expect("page should build")
+    }
+
+    #[test]
+    fn parse_with_options_rejects_exceeded_page_count_before_decode() {
+        let data = fixture_bytes("boy.djvu");
+        let err = DjVuDocument::parse_with_options(
+            &data,
+            &crate::resource_limits::ParseOptions {
+                limits: Some(crate::resource_limits::ResourceLimits {
+                    max_pages: Some(0),
+                    ..Default::default()
+                }),
+            },
+        )
+        .expect_err("parse should fail on page-count limit");
+        assert!(matches!(err, DocError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn parse_with_options_stores_limits_for_render_inheritance() {
+        let data = fixture_bytes("boy.djvu");
+        let limits = crate::resource_limits::ResourceLimits {
+            max_render_pixels: Some(100_000),
+            ..Default::default()
+        };
+        let doc = DjVuDocument::parse_with_options(
+            &data,
+            &crate::resource_limits::ParseOptions {
+                limits: Some(limits),
+            },
+        )
+        .expect("parse should succeed");
+        assert_eq!(doc.resource_limits(), Some(limits));
+        assert_eq!(doc.page(0).unwrap().resource_limits(), Some(limits));
     }
 
     #[test]
