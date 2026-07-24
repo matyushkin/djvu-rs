@@ -724,6 +724,35 @@ Honest boundaries, so you can decide fast:
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
 
+## API stability & compatibility
+
+The full contract lives in [`docs/api-compatibility.md`](docs/api-compatibility.md)
+(policy) and [`docs/feature-matrix.md`](docs/feature-matrix.md) (supported
+combinations and targets), and is enforced in CI. In short:
+
+- **Stable surface** — the document model (`Document`/`Page`, `DjVuDocument`/
+  `DjVuPage`), the render entry points, the codec entry points, the parsers, and
+  the writer `djvu_to_*` functions. Follows SemVer; breakage is caught by
+  `cargo-semver-checks`.
+- **Experimental / placeholder** — `experimental`, `iw44-probe`, `alloc-profile`,
+  `ocr-onnx`, `wasm-threads`, and the `ocr-neural` placeholder. These may change
+  in any release and are the ones marked *Experimental*/*Placeholder* in the
+  feature table above.
+- **Deprecated (kept for ≥ 2 minor releases / 90 days)** — the `bzz_new` and
+  `iw44_new` module aliases and the `ocr-neural-candle` feature alias.
+- **MSRV** — Rust 1.88, a required CI gate.
+- **Thread-safety** — `Document`, `DjVuDocument`, `DjVuPage`, pixel buffers, and
+  the parsed content/error types are `Send + Sync`; the mutable editor is
+  `Send`; `LazyDocument<R>` inherits its thread-safety from `R`. Asserted in
+  [`tests/send_sync_contract.rs`](tests/send_sync_contract.rs).
+- **Untrusted input** — no public parse/decode/render entry point panics on any
+  input; malformed bytes surface as typed errors. Covered by
+  [`tests/panic_free_corpus.rs`](tests/panic_free_corpus.rs), proptests, and
+  libFuzzer/OSS-Fuzz targets.
+- **Resource limits** — decode/render inherit documented, bounded memory/work
+  ceilings; exceeding one returns a typed error naming the codec and axis. See
+  [`SECURITY.md`](SECURITY.md#decode-time-resource-ceilings).
+
 ## Performance
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for Criterion numbers,
