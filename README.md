@@ -137,6 +137,7 @@ djvu optimize book.djvu --output optimized.djvu --preset archival --target-size 
 djvu optimize book.djvu --output optimized.djvu --max-ssim-loss 0.001
 
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
+# TIFF input requires building/installing with --features tiff (cli alone does not enable it).
 djvu encode scan.png --output scan.djvu --dpi 300
 
 # Opt into a DjVuLibre-compatible G4/MMR mask for fax/scanner workflows
@@ -698,7 +699,7 @@ Honest boundaries, so you can decide fast:
 | `pdf` | disabled | PDF export via `djvu_to_pdf` (owns `miniz_oxide` + `jpeg-encoder`) |
 | `cli` | disabled | Build the `djvu` command-line binary (implies `pdf` and `cbz`) |
 | `cbz` | disabled | CBZ (comic-book ZIP) export — backs `render --format cbz` (owns `zip`) |
-| `tiff` | disabled | TIFF export via the `tiff` crate |
+| `tiff` | disabled | TIFF export (`djvu_to_tiff`) **and** TIFF encode input for `djvu encode` / `decode_image_to_pixmap` |
 | `async` | disabled | Async render API and lazy `AsyncRead + AsyncSeek` document loading |
 | `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
 | `jpeg` | disabled | Standalone JPEG decode without full `std` (JPEG is included in `std` by default) |
