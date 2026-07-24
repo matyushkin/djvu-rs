@@ -113,10 +113,18 @@ pkg.files = [
   "simd128/djvu_rs_bg.wasm",
   "simd128/djvu_rs_bg.wasm.d.ts",
 ];
+pkg.type = "module";
 pkg.module = "djvu_rs.js";
+pkg.main = "djvu_rs.js";
 pkg.types = "djvu_rs.d.ts";
+pkg.exports = {
+  ".": {
+    types: "./djvu_rs.d.ts",
+    import: "./djvu_rs.js",
+    default: "./djvu_rs.js",
+  },
+};
 pkg.sideEffects = false;
-delete pkg.main;
 console.log(`${JSON.stringify(pkg, null, 2)}\n`);
 EOF_NODE
 

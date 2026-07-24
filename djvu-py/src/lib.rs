@@ -1,9 +1,35 @@
 use std::ffi::{CString, c_int, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyBufferError, PyIOError, PyIndexError, PyValueError};
+use pyo3::create_exception;
+use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+create_exception!(
+    djvu_rs,
+    Error,
+    pyo3::exceptions::PyException,
+    "Base exception for all djvu-rs Python binding errors."
+);
+create_exception!(
+    djvu_rs,
+    DecodeError,
+    Error,
+    "Document parse, decode, or render failure."
+);
+create_exception!(
+    djvu_rs,
+    IoError,
+    Error,
+    "Filesystem or I/O failure while opening a DjVu document."
+);
+create_exception!(
+    djvu_rs,
+    PageIndexError,
+    pyo3::exceptions::PyIndexError,
+    "Page index is out of range for this document."
+);
 
 /// A DjVu document.
 #[pyclass]
@@ -20,8 +46,8 @@ impl Document {
     #[staticmethod]
     fn open(py: Python<'_>, path: &str) -> PyResult<Self> {
         let doc = py.detach(|| {
-            let data = std::fs::read(path).map_err(|e| PyIOError::new_err(format!("{e}")))?;
-            djvu_rs::Document::from_bytes(data).map_err(|e| PyValueError::new_err(format!("{e}")))
+            let data = std::fs::read(path).map_err(|e| IoError::new_err(format!("{e}")))?;
+            djvu_rs::Document::from_bytes(data).map_err(|e| DecodeError::new_err(format!("{e}")))
         })?;
         Ok(Document {
             inner: Arc::new(doc),
@@ -36,7 +62,7 @@ impl Document {
     fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         let data = data.to_vec();
         let doc = py.detach(move || {
-            djvu_rs::Document::from_bytes(data).map_err(|e| PyValueError::new_err(format!("{e}")))
+            djvu_rs::Document::from_bytes(data).map_err(|e| DecodeError::new_err(format!("{e}")))
         })?;
         Ok(Document {
             inner: Arc::new(doc),
@@ -53,7 +79,7 @@ impl Document {
         let p = self
             .inner
             .page(index)
-            .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+            .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
         Ok(Page {
             width: p.width(),
             height: p.height(),
@@ -126,7 +152,7 @@ impl Page {
             let page = self
                 .doc
                 .page(self.index)
-                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
 
             if let Some(target_dpi) = dpi {
                 let scale = target_dpi / self.dpi as f32;
@@ -136,7 +162,7 @@ impl Page {
             } else {
                 page.render()
             }
-            .map_err(|e| PyValueError::new_err(format!("render failed: {e}")))
+            .map_err(|e| DecodeError::new_err(format!("render failed: {e}")))
         })?;
 
         Ok(Pixmap {
@@ -174,9 +200,9 @@ impl Page {
             let page = self
                 .doc
                 .page(self.index)
-                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
             page.render_region(fw, fh, x, y, w, h)
-                .map_err(|e| PyValueError::new_err(format!("render_region failed: {e}")))
+                .map_err(|e| DecodeError::new_err(format!("render_region failed: {e}")))
         })?;
         Ok(Pixmap {
             width: pixmap.width,
@@ -194,9 +220,9 @@ impl Page {
             let page = self
                 .doc
                 .page(self.index)
-                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
             page.render_coarse(w, h)
-                .map_err(|e| PyValueError::new_err(format!("render_coarse failed: {e}")))
+                .map_err(|e| DecodeError::new_err(format!("render_coarse failed: {e}")))
         })?;
         Ok(pm.map(|p| Pixmap {
             width: p.width,
@@ -220,9 +246,9 @@ impl Page {
             let page = self
                 .doc
                 .page(self.index)
-                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
             page.render_progressive(w, h, chunk_n)
-                .map_err(|e| PyValueError::new_err(format!("render_progressive failed: {e}")))
+                .map_err(|e| DecodeError::new_err(format!("render_progressive failed: {e}")))
         })?;
         Ok(Pixmap {
             width: pm.width,
@@ -237,7 +263,7 @@ impl Page {
         let page = self
             .doc
             .page(self.index)
-            .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+            .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
         Ok(page.bg44_chunk_count())
     }
 
@@ -250,9 +276,9 @@ impl Page {
             let page = self
                 .doc
                 .page(self.index)
-                .map_err(|e| PyIndexError::new_err(format!("{e}")))?;
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
             page.text()
-                .map_err(|e| PyValueError::new_err(format!("{e}")))
+                .map_err(|e| DecodeError::new_err(format!("{e}")))
         })
     }
 }
@@ -415,6 +441,11 @@ impl Pixmap {
 /// Python module definition.
 #[pymodule(name = "djvu_rs")]
 fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("Error", m.py().get_type::<Error>())?;
+    m.add("DecodeError", m.py().get_type::<DecodeError>())?;
+    m.add("IoError", m.py().get_type::<IoError>())?;
+    m.add("PageIndexError", m.py().get_type::<PageIndexError>())?;
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;
     m.add_class::<Pixmap>()?;

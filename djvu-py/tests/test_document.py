@@ -13,7 +13,7 @@ def test_open_from_path(boy_path):
 
 
 def test_open_missing_path_raises():
-    with pytest.raises(Exception):
+    with pytest.raises(djvu.IoError):
         djvu.Document.open("/nonexistent/path/does-not-exist.djvu")
 
 
@@ -53,7 +53,7 @@ def test_jb2_page_metadata(boy_jb2_path):
 
 def test_page_index_out_of_range_raises(boy_path):
     doc = djvu.Document.open(str(boy_path))
-    with pytest.raises(IndexError):
+    with pytest.raises(djvu.PageIndexError):
         doc.page(doc.page_count())
 
 
@@ -76,16 +76,27 @@ def test_page_index_far_out_of_range_raises(boy_path):
     ],
 )
 def test_from_bytes_garbage_raises(data):
-    with pytest.raises(Exception):
+    with pytest.raises(djvu.DecodeError):
         djvu.Document.from_bytes(data)
 
 
 def test_open_directory_raises(tmp_path):
-    with pytest.raises(Exception):
+    with pytest.raises(djvu.IoError):
         djvu.Document.open(str(tmp_path))
 
 
 def test_from_bytes_truncated_valid_file_raises(boy_bytes):
     truncated = boy_bytes[: len(boy_bytes) // 2]
-    with pytest.raises(Exception):
+    with pytest.raises(djvu.DecodeError):
         djvu.Document.from_bytes(truncated)
+
+
+def test_typed_exception_hierarchy():
+    assert issubclass(djvu.DecodeError, djvu.Error)
+    assert issubclass(djvu.IoError, djvu.Error)
+    assert issubclass(djvu.PageIndexError, IndexError)
+
+
+def test_module_version_matches_package():
+    assert isinstance(djvu.__version__, str)
+    assert len(djvu.__version__.split(".")) >= 2

@@ -1,0 +1,170 @@
+name: API stability
+
+# Enforces the compatibility contract in docs/api-compatibility.md (#695):
+#   - unintended breakage of the stable public API surface (cargo-semver-checks)
+#   - the documented feature combinations and targets all build
+#   - the Send/Sync + panic-free contracts hold under the async feature
+#
+# These are kept in a dedicated workflow (not ci.yml) so the API-policy gates
+# evolve independently of the core fmt/clippy/test pipeline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Public API breakage detection (AC2) ──────────────────────────────────────
+  # Compares the PR against the latest version published on crates.io. For a
+  # 0.x crate, cargo-semver-checks treats a MINOR bump as the breaking axis, so
+  # this fails only on an *unintended* break of the stable surface that was not
+  # accompanied by the required version bump.
+  semver:
+    name: Public API breakage (cargo-semver-checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # TODO(#695): non-blocking until the next crates.io release resets the
+    # baseline. cargo-semver-checks compares against the last published release
+    # (currently v0.27.0); the error enums DocError / DjvmError / SmmrError
+    # gained variants (and SmmrError's implicit discriminants shifted) in the
+    # already-merged #696 work, so the gate reports pre-existing, intended
+    # breakage that no change on this PR can clear. Flip this back to a hard
+    # failure (delete continue-on-error) once a release has shipped and/or the
+    # error enums are marked #[non_exhaustive] per docs/api-compatibility.md §1
+    # ("Error stability rule").
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: semver-checks
+
+      - name: cargo-semver-checks (stable public API)
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          # Default features = the decode-only `std` stable surface. Writer /
+          # async / experimental surfaces are checked as they stabilize.
+          feature-group: default-features
+          package: djvu-rs
+
+  # ── Documented feature combinations & targets (AC3) ──────────────────────────
+  # The human-readable companion is docs/feature-matrix.md; keep the two in sync.
+  feature-matrix:
+    name: Feature matrix (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "no_std (host)"
+            flags: "--no-default-features"
+          - name: "default (std, decode-only)"
+            flags: ""
+          - name: "jpeg"
+            flags: "--features std,jpeg"
+          - name: "pdf"
+            flags: "--features pdf"
+          - name: "epub"
+            flags: "--features epub"
+          - name: "cbz"
+            flags: "--features cbz"
+          - name: "tiff"
+            flags: "--features tiff"
+          - name: "cli"
+            flags: "--features cli"
+          - name: "async"
+            flags: "--features async"
+          - name: "parallel"
+            flags: "--features parallel"
+          - name: "mmap"
+            flags: "--features mmap"
+          - name: "serde"
+            flags: "--features serde"
+          - name: "image"
+            flags: "--features image"
+          - name: "kitchen-sink"
+            flags: "--features cli,tiff,async,serde,image,epub,mmap,parallel"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-matrix
+
+      - name: cargo check ${{ matrix.flags }}
+        run: cargo check ${{ matrix.flags }}
+
+  # ── wasm32 documented feature set (AC3) ──────────────────────────────────────
+  feature-matrix-wasm:
+    name: Feature matrix (wasm32 ${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "no_std"
+            flags: "--no-default-features"
+          - name: "wasm"
+            flags: "--features wasm"
+          - name: "wasm-lazy"
+            flags: "--features wasm-lazy"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-matrix-wasm
+
+      - name: cargo check --target wasm32-unknown-unknown ${{ matrix.flags }}
+        run: cargo check --target wasm32-unknown-unknown ${{ matrix.flags }}
+
+  # ── Contract tests under the async feature (AC7 + AC8) ───────────────────────
+  # The default Test (stable) job runs without `async`, so the Send/Sync
+  # assertions for LazyDocument and the async panic-free surface are only
+  # exercised here.
+  contract-tests:
+    name: Send/Sync + panic-free contracts (async)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: contract-tests
+
+      - name: Send/Sync contract
+        run: cargo test --test send_sync_contract --features async
+
+      - name: Panic-free corpus + adversarial inputs
+        run: cargo test --test panic_free_corpus --features cli

@@ -195,12 +195,8 @@ separate fresh-encode and mutation APIs.
 
 ## Python
 
-PyO3 bindings live in [`djvu-py/`](djvu-py/). They are **not published to PyPI
-yet** — build them from the repository (requires a Rust toolchain):
-
 ```sh
-pip install ./djvu-py
-# or, for development: pip install maturin && cd djvu-py && maturin develop --release
+pip install djvu-rs
 ```
 
 ```python
@@ -216,28 +212,22 @@ img.save('page.png')
 text = page.text()
 ```
 
-The bindings cover the reading surface: open documents, render pages
-(including region and progressive rendering, with zero-copy numpy/PIL paths),
-and extract the text layer. See [`djvu-py/README.md`](djvu-py/README.md).
+PyO3 bindings live in [`djvu-py/`](djvu-py/). Wheels track the crate version
+(CPython 3.9–3.13 on manylinux/musllinux, macOS, and Windows). The bindings
+cover the reading surface: open documents, render pages (including region and
+progressive rendering, with zero-copy numpy/PIL paths), and extract the text
+layer. Encode, mutation, and PDF/EPUB/TIFF export stay on the Rust crate / CLI
+for now. See [`djvu-py/README.md`](djvu-py/README.md) and
+[`docs/packaging.md`](docs/packaging.md).
 
 ## WebAssembly
 
-Build the browser package with [wasm-pack](https://rustwasm.github.io/wasm-pack/)
-through the checked-in wrapper:
-
 ```sh
-make wasm
+npm install djvu-rs
 ```
 
-This produces `examples/wasm/pkg/` with one JavaScript entry point, a scalar
-fallback `.wasm`, and a `simd128` `.wasm`. At runtime the loader validates a
-tiny WebAssembly SIMD probe and selects the faster `simd128` artifact when the
-browser supports it, otherwise it loads the scalar artifact.
-
-Then use in JavaScript/TypeScript:
-
 ```js
-import init, { WasmDocument, selectedWasmVariant } from './pkg/djvu_rs.js';
+import init, { WasmDocument, selectedWasmVariant } from 'djvu-rs';
 
 await init();
 console.log(`djvu-rs wasm variant: ${selectedWasmVariant()}`);
@@ -251,15 +241,21 @@ const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
 ctx.putImageData(img, 0, 0);
 ```
 
+The npm package ships TypeScript declarations plus scalar and `simd128` wasm
+artifacts; at runtime a tiny `WebAssembly.validate()` probe selects SIMD when
+supported. Package versions match the Rust crate — see
+[`docs/packaging.md`](docs/packaging.md).
+
+To rebuild the package from this repository:
+
+```sh
+make wasm   # → examples/wasm/pkg (dual scalar + simd128 loader)
+```
+
 See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo, and
 [`examples/wasm/range_lazy.md`](examples/wasm/range_lazy.md) for lazy loading
 over HTTP `Range` requests (`wasm-lazy` feature) — the browser fetches only
 the index plus the pages actually opened.
-
-The generated npm package follows the Rust crate version; there is no separate
-WASM release train. The local `pkg/` directory is ignored wasm-pack output, so
-regenerate it with `make wasm` from the checked-in `Cargo.toml` before
-publishing instead of editing generated `pkg/package.json` by hand.
 
 ## Advanced usage
 
@@ -723,6 +719,35 @@ Honest boundaries, so you can decide fast:
 
 Without `std`, the crate provides IFF parsing, BZZ decompression, JB2/IW44 decoding,
 text/annotation parsing — all codec primitives that work on byte slices.
+
+## API stability & compatibility
+
+The full contract lives in [`docs/api-compatibility.md`](docs/api-compatibility.md)
+(policy) and [`docs/feature-matrix.md`](docs/feature-matrix.md) (supported
+combinations and targets), and is enforced in CI. In short:
+
+- **Stable surface** — the document model (`Document`/`Page`, `DjVuDocument`/
+  `DjVuPage`), the render entry points, the codec entry points, the parsers, and
+  the writer `djvu_to_*` functions. Follows SemVer; breakage is caught by
+  `cargo-semver-checks`.
+- **Experimental / placeholder** — `experimental`, `iw44-probe`, `alloc-profile`,
+  `ocr-onnx`, `wasm-threads`, and the `ocr-neural` placeholder. These may change
+  in any release and are the ones marked *Experimental*/*Placeholder* in the
+  feature table above.
+- **Deprecated (kept for ≥ 2 minor releases / 90 days)** — the `bzz_new` and
+  `iw44_new` module aliases and the `ocr-neural-candle` feature alias.
+- **MSRV** — Rust 1.88, a required CI gate.
+- **Thread-safety** — `Document`, `DjVuDocument`, `DjVuPage`, pixel buffers, and
+  the parsed content/error types are `Send + Sync`; the mutable editor is
+  `Send`; `LazyDocument<R>` inherits its thread-safety from `R`. Asserted in
+  [`tests/send_sync_contract.rs`](tests/send_sync_contract.rs).
+- **Untrusted input** — no public parse/decode/render entry point panics on any
+  input; malformed bytes surface as typed errors. Covered by
+  [`tests/panic_free_corpus.rs`](tests/panic_free_corpus.rs), proptests, and
+  libFuzzer/OSS-Fuzz targets.
+- **Resource limits** — decode/render inherit documented, bounded memory/work
+  ceilings; exceeding one returns a typed error naming the codec and axis. See
+  [`SECURITY.md`](SECURITY.md#decode-time-resource-ceilings).
 
 ## Performance
 
