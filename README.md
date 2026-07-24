@@ -102,9 +102,10 @@ djvu info file.djvu
 # Inspect IFF chunk identities, offsets, sizes, and bundled component relationships
 djvu inspect book.djvu --json
 
-# Layered validation: structural, dependency, and codec findings with stable codes
-# (--strict makes warnings fail the exit code; --decode-pages adds full codec decodes)
-djvu validate book.djvu --strict --decode-pages --json
+# Layered validation: structural, dependency, codec, and resource findings with
+# stable codes (--strict makes warnings fail the exit code; --decode-pages adds
+# full codec decodes; --limits gates size/page/pixel/memory budgets before decode)
+djvu validate book.djvu --strict --decode-pages --limits server.json --json
 
 # Semantic comparison of two documents: pages, text, annotations, metadata,
 # bookmarks, and the component graph (--plane filters the compared planes)

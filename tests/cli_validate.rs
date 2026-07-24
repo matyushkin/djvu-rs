@@ -88,3 +88,120 @@ fn unreadable_file_exits_two() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn json_reports_resource_estimate() {
+    let output = Command::cargo_bin("djvu")
+        .expect("binary builds")
+        .args([
+            "validate",
+            fixture("boy.djvu").to_str().expect("utf8 fixture path"),
+            "--json",
+        ])
+        .output()
+        .expect("run validate");
+    assert!(output.status.success(), "{output:?}");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    let resources = json["resources"].as_object().expect("resources object");
+    for field in [
+        "file_bytes",
+        "pages",
+        "components",
+        "max_page_pixels",
+        "total_pixels",
+        "peak_decoded_bytes",
+    ] {
+        assert!(
+            resources.get(field).and_then(Value::as_u64).is_some(),
+            "missing numeric {field}: {resources:?}"
+        );
+    }
+    assert_eq!(resources["pages"].as_u64(), Some(1));
+    assert_eq!(resources["components"].as_u64(), Some(1));
+}
+
+#[test]
+fn exceeded_limits_fail_as_resource_errors() {
+    let limits = NamedTempFile::new().expect("temp limits file");
+    std::fs::write(limits.path(), br#"{"max_pages": 0, "max_page_pixels": 1}"#)
+        .expect("write limits");
+
+    let output = Command::cargo_bin("djvu")
+        .expect("binary builds")
+        .args([
+            "validate",
+            fixture("boy.djvu").to_str().expect("utf8 fixture path"),
+            "--limits",
+            limits.path().to_str().expect("utf8 limits path"),
+            "--json",
+        ])
+        .output()
+        .expect("run validate");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    assert_eq!(json["valid"].as_bool(), Some(false));
+    let codes: Vec<&str> = json["findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .filter(|finding| finding["layer"] == "resource")
+        .filter_map(|finding| finding["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"resource.too-many-pages"), "{codes:?}");
+    assert!(codes.contains(&"resource.page-too-large"), "{codes:?}");
+}
+
+#[test]
+fn generous_limits_keep_a_clean_file_valid() {
+    let limits = NamedTempFile::new().expect("temp limits file");
+    std::fs::write(
+        limits.path(),
+        br#"{"max_file_bytes": 1000000000, "max_pages": 100000}"#,
+    )
+    .expect("write limits");
+
+    Command::cargo_bin("djvu")
+        .expect("binary builds")
+        .args([
+            "validate",
+            fixture("boy.djvu").to_str().expect("utf8 fixture path"),
+            "--limits",
+            limits.path().to_str().expect("utf8 limits path"),
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn malformed_limits_file_exits_two() {
+    let limits = NamedTempFile::new().expect("temp limits file");
+    std::fs::write(limits.path(), br#"{"max_pages": "lots"}"#).expect("write limits");
+
+    Command::cargo_bin("djvu")
+        .expect("binary builds")
+        .args([
+            "validate",
+            fixture("boy.djvu").to_str().expect("utf8 fixture path"),
+            "--limits",
+            limits.path().to_str().expect("utf8 limits path"),
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn unknown_limits_key_exits_two() {
+    let limits = NamedTempFile::new().expect("temp limits file");
+    std::fs::write(limits.path(), br#"{"max_frobs": 5}"#).expect("write limits");
+
+    Command::cargo_bin("djvu")
+        .expect("binary builds")
+        .args([
+            "validate",
+            fixture("boy.djvu").to_str().expect("utf8 fixture path"),
+            "--limits",
+            limits.path().to_str().expect("utf8 limits path"),
+        ])
+        .assert()
+        .code(2);
+}

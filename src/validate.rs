@@ -1,12 +1,19 @@
 //! Layered, non-rendering validation for DjVu byte streams.
 //!
-//! The validator currently implements the structural, dependency, and codec
-//! layers. [`Layer::Semantic`] and [`Layer::Resource`] are intentionally part
-//! of the public schema now, but have no checks until later validator slices.
+//! The validator implements the structural, dependency, codec, and resource
+//! layers. [`Layer::Semantic`] is intentionally part of the public schema now,
+//! but has no checks until a later validator slice.
 //! By default codec validation is probe-level: it checks IW44 headers and BZZ
 //! streams but never renders pixels. Set [`ValidateOptions::decode_pages`] to
 //! decode IW44 coefficients and JB2 symbols; that still does not convert IW44
 //! data to RGB or composite a page.
+//!
+//! The resource layer is header-only: it derives cheap estimates (file size,
+//! page and component counts, per-page pixel areas from INFO chunks) and, when
+//! [`ValidateOptions::limits`] is set, reports configured-limit violations
+//! *before* any expensive per-page decode is attempted. A decode-cost limit
+//! violation additionally suppresses the opt-in [`ValidateOptions::decode_pages`]
+//! work so the validator never performs the very decode the limit forbids.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +21,13 @@ use crate::{
     ComponentGraph, ComponentNodeKind, DjVuDocument, GraphError,
     dirm::DirmPayload,
     iff::{self, ChunkRecord},
+    info::PageInfo,
 };
+
+/// Bytes a decoded page occupies while it is rendered, used to turn a
+/// pixel-area estimate into a peak-memory estimate. A composite render holds an
+/// RGBA buffer, so four bytes per pixel is the dominant per-page allocation.
+const DECODED_BYTES_PER_PIXEL: u64 = 4;
 
 /// The outcome category of a validation finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +65,7 @@ pub enum Layer {
     Codec,
     /// Reserved for later checks of cross-page/document meaning.
     Semantic,
-    /// Reserved for later checks of external resource availability and limits.
+    /// Header-only resource estimates and configured-limit violations.
     Resource,
 }
 
@@ -101,19 +114,87 @@ pub struct ValidationSummary {
     pub recovery: usize,
 }
 
+/// Configured processing limits checked by the resource layer.
+///
+/// Every field is optional: `None` means "no limit for this dimension". All
+/// limits are compared against the cheap, header-only [`ResourceEstimate`], so
+/// they are evaluated before any per-page decode is attempted. Pixel and byte
+/// counts use [`u64`] so a limit stays meaningful on 32-bit targets where a
+/// single page area can exceed [`u32::MAX`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Maximum accepted input size in bytes.
+    pub max_file_bytes: Option<u64>,
+    /// Maximum accepted page count.
+    pub max_pages: Option<u64>,
+    /// Maximum accepted embedded component count (bundled documents).
+    pub max_components: Option<u64>,
+    /// Maximum accepted pixel area (`width * height`) of any single page.
+    pub max_page_pixels: Option<u64>,
+    /// Maximum accepted sum of every page's pixel area.
+    pub max_total_pixels: Option<u64>,
+    /// Maximum accepted peak decoded-page memory, in bytes.
+    pub max_decoded_bytes: Option<u64>,
+}
+
+impl ResourceLimits {
+    /// Whether every limit field is unset (the resource layer emits estimates
+    /// but never a violation).
+    pub const fn is_empty(&self) -> bool {
+        self.max_file_bytes.is_none()
+            && self.max_pages.is_none()
+            && self.max_components.is_none()
+            && self.max_page_pixels.is_none()
+            && self.max_total_pixels.is_none()
+            && self.max_decoded_bytes.is_none()
+    }
+}
+
+/// Cheap, pre-decode resource estimates derived from container headers only.
+///
+/// Every field is computed by walking the IFF chunk tree and parsing INFO
+/// chunk headers — no page is decoded or rendered — so the estimate is always
+/// available, even for documents whose pages cannot be decoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceEstimate {
+    /// Total input size in bytes.
+    pub file_bytes: u64,
+    /// Number of pages (INFO-bearing `FORM:DJVU` components).
+    pub pages: u64,
+    /// Number of embedded components (`1` for a single-page document).
+    pub components: u64,
+    /// Largest single-page pixel area (`width * height`).
+    pub max_page_pixels: u64,
+    /// Sum of every page's pixel area.
+    pub total_pixels: u64,
+    /// Estimated peak decoded-page memory in bytes: the largest page's area
+    /// times [`DECODED_BYTES_PER_PIXEL`].
+    pub peak_decoded_bytes: u64,
+}
+
 /// Complete result of one [`validate`] call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationReport {
-    /// Findings in deterministic structural/dependency/codec order.
+    /// Findings in deterministic structural/dependency/codec/resource order.
     pub findings: Vec<Finding>,
     /// Severity counts captured when the report was produced.
     pub summary: ValidationSummary,
+    /// Header-only resource estimate computed for every validated document.
+    pub resources: ResourceEstimate,
 }
 
 impl ValidationReport {
     fn from_findings(findings: Vec<Finding>) -> Self {
+        Self::from_findings_with_resources(findings, ResourceEstimate::default())
+    }
+
+    fn from_findings_with_resources(findings: Vec<Finding>, resources: ResourceEstimate) -> Self {
         let summary = count_findings(&findings);
-        Self { findings, summary }
+        Self {
+            findings,
+            summary,
+            resources,
+        }
     }
 
     /// Severity counts derived from [`Self::findings`].
@@ -139,6 +220,13 @@ pub struct ValidateOptions {
     ///
     /// The default `false` checks only cheap IW44 headers and BZZ streams.
     pub decode_pages: bool,
+    /// Configured processing limits for the resource layer.
+    ///
+    /// When set, the resource layer reports [`Severity::Error`] findings for
+    /// every exceeded limit before any per-page decode is attempted. A
+    /// decode-cost limit violation also suppresses the [`Self::decode_pages`]
+    /// work so the validator never performs the decode a limit forbids.
+    pub limits: Option<ResourceLimits>,
 }
 
 /// Validate a writer's planned output before it is committed (#696).
@@ -182,9 +270,43 @@ pub fn validate(data: &[u8], opts: &ValidateOptions) -> ValidationReport {
 
     validate_structural(data, &records, &mut findings);
     let component_offsets = validate_dependencies(data, &records, &mut findings);
-    validate_codecs(data, &records, &component_offsets, opts, &mut findings);
 
-    ValidationReport::from_findings(findings)
+    // Resource estimates and configured-limit checks run before the codec
+    // layer so a limit violation is reported — and the expensive decode is
+    // skipped — before any per-page decode work (#696).
+    let estimate = estimate_resources(data, &records);
+    let mut decode_pages = opts.decode_pages;
+    if let Some(limits) = opts.limits.filter(|limits| !limits.is_empty()) {
+        let exceeds_decode_cost =
+            validate_resources(data, &records, &estimate, &limits, &mut findings);
+        if exceeds_decode_cost && decode_pages {
+            decode_pages = false;
+            findings.push(finding(
+                Severity::Recovery,
+                Layer::Resource,
+                "resource.decode-skipped",
+                None,
+                None,
+                None,
+                "per-page decode was skipped because a configured resource limit was exceeded"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let codec_opts = ValidateOptions {
+        decode_pages,
+        ..*opts
+    };
+    validate_codecs(
+        data,
+        &records,
+        &component_offsets,
+        &codec_opts,
+        &mut findings,
+    );
+
+    ValidationReport::from_findings_with_resources(findings, estimate)
 }
 
 fn count_findings(findings: &[Finding]) -> ValidationSummary {
@@ -533,6 +655,167 @@ fn graph_error_finding(error: GraphError) -> Finding {
             format!("component graph parse failed: {message}"),
         ),
     }
+}
+
+/// Derive cheap, header-only resource estimates by walking the chunk tree and
+/// parsing INFO headers. No page is decoded, so this is safe to run before any
+/// resource-limit gate on untrusted input.
+fn estimate_resources(data: &[u8], records: &[ChunkRecord]) -> ResourceEstimate {
+    let mut estimate = ResourceEstimate {
+        file_bytes: data.len() as u64,
+        ..ResourceEstimate::default()
+    };
+
+    let root_is_djvm = records
+        .first()
+        .is_some_and(|record| record.form_type == Some(*b"DJVM"));
+    estimate.components = if root_is_djvm {
+        records
+            .iter()
+            .filter(|record| record.id == *b"FORM" && record.depth == 1)
+            .count() as u64
+    } else {
+        1
+    };
+
+    for record in records.iter().filter(|record| record.id == *b"INFO") {
+        let Ok(info) = PageInfo::parse(record_data(data, record)) else {
+            continue;
+        };
+        // u16 * u16 overflows u32 on the largest pages; u64 keeps the estimate
+        // exact on 32-bit targets too.
+        let pixels = u64::from(info.width) * u64::from(info.height);
+        estimate.pages += 1;
+        estimate.total_pixels = estimate.total_pixels.saturating_add(pixels);
+        estimate.max_page_pixels = estimate.max_page_pixels.max(pixels);
+    }
+    estimate.peak_decoded_bytes = estimate
+        .max_page_pixels
+        .saturating_mul(DECODED_BYTES_PER_PIXEL);
+    estimate
+}
+
+/// Compare a resource estimate against configured limits, emitting one
+/// [`Severity::Error`] finding per exceeded limit. Returns whether a limit that
+/// bounds decode cost (per-page pixels, total pixels, or peak decoded memory)
+/// was exceeded, so the caller can skip the expensive decode entirely.
+fn validate_resources(
+    data: &[u8],
+    records: &[ChunkRecord],
+    estimate: &ResourceEstimate,
+    limits: &ResourceLimits,
+    findings: &mut Vec<Finding>,
+) -> bool {
+    if let Some(max) = limits.max_file_bytes
+        && estimate.file_bytes > max
+    {
+        findings.push(finding(
+            Severity::Error,
+            Layer::Resource,
+            "resource.file-too-large",
+            None,
+            None,
+            None,
+            format!(
+                "file is {} bytes, exceeding the configured limit of {max}",
+                estimate.file_bytes
+            ),
+        ));
+    }
+    if let Some(max) = limits.max_pages
+        && estimate.pages > max
+    {
+        findings.push(finding(
+            Severity::Error,
+            Layer::Resource,
+            "resource.too-many-pages",
+            None,
+            None,
+            None,
+            format!(
+                "document has {} pages, exceeding the configured limit of {max}",
+                estimate.pages
+            ),
+        ));
+    }
+    if let Some(max) = limits.max_components
+        && estimate.components > max
+    {
+        findings.push(finding(
+            Severity::Error,
+            Layer::Resource,
+            "resource.too-many-components",
+            None,
+            None,
+            None,
+            format!(
+                "document has {} components, exceeding the configured limit of {max}",
+                estimate.components
+            ),
+        ));
+    }
+
+    let mut exceeds_decode_cost = false;
+    if let Some(max) = limits.max_page_pixels {
+        let mut page_number = 0usize;
+        for record in records.iter().filter(|record| record.id == *b"INFO") {
+            page_number += 1;
+            let Ok(info) = PageInfo::parse(record_data(data, record)) else {
+                continue;
+            };
+            let pixels = u64::from(info.width) * u64::from(info.height);
+            if pixels > max {
+                exceeds_decode_cost = true;
+                findings.push(finding(
+                    Severity::Error,
+                    Layer::Resource,
+                    "resource.page-too-large",
+                    None,
+                    Some("INFO".to_string()),
+                    Some(record.offset),
+                    format!(
+                        "page {page_number} is {}x{} = {pixels} pixels, exceeding the configured per-page limit of {max}",
+                        info.width, info.height
+                    ),
+                ));
+            }
+        }
+    }
+    if let Some(max) = limits.max_total_pixels
+        && estimate.total_pixels > max
+    {
+        exceeds_decode_cost = true;
+        findings.push(finding(
+            Severity::Error,
+            Layer::Resource,
+            "resource.total-pixels-exceeded",
+            None,
+            None,
+            None,
+            format!(
+                "document totals {} pixels, exceeding the configured limit of {max}",
+                estimate.total_pixels
+            ),
+        ));
+    }
+    if let Some(max) = limits.max_decoded_bytes
+        && estimate.peak_decoded_bytes > max
+    {
+        exceeds_decode_cost = true;
+        findings.push(finding(
+            Severity::Error,
+            Layer::Resource,
+            "resource.decoded-memory-exceeded",
+            None,
+            None,
+            None,
+            format!(
+                "peak decoded page memory is an estimated {} bytes, exceeding the configured limit of {max}",
+                estimate.peak_decoded_bytes
+            ),
+        ));
+    }
+    exceeds_decode_cost
 }
 
 fn validate_codecs(
@@ -1086,6 +1369,7 @@ mod tests {
             &ValidateOptions {
                 strict: false,
                 decode_pages: true,
+                limits: None,
             },
         );
         assert!(
@@ -1158,6 +1442,146 @@ mod tests {
         assert_eq!(
             summary.errors + summary.warnings + summary.tolerated + summary.recovery,
             report.findings.len()
+        );
+    }
+
+    #[test]
+    fn resource_estimate_is_populated_without_limits() {
+        let data = fixture("boy.djvu");
+        let report = validate(&data, &ValidateOptions::default());
+        let estimate = report.resources;
+        assert_eq!(estimate.file_bytes, data.len() as u64);
+        assert_eq!(estimate.pages, 1);
+        assert_eq!(estimate.components, 1);
+        assert!(estimate.max_page_pixels > 0);
+        assert_eq!(estimate.total_pixels, estimate.max_page_pixels);
+        assert_eq!(
+            estimate.peak_decoded_bytes,
+            estimate.max_page_pixels * DECODED_BYTES_PER_PIXEL
+        );
+        // No limits configured means no resource-layer findings.
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.layer != Layer::Resource)
+        );
+    }
+
+    #[test]
+    fn empty_limits_never_produce_resource_findings() {
+        let report = validate(
+            &fixture("boy.djvu"),
+            &ValidateOptions {
+                limits: Some(ResourceLimits::default()),
+                ..Default::default()
+            },
+        );
+        assert!(report.is_valid());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.layer != Layer::Resource)
+        );
+    }
+
+    #[test]
+    fn each_exceeded_limit_is_reported_as_a_resource_error() {
+        let report = validate(
+            &fixture("boy.djvu"),
+            &ValidateOptions {
+                limits: Some(ResourceLimits {
+                    max_file_bytes: Some(1),
+                    max_pages: Some(0),
+                    max_components: Some(0),
+                    max_page_pixels: Some(1),
+                    max_total_pixels: Some(1),
+                    max_decoded_bytes: Some(1),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(!report.is_valid());
+        let codes: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.layer == Layer::Resource)
+            .map(|finding| finding.code)
+            .collect();
+        for expected in [
+            "resource.file-too-large",
+            "resource.too-many-pages",
+            "resource.too-many-components",
+            "resource.page-too-large",
+            "resource.total-pixels-exceeded",
+            "resource.decoded-memory-exceeded",
+        ] {
+            assert!(codes.contains(&expected), "missing {expected}: {codes:?}");
+        }
+        // Every resource finding is an error and the per-page one carries an offset.
+        assert!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.layer == Layer::Resource)
+                .all(|finding| finding.severity == Severity::Error)
+        );
+        assert!(report.findings.iter().any(|finding| {
+            finding.code == "resource.page-too-large" && finding.offset.is_some()
+        }));
+    }
+
+    #[test]
+    fn generous_limits_stay_valid() {
+        let report = validate(
+            &fixture("boy.djvu"),
+            &ValidateOptions {
+                limits: Some(ResourceLimits {
+                    max_file_bytes: Some(u64::MAX),
+                    max_pages: Some(u64::MAX),
+                    max_components: Some(u64::MAX),
+                    max_page_pixels: Some(u64::MAX),
+                    max_total_pixels: Some(u64::MAX),
+                    max_decoded_bytes: Some(u64::MAX),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(report.is_valid(), "{:#?}", report.findings);
+    }
+
+    #[test]
+    fn decode_cost_limit_skips_the_expensive_page_decode() {
+        // A corrupt JB2 mask would surface as codec.jb2-decode-failed under
+        // decode_pages, but a per-page pixel limit must short-circuit the
+        // decode before that expensive work happens.
+        let corrupt = with_replaced_chunk(&fixture("boy_jb2.djvu"), *b"Sjbz", vec![0]);
+        let report = validate(
+            &corrupt,
+            &ValidateOptions {
+                strict: false,
+                decode_pages: true,
+                limits: Some(ResourceLimits {
+                    max_page_pixels: Some(1),
+                    ..ResourceLimits::default()
+                }),
+            },
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.code != "codec.jb2-decode-failed"),
+            "decode must be skipped: {:#?}",
+            report.findings
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "resource.decode-skipped"
+                    && finding.severity == Severity::Recovery)
         );
     }
 }

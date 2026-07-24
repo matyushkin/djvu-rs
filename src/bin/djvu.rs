@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use djvu_rs::{
     ComponentGraph, ComponentNodeKind, Document,
     iff::ChunkRecord,
-    validate::{Layer as ValidationLayer, ValidateOptions, ValidationReport},
+    validate::{Layer as ValidationLayer, ResourceLimits, ValidateOptions, ValidationReport},
 };
 use serde_json::{Map, Value, json};
 
@@ -52,10 +52,18 @@ enum Cmd {
         #[arg(short, long)]
         json: bool,
     },
-    /// Validate document structure, dependencies, and codec streams without rendering.
+    /// Validate document structure, dependencies, codec streams, and resource
+    /// limits without rendering.
     ///
     /// Exits 0 when no errors are found; with --strict, warnings also exit 1.
-    /// Exits 1 for validation findings and 2 when the input file cannot be read.
+    /// Exits 1 for validation findings and 2 when the input file (or a
+    /// --limits file) cannot be read or parsed.
+    ///
+    /// A --limits JSON file may set any of `max_file_bytes`, `max_pages`,
+    /// `max_components`, `max_page_pixels`, `max_total_pixels`, and
+    /// `max_decoded_bytes` (all optional, unsigned integers). Exceeded limits
+    /// are reported as resource-layer errors before any page decode, and a
+    /// decode-cost limit additionally suppresses --decode-pages work.
     Validate {
         /// Path to the DjVu file.
         file: PathBuf,
@@ -68,6 +76,9 @@ enum Cmd {
         /// Decode IW44 coefficients and JB2 symbols, without RGB rendering.
         #[arg(long)]
         decode_pages: bool,
+        /// Path to a JSON file of configured resource limits.
+        #[arg(long)]
+        limits: Option<PathBuf>,
     },
     /// Compare two documents semantically: page properties, text, annotations,
     /// metadata, bookmarks, and the component graph.
@@ -388,7 +399,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             strict,
             json,
             decode_pages,
-        } => cmd_validate(&file, strict, json, decode_pages),
+            limits,
+        } => cmd_validate(&file, strict, json, decode_pages, limits.as_deref()),
         Cmd::Diff { a, b, json, planes } => cmd_diff(&a, &b, json, &planes),
         Cmd::Render {
             file,
@@ -746,15 +758,21 @@ fn cmd_validate(
     strict: bool,
     json: bool,
     decode_pages: bool,
+    limits_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(path).map_err(|error| ValidateExit {
         code: 2,
         silent: false,
         message: format!("cannot read {}: {error}", path.display()),
     })?;
+    let limits = match limits_path {
+        Some(limits_path) => Some(load_limits(limits_path)?),
+        None => None,
+    };
     let options = ValidateOptions {
         strict,
         decode_pages,
+        limits,
     };
     let report = djvu_rs::validate::validate(&data, &options);
     let summary = report.summary();
@@ -773,6 +791,61 @@ fn cmd_validate(
         }));
     }
     Ok(())
+}
+
+/// Load configured resource limits from a JSON file. Unknown keys and
+/// non-integer values are rejected so a mistyped limit fails loudly rather than
+/// silently disabling a guard. Every failure maps to the read/parse exit code 2.
+fn load_limits(path: &Path) -> Result<ResourceLimits, Box<dyn std::error::Error>> {
+    let fail = |message: String| ValidateExit {
+        code: 2,
+        silent: false,
+        message,
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| fail(format!("cannot read limits {}: {error}", path.display())))?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| fail(format!("cannot parse limits {}: {error}", path.display())))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| fail(format!("limits {} must be a JSON object", path.display())))?;
+
+    const KNOWN: [&str; 6] = [
+        "max_file_bytes",
+        "max_pages",
+        "max_components",
+        "max_page_pixels",
+        "max_total_pixels",
+        "max_decoded_bytes",
+    ];
+    for key in object.keys() {
+        if !KNOWN.contains(&key.as_str()) {
+            return Err(Box::new(fail(format!(
+                "limits {}: unknown key '{key}'",
+                path.display()
+            ))));
+        }
+    }
+
+    let read = |key: &str| -> Result<Option<u64>, Box<dyn std::error::Error>> {
+        match object.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) if number.is_u64() => Ok(number.as_u64()),
+            Some(_) => Err(Box::new(fail(format!(
+                "limits {}: '{key}' must be a non-negative integer",
+                path.display()
+            ))) as Box<dyn std::error::Error>),
+        }
+    };
+
+    Ok(ResourceLimits {
+        max_file_bytes: read("max_file_bytes")?,
+        max_pages: read("max_pages")?,
+        max_components: read("max_components")?,
+        max_page_pixels: read("max_page_pixels")?,
+        max_total_pixels: read("max_total_pixels")?,
+        max_decoded_bytes: read("max_decoded_bytes")?,
+    })
 }
 
 // ── diff ─────────────────────────────────────────────────────────────────────
@@ -891,6 +964,15 @@ fn print_validate_human(report: &ValidationReport) {
             );
         }
     }
+    let resources = &report.resources;
+    println!(
+        "resources: {} pages, {} components, {} bytes, {} peak page pixels, {} est. peak decoded bytes",
+        resources.pages,
+        resources.components,
+        resources.file_bytes,
+        resources.max_page_pixels,
+        resources.peak_decoded_bytes,
+    );
     let summary = report.summary();
     println!(
         "{} errors, {} warnings, {} tolerated, {} recovery",
@@ -900,6 +982,7 @@ fn print_validate_human(report: &ValidationReport) {
 
 fn validate_json(path: &Path, report: &ValidationReport) -> Value {
     let summary = report.summary();
+    let resources = &report.resources;
     json!({
         "file": path.display().to_string(),
         "valid": report.is_valid(),
@@ -908,6 +991,14 @@ fn validate_json(path: &Path, report: &ValidationReport) -> Value {
             "warnings": summary.warnings,
             "tolerated": summary.tolerated,
             "recovery": summary.recovery,
+        },
+        "resources": {
+            "file_bytes": resources.file_bytes,
+            "pages": resources.pages,
+            "components": resources.components,
+            "max_page_pixels": resources.max_page_pixels,
+            "total_pixels": resources.total_pixels,
+            "peak_decoded_bytes": resources.peak_decoded_bytes,
         },
         "findings": report.findings.iter().map(|finding| json!({
             "severity": finding.severity.as_str(),
