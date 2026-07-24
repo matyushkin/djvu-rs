@@ -51,6 +51,9 @@ jobs:
       - name: Feature hygiene (decode-only default tree)
         run: scripts/check_feature_hygiene.sh
 
+      - name: Python package version sync (djvu-py)
+        run: scripts/check_python_version_sync.sh
+
   # ── Tests ────────────────────────────────────────────────────────────────────
   # stable: every push + PRs, full suite on main
   test-stable:
