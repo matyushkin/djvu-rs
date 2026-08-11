@@ -138,9 +138,12 @@ project-owned**:
    `scripts/fetch_ocr_models.sh`, deterministic fixed-point preprocessing,
    DBNet detection with a shape-keyed plan LRU, and the main-only
    `OCR (onnx models)` CI job.
-3. Recognition + text layer: CRNN/CTC per line (Latin + Cyrillic
-   dictionaries), reading-order sort, `TextLayer` emission, word-split
-   heuristic, CLI `--backend` wiring through the existing seam
+3. **(done)** Recognition + text layer: Cyrillic PP-OCRv5 CTC recognition
+   against the pinned dictionary (`ocr_onnx::recognize`; the dictionary also
+   covers Latin, digits, and punctuation — the separate Latin model stays
+   pinned but unwired), detector-order line emission, `TextLayer` assembly
+   with the proportional word-split heuristic (`ocr_onnx::pipeline`), and
+   CLI wiring as `--backend onnx` through the existing seam
    (`docs/ocr-backend-seam.md`).
 4. Metrics corpus: synthetic generator, CER/WER/IoU harness, recorded
    baseline for the pinned model versions.

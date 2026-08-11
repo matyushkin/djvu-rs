@@ -182,7 +182,9 @@ enum Cmd {
         /// Languages for recognition (e.g. "eng", "rus+eng").
         #[arg(short, long, default_value = "eng")]
         lang: String,
-        /// Path to ONNX model file (required for --backend onnx).
+        /// Unused: --backend onnx loads its models from the pinned manifest
+        /// (fetch with scripts/fetch_ocr_models.sh; directory override via
+        /// DJVU_OCR_MODELS_DIR). Kept for CLI-shape stability.
         #[arg(long)]
         model: Option<PathBuf>,
         /// Output DjVu file with embedded OCR text layer.
@@ -314,7 +316,9 @@ enum OptimizePresetArg {
 enum OcrBackendChoice {
     /// Supported backend: system Tesseract via tesseract-rs.
     Tesseract,
-    /// Experimental library-only ONNX scaffold; no stable CLI contract yet.
+    /// Neural PP-OCR pipeline (DBNet detection + Cyrillic CTC recognition)
+    /// using the pinned model manifest; fetch models first with
+    /// scripts/fetch_ocr_models.sh.
     Onnx,
     /// Experimental neural placeholder; no supported model implementation yet.
     Candle,
@@ -1480,7 +1484,9 @@ fn cmd_ocr(
     // independent and OCR dominates wall-clock, so with the `parallel`
     // feature the render+recognize fan out over rayon (#573) — one backend
     // instance per task (`recognize` builds a fresh Tesseract per call, so
-    // instances never cross threads); text layers are injected sequentially
+    // instances never cross threads; the onnx backend re-optimizes its tract
+    // plans per page here — cross-page plan reuse is a known follow-up); text
+    // layers are injected sequentially
     // in page order afterwards, keeping the output bytes identical to the
     // sequential path.
     let count = doc.page_count();
@@ -1575,12 +1581,28 @@ fn build_ocr_backend(
             }
         }
         OcrBackendChoice::Onnx => {
-            let _ = model_path;
-            Err(
-                "ONNX OCR backend is experimental library-only and has no stable CLI model \
-                 contract yet; use --backend tesseract with --features ocr-tesseract"
-                    .into(),
-            )
+            #[cfg(feature = "ocr-onnx")]
+            {
+                // Models come only from the pinned manifest (SHA-256 verified);
+                // an ad-hoc --model path would bypass that verification.
+                if model_path.is_some() {
+                    return Err(
+                        "--backend onnx does not take --model: models are pinned by \
+                         docs/ocr-model-manifest.toml; fetch them with \
+                         scripts/fetch_ocr_models.sh (directory override: \
+                         DJVU_OCR_MODELS_DIR)"
+                            .into(),
+                    );
+                }
+                Ok(Box::new(
+                    djvu_rs::ocr_onnx::pipeline::NeuralOcrBackend::load_default()?,
+                ))
+            }
+            #[cfg(not(feature = "ocr-onnx"))]
+            {
+                let _ = model_path;
+                Err("ONNX OCR backend is not enabled; rebuild with --features ocr-onnx".into())
+            }
         }
         OcrBackendChoice::Candle => {
             let _ = model_path;

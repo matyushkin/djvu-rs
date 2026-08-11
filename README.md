@@ -609,15 +609,16 @@ Library callers can attach recognized text at encode time instead, via
 `PageEncoder::with_ocr_text_layer` (or `with_text_layer` for an existing
 `TextLayer`).
 
-`ocr-onnx` is experimental. It now hosts the in-progress PP-OCRv4 neural
-pipeline (#693): a pinned model manifest with mandatory SHA-256 verification
-(`docs/ocr-model-manifest.toml`, fetched explicitly via
+`ocr-onnx` is experimental but now CLI-live (#693): `--backend onnx` runs the
+full PP-OCR neural pipeline — DBNet text detection plus Cyrillic PP-OCRv5 CTC
+line recognition (its pinned dictionary also covers Latin, digits, and
+punctuation) assembled into a `page → line → word` text layer with heuristic
+word rectangles. Models come only from the pinned manifest with mandatory
+SHA-256 verification (`docs/ocr-model-manifest.toml`, fetched explicitly via
 `scripts/fetch_ocr_models.sh` — weights are never committed and never
-downloaded implicitly), deterministic detector preprocessing, and DBNet text
-detection (`ocr_onnx::{manifest, preprocess, detect}`). Recognition and CLI
-wiring land in later slices; until then the CLI accepts
-`--backend onnx --model <path>` only as the older generic CTC helper and does
-not treat it as a stable backend. `ocr-neural` is a placeholder only: `CandleBackend` now
+downloaded implicitly; directory override: `DJVU_OCR_MODELS_DIR`). The
+`--model` flag is not used by this backend, and `OcrOptions`
+(`languages`/`dpi`) are advisory and ignored. `ocr-neural` is a placeholder only: `CandleBackend` now
 returns a clear unsupported-backend error instead of constructing a backend that
 always fails at recognition time. The compatibility feature name
 `ocr-neural-candle` is a no-op and no longer pulls Candle/tokenizers into
@@ -692,9 +693,10 @@ Honest boundaries, so you can decide fast:
   size targets; archival codec search, progress callbacks, and cancellation
   remain planned. See [`docs/optimizer.md`](docs/optimizer.md); it always writes
   a separate output file.
-- **OCR: Tesseract is the only supported recognition backend.** `OcrOptions`
-  (languages, dpi) are honored by Tesseract only; `ocr-onnx` is experimental
-  and `ocr-neural` is a placeholder that returns an error.
+- **OCR: Tesseract is the supported recognition backend.** `OcrOptions`
+  (languages, dpi) are honored by Tesseract only; the `ocr-onnx` neural
+  pipeline is CLI-live but experimental (fixed pinned models, options
+  ignored) and `ocr-neural` is a placeholder that returns an error.
 
 ## Feature flags
 
@@ -716,7 +718,7 @@ Honest boundaries, so you can decide fast:
 | `wasm-lazy` | disabled | Lazy Range-based document loading in the browser: a JS `(offset, len)` reader fetches only the pages you open |
 | `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
 | `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
-| `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx`: pinned PP-OCRv4 manifest + SHA-256-verified weights, DBNet detection (#693); recognition in progress |
+| `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx` (#693): pinned manifest + SHA-256-verified weights, DBNet detection, Cyrillic CTC recognition, CLI `--backend onnx` |
 | `ocr-neural` | disabled | Placeholder backend only — `CandleBackend::load` returns a clear unsupported error |
 | `ocr-neural-candle` | disabled | Deprecated no-op alias for `ocr-neural` |
 | `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |
