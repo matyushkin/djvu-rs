@@ -1205,14 +1205,15 @@ fn best_iw44_subsample(scale: f32) -> u32 {
 #[cfg(feature = "std")]
 const TILE_SIZE: u32 = 256;
 
-/// Per-page byte budget for the composited-tile cache — about 32 full tiles
-/// (256×256×4 B = 256 KiB each). Independent of, but counted towards,
-/// [`PageLayers::cached_bytes`] / `DjVuDocument::enforce_cache_budget`: a
-/// document-wide budget sweep evicts whole pages (tiles included), while this
-/// bound keeps one page's own pan history from growing unboundedly between
-/// sweeps.
+/// Default per-page byte budget for the composited-tile cache — about 32
+/// full tiles (256×256×4 B = 256 KiB each). Independent of, but counted
+/// towards, [`PageLayers::cached_bytes`] / `DjVuDocument::enforce_cache_budget`:
+/// a document-wide budget sweep evicts whole pages (tiles included), while
+/// this bound keeps one page's own pan history from growing unboundedly
+/// between sweeps. Overridable per page via
+/// [`crate::djvu_tile::set_tile_cache_budget`] (#691 slice 2).
 #[cfg(feature = "std")]
-const TILE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const TILE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Composited-output tile cache key: `(full_w, full_h, tile_x, tile_y, bold,
 /// mask_aa)` — the tuple of [`RenderOptions`] fields (plus the tile's
@@ -1241,6 +1242,10 @@ struct TileCacheState {
     map: std::collections::HashMap<TileKey, std::sync::Arc<TileEntry>>,
     order: std::collections::VecDeque<TileKey>,
     bytes: usize,
+    /// Per-page budget override (#691 slice 2); `None` means
+    /// [`TILE_CACHE_MAX_BYTES`]. Kept as an `Option` so `derive(Default)`
+    /// stays valid and "still on the default" remains observable.
+    budget: Option<usize>,
     /// Hit/miss/eviction telemetry (#576). Test-only so the release lock
     /// section stays exactly as cheap as before.
     #[cfg(test)]
@@ -1249,6 +1254,32 @@ struct TileCacheState {
     misses: usize,
     #[cfg(test)]
     evictions: usize,
+}
+
+#[cfg(feature = "std")]
+impl TileCacheState {
+    /// The budget this cache currently enforces (override or default).
+    fn effective_budget(&self) -> usize {
+        self.budget.unwrap_or(TILE_CACHE_MAX_BYTES)
+    }
+
+    /// Evict oldest-first until `bytes` is back under the effective budget.
+    fn evict_to_budget(&mut self) {
+        while self.bytes > self.effective_budget() {
+            match self.order.pop_front() {
+                Some(old_key) => {
+                    if let Some(old) = self.map.remove(&old_key) {
+                        self.bytes = self.bytes.saturating_sub(old.data.len());
+                        #[cfg(test)]
+                        {
+                            self.evictions += 1;
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+    }
 }
 
 /// Render-tier cache of a page's decoded layers.
@@ -1426,7 +1457,17 @@ impl PageLayers {
         self.fg44 = std::sync::OnceLock::new();
         self.mask_indexed = std::sync::OnceLock::new();
         self.bg_rgb_s1 = std::sync::OnceLock::new();
-        self.tile_cache = std::sync::Mutex::new(TileCacheState::default());
+        // Tiles are dropped, but a per-page budget override (#691 slice 2)
+        // survives the downgrade — it is configuration, not cached data.
+        let budget = self
+            .tile_cache
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget;
+        self.tile_cache = std::sync::Mutex::new(TileCacheState {
+            budget,
+            ..TileCacheState::default()
+        });
         // bg_rgb_s2 / bg_rgb_s4 / access tick intentionally preserved.
     }
 
@@ -1469,7 +1510,7 @@ impl PageLayers {
     }
 
     /// Insert a freshly composited tile, evicting the oldest tiles (FIFO)
-    /// until back under `TILE_CACHE_MAX_BYTES`.
+    /// until back under the page's effective tile-cache budget.
     fn insert_tile(&self, key: TileKey, entry: std::sync::Arc<TileEntry>) {
         let mut state = self
             .tile_cache
@@ -1481,20 +1522,100 @@ impl PageLayers {
         state.bytes += entry.data.len();
         state.map.insert(key, entry);
         state.order.push_back(key);
-        while state.bytes > TILE_CACHE_MAX_BYTES {
-            match state.order.pop_front() {
-                Some(old_key) => {
-                    if let Some(old) = state.map.remove(&old_key) {
-                        state.bytes = state.bytes.saturating_sub(old.data.len());
-                        #[cfg(test)]
-                        {
-                            state.evictions += 1;
-                        }
-                    }
-                }
-                None => break,
+        state.evict_to_budget();
+    }
+
+    /// The tile-cache budget this page currently enforces (#691 slice 2).
+    pub(crate) fn tile_cache_budget(&self) -> usize {
+        self.tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effective_budget()
+    }
+
+    /// Number of composited tiles currently cached (#691 slice 2).
+    pub(crate) fn tile_cache_len(&self) -> usize {
+        self.tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .len()
+    }
+
+    /// Override this page's tile-cache byte budget, evicting oldest-first
+    /// down to the new bound immediately (#691 slice 2). A budget of `0`
+    /// effectively disables composited-tile caching for the page.
+    pub(crate) fn set_tile_cache_budget(&self, max_bytes: usize) {
+        let mut state = self
+            .tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.budget = Some(max_bytes);
+        state.evict_to_budget();
+    }
+
+    /// Drop every cached composited tile, returning the bytes freed
+    /// (#691 slice 2). The budget override, if any, is kept.
+    pub(crate) fn clear_tile_cache(&self) -> usize {
+        let mut state = self
+            .tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let freed = state.bytes;
+        state.map.clear();
+        state.order.clear();
+        state.bytes = 0;
+        freed
+    }
+
+    /// Drop every cached composited tile that intersects `rect`, where `rect`
+    /// is given in the pre-rotation pixel space of a `canvas_w × canvas_h`
+    /// full render (#691 slice 2). Cached tiles belonging to *other* render
+    /// sizes are matched by scaling the rect proportionally (outward, so a
+    /// boundary-straddling tile is always dropped rather than kept). Returns
+    /// the bytes freed.
+    pub(crate) fn remove_tiles_intersecting(
+        &self,
+        rect: RenderRect,
+        canvas_w: u32,
+        canvas_h: u32,
+    ) -> usize {
+        if canvas_w == 0 || canvas_h == 0 || rect.width == 0 || rect.height == 0 {
+            return 0;
+        }
+        let mut state = self
+            .tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut freed = 0usize;
+        let doomed: Vec<TileKey> = state
+            .map
+            .iter()
+            .filter(|((fw, fh, tx, ty, _, _), entry)| {
+                // Scale the rect into this entry's (fw × fh) render space,
+                // rounding outward (floor start, ceil end).
+                let x0 = u64::from(rect.x) * u64::from(*fw) / u64::from(canvas_w);
+                let x1 = ((u64::from(rect.x) + u64::from(rect.width)) * u64::from(*fw))
+                    .div_ceil(u64::from(canvas_w));
+                let y0 = u64::from(rect.y) * u64::from(*fh) / u64::from(canvas_h);
+                let y1 = ((u64::from(rect.y) + u64::from(rect.height)) * u64::from(*fh))
+                    .div_ceil(u64::from(canvas_h));
+                let (tx0, ty0) = (u64::from(*tx), u64::from(*ty));
+                let (tx1, ty1) = (tx0 + u64::from(entry.w), ty0 + u64::from(entry.h));
+                tx0 < x1 && tx1 > x0 && ty0 < y1 && ty1 > y0
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for key in doomed {
+            if let Some(old) = state.map.remove(&key) {
+                freed += old.data.len();
+            }
+            if let Some(pos) = state.order.iter().position(|k| *k == key) {
+                state.order.remove(pos);
             }
         }
+        state.bytes = state.bytes.saturating_sub(freed);
+        freed
     }
 
     /// Tile-cache telemetry snapshot `(hits, misses, evictions)` (#576).

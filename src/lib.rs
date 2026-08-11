@@ -258,8 +258,11 @@ pub mod djvu_render;
 /// Provides `djvu_tile::TileLayout`, `djvu_tile::TileRect`,
 /// `djvu_tile::render_tile`, and `djvu_tile::render_tile_cached` — a
 /// display-space tile grid over the region renderer, with byte-identical
-/// assembly and order-independent tile pixels. Contract:
-/// `docs/tile-rendering.md`.
+/// assembly and order-independent tile pixels — plus tile-granular cache
+/// control (`djvu_tile::tile_cache_usage`, `djvu_tile::set_tile_cache_budget`,
+/// `djvu_tile::clear_tile_cache`, `djvu_tile::invalidate_tile_region`) and,
+/// with the `parallel` feature, bounded background
+/// `djvu_tile::prefetch_tiles`. Contract: `docs/tile-rendering.md`.
 pub mod djvu_tile;
 
 /// Perceptual image-quality metrics (PSNR, SSIM) for render experiments.
