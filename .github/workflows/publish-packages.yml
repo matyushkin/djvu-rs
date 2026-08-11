@@ -259,12 +259,12 @@ jobs:
           set -euo pipefail
           python -m venv /tmp/djvu-wheel-venv
           /tmp/djvu-wheel-venv/bin/pip install --upgrade pip
-          WHEEL=$(ls wheelhouse/djvu_rs-*-manylinux*.whl wheelhouse/djvu_rs-*-linux*.whl 2>/dev/null | head -1 || true)
-          if [ -z "${WHEEL:-}" ]; then
-            WHEEL=$(ls wheelhouse/*.whl | head -1)
-          fi
-          echo "Installing $WHEEL"
-          /tmp/djvu-wheel-venv/bin/pip install "$WHEEL"
+          # Let pip pick the wheel compatible with this runner and interpreter:
+          # the wheelhouse also holds arm64/macOS/Windows and other-CPython
+          # wheels, so "first .whl by name" is not installable here.
+          ls wheelhouse
+          /tmp/djvu-wheel-venv/bin/pip install --no-index --find-links wheelhouse \
+            "djvu-rs==${{ needs.resolve.outputs.version }}"
           cd /tmp
           /tmp/djvu-wheel-venv/bin/python "$GITHUB_WORKSPACE/scripts/smoke_python_wheel.py" \
             --fixture "$GITHUB_WORKSPACE/tests/fixtures/boy.djvu" \
