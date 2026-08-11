@@ -253,6 +253,15 @@ pub mod semantic_diff;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// Tile-first rendering API for viewer engines (#691).
+///
+/// Provides `djvu_tile::TileLayout`, `djvu_tile::TileRect`,
+/// `djvu_tile::render_tile`, and `djvu_tile::render_tile_cached` — a
+/// display-space tile grid over the region renderer, with byte-identical
+/// assembly and order-independent tile pixels. Contract:
+/// `docs/tile-rendering.md`.
+pub mod djvu_tile;
+
 /// Perceptual image-quality metrics (PSNR, SSIM) for render experiments.
 ///
 /// Judges whether a render change is perceptually better/worse against a

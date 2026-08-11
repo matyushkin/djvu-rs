@@ -1060,7 +1060,10 @@ fn user_rotation_to_steps(r: UserRotation) -> u8 {
 
 /// Combine INFO chunk rotation with user rotation and return the combined
 /// `info::Rotation` value.
-fn combine_rotations(info: crate::info::Rotation, user: UserRotation) -> crate::info::Rotation {
+pub(crate) fn combine_rotations(
+    info: crate::info::Rotation,
+    user: UserRotation,
+) -> crate::info::Rotation {
     use crate::info::Rotation;
     let steps = (rotation_to_steps(info) + user_rotation_to_steps(user)) % 4;
     match steps {
@@ -3790,12 +3793,22 @@ pub fn render_region(
         height: full_h,
         ..*opts
     };
+    // Same 1/4-res mask fast-path decision as `render_into`/`render_rows`, so
+    // a region render stays byte-identical to the matching crop of the full
+    // render at every subsample tier (#691).
+    let (ctx_mask, mask_shift) = resolve_sub4_mask(
+        page,
+        bg_subsample,
+        opts,
+        mask.as_deref(),
+        fg_palette.as_ref(),
+    );
     let ctx = CompositeContext::from_layers(
         page,
         &region_opts,
         bg.as_deref(),
-        mask.as_deref(),
-        0,
+        ctx_mask,
+        mask_shift,
         fg_palette.as_ref(),
         blit_map.as_deref(),
         fg44.as_deref(),
@@ -3910,14 +3923,24 @@ pub fn render_region_tiled(
         height: full_h,
         ..*opts
     };
+    // Same 1/4-res mask fast-path decision as `render_into`/`render_rows`
+    // (see render_region); the choice is a pure function of the tile-key
+    // fields plus per-page constants, so cached tiles stay coherent.
+    let (ctx_mask, mask_shift) = resolve_sub4_mask(
+        page,
+        bg_subsample,
+        opts,
+        mask.as_deref(),
+        fg_palette.as_ref(),
+    );
     // Template context for the whole full_w×full_h render; each tile below
     // copies it (cheap: `Copy`) and only overwrites offset/out fields.
     let ctx_template = CompositeContext::from_layers(
         page,
         &region_opts,
         bg.as_deref(),
-        mask.as_deref(),
-        0,
+        ctx_mask,
+        mask_shift,
         fg_palette.as_ref(),
         blit_map.as_deref(),
         fg44.as_deref(),
@@ -7275,6 +7298,38 @@ mod tests {
         assert_eq!(
             part.height, 40,
             "expected height=40 (was region.width) after CW90 rotation"
+        );
+    }
+
+    /// #691: `render_region` matches the same crop of `render_pixmap` even
+    /// when the downscale activates the 1/4-resolution mask fast path
+    /// (`bg_subsample >= 4`, no bold, no FGbz) — the region path must take
+    /// the same `resolve_sub4_mask` decision as the full-page path.
+    #[test]
+    fn render_region_matches_full_render_crop_at_sub4() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 40,
+            height: 52,
+            ..Default::default()
+        };
+        let full = render_pixmap(page, &opts).unwrap();
+        let region = RenderRect {
+            x: 8,
+            y: 8,
+            width: 24,
+            height: 24,
+        };
+        let reg = render_region(page, region, &opts).unwrap();
+        let mut crop = Vec::new();
+        for y in 0..24usize {
+            let s = ((8 + y) * 40 + 8) * 4;
+            crop.extend_from_slice(&full.data[s..s + 24 * 4]);
+        }
+        assert_eq!(
+            reg.data, crop,
+            "render_region must be byte-identical to the matching crop of render_pixmap"
         );
     }
 
