@@ -155,7 +155,10 @@ jobs:
             manylinux: musllinux_1_2
             when: release
           - label: macos-x64
-            os: macos-13
+            # macos-13 was retired by GitHub (Dec 2025); macos-15-intel is the
+            # supported Intel image (through Aug 2027). Jobs on retired labels
+            # queue forever, silently blocking the publish chain.
+            os: macos-15-intel
             target: x86_64
             manylinux: ''
             when: release
