@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786450954802,
+  "lastUpdate": 1786458902104,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -15946,6 +15946,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 36511000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2cb629f9fdc6eb7dcdd3637bfe425c9499cff2ea",
+          "message": "feat(render): tile-first rendering API slice 1 (#691) (#744)\n\nAdd djvu_tile module: TileLayout/TileRect/TileError plus render_tile and\nrender_tile_cached. Tiles live in display space (post-rotation); the\nlayout pulls each tile back to the region renderer's pre-rotation\nRenderRect for all four combined rotations. Assembly of all tiles is\nbyte-identical to render_pixmap; tile pixels are order-independent,\ncached or not. Lanczos3 and aa are rejected up front (post-passes that\ncannot be tiled byte-identically yet). Contract: docs/tile-rendering.md.\n\nFix a renderer divergence the parity tests exposed: render_region and\nrender_region_tiled always composited against the full-resolution JB2\nmask, while render_into/render_rows switch to the 1/4-resolution mask at\nbackground subsample >= 4. Both region entry points now take the same\nresolve_sub4_mask decision (regression test\nrender_region_matches_full_render_crop_at_sub4).\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-11T19:09:22+05:00",
+          "tree_id": "11e93a4149e9624c1a1195ee9e26362fd2b37b56",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2cb629f9fdc6eb7dcdd3637bfe425c9499cff2ea"
+        },
+        "date": 1786458899771,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7221000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45184000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43127000,
             "range": "± 0",
             "unit": "ns/iter"
           }
