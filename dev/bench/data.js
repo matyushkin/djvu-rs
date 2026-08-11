@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786448728330,
+  "lastUpdate": 1786450954802,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -15898,6 +15898,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47595000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "73e1197530209afcf14f989f8624cf32609bc8e8",
+          "message": "feat(ingest): expand TIFF encoder ingestion slice 2 (#694) (#742)\n\nDecode 16-bit gray/RGB/RGBA/CMYK TIFF through the IngestPolicy\ndown-conversion, convert CMYK via a documented profile-free transform,\nand add a raw strip reader for the layouts tiff 0.9 mishandles:\nbilevel, 2/4-bit gray, and palette images (uncompressed strips).\nMultipage TIFFs decode page-per-IFD; the CLI maps them to a\nmulti-page bundle under the same rules as directory input.\nUnsupported layouts (CCITT G4, tiled/planar bilevel, FillOrder 2)\nget targeted errors. Documents the matrix in encoder-ingestion.md.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-11T16:59:11+05:00",
+          "tree_id": "4dcc16ec809c2c099986f1cc5079859905736d75",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/73e1197530209afcf14f989f8624cf32609bc8e8"
+        },
+        "date": 1786450953562,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 119000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6192000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 37889000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 36511000,
             "range": "± 0",
             "unit": "ns/iter"
           }
