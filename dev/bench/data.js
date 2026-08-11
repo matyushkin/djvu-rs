@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786478872896,
+  "lastUpdate": 1786480193265,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16186,6 +16186,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51259000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bd6e1e644ef58cba05d2b8b2ce1c3f1ac6b7024c",
+          "message": "feat(ocr): NeuralOcrBackend pipeline wired to CLI as --backend onnx (#751)\n\n* feat(ocr): Cyrillic CTC line recognition with pinned dictionary (#693)\n\nSlice 3a of the neural OCR pipeline — the recognition core:\n\n- manifest: add the official PaddlePaddle Cyrillic PP-OCRv5 mobile\n  recognizer (ONNX, opset 7, Apache-2.0) plus its companion inference.yml\n  pinned as a sibling artifact from the same upstream commit; the yml\n  embeds the CTC character dictionary (850 chars). Non-ONNX artifacts\n  use opset = 0; the manifest test now checks per-kind opsets and that\n  model and dictionary share one pinned commit\n- ocr_onnx::recognize: Vocabulary (dict parsed from the verified config;\n  class 0 = CTC blank, last class = appended space), pure greedy CTC\n  decoder with mean-confidence, line-crop preprocessing (height 48,\n  aspect-preserving fixed-point bilinear resize, width buckets of 32\n  capped at 3200, BGR, (v/255-0.5)/0.5, zero padding), TextRecognizer\n  with an LRU of tract plans keyed by padded width; a class-count\n  mismatch between model and dictionary is a hard error\n- 10 new unit tests run without weights; 2 model-gated tests verify the\n  real pinned dict/model agree (852 classes) and blank lines decode to\n  empty, and exercise plan-cache reuse; they skip silently when weights\n  are absent (the ocr-onnx CI job fetches them)\n\nSpike (local): tract-onnx 0.22.3 runs the model, output [1, W/8, 852].\nTextLayer assembly, word split, and CLI wiring follow in slice 3b.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs\n\n* feat(ocr): neural OCR pipeline backend + CLI --backend onnx (#693)\n\nSlice 3b: assemble DBNet detection and Cyrillic CTC recognition into a\nCLI-live OCR backend.\n\n- ocr_onnx::pipeline::NeuralOcrBackend: detect -> recognize per line ->\n  TextLayer; engines behind one Mutex (plan caches need &mut, the trait\n  takes &self); always emits the guaranteed page-level zone.\n- assemble_text_layer / word_zones pure helpers: blank lines dropped,\n  detector order kept, proportional word-split heuristic (>= 1 px, full\n  line height).\n- CLI: --backend onnx now builds NeuralOcrBackend from the pinned\n  manifest; --model is rejected for this backend (it would bypass\n  SHA-256 verification); un-featured builds get a clear enable hint.\n- Docs: README (backend now CLI-live), seam decision update, design-doc\n  slice 3 marked done, OcrBackend granularity note.\n\nVerified end-to-end: tests/fixtures/big-scanned-page.djvu -> 627 chars\nembedded and re-extracted via `djvu text`. 10 new unit tests (8 pure,\n2 model-gated).\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-12T00:57:49+05:00",
+          "tree_id": "5216d73491b5804bc2a5d47ffc2cccabe00239c7",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bd6e1e644ef58cba05d2b8b2ce1c3f1ac6b7024c"
+        },
+        "date": 1786480191938,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 106000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5211000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 31206000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29204000,
             "range": "± 0",
             "unit": "ns/iter"
           }
