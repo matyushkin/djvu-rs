@@ -65,6 +65,21 @@ sha256 = "5371ee1ddaa7983cc62d0818d99e982b6804638c85e4f960d59a574094e172e5"
 opset = 7
 license = "Apache-2.0"
 
+# Deterministic metrics-corpus font (not an ONNX graph, opset = 0): PT Sans
+# regular from the official google/fonts mirror (SIL OFL 1.1; designed for
+# Russian, covers Latin + Cyrillic). Used by the synthetic CER/WER/IoU corpus
+# (`ocr_onnx::corpus`); pinned like every other artifact so the corpus
+# renders identically everywhere.
+[[model]]
+name = "metrics-font-pt-sans"
+file = "PT_Sans-Web-Regular.ttf"
+url = "https://raw.githubusercontent.com/google/fonts/038b637da7b3fd956a4ed93ffc607c3d5e4ce172/ofl/ptsans/PT_Sans-Web-Regular.ttf"
+commit = "038b637da7b3fd956a4ed93ffc607c3d5e4ce172"
+size = 442960
+sha256 = "9cc831490532009bae2b3ce0d39c62adfc889060beb421593bfd9d2396d0f10a"
+opset = 0
+license = "OFL-1.1"
+
 # Companion config of ppocr-v5-cyrillic-rec (not an ONNX graph, opset = 0):
 # `PostProcess.CTCLabelDecode.character_dict` inside it is the pinned CTC
 # dictionary (850 chars; decode indices = blank, dict..., space).

@@ -169,6 +169,9 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 proptest = "1"
 # cold_open_bench only: F_NOCACHE fcntl for the cold-copy strategy (macOS).
 libc = "0.2"
+# OCR metrics corpus (#693): rasterizes the pinned PT Sans font into
+# synthetic ground-truth pages (`ocr_onnx::corpus`, test-only).
+ab_glyph = "0.2"
 
 [[bin]]
 name = "djvu"

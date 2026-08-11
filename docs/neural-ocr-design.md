@@ -145,5 +145,7 @@ project-owned**:
    with the proportional word-split heuristic (`ocr_onnx::pipeline`), and
    CLI wiring as `--backend onnx` through the existing seam
    (`docs/ocr-backend-seam.md`).
-4. Metrics corpus: synthetic generator, CER/WER/IoU harness, recorded
-   baseline for the pinned model versions.
+4. **(done)** Metrics corpus: deterministic synthetic generator (pinned
+   PT Sans font as a manifest artifact), CER/WER/IoU harness
+   (`ocr_onnx::{metrics, corpus}`), thresholds in the model-gated corpus
+   test, recorded baseline in `docs/ocr-model-metrics.md`.

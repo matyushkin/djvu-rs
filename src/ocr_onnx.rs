@@ -14,8 +14,11 @@
 //!   recognizers where the caller provides the model and vocabulary; not a
 //!   CLI backend.
 
+#[cfg(test)]
+mod corpus;
 pub mod detect;
 pub mod manifest;
+pub mod metrics;
 pub mod pipeline;
 pub mod preprocess;
 pub mod recognize;
