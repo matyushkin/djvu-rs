@@ -27,6 +27,7 @@ forbidden=(
   wasm-bindgen  # wasm
   tesseract     # ocr-tesseract
   tract-onnx    # ocr-onnx
+  sha2          # ocr-onnx (model-weight verification, #693)
 )
 
 # `-e normal` excludes dev/build deps; `--prefix none` gives "name version"

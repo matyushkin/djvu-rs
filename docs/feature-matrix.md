@@ -50,7 +50,7 @@ full power-set explosion (which is intractable for ~20 features).
 |-------------|------------------|
 | `wasm-threads` (wasm32) | needs nightly + `-Z build-std`; checked by `make wasm-threads-check` |
 | `experimental`, `iw44-probe`, `alloc-profile` | dev/experimental surfaces (see §1 of the policy) |
-| `ocr-onnx`, `ocr-neural` | experimental / placeholder OCR (out of scope for #695) |
+| `ocr-onnx`, `ocr-neural` | experimental / placeholder OCR (out of scope for #695); `ocr-onnx` unit + model-gated tests run in the main-only `OCR (onnx models)` job (#693) |
 
 ## Feature-graph invariants
 

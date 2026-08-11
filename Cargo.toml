@@ -23,6 +23,7 @@ exclude = [
     "references/*",
     "benches/*",
     "fuzz/*",
+    "models/*",
     "scripts/*",
     "BENCHMARKS_RESULTS.md",
     "BENCHMARKS.md",
@@ -79,6 +80,9 @@ dhat = { version = "0.3", optional = true }
 # patched 0.21.x line pins `time <0.3.42`, which is itself vulnerable
 # (RUSTSEC-2026-0009). 0.23.x needs Rust 1.91 > our MSRV 1.88.
 tract-onnx = { version = "0.22.2", optional = true }
+# SHA-256 verification of OCR model weights against docs/ocr-model-manifest.toml
+# (#693): unverified weights are never loaded.
+sha2 = { version = "0.10", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -125,7 +129,7 @@ wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 epub = ["std", "dep:zip", "dep:flate2", "dep:jpeg-encoder"]
 cbz = ["std", "dep:zip", "dep:flate2"]
 ocr-tesseract = ["dep:tesseract", "std"]
-ocr-onnx = ["dep:tract-onnx", "std"]
+ocr-onnx = ["dep:tract-onnx", "dep:sha2", "std"]
 # ocr-neural: experimental placeholder only. It exposes the CandleBackend type
 # but no supported model contract or CLI backend; load() returns a clear error.
 ocr-neural = ["std"]

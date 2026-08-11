@@ -1,0 +1,47 @@
+# OCR model manifest (#693).
+#
+# Pinned neural OCR model artifacts for the `ocr-onnx` feature. Weights are
+# NEVER committed to this repository and NEVER downloaded implicitly at build
+# or run time — fetch them explicitly with `scripts/fetch_ocr_models.sh`
+# (default destination: `models/ocr/`, gitignored and excluded from the
+# published crate).
+#
+# The Rust loader (`djvu_rs::ocr_onnx::manifest`) embeds this file at compile
+# time and refuses to load any model file whose byte size or SHA-256 does not
+# match its entry here — a mismatch is a hard, typed error, not a warning.
+# Bumping a model version therefore always means a PR that changes this file.
+#
+# Field contract (all fields required per entry):
+#   name    — stable manifest key used by the Rust API (never renamed casually)
+#   file    — canonical local file name under the models directory
+#   url     — direct download URL pinned to an immutable commit (never a branch)
+#   commit  — upstream repository commit the URL is pinned to
+#   size    — exact byte size of the artifact
+#   sha256  — lowercase hex SHA-256 of the exact bytes
+#   opset   — ONNX opset the graph declares (ai.onnx domain)
+#   license — SPDX identifier of the model weights' license
+#
+# Source: PaddleOCR PP-OCRv4 mobile models, converted to ONNX by the RapidOCR
+# project (https://huggingface.co/SWHL/RapidOCR, Apache-2.0). Verified to load
+# and run under tract-onnx 0.22 (see `ocr_onnx::detect` tests). The dedicated
+# Cyrillic recognizer is added in the recognition slice of #693.
+
+[[model]]
+name = "ppocr-v4-mobile-det"
+file = "ch_PP-OCRv4_det_infer.onnx"
+url = "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx"
+commit = "1cfba2e90fc938db55889873735088de210cc173"
+size = 4745517
+sha256 = "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9"
+opset = 12
+license = "Apache-2.0"
+
+[[model]]
+name = "ppocr-v4-mobile-rec"
+file = "ch_PP-OCRv4_rec_infer.onnx"
+url = "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx"
+commit = "1cfba2e90fc938db55889873735088de210cc173"
+size = 10857958
+sha256 = "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b"
+opset = 12
+license = "Apache-2.0"

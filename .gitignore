@@ -58,3 +58,6 @@ examples/wasm/pkg/
 /npm-dist/
 /target/wheels/
 /node_modules/
+
+# OCR model weights (never committed; fetch via scripts/fetch_ocr_models.sh, #693)
+/models/

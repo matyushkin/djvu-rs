@@ -297,6 +297,39 @@ jobs:
       - name: Test (ocr-tesseract integration)
         run: cargo test --test ocr_tesseract --features cli,ocr-tesseract
 
+  # ── Neural OCR (ocr-onnx) with pinned model weights (#693) ──────────────────
+  # Non-required (informational), skipped on PRs like ocr-tesseract: fetches the
+  # SHA-256-pinned PP-OCRv4 weights (the only place they are ever downloaded)
+  # and runs the ocr_onnx test tree including the model-gated inference tests
+  # that skip silently elsewhere.
+  ocr-onnx-models:
+    name: OCR (onnx models)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ocr-onnx-models
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: models/ocr
+          key: ocr-models-${{ hashFiles('docs/ocr-model-manifest.toml') }}
+
+      - name: Fetch pinned model weights
+        run: bash scripts/fetch_ocr_models.sh
+
+      - name: Test (ocr-onnx incl. model-gated inference)
+        run: cargo test --features ocr-onnx ocr_onnx
+
   # ── Python bindings (djvu-py) ────────────────────────────────────────────────
   # Non-required (informational): builds the extension module via maturin into
   # a uv-managed venv and runs the pytest suite covering the public API surface,
