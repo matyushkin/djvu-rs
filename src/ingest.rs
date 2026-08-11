@@ -39,6 +39,13 @@ impl IngestPolicy {
         let _ = (self.depth_downconversion, lo);
         hi
     }
+
+    /// Reduce one native-endian 16-bit channel sample to 8 bits.
+    #[inline]
+    pub fn downsample_u16(&self, sample: u16) -> u8 {
+        let _ = self.depth_downconversion;
+        (sample >> 8) as u8
+    }
 }
 
 #[cfg(test)]
