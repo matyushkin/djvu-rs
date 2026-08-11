@@ -1844,9 +1844,46 @@ fn cmd_encode(
         return Ok(());
     }
 
+    // #694 slice 2: a multipage TIFF file maps to a multi-page bundle — one
+    // DjVu page per TIFF page (IFD), in stored order, same bundle rules as a
+    // directory input.
+    #[cfg(feature = "tiff")]
+    let tiff_pages: Option<Vec<djvu_rs::Pixmap>> = if input_is_tiff(input) {
+        Some(djvu_rs::png_io::decode_tiff_file_to_pixmaps(
+            input,
+            djvu_rs::ingest::IngestPolicy::default(),
+        )?)
+    } else {
+        None
+    };
+    #[cfg(feature = "tiff")]
+    if tiff_pages.as_ref().is_some_and(|p| p.len() > 1) {
+        if bilevel_codec != BilevelCodecArg::Jb2 {
+            return Err("--bilevel-codec smmr is supported only for single-image input".into());
+        }
+        let pixmaps = tiff_pages.unwrap();
+        return encode_pixmap_bundle(
+            &pixmaps,
+            input,
+            output,
+            dpi,
+            quality,
+            q,
+            segment_options,
+            shared_dict_pages,
+            thumbnails,
+        );
+    }
+
     if thumbnails {
         eprintln!("--thumbnails applies to multi-page bundles only — ignored");
     }
+    #[cfg(feature = "tiff")]
+    let pixmap = match tiff_pages {
+        Some(mut pages) => pages.remove(0),
+        None => djvu_rs::png_io::decode_image_to_pixmap(input)?,
+    };
+    #[cfg(not(feature = "tiff"))]
     let pixmap = djvu_rs::png_io::decode_image_to_pixmap(input)?;
 
     // --quality auto (#570): pick the profile from cheap pixel statistics.
@@ -1898,6 +1935,97 @@ fn cmd_encode(
         pixmap.width,
         pixmap.height,
         bytes.len(),
+    );
+    Ok(())
+}
+
+/// True when `path` looks like a TIFF input: `.tif`/`.tiff` extension, or a
+/// TIFF magic header for extension-less paths (mirrors `decode_image_to_pixmap`).
+#[cfg(feature = "tiff")]
+fn input_is_tiff(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("tif") | Some("tiff") => return true,
+        Some("png") | Some("jpg") | Some("jpeg") => return false,
+        _ => {}
+    }
+    let mut header = [0u8; 4];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    if f.read_exact(&mut header).is_err() {
+        return false;
+    }
+    header.starts_with(b"II\x2A\x00") || header.starts_with(b"MM\x00\x2A")
+}
+
+/// Encode already-decoded pages as a multi-page bundle, mirroring the
+/// directory-input rules of `cmd_encode` (auto classification, lossless JB2
+/// bundle, or layered bundle with a shared dictionary).
+#[cfg(feature = "tiff")]
+#[allow(clippy::too_many_arguments)]
+fn encode_pixmap_bundle(
+    pixmaps: &[djvu_rs::Pixmap],
+    input: &Path,
+    output: &Path,
+    dpi: u16,
+    quality: EncodeQualityArg,
+    q: djvu_rs::djvu_encode::EncodeQuality,
+    segment_options: Option<djvu_rs::segment::SegmentOptions>,
+    shared_dict_pages: usize,
+    thumbnails: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
+    use djvu_rs::segment::{SegmentOptions, segment_page};
+
+    let quality = if matches!(quality, EncodeQualityArg::Auto) {
+        let all_bilevel = pixmaps.iter().all(|pm| {
+            djvu_rs::djvu_encode::classify_content(pm)
+                == djvu_rs::djvu_encode::EncodeQuality::Lossless
+        });
+        let picked = if all_bilevel {
+            EncodeQualityArg::Lossless
+        } else {
+            EncodeQualityArg::Quality
+        };
+        eprintln!("auto profile (bundle): {picked:?}");
+        picked
+    } else {
+        quality
+    };
+
+    let bytes = if matches!(quality, EncodeQualityArg::Lossless) {
+        if thumbnails {
+            eprintln!("--thumbnails is ignored for lossless (JB2-only) bundles");
+        }
+        let masks: Vec<_> = pixmaps
+            .iter()
+            .map(|pm| segment_page(pm, &SegmentOptions::default()).mask)
+            .collect();
+        encode_djvm_bundle_jb2(&masks, shared_dict_pages, dpi)
+    } else {
+        djvu_rs::djvu_encode::encode_djvm_layered_shared_with_thumbnails(
+            pixmaps,
+            q,
+            dpi,
+            segment_options,
+            shared_dict_pages,
+            thumbnails,
+        )
+        .map_err(|e| format!("layered encode: {e}"))?
+    };
+    std::fs::write(output, &bytes)?;
+    eprintln!(
+        "{} ({} TIFF pages) → {} ({} bytes, shared-dict threshold = {})",
+        input.display(),
+        pixmaps.len(),
+        output.display(),
+        bytes.len(),
+        shared_dict_pages,
     );
     Ok(())
 }

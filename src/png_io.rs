@@ -228,68 +228,419 @@ pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::er
     })
 }
 
-/// Decode a TIFF file at `path` into a [`Pixmap`] (RGBA, alpha = 255).
+/// Decode the first page of a TIFF file at `path` into a [`Pixmap`] using the
+/// default [`IngestPolicy`].
+///
+/// Requires the `tiff` feature. See `docs/encoder-ingestion.md` for the
+/// supported input matrix.
+#[cfg(feature = "tiff")]
+pub fn decode_tiff_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    decode_tiff_file_to_pixmap_with_policy(path, IngestPolicy::default())
+}
+
+/// Decode the first page of a TIFF file at `path` with an explicit
+/// [`IngestPolicy`].
+#[cfg(feature = "tiff")]
+pub fn decode_tiff_file_to_pixmap_with_policy(
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    let mut pages = tiff_ingest::decode_pages(path, policy, Some(1))?;
+    Ok(pages.remove(0))
+}
+
+/// Decode every page of a (possibly multipage) TIFF file into [`Pixmap`]s,
+/// in stored IFD order.
 ///
 /// Requires the `tiff` feature.
 #[cfg(feature = "tiff")]
-pub fn decode_tiff_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+pub fn decode_tiff_file_to_pixmaps(
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<Vec<Pixmap>, Box<dyn std::error::Error>> {
+    tiff_ingest::decode_pages(path, policy, None)
+}
+
+#[cfg(feature = "tiff")]
+mod tiff_ingest {
+    //! TIFF → RGBA [`Pixmap`] normalization (#694 slice 2).
+    //!
+    //! The `tiff` crate handles 8/16-bit gray, RGB, RGBA, and CMYK samples.
+    //! Sub-byte grayscale (`Gray(1|2|4)`) and palette images go through a raw
+    //! strip reader here: tiff 0.9 `read_image` returns unexpanded bytes for
+    //! sub-byte samples and rejects palette color maps outright.
+
+    use std::io::Cursor;
+    use std::path::Path;
+
     use tiff::ColorType;
     use tiff::decoder::{Decoder, DecodingResult};
+    use tiff::tags::Tag;
 
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut decoder = Decoder::new(std::io::BufReader::new(file))
-        .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
-    let (w, h) = decoder
-        .dimensions()
-        .map_err(|e| format!("{}: TIFF dimensions error: {e}", path.display()))?;
-    let color = decoder
-        .colortype()
-        .map_err(|e| format!("{}: TIFF colortype error: {e}", path.display()))?;
-    let result = decoder
-        .read_image()
-        .map_err(|e| format!("{}: TIFF decode error: {e}", path.display()))?;
-    let DecodingResult::U8(pixels) = result else {
-        return Err(format!(
-            "{}: unsupported TIFF sample depth (only 8-bit channels supported)",
-            path.display()
-        )
-        .into());
-    };
-    let pixel_count = w as usize * h as usize;
-    let mut data = Vec::with_capacity(pixel_count * 4);
-    match color {
-        ColorType::RGB(8) => {
-            for chunk in pixels.chunks_exact(3) {
-                data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+    use crate::Pixmap;
+    use crate::ingest::IngestPolicy;
+
+    type BoxError = Box<dyn std::error::Error>;
+    type FileDecoder<'a> = Decoder<Cursor<&'a [u8]>>;
+
+    pub(super) fn decode_pages(
+        path: &Path,
+        policy: IngestPolicy,
+        limit: Option<usize>,
+    ) -> Result<Vec<Pixmap>, BoxError> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
+            .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+        let mut pages = Vec::new();
+        loop {
+            pages.push(decode_current_page(&mut decoder, &bytes, path, policy)?);
+            if limit.is_some_and(|n| pages.len() >= n) || !decoder.more_images() {
+                return Ok(pages);
             }
+            decoder
+                .next_image()
+                .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
         }
-        ColorType::RGBA(8) => {
-            data.extend_from_slice(&pixels);
-        }
-        ColorType::Gray(8) => {
-            for &g in &pixels {
-                data.extend_from_slice(&[g, g, g, 255]);
+    }
+
+    fn decode_current_page(
+        decoder: &mut FileDecoder<'_>,
+        file_bytes: &[u8],
+        path: &Path,
+        policy: IngestPolicy,
+    ) -> Result<Pixmap, BoxError> {
+        let (w, h) = decoder
+            .dimensions()
+            .map_err(|e| format!("{}: TIFF dimensions error: {e}", path.display()))?;
+        let pixel_count = w as usize * h as usize;
+
+        let color = match decoder.colortype() {
+            Ok(c) => c,
+            // tiff 0.9 cannot classify palette images; everything else keeps
+            // the crate's error text.
+            Err(e) => {
+                let photometric = decoder
+                    .find_tag(Tag::PhotometricInterpretation)
+                    .ok()
+                    .flatten();
+                let is_palette =
+                    photometric.and_then(|v| v.into_u16().ok()) == Some(PHOTOMETRIC_PALETTE);
+                if is_palette {
+                    return decode_raw_page(decoder, file_bytes, path, policy, w, h);
+                }
+                return Err(format!("{}: TIFF colortype error: {e}", path.display()).into());
             }
+        };
+
+        // Sub-byte grayscale: tiff 0.9 read_image does not unpack bits — take
+        // the raw strip path instead.
+        if matches!(color, ColorType::Gray(n) if n < 8) {
+            return decode_raw_page(decoder, file_bytes, path, policy, w, h);
         }
-        ColorType::GrayA(8) => {
-            for chunk in pixels.chunks_exact(2) {
-                let g = chunk[0];
-                data.extend_from_slice(&[g, g, g, chunk[1]]);
+
+        let result = decoder
+            .read_image()
+            .map_err(|e| format!("{}: TIFF decode error: {e}", path.display()))?;
+        let data = match (color, result) {
+            (ColorType::RGB(8), DecodingResult::U8(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(3) {
+                    data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                }
+                data
             }
-        }
-        other => {
+            (ColorType::RGBA(8), DecodingResult::U8(pixels)) => pixels,
+            (ColorType::Gray(8), DecodingResult::U8(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for &g in &pixels {
+                    data.extend_from_slice(&[g, g, g, 255]);
+                }
+                data
+            }
+            (ColorType::GrayA(8), DecodingResult::U8(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(2) {
+                    let g = chunk[0];
+                    data.extend_from_slice(&[g, g, g, chunk[1]]);
+                }
+                data
+            }
+            (ColorType::CMYK(8), DecodingResult::U8(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(4) {
+                    data.extend_from_slice(&cmyk_to_rgba(chunk[0], chunk[1], chunk[2], chunk[3]));
+                }
+                data
+            }
+            (ColorType::Gray(16), DecodingResult::U16(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for &s in &pixels {
+                    let g = policy.downsample_u16(s);
+                    data.extend_from_slice(&[g, g, g, 255]);
+                }
+                data
+            }
+            (ColorType::GrayA(16), DecodingResult::U16(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(2) {
+                    let g = policy.downsample_u16(chunk[0]);
+                    data.extend_from_slice(&[g, g, g, policy.downsample_u16(chunk[1])]);
+                }
+                data
+            }
+            (ColorType::RGB(16), DecodingResult::U16(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(3) {
+                    data.extend_from_slice(&[
+                        policy.downsample_u16(chunk[0]),
+                        policy.downsample_u16(chunk[1]),
+                        policy.downsample_u16(chunk[2]),
+                        255,
+                    ]);
+                }
+                data
+            }
+            (ColorType::RGBA(16), DecodingResult::U16(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(4) {
+                    data.extend_from_slice(&[
+                        policy.downsample_u16(chunk[0]),
+                        policy.downsample_u16(chunk[1]),
+                        policy.downsample_u16(chunk[2]),
+                        policy.downsample_u16(chunk[3]),
+                    ]);
+                }
+                data
+            }
+            (ColorType::CMYK(16), DecodingResult::U16(pixels)) => {
+                let mut data = Vec::with_capacity(pixel_count * 4);
+                for chunk in pixels.chunks_exact(4) {
+                    data.extend_from_slice(&cmyk_to_rgba(
+                        policy.downsample_u16(chunk[0]),
+                        policy.downsample_u16(chunk[1]),
+                        policy.downsample_u16(chunk[2]),
+                        policy.downsample_u16(chunk[3]),
+                    ));
+                }
+                data
+            }
+            (other, _) => {
+                return Err(format!(
+                    "{}: unsupported TIFF color type {other:?} \
+                     (supported: gray/RGB/RGBA/CMYK at 8 or 16 bits, bilevel, palette)",
+                    path.display()
+                )
+                .into());
+            }
+        };
+
+        if data.len() != pixel_count * 4 {
             return Err(format!(
-                "{}: unsupported TIFF color type {other:?} (supported: RGB8, RGBA8, Gray8, GrayA8)",
-                path.display()
+                "{}: TIFF decode size mismatch (expected {} RGBA bytes, got {})",
+                path.display(),
+                pixel_count * 4,
+                data.len()
             )
             .into());
         }
+        Ok(Pixmap {
+            width: w,
+            height: h,
+            data,
+        })
     }
-    Ok(Pixmap {
-        width: w,
-        height: h,
-        data,
-    })
+
+    /// Uncomposited naive CMYK → RGB (no ICC): channel = (255-ink)·(255-K)/255.
+    ///
+    /// Documented in `docs/encoder-ingestion.md`; deterministic on all targets.
+    fn cmyk_to_rgba(c: u8, m: u8, y: u8, k: u8) -> [u8; 4] {
+        let apply = |ink: u8| -> u8 { ((255 - ink as u16) * (255 - k as u16) / 255) as u8 };
+        [apply(c), apply(m), apply(y), 255]
+    }
+
+    const PHOTOMETRIC_WHITE_IS_ZERO: u16 = 0;
+    const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
+    const PHOTOMETRIC_PALETTE: u16 = 3;
+
+    /// Raw strip reader for the layouts tiff 0.9 mishandles: sub-byte
+    /// grayscale (bilevel, 2-bit, 4-bit) and palette images (any depth ≤ 8).
+    ///
+    /// Only uncompressed, chunky, MSB-first, strip-organized files are
+    /// accepted; anything else gets a targeted error naming the limitation.
+    fn decode_raw_page(
+        decoder: &mut FileDecoder<'_>,
+        file_bytes: &[u8],
+        path: &Path,
+        policy: IngestPolicy,
+        w: u32,
+        h: u32,
+    ) -> Result<Pixmap, BoxError> {
+        let ctx = |msg: String| -> BoxError { format!("{}: {msg}", path.display()).into() };
+
+        let tag_u16 = |d: &mut FileDecoder<'_>, tag: Tag, default: u16| -> Result<u16, BoxError> {
+            match d.find_tag(tag) {
+                Ok(Some(v)) => v
+                    .into_u16()
+                    .map_err(|e| format!("{}: TIFF tag {tag:?}: {e}", path.display()).into()),
+                Ok(None) => Ok(default),
+                Err(e) => Err(format!("{}: TIFF tag {tag:?}: {e}", path.display()).into()),
+            }
+        };
+
+        let photometric = tag_u16(decoder, Tag::PhotometricInterpretation, 1)?;
+        let bits = tag_u16(decoder, Tag::BitsPerSample, 1)?;
+        let samples = tag_u16(decoder, Tag::SamplesPerPixel, 1)?;
+        let compression = tag_u16(decoder, Tag::Compression, 1)?;
+        let planar = tag_u16(decoder, Tag::PlanarConfiguration, 1)?;
+        let fill_order = tag_u16(decoder, Tag::FillOrder, 1)?;
+
+        if compression != 1 {
+            let name = match compression {
+                2 => "CCITT RLE",
+                3 => "CCITT G3",
+                4 => "CCITT G4",
+                5 => "LZW",
+                7 => "JPEG",
+                8 => "Deflate",
+                32773 => "PackBits",
+                _ => "unknown",
+            };
+            return Err(ctx(format!(
+                "compressed bilevel/palette TIFF is not supported yet \
+                 (compression {compression} = {name}; #694 tracks this)"
+            )));
+        }
+        if samples != 1 {
+            return Err(ctx(format!(
+                "bilevel/palette TIFF with {samples} samples per pixel is not supported"
+            )));
+        }
+        if planar != 1 {
+            return Err(ctx("planar TIFF configuration is not supported".into()));
+        }
+        if fill_order != 1 {
+            return Err(ctx("TIFF FillOrder 2 (LSB-first) is not supported".into()));
+        }
+        if !matches!(bits, 1 | 2 | 4 | 8) {
+            return Err(ctx(format!(
+                "bilevel/palette TIFF with {bits} bits per sample is not supported"
+            )));
+        }
+        if decoder.find_tag(Tag::TileWidth).ok().flatten().is_some() {
+            return Err(ctx("tiled bilevel/palette TIFF is not supported".into()));
+        }
+
+        let palette = match photometric {
+            PHOTOMETRIC_WHITE_IS_ZERO | PHOTOMETRIC_BLACK_IS_ZERO => None,
+            PHOTOMETRIC_PALETTE => {
+                let map = decoder
+                    .get_tag_u16_vec(Tag::ColorMap)
+                    .map_err(|e| ctx(format!("palette TIFF ColorMap: {e}")))?;
+                let entries = 1usize << bits;
+                if map.len() != entries * 3 {
+                    return Err(ctx(format!(
+                        "palette TIFF ColorMap has {} values, expected {}",
+                        map.len(),
+                        entries * 3
+                    )));
+                }
+                Some(map)
+            }
+            other => {
+                return Err(ctx(format!(
+                    "TIFF photometric interpretation {other} is not supported"
+                )));
+            }
+        };
+
+        let offsets = decoder
+            .get_tag_u64_vec(Tag::StripOffsets)
+            .map_err(|e| ctx(format!("TIFF strip offsets: {e}")))?;
+        let counts = decoder
+            .get_tag_u64_vec(Tag::StripByteCounts)
+            .map_err(|e| ctx(format!("TIFF strip byte counts: {e}")))?;
+        if offsets.len() != counts.len() || offsets.is_empty() {
+            return Err(ctx("inconsistent TIFF strip layout".into()));
+        }
+        let rows_per_strip = match decoder.find_tag(Tag::RowsPerStrip) {
+            Ok(Some(v)) => v
+                .into_u32()
+                .map_err(|e| ctx(format!("TIFF rows per strip: {e}")))?,
+            _ => h,
+        }
+        .max(1);
+
+        // TIFF rows are padded to a whole byte per row.
+        let row_bytes = (w as usize * bits as usize).div_ceil(8);
+        let mut rows: Vec<&[u8]> = Vec::with_capacity(h as usize);
+        for (i, (&off, &len)) in offsets.iter().zip(&counts).enumerate() {
+            let strip_rows = (h as usize)
+                .saturating_sub(i * rows_per_strip as usize)
+                .min(rows_per_strip as usize);
+            let need = strip_rows * row_bytes;
+            let start =
+                usize::try_from(off).map_err(|_| ctx("TIFF strip offset overflow".into()))?;
+            let len = usize::try_from(len).map_err(|_| ctx("TIFF strip length overflow".into()))?;
+            let end = start
+                .checked_add(len)
+                .filter(|&e| e <= file_bytes.len())
+                .ok_or_else(|| ctx("TIFF strip extends past end of file".into()))?;
+            let strip = &file_bytes[start..end];
+            if strip.len() < need {
+                return Err(ctx(format!(
+                    "TIFF strip {i} holds {} bytes, expected at least {need}",
+                    strip.len()
+                )));
+            }
+            for r in 0..strip_rows {
+                rows.push(&strip[r * row_bytes..(r + 1) * row_bytes]);
+            }
+        }
+        if rows.len() != h as usize {
+            return Err(ctx(format!(
+                "TIFF strips cover {} rows, expected {h}",
+                rows.len()
+            )));
+        }
+
+        let max_sample = (1u16 << bits) - 1;
+        let mut data = Vec::with_capacity(w as usize * h as usize * 4);
+        for row in rows {
+            for x in 0..w as usize {
+                let bit_pos = x * bits as usize;
+                let byte = row[bit_pos / 8];
+                let shift = 8 - bits as usize - (bit_pos % 8);
+                let sample = u16::from((byte >> shift) & max_sample as u8);
+                match &palette {
+                    Some(map) => {
+                        let entries = 1usize << bits;
+                        let idx = sample as usize;
+                        data.extend_from_slice(&[
+                            policy.downsample_u16(map[idx]),
+                            policy.downsample_u16(map[entries + idx]),
+                            policy.downsample_u16(map[2 * entries + idx]),
+                            255,
+                        ]);
+                    }
+                    None => {
+                        let level = if photometric == PHOTOMETRIC_WHITE_IS_ZERO {
+                            max_sample - sample
+                        } else {
+                            sample
+                        };
+                        let g = (level * 255 / max_sample) as u8;
+                        data.extend_from_slice(&[g, g, g, 255]);
+                    }
+                }
+            }
+        }
+
+        Ok(Pixmap {
+            width: w,
+            height: h,
+            data,
+        })
+    }
 }
 
 /// Unified image decoder: dispatch by extension, fall back to magic bytes.
