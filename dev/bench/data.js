@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786458902104,
+  "lastUpdate": 1786460717024,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -15994,6 +15994,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 43127000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fe7914f466ab08e9420a50e29fe1fc3e94e86d26",
+          "message": "feat(render): tile cache budget, invalidation, prefetch (#691 slice 2) (#746)\n\nPublic cache control at tile granularity in djvu_tile:\ntile_cache_usage (bytes/budget/internal-tile count),\nset_tile_cache_budget (per-page override, 0 disables caching, evicts\ndown immediately, survives downgrade), clear_tile_cache, and\ninvalidate_tile_region — a display-space rect pulled back through the\ncombined rotation and mapped proportionally (rounding outward) into\nevery cached render size. With the parallel feature, prefetch_tiles\nschedules a bounded (Chebyshev radius, grid-clipped) background warm of\nthe same cache render_tile_cached reads.\n\nInternally TileCacheState grows an Option<usize> budget override and a\nshared evict_to_budget helper; PageLayers::downgrade now preserves the\noverride (configuration, not cached data). Cache state never changes\nrendered bytes — only latency; determinism tests cover budget shrink,\nbudget 0, cross-scale and cross-rotation invalidation, and prefetch.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-11T19:39:38+05:00",
+          "tree_id": "65a7a6acfd8389f51134f7b77ee0150af0ce519d",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/fe7914f466ab08e9420a50e29fe1fc3e94e86d26"
+        },
+        "date": 1786460715914,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 165000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8199999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49245000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47535000,
             "range": "± 0",
             "unit": "ns/iter"
           }
