@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786480193265,
+  "lastUpdate": 1786483273623,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16234,6 +16234,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29204000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "667003e2c53e7eab07392bbfc412d77ed26975dc",
+          "message": "feat(ocr): synthetic metrics corpus with CER/WER/IoU baseline (#752)\n\n* feat(ocr): synthetic metrics corpus with CER/WER/IoU baseline (#693)\n\nSlice 4: deterministic quality gate for the pinned neural OCR models.\n\n- Manifest: pin PT Sans regular (google/fonts, OFL-1.1) as the corpus\n  font — fetched and SHA-256-verified like every other artifact; the\n  fetch script handles it unchanged.\n- ocr_onnx::metrics: pure CER / WER / rect IoU / greedy mean line IoU\n  with unit tests; no new runtime dependencies.\n- ocr_onnx::corpus (test-only, ab_glyph as dev-dependency): renders\n  Cyrillic and Latin+digits pages from versioned layout parameters with\n  ink-tight ground-truth line boxes; determinism test plus a model-gated\n  baseline test (skips when artifacts are absent).\n- Recorded baseline in docs/ocr-model-metrics.md: CER = 0.0 and\n  WER = 0.0 on both samples; line IoU 0.937 (Cyrillic) / 0.827 (Latin).\n  Thresholds gate at 0.05 / 0.10 / 0.80-0.70 with margins.\n- Design doc slice 4 marked done; README points at the baseline.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs\n\n* chore(deny): ignore RUSTSEC-2026-0192 (ttf-parser unmaintained, dev-only via ab_glyph)\n\nThe metrics corpus rasterizer (ab_glyph, dev-dependency) pulls\nowned_ttf_parser -> ttf-parser, now flagged unmaintained. Not a\nvulnerability and never part of the shipped library; revisit when\nab_glyph migrates (skrifa is the suggested successor).\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-12T01:57:37+05:00",
+          "tree_id": "b396d14cd7e3942c85986940ff67decd97c412c4",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/667003e2c53e7eab07392bbfc412d77ed26975dc"
+        },
+        "date": 1786483271807,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 124000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6891000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 42366000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40422000,
             "range": "± 0",
             "unit": "ns/iter"
           }
