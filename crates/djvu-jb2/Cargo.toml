@@ -1,6 +1,6 @@
 [package]
 name = "djvu-jb2"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -14,11 +14,11 @@ publish = true
 [dependencies]
 thiserror = "2"
 rayon = { version = "1", optional = true }
-djvu-zp = { version = "0.27.0", path = "../djvu-zp", default-features = false }
-djvu-bitmap = { version = "0.27.0", path = "../djvu-bitmap", default-features = false }
+djvu-zp = { version = "0.28.0", path = "../djvu-zp", default-features = false }
+djvu-bitmap = { version = "0.28.0", path = "../djvu-bitmap", default-features = false }
 
 [dev-dependencies]
-djvu-iff = { version = "0.27.0", path = "../djvu-iff" }
+djvu-iff = { version = "0.28.0", path = "../djvu-iff" }
 
 [features]
 default = ["std"]
