@@ -1,4 +1,4 @@
-//! Tile-first progressive rendering API for viewer engines (#691, slice 1).
+//! Tile-first progressive rendering API for viewer engines (#691, slices 1–2).
 //!
 //! This module formalizes a tile-oriented contract on top of the existing
 //! region renderer: a page render at a chosen output size is partitioned into
@@ -20,8 +20,14 @@
 //!   coordinate and the render options; request order (and cache state, for
 //!   [`render_tile_cached`]) never changes a single byte.
 //!
-//! Layer selection, explicit quality tiers, cancellation, cache budgeting,
-//! and async/wasm surfaces are later slices of #691.
+//! Slice 2 adds cache control at tile granularity: [`tile_cache_usage`],
+//! [`set_tile_cache_budget`], [`clear_tile_cache`],
+//! [`invalidate_tile_region`], and (with the `parallel` feature) bounded
+//! background [`prefetch_tiles`]. Cache state never changes rendered bytes —
+//! only latency.
+//!
+//! Layer selection, explicit quality tiers, cancellation, and async/wasm
+//! surfaces are later slices of #691.
 
 use crate::djvu_document::DjVuPage;
 use crate::djvu_render::{
@@ -298,6 +304,161 @@ pub fn render_tile_cached(
     )?)
 }
 
+/// Snapshot of one page's composited-tile cache (#691 slice 2).
+///
+/// The cache stores *internal* 256-pixel composited tiles (the granularity of
+/// [`render_region_tiled`](crate::djvu_render::render_region_tiled)), which
+/// back any caller-chosen [`render_tile_cached`] grid. `tiles` therefore
+/// counts internal tiles, not caller tiles.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileCacheUsage {
+    /// Bytes currently held by cached composited tiles.
+    pub bytes: usize,
+    /// Byte budget the cache enforces. Defaults to 8 MiB per page; override
+    /// with [`set_tile_cache_budget`].
+    pub budget: usize,
+    /// Number of cached internal tiles.
+    pub tiles: usize,
+}
+
+/// Current usage of `page`'s composited-tile cache.
+///
+/// Reading usage never renders or decodes anything.
+#[cfg(feature = "std")]
+pub fn tile_cache_usage(page: &DjVuPage) -> TileCacheUsage {
+    let layers = page.render_layers();
+    TileCacheUsage {
+        bytes: layers.tile_cache_bytes(),
+        budget: layers.tile_cache_budget(),
+        tiles: layers.tile_cache_len(),
+    }
+}
+
+/// Override `page`'s composited-tile cache byte budget (#691 slice 2).
+///
+/// Takes effect immediately: if the cache currently holds more than
+/// `max_bytes`, the oldest tiles are evicted until it fits. A budget of `0`
+/// effectively disables composited-tile caching for this page —
+/// [`render_tile_cached`] stays correct, it just stops being warm.
+///
+/// The override is kept when the document's budget sweep *downgrades* the
+/// page (`DjVuDocument::downgrade_render_caches`), but is reset to the
+/// default when the page's whole render cache is dropped
+/// (`DjVuPage::evict_render_cache`, `DjVuDocument::evict_render_caches`, or
+/// an `enforce_cache_budget` eviction): the budget lives with the cache it
+/// bounds.
+#[cfg(feature = "std")]
+pub fn set_tile_cache_budget(page: &DjVuPage, max_bytes: usize) {
+    page.render_layers().set_tile_cache_budget(max_bytes);
+}
+
+/// Drop every cached composited tile of `page`, returning the bytes freed.
+///
+/// Decoded layers (mask, background, foreground) stay cached; only the
+/// compositor's memoized output is invalidated. A budget override set via
+/// [`set_tile_cache_budget`] survives.
+#[cfg(feature = "std")]
+pub fn clear_tile_cache(page: &DjVuPage) -> usize {
+    page.render_layers().clear_tile_cache()
+}
+
+/// Invalidate every cached composited tile that intersects `region`,
+/// returning the bytes freed (#691 slice 2).
+///
+/// `region` is a **display-space** rectangle under `opts` — the same
+/// coordinate space as [`TileLayout::tile_rect`]; it is clipped to the
+/// display canvas. Cached tiles are dropped across **all** cached render
+/// sizes of the page, not just `opts.width × opts.height`: the region is
+/// mapped proportionally into each cached size, rounding outward, so a tile
+/// that touches the region at any scale is dropped rather than kept. Tiles
+/// wholly outside the region stay warm.
+///
+/// # Errors
+///
+/// [`RenderError::UnsupportedOption`] for Lanczos-3 resampling or `aa`
+/// (same eligibility as [`TileLayout::new`]).
+#[cfg(feature = "std")]
+pub fn invalidate_tile_region(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    region: TileRect,
+) -> Result<usize, TileError> {
+    // Tile size is irrelevant here — the layout is only used for its canvas
+    // dimensions and rotation pull-back.
+    let layout = TileLayout::new(page, opts, 1)?;
+    let x = region.x.min(layout.output_width);
+    let y = region.y.min(layout.output_height);
+    let width = region.width.min(layout.output_width - x);
+    let height = region.height.min(layout.output_height - y);
+    if width == 0 || height == 0 {
+        return Ok(0);
+    }
+    let rect = layout.to_render_rect(TileRect {
+        x,
+        y,
+        width,
+        height,
+    });
+    Ok(page
+        .render_layers()
+        .remove_tiles_intersecting(rect, layout.full_width, layout.full_height))
+}
+
+/// Schedule a bounded background prefetch of the tiles around `(col, row)`
+/// (#691 slice 2), returning how many tiles were scheduled.
+///
+/// Warms the same composited-tile cache [`render_tile_cached`] reads, for
+/// every grid tile within Chebyshev distance `radius` of the center tile
+/// (at most `(2·radius + 1)²`, clipped to the grid; `radius = 0` prefetches
+/// just the center tile). The work runs on the shared rayon pool; whichever
+/// side finishes a tile first populates the cache, the other observes it —
+/// there is no separate prefetch buffer to race against.
+///
+/// This is a hint, not a guarantee: an out-of-range `page_index` is a no-op
+/// returning `Ok(0)`, and decode errors inside the background task are
+/// swallowed — a later foreground [`render_tile_cached`] call will surface
+/// them. Retained bytes stay bounded by the page's tile-cache budget.
+///
+/// # Errors
+///
+/// Same as [`render_tile`] for grid violations and rejected options; the
+/// center tile must lie inside the grid.
+#[cfg(all(feature = "std", feature = "parallel"))]
+pub fn prefetch_tiles(
+    doc: &std::sync::Arc<crate::djvu_document::DjVuDocument>,
+    page_index: usize,
+    opts: &RenderOptions,
+    tile_size: u32,
+    col: u32,
+    row: u32,
+    radius: u32,
+) -> Result<u64, TileError> {
+    let Ok(page) = doc.page(page_index) else {
+        return Ok(0);
+    };
+    let layout = TileLayout::new(page, opts, tile_size)?;
+    layout.tile_rect(col, row)?;
+    let c0 = col.saturating_sub(radius);
+    let c1 = col.saturating_add(radius).min(layout.cols() - 1);
+    let r0 = row.saturating_sub(radius);
+    let r1 = row.saturating_add(radius).min(layout.rows() - 1);
+    let scheduled = u64::from(c1 - c0 + 1) * u64::from(r1 - r0 + 1);
+    let doc = std::sync::Arc::clone(doc);
+    let opts = opts.clone();
+    rayon::spawn(move || {
+        let Ok(page) = doc.page(page_index) else {
+            return;
+        };
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let _ = render_tile_cached(page, &opts, tile_size, c, r);
+            }
+        }
+    });
+    Ok(scheduled)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -539,5 +700,221 @@ mod tests {
             (60, 80),
             "Cw90 display canvas must be opts.height × opts.width"
         );
+    }
+
+    /// Warm every cached tile of the `opts`-sized render of `page` via the
+    /// caller grid that matches the internal 256-px cache granularity.
+    fn warm_grid(page: &DjVuPage, opts: &RenderOptions) {
+        let layout = TileLayout::new(page, opts, 256).unwrap();
+        for row in 0..layout.rows() {
+            for col in 0..layout.cols() {
+                render_tile_cached(page, opts, 256, col, row).unwrap();
+            }
+        }
+    }
+
+    /// Usage reporting, budget enforcement (including shrink-on-set and
+    /// budget 0 = caching off), and clear-with-budget-preserved semantics.
+    #[test]
+    fn cache_usage_budget_and_clear() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 600,
+            height: 800,
+            ..Default::default()
+        };
+
+        let fresh = tile_cache_usage(page);
+        assert_eq!((fresh.bytes, fresh.tiles), (0, 0));
+        assert_eq!(fresh.budget, 8 * 1024 * 1024, "default budget is 8 MiB");
+
+        warm_grid(page, &opts);
+        let warm = tile_cache_usage(page);
+        assert!(warm.bytes > 0 && warm.tiles > 0);
+
+        // Shrinking the budget below current usage evicts immediately.
+        set_tile_cache_budget(page, 300_000);
+        let shrunk = tile_cache_usage(page);
+        assert!(shrunk.bytes <= 300_000, "usage {} > budget", shrunk.bytes);
+        assert!(shrunk.tiles < warm.tiles);
+        assert_eq!(shrunk.budget, 300_000);
+
+        // Under a tiny budget rendering stays byte-correct, just cold.
+        let cached = render_tile_cached(page, &opts, 256, 0, 0).unwrap();
+        let direct = render_tile(page, &opts, 256, 0, 0).unwrap();
+        assert_eq!(cached.data, direct.data);
+        assert!(tile_cache_usage(page).bytes <= 300_000);
+
+        // Budget 0 disables caching entirely; correctness is unaffected.
+        set_tile_cache_budget(page, 0);
+        let cached = render_tile_cached(page, &opts, 256, 1, 1).unwrap();
+        let direct = render_tile(page, &opts, 256, 1, 1).unwrap();
+        assert_eq!(cached.data, direct.data);
+        assert_eq!(tile_cache_usage(page).bytes, 0);
+
+        // clear_tile_cache reports the bytes it freed and keeps the budget.
+        set_tile_cache_budget(page, 8 * 1024 * 1024);
+        warm_grid(page, &opts);
+        let before = tile_cache_usage(page);
+        let freed = clear_tile_cache(page);
+        assert_eq!(freed, before.bytes);
+        let after = tile_cache_usage(page);
+        assert_eq!((after.bytes, after.tiles), (0, 0));
+        assert_eq!(after.budget, 8 * 1024 * 1024);
+    }
+
+    /// Region invalidation drops exactly the overlapping tiles — across all
+    /// cached render sizes — and re-rendering restores identical bytes.
+    #[test]
+    fn invalidate_region_drops_overlapping_tiles_across_scales() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let big = RenderOptions {
+            width: 600,
+            height: 800,
+            ..Default::default()
+        };
+        let small = RenderOptions {
+            width: 300,
+            height: 400,
+            ..Default::default()
+        };
+        warm_grid(page, &big); // internal tiles: 3 cols × 4 rows = 12
+        warm_grid(page, &small); // internal tiles: 2 cols × 2 rows = 4
+        let reference = render_tile_cached(page, &big, 256, 0, 0).unwrap();
+        let before = tile_cache_usage(page);
+        assert_eq!(before.tiles, 16);
+
+        // Left half of the 600-wide display canvas. At 600: x < 300 drops
+        // columns 0 and 256, keeps 512 (4 tiles survive). At 300 the rect
+        // scales to x < 150: drops column 0, keeps 256 (2 tiles survive).
+        let freed = invalidate_tile_region(
+            page,
+            &big,
+            TileRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 800,
+            },
+        )
+        .unwrap();
+        assert!(freed > 0);
+        let after = tile_cache_usage(page);
+        assert_eq!(after.tiles, 6, "only right-column tiles survive");
+        assert_eq!(after.bytes, before.bytes - freed);
+
+        // Re-rendering a dropped tile reproduces the original bytes.
+        let rerendered = render_tile_cached(page, &big, 256, 0, 0).unwrap();
+        assert_eq!(rerendered.data, reference.data);
+
+        // A region wholly outside every cached tile frees nothing.
+        assert_eq!(
+            invalidate_tile_region(
+                page,
+                &big,
+                TileRect {
+                    x: 599,
+                    y: 799,
+                    width: 0,
+                    height: 0,
+                },
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    /// A display-space region under a rotated view invalidates the same
+    /// pre-rotation tiles as the equivalent unrotated region.
+    #[test]
+    fn invalidate_maps_display_rect_through_rotation() {
+        let identity = RenderOptions {
+            width: 600,
+            height: 800,
+            ..Default::default()
+        };
+        let rotated = RenderOptions {
+            rotation: UserRotation::Cw90,
+            ..identity.clone()
+        };
+
+        // Two identically warmed caches (separate documents = separate caches).
+        let doc_a = load_doc("chicken.djvu");
+        let page_a = doc_a.page(0).unwrap();
+        warm_grid(page_a, &identity);
+        let doc_b = load_doc("chicken.djvu");
+        let page_b = doc_b.page(0).unwrap();
+        warm_grid(page_b, &identity);
+
+        // Under Cw90 the display canvas is 800×600 and its top strip
+        // `{0, 0, 800, 300}` pulls back to the pre-rotation left strip
+        // `{0, 0, 300, 800}` — the same region as the identity-space rect.
+        let freed_identity = invalidate_tile_region(
+            page_a,
+            &identity,
+            TileRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 800,
+            },
+        )
+        .unwrap();
+        let freed_rotated = invalidate_tile_region(
+            page_b,
+            &rotated,
+            TileRect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 300,
+            },
+        )
+        .unwrap();
+        assert!(freed_identity > 0);
+        assert_eq!(freed_identity, freed_rotated);
+        assert_eq!(
+            tile_cache_usage(page_a).tiles,
+            tile_cache_usage(page_b).tiles
+        );
+    }
+
+    /// Prefetch warms the same cache `render_tile_cached` reads, without
+    /// changing a byte of output; out-of-range pages are a no-op.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn prefetch_tiles_warms_cache() {
+        let doc = std::sync::Arc::new(load_doc("chicken.djvu"));
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 600,
+            height: 800,
+            ..Default::default()
+        };
+
+        assert_eq!(prefetch_tiles(&doc, 99, &opts, 256, 0, 0, 1).unwrap(), 0);
+        assert!(matches!(
+            prefetch_tiles(&doc, 0, &opts, 256, 99, 0, 1),
+            Err(TileError::OutOfRange { .. })
+        ));
+
+        // radius 1 around (0,0) on a 3×4 grid clips to a 2×2 neighborhood.
+        let scheduled = prefetch_tiles(&doc, 0, &opts, 256, 0, 0, 1).unwrap();
+        assert_eq!(scheduled, 4);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while tile_cache_usage(page).tiles < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            tile_cache_usage(page).tiles >= 4,
+            "prefetch never landed: {:?}",
+            tile_cache_usage(page)
+        );
+        let warm = render_tile_cached(page, &opts, 256, 0, 0).unwrap();
+        let direct = render_tile(page, &opts, 256, 0, 0).unwrap();
+        assert_eq!(warm.data, direct.data);
     }
 }

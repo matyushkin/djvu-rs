@@ -78,6 +78,54 @@ semantics (the cached path falls back to uncached rendering in that mode).
 Each tile render is bounded by the same `max_render_pixels` check as any
 region render (limits inherited from the parent document at parse time).
 
+## Slice 2: cache budget, invalidation, prefetch
+
+Slice 2 makes the composited-tile cache behind `render_tile_cached` a
+controllable resource. All of it is `std`-only; prefetch additionally needs
+the `parallel` feature. **Cache state never changes rendered bytes — only
+latency**; every entry point below preserves slice 1's determinism
+guarantees.
+
+### Usage and budget
+
+- `tile_cache_usage(page)` returns `TileCacheUsage { bytes, budget, tiles }`
+  for the page's cache. `tiles` counts *internal* 256-px composited tiles
+  (the cache's granularity), not caller-grid tiles. Reading usage never
+  decodes or renders.
+- `set_tile_cache_budget(page, max_bytes)` overrides the per-page byte
+  budget (default 8 MiB), evicting oldest-first down to the new bound
+  immediately. Budget `0` disables composited-tile caching for the page.
+  The override survives a document-level cache *downgrade* but resets to the
+  default when the page's whole render cache is dropped (it lives with the
+  cache it bounds).
+
+### Invalidation
+
+- `clear_tile_cache(page)` drops every cached tile, returning bytes freed.
+  Decoded layers stay warm; only memoized compositor output is dropped.
+- `invalidate_tile_region(page, opts, region)` drops exactly the cached
+  tiles intersecting a **display-space** rectangle (same space as
+  `TileLayout::tile_rect`, clipped to the canvas) and returns bytes freed.
+  The region is pulled back through the combined rotation and then mapped
+  proportionally into **every** cached render size, rounding outward — a
+  tile touching the region at any scale is dropped, never kept.
+
+### Prefetch
+
+- `prefetch_tiles(doc, page_index, opts, tile_size, col, row, radius)`
+  schedules background composition of all grid tiles within Chebyshev
+  distance `radius` of the center tile (at most `(2·radius + 1)²`, clipped
+  to the grid) on the shared rayon pool, returning the scheduled count. It
+  warms the same cache `render_tile_cached` reads — no separate buffer, no
+  race: whichever side composites a tile first, the other observes it. It is
+  a hint: out-of-range pages are a no-op, background errors are swallowed
+  (a foreground render surfaces them), and retained bytes stay bounded by
+  the page's budget.
+
+Tests: `cache_usage_budget_and_clear`,
+`invalidate_region_drops_overlapping_tiles_across_scales`,
+`invalidate_maps_display_rect_through_rotation`, `prefetch_tiles_warms_cache`.
+
 ## Renderer fix that fell out of slice 1
 
 `render_region`/`render_region_tiled` previously always composited against
@@ -92,8 +140,6 @@ same `resolve_sub4_mask` decision (`render_region_matches_full_render_crop_at_su
 - Explicit progressive quality tiers per tile (never regressing), on top of
   the BG44-chunk refinement primitives.
 - Cancellation that stops remaining decode/composite work.
-- Public cache budget / usage / eviction / invalidation API at tile
-  granularity; bounded adjacent-tile prefetch.
 - Layer selection (mask/foreground/background) per tile request.
 - Lanczos-3 tiles (needs kernel-window-aware tile aprons).
 - Async and WASM tile surfaces with equivalent observable semantics.
