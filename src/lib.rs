@@ -376,6 +376,8 @@ pub mod tiff_export;
 ///
 /// Key abstractions: [`djvu_async::LazyDocument`],
 /// [`djvu_async::render_progressive_stream`],
+/// [`djvu_async::render_tile_async`],
+/// [`djvu_async::render_tile_progressive_stream`],
 /// [`djvu_async::load_document_async_streaming`].
 #[cfg(feature = "async")]
 pub mod djvu_async;
