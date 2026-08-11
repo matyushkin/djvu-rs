@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786476944173,
+  "lastUpdate": 1786478872896,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16138,6 +16138,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47498000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2f934f11cd8494e728df256968e0c54f92e51600",
+          "message": "feat(tile): progressive tile quality, cancellation, async+wasm surfaces (#748)\n\nAsync (feature \"async\"):\n- render_tile_async runs render_tile_with inside spawn_blocking; every\n  byte guarantee of the sync entry point carries over unchanged, and a\n  TileCancelToken clone cancels from any task.\n- render_tile_progressive_stream is the tile-granular counterpart of\n  render_progressive_stream: one frame per quality step, coarsest first,\n  each byte-identical to the matching crop of the full-page progressive\n  frame. On cancellation the stream yields one Cancelled error and ends.\n- New AsyncTileError mirrors AsyncRenderError (Tile + Join).\n\nWASM (feature \"wasm\"):\n- WasmPage::tile_cols/tile_rows expose the display-space grid;\n  render_tile (full quality, composited-tile cache, returns WasmPixmap\n  with the clipped tile dimensions), render_tile_progressive (quality\n  step chunk_n, never cached), render_tile_into_pixmap (#611\n  buffer-reuse pattern). Cancellation tokens are not exposed: wasm\n  renders are synchronous calls JS cannot interrupt mid-call.\n\nBoth surfaces are thin adapters over render_tile_with — no rendering\nlogic of their own. Contract: docs/tile-rendering.md, slice 3b section.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-12T00:42:27+05:00",
+          "tree_id": "829a049599ff01032cedc950b870de4c9496197f",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2f934f11cd8494e728df256968e0c54f92e51600"
+        },
+        "date": 1786478871959,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8682000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 52836000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51259000,
             "range": "± 0",
             "unit": "ns/iter"
           }
