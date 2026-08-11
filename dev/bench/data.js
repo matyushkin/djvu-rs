@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786475454372,
+  "lastUpdate": 1786476944173,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16090,6 +16090,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51339000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2b131064e544cf3a7b5a59c07482a38a525457ef",
+          "message": "feat(ocr): model manifest with SHA-256 verification + DBNet detection (#693) (#749)\n\nSlice 2 of the neural OCR pipeline:\n\n- docs/ocr-model-manifest.toml: pinned PP-OCRv4 mobile det/rec artifacts\n  (commit-pinned URL, size, SHA-256, opset, SPDX license); embedded at\n  compile time as the single source of truth\n- ocr_onnx::manifest: manifest parser + mandatory size/SHA-256\n  verification; unverified weights are never loaded (typed hard errors)\n- ocr_onnx::preprocess: deterministic detector preprocessing — input size\n  from the page's actual extent (long side <= 960, sides rounded to x32),\n  fixed-point 16.16 bilinear resize, ImageNet mean/std CHW tensor\n- ocr_onnx::detect: DBNet text detection with a shape-keyed LRU of tract\n  plans; pure prob-map postprocessing (binarize, 4-connected components,\n  score/size filters, unclip, page-coordinate mapping) unit-tested on\n  synthetic maps; real-model tests skip silently without weights\n- scripts/fetch_ocr_models.sh: explicit, verifying fetch (weights are\n  never committed and never downloaded implicitly); models/ gitignored\n  and excluded from the published crate\n- CI: main-only non-required \"OCR (onnx models)\" job fetches pinned\n  weights (cached by manifest hash) and runs the ocr_onnx test tree\n- sha2 added to the ocr-onnx feature and to the feature-hygiene\n  forbidden list; README/feature-matrix/design-doc updated\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-11T23:45:06+05:00",
+          "tree_id": "481b32e58e63386aa528c0e79cae2f2e7b4706a1",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2b131064e544cf3a7b5a59c07482a38a525457ef"
+        },
+        "date": 1786476943424,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8228000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49554000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47498000,
             "range": "± 0",
             "unit": "ns/iter"
           }
