@@ -24,6 +24,13 @@ pub const DET_MODEL: &str = "ppocr-v4-mobile-det";
 /// Manifest key of the PP-OCRv4 mobile text recognizer (CRNN/CTC).
 pub const REC_MODEL: &str = "ppocr-v4-mobile-rec";
 
+/// Manifest key of the Cyrillic PP-OCRv5 mobile text recognizer (CTC).
+pub const REC_CYRILLIC_MODEL: &str = "ppocr-v5-cyrillic-rec";
+
+/// Manifest key of the Cyrillic recognizer's pinned config (embeds the CTC
+/// character dictionary; not an ONNX graph, so its `opset` is 0).
+pub const REC_CYRILLIC_CONFIG: &str = "ppocr-v5-cyrillic-rec-config";
+
 /// One pinned model artifact from the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
@@ -285,8 +292,15 @@ mod tests {
         let manifest = ModelManifest::builtin().expect("built-in manifest must parse");
         let det = manifest.entry(DET_MODEL).expect("det entry must exist");
         let rec = manifest.entry(REC_MODEL).expect("rec entry must exist");
+        let cyr = manifest.entry(REC_CYRILLIC_MODEL).expect("cyrillic rec");
+        let cfg = manifest.entry(REC_CYRILLIC_CONFIG).expect("cyrillic cfg");
         assert_eq!(det.file, "ch_PP-OCRv4_det_infer.onnx");
         assert_eq!(rec.file, "ch_PP-OCRv4_rec_infer.onnx");
+        assert_eq!(cyr.file, "cyrillic_PP-OCRv5_mobile_rec.onnx");
+        assert_eq!(cfg.file, "cyrillic_PP-OCRv5_mobile_rec.yml");
+        // The recognizer and its dictionary config must come from the same
+        // pinned upstream commit.
+        assert_eq!(cyr.commit, cfg.commit);
         for entry in manifest.entries() {
             assert!(
                 entry.url.contains(&entry.commit),
@@ -295,7 +309,13 @@ mod tests {
             );
             assert_eq!(entry.license, "Apache-2.0");
             assert!(entry.size > 0);
-            assert_eq!(entry.opset, 12);
+            let is_onnx = entry.file.ends_with(".onnx");
+            assert_eq!(
+                is_onnx,
+                entry.opset > 0,
+                "ONNX graphs declare an opset; companion artifacts use 0 ('{}')",
+                entry.name
+            );
         }
     }
 

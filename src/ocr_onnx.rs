@@ -2,12 +2,13 @@
 //!
 //! Two layers live here:
 //!
-//! - The concrete PP-OCRv4 pipeline being built under #693 (see
+//! - The concrete PP-OCR pipeline being built under #693 (see
 //!   `docs/neural-ocr-design.md`):
 //!   [`manifest`] — pinned model artifacts with mandatory SHA-256
 //!   verification; [`preprocess`] — deterministic detector preprocessing;
-//!   [`detect`] — DBNet text detection producing page-coordinate boxes.
-//!   Recognition (CRNN/CTC) and CLI wiring land in later slices.
+//!   [`detect`] — DBNet text detection producing page-coordinate boxes;
+//!   [`recognize`] — Cyrillic CTC line recognition against the pinned
+//!   dictionary. `TextLayer` assembly and CLI wiring land in later slices.
 //! - [`OnnxBackend`] — an older generic scaffold for simple CTC-style
 //!   recognizers where the caller provides the model and vocabulary.
 //!
@@ -16,6 +17,7 @@
 pub mod detect;
 pub mod manifest;
 pub mod preprocess;
+pub mod recognize;
 
 use std::path::Path;
 
