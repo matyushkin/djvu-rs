@@ -31,6 +31,10 @@ pub const REC_CYRILLIC_MODEL: &str = "ppocr-v5-cyrillic-rec";
 /// character dictionary; not an ONNX graph, so its `opset` is 0).
 pub const REC_CYRILLIC_CONFIG: &str = "ppocr-v5-cyrillic-rec-config";
 
+/// Manifest key of the pinned metrics-corpus font (PT Sans regular; not an
+/// ONNX graph, so its `opset` is 0).
+pub const METRICS_FONT: &str = "metrics-font-pt-sans";
+
 /// One pinned model artifact from the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
@@ -307,7 +311,12 @@ mod tests {
                 "URL for '{}' must be pinned to its commit, not a branch",
                 entry.name
             );
-            assert_eq!(entry.license, "Apache-2.0");
+            let expected_license = if entry.name == METRICS_FONT {
+                "OFL-1.1" // font, not model weights
+            } else {
+                "Apache-2.0"
+            };
+            assert_eq!(entry.license, expected_license);
             assert!(entry.size > 0);
             let is_onnx = entry.file.ends_with(".onnx");
             assert_eq!(
