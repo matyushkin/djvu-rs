@@ -104,9 +104,11 @@ pub trait OcrBackend {
     /// top-level [`TextLayer`]`::text` string and at least one page-level zone;
     /// the richer `page -> line -> word` hierarchy is best-effort and
     /// backend-dependent. The Tesseract backend produces the full hierarchy;
-    /// the experimental `ocr-onnx`/`ocr-neural` backends (see the module docs)
-    /// may emit a coarser tree or none at all. Consumers that need word-level
-    /// rects (e.g. the hOCR/ALTO exporters) must tolerate a flatter layer.
+    /// the `ocr-onnx` neural pipeline emits `page -> line -> word` with
+    /// *heuristic* word rects (proportional split of the line box); other
+    /// experimental backends (see the module docs) may emit a coarser tree or
+    /// none at all. Consumers that need word-level rects (e.g. the hOCR/ALTO
+    /// exporters) must tolerate a flatter layer.
     fn recognize(&self, pixmap: &Pixmap, options: &OcrOptions) -> Result<TextLayer, OcrError>;
 }
 

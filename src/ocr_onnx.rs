@@ -8,14 +8,15 @@
 //!   verification; [`preprocess`] — deterministic detector preprocessing;
 //!   [`detect`] — DBNet text detection producing page-coordinate boxes;
 //!   [`recognize`] — Cyrillic CTC line recognition against the pinned
-//!   dictionary. `TextLayer` assembly and CLI wiring land in later slices.
+//!   dictionary; [`pipeline`] — the [`pipeline::NeuralOcrBackend`] composition
+//!   wired to the CLI as `--backend onnx`.
 //! - [`OnnxBackend`] — an older generic scaffold for simple CTC-style
-//!   recognizers where the caller provides the model and vocabulary.
-//!
-//! Neither layer is advertised as a supported CLI backend yet.
+//!   recognizers where the caller provides the model and vocabulary; not a
+//!   CLI backend.
 
 pub mod detect;
 pub mod manifest;
+pub mod pipeline;
 pub mod preprocess;
 pub mod recognize;
 
