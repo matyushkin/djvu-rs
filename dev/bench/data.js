@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786460717024,
+  "lastUpdate": 1786475454372,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16042,6 +16042,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47535000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1534ba766391ded66d999595f4949be307cd54e3",
+          "message": "feat(tile): progressive quality steps and cooperative cancellation (#691 slice 3a) (#747)\n\nAdd render_tile_with(page, opts, tile_size, col, row, &TileRenderControls):\n- quality_step: Some(k) composites the tile from BG44 chunks 0..=k only,\n  byte-identical to the matching crop of render_progressive_step frame k\n  under every rotation; monotonic never-regress ladder by construction.\n  Partial-quality pixels never enter the composited-tile cache.\n- TileCancelToken: shared one-way flag with checkpoints between units of\n  work (per tile, per internal cache tile, between decode and composite);\n  cancelled calls return TileError::Cancelled and never corrupt caches.\n- prefetch_tiles_cancellable bounds how much of the prefetch schedule runs.\n\nInternally, render_region_tiled gains a cancellable variant returning\nOk(None) on cancellation, and a new render_region_progressive mirrors\nrender_progressive's compositing (full-resolution mask, no\nresolve_sub4_mask) so crop parity holds by construction.\n\nAlso fixes a pre-existing determinism bug: the #607 warm-mask fast path in\ndecode_layers returned a maskless layer set to progressive renders, so a\nprior full render at strong downscale silently dropped the text layer from\nlater progressive frames (colorbook/history/carte fixtures). The fast path\nis now gated to full-background decodes; regression test\nrender_progressive_ignores_mask_sub4_warmth.\n\nContract: docs/tile-rendering.md, slice 3 section.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-11T23:44:59+05:00",
+          "tree_id": "b7025013707179e7079c77a4e2e099b91f7cafba",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/1534ba766391ded66d999595f4949be307cd54e3"
+        },
+        "date": 1786475452834,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8693000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53799000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51339000,
             "range": "± 0",
             "unit": "ns/iter"
           }
