@@ -75,7 +75,10 @@ wasm-bindgen-rayon = { version = "1.3", optional = true }
 tesseract = { version = "0.15", optional = true }
 # Dev-only allocation profiling (#600): global allocator for examples/alloc_profile.rs.
 dhat = { version = "0.3", optional = true }
-tract-onnx = { version = "0.21", optional = true }
+# Floor 0.22.2: RUSTSEC-2026-0217 fix (tract-nnef tensor-parser OOB read); the
+# patched 0.21.x line pins `time <0.3.42`, which is itself vulnerable
+# (RUSTSEC-2026-0009). 0.23.x needs Rust 1.91 > our MSRV 1.88.
+tract-onnx = { version = "0.22.2", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

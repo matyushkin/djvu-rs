@@ -810,13 +810,14 @@ fn load_limits(path: &Path) -> Result<ResourceLimits, Box<dyn std::error::Error>
         .as_object()
         .ok_or_else(|| fail(format!("limits {} must be a JSON object", path.display())))?;
 
-    const KNOWN: [&str; 6] = [
+    const KNOWN: [&str; 7] = [
         "max_file_bytes",
         "max_pages",
         "max_components",
         "max_page_pixels",
         "max_total_pixels",
         "max_decoded_bytes",
+        "max_render_pixels",
     ];
     for key in object.keys() {
         if !KNOWN.contains(&key.as_str()) {
@@ -845,6 +846,7 @@ fn load_limits(path: &Path) -> Result<ResourceLimits, Box<dyn std::error::Error>
         max_page_pixels: read("max_page_pixels")?,
         max_total_pixels: read("max_total_pixels")?,
         max_decoded_bytes: read("max_decoded_bytes")?,
+        max_render_pixels: read("max_render_pixels")?,
     })
 }
 

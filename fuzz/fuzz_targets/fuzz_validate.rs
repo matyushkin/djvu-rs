@@ -35,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
                 max_page_pixels: Some(0),
                 max_total_pixels: Some(0),
                 max_decoded_bytes: Some(0),
+                max_render_pixels: Some(0),
             }),
         },
     );

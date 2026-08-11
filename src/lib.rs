@@ -202,6 +202,9 @@ pub mod ingest;
 #[cfg(feature = "std")]
 pub mod png_io;
 
+/// Shared configurable resource limits for parse, render, and validate.
+pub mod resource_limits;
+
 /// New document model — phase 3.
 ///
 /// Provides [`DjVuDocument`] (high-level document API built on the new IFF/BZZ/IW44
@@ -468,11 +471,15 @@ pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, Grap
 #[cfg(feature = "std")]
 pub use semantic_diff::{PlaneDiff, PlaneStatus, SemanticDiff, semantic_diff};
 
+pub use resource_limits::{
+    DEFAULT_MAX_RENDER_PIXELS, ParseOptions, ResourceLimitAxis, ResourceLimitExceeded,
+    ResourceLimits,
+};
 /// Re-export the layered validation API for callers that prefer the crate root.
 #[cfg(feature = "std")]
 pub use validate::{
-    Finding, Layer as ValidationLayer, Severity, ValidateOptions, ValidationReport,
-    ValidationSummary,
+    Finding, Layer as ValidationLayer, ResourceEstimate, Severity, ValidateOptions,
+    ValidationReport, ValidationSummary,
 };
 
 /// Shared export progress and cancellation types.
@@ -527,9 +534,17 @@ impl Document {
     /// This method uses `DjVuDocument::parse` which only handles bundled
     /// (self-contained) files; it will return an error for indirect documents.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::open_with_options(path, &crate::resource_limits::ParseOptions::default())
+    }
+
+    /// Open a DjVu file with configurable resource limits.
+    pub fn open_with_options(
+        path: impl AsRef<std::path::Path>,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, Error> {
         let data = std::fs::read(path.as_ref())
             .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
-        Self::from_bytes(data)
+        Self::from_bytes_with_options(data, opts)
     }
 
     /// Open an indirect DJVM document from disk, resolving component pages
@@ -539,11 +554,19 @@ impl Document {
     /// individual page files (e.g. `page001.djvu`) live alongside the index.
     /// For self-contained (bundled) files, [`Document::open`] is sufficient.
     pub fn open_dir(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::open_dir_with_options(path, &crate::resource_limits::ParseOptions::default())
+    }
+
+    /// Open an indirect DJVM document with configurable resource limits.
+    pub fn open_dir_with_options(
+        path: impl AsRef<std::path::Path>,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, Error> {
         let path = path.as_ref();
         let data = std::fs::read(path)
             .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
         let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
-        let doc = DjVuDocument::parse_from_dir(&data, base_dir)
+        let doc = DjVuDocument::parse_from_dir_with_options(&data, base_dir, opts)
             .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Document { doc })
     }
@@ -564,10 +587,23 @@ impl Document {
     /// can construct pages lazily (chunk bytes are materialised on first access
     /// rather than copied at open time; see `DjVuDocument::parse_backed`).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, Error> {
+        Self::from_bytes_with_options(data, &crate::resource_limits::ParseOptions::default())
+    }
+
+    /// Parse a DjVu document from owned bytes with configurable resource limits.
+    pub fn from_bytes_with_options(
+        data: Vec<u8>,
+        opts: &crate::resource_limits::ParseOptions,
+    ) -> Result<Self, Error> {
         let backing: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = std::sync::Arc::new(data);
-        let doc =
-            DjVuDocument::parse_backed(backing).map_err(|e| Error::FormatError(e.to_string()))?;
+        let doc = DjVuDocument::parse_backed_with_options(backing, opts)
+            .map_err(|e| Error::FormatError(e.to_string()))?;
         Ok(Document { doc })
+    }
+
+    /// Configurable resource limits supplied at parse/open time, if any.
+    pub fn resource_limits(&self) -> Option<crate::resource_limits::ResourceLimits> {
+        self.doc.resource_limits()
     }
 
     /// Parse the NAVM bookmarks (table of contents).
@@ -737,7 +773,17 @@ impl<'a> Page<'a> {
     /// `bold` / `aa` / `resampling` as needed. This supersedes the bespoke
     /// `render_bold` / `render_aa` / `render_scaled*` methods.
     pub fn render_with(&self, opts: &djvu_render::RenderOptions) -> Result<Pixmap, Error> {
-        djvu_render::render_pixmap(self.page, opts).map_err(Self::render_err)
+        djvu_render::render_pixmap_with_limits(self.page, opts, self.page.resource_limits())
+            .map_err(Self::render_err)
+    }
+
+    /// Render with caller-supplied [`RenderOptions`] and an optional limit override.
+    pub fn render_with_limits(
+        &self,
+        opts: &djvu_render::RenderOptions,
+        limits: Option<crate::resource_limits::ResourceLimits>,
+    ) -> Result<Pixmap, Error> {
+        djvu_render::render_pixmap_with_limits(self.page, opts, limits).map_err(Self::render_err)
     }
 
     /// Page resolution in dots per inch.
