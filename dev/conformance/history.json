@@ -297,8 +297,8 @@
     "failures": []
   },
   {
-    "timestamp": "2026-08-11T19:44:13+00:00",
-    "commit": "2f934f11cd8494e728df256968e0c54f92e51600",
+    "timestamp": "2026-08-11T19:46:29+00:00",
+    "commit": "beade4c26ce80e53933b1b8d1340fcee2c6ab0f5",
     "status": "pass",
     "pages_compared": 14,
     "max_mismatch_pct": 0.7488,
