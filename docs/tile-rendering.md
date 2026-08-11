@@ -171,6 +171,40 @@ Tests: `progressive_tiles_match_progressive_frames`,
 `quality_steps_on_bilevel_page`, `cancelled_token_aborts_every_mode`,
 `prefetch_tiles_cancellable_behaviour`.
 
+## Slice 3b: async and WASM surfaces
+
+Thin adapters over `render_tile_with` — every byte guarantee above carries
+over unchanged; neither surface adds rendering logic of its own.
+
+### Async (`djvu_async`, feature `async`)
+
+- `render_tile_async(page, opts, tile_size, col, row, controls)` runs the
+  sync entry point inside `tokio::task::spawn_blocking`. Cancel from any
+  task via a clone of the token in `controls.cancel`; the render stops at
+  its next checkpoint with `TileError::Cancelled` (wrapped in
+  `AsyncTileError::Tile`).
+- `render_tile_progressive_stream(page, opts, tile_size, col, row, cancel)`
+  is the tile-granular counterpart of `render_progressive_stream`: one
+  frame per quality step, coarsest first, each byte-identical to the
+  matching crop of the full-page progressive frame. On cancellation the
+  stream yields one `Cancelled` error and ends (the token is sticky).
+
+Tests: `tile_async_matches_sync_tile`,
+`tile_progressive_stream_frames_match_quality_steps`,
+`tile_cancellation_surfaces_and_ends_stream`.
+
+### WASM (`wasm`, feature `wasm`)
+
+`WasmPage` gains `tile_cols`/`tile_rows` (grid dimensions; tile `(col, row)`
+starts at canvas pixel `(col·tile_size, row·tile_size)`),
+`render_tile` (full quality, composited-tile cache, returns a `WasmPixmap`
+carrying the clipped tile dimensions), `render_tile_progressive`
+(quality step `chunk_n`, matching `render_progressive`'s numbering, never
+cached), and `render_tile_into_pixmap` (buffer-reuse variant, #611
+pattern). Cancellation tokens are not exposed: wasm renders are
+synchronous calls that JS cannot interrupt mid-call. Parity is enforced by
+the sync tile tests the bindings delegate to.
+
 ## Renderer fix that fell out of slice 1
 
 `render_region`/`render_region_tiled` previously always composited against
@@ -194,4 +228,3 @@ decodes, which the non-progressive paths resolve through
 
 - Layer selection (mask/foreground/background) per tile request.
 - Lanczos-3 tiles (needs kernel-window-aware tile aprons).
-- Async and WASM tile surfaces with equivalent observable semantics.
