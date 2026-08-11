@@ -126,6 +126,51 @@ Tests: `cache_usage_budget_and_clear`,
 `invalidate_region_drops_overlapping_tiles_across_scales`,
 `invalidate_maps_display_rect_through_rotation`, `prefetch_tiles_warms_cache`.
 
+## Slice 3: progressive quality steps and cancellation
+
+One entry point carries both:
+`render_tile_with(page, opts, tile_size, col, row, &TileRenderControls)`.
+Default controls reproduce `render_tile` byte-for-byte; `use_cache: true`
+reproduces `render_tile_cached`.
+
+### Quality steps
+
+- `quality_step: Some(k)` composites the tile from BG44 background chunks
+  `0..=k` only (full foreground and mask), for
+  `k < progressive_steps(page)`. The tile is **byte-identical** to the
+  matching crop of the full-page progressive frame
+  `render_progressive_step(page, opts, k)`, under every rotation.
+- **Never-regress by construction.** Each BG44 chunk is a wavelet
+  refinement over the same base image: step `k+1` adds detail to step `k`,
+  never replaces or coarsens it. Walking `0..progressive_steps` is the same
+  monotonic ladder full-page progressive rendering rides; the tile API adds
+  no resampling or re-quantization that could break it.
+- On pages without BG44 data the ladder has exactly one step: `Some(0)` is
+  the full render (mirroring `render_progressive_step`), larger steps error
+  with `ChunkOutOfRange`.
+- Partial-quality pixels are decoded per call and **never** enter the
+  composited-tile cache, so no later full-quality render can observe them.
+
+### Cancellation
+
+- `TileCancelToken` is a shared one-way flag: clones observe one another,
+  `cancel()` is sticky. Pass a clone in `TileRenderControls::cancel`, or to
+  `prefetch_tiles_cancellable` (same schedule count as `prefetch_tiles`;
+  cancellation bounds how much of the schedule runs).
+- Checkpoints sit **between** units of work: before each tile, before each
+  internal 256-px cache tile, and between layer decode and composite. An
+  in-flight unit always completes; cancelled calls return
+  `TileError::Cancelled`.
+- Cancellation never changes bytes and never corrupts caches: a cache tile
+  is inserted only after its composite finished, so an abandoned call
+  leaves either complete tiles or nothing.
+
+Tests: `progressive_tiles_match_progressive_frames`,
+`progressive_tiles_match_under_rotation`,
+`render_tile_with_matches_dedicated_entry_points`,
+`quality_steps_on_bilevel_page`, `cancelled_token_aborts_every_mode`,
+`prefetch_tiles_cancellable_behaviour`.
+
 ## Renderer fix that fell out of slice 1
 
 `render_region`/`render_region_tiled` previously always composited against
@@ -135,11 +180,18 @@ FGbz). Region renders of heavily downscaled pages therefore diverged from
 the matching crop of the full render. Both region entry points now take the
 same `resolve_sub4_mask` decision (`render_region_matches_full_render_crop_at_sub4`).
 
+## Renderer fix that fell out of slice 3
+
+`render_progressive` frames used to depend on cache warmth: when a prior
+full render at the same strong downscale had retained the 1/4-resolution
+mask (#607 fast path), `decode_layers` handed the progressive path a
+maskless layer set and the text layer silently vanished from every later
+progressive frame. The fast path is now restricted to full-background
+decodes, which the non-progressive paths resolve through
+`resolve_sub4_mask` (`render_progressive_ignores_mask_sub4_warmth`).
+
 ## Planned follow-ups (#691)
 
-- Explicit progressive quality tiers per tile (never regressing), on top of
-  the BG44-chunk refinement primitives.
-- Cancellation that stops remaining decode/composite work.
 - Layer selection (mask/foreground/background) per tile request.
 - Lanczos-3 tiles (needs kernel-window-aware tile aprons).
 - Async and WASM tile surfaces with equivalent observable semantics.

@@ -2212,8 +2212,16 @@ fn decode_layers<'a>(
     // (no bold dilation, no FGbz palette — those need full-resolution mask
     // semantics); the compositor then reads only the sub4 plane, so output is
     // pixel-identical to the full-decode path by construction.
+    //
+    // Restricted to full-background decodes (`bg_chunk_limit == usize::MAX`):
+    // the progressive path composites with the mask returned *here* (it never
+    // consults `resolve_sub4_mask`), so handing it a maskless layer set made
+    // `render_progressive` frames silently drop the text layer whenever this
+    // cache happened to be warm — output depended on cache warmth (#691
+    // slice 3 regression test `render_progressive_ignores_mask_sub4_warmth`).
     #[cfg(feature = "std")]
-    if bg_subsample >= 4
+    if bg_chunk_limit == usize::MAX
+        && bg_subsample >= 4
         && opts.bold == 0
         && page.find_chunk(b"FGbz").is_none()
         && page.render_layers().mask_sub4_cached().is_some()
@@ -3956,6 +3964,115 @@ pub fn render_region(
     ))
 }
 
+/// `true` when a cooperative cancel flag is present and set.
+///
+/// `Relaxed` is enough: the flag carries no data, it only asks in-flight work
+/// to stop at its next checkpoint.
+#[inline]
+pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Region variant of [`render_progressive`] (#691 slice 3): composite the
+/// `region` sub-rectangle of progressive frame `chunk_n` (BG44 chunks
+/// `0..=chunk_n`, full foreground).
+///
+/// **Byte-identical** to the matching crop of
+/// `render_progressive(page, opts, chunk_n)` for every input: the layer
+/// decode is the same `decode_layers(.., chunk_n + 1)` call, the composite
+/// uses the same full-resolution mask (shift 0 — `render_progressive` never
+/// takes the 1/4-res mask fast path), and `composite_into` computes each
+/// pixel from its absolute position in the full render, so a sub-rectangle
+/// reproduces the frame's bytes exactly (see
+/// `progressive_tiles_match_progressive_frames` in `djvu_tile`).
+///
+/// `cancel` is a cooperative stop flag checked on entry and between the
+/// layer decode and the composite; `Ok(None)` means the render was abandoned
+/// at a checkpoint. Partial-quality frames are decoded from scratch on every
+/// call (the `PageLayers` caches only memoize the full-chunk decode), and
+/// their pixels are never inserted into the composited-tile cache.
+///
+/// # Errors
+///
+/// Same as [`render_progressive`], plus [`RenderError::UnsupportedOption`]
+/// for Lanczos-3 resampling (its whole-pixmap re-render recursion is
+/// incompatible with region output; the tile API rejects it earlier anyway).
+pub(crate) fn render_region_progressive(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+    chunk_n: usize,
+    cancel: Option<&core::sync::atomic::AtomicBool>,
+) -> Result<Option<Pixmap>, RenderError> {
+    check_output_pixels(
+        "render_region_progressive",
+        page,
+        None,
+        region.width,
+        region.height,
+    )?;
+    if opts.resampling == Resampling::Lanczos3 {
+        return Err(RenderError::UnsupportedOption(
+            "Lanczos-3 resampling is not supported for progressive region renders",
+        ));
+    }
+    let n_bg44 = page.bg44_chunks().len();
+    let max_chunk = n_bg44.saturating_sub(1);
+    if n_bg44 > 0 && chunk_n > max_chunk {
+        return Err(RenderError::ChunkOutOfRange {
+            chunk_n,
+            max: max_chunk,
+        });
+    }
+    if is_cancelled(cancel) {
+        return Ok(None);
+    }
+
+    let full_w = opts.width.max(1);
+    let full_h = opts.height.max(1);
+    let gamma_lut = build_gamma_lut(page.gamma());
+    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+    let DecodedLayers {
+        bg,
+        fg_palette,
+        mask,
+        blit_map,
+        fg44,
+    } = decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
+
+    if is_cancelled(cancel) {
+        return Ok(None);
+    }
+
+    let out_w = region.width;
+    let out_h = region.height;
+    let mut pm = Pixmap::white(out_w, out_h);
+    let region_opts = RenderOptions {
+        width: full_w,
+        height: full_h,
+        ..*opts
+    };
+    let ctx = CompositeContext::from_layers(
+        page,
+        &region_opts,
+        bg.as_deref(),
+        mask.as_deref(),
+        0,
+        fg_palette.as_ref(),
+        blit_map.as_deref(),
+        fg44.as_deref(),
+        &gamma_lut,
+        (region.x, region.y),
+        (out_w, out_h),
+    );
+    composite_into(&ctx, &mut pm.data)?;
+
+    Ok(Some(rotate_pixmap(
+        pm,
+        combine_rotations(page.rotation(), opts.rotation),
+    )))
+}
+
 /// Render a sub-rectangle of a page, assembling the output from a per-page
 /// cache of composited [`TILE_SIZE`]×`TILE_SIZE` output tiles.
 ///
@@ -4010,6 +4127,25 @@ pub fn render_region_tiled(
     region: RenderRect,
     opts: &RenderOptions,
 ) -> Result<Pixmap, RenderError> {
+    let pm = render_region_tiled_cancellable(page, region, opts, None)?;
+    // Without a cancel flag the render can never be abandoned.
+    Ok(pm.expect("uncancellable render completed"))
+}
+
+/// [`render_region_tiled`] with a cooperative cancel flag (#691 slice 3).
+///
+/// The flag is checked on entry and again before each internal
+/// [`TILE_SIZE`]-tile is fetched or composited; `Ok(None)` means the render
+/// was abandoned at a checkpoint. Cancellation never corrupts the tile
+/// cache: a tile is inserted only after its composite completed, so an
+/// abandoned call leaves either fully-composited tiles or nothing.
+#[cfg(feature = "std")]
+pub(crate) fn render_region_tiled_cancellable(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+    cancel: Option<&core::sync::atomic::AtomicBool>,
+) -> Result<Option<Pixmap>, RenderError> {
     check_output_pixels(
         "render_region_tiled",
         page,
@@ -4025,8 +4161,11 @@ pub fn render_region_tiled(
         && !opts.permissive
         && combine_rotations(page.rotation(), opts.rotation) == crate::info::Rotation::None;
 
+    if is_cancelled(cancel) {
+        return Ok(None);
+    }
     if !eligible {
-        return render_region(page, region, opts);
+        return render_region(page, region, opts).map(Some);
     }
 
     let gamma_lut = build_gamma_lut(page.gamma());
@@ -4081,7 +4220,7 @@ pub fn render_region_tiled(
         // Region lies entirely outside the full render — nothing to copy;
         // return the white-filled pixmap (matches render_region's behaviour,
         // whose compositor loop would likewise touch no valid pixels).
-        return Ok(pm);
+        return Ok(Some(pm));
     }
     let tx0 = region.x / TILE_SIZE;
     let ty0 = region.y / TILE_SIZE;
@@ -4093,6 +4232,9 @@ pub fn render_region_tiled(
         let tile_y0 = ty * TILE_SIZE;
         let tile_h = TILE_SIZE.min(full_h - tile_y0);
         for tx in tx0..=tx1 {
+            if is_cancelled(cancel) {
+                return Ok(None);
+            }
             let tile_x0 = tx * TILE_SIZE;
             let tile_w = TILE_SIZE.min(full_w - tile_x0);
             let key: TileKey = (full_w, full_h, tile_x0, tile_y0, opts.bold, opts.mask_aa);
@@ -4140,7 +4282,7 @@ pub fn render_region_tiled(
         }
     }
 
-    Ok(pm)
+    Ok(Some(pm))
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -6235,6 +6377,43 @@ mod tests {
         // `render_progressive_step(0)` is also a valid (coarse) frame.
         let first = render_progressive_step(page, &opts, 0).expect("step 0 must succeed");
         assert_eq!(first.data, frames[0].data);
+    }
+
+    /// #691 slice 3 regression: a progressive frame must not depend on
+    /// whether the retained 1/4-res mask cache (#607) is warm. The fast
+    /// path in `decode_layers` used to hand the progressive path a maskless
+    /// layer set, so a prior full render at the same downscale silently
+    /// dropped the text layer from every later progressive frame.
+    #[cfg(feature = "std")]
+    #[test]
+    fn render_progressive_ignores_mask_sub4_warmth() {
+        // colorbook.djvu: multi-chunk BG44, JB2 mask, no FGbz palette — at a
+        // strong downscale it is exactly the page shape the #607 fast path
+        // triggers on.
+        let opts = RenderOptions {
+            width: 61,
+            height: 83,
+            ..Default::default()
+        };
+        let cold = {
+            let doc = load_doc("colorbook.djvu");
+            let page = doc.page(0).unwrap();
+            render_progressive_step(page, &opts, 1).unwrap()
+        };
+        let doc = load_doc("colorbook.djvu");
+        let page = doc.page(0).unwrap();
+        // Warm the sub4 mask cache the way any interactive session would:
+        // with a plain full render at the same output size.
+        let _ = render_pixmap(page, &opts).unwrap();
+        assert!(
+            page.render_layers().mask_sub4_cached().is_some(),
+            "precondition: the full render must have retained the sub4 mask"
+        );
+        let warm = render_progressive_step(page, &opts, 1).unwrap();
+        assert_eq!(
+            cold.data, warm.data,
+            "progressive frame changed with cache warmth"
+        );
     }
 
     /// render_progressive with chunk_n out of range returns ChunkOutOfRange.

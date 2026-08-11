@@ -26,8 +26,29 @@
 //! background [`prefetch_tiles`]. Cache state never changes rendered bytes —
 //! only latency.
 //!
-//! Layer selection, explicit quality tiers, cancellation, and async/wasm
-//! surfaces are later slices of #691.
+//! Slice 3 adds explicit progressive quality steps and cooperative
+//! cancellation through [`render_tile_with`] / [`TileRenderControls`] /
+//! [`TileCancelToken`] (plus [`prefetch_tiles_cancellable`]):
+//!
+//! - **Quality steps.** `quality_step = Some(k)` renders the tile from BG44
+//!   background chunks `0..=k` only — byte-identical to the matching crop of
+//!   [`render_progressive_step`](crate::djvu_render::render_progressive_step)
+//!   frame `k`. Each later step only *adds* wavelet refinement over the same
+//!   base image, so walking steps `0..progressive_steps` never regresses
+//!   detail — the same monotonic ladder full-page progressive rendering
+//!   already rides.
+//! - **Cancellation.** A cancelled token makes in-flight work stop at its
+//!   next checkpoint (per tile, and between decode and composite) with
+//!   [`TileError::Cancelled`]. Cancellation never corrupts caches and never
+//!   changes the bytes of any completed tile.
+//!
+//! Layer selection, Lanczos tile aprons, and async/wasm surfaces are later
+//! slices of #691.
+
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use crate::djvu_document::DjVuPage;
 use crate::djvu_render::{
@@ -46,6 +67,11 @@ pub enum TileError {
     /// The tile size is zero.
     #[error("tile size must be non-zero")]
     InvalidTileSize,
+
+    /// The operation was abandoned because its [`TileCancelToken`] was
+    /// cancelled.
+    #[error("tile operation cancelled")]
+    Cancelled,
 
     /// The tile coordinate lies outside the tile grid.
     #[error("tile ({col}, {row}) out of range for a {cols}x{rows} tile grid")]
@@ -304,6 +330,139 @@ pub fn render_tile_cached(
     )?)
 }
 
+/// Cooperative cancellation token for tile work (#691 slice 3).
+///
+/// Clones share one flag: cancel any clone and every operation holding a
+/// clone stops at its next checkpoint with [`TileError::Cancelled`].
+/// Checkpoints sit *between* units of work — before each tile, before each
+/// internal cache tile, and between layer decode and composite — so an
+/// in-flight decode always runs to completion; cancellation bounds further
+/// work, not the current unit. A token is one-way: once cancelled it stays
+/// cancelled (create a fresh token per request generation instead of
+/// resetting).
+///
+/// Cancellation never changes rendered bytes and never corrupts caches:
+/// work either completes a unit fully or abandons it without publishing
+/// anything partial.
+#[derive(Debug, Clone, Default)]
+pub struct TileCancelToken {
+    flag: Arc<core::sync::atomic::AtomicBool>,
+}
+
+impl TileCancelToken {
+    /// A fresh, un-cancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal every holder of a clone of this token to stop.
+    pub fn cancel(&self) {
+        self.flag.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called on any clone.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The raw flag the render internals poll.
+    fn as_flag(&self) -> &core::sync::atomic::AtomicBool {
+        &self.flag
+    }
+}
+
+/// Per-call controls for [`render_tile_with`] (#691 slice 3).
+///
+/// The default value reproduces [`render_tile`] exactly: full quality, no
+/// cancellation, no composited-tile cache.
+#[derive(Debug, Clone, Default)]
+pub struct TileRenderControls {
+    /// Progressive quality step, `0..progressive_steps(page)` (see
+    /// [`progressive_steps`](crate::djvu_render::progressive_steps)).
+    ///
+    /// `Some(k)` composites the tile from BG44 background chunks `0..=k`
+    /// only — byte-identical to the matching crop of
+    /// [`render_progressive_step`](crate::djvu_render::render_progressive_step)
+    /// frame `k`. `None` (default) renders full quality, byte-identical to
+    /// [`render_tile`]. Partial-quality pixels are decoded per call and are
+    /// never stored in the composited-tile cache, so a later full-quality
+    /// render can never be polluted by a lower step.
+    pub quality_step: Option<usize>,
+
+    /// Cooperative cancellation token; see [`TileCancelToken`].
+    pub cancel: Option<TileCancelToken>,
+
+    /// Assemble the tile from the page's composited-tile cache when
+    /// eligible, exactly like [`render_tile_cached`]. Ignored when
+    /// `quality_step` selects a progressive frame (partial-quality tiles
+    /// are never cached).
+    #[cfg(feature = "std")]
+    pub use_cache: bool,
+}
+
+/// Render one tile under explicit [`TileRenderControls`] (#691 slice 3).
+///
+/// One entry point for the whole matrix: quality steps × cancellation ×
+/// cache assembly. Byte guarantees per mode:
+///
+/// - default controls ⇒ identical to [`render_tile`];
+/// - `use_cache` ⇒ identical to [`render_tile_cached`] (which is itself
+///   byte-identical to [`render_tile`]);
+/// - `quality_step: Some(k)` ⇒ identical to the tile's crop of
+///   [`render_progressive_step`](crate::djvu_render::render_progressive_step)
+///   frame `k`; on pages without BG44 background data the single step `0`
+///   is the full render (mirroring `render_progressive_step`'s fallback).
+///
+/// # Errors
+///
+/// - Everything [`render_tile`] can return.
+/// - [`TileError::Cancelled`] if `controls.cancel` was cancelled before or
+///   during the render.
+/// - [`RenderError::ChunkOutOfRange`] if `quality_step` is
+///   `Some(k)` with `k >= progressive_steps(page)`.
+pub fn render_tile_with(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    tile_size: u32,
+    col: u32,
+    row: u32,
+    controls: &TileRenderControls,
+) -> Result<Pixmap, TileError> {
+    let layout = TileLayout::new(page, opts, tile_size)?;
+    let rect = layout.tile_rect(col, row)?;
+    let cancel = controls.cancel.as_ref();
+    if cancel.is_some_and(TileCancelToken::is_cancelled) {
+        return Err(TileError::Cancelled);
+    }
+    let flag = cancel.map(TileCancelToken::as_flag);
+    let render_rect = layout.to_render_rect(rect);
+
+    if let Some(step) = controls.quality_step {
+        let steps = crate::djvu_render::progressive_steps(page);
+        if step >= steps {
+            return Err(TileError::Render(RenderError::ChunkOutOfRange {
+                chunk_n: step,
+                max: steps - 1,
+            }));
+        }
+        if page.bg44_chunks().is_empty() {
+            // No BG44 refinement ladder: the single step is the full render
+            // (mirrors `render_progressive_step`'s fallback).
+            return Ok(render_region(page, render_rect, opts)?);
+        }
+        return crate::djvu_render::render_region_progressive(page, render_rect, opts, step, flag)?
+            .ok_or(TileError::Cancelled);
+    }
+
+    #[cfg(feature = "std")]
+    if controls.use_cache {
+        return crate::djvu_render::render_region_tiled_cancellable(page, render_rect, opts, flag)?
+            .ok_or(TileError::Cancelled);
+    }
+
+    Ok(render_region(page, render_rect, opts)?)
+}
+
 /// Snapshot of one page's composited-tile cache (#691 slice 2).
 ///
 /// The cache stores *internal* 256-pixel composited tiles (the granularity of
@@ -434,6 +593,61 @@ pub fn prefetch_tiles(
     row: u32,
     radius: u32,
 ) -> Result<u64, TileError> {
+    prefetch_tiles_inner(doc, page_index, opts, tile_size, col, row, radius, None)
+}
+
+/// [`prefetch_tiles`] with a cooperative [`TileCancelToken`] (#691 slice 3).
+///
+/// Cancelling the token stops the background sweep at its next checkpoint:
+/// before each remaining tile, and inside an in-flight tile before each
+/// internal cache tile. Tiles already composited stay in the cache (they are
+/// complete and byte-correct); tiles not yet started are skipped. The
+/// returned schedule count is the same as [`prefetch_tiles`] — cancellation
+/// bounds how much of the schedule actually runs.
+///
+/// # Errors
+///
+/// Same as [`prefetch_tiles`], plus [`TileError::Cancelled`] when the token
+/// is already cancelled at call time (nothing is scheduled).
+#[cfg(all(feature = "std", feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
+pub fn prefetch_tiles_cancellable(
+    doc: &std::sync::Arc<crate::djvu_document::DjVuDocument>,
+    page_index: usize,
+    opts: &RenderOptions,
+    tile_size: u32,
+    col: u32,
+    row: u32,
+    radius: u32,
+    cancel: &TileCancelToken,
+) -> Result<u64, TileError> {
+    if cancel.is_cancelled() {
+        return Err(TileError::Cancelled);
+    }
+    prefetch_tiles_inner(
+        doc,
+        page_index,
+        opts,
+        tile_size,
+        col,
+        row,
+        radius,
+        Some(cancel.clone()),
+    )
+}
+
+#[cfg(all(feature = "std", feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
+fn prefetch_tiles_inner(
+    doc: &std::sync::Arc<crate::djvu_document::DjVuDocument>,
+    page_index: usize,
+    opts: &RenderOptions,
+    tile_size: u32,
+    col: u32,
+    row: u32,
+    radius: u32,
+    cancel: Option<TileCancelToken>,
+) -> Result<u64, TileError> {
     let Ok(page) = doc.page(page_index) else {
         return Ok(0);
     };
@@ -450,9 +664,21 @@ pub fn prefetch_tiles(
         let Ok(page) = doc.page(page_index) else {
             return;
         };
+        let controls = TileRenderControls {
+            quality_step: None,
+            cancel,
+            use_cache: true,
+        };
         for r in r0..=r1 {
             for c in c0..=c1 {
-                let _ = render_tile_cached(page, &opts, tile_size, c, r);
+                if controls
+                    .cancel
+                    .as_ref()
+                    .is_some_and(TileCancelToken::is_cancelled)
+                {
+                    return;
+                }
+                let _ = render_tile_with(page, &opts, tile_size, c, r, &controls);
             }
         }
     });
@@ -463,7 +689,9 @@ pub fn prefetch_tiles(
 mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
-    use crate::djvu_render::{UserRotation, render_pixmap};
+    use crate::djvu_render::{
+        UserRotation, progressive_steps, render_pixmap, render_progressive_step,
+    };
 
     fn assets_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -913,6 +1141,239 @@ mod tests {
             "prefetch never landed: {:?}",
             tile_cache_usage(page)
         );
+        let warm = render_tile_cached(page, &opts, 256, 0, 0).unwrap();
+        let direct = render_tile(page, &opts, 256, 0, 0).unwrap();
+        assert_eq!(warm.data, direct.data);
+    }
+
+    /// At every progressive quality step, assembled tiles are byte-identical
+    /// to the full `render_progressive_step` frame; steps actually refine.
+    #[test]
+    fn progressive_tiles_match_progressive_frames() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let steps = progressive_steps(page);
+        assert!(steps >= 2, "need a multi-chunk BG44 page");
+        let opts = RenderOptions {
+            width: 61,
+            height: 83,
+            ..Default::default()
+        };
+        let layout = TileLayout::new(page, &opts, 32).unwrap();
+        let mut frames = Vec::new();
+        for step in 0..steps {
+            let full = render_progressive_step(page, &opts, step).unwrap();
+            let controls = TileRenderControls {
+                quality_step: Some(step),
+                ..Default::default()
+            };
+            let stitched = assemble(&layout, |c, r| {
+                render_tile_with(page, &opts, 32, c, r, &controls).unwrap()
+            });
+            assert_eq!(
+                full.data, stitched.data,
+                "stitched step-{step} tiles must match the progressive frame"
+            );
+            frames.push(full.data);
+        }
+        assert_ne!(
+            frames[0],
+            frames[steps - 1],
+            "the first and last quality steps must differ (refinement adds detail)"
+        );
+    }
+
+    /// Progressive tiles honor the rotation pull-back exactly like full
+    /// quality tiles: stitched step-0 tiles match the rotated frame.
+    #[test]
+    fn progressive_tiles_match_under_rotation() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 61,
+            height: 83,
+            rotation: UserRotation::Cw90,
+            ..Default::default()
+        };
+        let full = render_progressive_step(page, &opts, 0).unwrap();
+        let layout = TileLayout::new(page, &opts, 32).unwrap();
+        let controls = TileRenderControls {
+            quality_step: Some(0),
+            ..Default::default()
+        };
+        let stitched = assemble(&layout, |c, r| {
+            render_tile_with(page, &opts, 32, c, r, &controls).unwrap()
+        });
+        assert_eq!(full.data, stitched.data);
+    }
+
+    /// `render_tile_with` reproduces the dedicated entry points byte-for-byte
+    /// in its default and cache-assembly modes.
+    #[test]
+    fn render_tile_with_matches_dedicated_entry_points() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 61,
+            height: 83,
+            ..Default::default()
+        };
+        let direct = render_tile(page, &opts, 32, 1, 1).unwrap();
+
+        let default = render_tile_with(page, &opts, 32, 1, 1, &TileRenderControls::default());
+        assert_eq!(default.unwrap().data, direct.data);
+
+        let cached = render_tile_with(
+            page,
+            &opts,
+            32,
+            1,
+            1,
+            &TileRenderControls {
+                use_cache: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(cached.unwrap().data, direct.data);
+    }
+
+    /// On a page without BG44 background data the quality ladder has exactly
+    /// one step: step 0 is the full render, step 1 is out of range.
+    #[test]
+    fn quality_steps_on_bilevel_page() {
+        let doc = load_doc("boy_jb2.djvu");
+        let page = doc.page(0).unwrap();
+        assert_eq!(progressive_steps(page), 1);
+        let opts = RenderOptions {
+            width: 40,
+            height: 52,
+            ..Default::default()
+        };
+        let direct = render_tile(page, &opts, 16, 0, 0).unwrap();
+        let step0 = render_tile_with(
+            page,
+            &opts,
+            16,
+            0,
+            0,
+            &TileRenderControls {
+                quality_step: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(step0.data, direct.data);
+
+        assert!(matches!(
+            render_tile_with(
+                page,
+                &opts,
+                16,
+                0,
+                0,
+                &TileRenderControls {
+                    quality_step: Some(1),
+                    ..Default::default()
+                },
+            ),
+            Err(TileError::Render(RenderError::ChunkOutOfRange {
+                chunk_n: 1,
+                max: 0
+            }))
+        ));
+    }
+
+    /// A cancelled token aborts every mode with `TileError::Cancelled`; a
+    /// live token changes nothing about the rendered bytes.
+    #[test]
+    fn cancelled_token_aborts_every_mode() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 61,
+            height: 83,
+            ..Default::default()
+        };
+
+        let token = TileCancelToken::new();
+        assert!(!token.is_cancelled());
+        let shared = token.clone();
+        shared.cancel();
+        assert!(token.is_cancelled(), "clones share one flag");
+
+        for controls in [
+            TileRenderControls {
+                cancel: Some(token.clone()),
+                ..Default::default()
+            },
+            TileRenderControls {
+                cancel: Some(token.clone()),
+                use_cache: true,
+                ..Default::default()
+            },
+            TileRenderControls {
+                cancel: Some(token.clone()),
+                quality_step: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                render_tile_with(page, &opts, 32, 0, 0, &controls),
+                Err(TileError::Cancelled)
+            ));
+        }
+
+        // A live token leaves output byte-identical to the plain call.
+        let live = TileCancelToken::new();
+        let with_token = render_tile_with(
+            page,
+            &opts,
+            32,
+            0,
+            0,
+            &TileRenderControls {
+                cancel: Some(live),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let direct = render_tile(page, &opts, 32, 0, 0).unwrap();
+        assert_eq!(with_token.data, direct.data);
+    }
+
+    /// Cancellable prefetch: an already-cancelled token schedules nothing;
+    /// a live token warms the cache exactly like `prefetch_tiles`.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn prefetch_tiles_cancellable_behaviour() {
+        let doc = std::sync::Arc::new(load_doc("chicken.djvu"));
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 600,
+            height: 800,
+            ..Default::default()
+        };
+
+        let cancelled = TileCancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            prefetch_tiles_cancellable(&doc, 0, &opts, 256, 0, 0, 1, &cancelled),
+            Err(TileError::Cancelled)
+        ));
+        assert_eq!(
+            tile_cache_usage(page).tiles,
+            0,
+            "a pre-cancelled prefetch must not warm anything"
+        );
+
+        let live = TileCancelToken::new();
+        let scheduled = prefetch_tiles_cancellable(&doc, 0, &opts, 256, 0, 0, 1, &live).unwrap();
+        assert_eq!(scheduled, 4);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while tile_cache_usage(page).tiles < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(tile_cache_usage(page).tiles >= 4);
         let warm = render_tile_cached(page, &opts, 256, 0, 0).unwrap();
         let direct = render_tile(page, &opts, 256, 0, 0).unwrap();
         assert_eq!(warm.data, direct.data);

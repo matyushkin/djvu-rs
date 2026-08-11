@@ -260,9 +260,13 @@ pub mod djvu_render;
 /// display-space tile grid over the region renderer, with byte-identical
 /// assembly and order-independent tile pixels — plus tile-granular cache
 /// control (`djvu_tile::tile_cache_usage`, `djvu_tile::set_tile_cache_budget`,
-/// `djvu_tile::clear_tile_cache`, `djvu_tile::invalidate_tile_region`) and,
-/// with the `parallel` feature, bounded background
-/// `djvu_tile::prefetch_tiles`. Contract: `docs/tile-rendering.md`.
+/// `djvu_tile::clear_tile_cache`, `djvu_tile::invalidate_tile_region`),
+/// progressive quality steps and cooperative cancellation
+/// (`djvu_tile::render_tile_with`, `djvu_tile::TileRenderControls`,
+/// `djvu_tile::TileCancelToken`) and, with the `parallel` feature, bounded
+/// background `djvu_tile::prefetch_tiles` /
+/// `djvu_tile::prefetch_tiles_cancellable`. Contract:
+/// `docs/tile-rendering.md`.
 pub mod djvu_tile;
 
 /// Perceptual image-quality metrics (PSNR, SSIM) for render experiments.
