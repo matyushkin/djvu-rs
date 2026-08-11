@@ -42,7 +42,7 @@
     "resolved_failures": [],
     "status_changed": false
   },
-  "commit": "fc6162738ad7a19aa43b1452e4da3c1daf270765",
+  "commit": "73e1197530209afcf14f989f8624cf32609bc8e8",
   "corpus_digest": "18484443086b73f299d8ba13486d97508dab6dff8e44af6aa7a6ac1e05e0c6fd",
   "diff_fuzz_registry": {
     "categories": {
@@ -824,9 +824,9 @@
     }
   ],
   "status": "pass",
-  "timestamp": "2026-08-10T05:14:57+00:00",
+  "timestamp": "2026-08-11T12:00:48+00:00",
   "tools": {
-    "djvu_rs": "fc6162738ad7a19aa43b1452e4da3c1daf270765",
+    "djvu_rs": "73e1197530209afcf14f989f8624cf32609bc8e8",
     "djvulibre": "DDJVU --- DjVuLibre-3.5.28 (Ubuntu 3.5.28-2ubuntu0.24.04.2)"
   },
   "writer_validation": {
