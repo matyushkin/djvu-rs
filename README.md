@@ -609,10 +609,15 @@ Library callers can attach recognized text at encode time instead, via
 `PageEncoder::with_ocr_text_layer` (or `with_text_layer` for an existing
 `TextLayer`).
 
-`ocr-onnx` is an experimental library-level CTC helper; the CLI accepts
-`--backend onnx --model <path>` but does not treat it as a stable backend
-because no specific model family, preprocessing contract, or
-fixture is guaranteed yet. `ocr-neural` is a placeholder only: `CandleBackend` now
+`ocr-onnx` is experimental. It now hosts the in-progress PP-OCRv4 neural
+pipeline (#693): a pinned model manifest with mandatory SHA-256 verification
+(`docs/ocr-model-manifest.toml`, fetched explicitly via
+`scripts/fetch_ocr_models.sh` — weights are never committed and never
+downloaded implicitly), deterministic detector preprocessing, and DBNet text
+detection (`ocr_onnx::{manifest, preprocess, detect}`). Recognition and CLI
+wiring land in later slices; until then the CLI accepts
+`--backend onnx --model <path>` only as the older generic CTC helper and does
+not treat it as a stable backend. `ocr-neural` is a placeholder only: `CandleBackend` now
 returns a clear unsupported-backend error instead of constructing a backend that
 always fails at recognition time. The compatibility feature name
 `ocr-neural-candle` is a no-op and no longer pulls Candle/tokenizers into
@@ -711,7 +716,7 @@ Honest boundaries, so you can decide fast:
 | `wasm-lazy` | disabled | Lazy Range-based document loading in the browser: a JS `(offset, len)` reader fetches only the pages you open |
 | `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
 | `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
-| `ocr-onnx` | disabled | Experimental ONNX CTC recognition helper via `tract-onnx`; no stable model contract |
+| `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx`: pinned PP-OCRv4 manifest + SHA-256-verified weights, DBNet detection (#693); recognition in progress |
 | `ocr-neural` | disabled | Placeholder backend only — `CandleBackend::load` returns a clear unsupported error |
 | `ocr-neural-candle` | disabled | Deprecated no-op alias for `ocr-neural` |
 | `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |

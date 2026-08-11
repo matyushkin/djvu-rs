@@ -132,9 +132,12 @@ project-owned**:
 
 1. **(this slice)** Design doc — model family, provisioning policy,
    contract.
-2. Spike + detection: verify both mobile models under tract-onnx 0.22
-   (fixture test), implement deterministic preprocessing + DBNet detection
-   with shape-keyed plan caching, manifest + SHA-256 verification.
+2. **(done)** Spike + detection: both mobile models verified under
+   tract-onnx 0.22; shipped as `ocr_onnx::{manifest, preprocess, detect}` —
+   pinned manifest (`docs/ocr-model-manifest.toml`) + SHA-256 verification,
+   `scripts/fetch_ocr_models.sh`, deterministic fixed-point preprocessing,
+   DBNet detection with a shape-keyed plan LRU, and the main-only
+   `OCR (onnx models)` CI job.
 3. Recognition + text layer: CRNN/CTC per line (Latin + Cyrillic
    dictionaries), reading-order sort, `TextLayer` emission, word-split
    heuristic, CLI `--backend` wiring through the existing seam

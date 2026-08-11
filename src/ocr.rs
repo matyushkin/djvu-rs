@@ -39,6 +39,26 @@ pub enum OcrError {
     #[error("OCR model/language not found: {0}")]
     ModelNotFound(String),
 
+    /// Model bytes do not match their pinned manifest entry (#693).
+    ///
+    /// Raised by the `ocr-onnx` manifest loader when a model file's byte size
+    /// or SHA-256 differs from `docs/ocr-model-manifest.toml`. Unverified
+    /// weights are never loaded — this is a hard error, not a warning.
+    #[error("model verification failed for '{name}': {detail}")]
+    ModelVerificationFailed {
+        /// Manifest entry name (e.g. "ppocr-v4-mobile-det").
+        name: String,
+        /// What differed: size or SHA-256, with expected/actual values.
+        detail: String,
+    },
+
+    /// The embedded model manifest is malformed (#693).
+    ///
+    /// Indicates a bug in `docs/ocr-model-manifest.toml` itself; guarded by
+    /// unit tests, so callers should never see this for the built-in manifest.
+    #[error("model manifest invalid: {0}")]
+    ManifestInvalid(String),
+
     /// I/O error (e.g. loading model file).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
