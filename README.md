@@ -802,7 +802,9 @@ MIT. See [LICENSE](LICENSE).
 
 Written from the public DjVu v3 specification:
 - https://www.sndjvu.org/spec.html
-- https://djvu.sourceforge.net/spec/DjVu3Spec.djvu (the spec is itself a DjVu file)
+- https://web.archive.org/web/20251005122807/http://www.djvu.org/docs/DjVu3Spec.djvu
+  (the spec is itself a DjVu file; archived copy — djvu.org and
+  djvu.sourceforge.net no longer serve the original)
 
 No code derived from GPL-licensed DjVuLibre or any other GPL source.
 All algorithms are independent implementations from the spec.
