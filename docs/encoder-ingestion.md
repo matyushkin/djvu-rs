@@ -78,6 +78,20 @@ first page's X/YResolution + ResolutionUnit tags set the INFO dpi
 (XResolution preferred, cm converted to inch, sane range 25–6000); missing
 or unusable tags fall back to 300. An explicit `--dpi` always wins.
 
+### Bilevel TIFF fast path
+
+With `--quality lossless` or `--quality auto`, a TIFF whose pages are all
+1-bit single-sample grayscale decodes straight to packed JB2 masks via
+[`decode_tiff_file_to_bitmaps`](../src/png_io.rs) — no RGBA expansion (32×
+the memory) and no segmentation pass. The masks are identical to what the
+default fixed-threshold segmentation produces from the RGBA route, so the
+output bytes do not change. Under `--quality auto`, 1-bit pages are bilevel
+by construction and resolve to Lossless without pixel statistics (this also
+routes blank 1-bit pages to Lossless; the sampling classifier used to send
+them layered). Any non-1-bit page falls the whole file back to the RGBA
+route; explicit layered profiles (`quality`/`archival`/`photo`) keep the
+RGBA route too.
+
 ## Orientation
 
 EXIF/TIFF orientation tags are **not** applied at ingest in slice 1. Pages are
@@ -85,7 +99,6 @@ decoded in stored raster order; rotation belongs to a later slice.
 
 ## Planned follow-ups (#694)
 
-- Bilevel TIFF fast path without RGBA expansion
 - CMYK JPEG input
 - EXIF/TIFF orientation applied exactly once
 - Configurable alpha compositing CLI flag

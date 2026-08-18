@@ -1891,6 +1891,63 @@ fn cmd_encode(
         return Ok(());
     }
 
+    // #694: bilevel TIFF fast path — 1-bit pages decode straight to packed
+    // Bitmap masks, skipping RGBA expansion and segmentation. A 1-bit TIFF is
+    // bilevel by construction, so --quality auto resolves to Lossless without
+    // pixel statistics.
+    #[cfg(feature = "tiff")]
+    if input_is_tiff(input)
+        && matches!(quality, EncodeQualityArg::Auto | EncodeQualityArg::Lossless)
+        && let Some(bitmaps) = djvu_rs::png_io::decode_tiff_file_to_bitmaps(input)?
+    {
+        if matches!(quality, EncodeQualityArg::Auto) {
+            eprintln!("auto profile: Lossless (1-bit TIFF)");
+        }
+        if bitmaps.len() > 1 {
+            if bilevel_codec != BilevelCodecArg::Jb2 {
+                return Err("--bilevel-codec smmr is supported only for single-image input".into());
+            }
+            if thumbnails {
+                eprintln!("--thumbnails is ignored for lossless (JB2-only) bundles");
+            }
+            let bytes = encode_djvm_bundle_jb2(&bitmaps, shared_dict_pages, dpi);
+            std::fs::write(output, &bytes)?;
+            eprintln!(
+                "{} ({} TIFF pages) → {} ({} bytes, shared-dict threshold = {})",
+                input.display(),
+                bitmaps.len(),
+                output.display(),
+                bytes.len(),
+                shared_dict_pages,
+            );
+            return Ok(());
+        }
+        if thumbnails {
+            eprintln!("--thumbnails applies to multi-page bundles only — ignored");
+        }
+        let codec = match bilevel_codec {
+            BilevelCodecArg::Jb2 => BilevelCodec::Jb2,
+            BilevelCodecArg::Smmr => BilevelCodec::Smmr,
+        };
+        let bm = &bitmaps[0];
+        let bytes = PageEncoder::from_bitmap(bm)
+            .with_dpi(dpi)
+            .with_quality(EncodeQuality::Lossless)
+            .with_bilevel_codec(codec)
+            .encode()
+            .map_err(|e| format!("encode: {e}"))?;
+        std::fs::write(output, &bytes)?;
+        eprintln!(
+            "{} → {} ({}×{} px, {} bytes)",
+            input.display(),
+            output.display(),
+            bm.width,
+            bm.height,
+            bytes.len(),
+        );
+        return Ok(());
+    }
+
     // #694 slice 2: a multipage TIFF file maps to a multi-page bundle — one
     // DjVu page per TIFF page (IFD), in stored order, same bundle rules as a
     // directory input.

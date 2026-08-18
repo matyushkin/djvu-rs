@@ -948,3 +948,174 @@ mod tiff_resolution {
         assert_eq!(encoded_dpi(&input, &output, &[]), 300);
     }
 }
+
+#[cfg(feature = "tiff")]
+mod tiff_fastpath {
+    use super::tiff_slice2::{TiffPage, write_tiff};
+    use assert_cmd::Command;
+    use djvu_rs::Bitmap;
+    use djvu_rs::png_io::decode_tiff_file_to_bitmaps;
+    use djvu_rs::smmr::encode_g4;
+    use std::path::Path;
+
+    /// 16-wide bitmap with one black run per row: row r has pixels r..r+4 set.
+    fn stair_bitmap(height: u32) -> Bitmap {
+        let mut bm = Bitmap::new(16, height);
+        for r in 0..height {
+            for c in r..(r + 4).min(16) {
+                bm.set(c, r, true);
+            }
+        }
+        bm
+    }
+
+    /// A 1-bit page carrying the packed rows of `bm` verbatim.
+    fn bilevel_page(bm: &Bitmap, photometric: u16) -> TiffPage {
+        TiffPage::gray(bm.width, bm.height, 1, photometric, bm.data.clone())
+    }
+
+    #[test]
+    fn white_is_zero_page_decodes_to_bitmap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wz.tif");
+        let bm = stair_bitmap(4);
+        write_tiff(&path, &[bilevel_page(&bm, 0)]);
+        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        assert_eq!(pages, vec![bm]);
+    }
+
+    #[test]
+    fn black_is_zero_page_inverts_and_clears_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bz.tif");
+        // Width 12: the last 4 bits of each row byte-pair are padding and
+        // must come out zero after the BlackIsZero inversion.
+        let page = TiffPage::gray(12, 2, 1, 1, vec![0xF0, 0x00, 0x00, 0xF0]);
+        write_tiff(&path, &[page]);
+        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        let mut expected = Bitmap::new(12, 2);
+        for x in 0..12 {
+            expected.set(x, 0, x >= 4); // row 0: samples 1 on 0..4 → white
+            expected.set(x, 1, !(8..12).contains(&x));
+        }
+        assert_eq!(pages, vec![expected]);
+    }
+
+    #[test]
+    fn g4_page_round_trips_to_bitmap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4fast.tif");
+        let bm = stair_bitmap(6);
+        let stream = encode_g4(&bm);
+        let mut page = TiffPage::gray(16, 6, 1, 0, stream.clone());
+        page.compression = 4;
+        page.strip_byte_counts = Some(vec![stream.len() as u32]);
+        write_tiff(&path, &[page]);
+        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        assert_eq!(pages, vec![bm]);
+    }
+
+    #[test]
+    fn gray8_page_yields_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g8.tif");
+        write_tiff(&path, &[TiffPage::gray(4, 1, 8, 1, vec![0, 64, 128, 255])]);
+        assert!(decode_tiff_file_to_bitmaps(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn mixed_multipage_yields_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.tif");
+        let bm = stair_bitmap(2);
+        write_tiff(
+            &path,
+            &[
+                bilevel_page(&bm, 0),
+                TiffPage::gray(4, 1, 8, 1, vec![0, 64, 128, 255]),
+            ],
+        );
+        assert!(decode_tiff_file_to_bitmaps(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn multipage_bilevel_decodes_every_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.tif");
+        let (a, b) = (stair_bitmap(3), stair_bitmap(5));
+        write_tiff(&path, &[bilevel_page(&a, 0), bilevel_page(&b, 0)]);
+        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        assert_eq!(pages, vec![a, b]);
+    }
+
+    fn encode_auto(input: &Path, output: &Path) -> String {
+        let assert = Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--quality",
+                "auto",
+            ])
+            .assert()
+            .success();
+        String::from_utf8_lossy(&assert.get_output().stderr).into_owned()
+    }
+
+    #[test]
+    fn cli_auto_takes_fast_path_and_round_trips_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("fast.tif");
+        let bm = stair_bitmap(8);
+        write_tiff(&input, &[bilevel_page(&bm, 0)]);
+        let output = dir.path().join("fast.djvu");
+        let stderr = encode_auto(&input, &output);
+        assert!(
+            stderr.contains("auto profile: Lossless (1-bit TIFF)"),
+            "fast-path marker missing in stderr: {stderr}"
+        );
+        let pm = super::render_first_page(&output);
+        for y in 0..8u32 {
+            for x in 0..16u32 {
+                let px = pm.data[((y * 16 + x) * 4) as usize];
+                let expect = if bm.get(x, y) { 0 } else { 255 };
+                assert_eq!(px, expect, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn cli_auto_multipage_builds_lossless_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("fastmulti.tif");
+        let bm = stair_bitmap(4);
+        write_tiff(&input, &[bilevel_page(&bm, 0), bilevel_page(&bm, 1)]);
+        let output = dir.path().join("fastmulti.djvu");
+        let stderr = encode_auto(&input, &output);
+        assert!(
+            stderr.contains("auto profile: Lossless (1-bit TIFF)"),
+            "fast-path marker missing in stderr: {stderr}"
+        );
+        let doc = djvu_rs::Document::from_bytes(std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(doc.page_count(), 2);
+    }
+
+    #[test]
+    fn cli_auto_all_white_page_stays_lossless() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("blank.tif");
+        // A blank 1-bit page is bilevel by construction; the pixel-statistics
+        // classifier used to route it to a layered profile.
+        write_tiff(&input, &[bilevel_page(&Bitmap::new(32, 8), 0)]);
+        let output = dir.path().join("blank.djvu");
+        let stderr = encode_auto(&input, &output);
+        assert!(
+            stderr.contains("auto profile: Lossless (1-bit TIFF)"),
+            "fast-path marker missing in stderr: {stderr}"
+        );
+        let pm = super::render_first_page(&output);
+        assert!(pm.data.chunks_exact(4).all(|px| px[0] == 255));
+    }
+}
