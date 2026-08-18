@@ -73,8 +73,10 @@ with embedded profiles renders approximately.
 multi-page bundle under the same rules as a directory input: `--quality auto`
 classifies every page (all bilevel → lossless JB2 bundle, else layered),
 `--shared-dict-pages` and `--thumbnails` apply, `--bilevel-codec smmr` is
-rejected. Page order is stored IFD order. DPI comes from `--dpi`;
-X/YResolution tags are ignored (follow-up below).
+rejected. Page order is stored IFD order. Without an explicit `--dpi`, the
+first page's X/YResolution + ResolutionUnit tags set the INFO dpi
+(XResolution preferred, cm converted to inch, sane range 25–6000); missing
+or unusable tags fall back to 300. An explicit `--dpi` always wins.
 
 ## Orientation
 
@@ -84,7 +86,6 @@ decoded in stored raster order; rotation belongs to a later slice.
 ## Planned follow-ups (#694)
 
 - Bilevel TIFF fast path without RGBA expansion
-- TIFF X/YResolution → default DPI mapping
 - CMYK JPEG input
 - EXIF/TIFF orientation applied exactly once
 - Configurable alpha compositing CLI flag

@@ -257,6 +257,12 @@ mod tiff_slice2 {
         pub strip_byte_counts: Option<Vec<u32>>,
         /// Extra IFD entries appended verbatim: (tag, type, count, value).
         pub extra_tags: Vec<(u16, u16, u32, u32)>,
+        /// XResolution (tag 282) as a RATIONAL numerator/denominator pair.
+        pub x_resolution: Option<(u32, u32)>,
+        /// YResolution (tag 283) as a RATIONAL numerator/denominator pair.
+        pub y_resolution: Option<(u32, u32)>,
+        /// ResolutionUnit (tag 296): 1 none, 2 inch, 3 centimeter.
+        pub resolution_unit: Option<u16>,
     }
 
     impl TiffPage {
@@ -272,6 +278,9 @@ mod tiff_slice2 {
                 compression: 1,
                 strip_byte_counts: None,
                 extra_tags: Vec::new(),
+                x_resolution: None,
+                y_resolution: None,
+                resolution_unit: None,
             }
         }
     }
@@ -340,6 +349,9 @@ mod tiff_slice2 {
                 }
                 off
             };
+            // RATIONAL values (8 bytes) always live out-of-line.
+            let xres_offset = p.x_resolution.map(|(n, d)| write_u32s(&mut out, &[n, d]));
+            let yres_offset = p.y_resolution.map(|(n, d)| write_u32s(&mut out, &[n, d]));
             let (offsets_value, counts_value) = if strip_count > 1 {
                 (
                     write_u32s(&mut out, &strip_offsets),
@@ -371,6 +383,16 @@ mod tiff_slice2 {
             });
             if let (Some(cm), Some(off)) = (&p.colormap, colormap_offset) {
                 entries.push((320, 3, cm.len() as u32, off));
+            }
+            // (tag, type 5 = RATIONAL, count, offset)
+            if let Some(off) = xres_offset {
+                entries.push((282, 5, 1, off));
+            }
+            if let Some(off) = yres_offset {
+                entries.push((283, 5, 1, off));
+            }
+            if let Some(unit) = p.resolution_unit {
+                entries.push((296, 3, 1, unit as u32));
             }
             entries.extend(p.extra_tags.iter().copied());
             entries.sort_by_key(|e| e.0);
@@ -483,6 +505,9 @@ mod tiff_slice2 {
             compression: 1,
             strip_byte_counts: None,
             extra_tags: Vec::new(),
+            x_resolution: None,
+            y_resolution: None,
+            resolution_unit: None,
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -505,6 +530,9 @@ mod tiff_slice2 {
             compression: 1,
             strip_byte_counts: None,
             extra_tags: Vec::new(),
+            x_resolution: None,
+            y_resolution: None,
+            resolution_unit: None,
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -532,6 +560,9 @@ mod tiff_slice2 {
             compression: 1,
             strip_byte_counts: None,
             extra_tags: Vec::new(),
+            x_resolution: None,
+            y_resolution: None,
+            resolution_unit: None,
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -557,6 +588,9 @@ mod tiff_slice2 {
             compression: 1,
             strip_byte_counts: None,
             extra_tags: Vec::new(),
+            x_resolution: None,
+            y_resolution: None,
+            resolution_unit: None,
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -785,5 +819,132 @@ mod tiff_slice3 {
         write_tiff(&path, &[page]);
         let err = decode_tiff_file_to_pixmap(&path).unwrap_err().to_string();
         assert!(err.contains("PackBits"), "unexpected error: {err}");
+    }
+}
+
+#[cfg(feature = "tiff")]
+mod tiff_resolution {
+    use super::tiff_slice2::{TiffPage, write_tiff};
+    use assert_cmd::Command;
+    use djvu_rs::png_io::tiff_file_dpi;
+    use std::path::Path;
+
+    /// 8×2 bilevel WhiteIsZero page with the given resolution tags.
+    fn page(xres: Option<(u32, u32)>, yres: Option<(u32, u32)>, unit: Option<u16>) -> TiffPage {
+        let mut p = TiffPage::gray(8, 2, 1, 0, vec![0xF0, 0x0F]);
+        p.x_resolution = xres;
+        p.y_resolution = yres;
+        p.resolution_unit = unit;
+        p
+    }
+
+    fn dpi_of(path: &Path) -> Option<u16> {
+        tiff_file_dpi(path).unwrap()
+    }
+
+    #[test]
+    fn inch_resolution_maps_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inch.tif");
+        write_tiff(&path, &[page(Some((300, 1)), None, Some(2))]);
+        assert_eq!(dpi_of(&path), Some(300));
+    }
+
+    #[test]
+    fn centimeter_resolution_converts_to_inches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cm.tif");
+        // 118 dots/cm × 2.54 = 299.72 → rounds to 300.
+        write_tiff(&path, &[page(Some((118, 1)), None, Some(3))]);
+        assert_eq!(dpi_of(&path), Some(300));
+    }
+
+    #[test]
+    fn rational_denominator_is_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rat.tif");
+        // 6000/20 = 300; ResolutionUnit absent defaults to inch.
+        write_tiff(&path, &[page(Some((6000, 20)), None, None)]);
+        assert_eq!(dpi_of(&path), Some(300));
+    }
+
+    #[test]
+    fn missing_tags_yield_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("none.tif");
+        write_tiff(&path, &[page(None, None, None)]);
+        assert_eq!(dpi_of(&path), None);
+    }
+
+    #[test]
+    fn unit_none_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aspect.tif");
+        // ResolutionUnit 1 means "no absolute unit": the rational is only
+        // an aspect ratio, not a physical density.
+        write_tiff(&path, &[page(Some((300, 1)), None, Some(1))]);
+        assert_eq!(dpi_of(&path), None);
+    }
+
+    #[test]
+    fn out_of_range_resolution_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.tif");
+        write_tiff(&path, &[page(Some((1, 1)), None, Some(2))]);
+        assert_eq!(dpi_of(&path), None);
+    }
+
+    #[test]
+    fn y_resolution_is_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("yonly.tif");
+        write_tiff(&path, &[page(None, Some((200, 1)), Some(2))]);
+        assert_eq!(dpi_of(&path), Some(200));
+    }
+
+    fn encoded_dpi(input: &Path, output: &Path, extra: &[&str]) -> u16 {
+        let mut args = vec![
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "lossless",
+        ];
+        args.extend_from_slice(extra);
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args(&args)
+            .assert()
+            .success();
+        let doc = djvu_rs::Document::from_bytes(std::fs::read(output).unwrap()).unwrap();
+        doc.page(0).unwrap().dpi()
+    }
+
+    #[test]
+    fn cli_uses_tiff_resolution_when_dpi_flag_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("res200.tif");
+        write_tiff(&input, &[page(Some((200, 1)), None, Some(2))]);
+        let output = dir.path().join("res200.djvu");
+        assert_eq!(encoded_dpi(&input, &output, &[]), 200);
+    }
+
+    #[test]
+    fn cli_explicit_dpi_flag_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("res200b.tif");
+        write_tiff(&input, &[page(Some((200, 1)), None, Some(2))]);
+        let output = dir.path().join("res200b.djvu");
+        assert_eq!(encoded_dpi(&input, &output, &["--dpi", "150"]), 150);
+    }
+
+    #[test]
+    fn cli_defaults_to_300_without_resolution_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("nores.tif");
+        write_tiff(&input, &[page(None, None, None)]);
+        let output = dir.path().join("nores.djvu");
+        assert_eq!(encoded_dpi(&input, &output, &[]), 300);
     }
 }
