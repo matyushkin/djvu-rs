@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787070031717,
+  "lastUpdate": 1787076495187,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16522,6 +16522,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47587000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bf20e3b5e28f861a2f772cebc47ce558812cfdf0",
+          "message": "feat(ingest): apply TIFF Orientation tag exactly once at ingest (#694) (#760)\n\nThe tiff crate never applies tag 274, so ingest now does it once per\npage: mirrors (2, 4), 180-degree rotation (3), transpose variants\n(5, 7), and 90-degree rotations (6, 8) with swapped dimensions. Both\nthe RGBA route and the bilevel fast path orient identically; for\norientations 5-8 the DPI mapping prefers the stored YResolution,\nwhich becomes the visual horizontal density. Out-of-range values are\ntreated as upright (libtiff-compatible). JPEG EXIF orientation stays\non the #694 follow-up list.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T22:40:53+05:00",
+          "tree_id": "9b18a2e396b7a15497371b963c4d99b547ca972d",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bf20e3b5e28f861a2f772cebc47ce558812cfdf0"
+        },
+        "date": 1787076493051,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8810000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53460000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51509000,
             "range": "± 0",
             "unit": "ns/iter"
           }
