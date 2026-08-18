@@ -46,7 +46,8 @@ Future slices may add explicit ICC handling or rejection.
 | Source | Internal RGBA | Notes |
 |--------|---------------|-------|
 | RGB (baseline/progressive) | R,G,B, A=255 | via `zune-jpeg` |
-| CMYK | — | **not yet supported** (#694) |
+| Grayscale | R=G=B=luma, A=255 | |
+| CMYK / YCCK (Adobe APP14) | naive transform (below), A=255 | baseline and progressive; `zune-jpeg` handles the Adobe-inverted storage and the YCCK chroma transform, then applies the same profile-free `(255 − ink) · (255 − K) / 255` mix as CMYK TIFF |
 
 ## TIFF (slices 2–3, `tiff` feature)
 
@@ -104,7 +105,6 @@ below); PNG has no standard orientation metadata.
 
 ## Planned follow-ups (#694)
 
-- CMYK JPEG input
 - JPEG EXIF orientation applied exactly once
 - Configurable alpha compositing CLI flag
 - Explicit ICC preserve/reject/transform modes

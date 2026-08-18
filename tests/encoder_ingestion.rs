@@ -1235,3 +1235,124 @@ mod tiff_orientation {
         assert_eq!(grays(&pages[1]), vec![60, 50, 40, 30, 20, 10]);
     }
 }
+
+mod jpeg_cmyk {
+    use assert_cmd::Command;
+    use djvu_rs::png_io::decode_jpeg_file_to_pixmap;
+    use std::path::Path;
+
+    /// Write a 16×16 solid-color JPEG from true ink values `[C, M, Y, K]`.
+    ///
+    /// `jpeg-encoder` stores CMYK Adobe-inverted (`255 − v`) and writes the
+    /// APP14 marker (transform 0 for `Cmyk`, transform 2 for `CmykAsYcck`),
+    /// matching Photoshop/libjpeg conventions.
+    fn write_cmyk_jpeg(
+        path: &Path,
+        color_type: jpeg_encoder::ColorType,
+        cmyk: [u8; 4],
+        progressive: bool,
+    ) {
+        let mut pixels = Vec::with_capacity(16 * 16 * 4);
+        for _ in 0..16 * 16 {
+            pixels.extend_from_slice(&cmyk);
+        }
+        let mut encoder = jpeg_encoder::Encoder::new_file(path, 100).unwrap();
+        if progressive {
+            encoder.set_progressive(true);
+        }
+        encoder.encode(&pixels, 16, 16, color_type).unwrap();
+    }
+
+    /// The naive profile-free transform documented for CMYK TIFF ingest:
+    /// `channel = (255 − ink) · (255 − K) / 255`.
+    fn expected_rgb([c, m, y, k]: [u8; 4]) -> [u8; 3] {
+        let mix = |ink: u8| (((255 - ink as u32) * (255 - k as u32) + 127) / 255) as u8;
+        [mix(c), mix(m), mix(y)]
+    }
+
+    fn assert_decodes_close(path: &Path, expected: [u8; 3], tol: i16, ctx: &str) {
+        let pm = decode_jpeg_file_to_pixmap(path).unwrap();
+        assert_eq!((pm.width, pm.height), (16, 16), "{ctx}: dims");
+        let i = ((8 * pm.width + 8) * 4) as usize;
+        let got = [pm.data[i], pm.data[i + 1], pm.data[i + 2]];
+        for ch in 0..3 {
+            assert!(
+                (got[ch] as i16 - expected[ch] as i16).abs() <= tol,
+                "{ctx}: got {got:?}, want {expected:?} ±{tol}"
+            );
+        }
+        assert_eq!(pm.data[i + 3], 255, "{ctx}: alpha");
+    }
+
+    const INKS: [[u8; 4]; 4] = [
+        [0, 0, 0, 0],      // white
+        [255, 0, 0, 0],    // pure cyan
+        [0, 0, 0, 255],    // pure black ink
+        [64, 128, 32, 16], // mixed inks
+    ];
+
+    #[test]
+    fn cmyk_jpeg_decodes_with_naive_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        for cmyk in INKS {
+            let path = dir.path().join("c.jpg");
+            write_cmyk_jpeg(&path, jpeg_encoder::ColorType::Cmyk, cmyk, false);
+            assert_decodes_close(&path, expected_rgb(cmyk), 3, &format!("cmyk {cmyk:?}"));
+        }
+    }
+
+    #[test]
+    fn ycck_jpeg_decodes_with_naive_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        for cmyk in INKS {
+            let path = dir.path().join("y.jpg");
+            write_cmyk_jpeg(&path, jpeg_encoder::ColorType::CmykAsYcck, cmyk, false);
+            // The extra YCbCr round-trip costs a little precision.
+            assert_decodes_close(&path, expected_rgb(cmyk), 5, &format!("ycck {cmyk:?}"));
+        }
+    }
+
+    #[test]
+    fn progressive_cmyk_jpeg_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        for color_type in [
+            jpeg_encoder::ColorType::Cmyk,
+            jpeg_encoder::ColorType::CmykAsYcck,
+        ] {
+            let path = dir.path().join("p.jpg");
+            write_cmyk_jpeg(&path, color_type, [64, 128, 32, 16], true);
+            assert_decodes_close(
+                &path,
+                expected_rgb([64, 128, 32, 16]),
+                5,
+                &format!("progressive {color_type:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn cli_encodes_cmyk_jpeg_to_layered_djvu() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("ink.jpg");
+        let output = dir.path().join("ink.djvu");
+        write_cmyk_jpeg(&input, jpeg_encoder::ColorType::Cmyk, [255, 0, 0, 0], false);
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--quality",
+                "quality",
+            ])
+            .assert()
+            .success();
+        let pm = super::render_first_page(&output);
+        assert_eq!((pm.width, pm.height), (16, 16));
+        let i = ((8 * pm.width + 8) * 4) as usize;
+        let [r, g, b] = [pm.data[i], pm.data[i + 1], pm.data[i + 2]];
+        // Pure cyan survives the lossy IW44 background layer approximately.
+        assert!(r < 60 && g > 195 && b > 195, "rendered ({r},{g},{b})");
+    }
+}
