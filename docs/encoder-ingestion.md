@@ -9,7 +9,7 @@ is deterministic and tested.
 
 All raster ingest paths target **8-bit RGBA** (`djvu_rs::Pixmap`: width × height ×
 4 bytes, row-major). Alpha is preserved unless an explicit compositing policy is
-selected (future CLI flag).
+selected (`djvu encode --background <COLOR>`).
 
 ## PNG (slice 1)
 
@@ -34,6 +34,14 @@ big-endian layout). No dithering; identical results on all targets.
 
 Default: [`AlphaCompositing::Preserve`](../src/ingest.rs). Partial transparency
 is **not** flattened onto an undocumented background during file decode.
+
+`djvu encode --background <COLOR>` (RRGGBB hex with optional `#`, or
+`white`/`black`) selects [`AlphaCompositing::CompositeOnBackground`](../src/ingest.rs):
+every non-opaque pixel is blended onto the solid background at decode time
+with deterministic integer rounding — `out = (c·a + bg·(255 − a) + 127) / 255`
+per channel — and its alpha becomes 255. The policy applies uniformly to PNG
+and TIFF (after orientation); JPEG never carries alpha, and the bilevel TIFF
+fast path never expands to RGBA, so both are unaffected.
 
 ### ICC / color profiles
 
@@ -111,5 +119,4 @@ orientation metadata.
 
 ## Planned follow-ups (#694)
 
-- Configurable alpha compositing CLI flag
 - Explicit ICC preserve/reject/transform modes

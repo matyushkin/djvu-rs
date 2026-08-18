@@ -1236,6 +1236,135 @@ mod tiff_orientation {
     }
 }
 
+mod alpha_compositing {
+    use assert_cmd::Command;
+    use djvu_rs::ingest::{AlphaCompositing, IngestPolicy};
+    use djvu_rs::png_io::{decode_image_to_pixmap_with_policy, decode_png_to_pixmap};
+    use std::path::Path;
+
+    fn on_background(red: u8, green: u8, blue: u8) -> IngestPolicy {
+        IngestPolicy {
+            alpha: AlphaCompositing::CompositeOnBackground { red, green, blue },
+            ..Default::default()
+        }
+    }
+
+    /// 2×1 RGBA PNG: one half-transparent pixel, one fully transparent.
+    fn write_test_png(path: &Path) {
+        super::write_png(
+            path,
+            2,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[200, 100, 0, 128, 55, 66, 77, 0],
+        );
+    }
+
+    #[test]
+    fn png_composites_onto_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        write_test_png(&path);
+        // (c·a + bg·(255 − a) + 127) / 255; fully transparent pixels become
+        // the background colour exactly.
+        let white =
+            decode_image_to_pixmap_with_policy(&path, on_background(255, 255, 255)).unwrap();
+        assert_eq!(white.data, vec![227, 177, 127, 255, 255, 255, 255, 255]);
+        let black = decode_image_to_pixmap_with_policy(&path, on_background(0, 0, 0)).unwrap();
+        assert_eq!(black.data, vec![100, 50, 0, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn default_policy_preserves_alpha() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        write_test_png(&path);
+        let pm = decode_png_to_pixmap(&path).unwrap();
+        assert_eq!(pm.data, vec![200, 100, 0, 128, 55, 66, 77, 0]);
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn tiff_rgba_composites() {
+        use super::tiff_slice2::{TiffPage, write_tiff};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rgba.tif");
+        // RGBA8, 2×1: same pixels as the PNG test. The builder derives row
+        // bytes from the first sample only, so the strip byte count is
+        // explicit; tag 338 marks the unassociated alpha sample. (GrayA8 is
+        // not testable here: tiff 0.9 rejects BlackIsZero with two samples.)
+        let mut page = TiffPage::gray(2, 1, 8, 2, vec![200, 100, 0, 128, 55, 66, 77, 0]);
+        page.bits = vec![8, 8, 8, 8];
+        page.strip_byte_counts = Some(vec![8]);
+        page.extra_tags = vec![(338, 3, 1, 2)];
+        write_tiff(&path, &[page]);
+        let pm = decode_image_to_pixmap_with_policy(&path, on_background(255, 255, 255)).unwrap();
+        assert_eq!(pm.data, vec![227, 177, 127, 255, 255, 255, 255, 255]);
+    }
+
+    fn encode_with_background(background: &str, output: &Path) {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("t.png");
+        // 8×8 fully transparent page: the rendered result is exactly the
+        // chosen background colour.
+        super::write_png(
+            &input,
+            8,
+            8,
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            &[0u8; 8 * 8 * 4],
+        );
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--quality",
+                "lossless",
+                "--background",
+                background,
+            ])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn cli_background_sets_page_colour() {
+        let dir = tempfile::tempdir().unwrap();
+        for (arg, expected) in [("white", 255u8), ("000000", 0u8), ("#000000", 0u8)] {
+            let output = dir.path().join("t.djvu");
+            encode_with_background(arg, &output);
+            let pm = super::render_first_page(&output);
+            let center = ((4 * pm.width + 4) * 4) as usize;
+            assert_eq!(pm.data[center], expected, "--background {arg}");
+        }
+    }
+
+    #[test]
+    fn cli_rejects_invalid_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("t.png");
+        write_test_png(&input);
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                "-o",
+                dir.path().join("t.djvu").to_str().unwrap(),
+                "--background",
+                "chartreuse",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("invalid colour"));
+    }
+}
+
 mod jpeg_exif {
     use assert_cmd::Command;
     use djvu_rs::png_io::decode_jpeg_file_to_pixmap;

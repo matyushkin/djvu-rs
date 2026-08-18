@@ -159,6 +159,9 @@ djvu encode scan.png --quality quality --binarization sauvola --bg-inpaint --out
 # Cap the IW44 background at a bits-per-pixel budget (smaller file, lower quality)
 djvu encode scan.jpg --quality quality --bg-bpp 0.8 --output scan.djvu
 
+# Composite transparent PNG/TIFF pixels onto a solid colour (hex or white/black)
+djvu encode logo.png --background white --output logo.djvu
+
 # Encode a directory of images into a bundled DJVM with shared Djbz
 djvu encode pages/ --output book.djvu --shared-dict-pages 2
 

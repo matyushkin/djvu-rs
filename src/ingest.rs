@@ -5,15 +5,39 @@
 //! root for the supported input matrix.
 
 /// How semi-transparent pixels are handled when an ingest path must produce
-/// opaque RGBA (not yet wired to CLI flags — defaults only in slice 1).
+/// opaque RGBA (CLI: `djvu encode --background <COLOR>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlphaCompositing {
     /// Keep the alpha channel unchanged. Downstream segmentation/encoding sees
     /// partial transparency as-is; no background colour is applied silently.
     #[default]
     Preserve,
-    /// Composite onto a solid background before encoding (future CLI flag).
+    /// Composite onto a solid background at decode time.
     CompositeOnBackground { red: u8, green: u8, blue: u8 },
+}
+
+impl AlphaCompositing {
+    /// Apply this policy to decoded RGBA pixels in place.
+    ///
+    /// [`Preserve`](Self::Preserve) is a no-op. `CompositeOnBackground`
+    /// blends every non-opaque pixel onto the solid background with
+    /// deterministic integer rounding and sets its alpha to 255:
+    /// `out = (c·a + bg·(255 − a) + 127) / 255`.
+    pub fn apply(&self, rgba: &mut [u8]) {
+        let Self::CompositeOnBackground { red, green, blue } = *self else {
+            return;
+        };
+        for px in rgba.chunks_exact_mut(4) {
+            let a = u32::from(px[3]);
+            if a == 255 {
+                continue;
+            }
+            for (c, bg) in px.iter_mut().zip([red, green, blue]) {
+                *c = ((u32::from(*c) * a + u32::from(bg) * (255 - a) + 127) / 255) as u8;
+            }
+            px[3] = 255;
+        }
+    }
 }
 
 /// Deterministic reduction of >8-bit samples to 8-bit channels.
@@ -61,5 +85,35 @@ mod tests {
             DepthDownconversion::TruncateHighByte
         );
         assert_eq!(policy.downsample_u16_be(0x12, 0x34), 0x12);
+    }
+
+    #[test]
+    fn preserve_leaves_pixels_untouched() {
+        let mut rgba = [200, 100, 0, 128, 10, 20, 30, 0];
+        AlphaCompositing::Preserve.apply(&mut rgba);
+        assert_eq!(rgba, [200, 100, 0, 128, 10, 20, 30, 0]);
+    }
+
+    #[test]
+    fn composite_blends_and_makes_opaque() {
+        let white = AlphaCompositing::CompositeOnBackground {
+            red: 255,
+            green: 255,
+            blue: 255,
+        };
+        // (c·a + bg·(255 − a) + 127) / 255 for a = 128 on white.
+        let mut rgba = [200, 100, 0, 128, 10, 20, 30, 255];
+        white.apply(&mut rgba);
+        assert_eq!(rgba, [227, 177, 127, 255, 10, 20, 30, 255]);
+
+        // Fully transparent becomes the background colour exactly.
+        let blue = AlphaCompositing::CompositeOnBackground {
+            red: 0,
+            green: 0,
+            blue: 255,
+        };
+        let mut rgba = [200, 100, 0, 0];
+        blue.apply(&mut rgba);
+        assert_eq!(rgba, [0, 0, 255, 255]);
     }
 }
