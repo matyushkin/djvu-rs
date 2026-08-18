@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786485450914,
+  "lastUpdate": 1787033497839,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16330,6 +16330,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47379000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fdd606445944a7b33d97d0e799f4f654ef250d98",
+          "message": "feat(ingest): decode CCITT G4 and PackBits TIFF strips (#694) (#756)\n\nAccept compression 4 (CCITT G4, bilevel only) and 32773 (PackBits) in\nthe raw TIFF strip reader. G4 reuses the existing T.6 decoder in\nsrc/smmr.rs via a new crate-internal decode_g4_rows helper; each strip\nis an independent stream with a fresh all-white reference line.\nBlackIsZero G4 renders inverted, matching libtiff. T6Options\nuncompressed mode, palette+G4, and remaining compressions (CCITT\nRLE/G3, LZW, Deflate, JPEG) keep targeted errors.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T10:45:06+05:00",
+          "tree_id": "172303d7f4df66efcb254fb2fb4d6e4a04af0405",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/fdd606445944a7b33d97d0e799f4f654ef250d98"
+        },
+        "date": 1787033496218,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 9425000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53906000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51783000,
             "range": "± 0",
             "unit": "ns/iter"
           }
