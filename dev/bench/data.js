@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787054114410,
+  "lastUpdate": 1787056153433,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16426,6 +16426,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47813000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "afa2c67b43155b803ec4fce5bea606622a924054",
+          "message": "perf(ingest): bilevel TIFF fast path straight to JB2 masks (#694) (#759)\n\n* perf(ingest): bilevel TIFF fast path straight to JB2 masks (#694)\n\n1-bit single-sample TIFF pages now decode directly to packed Bitmap\nmasks via png_io::decode_tiff_file_to_bitmaps, skipping the 32x RGBA\nexpansion and the segmentation pass. TIFF packed rows and Bitmap share\nthe MSB-first byte-padded layout, so WhiteIsZero rows copy through and\nBlackIsZero rows invert (padding bits cleared).\n\nThe CLI takes this path for --quality lossless and --quality auto;\nmasks are identical to the fixed-threshold segmentation of the RGBA\nroute, so output bytes do not change. Under auto, 1-bit pages are\nbilevel by construction and resolve to Lossless without pixel\nstatistics (blank 1-bit pages now go lossless too). Any non-1-bit\npage falls the file back to the RGBA route.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs\n\n* docs(perf): record bilevel TIFF fast-path measurements (#694)\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T17:05:38+05:00",
+          "tree_id": "550925f852827d1b93ae277c5892ac03815e56ee",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/afa2c67b43155b803ec4fce5bea606622a924054"
+        },
+        "date": 1787056152565,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 123000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6023000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35561000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 33962000,
             "range": "± 0",
             "unit": "ns/iter"
           }
