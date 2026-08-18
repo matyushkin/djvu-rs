@@ -187,6 +187,9 @@ fn expand_png16_to_rgba(
 /// Decode a JPEG file at `path` into a [`Pixmap`] (RGBA, alpha = 255).
 ///
 /// Uses the `zune-jpeg` crate (already pulled in by the `std` feature).
+/// Grayscale, RGB, CMYK, and YCCK (Adobe APP14) sources all decode to RGB;
+/// CMYK/YCCK use the same profile-free `(255 − ink) · (255 − K) / 255` mix
+/// as CMYK TIFF ingest (see `docs/encoder-ingestion.md`).
 pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
