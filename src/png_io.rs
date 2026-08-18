@@ -275,6 +275,23 @@ pub fn tiff_file_dpi(path: &Path) -> Result<Option<u16>, Box<dyn std::error::Err
     tiff_ingest::first_page_dpi(path)
 }
 
+/// Bilevel TIFF fast path: decode every page straight to a packed
+/// [`Bitmap`](crate::Bitmap) (true = black), skipping RGBA expansion.
+///
+/// Returns `Ok(None)` when any page is not 1-bit single-sample grayscale —
+/// callers fall back to [`decode_tiff_file_to_pixmaps`]. For pages this path
+/// does accept, the bitmaps are identical to the masks the default
+/// fixed-threshold segmentation builds from the RGBA route: WhiteIsZero
+/// sample 1 → black, BlackIsZero sample 0 → black.
+///
+/// Requires the `tiff` feature.
+#[cfg(feature = "tiff")]
+pub fn decode_tiff_file_to_bitmaps(
+    path: &Path,
+) -> Result<Option<Vec<crate::Bitmap>>, Box<dyn std::error::Error>> {
+    tiff_ingest::decode_bilevel_pages(path)
+}
+
 #[cfg(feature = "tiff")]
 mod tiff_ingest {
     //! TIFF → RGBA [`Pixmap`] normalization (#694 slices 2–3).
@@ -292,8 +309,8 @@ mod tiff_ingest {
     use tiff::decoder::{Decoder, DecodingResult};
     use tiff::tags::Tag;
 
-    use crate::Pixmap;
     use crate::ingest::IngestPolicy;
+    use crate::{Bitmap, Pixmap};
 
     type BoxError = Box<dyn std::error::Error>;
     type FileDecoder<'a> = Decoder<Cursor<&'a [u8]>>;
@@ -355,6 +372,74 @@ mod tiff_ingest {
             return Ok(None);
         }
         Ok(Some(rounded as u16))
+    }
+
+    pub(super) fn decode_bilevel_pages(path: &Path) -> Result<Option<Vec<Bitmap>>, BoxError> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
+            .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+        let mut pages = Vec::new();
+        loop {
+            if !page_is_bilevel(&mut decoder) {
+                return Ok(None);
+            }
+            let (w, h) = decoder
+                .dimensions()
+                .map_err(|e| format!("{}: TIFF dimensions error: {e}", path.display()))?;
+            let raw = read_raw_page(&mut decoder, &bytes, path, w, h)?;
+            pages.push(bilevel_page_to_bitmap(&raw, w, h));
+            if !decoder.more_images() {
+                return Ok(Some(pages));
+            }
+            decoder
+                .next_image()
+                .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
+        }
+    }
+
+    /// Cheap tag probe: is the current page 1-bit single-sample grayscale?
+    /// Any unreadable tag routes to the general pixmap path instead.
+    fn page_is_bilevel(decoder: &mut FileDecoder<'_>) -> bool {
+        let probe = |d: &mut FileDecoder<'_>, tag: Tag, default: u16| -> Option<u16> {
+            match d.find_tag(tag) {
+                Ok(Some(v)) => v.into_u16().ok(),
+                Ok(None) => Some(default),
+                Err(_) => None,
+            }
+        };
+        probe(decoder, Tag::BitsPerSample, 1) == Some(1)
+            && probe(decoder, Tag::SamplesPerPixel, 1) == Some(1)
+            && matches!(
+                probe(decoder, Tag::PhotometricInterpretation, 1),
+                Some(PHOTOMETRIC_WHITE_IS_ZERO | PHOTOMETRIC_BLACK_IS_ZERO)
+            )
+    }
+
+    /// Pack validated 1-bit rows into a [`Bitmap`] (true = black).
+    ///
+    /// TIFF rows and `Bitmap` share the MSB-first byte-padded layout, so
+    /// WhiteIsZero rows (sample 1 = black) copy through; BlackIsZero rows
+    /// invert. Row-padding bits are forced to zero either way.
+    fn bilevel_page_to_bitmap(raw: &RawPage<'_>, w: u32, h: u32) -> Bitmap {
+        let mut bm = Bitmap::new(w, h);
+        let stride = bm.row_stride();
+        debug_assert_eq!(stride, raw.row_bytes);
+        let invert = raw.photometric == PHOTOMETRIC_BLACK_IS_ZERO;
+        let tail_mask: u8 = match w % 8 {
+            0 => 0xFF,
+            used => 0xFF << (8 - used),
+        };
+        for (r, row) in raw.rows().enumerate() {
+            let dst = &mut bm.data[r * stride..(r + 1) * stride];
+            for (d, &s) in dst.iter_mut().zip(row) {
+                *d = if invert { !s } else { s };
+            }
+            if let Some(last) = dst.last_mut() {
+                *last &= tail_mask;
+            }
+        }
+        debug_assert_eq!(h as usize, raw.rows().count());
+        bm
     }
 
     fn decode_current_page(
@@ -530,6 +615,25 @@ mod tiff_ingest {
     /// Accepts uncompressed, PackBits, and (bilevel-only) CCITT G4 strips in
     /// chunky MSB-first order; anything else gets a targeted error naming the
     /// limitation.
+    /// Validated packed rows of a strip-based sub-byte / palette TIFF page,
+    /// shared by the RGBA expansion and the bilevel [`Bitmap`] fast path.
+    struct RawPage<'a> {
+        photometric: u16,
+        bits: u16,
+        palette: Option<Vec<u16>>,
+        strips: Vec<(Cow<'a, [u8]>, usize)>,
+        row_bytes: usize,
+    }
+
+    impl RawPage<'_> {
+        /// Iterate the page's packed rows in top-to-bottom order.
+        fn rows(&self) -> impl Iterator<Item = &[u8]> {
+            self.strips.iter().flat_map(move |(strip, strip_rows)| {
+                (0..*strip_rows).map(move |r| &strip[r * self.row_bytes..(r + 1) * self.row_bytes])
+            })
+        }
+    }
+
     fn decode_raw_page(
         decoder: &mut FileDecoder<'_>,
         file_bytes: &[u8],
@@ -538,6 +642,60 @@ mod tiff_ingest {
         w: u32,
         h: u32,
     ) -> Result<Pixmap, BoxError> {
+        let raw = read_raw_page(decoder, file_bytes, path, w, h)?;
+        let RawPage {
+            photometric,
+            bits,
+            ref palette,
+            ..
+        } = raw;
+
+        let max_sample = (1u16 << bits) - 1;
+        let mut data = Vec::with_capacity(w as usize * h as usize * 4);
+        for row in raw.rows() {
+            for x in 0..w as usize {
+                let bit_pos = x * bits as usize;
+                let byte = row[bit_pos / 8];
+                let shift = 8 - bits as usize - (bit_pos % 8);
+                let sample = u16::from((byte >> shift) & max_sample as u8);
+                match palette {
+                    Some(map) => {
+                        let entries = 1usize << bits;
+                        let idx = sample as usize;
+                        data.extend_from_slice(&[
+                            policy.downsample_u16(map[idx]),
+                            policy.downsample_u16(map[entries + idx]),
+                            policy.downsample_u16(map[2 * entries + idx]),
+                            255,
+                        ]);
+                    }
+                    None => {
+                        let level = if photometric == PHOTOMETRIC_WHITE_IS_ZERO {
+                            max_sample - sample
+                        } else {
+                            sample
+                        };
+                        let g = (level * 255 / max_sample) as u8;
+                        data.extend_from_slice(&[g, g, g, 255]);
+                    }
+                }
+            }
+        }
+
+        Ok(Pixmap {
+            width: w,
+            height: h,
+            data,
+        })
+    }
+
+    fn read_raw_page<'a>(
+        decoder: &mut FileDecoder<'_>,
+        file_bytes: &'a [u8],
+        path: &Path,
+        w: u32,
+        h: u32,
+    ) -> Result<RawPage<'a>, BoxError> {
         let ctx = |msg: String| -> BoxError { format!("{}: {msg}", path.display()).into() };
 
         let tag_u16 = |d: &mut FileDecoder<'_>, tag: Tag, default: u16| -> Result<u16, BoxError> {
@@ -689,55 +847,19 @@ mod tiff_ingest {
             };
             strips.push((unpacked, strip_rows));
         }
-        let mut rows: Vec<&[u8]> = Vec::with_capacity(h as usize);
-        for (strip, strip_rows) in &strips {
-            for r in 0..*strip_rows {
-                rows.push(&strip[r * row_bytes..(r + 1) * row_bytes]);
-            }
-        }
-        if rows.len() != h as usize {
+        let total_rows: usize = strips.iter().map(|(_, n)| n).sum();
+        if total_rows != h as usize {
             return Err(ctx(format!(
-                "TIFF strips cover {} rows, expected {h}",
-                rows.len()
+                "TIFF strips cover {total_rows} rows, expected {h}"
             )));
         }
 
-        let max_sample = (1u16 << bits) - 1;
-        let mut data = Vec::with_capacity(w as usize * h as usize * 4);
-        for row in rows {
-            for x in 0..w as usize {
-                let bit_pos = x * bits as usize;
-                let byte = row[bit_pos / 8];
-                let shift = 8 - bits as usize - (bit_pos % 8);
-                let sample = u16::from((byte >> shift) & max_sample as u8);
-                match &palette {
-                    Some(map) => {
-                        let entries = 1usize << bits;
-                        let idx = sample as usize;
-                        data.extend_from_slice(&[
-                            policy.downsample_u16(map[idx]),
-                            policy.downsample_u16(map[entries + idx]),
-                            policy.downsample_u16(map[2 * entries + idx]),
-                            255,
-                        ]);
-                    }
-                    None => {
-                        let level = if photometric == PHOTOMETRIC_WHITE_IS_ZERO {
-                            max_sample - sample
-                        } else {
-                            sample
-                        };
-                        let g = (level * 255 / max_sample) as u8;
-                        data.extend_from_slice(&[g, g, g, 255]);
-                    }
-                }
-            }
-        }
-
-        Ok(Pixmap {
-            width: w,
-            height: h,
-            data,
+        Ok(RawPage {
+            photometric,
+            bits,
+            palette,
+            strips,
+            row_bytes,
         })
     }
 
