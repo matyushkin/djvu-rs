@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787080253992,
+  "lastUpdate": 1787082026233,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16666,6 +16666,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47768000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0abae18d5b0ea32f3e3855369ab07b6db2694159",
+          "message": "feat(ingest): configurable alpha compositing via encode --background (#694) (#764)\n\nImplement AlphaCompositing::CompositeOnBackground (declared but dead until\nnow): blend every non-opaque RGBA pixel onto a solid background at decode\ntime with deterministic integer rounding, out = (c*a + bg*(255-a) + 127)/255,\nand set alpha to 255. Preserve stays the default and is a no-op.\n\nWire it through the CLI as `djvu encode --background <COLOR>` (RRGGBB hex\nwith optional '#', or white/black), threading an IngestPolicy into all\nencode decode call sites via decode_image_to_pixmap_with_policy. The policy\napplies uniformly to PNG and TIFF (after orientation); JPEG never carries\nalpha and the bilevel TIFF fast path never expands to RGBA.\n\nTests: unit coverage of apply(); integration coverage for PNG and RGBA8\nTIFF compositing (GrayA8 is untestable — tiff 0.9 rejects BlackIsZero with\ntwo samples), the preserve default, CLI colour parsing (white/hex/#hex),\nand rejection of invalid colours. Docs and README updated.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-19T00:14:03+05:00",
+          "tree_id": "30722e72bff4624b42ba72560795d48d889260a1",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0abae18d5b0ea32f3e3855369ab07b6db2694159"
+        },
+        "date": 1787082024975,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8228000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49558000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47647000,
             "range": "± 0",
             "unit": "ns/iter"
           }
