@@ -13377,3 +13377,29 @@ the scalar fallback. The primary fresh-render path clears the >=5% bar in the
 direct run and in the repeated-run median; progressive also trends positive
 across repeats. Cached-page timings are neutral/noisy rather than a reliable
 win, so this is not claimed as an across-the-board speedup.
+
+## Perf round 112 (2026-08-18) — BILEVEL_TIFF_FASTPATH: 1-bit TIFF straight to JB2 masks (#694) — **Kept**
+
+**Issue.** #694 follow-up: bilevel TIFF ingestion expanded every 1-bit page
+to 8-bit RGBA (32× the packed size) only for the fixed-threshold
+segmentation to immediately re-binarize it into a JB2 mask.
+
+**Approach.** `png_io::decode_tiff_file_to_bitmaps` decodes 1-bit
+single-sample pages directly into packed `Bitmap` masks — TIFF rows and
+`Bitmap` share the MSB-first byte-padded layout, so WhiteIsZero strips copy
+through and BlackIsZero strips invert with padding cleared. The CLI takes
+this path for `--quality lossless|auto`; non-1-bit pages fall back to the
+RGBA route.
+
+**Numbers.** Synthetic A4 text page (2480×3508, 1-bit, uncompressed strips),
+release CLI, `encode --quality lossless`, hyperfine warmup 2:
+main 107.1 ± 3.1 ms → fast path 29.6 ± 0.4 ms (**3.62× ± 0.11 faster**).
+Peak memory footprint (`/usr/bin/time -l`): 40.3 MB → 6.1 MB (**6.6× less**).
+Output `.djvu` bytes are identical (`cmp` clean).
+
+**Decision.** Kept.
+
+**Reason.** Large end-to-end win on the archival-scan hot path with
+byte-identical output; the only behaviour change is deliberate and
+documented (`--quality auto` now treats any 1-bit TIFF — including blank
+pages — as bilevel by construction instead of sampling pixels).
