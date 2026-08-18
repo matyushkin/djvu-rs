@@ -1119,3 +1119,119 @@ mod tiff_fastpath {
         assert!(pm.data.chunks_exact(4).all(|px| px[0] == 255));
     }
 }
+
+#[cfg(feature = "tiff")]
+mod tiff_orientation {
+    use super::tiff_slice2::{TiffPage, write_tiff};
+    use djvu_rs::Bitmap;
+    use djvu_rs::png_io::{decode_tiff_file_to_bitmaps, decode_tiff_file_to_pixmap, tiff_file_dpi};
+
+    /// 3×2 gray page (rows `10 20 30` / `40 50 60`) with an Orientation tag.
+    fn oriented_gray_page(orientation: u32) -> TiffPage {
+        let mut p = TiffPage::gray(3, 2, 8, 1, vec![10, 20, 30, 40, 50, 60]);
+        p.extra_tags = vec![(274, 3, 1, orientation)];
+        p
+    }
+
+    fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
+        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+    }
+
+    #[test]
+    fn all_eight_orientations_reorder_pixels() {
+        // Hand-written expected grids — independent of the implementation.
+        let cases: [(u32, (u32, u32), Vec<u8>); 8] = [
+            (1, (3, 2), vec![10, 20, 30, 40, 50, 60]),
+            (2, (3, 2), vec![30, 20, 10, 60, 50, 40]), // mirrored horizontally
+            (3, (3, 2), vec![60, 50, 40, 30, 20, 10]), // rotated 180°
+            (4, (3, 2), vec![40, 50, 60, 10, 20, 30]), // mirrored vertically
+            (5, (2, 3), vec![10, 40, 20, 50, 30, 60]), // transposed
+            (6, (2, 3), vec![40, 10, 50, 20, 60, 30]), // rotated 90° CW
+            (7, (2, 3), vec![60, 30, 50, 20, 40, 10]), // anti-transposed
+            (8, (2, 3), vec![30, 60, 20, 50, 10, 40]), // rotated 90° CCW
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        for (o, dims, expected) in cases {
+            let path = dir.path().join(format!("o{o}.tif"));
+            write_tiff(&path, &[oriented_gray_page(o)]);
+            let pm = decode_tiff_file_to_pixmap(&path).unwrap();
+            assert_eq!((pm.width, pm.height), dims, "orientation {o} dims");
+            assert_eq!(grays(&pm), expected, "orientation {o} pixels");
+        }
+    }
+
+    #[test]
+    fn out_of_range_orientation_is_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [0u32, 9] {
+            let path = dir.path().join(format!("bad{bad}.tif"));
+            write_tiff(&path, &[oriented_gray_page(bad)]);
+            let pm = decode_tiff_file_to_pixmap(&path).unwrap();
+            assert_eq!(grays(&pm), vec![10, 20, 30, 40, 50, 60]);
+        }
+    }
+
+    /// 16×4 bilevel page: row r has pixels r..r+4 black, plus corner (15, 3).
+    fn asymmetric_bitmap() -> Bitmap {
+        let mut bm = Bitmap::new(16, 4);
+        for r in 0..4 {
+            for c in r..r + 4 {
+                bm.set(c, r, true);
+            }
+        }
+        bm.set(15, 3, true);
+        bm
+    }
+
+    #[test]
+    fn bilevel_fast_path_matches_pixmap_route_for_every_orientation() {
+        let dir = tempfile::tempdir().unwrap();
+        let bm = asymmetric_bitmap();
+        for o in 1..=8u32 {
+            let path = dir.path().join(format!("bl{o}.tif"));
+            let mut page = TiffPage::gray(16, 4, 1, 0, bm.data.clone());
+            page.extra_tags = vec![(274, 3, 1, o)];
+            write_tiff(&path, &[page]);
+            let fast = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+            let pm = decode_tiff_file_to_pixmap(&path).unwrap();
+            assert_eq!(
+                (fast[0].width, fast[0].height),
+                (pm.width, pm.height),
+                "orientation {o} dims"
+            );
+            for y in 0..pm.height {
+                for x in 0..pm.width {
+                    let black = pm.data[((y * pm.width + x) * 4) as usize] == 0;
+                    assert_eq!(fast[0].get(x, y), black, "orientation {o} pixel ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_page_prefers_y_resolution_for_dpi() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rotdpi.tif");
+        let mut page = oriented_gray_page(6);
+        page.x_resolution = Some((300, 1));
+        page.y_resolution = Some((150, 1));
+        page.resolution_unit = Some(2);
+        write_tiff(&path, &[page]);
+        // Rotated 90°: the stored Y axis becomes the visual horizontal.
+        assert_eq!(tiff_file_dpi(&path).unwrap(), Some(150));
+    }
+
+    #[test]
+    fn multipage_orientation_applies_per_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.tif");
+        write_tiff(&path, &[oriented_gray_page(1), oriented_gray_page(3)]);
+        let pages = djvu_rs::png_io::decode_tiff_file_to_pixmaps(
+            &path,
+            djvu_rs::ingest::IngestPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(grays(&pages[0]), vec![10, 20, 30, 40, 50, 60]);
+        assert_eq!(grays(&pages[1]), vec![60, 50, 40, 30, 20, 10]);
+    }
+}

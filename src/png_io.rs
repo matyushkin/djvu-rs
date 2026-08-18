@@ -325,7 +325,9 @@ mod tiff_ingest {
             .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
         let mut pages = Vec::new();
         loop {
-            pages.push(decode_current_page(&mut decoder, &bytes, path, policy)?);
+            let orientation = page_orientation(&mut decoder);
+            let pm = decode_current_page(&mut decoder, &bytes, path, policy)?;
+            pages.push(orient_pixmap(pm, orientation));
             if limit.is_some_and(|n| pages.len() >= n) || !decoder.more_images() {
                 return Ok(pages);
             }
@@ -333,6 +335,78 @@ mod tiff_ingest {
                 .next_image()
                 .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
         }
+    }
+
+    /// Read the page's Orientation tag (274). The `tiff` crate never applies
+    /// it, so ingest applies it exactly once. Out-of-range or unreadable
+    /// values fall back to 1 (upright), matching libtiff and browsers.
+    fn page_orientation(decoder: &mut FileDecoder<'_>) -> u16 {
+        match decoder.find_tag(Tag::Orientation) {
+            Ok(Some(v)) => match v.into_u16() {
+                Ok(o @ 1..=8) => o,
+                _ => 1,
+            },
+            _ => 1,
+        }
+    }
+
+    /// Oriented page dimensions: orientations 5–8 swap width and height.
+    fn oriented_dims(o: u16, w: u32, h: u32) -> (u32, u32) {
+        if (5..=8).contains(&o) { (h, w) } else { (w, h) }
+    }
+
+    /// Source pixel for upright destination pixel (x, y) under TIFF
+    /// orientation `o`; (w, h) are the *stored* dimensions.
+    fn source_pos(o: u16, w: u32, h: u32, x: u32, y: u32) -> (u32, u32) {
+        match o {
+            2 => (w - 1 - x, y),         // mirrored horizontally
+            3 => (w - 1 - x, h - 1 - y), // rotated 180°
+            4 => (x, h - 1 - y),         // mirrored vertically
+            5 => (y, x),                 // transposed
+            6 => (y, h - 1 - x),         // rotated 90° clockwise
+            7 => (w - 1 - y, h - 1 - x), // anti-transposed
+            8 => (w - 1 - y, x),         // rotated 90° counter-clockwise
+            _ => (x, y),                 // 1: upright
+        }
+    }
+
+    fn orient_pixmap(pm: Pixmap, o: u16) -> Pixmap {
+        if o == 1 {
+            return pm;
+        }
+        let (w, h) = (pm.width, pm.height);
+        let (dw, dh) = oriented_dims(o, w, h);
+        let mut data = vec![0u8; pm.data.len()];
+        for y in 0..dh {
+            for x in 0..dw {
+                let (sx, sy) = source_pos(o, w, h, x, y);
+                let s = ((sy * w + sx) * 4) as usize;
+                let d = ((y * dw + x) * 4) as usize;
+                data[d..d + 4].copy_from_slice(&pm.data[s..s + 4]);
+            }
+        }
+        Pixmap {
+            width: dw,
+            height: dh,
+            data,
+        }
+    }
+
+    fn orient_bitmap(bm: Bitmap, o: u16) -> Bitmap {
+        if o == 1 {
+            return bm;
+        }
+        let (dw, dh) = oriented_dims(o, bm.width, bm.height);
+        let mut out = Bitmap::new(dw, dh);
+        for y in 0..dh {
+            for x in 0..dw {
+                let (sx, sy) = source_pos(o, bm.width, bm.height, x, y);
+                if bm.get(sx, sy) {
+                    out.set(x, y, true);
+                }
+            }
+        }
+        out
     }
 
     pub(super) fn first_page_dpi(path: &Path) -> Result<Option<u16>, BoxError> {
@@ -347,9 +421,16 @@ mod tiff_ingest {
         if unit == 1 {
             return Ok(None);
         }
-        let value = match decoder.find_tag(Tag::XResolution) {
+        // Orientations 5–8 rotate the raster 90°, so the stored YResolution
+        // becomes the visual horizontal density.
+        let (first, second) = if (5..=8).contains(&page_orientation(&mut decoder)) {
+            (Tag::YResolution, Tag::XResolution)
+        } else {
+            (Tag::XResolution, Tag::YResolution)
+        };
+        let value = match decoder.find_tag(first) {
             Ok(Some(v)) => v,
-            _ => match decoder.find_tag(Tag::YResolution) {
+            _ => match decoder.find_tag(second) {
                 Ok(Some(v)) => v,
                 _ => return Ok(None),
             },
@@ -386,8 +467,12 @@ mod tiff_ingest {
             let (w, h) = decoder
                 .dimensions()
                 .map_err(|e| format!("{}: TIFF dimensions error: {e}", path.display()))?;
+            let orientation = page_orientation(&mut decoder);
             let raw = read_raw_page(&mut decoder, &bytes, path, w, h)?;
-            pages.push(bilevel_page_to_bitmap(&raw, w, h));
+            pages.push(orient_bitmap(
+                bilevel_page_to_bitmap(&raw, w, h),
+                orientation,
+            ));
             if !decoder.more_images() {
                 return Ok(Some(pages));
             }
