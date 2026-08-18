@@ -1236,6 +1236,144 @@ mod tiff_orientation {
     }
 }
 
+mod jpeg_exif {
+    use assert_cmd::Command;
+    use djvu_rs::png_io::decode_jpeg_file_to_pixmap;
+    use std::path::Path;
+
+    /// APP1 payload: `Exif\0\0` + minimal TIFF block with one IFD0 entry —
+    /// Orientation (274) as a single SHORT.
+    fn exif_app1(orientation: u16, le: bool) -> Vec<u8> {
+        let mut v = b"Exif\0\0".to_vec();
+        macro_rules! push {
+            ($val:expr) => {
+                if le {
+                    v.extend_from_slice(&$val.to_le_bytes());
+                } else {
+                    v.extend_from_slice(&$val.to_be_bytes());
+                }
+            };
+        }
+        v.extend_from_slice(if le { b"II" } else { b"MM" });
+        push!(42u16);
+        push!(8u32); // IFD0 offset
+        push!(1u16); // entry count
+        push!(274u16);
+        push!(3u16); // type SHORT
+        push!(1u32); // count
+        push!(orientation);
+        push!(0u16); // value field padding
+        push!(0u32); // next IFD offset
+        v
+    }
+
+    /// 3×2 gray-valued RGB JPEG (rows `a b c` / `d e f`) with an EXIF APP1.
+    fn write_jpeg(path: &Path, app1: Option<&[u8]>) {
+        let mut pixels = Vec::new();
+        for g in [10u8, 60, 110, 160, 210, 250] {
+            pixels.extend_from_slice(&[g, g, g]);
+        }
+        let mut encoder = jpeg_encoder::Encoder::new_file(path, 100).unwrap();
+        if let Some(data) = app1 {
+            encoder.add_app_segment(1, data).unwrap();
+        }
+        encoder
+            .encode(&pixels, 3, 2, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+    }
+
+    fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
+        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+    }
+
+    #[test]
+    fn all_eight_exif_orientations_reorder_pixels() {
+        // Hand-written index permutations of the upright grid [0 1 2 / 3 4 5]
+        // — independent of the implementation. Pixel values come from the
+        // baseline decode, so comparisons are exact despite JPEG loss.
+        let cases: [(u16, (u32, u32), [usize; 6]); 8] = [
+            (1, (3, 2), [0, 1, 2, 3, 4, 5]),
+            (2, (3, 2), [2, 1, 0, 5, 4, 3]), // mirrored horizontally
+            (3, (3, 2), [5, 4, 3, 2, 1, 0]), // rotated 180°
+            (4, (3, 2), [3, 4, 5, 0, 1, 2]), // mirrored vertically
+            (5, (2, 3), [0, 3, 1, 4, 2, 5]), // transposed
+            (6, (2, 3), [3, 0, 4, 1, 5, 2]), // rotated 90° CW
+            (7, (2, 3), [5, 2, 4, 1, 3, 0]), // anti-transposed
+            (8, (2, 3), [2, 5, 1, 4, 0, 3]), // rotated 90° CCW
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.jpg");
+        write_jpeg(&base_path, None);
+        let base = grays(&decode_jpeg_file_to_pixmap(&base_path).unwrap());
+        for (o, dims, perm) in cases {
+            let path = dir.path().join(format!("o{o}.jpg"));
+            write_jpeg(&path, Some(&exif_app1(o, true)));
+            let pm = decode_jpeg_file_to_pixmap(&path).unwrap();
+            assert_eq!((pm.width, pm.height), dims, "orientation {o} dims");
+            let expected: Vec<u8> = perm.iter().map(|&i| base[i]).collect();
+            assert_eq!(grays(&pm), expected, "orientation {o} pixels");
+        }
+    }
+
+    #[test]
+    fn big_endian_exif_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mm.jpg");
+        write_jpeg(&path, Some(&exif_app1(3, false)));
+        let base_path = dir.path().join("base.jpg");
+        write_jpeg(&base_path, None);
+        let base = grays(&decode_jpeg_file_to_pixmap(&base_path).unwrap());
+        let pm = decode_jpeg_file_to_pixmap(&path).unwrap();
+        let expected: Vec<u8> = [5, 4, 3, 2, 1, 0].iter().map(|&i| base[i]).collect();
+        assert_eq!(grays(&pm), expected);
+    }
+
+    #[test]
+    fn out_of_range_or_malformed_exif_is_upright() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.jpg");
+        write_jpeg(&base_path, None);
+        let base = grays(&decode_jpeg_file_to_pixmap(&base_path).unwrap());
+        let payloads: Vec<(&str, Vec<u8>)> = vec![
+            ("orientation 0", exif_app1(0, true)),
+            ("orientation 9", exif_app1(9, true)),
+            ("truncated", exif_app1(6, true)[..12].to_vec()),
+            ("garbage", b"Exif\0\0not a tiff header at all".to_vec()),
+        ];
+        for (ctx, app1) in payloads {
+            let path = dir.path().join("bad.jpg");
+            write_jpeg(&path, Some(&app1));
+            let pm = decode_jpeg_file_to_pixmap(&path).unwrap();
+            assert_eq!((pm.width, pm.height), (3, 2), "{ctx}: dims");
+            assert_eq!(grays(&pm), base, "{ctx}: pixels");
+        }
+    }
+
+    #[test]
+    fn cli_encode_swaps_dimensions_for_rotated_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("rot.jpg");
+        let output = dir.path().join("rot.djvu");
+        write_jpeg(&input, Some(&exif_app1(6, true)));
+        Command::cargo_bin("djvu")
+            .unwrap()
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "--quality",
+                "quality",
+            ])
+            .assert()
+            .success();
+        let bytes = std::fs::read(&output).unwrap();
+        let doc = djvu_rs::Document::from_bytes(bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        assert_eq!((page.width(), page.height()), (2, 3));
+    }
+}
+
 mod jpeg_cmyk {
     use assert_cmd::Command;
     use djvu_rs::png_io::decode_jpeg_file_to_pixmap;
