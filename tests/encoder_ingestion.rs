@@ -252,6 +252,11 @@ mod tiff_slice2 {
         pub colormap: Option<Vec<u16>>,
         /// Compression tag value (1 = none). Data is written as-is.
         pub compression: u16,
+        /// Explicit per-strip byte counts (tag 279) for compressed data.
+        /// `None` assumes uncompressed strips of `rows * row_bytes` bytes.
+        pub strip_byte_counts: Option<Vec<u32>>,
+        /// Extra IFD entries appended verbatim: (tag, type, count, value).
+        pub extra_tags: Vec<(u16, u16, u32, u32)>,
     }
 
     impl TiffPage {
@@ -265,6 +270,8 @@ mod tiff_slice2 {
                 rows_per_strip: None,
                 colormap: None,
                 compression: 1,
+                strip_byte_counts: None,
+                extra_tags: Vec::new(),
             }
         }
     }
@@ -295,16 +302,21 @@ mod tiff_slice2 {
             let row_bytes = (p.width as usize * p.bits[0] as usize).div_ceil(8);
 
             // Per-strip offsets/byte counts (out-of-line when > 1 strip).
+            let strip_counts: Vec<u32> = p.strip_byte_counts.clone().unwrap_or_else(|| {
+                (0..strip_count)
+                    .map(|s| {
+                        let rows = (p.height as usize)
+                            .saturating_sub(s * rows_per_strip as usize)
+                            .min(rows_per_strip as usize);
+                        (rows * row_bytes) as u32
+                    })
+                    .collect()
+            });
+            assert_eq!(strip_counts.len(), strip_count, "strip_byte_counts length");
             let mut strip_offsets = Vec::with_capacity(strip_count);
-            let mut strip_counts = Vec::with_capacity(strip_count);
             let mut cursor = data_offsets[i];
-            for s in 0..strip_count {
-                let rows = (p.height as usize)
-                    .saturating_sub(s * rows_per_strip as usize)
-                    .min(rows_per_strip as usize);
-                let len = (rows * row_bytes) as u32;
+            for &len in &strip_counts {
                 strip_offsets.push(cursor);
-                strip_counts.push(len);
                 cursor += len;
             }
 
@@ -360,6 +372,7 @@ mod tiff_slice2 {
             if let (Some(cm), Some(off)) = (&p.colormap, colormap_offset) {
                 entries.push((320, 3, cm.len() as u32, off));
             }
+            entries.extend(p.extra_tags.iter().copied());
             entries.sort_by_key(|e| e.0);
 
             out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
@@ -468,6 +481,8 @@ mod tiff_slice2 {
             rows_per_strip: None,
             colormap: None,
             compression: 1,
+            strip_byte_counts: None,
+            extra_tags: Vec::new(),
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -488,6 +503,8 @@ mod tiff_slice2 {
             rows_per_strip: None,
             colormap: None,
             compression: 1,
+            strip_byte_counts: None,
+            extra_tags: Vec::new(),
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -513,6 +530,8 @@ mod tiff_slice2 {
             rows_per_strip: None,
             colormap: Some(cm),
             compression: 1,
+            strip_byte_counts: None,
+            extra_tags: Vec::new(),
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -536,6 +555,8 @@ mod tiff_slice2 {
             rows_per_strip: None,
             colormap: Some(cm),
             compression: 1,
+            strip_byte_counts: None,
+            extra_tags: Vec::new(),
         };
         write_tiff(&path, &[page]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
@@ -567,12 +588,202 @@ mod tiff_slice2 {
     #[test]
     fn compressed_bilevel_reports_targeted_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("g4comp.tif");
+        let path = dir.path().join("lzwcomp.tif");
         let mut page = TiffPage::gray(8, 1, 1, 1, vec![0xAA]);
-        page.compression = 4; // CCITT G4
+        page.compression = 5; // LZW
         write_tiff(&path, &[page]);
         let err = decode_tiff_file_to_pixmap(&path).unwrap_err().to_string();
-        assert!(err.contains("CCITT G4"), "unexpected error: {err}");
+        assert!(err.contains("LZW"), "unexpected error: {err}");
         assert!(err.contains("not supported"), "unexpected error: {err}");
+    }
+}
+
+/// #694 slice 3: CCITT G4 and PackBits compressed strips through the raw
+/// bilevel/palette reader. G4 fixtures come from the crate's own
+/// [`djvu_rs::smmr::encode_g4`], which emits the same raw T.6 bitstream TIFF
+/// stores per strip.
+#[cfg(feature = "tiff")]
+mod tiff_slice3 {
+    use super::tiff_slice2::{TiffPage, write_tiff};
+    use djvu_rs::Bitmap;
+    use djvu_rs::png_io::decode_tiff_file_to_pixmap;
+    use djvu_rs::smmr::encode_g4;
+
+    /// 16-wide bitmap with one black run per row: row r has pixels r..r+4 set.
+    fn stair_bitmap(height: u32) -> Bitmap {
+        let mut bm = Bitmap::new(16, height);
+        for r in 0..height {
+            for c in r..(r + 4).min(16) {
+                bm.set(c, r, true);
+            }
+        }
+        bm
+    }
+
+    fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
+        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+    }
+
+    #[test]
+    fn g4_white_is_zero_single_strip_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4.tif");
+        let bm = stair_bitmap(4);
+        let stream = encode_g4(&bm);
+        let mut page = TiffPage::gray(16, 4, 1, 0, stream.clone());
+        page.compression = 4;
+        page.strip_byte_counts = Some(vec![stream.len() as u32]);
+        write_tiff(&path, &[page]);
+        let pm = decode_tiff_file_to_pixmap(&path).unwrap();
+        assert_eq!((pm.width, pm.height), (16, 4));
+        let g = grays(&pm);
+        for r in 0..4u32 {
+            for c in 0..16u32 {
+                let expect = if bm.get(c, r) { 0 } else { 255 };
+                assert_eq!(g[(r * 16 + c) as usize], expect, "pixel ({c},{r})");
+            }
+        }
+    }
+
+    #[test]
+    fn g4_black_is_zero_renders_inverted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4inv.tif");
+        let bm = stair_bitmap(2);
+        let stream = encode_g4(&bm);
+        let mut page = TiffPage::gray(16, 2, 1, 1, stream.clone());
+        page.compression = 4;
+        page.strip_byte_counts = Some(vec![stream.len() as u32]);
+        write_tiff(&path, &[page]);
+        let g = grays(&decode_tiff_file_to_pixmap(&path).unwrap());
+        // Fax black packs as sample 1; BlackIsZero maps sample 1 to white.
+        assert_eq!(g[0], 255, "fax black pixel renders white");
+        assert_eq!(g[15], 0, "fax white pixel renders black");
+    }
+
+    #[test]
+    fn g4_multi_strip_streams_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4strips.tif");
+        let full = stair_bitmap(6);
+        // Three strips of two rows, each an independent T.6 stream.
+        let mut data = Vec::new();
+        let mut counts = Vec::new();
+        for s in 0..3u32 {
+            let mut part = Bitmap::new(16, 2);
+            for r in 0..2 {
+                for c in 0..16 {
+                    if full.get(c, s * 2 + r) {
+                        part.set(c, r, true);
+                    }
+                }
+            }
+            let stream = encode_g4(&part);
+            counts.push(stream.len() as u32);
+            data.extend_from_slice(&stream);
+        }
+        let mut page = TiffPage::gray(16, 6, 1, 0, data);
+        page.compression = 4;
+        page.rows_per_strip = Some(2);
+        page.strip_byte_counts = Some(counts);
+        write_tiff(&path, &[page]);
+        let g = grays(&decode_tiff_file_to_pixmap(&path).unwrap());
+        for r in 0..6u32 {
+            for c in 0..16u32 {
+                let expect = if full.get(c, r) { 0 } else { 255 };
+                assert_eq!(g[(r * 16 + c) as usize], expect, "pixel ({c},{r})");
+            }
+        }
+    }
+
+    #[test]
+    fn g4_t6options_uncompressed_mode_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4uncomp.tif");
+        let bm = stair_bitmap(1);
+        let stream = encode_g4(&bm);
+        let mut page = TiffPage::gray(16, 1, 1, 0, stream.clone());
+        page.compression = 4;
+        page.strip_byte_counts = Some(vec![stream.len() as u32]);
+        page.extra_tags = vec![(293, 4, 1, 2)]; // T6Options: uncompressed mode
+        write_tiff(&path, &[page]);
+        let err = decode_tiff_file_to_pixmap(&path).unwrap_err().to_string();
+        assert!(err.contains("uncompressed mode"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn g4_palette_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g4pal.tif");
+        let mut page = TiffPage::gray(8, 1, 1, 3, vec![0]);
+        page.compression = 4;
+        page.colormap = Some(vec![0u16; 6]);
+        write_tiff(&path, &[page]);
+        let err = decode_tiff_file_to_pixmap(&path).unwrap_err().to_string();
+        assert!(err.contains("palette"), "unexpected error: {err}");
+        assert!(err.contains("G4"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn packbits_bilevel_literal_and_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pb1.tif");
+        // Rows 0xAA, 0xCC as one literal run, preceded by a -128 no-op byte.
+        let data = vec![0x80, 0x01, 0xAA, 0xCC];
+        let mut page = TiffPage::gray(8, 2, 1, 1, data);
+        page.compression = 32773;
+        page.strip_byte_counts = Some(vec![4]);
+        write_tiff(&path, &[page]);
+        let g = grays(&decode_tiff_file_to_pixmap(&path).unwrap());
+        assert_eq!(
+            g,
+            vec![
+                255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn packbits_repeat_runs_expand() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pb8.tif");
+        // 8-bit gray, 4 px: repeat 7 three times, then literal 9.
+        let data = vec![0xFE, 7, 0x00, 9];
+        let mut page = TiffPage::gray(4, 1, 8, 1, data);
+        page.compression = 32773;
+        page.strip_byte_counts = Some(vec![4]);
+        write_tiff(&path, &[page]);
+        let g = grays(&decode_tiff_file_to_pixmap(&path).unwrap());
+        assert_eq!(g, vec![7, 7, 7, 9]);
+    }
+
+    #[test]
+    fn packbits_palette_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pbpal.tif");
+        let mut cm = vec![0u16; 3 * 256];
+        cm[0] = 0xFF00; // R of entry 0
+        cm[256 + 1] = 0x8000; // G of entry 1
+        let mut page = TiffPage::gray(2, 1, 8, 3, vec![0x01, 0, 1]);
+        page.compression = 32773;
+        page.colormap = Some(cm);
+        page.strip_byte_counts = Some(vec![3]);
+        write_tiff(&path, &[page]);
+        let pm = decode_tiff_file_to_pixmap(&path).unwrap();
+        assert_eq!(&pm.data[0..4], &[0xFF, 0, 0, 255]);
+        assert_eq!(&pm.data[4..8], &[0, 0x80, 0, 255]);
+    }
+
+    #[test]
+    fn packbits_truncated_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pbbad.tif");
+        // Control byte promises 6 literals, none follow.
+        let mut page = TiffPage::gray(8, 1, 1, 1, vec![0x05]);
+        page.compression = 32773;
+        page.strip_byte_counts = Some(vec![1]);
+        write_tiff(&path, &[page]);
+        let err = decode_tiff_file_to_pixmap(&path).unwrap_err().to_string();
+        assert!(err.contains("PackBits"), "unexpected error: {err}");
     }
 }

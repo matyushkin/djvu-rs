@@ -526,6 +526,40 @@ fn decode_row_pixels(
 
 // ---- Main decoder ----------------------------------------------------------
 
+/// Decode a raw G4/MMR bitstream (no chunk header) into `nrows` rows of
+/// `ncols` pixels, `true` = black.
+///
+/// Every call starts from an all-white reference line, which matches both the
+/// `Smmr` chunk layout and one TIFF CCITT G4 strip (each strip is an
+/// independent T.6 stream). Rows past the end of a truncated stream come back
+/// all-white, mirroring [`decode_smmr`]'s tolerance.
+pub(crate) fn decode_g4_rows(
+    body: &[u8],
+    ncols: usize,
+    nrows: usize,
+) -> Result<Vec<Vec<bool>>, SmmrError> {
+    if ncols.saturating_mul(nrows) > MAX_SMMR_PIXELS {
+        return Err(SmmrError::ImageTooLarge);
+    }
+    let mut rows: Vec<Vec<bool>> = Vec::with_capacity(nrows);
+    if ncols == 0 {
+        rows.resize(nrows, Vec::new());
+        return Ok(rows);
+    }
+    let white = vec![false; ncols];
+    let mut br = BitReader::new(body);
+    for _ in 0..nrows {
+        if br.is_empty() {
+            rows.push(white.clone());
+            continue;
+        }
+        let prev = rows.last().unwrap_or(&white);
+        let pixels = decode_row_pixels(&mut br, prev, ncols)?;
+        rows.push(pixels);
+    }
+    Ok(rows)
+}
+
 /// Decode an `Smmr` (G4/MMR) chunk payload into a [`Bitmap`].
 pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
     if data.len() < 4 {
@@ -566,20 +600,13 @@ pub fn decode_smmr(data: &[u8]) -> Result<Bitmap, SmmrError> {
         return Ok(bm);
     }
 
-    let mut br = BitReader::new(body);
-    let mut prev = vec![false; ncols]; // all-white reference
-
-    for row in 0..nrows {
-        if br.is_empty() {
-            break;
-        }
-        let pixels = decode_row_pixels(&mut br, &prev, ncols)?;
+    let rows = decode_g4_rows(body, ncols, nrows)?;
+    for (row, pixels) in rows.iter().enumerate() {
         for (col, &px) in pixels.iter().enumerate() {
             if px ^ inverted {
                 bm.set(col as u32, row as u32, true);
             }
         }
-        prev = pixels;
     }
 
     Ok(bm)

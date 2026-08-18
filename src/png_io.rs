@@ -263,13 +263,14 @@ pub fn decode_tiff_file_to_pixmaps(
 
 #[cfg(feature = "tiff")]
 mod tiff_ingest {
-    //! TIFF → RGBA [`Pixmap`] normalization (#694 slice 2).
+    //! TIFF → RGBA [`Pixmap`] normalization (#694 slices 2–3).
     //!
     //! The `tiff` crate handles 8/16-bit gray, RGB, RGBA, and CMYK samples.
     //! Sub-byte grayscale (`Gray(1|2|4)`) and palette images go through a raw
     //! strip reader here: tiff 0.9 `read_image` returns unexpanded bytes for
     //! sub-byte samples and rejects palette color maps outright.
 
+    use std::borrow::Cow;
     use std::io::Cursor;
     use std::path::Path;
 
@@ -462,11 +463,20 @@ mod tiff_ingest {
     const PHOTOMETRIC_BLACK_IS_ZERO: u16 = 1;
     const PHOTOMETRIC_PALETTE: u16 = 3;
 
+    const COMPRESSION_NONE: u16 = 1;
+    const COMPRESSION_G4: u16 = 4;
+    const COMPRESSION_PACKBITS: u16 = 32773;
+    /// T6Options (tag 293) bit 1: the optional T.6 uncompressed mode, which
+    /// the shared `smmr` decoder does not implement.
+    const T6_UNCOMPRESSED_MODE: u16 = 0b10;
+    const TAG_T6_OPTIONS: u16 = 293;
+
     /// Raw strip reader for the layouts tiff 0.9 mishandles: sub-byte
     /// grayscale (bilevel, 2-bit, 4-bit) and palette images (any depth ≤ 8).
     ///
-    /// Only uncompressed, chunky, MSB-first, strip-organized files are
-    /// accepted; anything else gets a targeted error naming the limitation.
+    /// Accepts uncompressed, PackBits, and (bilevel-only) CCITT G4 strips in
+    /// chunky MSB-first order; anything else gets a targeted error naming the
+    /// limitation.
     fn decode_raw_page(
         decoder: &mut FileDecoder<'_>,
         file_bytes: &[u8],
@@ -494,15 +504,16 @@ mod tiff_ingest {
         let planar = tag_u16(decoder, Tag::PlanarConfiguration, 1)?;
         let fill_order = tag_u16(decoder, Tag::FillOrder, 1)?;
 
-        if compression != 1 {
+        if !matches!(
+            compression,
+            COMPRESSION_NONE | COMPRESSION_G4 | COMPRESSION_PACKBITS
+        ) {
             let name = match compression {
                 2 => "CCITT RLE",
                 3 => "CCITT G3",
-                4 => "CCITT G4",
                 5 => "LZW",
                 7 => "JPEG",
                 8 => "Deflate",
-                32773 => "PackBits",
                 _ => "unknown",
             };
             return Err(ctx(format!(
@@ -528,6 +539,24 @@ mod tiff_ingest {
         }
         if decoder.find_tag(Tag::TileWidth).ok().flatten().is_some() {
             return Err(ctx("tiled bilevel/palette TIFF is not supported".into()));
+        }
+        if compression == COMPRESSION_G4 {
+            if bits != 1 {
+                return Err(ctx(format!(
+                    "CCITT G4 TIFF must be bilevel, got {bits} bits per sample"
+                )));
+            }
+            if photometric == PHOTOMETRIC_PALETTE {
+                return Err(ctx(
+                    "palette TIFF with CCITT G4 compression is not supported".into(),
+                ));
+            }
+            let t6 = tag_u16(decoder, Tag::Unknown(TAG_T6_OPTIONS), 0)?;
+            if t6 & T6_UNCOMPRESSED_MODE != 0 {
+                return Err(ctx(
+                    "CCITT G4 TIFF with T6Options uncompressed mode is not supported".into(),
+                ));
+            }
         }
 
         let palette = match photometric {
@@ -572,7 +601,7 @@ mod tiff_ingest {
 
         // TIFF rows are padded to a whole byte per row.
         let row_bytes = (w as usize * bits as usize).div_ceil(8);
-        let mut rows: Vec<&[u8]> = Vec::with_capacity(h as usize);
+        let mut strips: Vec<(Cow<'_, [u8]>, usize)> = Vec::with_capacity(offsets.len());
         for (i, (&off, &len)) in offsets.iter().zip(&counts).enumerate() {
             let strip_rows = (h as usize)
                 .saturating_sub(i * rows_per_strip as usize)
@@ -586,13 +615,30 @@ mod tiff_ingest {
                 .filter(|&e| e <= file_bytes.len())
                 .ok_or_else(|| ctx("TIFF strip extends past end of file".into()))?;
             let strip = &file_bytes[start..end];
-            if strip.len() < need {
-                return Err(ctx(format!(
-                    "TIFF strip {i} holds {} bytes, expected at least {need}",
-                    strip.len()
-                )));
-            }
-            for r in 0..strip_rows {
+            let unpacked: Cow<'_, [u8]> = match compression {
+                COMPRESSION_PACKBITS => Cow::Owned(
+                    unpackbits(strip, need)
+                        .map_err(|e| ctx(format!("TIFF strip {i} PackBits: {e}")))?,
+                ),
+                COMPRESSION_G4 => Cow::Owned(
+                    decode_g4_strip(strip, w as usize, strip_rows, row_bytes)
+                        .map_err(|e| ctx(format!("TIFF strip {i} CCITT G4: {e}")))?,
+                ),
+                _ => {
+                    if strip.len() < need {
+                        return Err(ctx(format!(
+                            "TIFF strip {i} holds {} bytes, expected at least {need}",
+                            strip.len()
+                        )));
+                    }
+                    Cow::Borrowed(strip)
+                }
+            };
+            strips.push((unpacked, strip_rows));
+        }
+        let mut rows: Vec<&[u8]> = Vec::with_capacity(h as usize);
+        for (strip, strip_rows) in &strips {
+            for r in 0..*strip_rows {
                 rows.push(&strip[r * row_bytes..(r + 1) * row_bytes]);
             }
         }
@@ -640,6 +686,69 @@ mod tiff_ingest {
             height: h,
             data,
         })
+    }
+
+    /// Decode one CCITT G4 strip into MSB-first packed bilevel rows.
+    ///
+    /// Fax black always packs as sample 1, independent of photometric: the
+    /// shared sample→gray mapping then renders WhiteIsZero normally and
+    /// BlackIsZero inverted, matching libtiff.
+    fn decode_g4_strip(
+        strip: &[u8],
+        width: usize,
+        strip_rows: usize,
+        row_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        let rows =
+            crate::smmr::decode_g4_rows(strip, width, strip_rows).map_err(|e| e.to_string())?;
+        let mut packed = vec![0u8; strip_rows * row_bytes];
+        for (r, row) in rows.iter().enumerate() {
+            for (x, &black) in row.iter().enumerate() {
+                if black {
+                    packed[r * row_bytes + x / 8] |= 0x80 >> (x % 8);
+                }
+            }
+        }
+        Ok(packed)
+    }
+
+    /// Expand PackBits (TIFF spec §9) data to exactly `expected` bytes.
+    fn unpackbits(src: &[u8], expected: usize) -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(expected);
+        let mut i = 0;
+        while out.len() < expected {
+            let Some(&ctl) = src.get(i) else {
+                return Err(format!(
+                    "data ended after {} of {expected} bytes",
+                    out.len()
+                ));
+            };
+            i += 1;
+            let ctl = ctl as i8;
+            if ctl >= 0 {
+                let n = ctl as usize + 1;
+                let lit = src
+                    .get(i..i + n)
+                    .ok_or_else(|| format!("literal run of {n} bytes is truncated"))?;
+                out.extend_from_slice(lit);
+                i += n;
+            } else if ctl != -128 {
+                // -128 is a no-op filler byte.
+                let n = (1 - ctl as isize) as usize;
+                let &b = src
+                    .get(i)
+                    .ok_or_else(|| "repeat run is truncated".to_string())?;
+                i += 1;
+                out.extend(std::iter::repeat_n(b, n));
+            }
+        }
+        if out.len() != expected {
+            return Err(format!(
+                "expanded to {} bytes, expected {expected}",
+                out.len()
+            ));
+        }
+        Ok(out)
     }
 }
 
