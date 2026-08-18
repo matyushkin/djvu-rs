@@ -94,12 +94,17 @@ RGBA route too.
 
 ## Orientation
 
-EXIF/TIFF orientation tags are **not** applied at ingest in slice 1. Pages are
-decoded in stored raster order; rotation belongs to a later slice.
+The TIFF Orientation tag (274, values 1–8) is applied **exactly once**, at
+ingest, per page — the `tiff` crate itself never applies it. Both the RGBA
+route and the bilevel fast path rotate/mirror identically; orientations 5–8
+swap page dimensions and make the stored YResolution the visual horizontal
+density for the DPI mapping. Out-of-range values are treated as upright
+(libtiff-compatible). JPEG EXIF orientation is **not** applied yet (follow-up
+below); PNG has no standard orientation metadata.
 
 ## Planned follow-ups (#694)
 
 - CMYK JPEG input
-- EXIF/TIFF orientation applied exactly once
+- JPEG EXIF orientation applied exactly once
 - Configurable alpha compositing CLI flag
 - Explicit ICC preserve/reject/transform modes
