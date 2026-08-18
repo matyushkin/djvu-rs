@@ -190,6 +190,10 @@ fn expand_png16_to_rgba(
 /// Grayscale, RGB, CMYK, and YCCK (Adobe APP14) sources all decode to RGB;
 /// CMYK/YCCK use the same profile-free `(255 − ink) · (255 − K) / 255` mix
 /// as CMYK TIFF ingest (see `docs/encoder-ingestion.md`).
+///
+/// The EXIF orientation (tag 274, values 1–8) is applied exactly once here —
+/// `zune-jpeg` itself never applies it. Orientations 5–8 swap the reported
+/// width and height; malformed or out-of-range values mean upright.
 pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -208,6 +212,7 @@ pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::er
     let rgb = decoder
         .decode()
         .map_err(|e| format!("{}: JPEG decode error: {e:?}", path.display()))?;
+    let orientation = decoder.exif().map_or(1, |exif| exif_orientation(exif));
     let pixel_count = w * h;
     // zune-jpeg returns packed RGB; convert to RGBA with alpha = 255.
     let rgb = if rgb.len() >= pixel_count * 3 {
@@ -224,11 +229,14 @@ pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::er
         data[i * 4 + 2] = chunk[2];
         data[i * 4 + 3] = 255;
     }
-    Ok(Pixmap {
-        width: w as u32,
-        height: h as u32,
-        data,
-    })
+    Ok(orient_pixmap(
+        Pixmap {
+            width: w as u32,
+            height: h as u32,
+            data,
+        },
+        orientation,
+    ))
 }
 
 /// Decode the first page of a TIFF file at `path` into a [`Pixmap`] using the
@@ -295,6 +303,100 @@ pub fn decode_tiff_file_to_bitmaps(
     tiff_ingest::decode_bilevel_pages(path)
 }
 
+// ── Orientation (shared by TIFF tag 274 and JPEG EXIF) ───────────────────────
+//
+// EXIF inherited TIFF's Orientation tag, so both use the same 1–8 mapping.
+// Ingest applies it exactly once; out-of-range values mean upright.
+
+/// Oriented page dimensions: orientations 5–8 swap width and height.
+fn oriented_dims(o: u16, w: u32, h: u32) -> (u32, u32) {
+    if (5..=8).contains(&o) { (h, w) } else { (w, h) }
+}
+
+/// Source pixel for upright destination pixel (x, y) under TIFF/EXIF
+/// orientation `o`; (w, h) are the *stored* dimensions.
+fn source_pos(o: u16, w: u32, h: u32, x: u32, y: u32) -> (u32, u32) {
+    match o {
+        2 => (w - 1 - x, y),         // mirrored horizontally
+        3 => (w - 1 - x, h - 1 - y), // rotated 180°
+        4 => (x, h - 1 - y),         // mirrored vertically
+        5 => (y, x),                 // transposed
+        6 => (y, h - 1 - x),         // rotated 90° clockwise
+        7 => (w - 1 - y, h - 1 - x), // anti-transposed
+        8 => (w - 1 - y, x),         // rotated 90° counter-clockwise
+        _ => (x, y),                 // 1: upright
+    }
+}
+
+fn orient_pixmap(pm: Pixmap, o: u16) -> Pixmap {
+    if o == 1 {
+        return pm;
+    }
+    let (w, h) = (pm.width, pm.height);
+    let (dw, dh) = oriented_dims(o, w, h);
+    let mut data = vec![0u8; pm.data.len()];
+    for y in 0..dh {
+        for x in 0..dw {
+            let (sx, sy) = source_pos(o, w, h, x, y);
+            let s = ((sy * w + sx) * 4) as usize;
+            let d = ((y * dw + x) * 4) as usize;
+            data[d..d + 4].copy_from_slice(&pm.data[s..s + 4]);
+        }
+    }
+    Pixmap {
+        width: dw,
+        height: dh,
+        data,
+    }
+}
+
+/// EXIF orientation from raw EXIF bytes starting at the TIFF header (what
+/// `zune-jpeg` returns from its APP1 parse). Lenient: any malformed
+/// structure, wrong entry type, or out-of-range value falls back to 1.
+fn exif_orientation(exif: &[u8]) -> u16 {
+    fn parse(exif: &[u8]) -> Option<u16> {
+        let le = match exif.get(0..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let u16_at = |o: usize| -> Option<u16> {
+            let b: [u8; 2] = exif.get(o..o + 2)?.try_into().ok()?;
+            Some(if le {
+                u16::from_le_bytes(b)
+            } else {
+                u16::from_be_bytes(b)
+            })
+        };
+        let u32_at = |o: usize| -> Option<u32> {
+            let b: [u8; 4] = exif.get(o..o + 4)?.try_into().ok()?;
+            Some(if le {
+                u32::from_le_bytes(b)
+            } else {
+                u32::from_be_bytes(b)
+            })
+        };
+        if u16_at(2)? != 42 {
+            return None;
+        }
+        let ifd = usize::try_from(u32_at(4)?).ok()?;
+        let count = usize::from(u16_at(ifd)?);
+        for i in 0..count {
+            let entry = ifd.checked_add(2 + i * 12)?;
+            if u16_at(entry)? == 274 {
+                // Must be a single SHORT; its value sits in the first two
+                // bytes of the inline value field.
+                if u16_at(entry + 2)? != 3 || u32_at(entry + 4)? != 1 {
+                    return None;
+                }
+                return u16_at(entry + 8);
+            }
+        }
+        None
+    }
+    parse(exif).filter(|o| (1..=8).contains(o)).unwrap_or(1)
+}
+
 #[cfg(feature = "tiff")]
 mod tiff_ingest {
     //! TIFF → RGBA [`Pixmap`] normalization (#694 slices 2–3).
@@ -353,47 +455,7 @@ mod tiff_ingest {
         }
     }
 
-    /// Oriented page dimensions: orientations 5–8 swap width and height.
-    fn oriented_dims(o: u16, w: u32, h: u32) -> (u32, u32) {
-        if (5..=8).contains(&o) { (h, w) } else { (w, h) }
-    }
-
-    /// Source pixel for upright destination pixel (x, y) under TIFF
-    /// orientation `o`; (w, h) are the *stored* dimensions.
-    fn source_pos(o: u16, w: u32, h: u32, x: u32, y: u32) -> (u32, u32) {
-        match o {
-            2 => (w - 1 - x, y),         // mirrored horizontally
-            3 => (w - 1 - x, h - 1 - y), // rotated 180°
-            4 => (x, h - 1 - y),         // mirrored vertically
-            5 => (y, x),                 // transposed
-            6 => (y, h - 1 - x),         // rotated 90° clockwise
-            7 => (w - 1 - y, h - 1 - x), // anti-transposed
-            8 => (w - 1 - y, x),         // rotated 90° counter-clockwise
-            _ => (x, y),                 // 1: upright
-        }
-    }
-
-    fn orient_pixmap(pm: Pixmap, o: u16) -> Pixmap {
-        if o == 1 {
-            return pm;
-        }
-        let (w, h) = (pm.width, pm.height);
-        let (dw, dh) = oriented_dims(o, w, h);
-        let mut data = vec![0u8; pm.data.len()];
-        for y in 0..dh {
-            for x in 0..dw {
-                let (sx, sy) = source_pos(o, w, h, x, y);
-                let s = ((sy * w + sx) * 4) as usize;
-                let d = ((y * dw + x) * 4) as usize;
-                data[d..d + 4].copy_from_slice(&pm.data[s..s + 4]);
-            }
-        }
-        Pixmap {
-            width: dw,
-            height: dh,
-            data,
-        }
-    }
+    use super::{orient_pixmap, oriented_dims, source_pos};
 
     fn orient_bitmap(bm: Bitmap, o: u16) -> Bitmap {
         if o == 1 {

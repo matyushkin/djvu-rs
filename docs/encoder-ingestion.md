@@ -100,11 +100,16 @@ ingest, per page — the `tiff` crate itself never applies it. Both the RGBA
 route and the bilevel fast path rotate/mirror identically; orientations 5–8
 swap page dimensions and make the stored YResolution the visual horizontal
 density for the DPI mapping. Out-of-range values are treated as upright
-(libtiff-compatible). JPEG EXIF orientation is **not** applied yet (follow-up
-below); PNG has no standard orientation metadata.
+(libtiff-compatible).
+
+JPEG EXIF orientation (the same tag 274, inherited from TIFF, inside the
+APP1 `Exif` segment) is applied **exactly once** too, with the same 1–8
+mapping — `zune-jpeg` exposes the raw EXIF block and never applies it. Both
+EXIF byte orders (`II`/`MM`) are parsed; a malformed EXIF block, a wrong
+entry type, or an out-of-range value means upright. PNG has no standard
+orientation metadata.
 
 ## Planned follow-ups (#694)
 
-- JPEG EXIF orientation applied exactly once
 - Configurable alpha compositing CLI flag
 - Explicit ICC preserve/reject/transform modes
