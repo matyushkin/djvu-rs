@@ -954,6 +954,7 @@ mod tiff_fastpath {
     use super::tiff_slice2::{TiffPage, write_tiff};
     use assert_cmd::Command;
     use djvu_rs::Bitmap;
+    use djvu_rs::ingest::IngestPolicy;
     use djvu_rs::png_io::decode_tiff_file_to_bitmaps;
     use djvu_rs::smmr::encode_g4;
     use std::path::Path;
@@ -980,7 +981,9 @@ mod tiff_fastpath {
         let path = dir.path().join("wz.tif");
         let bm = stair_bitmap(4);
         write_tiff(&path, &[bilevel_page(&bm, 0)]);
-        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        let pages = decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+            .unwrap()
+            .unwrap();
         assert_eq!(pages, vec![bm]);
     }
 
@@ -992,7 +995,9 @@ mod tiff_fastpath {
         // must come out zero after the BlackIsZero inversion.
         let page = TiffPage::gray(12, 2, 1, 1, vec![0xF0, 0x00, 0x00, 0xF0]);
         write_tiff(&path, &[page]);
-        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        let pages = decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+            .unwrap()
+            .unwrap();
         let mut expected = Bitmap::new(12, 2);
         for x in 0..12 {
             expected.set(x, 0, x >= 4); // row 0: samples 1 on 0..4 → white
@@ -1011,7 +1016,9 @@ mod tiff_fastpath {
         page.compression = 4;
         page.strip_byte_counts = Some(vec![stream.len() as u32]);
         write_tiff(&path, &[page]);
-        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        let pages = decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+            .unwrap()
+            .unwrap();
         assert_eq!(pages, vec![bm]);
     }
 
@@ -1020,7 +1027,11 @@ mod tiff_fastpath {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g8.tif");
         write_tiff(&path, &[TiffPage::gray(4, 1, 8, 1, vec![0, 64, 128, 255])]);
-        assert!(decode_tiff_file_to_bitmaps(&path).unwrap().is_none());
+        assert!(
+            decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1035,7 +1046,11 @@ mod tiff_fastpath {
                 TiffPage::gray(4, 1, 8, 1, vec![0, 64, 128, 255]),
             ],
         );
-        assert!(decode_tiff_file_to_bitmaps(&path).unwrap().is_none());
+        assert!(
+            decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1044,7 +1059,9 @@ mod tiff_fastpath {
         let path = dir.path().join("multi.tif");
         let (a, b) = (stair_bitmap(3), stair_bitmap(5));
         write_tiff(&path, &[bilevel_page(&a, 0), bilevel_page(&b, 0)]);
-        let pages = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+        let pages = decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+            .unwrap()
+            .unwrap();
         assert_eq!(pages, vec![a, b]);
     }
 
@@ -1124,6 +1141,7 @@ mod tiff_fastpath {
 mod tiff_orientation {
     use super::tiff_slice2::{TiffPage, write_tiff};
     use djvu_rs::Bitmap;
+    use djvu_rs::ingest::IngestPolicy;
     use djvu_rs::png_io::{decode_tiff_file_to_bitmaps, decode_tiff_file_to_pixmap, tiff_file_dpi};
 
     /// 3×2 gray page (rows `10 20 30` / `40 50 60`) with an Orientation tag.
@@ -1192,7 +1210,9 @@ mod tiff_orientation {
             let mut page = TiffPage::gray(16, 4, 1, 0, bm.data.clone());
             page.extra_tags = vec![(274, 3, 1, o)];
             write_tiff(&path, &[page]);
-            let fast = decode_tiff_file_to_bitmaps(&path).unwrap().unwrap();
+            let fast = decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+                .unwrap()
+                .unwrap();
             let pm = decode_tiff_file_to_pixmap(&path).unwrap();
             assert_eq!(
                 (fast[0].width, fast[0].height),
@@ -1621,5 +1641,126 @@ mod jpeg_cmyk {
         let [r, g, b] = [pm.data[i], pm.data[i + 1], pm.data[i + 2]];
         // Pure cyan survives the lossy IW44 background layer approximately.
         assert!(r < 60 && g > 195 && b > 195, "rendered ({r},{g},{b})");
+    }
+}
+
+mod icc_policy {
+    use assert_cmd::Command;
+    use djvu_rs::ingest::{IccHandling, IngestPolicy};
+    use djvu_rs::png_io::{decode_image_to_pixmap_with_policy, decode_jpeg_file_to_pixmap};
+    use std::path::Path;
+
+    /// Any bytes work: detection keys on presence, not profile validity.
+    const PROFILE: &[u8] = b"not a real ICC profile, presence is what counts";
+
+    fn reject() -> IngestPolicy {
+        IngestPolicy {
+            icc: IccHandling::Reject,
+            ..Default::default()
+        }
+    }
+
+    /// 1×1 gray PNG with an iCCP chunk.
+    fn write_png_with_iccp(path: &Path) {
+        let mut info = png::Info::with_size(1, 1);
+        info.color_type = png::ColorType::Grayscale;
+        info.bit_depth = png::BitDepth::Eight;
+        info.icc_profile = Some(PROFILE.into());
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = png::Encoder::with_info(std::io::BufWriter::new(file), info).unwrap();
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[128]).unwrap();
+    }
+
+    /// 1×1 gray JPEG with an APP2 `ICC_PROFILE` segment (chunk 1 of 1).
+    fn write_jpeg_with_icc(path: &Path) {
+        let mut app2 = b"ICC_PROFILE\0\x01\x01".to_vec();
+        app2.extend_from_slice(PROFILE);
+        let mut encoder = jpeg_encoder::Encoder::new_file(path, 90).unwrap();
+        encoder.add_app_segment(2, &app2).unwrap();
+        encoder
+            .encode(&[128], 1, 1, jpeg_encoder::ColorType::Luma)
+            .unwrap();
+    }
+
+    #[test]
+    fn png_iccp_ignored_by_default_rejected_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.png");
+        write_png_with_iccp(&path);
+        let pm = decode_image_to_pixmap_with_policy(&path, IngestPolicy::default()).unwrap();
+        assert_eq!(pm.data, vec![128, 128, 128, 255]);
+        let err = decode_image_to_pixmap_with_policy(&path, reject()).unwrap_err();
+        assert!(err.to_string().contains("ICC"), "{err}");
+    }
+
+    #[test]
+    fn jpeg_app2_ignored_by_default_rejected_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("j.jpg");
+        write_jpeg_with_icc(&path);
+        assert!(decode_jpeg_file_to_pixmap(&path).is_ok());
+        let err = decode_image_to_pixmap_with_policy(&path, reject()).unwrap_err();
+        assert!(err.to_string().contains("ICC"), "{err}");
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn tiff_icc_tag_ignored_by_default_rejected_on_demand() {
+        use super::tiff_slice2::{TiffPage, write_tiff};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.tif");
+        // Tag 34675 (InterColorProfile), type 7 (UNDEFINED), 4 bytes inline.
+        let mut page = TiffPage::gray(1, 1, 8, 1, vec![128]);
+        page.extra_tags = vec![(34675, 7, 4, u32::from_le_bytes(*b"acsp"))];
+        write_tiff(&path, &[page]);
+        let pm = decode_image_to_pixmap_with_policy(&path, IngestPolicy::default()).unwrap();
+        assert_eq!(pm.data, vec![128, 128, 128, 255]);
+        let err = decode_image_to_pixmap_with_policy(&path, reject()).unwrap_err();
+        assert!(err.to_string().contains("ICC"), "{err}");
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn tiff_bilevel_fast_path_respects_reject() {
+        use super::tiff_slice2::{TiffPage, write_tiff};
+        use djvu_rs::png_io::decode_tiff_file_to_bitmaps;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.tif");
+        let mut page = TiffPage::gray(8, 1, 1, 1, vec![0b1010_1010]);
+        page.extra_tags = vec![(34675, 7, 4, u32::from_le_bytes(*b"acsp"))];
+        write_tiff(&path, &[page]);
+        assert!(
+            decode_tiff_file_to_bitmaps(&path, IngestPolicy::default())
+                .unwrap()
+                .is_some()
+        );
+        let err = decode_tiff_file_to_bitmaps(&path, reject()).unwrap_err();
+        assert!(err.to_string().contains("ICC"), "{err}");
+    }
+
+    #[test]
+    fn cli_icc_reject_refuses_profiled_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("p.png");
+        write_png_with_iccp(&input);
+        let output = dir.path().join("p.djvu");
+        let encode = |icc: &str| {
+            Command::cargo_bin("djvu")
+                .unwrap()
+                .args([
+                    "encode",
+                    input.to_str().unwrap(),
+                    "-o",
+                    output.to_str().unwrap(),
+                    "--icc",
+                    icc,
+                ])
+                .assert()
+        };
+        encode("ignore").success();
+        encode("reject")
+            .failure()
+            .stderr(predicates::str::contains("ICC colour profile"));
     }
 }

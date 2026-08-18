@@ -238,6 +238,12 @@ enum Cmd {
         /// preserve the alpha channel unchanged.
         #[arg(long, value_parser = parse_background_color)]
         background: Option<(u8, u8, u8)>,
+        /// Embedded ICC colour profile handling. DjVu cannot store a
+        /// profile and no colour management is applied, so 'ignore'
+        /// (default) decodes pixel bytes as-is and drops the profile;
+        /// 'reject' fails with an explicit error on profiled input.
+        #[arg(long, default_value = "ignore", value_enum)]
+        icc: IccArg,
         /// Mask binarization for layered quality/archival encodes.
         #[arg(long, default_value = "fixed", value_enum)]
         binarization: BinarizationArg,
@@ -368,6 +374,14 @@ enum BilevelCodecArg {
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum IccArg {
+    /// Decode without colour management; the embedded profile is dropped.
+    Ignore,
+    /// Fail with an explicit error when the input embeds an ICC profile.
+    Reject,
+}
+
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum BinarizationArg {
     /// Fixed BT.601 luminance threshold.
     Fixed,
@@ -466,6 +480,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             quality,
             bilevel_codec,
             background,
+            icc,
             binarization,
             sauvola_window,
             sauvola_k,
@@ -481,6 +496,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 quality,
                 bilevel_codec,
                 background,
+                icc,
             },
             EncodeSegmentArgs {
                 binarization,
@@ -1798,15 +1814,21 @@ fn cmd_encode(
         quality,
         bilevel_codec,
         background,
+        icc,
     } = profile_args;
     // #694: --background composites transparent PNG/TIFF pixels onto a solid
-    // colour at decode time; the default preserves the alpha channel.
+    // colour at decode time (the default preserves the alpha channel);
+    // --icc reject refuses ICC-profiled input instead of dropping the profile.
     let policy = djvu_rs::ingest::IngestPolicy {
         alpha: match background {
             Some((red, green, blue)) => {
                 djvu_rs::ingest::AlphaCompositing::CompositeOnBackground { red, green, blue }
             }
             None => djvu_rs::ingest::AlphaCompositing::Preserve,
+        },
+        icc: match icc {
+            IccArg::Ignore => djvu_rs::ingest::IccHandling::Ignore,
+            IccArg::Reject => djvu_rs::ingest::IccHandling::Reject,
         },
         ..Default::default()
     };
@@ -1920,7 +1942,7 @@ fn cmd_encode(
     #[cfg(feature = "tiff")]
     if input_is_tiff(input)
         && matches!(quality, EncodeQualityArg::Auto | EncodeQualityArg::Lossless)
-        && let Some(bitmaps) = djvu_rs::png_io::decode_tiff_file_to_bitmaps(input)?
+        && let Some(bitmaps) = djvu_rs::png_io::decode_tiff_file_to_bitmaps(input, policy)?
     {
         if matches!(quality, EncodeQualityArg::Auto) {
             eprintln!("auto profile: Lossless (1-bit TIFF)");
@@ -2165,6 +2187,7 @@ struct EncodeProfileArgs {
     quality: EncodeQualityArg,
     bilevel_codec: BilevelCodecArg,
     background: Option<(u8, u8, u8)>,
+    icc: IccArg,
 }
 
 /// Parse `--background`: `RRGGBB` hex with optional `#`, or `white`/`black`.

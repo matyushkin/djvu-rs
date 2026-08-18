@@ -40,6 +40,24 @@ impl AlphaCompositing {
     }
 }
 
+/// What to do when an input file embeds an ICC colour profile
+/// (CLI: `djvu encode --icc <MODE>`).
+///
+/// DjVu has no container for ICC profiles and ingest applies no colour
+/// management, so a profile can never survive into the output. The policy
+/// makes that explicit instead of silent: `Ignore` decodes the pixel bytes
+/// as-is (the long-standing default), `Reject` refuses profiled input with
+/// an error naming the profile. A future `Transform` mode would need a
+/// colour-management engine and is out of scope (#694).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IccHandling {
+    /// Decode without colour management; the embedded profile is dropped.
+    #[default]
+    Ignore,
+    /// Fail with an explicit error when the input embeds an ICC profile.
+    Reject,
+}
+
 /// Deterministic reduction of >8-bit samples to 8-bit channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DepthDownconversion {
@@ -54,6 +72,7 @@ pub enum DepthDownconversion {
 pub struct IngestPolicy {
     pub alpha: AlphaCompositing,
     pub depth_downconversion: DepthDownconversion,
+    pub icc: IccHandling,
 }
 
 impl IngestPolicy {
@@ -80,6 +99,7 @@ mod tests {
     fn default_policy_preserves_alpha_and_truncates_depth() {
         let policy = IngestPolicy::default();
         assert_eq!(policy.alpha, AlphaCompositing::Preserve);
+        assert_eq!(policy.icc, IccHandling::Ignore);
         assert_eq!(
             policy.depth_downconversion,
             DepthDownconversion::TruncateHighByte
