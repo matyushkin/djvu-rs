@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787033497839,
+  "lastUpdate": 1787054114410,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16378,6 +16378,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51783000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5ec6a12db4251e567f948a6c9767a5c7704ab8cc",
+          "message": "feat(ingest): map TIFF X/YResolution tags to default DPI (#694) (#758)\n\n--dpi is now optional. Without it, a TIFF input's XResolution\n(YResolution as fallback) + ResolutionUnit tags set the INFO dpi:\ninch directly, cm converted (x2.54), rationals honored, sane range\n25..=6000. ResolutionUnit 1 (no absolute unit) and missing/unusable\ntags keep the historical 300 default. An explicit --dpi always wins.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T16:29:50+05:00",
+          "tree_id": "5d77fd9c406df1fdb012be362d5c3d896232acfb",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/5ec6a12db4251e567f948a6c9767a5c7704ab8cc"
+        },
+        "date": 1787054113069,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8288000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49403000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47813000,
             "range": "± 0",
             "unit": "ns/iter"
           }
