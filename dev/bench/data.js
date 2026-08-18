@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787078719285,
+  "lastUpdate": 1787080253992,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16618,6 +16618,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 48202000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "70908a499184de90537b8151cf9d7e602c70ebeb",
+          "message": "feat(ingest): apply JPEG EXIF orientation exactly once at ingest (#694) (#763)\n\nEXIF inherited TIFF's Orientation tag (274, values 1-8), so the pixmap\nreorientation helpers move out of the tiff_ingest module to the shared\ntop level of png_io. decode_jpeg_file_to_pixmap now reads the raw EXIF\nblock zune-jpeg exposes (it never applies orientation itself), parses\ntag 274 from IFD0 in either byte order, and reorients the decoded page\nonce. Malformed EXIF, a wrong entry type, or an out-of-range value\nfalls back to upright, matching the TIFF ingest behaviour.\n\nFour new tests: all eight orientations against hand-written index\npermutations, big-endian EXIF, malformed/out-of-range payloads, and a\nCLI round trip checking the swapped page dimensions.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T23:41:37+05:00",
+          "tree_id": "0c3b13d6da509c4e434e544c6e824db63b9cc094",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/70908a499184de90537b8151cf9d7e602c70ebeb"
+        },
+        "date": 1787080251960,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 166000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8250999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49723000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47768000,
             "range": "± 0",
             "unit": "ns/iter"
           }
