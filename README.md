@@ -20,6 +20,7 @@ specification.
 | Convert DjVu → PDF, EPUB, TIFF, PNG, CBZ | [`djvu render`](#cli) or [`djvu_to_pdf`](#pdf-export) / [`djvu_to_epub`](#epub-export) / [`djvu_to_tiff`](#tiff-export) |
 | Extract text (plain, hOCR, ALTO XML) | [`djvu text`](#cli) or [`page.text()`](#text-extraction), [`to_hocr` / `to_alto`](#hocr-and-alto-xml-export) |
 | Render pages to RGBA pixels | [`render_pixmap`](#quick-start) — sync, [async](#async-render), or [parallel](#feature-flags) |
+| Build a zoomable viewer (tiles) | [`djvu_tile`](#tile-rendering) — cached, prefetchable, cancellable tile rendering |
 | Show DjVu in the browser | [WebAssembly bindings](#webassembly), incl. lazy HTTP-Range loading |
 | Read DjVu from Python | `pip install djvu-rs` — [PyO3 bindings](#python) |
 | Create DjVu from images (PNG/JPEG/TIFF) | [`djvu encode`](#cli) or [`PageEncoder`](#encoding--low-level-api) |
@@ -138,6 +139,8 @@ djvu split book.djvu --pages 10-25 --output chapter.djvu
 djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup --dry-run
 djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup
 djvu optimize book.djvu --output optimized.djvu --preset archival --target-size 26214400
+# (--max-ssim-loss is reserved for the planned archival re-encode; the current
+#  lossless cleanup is pixel-exact by construction and reports this)
 djvu optimize book.djvu --output optimized.djvu --max-ssim-loss 0.001
 
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
@@ -432,6 +435,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Tile rendering
+
+For viewer engines: [`djvu_tile`](https://docs.rs/djvu-rs/latest/djvu_rs/djvu_tile/)
+renders a page as a display-space tile grid over the region renderer. Tile
+pixels are byte-identical to the same rectangle of a full-page render, in any
+request order.
+
+```rust,no_run
+use djvu_rs::{DjVuDocument, djvu_render::RenderOptions};
+use djvu_rs::djvu_tile::{TileLayout, render_tile_cached};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read("book.djvu")?;
+    let doc = DjVuDocument::parse(&data)?;
+    let page = doc.page(0)?;
+
+    let opts = RenderOptions { width: 2400, height: 3200, ..Default::default() };
+    let layout = TileLayout::new(page, &opts, 256)?;
+
+    for row in 0..layout.rows() {
+        for col in 0..layout.cols() {
+            let tile = render_tile_cached(page, &opts, 256, col, row)?;
+            // tile.data — RGBA bytes of exactly this tile rectangle
+            let _ = tile;
+        }
+    }
+    Ok(())
+}
+```
+
+`render_tile_cached` memoizes composited tiles per page; the cache is
+tile-granular and controllable (`tile_cache_usage`, `set_tile_cache_budget`,
+`clear_tile_cache`, `invalidate_tile_region`). `render_tile_with` +
+`TileRenderControls` / `TileCancelToken` add progressive quality steps and
+cooperative cancellation, and with the `parallel` feature `prefetch_tiles` /
+`prefetch_tiles_cancellable` warm the cache in the background with a bounded
+worker pool. The full contract lives in
+[`docs/tile-rendering.md`](docs/tile-rendering.md).
+
 ## Encoding & low-level API
 
 ### JB2 bilevel image encoder
@@ -550,6 +592,16 @@ indirect (each file is renamed atomically, but the multi-file commit as a
 whole is not transactional). Opening an indirect index directly with
 `DjVuDocumentMut::from_bytes` and calling `page_mut` remains unsupported; see
 [`docs/indirect-djvm-mutation.md`](docs/indirect-djvm-mutation.md).
+
+The reverse direction is covered too: `djvm::to_indirect` splits a bundled
+`FORM:DJVM` into an indirect index plus standalone component files, keeping
+component ids, names, titles, and the document `NAVM` stable. Related
+bundled-document operations in the same module: `djvm::remove_pages` deletes
+pages with an explicit `UnreachablePolicy` (preserve or garbage-collect shared
+components that lose their last including page),
+`djvm::dedup_shared_components` merges byte-identical shared components, and
+`djvm::DjvmStreamWriter` writes a bundle to any `io::Write` sink with memory
+bounded to the spooled component being appended.
 
 ### Typed document editing
 
@@ -687,7 +739,9 @@ Honest boundaries, so you can decide fast:
   and single-page `FORM:DJVU` only; indirect returns a clean `Unsupported`
   error.
 - **`create_indirect` does not emit shared `DJVI` dictionary components** —
-  build a bundled document with `djvu merge` when pages share a dictionary.
+  build a bundled document with `djvu merge` when pages share a dictionary, or
+  convert an existing bundled document with `djvm::to_indirect`, which
+  preserves shared components.
 - **Encoder size parity is corpus- and profile-dependent.** Run the
   reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
   the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
@@ -767,7 +821,10 @@ combinations and targets), and is enforced in CI. In short:
   [`tests/panic_free_corpus.rs`](tests/panic_free_corpus.rs), proptests, and
   libFuzzer/OSS-Fuzz targets.
 - **Resource limits** — decode/render inherit documented, bounded memory/work
-  ceilings; exceeding one returns a typed error naming the codec and axis. See
+  ceilings; exceeding one returns a typed error naming the codec and axis. The
+  ceilings are caller-configurable: pass `ResourceLimits` via `ParseOptions` to
+  `DjVuDocument::parse_with_options` (pages inherit them at render time), or
+  use `render_pixmap_with_limits` / `render_into_with_limits` directly. See
   [`SECURITY.md`](SECURITY.md#decode-time-resource-ceilings).
 
 ## Performance
