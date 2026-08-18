@@ -39,7 +39,8 @@ pub fn decode_png_to_pixmap_with_policy(
     let frame = reader.next_frame(&mut buf)?;
     buf.truncate(frame.buffer_size());
 
-    let data = expand_png_to_rgba(path, &info, color, depth, &buf, policy)?;
+    let mut data = expand_png_to_rgba(path, &info, color, depth, &buf, policy)?;
+    policy.alpha.apply(&mut data);
     Ok(Pixmap {
         width,
         height,
@@ -432,7 +433,9 @@ mod tiff_ingest {
         loop {
             let orientation = page_orientation(&mut decoder);
             let pm = decode_current_page(&mut decoder, &bytes, path, policy)?;
-            pages.push(orient_pixmap(pm, orientation));
+            let mut pm = orient_pixmap(pm, orientation);
+            policy.alpha.apply(&mut pm.data);
+            pages.push(pm);
             if limit.is_some_and(|n| pages.len() >= n) || !decoder.more_images() {
                 return Ok(pages);
             }
@@ -1087,17 +1090,29 @@ mod tiff_ingest {
 /// - `\xFF\xD8` → JPEG
 /// - `II\x2A` / `MM\x00\x2A` → TIFF (feature-gated)
 pub fn decode_image_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    decode_image_to_pixmap_with_policy(path, IngestPolicy::default())
+}
+
+/// [`decode_image_to_pixmap`] with an explicit [`IngestPolicy`].
+///
+/// JPEG never carries an alpha channel, so its decode is unaffected by
+/// [`AlphaCompositing`](crate::ingest::AlphaCompositing); the policy still
+/// controls PNG and TIFF inputs.
+pub fn decode_image_to_pixmap_with_policy(
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<Pixmap, Box<dyn std::error::Error>> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
 
     match ext.as_deref() {
-        Some("png") => return decode_png_to_pixmap(path),
+        Some("png") => return decode_png_to_pixmap_with_policy(path, policy),
         Some("jpg") | Some("jpeg") => return decode_jpeg_file_to_pixmap(path),
         Some("tif") | Some("tiff") => {
             #[cfg(feature = "tiff")]
-            return decode_tiff_file_to_pixmap(path);
+            return decode_tiff_file_to_pixmap_with_policy(path, policy);
             #[cfg(not(feature = "tiff"))]
             return Err(format!(
                 "{}: TIFF input requires the 'tiff' feature \
@@ -1120,14 +1135,14 @@ pub fn decode_image_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error:
     };
 
     if header.starts_with(b"\x89PNG") {
-        return decode_png_to_pixmap(path);
+        return decode_png_to_pixmap_with_policy(path, policy);
     }
     if header.starts_with(b"\xFF\xD8") {
         return decode_jpeg_file_to_pixmap(path);
     }
     if header.starts_with(b"II\x2A\x00") || header.starts_with(b"MM\x00\x2A") {
         #[cfg(feature = "tiff")]
-        return decode_tiff_file_to_pixmap(path);
+        return decode_tiff_file_to_pixmap_with_policy(path, policy);
         #[cfg(not(feature = "tiff"))]
         return Err(format!(
             "{}: TIFF input requires the 'tiff' feature \

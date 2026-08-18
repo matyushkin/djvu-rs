@@ -232,6 +232,12 @@ enum Cmd {
         /// Bilevel mask codec for single-image lossless encodes. Default: jb2.
         #[arg(long, default_value = "jb2", value_enum)]
         bilevel_codec: BilevelCodecArg,
+        /// Composite transparent pixels onto this background colour at
+        /// decode time (PNG/TIFF alpha; JPEG never has alpha). Accepts
+        /// RRGGBB hex with optional '#', or 'white'/'black'. Default:
+        /// preserve the alpha channel unchanged.
+        #[arg(long, value_parser = parse_background_color)]
+        background: Option<(u8, u8, u8)>,
         /// Mask binarization for layered quality/archival encodes.
         #[arg(long, default_value = "fixed", value_enum)]
         binarization: BinarizationArg,
@@ -459,6 +465,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dpi,
             quality,
             bilevel_codec,
+            background,
             binarization,
             sauvola_window,
             sauvola_k,
@@ -473,6 +480,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             EncodeProfileArgs {
                 quality,
                 bilevel_codec,
+                background,
             },
             EncodeSegmentArgs {
                 binarization,
@@ -1789,7 +1797,19 @@ fn cmd_encode(
     let EncodeProfileArgs {
         quality,
         bilevel_codec,
+        background,
     } = profile_args;
+    // #694: --background composites transparent PNG/TIFF pixels onto a solid
+    // colour at decode time; the default preserves the alpha channel.
+    let policy = djvu_rs::ingest::IngestPolicy {
+        alpha: match background {
+            Some((red, green, blue)) => {
+                djvu_rs::ingest::AlphaCompositing::CompositeOnBackground { red, green, blue }
+            }
+            None => djvu_rs::ingest::AlphaCompositing::Preserve,
+        },
+        ..Default::default()
+    };
     let EncodeBundleArgs {
         shared_dict_pages,
         thumbnails,
@@ -1822,7 +1842,7 @@ fn cmd_encode(
         let quality = if matches!(quality, EncodeQualityArg::Auto) {
             let mut all_bilevel = true;
             for path in &entries {
-                let pm = djvu_rs::png_io::decode_image_to_pixmap(path)?;
+                let pm = djvu_rs::png_io::decode_image_to_pixmap_with_policy(path, policy)?;
                 if djvu_rs::djvu_encode::classify_content(&pm)
                     != djvu_rs::djvu_encode::EncodeQuality::Lossless
                 {
@@ -1847,7 +1867,7 @@ fn cmd_encode(
             }
             let mut masks = Vec::with_capacity(entries.len());
             for path in &entries {
-                let pixmap = djvu_rs::png_io::decode_image_to_pixmap(path)?;
+                let pixmap = djvu_rs::png_io::decode_image_to_pixmap_with_policy(path, policy)?;
                 let seg = segment_page(&pixmap, &SegmentOptions::default());
                 masks.push(seg.mask);
             }
@@ -1867,7 +1887,9 @@ fn cmd_encode(
         // honoring --shared-dict-pages (was: per-page independent masks).
         let mut pixmaps = Vec::with_capacity(entries.len());
         for path in &entries {
-            pixmaps.push(djvu_rs::png_io::decode_image_to_pixmap(path)?);
+            pixmaps.push(djvu_rs::png_io::decode_image_to_pixmap_with_policy(
+                path, policy,
+            )?);
         }
         let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared_with_thumbnails(
             &pixmaps,
@@ -1953,10 +1975,7 @@ fn cmd_encode(
     // directory input.
     #[cfg(feature = "tiff")]
     let tiff_pages: Option<Vec<djvu_rs::Pixmap>> = if input_is_tiff(input) {
-        Some(djvu_rs::png_io::decode_tiff_file_to_pixmaps(
-            input,
-            djvu_rs::ingest::IngestPolicy::default(),
-        )?)
+        Some(djvu_rs::png_io::decode_tiff_file_to_pixmaps(input, policy)?)
     } else {
         None
     };
@@ -1985,10 +2004,10 @@ fn cmd_encode(
     #[cfg(feature = "tiff")]
     let pixmap = match tiff_pages {
         Some(mut pages) => pages.remove(0),
-        None => djvu_rs::png_io::decode_image_to_pixmap(input)?,
+        None => djvu_rs::png_io::decode_image_to_pixmap_with_policy(input, policy)?,
     };
     #[cfg(not(feature = "tiff"))]
-    let pixmap = djvu_rs::png_io::decode_image_to_pixmap(input)?;
+    let pixmap = djvu_rs::png_io::decode_image_to_pixmap_with_policy(input, policy)?;
 
     // --quality auto (#570): pick the profile from cheap pixel statistics.
     let q = if matches!(quality, EncodeQualityArg::Auto) {
@@ -2145,6 +2164,29 @@ struct EncodeBundleArgs {
 struct EncodeProfileArgs {
     quality: EncodeQualityArg,
     bilevel_codec: BilevelCodecArg,
+    background: Option<(u8, u8, u8)>,
+}
+
+/// Parse `--background`: `RRGGBB` hex with optional `#`, or `white`/`black`.
+fn parse_background_color(s: &str) -> Result<(u8, u8, u8), String> {
+    match s.to_ascii_lowercase().as_str() {
+        "white" => return Ok((255, 255, 255)),
+        "black" => return Ok((0, 0, 0)),
+        _ => {}
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() == 6
+        && let Ok(v) = u32::from_str_radix(hex, 16)
+    {
+        return Ok((
+            ((v >> 16) & 0xFF) as u8,
+            ((v >> 8) & 0xFF) as u8,
+            (v & 0xFF) as u8,
+        ));
+    }
+    Err(format!(
+        "invalid colour '{s}' (expected RRGGBB hex, 'white', or 'black')"
+    ))
 }
 
 #[derive(Clone, Copy)]
