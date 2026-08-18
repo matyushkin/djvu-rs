@@ -222,9 +222,10 @@ enum Cmd {
         /// Output DjVu file path.
         #[arg(short, long)]
         output: PathBuf,
-        /// Page DPI stored in the INFO chunk. Default: 300.
-        #[arg(short, long, default_value = "300")]
-        dpi: u16,
+        /// Page DPI stored in the INFO chunk. Default: the input's TIFF
+        /// X/YResolution tags when present, else 300.
+        #[arg(short, long)]
+        dpi: Option<u16>,
         /// Encoding profile.
         #[arg(short, long, default_value = "lossless", value_enum)]
         quality: EncodeQualityArg,
@@ -1757,12 +1758,34 @@ fn cmd_bzz_decode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::
 fn cmd_encode(
     input: &Path,
     output: &Path,
-    dpi: u16,
+    dpi: Option<u16>,
     profile_args: EncodeProfileArgs,
     segment_args: EncodeSegmentArgs,
     bg_bpp: Option<f32>,
     bundle_args: EncodeBundleArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // #694: without an explicit --dpi, a TIFF input's X/YResolution tags set
+    // the INFO dpi; everything else keeps the historical 300 default.
+    #[cfg(feature = "tiff")]
+    let dpi = match dpi {
+        Some(d) => d,
+        None => {
+            let tag_dpi = if input.is_file() && input_is_tiff(input) {
+                djvu_rs::png_io::tiff_file_dpi(input)?
+            } else {
+                None
+            };
+            match tag_dpi {
+                Some(d) => {
+                    eprintln!("dpi {d} (from TIFF resolution tags)");
+                    d
+                }
+                None => 300,
+            }
+        }
+    };
+    #[cfg(not(feature = "tiff"))]
+    let dpi = dpi.unwrap_or(300);
     let EncodeProfileArgs {
         quality,
         bilevel_codec,

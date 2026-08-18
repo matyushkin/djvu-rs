@@ -261,6 +261,20 @@ pub fn decode_tiff_file_to_pixmaps(
     tiff_ingest::decode_pages(path, policy, None)
 }
 
+/// Read the first page's TIFF X/YResolution tags as DPI (dots per inch).
+///
+/// Returns `Ok(None)` when the tags are absent or malformed, when
+/// ResolutionUnit is 1 (no absolute unit), or when the value falls outside
+/// the 25..=6000 range a DjVu INFO chunk sensibly stores. Centimeter
+/// resolutions (unit 3) convert to inches. XResolution wins when both axes
+/// are present — DjVu INFO stores a single DPI.
+///
+/// Requires the `tiff` feature.
+#[cfg(feature = "tiff")]
+pub fn tiff_file_dpi(path: &Path) -> Result<Option<u16>, Box<dyn std::error::Error>> {
+    tiff_ingest::first_page_dpi(path)
+}
+
 #[cfg(feature = "tiff")]
 mod tiff_ingest {
     //! TIFF → RGBA [`Pixmap`] normalization (#694 slices 2–3).
@@ -302,6 +316,45 @@ mod tiff_ingest {
                 .next_image()
                 .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
         }
+    }
+
+    pub(super) fn first_page_dpi(path: &Path) -> Result<Option<u16>, BoxError> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
+            .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+        // ResolutionUnit defaults to 2 (inch); 1 means "no absolute unit".
+        let unit = match decoder.find_tag(Tag::ResolutionUnit) {
+            Ok(Some(v)) => v.into_u16().unwrap_or(2),
+            _ => 2,
+        };
+        if unit == 1 {
+            return Ok(None);
+        }
+        let value = match decoder.find_tag(Tag::XResolution) {
+            Ok(Some(v)) => v,
+            _ => match decoder.find_tag(Tag::YResolution) {
+                Ok(Some(v)) => v,
+                _ => return Ok(None),
+            },
+        };
+        let Ok(parts) = value.into_u32_vec() else {
+            return Ok(None);
+        };
+        let [num, den] = parts[..] else {
+            return Ok(None);
+        };
+        if num == 0 || den == 0 {
+            return Ok(None);
+        }
+        let mut dpi = num as f64 / den as f64;
+        if unit == 3 {
+            dpi *= 2.54; // dots per centimeter → dots per inch
+        }
+        let rounded = dpi.round();
+        if !(25.0..=6000.0).contains(&rounded) {
+            return Ok(None);
+        }
+        Ok(Some(rounded as u16))
     }
 
     fn decode_current_page(
