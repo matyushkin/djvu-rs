@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787082026233,
+  "lastUpdate": 1787083719031,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16714,6 +16714,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47647000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0e5625060b6ef4a9348870ae414dadc49cfe1e5e",
+          "message": "feat(ingest): explicit ICC profile policy via encode --icc (#694) (#765)\n\nAdd IccHandling to IngestPolicy: Ignore (default) decodes pixel bytes as-is\nand drops the embedded profile — the long-standing behaviour, now explicit;\nReject fails with an error naming the source and profile size. DjVu has no\ncontainer for ICC profiles and ingest applies no colour management, so a\nprofile can never survive into the output; the policy makes that explicit\ninstead of silent. A Transform mode would need a colour-management engine\nand stays out of scope.\n\nDetection covers every ingest route: PNG iCCP chunk, JPEG APP2 ICC_PROFILE\nsegment (new decode_jpeg_file_to_pixmap_with_policy, dispatcher now routes\nJPEG through it), TIFF InterColorProfile tag 34675 on every page of the\nRGBA route, and the bilevel fast path (decode_tiff_file_to_bitmaps now\ntakes an IngestPolicy). An unreadable TIFF ICC tag under Reject is an\nerror, not a silent pass.\n\nCLI: `djvu encode --icc <ignore|reject>` (default ignore).\n\nTests: default-ignores + rejects for PNG, JPEG, TIFF, and the bilevel fast\npath, plus CLI end-to-end for both modes. Docs and README updated; the\ninitial #694 target coverage is now complete.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-19T00:42:23+05:00",
+          "tree_id": "84bbd7513c9afaf2088017e7b41e564002f285ce",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0e5625060b6ef4a9348870ae414dadc49cfe1e5e"
+        },
+        "date": 1787083717618,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8778000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53759000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 54615000,
             "range": "± 0",
             "unit": "ns/iter"
           }
