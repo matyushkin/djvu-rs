@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0](https://github.com/matyushkin/djvu-rs/compare/v0.29.0...v0.30.0) (2026-08-18)
+
+
+### Features
+
+* **ingest:** apply JPEG EXIF orientation exactly once at ingest ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#763](https://github.com/matyushkin/djvu-rs/issues/763)) ([70908a4](https://github.com/matyushkin/djvu-rs/commit/70908a499184de90537b8151cf9d7e602c70ebeb))
+* **ingest:** apply TIFF Orientation tag exactly once at ingest ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#760](https://github.com/matyushkin/djvu-rs/issues/760)) ([bf20e3b](https://github.com/matyushkin/djvu-rs/commit/bf20e3b5e28f861a2f772cebc47ce558812cfdf0))
+* **ingest:** configurable alpha compositing via encode --background ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#764](https://github.com/matyushkin/djvu-rs/issues/764)) ([0abae18](https://github.com/matyushkin/djvu-rs/commit/0abae18d5b0ea32f3e3855369ab07b6db2694159))
+* **ingest:** explicit ICC profile policy via encode --icc ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#765](https://github.com/matyushkin/djvu-rs/issues/765)) ([0e56250](https://github.com/matyushkin/djvu-rs/commit/0e5625060b6ef4a9348870ae414dadc49cfe1e5e))
+
 ## [0.29.0](https://github.com/matyushkin/djvu-rs/compare/v0.28.0...v0.29.0) (2026-08-18)
 
 
