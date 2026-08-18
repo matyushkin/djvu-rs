@@ -45,9 +45,20 @@ fast path never expands to RGBA, so both are unaffected.
 
 ### ICC / color profiles
 
-Embedded PNG `iCCP` and similar metadata are **ignored** at ingest in slice 1.
-No silent color-space conversion is applied; sRGB-ish bytes are passed through.
-Future slices may add explicit ICC handling or rejection.
+Explicit policy: [`IccHandling`](../src/ingest.rs), CLI `djvu encode --icc
+<ignore|reject>`. DjVu has no container for ICC profiles and ingest applies
+no colour management, so a profile can never survive into the output; the
+policy makes that explicit instead of silent.
+
+- `ignore` (default): decode the pixel bytes as-is and drop the profile.
+  No colour-space conversion; sRGB-ish bytes pass through.
+- `reject`: fail with an error naming the source (PNG `iCCP` chunk, JPEG
+  APP2 `ICC_PROFILE` segment, or TIFF InterColorProfile tag 34675) and the
+  profile size. All ingest routes enforce it, including the bilevel TIFF
+  fast path; for multipage TIFF every page is checked.
+
+A `transform` mode would need a colour-management engine (LCMS-class) and
+is out of scope for #694.
 
 ## JPEG (current)
 
@@ -119,4 +130,5 @@ orientation metadata.
 
 ## Planned follow-ups (#694)
 
-- Explicit ICC preserve/reject/transform modes
+None — the initial target coverage is complete. An ICC `transform` mode
+(actual colour management) is explicitly out of scope; see above.

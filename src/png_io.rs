@@ -13,7 +13,18 @@
 use std::path::Path;
 
 use crate::Pixmap;
-use crate::ingest::IngestPolicy;
+use crate::ingest::{IccHandling, IngestPolicy};
+
+/// Error for [`IccHandling::Reject`] when `source` embeds an ICC profile.
+fn reject_icc(path: &Path, source: &str, len: usize) -> Box<dyn std::error::Error> {
+    format!(
+        "{}: {source} embeds an ICC colour profile ({len} bytes); \
+         --icc reject refuses profiled input (the default --icc ignore \
+         decodes it without colour management)",
+        path.display()
+    )
+    .into()
+}
 
 /// Decode a PNG file at `path` into a [`Pixmap`] using default ingest policy.
 pub fn decode_png_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
@@ -32,6 +43,11 @@ pub fn decode_png_to_pixmap_with_policy(
     decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info()?;
     let info = reader.info().clone();
+    if policy.icc == IccHandling::Reject
+        && let Some(icc) = &info.icc_profile
+    {
+        return Err(reject_icc(path, "PNG iCCP chunk", icc.len()));
+    }
     let (color, depth) = reader.output_color_type();
     let width = info.width;
     let height = info.height;
@@ -196,6 +212,16 @@ fn expand_png16_to_rgba(
 /// `zune-jpeg` itself never applies it. Orientations 5–8 swap the reported
 /// width and height; malformed or out-of-range values mean upright.
 pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::error::Error>> {
+    decode_jpeg_file_to_pixmap_with_policy(path, IngestPolicy::default())
+}
+
+/// Decode a JPEG file at `path` with an explicit [`IngestPolicy`]. Only the
+/// ICC policy applies here: JPEG never carries alpha and 8-bit baseline
+/// needs no depth down-conversion.
+pub fn decode_jpeg_file_to_pixmap_with_policy(
+    path: &Path,
+    policy: IngestPolicy,
+) -> Result<Pixmap, Box<dyn std::error::Error>> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
 
@@ -205,6 +231,12 @@ pub fn decode_jpeg_file_to_pixmap(path: &Path) -> Result<Pixmap, Box<dyn std::er
     decoder
         .decode_headers()
         .map_err(|e| format!("{}: JPEG header error: {e:?}", path.display()))?;
+    if policy.icc == IccHandling::Reject
+        && let Some(icc) = decoder.icc_profile()
+        && !icc.is_empty()
+    {
+        return Err(reject_icc(path, "JPEG APP2 ICC_PROFILE segment", icc.len()));
+    }
     let info = decoder
         .info()
         .ok_or_else(|| format!("{}: missing JPEG image info", path.display()))?;
@@ -296,12 +328,17 @@ pub fn tiff_file_dpi(path: &Path) -> Result<Option<u16>, Box<dyn std::error::Err
 /// fixed-threshold segmentation builds from the RGBA route: WhiteIsZero
 /// sample 1 → black, BlackIsZero sample 0 → black.
 ///
+/// Only the ICC part of `policy` applies here — 1-bit pages have no alpha
+/// channel and no >8-bit samples, but [`IccHandling::Reject`] still fails
+/// on profiled pages, exactly like the RGBA route.
+///
 /// Requires the `tiff` feature.
 #[cfg(feature = "tiff")]
 pub fn decode_tiff_file_to_bitmaps(
     path: &Path,
+    policy: IngestPolicy,
 ) -> Result<Option<Vec<crate::Bitmap>>, Box<dyn std::error::Error>> {
-    tiff_ingest::decode_bilevel_pages(path)
+    tiff_ingest::decode_bilevel_pages(path, policy)
 }
 
 // ── Orientation (shared by TIFF tag 274 and JPEG EXIF) ───────────────────────
@@ -431,6 +468,7 @@ mod tiff_ingest {
             .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
         let mut pages = Vec::new();
         loop {
+            check_page_icc(&mut decoder, path, policy, pages.len())?;
             let orientation = page_orientation(&mut decoder);
             let pm = decode_current_page(&mut decoder, &bytes, path, policy)?;
             let mut pm = orient_pixmap(pm, orientation);
@@ -442,6 +480,37 @@ mod tiff_ingest {
             decoder
                 .next_image()
                 .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
+        }
+    }
+
+    /// [`IccHandling::Reject`]: fail when the current page carries an ICC
+    /// profile (tag 34675, InterColorProfile). An unreadable tag counts as
+    /// present — Reject must not silently pass what it cannot inspect.
+    fn check_page_icc(
+        decoder: &mut FileDecoder<'_>,
+        path: &Path,
+        policy: IngestPolicy,
+        page: usize,
+    ) -> Result<(), BoxError> {
+        use crate::ingest::IccHandling;
+        if policy.icc != IccHandling::Reject {
+            return Ok(());
+        }
+        match decoder.find_tag(Tag::Unknown(34675)) {
+            Ok(None) => Ok(()),
+            Ok(Some(v)) => {
+                let len = v.into_u8_vec().map(|v| v.len()).unwrap_or(0);
+                Err(super::reject_icc(
+                    path,
+                    &format!("TIFF page {page} InterColorProfile tag"),
+                    len,
+                ))
+            }
+            Err(e) => Err(format!(
+                "{}: TIFF page {page} InterColorProfile tag error: {e}",
+                path.display()
+            )
+            .into()),
         }
     }
 
@@ -523,12 +592,16 @@ mod tiff_ingest {
         Ok(Some(rounded as u16))
     }
 
-    pub(super) fn decode_bilevel_pages(path: &Path) -> Result<Option<Vec<Bitmap>>, BoxError> {
+    pub(super) fn decode_bilevel_pages(
+        path: &Path,
+        policy: IngestPolicy,
+    ) -> Result<Option<Vec<Bitmap>>, BoxError> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
             .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
         let mut pages = Vec::new();
         loop {
+            check_page_icc(&mut decoder, path, policy, pages.len())?;
             if !page_is_bilevel(&mut decoder) {
                 return Ok(None);
             }
@@ -1109,7 +1182,7 @@ pub fn decode_image_to_pixmap_with_policy(
 
     match ext.as_deref() {
         Some("png") => return decode_png_to_pixmap_with_policy(path, policy),
-        Some("jpg") | Some("jpeg") => return decode_jpeg_file_to_pixmap(path),
+        Some("jpg") | Some("jpeg") => return decode_jpeg_file_to_pixmap_with_policy(path, policy),
         Some("tif") | Some("tiff") => {
             #[cfg(feature = "tiff")]
             return decode_tiff_file_to_pixmap_with_policy(path, policy);
@@ -1138,7 +1211,7 @@ pub fn decode_image_to_pixmap_with_policy(
         return decode_png_to_pixmap_with_policy(path, policy);
     }
     if header.starts_with(b"\xFF\xD8") {
-        return decode_jpeg_file_to_pixmap(path);
+        return decode_jpeg_file_to_pixmap_with_policy(path, policy);
     }
     if header.starts_with(b"II\x2A\x00") || header.starts_with(b"MM\x00\x2A") {
         #[cfg(feature = "tiff")]
