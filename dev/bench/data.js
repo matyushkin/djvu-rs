@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787076495187,
+  "lastUpdate": 1787078719285,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -16570,6 +16570,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51509000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "238c21b9e4d642e5b00f81db335bc5cb9871f483",
+          "message": "test(ingest): pin CMYK/YCCK JPEG decode behaviour (#694) (#762)\n\nzune-jpeg 0.5 already decodes Adobe CMYK and YCCK JPEGs (baseline and\nprogressive) to RGB with the same profile-free (255-ink)*(255-K)/255 mix\nour CMYK TIFF ingest documents; verified pixel-exact against Pillow on\nfive sample files. The \"not yet supported\" matrix entry was stale.\n\nAdd four regression tests (CMYK, YCCK, progressive, CLI encode round\ntrip), update the supported-input matrix, and drop the follow-up item.\n\nClaude-Session: https://claude.ai/code/session_019AMBnPFkbYDEcPRRwTShTs",
+          "timestamp": "2026-08-18T23:19:01+05:00",
+          "tree_id": "e92233ba21faacd45013b92bcc702dc10e9f2f31",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/238c21b9e4d642e5b00f81db335bc5cb9871f483"
+        },
+        "date": 1787078718093,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 165000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8234000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 50283000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 48202000,
             "range": "± 0",
             "unit": "ns/iter"
           }
