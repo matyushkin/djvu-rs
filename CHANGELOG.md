@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0](https://github.com/matyushkin/djvu-rs/compare/v0.28.0...v0.29.0) (2026-08-18)
+
+
+### Features
+
+* **ingest:** decode CCITT G4 and PackBits TIFF strips ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#756](https://github.com/matyushkin/djvu-rs/issues/756)) ([fdd6064](https://github.com/matyushkin/djvu-rs/commit/fdd606445944a7b33d97d0e799f4f654ef250d98))
+* **ingest:** map TIFF X/YResolution tags to default DPI ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#758](https://github.com/matyushkin/djvu-rs/issues/758)) ([5ec6a12](https://github.com/matyushkin/djvu-rs/commit/5ec6a12db4251e567f948a6c9767a5c7704ab8cc))
+
+
+### Performance Improvements
+
+* **ingest:** bilevel TIFF fast path straight to JB2 masks ([#694](https://github.com/matyushkin/djvu-rs/issues/694)) ([#759](https://github.com/matyushkin/djvu-rs/issues/759)) ([afa2c67](https://github.com/matyushkin/djvu-rs/commit/afa2c67b43155b803ec4fce5bea606622a924054))
+
 ## [0.28.0](https://github.com/matyushkin/djvu-rs/compare/v0.27.0...v0.28.0) (2026-08-11)
 
 
