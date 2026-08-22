@@ -152,7 +152,7 @@ impl Raster {
         if pixmap.data.len() != rgb.len() / 3 * 4 {
             return None;
         }
-        for (i, pixel) in rgb.chunks_exact(3).enumerate() {
+        for (i, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
             let dst = &mut pixmap.data[i * 4..i * 4 + 4];
             dst[..3].copy_from_slice(pixel);
             dst[3] = 255;

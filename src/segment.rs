@@ -726,7 +726,7 @@ fn luminance_plane(rgba: &Pixmap) -> Vec<u8> {
 
 fn fill_fixed_mask(mask: &mut Bitmap, rgba: &Pixmap, threshold: u8) {
     let threshold = u32::from(threshold);
-    // Row-slice the packed RGBA rows (`chunks_exact(4)`) instead of a per-pixel
+    // Row-slice the packed RGBA rows (`as_chunks::<4>().0`) instead of a per-pixel
     // `rgba.get_rgb` (bounds check + `(y*width+x)*4` multiply) and set mask bits
     // directly in the row byte (`|= 0x80 >> (x&7)`) instead of `mask.set` (which
     // recomputes `y*stride + x/8` per call). `mask` starts cleared, so OR-ing in
@@ -736,7 +736,7 @@ fn fill_fixed_mask(mask: &mut Bitmap, rgba: &Pixmap, threshold: u8) {
     for y in 0..mask.height as usize {
         let src = &rgba.data[y * w * 4..(y + 1) * w * 4];
         let mrow = &mut mask.data[y * mstride..(y + 1) * mstride];
-        for (x, px) in src.chunks_exact(4).enumerate() {
+        for (x, px) in src.as_chunks::<4>().0.iter().enumerate() {
             if u32::from(luminance(px[0], px[1], px[2])) < threshold {
                 mrow[x >> 3] |= 0x80 >> (x & 7);
             }
@@ -870,7 +870,7 @@ fn block_mean(
         let row = &rgba.data[(ry * w + x0 as usize) * 4..(ry * w + x1 as usize) * 4];
         if unmasked_only {
             let mrow = &mask.data[ry * mstride..(ry + 1) * mstride];
-            for (i, px) in row.chunks_exact(4).enumerate() {
+            for (i, px) in row.as_chunks::<4>().0.iter().enumerate() {
                 let x = x0 as usize + i;
                 if (mrow[x >> 3] >> (7 - (x & 7))) & 1 != 0 {
                     continue;
@@ -878,7 +878,7 @@ fn block_mean(
                 acc.add(px[0], px[1], px[2]);
             }
         } else {
-            for px in row.chunks_exact(4) {
+            for px in row.as_chunks::<4>().0 {
                 acc.add(px[0], px[1], px[2]);
             }
         }
@@ -1097,7 +1097,7 @@ mod tests {
         }
         assert_eq!(seg.bg.width, 2);
         assert_eq!(seg.bg.height, 2);
-        for chunk in seg.bg.data.chunks_exact(4) {
+        for chunk in seg.bg.data.as_chunks::<4>().0 {
             assert_eq!(&chunk[..3], &[255, 255, 255]);
         }
     }

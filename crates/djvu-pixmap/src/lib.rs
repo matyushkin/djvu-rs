@@ -105,7 +105,7 @@ impl Pixmap {
     pub fn to_rgb(&self) -> Vec<u8> {
         let pixel_count = self.data.len() / 4;
         let mut out = Vec::with_capacity(pixel_count * 3);
-        for chunk in self.data.chunks_exact(4) {
+        for chunk in self.data.as_chunks::<4>().0 {
             out.push(chunk[0]);
             out.push(chunk[1]);
             out.push(chunk[2]);
@@ -121,7 +121,7 @@ impl Pixmap {
         let pixel_count = self.data.len() / 4;
         let mut out = Vec::with_capacity(header.len() + pixel_count * 3);
         out.extend_from_slice(header.as_bytes());
-        for chunk in self.data.chunks_exact(4) {
+        for chunk in self.data.as_chunks::<4>().0 {
             out.push(chunk[0]); // R
             out.push(chunk[1]); // G
             out.push(chunk[2]); // B
@@ -195,7 +195,7 @@ impl Pixmap {
     pub fn to_gray8(&self) -> GrayPixmap {
         let pixel_count = self.data.len() / 4;
         let mut data = Vec::with_capacity(pixel_count);
-        for chunk in self.data.chunks_exact(4) {
+        for chunk in self.data.as_chunks::<4>().0 {
             let r = chunk[0] as u32;
             let g = chunk[1] as u32;
             let b = chunk[2] as u32;

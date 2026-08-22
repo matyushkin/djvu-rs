@@ -264,7 +264,7 @@ pub(crate) fn ycbcr_row_to_rgba(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], o
         return;
     }
 
-    // Portable path: chunks_exact eliminates per-element bounds checks.
+    // Portable path: as_chunks eliminates per-element bounds checks.
     #[allow(unreachable_code)]
     ycbcr_portable(y_row, cb_row, cr_row, out, w);
 }
@@ -435,7 +435,7 @@ fn upsample_chroma_row_bilinear(
     }
 }
 
-/// Portable YCbCr→RGBA using chunks_exact so LLVM sees exact 8-element slices.
+/// Portable YCbCr→RGBA using as_chunks so LLVM sees exact 8-element slices.
 #[inline(always)]
 fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8], w: usize) {
     use wide::i32x8;
@@ -445,10 +445,12 @@ fn ycbcr_portable(y_row: &[i32], cb_row: &[i32], cr_row: &[i32], out: &mut [u8],
 
     let full8 = w / 8;
     for (((yc, cbc), crc), outc) in y_row[..full8 * 8]
-        .chunks_exact(8)
-        .zip(cb_row[..full8 * 8].chunks_exact(8))
-        .zip(cr_row[..full8 * 8].chunks_exact(8))
-        .zip(out[..full8 * 32].chunks_exact_mut(32))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(cb_row[..full8 * 8].as_chunks::<8>().0)
+        .zip(cr_row[..full8 * 8].as_chunks::<8>().0)
+        .zip(out[..full8 * 32].as_chunks_mut::<32>().0)
     {
         let ys = i32x8::from([yc[0], yc[1], yc[2], yc[3], yc[4], yc[5], yc[6], yc[7]]);
         let bs = i32x8::from([
@@ -4310,7 +4312,7 @@ mod tests {
         super::ycbcr_row_to_rgba(&ys, &bs, &rs, &mut simd_out);
 
         // All RGBA values must be in [0, 255] and alpha == 255.
-        for chunk in simd_out.chunks_exact(4) {
+        for chunk in simd_out.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 255, "alpha must always be 255");
         }
     }

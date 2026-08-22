@@ -13403,3 +13403,42 @@ Output `.djvu` bytes are identical (`cmp` clean).
 byte-identical output; the only behaviour change is deliberate and
 documented (`--quality auto` now treats any 1-bit TIFF — including blank
 pages — as bilevel by construction instead of sampling pixels).
+
+## Perf round 113 (2026-08-22) — AS_CHUNKS_MIGRATION: constant-size `chunks_exact(N)` → `as_chunks::<N>()` (#768) — **Kept**
+
+**Issue.** #768: clippy 1.98 added `chunks_exact_to_as_chunks`, flagging every
+constant-size `chunks_exact(N)` / `chunks_exact_mut(N)` (~82 sites across 28
+tracked files, incl. hot decode/encode loops). CI was temporarily green via
+`-A clippy::chunks_exact_to_as_chunks -A unknown_lints`; the lint is also a
+perf candidate — `as_chunks::<N>()` gives LLVM the chunk length statically,
+so per-chunk bounds checks vanish.
+
+**Approach.** Mechanical migration: `chunks_exact(N)` → `as_chunks::<N>().0`,
+`chunks_exact_mut(N)` → `as_chunks_mut::<N>().0`. `&[[T; N]]` is
+`IntoIterator` for `for`-loops and `.zip()` arguments, but iterator-adapter
+heads (`.map/.enumerate/.all/.any/.zip`) need an explicit `.iter()` /
+`.iter_mut()`. The two JB2 bit-unpack sites moved from
+`chunks_exact_mut(8)` + `into_remainder()` to the `(chunks, tail)` tuple.
+Variable-size `chunks_exact(stride)` and rayon `par_chunks_exact_mut` stay
+(lint targets constants only). Dropped both `-A` flags from
+`scripts/check.sh` and `.github/workflows/ci.yml`.
+
+**Numbers.** Criterion vs. pre-change baseline (same machine, same session).
+Render: `render_page/dpi/72` **-26.6%**, `render_corpus_bilevel_dpi`
+72/150/300 **-18.2% / -35.0% / -10.1%**, `render_colorbook` **-16.3%**
+(`full_render` stage -17.5%), `render_colorbook_cold` **-6.9%**,
+`bg_to_rgb_warm` -15.9%; high-dpi renders neutral (±1-3%). Codecs:
+`iw44_gray_decode_large/gray_direct` **-24.2%**, `jb2_encode_dict`
+**-7.6%**, `bzz_decode` -4.5%, `iw44_decode_first_chunk` -1.9%. Apparent
+encode regressions (`iw44_encode_large_1024x1024` +14.0%, `iw44_encode_color`
++4.3%, `bzz_encode` +3.9%, `segment_page_color_sauvola` +6.3%) are in code
+paths this change does not touch (bzz crate untouched; IW44 forward
+transform untouched — only YCbCr→RGBA output conversion changed); an
+immediate re-run flipped them (-7.5%, -3.8%, +2.1%, -4.1..-7.8%), i.e.
+within run-to-run machine noise.
+
+**Decision.** Kept.
+
+**Reason.** Reproducible double-digit wins on the low/mid-dpi render hot
+path and gray direct decode, no reproducible regression, and the clippy 1.98
+allow-flags are gone — CI lints the real code again.

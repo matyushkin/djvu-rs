@@ -315,7 +315,9 @@ fn build_page_artifacts(
     // JPEG, or both with keep-smaller (`adaptive`, the PDF_ADAPTIVE_RASTER
     // pattern — only one page's pair of encodings is ever live at once).
     let gray = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .all(|px| px[0] == px[1] && px[1] == px[2]);
     let make_png = || encode_rgba_to_png(&rgba, w, h, gray);
     let make_jpeg = |q: u8| encode_rgba_to_jpeg(&rgba, w, h, q, gray);
@@ -399,7 +401,7 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32, gray: bool) -> Vec<u
     // information loss (#599) — or Gray8 when the render is pure grayscale
     // (a further 3×, pixel-identical; #580).
     let data: Vec<u8> = if gray {
-        rgba.chunks_exact(4).map(|px| px[0]).collect()
+        rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect()
     } else {
         rgba_to_rgb(rgba)
     };
@@ -426,7 +428,7 @@ fn encode_rgba_to_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8, gray: 
     let mut out = Vec::new();
     let (data, ct): (Vec<u8>, ColorType) = if gray {
         (
-            rgba.chunks_exact(4).map(|px| px[0]).collect(),
+            rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect(),
             ColorType::Luma,
         )
     } else {
@@ -442,7 +444,7 @@ fn encode_rgba_to_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8, gray: 
 /// Strip the constant alpha channel from packed RGBA rows.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     rgb

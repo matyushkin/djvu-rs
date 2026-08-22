@@ -219,7 +219,7 @@ fn build_page_png(page: &DjVuPage, opts: &CbzOptions) -> Result<Vec<u8>, CbzErro
     // 25% less raw data into deflate, smaller archives, identical pixels
     // (#599).
     let mut rgb = Vec::with_capacity(pixmap.data.len() / 4 * 3);
-    for px in pixmap.data.chunks_exact(4) {
+    for px in pixmap.data.as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     let mut buf = Vec::new();

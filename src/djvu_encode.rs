@@ -712,7 +712,9 @@ impl<'a> PageEncoder<'a> {
                 // encoder: one luma plane instead of Y+Cb+Cr.
                 let gray = pm
                     .data
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|px| px[0] == px[1] && px[1] == px[2]);
                 let bg44_chunks = if gray {
                     crate::iw44_encode::encode_iw44_gray(&pm.to_gray8(), &iw44_options)
@@ -2018,8 +2020,10 @@ mod tests {
         let mut n = 0u64;
         for (a, b) in expected
             .data
-            .chunks_exact(4)
-            .zip(actual.data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(actual.data.as_chunks::<4>().0)
         {
             for c in 0..3 {
                 sum += a[c].abs_diff(b[c]) as u64;

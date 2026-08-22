@@ -856,7 +856,7 @@ fn sample_area_avg_bounds(pm: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> (u
     for sy in y0..y1 {
         let row_off = sy as usize * pw * 4 + x0 as usize * 4;
         if let Some(row) = pm.data.get(row_off..row_off + cols * 4) {
-            for chunk in row.chunks_exact(4) {
+            for chunk in row.as_chunks::<4>().0 {
                 r_sum += chunk[0] as u32;
                 g_sum += chunk[1] as u32;
                 b_sum += chunk[2] as u32;
@@ -2823,7 +2823,7 @@ fn composite_rows_bilevel_one(
     let mask = match ctx.mask {
         Some(m) => m,
         None => {
-            for chunk in row_buf.chunks_exact_mut(4) {
+            for chunk in row_buf.as_chunks_mut::<4>().0 {
                 chunk[0] = 255;
                 chunk[1] = 255;
                 chunk[2] = 255;
@@ -2877,7 +2877,7 @@ fn composite_rows_bilevel_one(
         }
 
         // Fallback: branchless per-pixel expansion with .min() clamp for partial/offset views.
-        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+        for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
             let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
             let ch = (is_fg.wrapping_sub(1) & 0xFF) as u8; // 0 when fg, 255 when bg
@@ -2911,7 +2911,7 @@ fn composite_rows_bilevel_one(
         }
     }
 
-    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(ctx.page_w.saturating_sub(1));
 
@@ -3045,7 +3045,7 @@ fn composite_rows_bilinear_one(
                     if bg.width as usize >= out_w {
                         row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
                     } else {
-                        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                        for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                             let px = ox.min((bg.width as usize).saturating_sub(1));
                             let off = px * 4;
                             if let Some(q) = bg_row.get(off..off + 4) {
@@ -3061,7 +3061,7 @@ fn composite_rows_bilinear_one(
                         }
                     }
                 } else {
-                    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+                    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         let px = ox.min((bg.width as usize).saturating_sub(1));
                         let off = px * 4;
                         if let Some(q) = bg_row.get(off..off + 4) {
@@ -3146,7 +3146,12 @@ fn composite_rows_bilinear_one(
                 if let Some((bg_row, bg_w)) = bg_row_1x1 {
                     if offset_x + out_w <= bg_w as usize {
                         let src = &bg_row[offset_x * 4..(offset_x + out_w) * 4];
-                        for (chunk, s) in row_buf.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                        for (chunk, s) in row_buf
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(src.as_chunks::<4>().0)
+                        {
                             chunk[0] = lut[s[0] as usize];
                             chunk[1] = lut[s[1] as usize];
                             chunk[2] = lut[s[2] as usize];
@@ -3157,7 +3162,7 @@ fn composite_rows_bilinear_one(
                     // Edge case (out_w clamped beyond bg_w): fall through.
                 } else {
                     let white = lut[255];
-                    for chunk in row_buf.chunks_exact_mut(4) {
+                    for chunk in row_buf.as_chunks_mut::<4>().0 {
                         chunk[0] = white;
                         chunk[1] = white;
                         chunk[2] = white;
@@ -3192,7 +3197,7 @@ fn composite_rows_bilinear_one(
             &g1_buf[..0] // no mask: all pixels are background
         };
 
-        for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+        for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
@@ -3298,7 +3303,7 @@ fn composite_rows_bilinear_one(
     let mask_upscale =
         ctx.opts.mask_aa && ctx.mask_shift == 0 && (fx_step < FRAC || fy_step < FRAC);
 
-    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let fx = (ox as u32 + ctx.offset_x) * fx_step;
         let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
@@ -3410,7 +3415,7 @@ fn composite_rows_area_avg_one(
             y1 <= y0 || !m.data[y0 * stride..y1 * stride].iter().any(|&b| b != 0)
         });
 
-    for (ox, pixel) in row_buf.chunks_exact_mut(4).enumerate() {
+    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let fallback;
         let ax = if let Some(ax) = area_avg_x.and_then(|xs| xs.get(ox)) {
             *ax
@@ -5301,7 +5306,9 @@ mod tests {
             );
             let has_intermediate_gray = pm_on
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[0] == px[1] && px[1] == px[2] && px[0] != 0 && px[0] != 255);
             assert!(
                 has_intermediate_gray,
@@ -6507,7 +6514,9 @@ mod tests {
         // A bilevel page should have some black pixels
         assert!(
             pm.data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0),
             "bilevel page should contain black pixels"
         );
@@ -6872,7 +6881,7 @@ mod tests {
         let page = doc.page(0).unwrap();
         let data = page.find_chunk(b"BGjp").unwrap();
         let pm = decode_jpeg_to_pixmap(data).expect("decode must succeed");
-        for chunk in pm.data.chunks_exact(4) {
+        for chunk in pm.data.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 255, "alpha must be 255 for every pixel");
         }
     }
