@@ -61,3 +61,9 @@ examples/wasm/pkg/
 
 # OCR model weights (never committed; fetch via scripts/fetch_ocr_models.sh, #693)
 /models/
+
+# Locally grown fuzz corpus + crash artifacts. The curated seed corpus is
+# already tracked (gitignore never hides tracked files); CI grows its own
+# corpus in the actions cache (fuzz.yml). Add new seeds with `git add -f`.
+/fuzz/corpus/
+/fuzz/artifacts/
