@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.1](https://github.com/matyushkin/djvu-rs/compare/v0.30.0...v0.30.1) (2026-08-22)
+
+
+### Performance Improvements
+
+* migrate constant-size chunks_exact(N) to as_chunks ([#768](https://github.com/matyushkin/djvu-rs/issues/768)) ([#770](https://github.com/matyushkin/djvu-rs/issues/770)) ([41f3b1a](https://github.com/matyushkin/djvu-rs/commit/41f3b1a83c610b8e655c8d78f266ab20c2b1d4a9))
+
 ## [0.30.0](https://github.com/matyushkin/djvu-rs/compare/v0.29.0...v0.30.0) (2026-08-18)
 
 
