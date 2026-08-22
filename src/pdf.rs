@@ -288,7 +288,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         // glyph edges in the raster) and cleaner (no JPEG ringing halos).
         let (rw, rh) = (bg.width, bg.height);
         let mut rgb = Vec::with_capacity(rw as usize * rh as usize * 3);
-        for px in bg.data.chunks_exact(4) {
+        for px in bg.data.as_chunks::<4>().0 {
             rgb.extend_from_slice(&px[..3]);
         }
         (Some(encode_img0_body(&rgb, rw, rh, opts)), layers)

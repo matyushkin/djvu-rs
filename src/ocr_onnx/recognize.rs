@@ -472,7 +472,7 @@ PostProcess:
     fn rec_tensor_is_bgr_normalized_and_padded() {
         // Uniform color: R=255, G=127.5-ish, B=0.
         let mut page = Pixmap::white(64, 32);
-        for px in page.data.chunks_exact_mut(4) {
+        for px in page.data.as_chunks_mut::<4>().0 {
             px[0] = 255; // R
             px[1] = 128; // G
             px[2] = 0; // B

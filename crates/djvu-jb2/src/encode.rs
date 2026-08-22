@@ -150,8 +150,8 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
     for y in 0..h {
         let src = &bm.data[y * stride..y * stride + stride];
         let dst = &mut pixels[(y + 2) * pw..(y + 2) * pw + w];
-        let mut chunks = dst.chunks_exact_mut(8);
-        for (&byte, chunk) in src.iter().zip(&mut chunks) {
+        let (chunks, tail) = dst.as_chunks_mut::<8>();
+        for (&byte, chunk) in src.iter().zip(chunks) {
             chunk[0] = (byte >> 7) & 1;
             chunk[1] = (byte >> 6) & 1;
             chunk[2] = (byte >> 5) & 1;
@@ -161,7 +161,6 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
             chunk[6] = (byte >> 1) & 1;
             chunk[7] = byte & 1;
         }
-        let tail = chunks.into_remainder();
         if !tail.is_empty() {
             let byte = src[full_bytes];
             for (bit, slot) in tail.iter_mut().enumerate() {
@@ -511,8 +510,8 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
     for y in 0..h {
         let src = &bitmap.data[y * stride..y * stride + stride];
         let dst = &mut pix[y * w..y * w + w];
-        let mut chunks = dst.chunks_exact_mut(8);
-        for (&byte, chunk) in src.iter().zip(&mut chunks) {
+        let (chunks, tail) = dst.as_chunks_mut::<8>();
+        for (&byte, chunk) in src.iter().zip(chunks) {
             chunk[0] = (byte >> 7) & 1;
             chunk[1] = (byte >> 6) & 1;
             chunk[2] = (byte >> 5) & 1;
@@ -522,7 +521,6 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
             chunk[6] = (byte >> 1) & 1;
             chunk[7] = byte & 1;
         }
-        let tail = chunks.into_remainder();
         if !tail.is_empty() {
             let byte = src[full_bytes];
             for (bit, slot) in tail.iter_mut().enumerate() {

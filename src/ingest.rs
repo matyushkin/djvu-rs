@@ -27,7 +27,7 @@ impl AlphaCompositing {
         let Self::CompositeOnBackground { red, green, blue } = *self else {
             return;
         };
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             let a = u32::from(px[3]);
             if a == 255 {
                 continue;

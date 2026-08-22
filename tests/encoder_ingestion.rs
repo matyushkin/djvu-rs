@@ -432,14 +432,14 @@ mod tiff_slice2 {
         );
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
         assert_eq!((pm.width, pm.height), (8, 2));
-        let grays: Vec<u8> = pm.data.chunks_exact(4).map(|px| px[0]).collect();
+        let grays: Vec<u8> = pm.data.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
         assert_eq!(
             grays,
             vec![
                 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 0, 0
             ]
         );
-        assert!(pm.data.chunks_exact(4).all(|px| px[3] == 255));
+        assert!(pm.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tiff_slice2 {
         let path = dir.path().join("g1w.tif");
         write_tiff(&path, &[TiffPage::gray(8, 1, 1, 0, vec![0b1010_1010])]);
         let pm = decode_tiff_file_to_pixmap(&path).unwrap();
-        let grays: Vec<u8> = pm.data.chunks_exact(4).map(|px| px[0]).collect();
+        let grays: Vec<u8> = pm.data.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
         assert_eq!(grays, vec![0, 255, 0, 255, 0, 255, 0, 255]);
     }
 
@@ -655,7 +655,7 @@ mod tiff_slice3 {
     }
 
     fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
-        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+        pm.data.as_chunks::<4>().0.iter().map(|px| px[0]).collect()
     }
 
     #[test]
@@ -1133,7 +1133,7 @@ mod tiff_fastpath {
             "fast-path marker missing in stderr: {stderr}"
         );
         let pm = super::render_first_page(&output);
-        assert!(pm.data.chunks_exact(4).all(|px| px[0] == 255));
+        assert!(pm.data.as_chunks::<4>().0.iter().all(|px| px[0] == 255));
     }
 }
 
@@ -1152,7 +1152,7 @@ mod tiff_orientation {
     }
 
     fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
-        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+        pm.data.as_chunks::<4>().0.iter().map(|px| px[0]).collect()
     }
 
     #[test]
@@ -1432,7 +1432,7 @@ mod jpeg_exif {
     }
 
     fn grays(pm: &djvu_rs::Pixmap) -> Vec<u8> {
-        pm.data.chunks_exact(4).map(|px| px[0]).collect()
+        pm.data.as_chunks::<4>().0.iter().map(|px| px[0]).collect()
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub fn det_tensor(src: &Pixmap, dst_w: u32, dst_h: u32) -> Vec<f32> {
     let rgb = resize_bilinear_rgb(src, dst_w, dst_h);
     let plane = dst_w as usize * dst_h as usize;
     let mut out = vec![0.0f32; 3 * plane];
-    for (i, px) in rgb.chunks_exact(3).enumerate() {
+    for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             out[c * plane + i] = (f32::from(px[c]) / 255.0 - DET_MEAN[c]) / DET_STD[c];
         }
@@ -191,7 +191,8 @@ mod tests {
         let rgb = resize_bilinear_rgb(&pm, 2, 2);
         let expected: Vec<u8> = pm
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
             .flat_map(|p| p[..3].to_vec())
             .collect();
         assert_eq!(rgb, expected);

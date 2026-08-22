@@ -1010,7 +1010,7 @@ fn ddjvu_error_class(stderr: &str) -> String {
 
 fn diff_stats_rgba(w: usize, h: usize, lhs_rgba: &[u8], rhs_rgba: &[u8]) -> DiffStats {
     let mut rhs_rgb = Vec::with_capacity(w * h * 3);
-    for pixel in rhs_rgba.chunks_exact(4) {
+    for pixel in rhs_rgba.as_chunks::<4>().0 {
         rhs_rgb.extend_from_slice(&pixel[..3]);
     }
     diff_stats(w, h, lhs_rgba, &rhs_rgb)

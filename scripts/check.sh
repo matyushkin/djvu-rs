@@ -9,12 +9,8 @@ cd "$(git rev-parse --show-toplevel)"
 run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --check
-# chunks_exact_to_as_chunks (clippy 1.98): ~50 hot decode/encode loops use
-# chunks_exact(N); migrating to as_chunks is a deliberate follow-up (#768),
-# not a lint-chase. unknown_lints keeps pre-1.98 local toolchains green.
-CLIPPY_FLAGS=(-D warnings -A unknown_lints -A clippy::chunks_exact_to_as_chunks)
-run cargo clippy --all-targets -- "${CLIPPY_FLAGS[@]}"
-run cargo clippy --all-targets --features cli,epub -- "${CLIPPY_FLAGS[@]}"  # pdf/epub writers (#509)
+run cargo clippy --all-targets -- -D warnings
+run cargo clippy --all-targets --features cli,epub -- -D warnings  # pdf/epub writers (#509)
 run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
 run scripts/check_package_versions.sh                       # py/npm versions track crate (#692)
 run cargo build --no-default-features                       # no_std (host)

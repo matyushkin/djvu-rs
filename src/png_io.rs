@@ -79,12 +79,12 @@ fn expand_png_to_rgba(
         png::BitDepth::Eight => match color {
             png::ColorType::Rgba => data.extend_from_slice(buf),
             png::ColorType::Rgb => {
-                for chunk in buf.chunks_exact(3) {
+                for chunk in buf.as_chunks::<3>().0 {
                     data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
                 }
             }
             png::ColorType::GrayscaleAlpha => {
-                for chunk in buf.chunks_exact(2) {
+                for chunk in buf.as_chunks::<2>().0 {
                     let g = chunk[0];
                     data.extend_from_slice(&[g, g, g, chunk[1]]);
                 }
@@ -162,7 +162,7 @@ fn expand_png16_to_rgba(
     let sample = |hi: u8, lo: u8| policy.downsample_u16_be(hi, lo);
     match color {
         png::ColorType::Rgb => {
-            for chunk in buf.chunks_exact(6) {
+            for chunk in buf.as_chunks::<6>().0 {
                 data.extend_from_slice(&[
                     sample(chunk[0], chunk[1]),
                     sample(chunk[2], chunk[3]),
@@ -172,7 +172,7 @@ fn expand_png16_to_rgba(
             }
         }
         png::ColorType::Rgba => {
-            for chunk in buf.chunks_exact(8) {
+            for chunk in buf.as_chunks::<8>().0 {
                 data.extend_from_slice(&[
                     sample(chunk[0], chunk[1]),
                     sample(chunk[2], chunk[3]),
@@ -182,13 +182,13 @@ fn expand_png16_to_rgba(
             }
         }
         png::ColorType::Grayscale => {
-            for chunk in buf.chunks_exact(2) {
+            for chunk in buf.as_chunks::<2>().0 {
                 let g = sample(chunk[0], chunk[1]);
                 data.extend_from_slice(&[g, g, g, 255]);
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for chunk in buf.chunks_exact(4) {
+            for chunk in buf.as_chunks::<4>().0 {
                 let g = sample(chunk[0], chunk[1]);
                 let a = sample(chunk[2], chunk[3]);
                 data.extend_from_slice(&[g, g, g, a]);
@@ -256,7 +256,7 @@ pub fn decode_jpeg_file_to_pixmap_with_policy(
         padded
     };
     let mut data = vec![0u8; pixel_count * 4];
-    for (i, chunk) in rgb[..pixel_count * 3].chunks_exact(3).enumerate() {
+    for (i, chunk) in rgb[..pixel_count * 3].as_chunks::<3>().0.iter().enumerate() {
         data[i * 4] = chunk[0];
         data[i * 4 + 1] = chunk[1];
         data[i * 4 + 2] = chunk[2];
@@ -709,7 +709,7 @@ mod tiff_ingest {
         let data = match (color, result) {
             (ColorType::RGB(8), DecodingResult::U8(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(3) {
+                for chunk in pixels.as_chunks::<3>().0 {
                     data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
                 }
                 data
@@ -724,7 +724,7 @@ mod tiff_ingest {
             }
             (ColorType::GrayA(8), DecodingResult::U8(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(2) {
+                for chunk in pixels.as_chunks::<2>().0 {
                     let g = chunk[0];
                     data.extend_from_slice(&[g, g, g, chunk[1]]);
                 }
@@ -732,7 +732,7 @@ mod tiff_ingest {
             }
             (ColorType::CMYK(8), DecodingResult::U8(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(4) {
+                for chunk in pixels.as_chunks::<4>().0 {
                     data.extend_from_slice(&cmyk_to_rgba(chunk[0], chunk[1], chunk[2], chunk[3]));
                 }
                 data
@@ -747,7 +747,7 @@ mod tiff_ingest {
             }
             (ColorType::GrayA(16), DecodingResult::U16(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(2) {
+                for chunk in pixels.as_chunks::<2>().0 {
                     let g = policy.downsample_u16(chunk[0]);
                     data.extend_from_slice(&[g, g, g, policy.downsample_u16(chunk[1])]);
                 }
@@ -755,7 +755,7 @@ mod tiff_ingest {
             }
             (ColorType::RGB(16), DecodingResult::U16(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(3) {
+                for chunk in pixels.as_chunks::<3>().0 {
                     data.extend_from_slice(&[
                         policy.downsample_u16(chunk[0]),
                         policy.downsample_u16(chunk[1]),
@@ -767,7 +767,7 @@ mod tiff_ingest {
             }
             (ColorType::RGBA(16), DecodingResult::U16(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(4) {
+                for chunk in pixels.as_chunks::<4>().0 {
                     data.extend_from_slice(&[
                         policy.downsample_u16(chunk[0]),
                         policy.downsample_u16(chunk[1]),
@@ -779,7 +779,7 @@ mod tiff_ingest {
             }
             (ColorType::CMYK(16), DecodingResult::U16(pixels)) => {
                 let mut data = Vec::with_capacity(pixel_count * 4);
-                for chunk in pixels.chunks_exact(4) {
+                for chunk in pixels.as_chunks::<4>().0 {
                     data.extend_from_slice(&cmyk_to_rgba(
                         policy.downsample_u16(chunk[0]),
                         policy.downsample_u16(chunk[1]),
