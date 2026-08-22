@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787413822576,
+  "lastUpdate": 1787422965065,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17446,6 +17446,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40278000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "41f3b1a83c610b8e655c8d78f266ab20c2b1d4a9",
+          "message": "perf: migrate constant-size chunks_exact(N) to as_chunks (#768) (#770)\n\nClippy 1.98's chunks_exact_to_as_chunks flagged ~82 constant-size\nchunks_exact(N)/chunks_exact_mut(N) sites across 28 files. Migrate them\nall to as_chunks::<N>()/as_chunks_mut::<N>() (stable since 1.88 = MSRV):\nthe compiler sees the chunk length statically, so per-chunk bounds\nchecks disappear. Iterator-adapter heads get an explicit .iter()/\n.iter_mut(); the JB2 bit-unpack sites move from chunks_exact_mut(8) +\ninto_remainder() to the (chunks, tail) tuple. Variable-size\nchunks_exact(stride) and rayon par_chunks_exact_mut stay.\n\nDrop the temporary -A unknown_lints -A clippy::chunks_exact_to_as_chunks\nflags from scripts/check.sh and .github/workflows/ci.yml.\n\nBenchmarks (PERF_EXPERIMENTS.md round 113): render_page/dpi/72 -26.6%,\nrender_corpus_bilevel_dpi 150 -35.0%, render_colorbook -16.3%,\niw44_gray_decode_large/gray_direct -24.2%, jb2_encode_dict -7.6%;\napparent encode regressions are in untouched code paths and flip sign\non re-run (machine noise).\n\nCloses #768\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-08-22T17:57:00Z",
+          "tree_id": "7a63b0a632f7779cae3ae094df932af4ef1b9da0",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/41f3b1a83c610b8e655c8d78f266ab20c2b1d4a9"
+        },
+        "date": 1787422963774,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8768000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53802000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51658000,
             "range": "± 0",
             "unit": "ns/iter"
           }
