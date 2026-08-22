@@ -36,14 +36,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # chunks_exact_to_as_chunks (clippy 1.98): ~50 hot decode/encode loops
+      # use chunks_exact(N); migrating to as_chunks is a deliberate follow-up
+      # (#768), not a lint-chase. Keep in sync with scripts/check.sh.
       - name: Clippy (all targets)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings -A unknown_lints -A clippy::chunks_exact_to_as_chunks
 
       # Writer surface moved out of the default features in #509, so the
       # default-features pass above no longer sees src/pdf.rs / src/epub.rs.
       # Lint them explicitly (cli implies pdf; epub added on top).
       - name: Clippy (all targets, cli+epub features)
-        run: cargo clippy --all-targets --features cli,epub -- -D warnings
+        run: cargo clippy --all-targets --features cli,epub -- -D warnings -A unknown_lints -A clippy::chunks_exact_to_as_chunks
 
       # #509 regression guard: writer/feature-owned crates (zip, zopfli,
       # jpeg-encoder, clap, …) must not leak into the default (decode-only)

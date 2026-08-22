@@ -484,32 +484,31 @@ fn decode_row_pixels(
         }
 
         // Vertical modes
-        let v_offset: i32;
-        if avail >= 7 && (bits >> (avail - 7)) & 0x7F == 0b0000011 {
+        let v_offset: i32 = if avail >= 7 && (bits >> (avail - 7)) & 0x7F == 0b0000011 {
             br.consume(7);
-            v_offset = 3; // VR3
+            3 // VR3
         } else if avail >= 7 && (bits >> (avail - 7)) & 0x7F == 0b0000010 {
             br.consume(7);
-            v_offset = -3; // VL3
+            -3 // VL3
         } else if avail >= 6 && (bits >> (avail - 6)) & 0x3F == 0b000011 {
             br.consume(6);
-            v_offset = 2; // VR2
+            2 // VR2
         } else if avail >= 6 && (bits >> (avail - 6)) & 0x3F == 0b000010 {
             br.consume(6);
-            v_offset = -2; // VL2
+            -2 // VL2
         } else if avail >= 3 && (bits >> (avail - 3)) & 7 == 0b011 {
             br.consume(3);
-            v_offset = 1; // VR1
+            1 // VR1
         } else if avail >= 3 && (bits >> (avail - 3)) & 7 == 0b010 {
             br.consume(3);
-            v_offset = -1; // VL1
+            -1 // VL1
         } else if avail >= 1 && (bits >> (avail - 1)) & 1 == 1 {
             br.consume(1);
-            v_offset = 0; // V0
+            0 // V0
         } else {
             // Unknown: EOFB or fill bits — stop this row
             break;
-        }
+        };
 
         let a1 = ((b1 as i32) + v_offset).clamp(0, ncols as i32) as usize;
         // Fill cur[a0..a1] with a0_color

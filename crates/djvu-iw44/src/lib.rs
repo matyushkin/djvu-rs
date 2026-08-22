@@ -3167,7 +3167,6 @@ impl Iw44Image {
         }
         let serial = data[0];
         let slices = data[1];
-        let payload_start;
 
         // Serial-number continuity check, mirroring DjVuLibre's `cserial`
         // counter in `IWBitmap::decode_chunk`/`IWPixmap::decode_chunk`
@@ -3188,7 +3187,7 @@ impl Iw44Image {
             return Err(Iw44Error::UnexpectedSerial);
         }
 
-        if serial == 0 {
+        let payload_start = if serial == 0 {
             // First chunk — parse the 9-byte image header.
             if data.len() < 9 {
                 return Err(Iw44Error::HeaderTooShort);
@@ -3234,13 +3233,13 @@ impl Iw44Image {
                 self.cb = Some(PlaneDecoder::new(cw, ch));
                 self.cr = Some(PlaneDecoder::new(cw, ch));
             }
-            payload_start = 9;
+            9
         } else {
             if self.y.is_none() {
                 return Err(Iw44Error::MissingFirstChunk);
             }
-            payload_start = 2;
-        }
+            2
+        };
 
         // A refinement chunk's ZP payload may legitimately be shorter than
         // `ZpDecoder::new`'s 2-byte minimum — even empty — when the encoder had
