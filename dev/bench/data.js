@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787496413128,
+  "lastUpdate": 1787687899270,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17542,6 +17542,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51737000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8778a8ce6119618144050a8addc1a33bac11feec",
+          "message": "test: cover resource limits, typed validation, jb2 indexed decode, editor errors (#774)\n\nCloses the highest-value coverage gaps found via cargo llvm-cov (mirroring\nCI's `nextest --profile ci --workspace --features cli,tiff` scope):\n\n- src/resource_limits.rs: Display impl was 0% covered (47.62% lines\n  overall); add tests for all 7 ResourceLimitAxis message formats,\n  the missing-fields-default-to-zero fallback, is_empty, and inherited().\n- src/validate.rs: the typed-error resource API (check_document_limits /\n  first_resource_violation) had no direct tests, only its Finding-based\n  sibling; add one test per axis plus a first-violation-wins-in-order\n  test, so both parallel limit-checking code paths are covered.\n- crates/djvu-jb2/src/lib.rs: decode_indexed (used by djvu_encode.rs and\n  djvu_document.rs) had zero coverage; add missing-shared-dict and\n  short-shared-dict error tests, plus indexed-vs-plain-decode parity\n  tests against dict-free and shared-dict fixtures.\n- crates/djvu-iw44/src/lib.rs: add the missing ImageTooLarge header-parse\n  error test (the only untested error arm in decode_chunk's header path).\n- tests/editor.rs: RemoveBookmarks was a wired-but-unexercised\n  EditOperation; add its round-trip test plus the two untested\n  EditError paths (OutputAliasesInput, UnsupportedDocumentShape for\n  indirect DJVM documents).\n\nCoverage (cargo llvm-cov, cli+tiff, ignoring benches/examples/fuzz):\n  lines:     92.79% -> 93.07%\n  regions:   92.45% -> 92.67%\n  functions: 91.77% -> 91.86%\n\nFull workspace suite (1449 tests), fmt, and both clippy gates\n(default and cli+epub, -D warnings) pass.\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-08-25T19:36:00Z",
+          "tree_id": "647241583fe60cac797c01735c6bf8cfbc2e954c",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/8778a8ce6119618144050a8addc1a33bac11feec"
+        },
+        "date": 1787687887508,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 99000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5120000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30524000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29875000,
             "range": "± 0",
             "unit": "ns/iter"
           }
