@@ -2523,6 +2523,97 @@ mod tests {
             "pool must have been used (capacity > 0 after decode)"
         );
     }
+
+    // ── Missing/short shared-dict error paths ────────────────────────────────
+
+    /// `decode` must return a typed error, not silently misdecode, when the
+    /// stream's "required-dict-or-reset" record references an external
+    /// dictionary but the caller supplies none.
+    #[test]
+    fn decode_missing_shared_dict_reports_typed_error() {
+        let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
+        let sjbz_data = find_page_form_data(&djvu, 1);
+        assert!(matches!(
+            decode(&sjbz_data, None),
+            Err(Jb2Error::MissingSharedDict)
+        ));
+    }
+
+    /// Same guard on the blit-index-tracking entry point.
+    #[test]
+    fn decode_indexed_missing_shared_dict_reports_typed_error() {
+        let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
+        let sjbz_data = find_page_form_data(&djvu, 1);
+        assert!(matches!(
+            decode_indexed(&sjbz_data, None),
+            Err(Jb2Error::MissingSharedDict)
+        ));
+    }
+
+    /// A shared dict shorter than the stream's declared inherited-dict length
+    /// must be rejected rather than indexed out of bounds.
+    #[test]
+    fn decode_rejects_shared_dict_shorter_than_declared() {
+        let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
+        let djbz_data = find_djvi_djbz_data(&djvu);
+        let sjbz_data = find_page_form_data(&djvu, 1);
+        let full_dict = decode_dict(&djbz_data, None).unwrap();
+        assert!(
+            !full_dict.symbols.is_empty(),
+            "fixture must declare a non-empty shared dict"
+        );
+        let short_dict = Jb2Dict {
+            symbols: full_dict.symbols[..full_dict.symbols.len() - 1].to_vec(),
+        };
+        assert!(matches!(
+            decode(&sjbz_data, Some(&short_dict)),
+            Err(Jb2Error::InheritedDictTooLarge)
+        ));
+    }
+
+    // ── decode_indexed: blit map consistency against decode() ────────────────
+
+    /// `decode_indexed` must produce the same bitmap as `decode`, plus a blit
+    /// map whose foreground/background split matches the bitmap exactly.
+    #[test]
+    fn decode_indexed_matches_decode_for_dict_free_fixture() {
+        let djvu = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let sjbz = extract_first_page_sjbz(&djvu);
+        let plain = decode(&sjbz, None).unwrap();
+        let (indexed_bitmap, blit_map) = decode_indexed(&sjbz, None).unwrap();
+        assert_eq!(plain.width, indexed_bitmap.width);
+        assert_eq!(plain.height, indexed_bitmap.height);
+        assert_eq!(plain.data, indexed_bitmap.data);
+        assert_eq!(blit_map.len(), (plain.width * plain.height) as usize);
+        for y in 0..plain.height {
+            for x in 0..plain.width {
+                let idx = (y * plain.width + x) as usize;
+                let fg = plain.get(x, y);
+                assert_eq!(blit_map[idx] >= 0, fg, "pixel ({x},{y}) fg/blit mismatch");
+            }
+        }
+    }
+
+    /// Same equivalence check when the stream draws symbols from a shared
+    /// dictionary (exercises the dict-lookup blit records, not just direct
+    /// new-symbol records).
+    #[test]
+    fn decode_indexed_matches_decode_for_shared_dict_fixture() {
+        let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
+        let djbz_data = find_djvi_djbz_data(&djvu);
+        let sjbz_data = find_page_form_data(&djvu, 1);
+        let shared_dict = decode_dict(&djbz_data, None).unwrap();
+        let plain = decode(&sjbz_data, Some(&shared_dict)).unwrap();
+        let (indexed_bitmap, blit_map) = decode_indexed(&sjbz_data, Some(&shared_dict)).unwrap();
+        assert_eq!(plain.width, indexed_bitmap.width);
+        assert_eq!(plain.height, indexed_bitmap.height);
+        assert_eq!(plain.data, indexed_bitmap.data);
+        assert_eq!(blit_map.len(), (plain.width * plain.height) as usize);
+        assert!(
+            blit_map.iter().any(|&b| b >= 0),
+            "expected at least one foreground blit"
+        );
+    }
 }
 
 #[cfg(test)]

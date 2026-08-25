@@ -3788,6 +3788,20 @@ mod tests {
         ));
     }
 
+    /// A declared width×height above the 64 MP decode-cost cap must be
+    /// rejected before any pixel buffer is allocated.
+    #[test]
+    fn iw44_new_rejects_oversized_image() {
+        let mut img = Iw44Image::new();
+        // serial=0, slices=1, majver=0, minor=2, w=65535, h=65535, delay=0
+        // → 65535×65535 ≈ 4.29 G pixels, far past the 64 MP cap.
+        let header = [0x00u8, 0x01, 0x00, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        assert!(matches!(
+            img.decode_chunk(&header),
+            Err(Iw44Error::ImageTooLarge)
+        ));
+    }
+
     /// Subsequent chunk before first chunk must be rejected.
     #[test]
     fn iw44_new_rejects_subsequent_before_first() {

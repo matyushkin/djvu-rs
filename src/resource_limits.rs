@@ -146,3 +146,129 @@ pub struct ParseOptions {
     /// Configurable resource limits checked before the document is fully parsed.
     pub limits: Option<ResourceLimits>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exceeded(axis: ResourceLimitAxis) -> ResourceLimitExceeded {
+        ResourceLimitExceeded {
+            operation: "document.parse",
+            axis,
+            found: 100,
+            limit: 10,
+            page_number: Some(3),
+            width: Some(20),
+            height: Some(5),
+        }
+    }
+
+    /// Every axis must render a distinct, human-readable message that names
+    /// the operation and both the observed and configured values — this is
+    /// what a caller (CLI error output, API consumer) actually sees.
+    #[test]
+    fn display_file_bytes() {
+        let msg = exceeded(ResourceLimitAxis::FileBytes).to_string();
+        assert_eq!(msg, "document.parse: file is 100 bytes, exceeding limit 10");
+    }
+
+    #[test]
+    fn display_page_count() {
+        let msg = exceeded(ResourceLimitAxis::PageCount).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: document has 100 pages, exceeding limit 10"
+        );
+    }
+
+    #[test]
+    fn display_component_count() {
+        let msg = exceeded(ResourceLimitAxis::ComponentCount).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: document has 100 components, exceeding limit 10"
+        );
+    }
+
+    #[test]
+    fn display_page_pixels_includes_page_number_and_dimensions() {
+        let msg = exceeded(ResourceLimitAxis::PagePixels).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: page 3 is 20x5 = 100 pixels, exceeding limit 10"
+        );
+    }
+
+    #[test]
+    fn display_total_pixels() {
+        let msg = exceeded(ResourceLimitAxis::TotalPixels).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: document totals 100 pixels, exceeding limit 10"
+        );
+    }
+
+    #[test]
+    fn display_decoded_bytes() {
+        let msg = exceeded(ResourceLimitAxis::DecodedBytes).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: peak decoded page memory is an estimated 100 bytes, exceeding limit 10"
+        );
+    }
+
+    #[test]
+    fn display_render_output_pixels_includes_dimensions() {
+        let msg = exceeded(ResourceLimitAxis::RenderOutputPixels).to_string();
+        assert_eq!(
+            msg,
+            "document.parse: render output 20x5 = 100 pixels exceeds limit 10"
+        );
+    }
+
+    /// `Display` must fall back to `0` rather than panic when the optional
+    /// page-number/width/height fields are unset (every non-`PagePixels`,
+    /// non-`RenderOutputPixels` axis constructs the error this way).
+    #[test]
+    fn display_page_pixels_defaults_missing_fields_to_zero() {
+        let err = ResourceLimitExceeded {
+            operation: "op",
+            axis: ResourceLimitAxis::PagePixels,
+            found: 5,
+            limit: 1,
+            page_number: None,
+            width: None,
+            height: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "op: page 0 is 0x0 = 5 pixels, exceeding limit 1"
+        );
+    }
+
+    #[test]
+    fn is_empty_true_for_default() {
+        assert!(ResourceLimits::default().is_empty());
+    }
+
+    #[test]
+    fn is_empty_false_when_any_field_set() {
+        let limits = ResourceLimits {
+            max_pages: Some(5),
+            ..ResourceLimits::default()
+        };
+        assert!(!limits.is_empty());
+    }
+
+    #[test]
+    fn inherited_sets_only_render_pixel_ceiling() {
+        let inherited = ResourceLimits::inherited();
+        assert_eq!(inherited.max_render_pixels, Some(DEFAULT_MAX_RENDER_PIXELS));
+        assert!(inherited.max_file_bytes.is_none());
+        assert!(inherited.max_pages.is_none());
+        assert!(inherited.max_components.is_none());
+        assert!(inherited.max_page_pixels.is_none());
+        assert!(inherited.max_total_pixels.is_none());
+        assert!(inherited.max_decoded_bytes.is_none());
+    }
+}
