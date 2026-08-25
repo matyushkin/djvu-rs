@@ -1692,6 +1692,111 @@ mod tests {
         assert_eq!(err.axis, ResourceLimitAxis::PagePixels);
     }
 
+    /// [`check_document_limits`] is the typed-error API surfaced to library
+    /// callers (`ParseOptions::limits`), distinct from the `Finding`-based
+    /// `validate_resources` path exercised above. Each axis must be checked
+    /// independently and report itself, not fall through to a later one.
+    #[test]
+    fn check_document_limits_reports_typed_file_bytes_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_file_bytes: Some(1),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::FileBytes);
+        assert_eq!(err.limit, 1);
+        assert!(err.found > 1);
+    }
+
+    #[test]
+    fn check_document_limits_reports_typed_page_count_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_pages: Some(0),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::PageCount);
+        assert_eq!(err.limit, 0);
+    }
+
+    #[test]
+    fn check_document_limits_reports_typed_component_count_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_components: Some(0),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::ComponentCount);
+        assert_eq!(err.limit, 0);
+    }
+
+    #[test]
+    fn check_document_limits_reports_typed_total_pixels_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_total_pixels: Some(1),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::TotalPixels);
+        assert_eq!(err.limit, 1);
+    }
+
+    #[test]
+    fn check_document_limits_reports_typed_decoded_bytes_violation() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_decoded_bytes: Some(1),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::DecodedBytes);
+        assert_eq!(err.limit, 1);
+    }
+
+    /// The first-violated axis wins, in the documented FileBytes → PageCount →
+    /// ComponentCount → PagePixels → TotalPixels → DecodedBytes check order —
+    /// not e.g. the smallest overage.
+    #[test]
+    fn check_document_limits_reports_first_violated_axis_in_order() {
+        let data = fixture("boy.djvu");
+        let err = super::check_document_limits(
+            &data,
+            &ResourceLimits {
+                max_file_bytes: Some(1),
+                max_pages: Some(0),
+                max_total_pixels: Some(1),
+                ..ResourceLimits::default()
+            },
+            "document.parse",
+        )
+        .expect_err("limit should fail");
+        assert_eq!(err.axis, ResourceLimitAxis::FileBytes);
+    }
+
     #[test]
     fn inherited_limits_set_render_ceiling_only() {
         let inherited = ResourceLimits::inherited();
