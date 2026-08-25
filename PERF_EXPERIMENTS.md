@@ -13442,3 +13442,42 @@ within run-to-run machine noise.
 **Reason.** Reproducible double-digit wins on the low/mid-dpi render hot
 path and gray direct decode, no reproducible regression, and the clippy 1.98
 allow-flags are gone — CI lints the real code again.
+
+## Perf round 114 (2026-08-26) — HIGH_DPI_RENDER_PROFILE: where high-dpi render time goes after #768 — **Reverted (diagnosis kept)**
+
+**Issue.** Round 113 (#768) left high-dpi renders neutral
+(`render_page/dpi/600` ±1-3%, `render_corpus_color` ~0%) while low/mid dpi
+gained 10-35%. Question: is there a follow-up win on the full-resolution
+path?
+
+**Approach.** Profiled with `samply` (PC sampling, symbols cross-checked via
+`atos`) on three scenarios: `boy.djvu` upscaled to 600 dpi, plus
+`watchmaker.djvu` (color) and `cable_1973_100133.djvu` (bilevel) at native
+size. Finding: >=98% of time in `composite_rows_bilinear_one`
+(`src/djvu_render.rs`). Round 113's win was on the 1:1 superdense path —
+none of these scenarios hit it, because corpus BG44 backgrounds are stored
+subsampled (~page/3), so even native-size renders take the general bilinear
+resampling path, dominated by `bilinear_from_rows` (4 neighbor loads per
+background pixel, bounds-checked).
+
+**Tried.** (a) Collapsing the 4 per-pixel bounds checks to 2 — rejected
+without implementing: it would weaken the truncated-buffer guarantee that
+partial/streaming decode (`decoded_bg44_partial`) relies on. (b) Hoisting
+the loop-invariant `gamma_is_identity` branch out of the general resampling
+loop (same "D1" trick the 1:1 path already uses), byte-identical by
+construction. Measured vs. a stashed baseline, repeated runs, no rebuild
+between runs: `render_page/dpi/600` ~10.0-10.1 ms → ~10.0-10.2 ms,
+`render_corpus_color` ~51.5-52.4 → ~51.0-52.0 ms, `render_corpus_bilevel`
+~48.8-49.2 → ~48.3-48.7 ms — criterion reports "within noise threshold"
+throughout. The branch predictor already eats a loop-invariant branch.
+
+**Numbers.** No benchmark moved beyond the noise threshold; full test suite
+green (1423 passed, 6 skipped).
+
+**Decision.** Reverted (code change dropped; `examples/profile_high_dpi.rs`
+kept as a profiling harness alongside `profile_iw44.rs`).
+
+**Reason.** Profiling-motivated and safe, but zero measurable gain. Further
+high-dpi wins would need unsafe code (banned by `#![deny(unsafe_code)]`) or
+an algorithmic rework of the resampler (separable horizontal/vertical
+passes) — a deliberate larger project, not a low-risk tweak.
