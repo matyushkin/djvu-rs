@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787687899270,
+  "lastUpdate": 1787710000796,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17590,6 +17590,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29875000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "15f327081b68c46c516fc5189449a787b92c9ebd",
+          "message": "perf(render): separable bilinear bg resampling with per-column table (#775)\n\n* perf(render): separable bilinear bg resampling with per-column table\n\nSplit the general bilinear bg path of composite_rows_bilinear_one into\na vertical pre-blend (once per bg column per row, exact in u16) and a\nhorizontal blend (two multiplies per pixel instead of four), plus a\nper-render BilinearX column table replicating the exact Q48 accumulator.\nByte-identical by algebra; equivalence test covers table vs fallback.\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU\n\n* docs(perf): record round 115 separable bilinear resampler\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-08-26T01:41:22Z",
+          "tree_id": "36ae62e7a301c0993598b5e06a26c5fd59a5c737",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/15f327081b68c46c516fc5189449a787b92c9ebd"
+        },
+        "date": 1787709999436,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 106000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5222000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 33922000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 31857000,
             "range": "± 0",
             "unit": "ns/iter"
           }
