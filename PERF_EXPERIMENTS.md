@@ -13481,3 +13481,46 @@ kept as a profiling harness alongside `profile_iw44.rs`).
 high-dpi wins would need unsafe code (banned by `#![deny(unsafe_code)]`) or
 an algorithmic rework of the resampler (separable horizontal/vertical
 passes) — a deliberate larger project, not a low-risk tweak.
+
+## Perf round 115 (2026-08-26) — SEPARABLE_BILINEAR: split the general bg resampler into vertical + horizontal passes — **Kept**
+
+**Issue.** Round 114's diagnosis: >=98% of high-dpi / native-with-subsampled-bg
+render time sits in `composite_rows_bilinear_one`'s general path, dominated by
+`bilinear_from_rows` (4 bounds-checked neighbor loads + 4 multiplies per
+background sample). The named follow-up was an algorithmic rework: separable
+horizontal/vertical passes.
+
+**Approach.** Exploit two invariances in the bilinear sample
+`(a*itx*ity + b*tx*ity + c*itx*ty + d*tx*ty + 128) >> 8`:
+(1) the vertical pair `(ty, rows y0/y1)` is row-invariant, so pre-blend
+`v = p0*ity + p1*ty` (fits u16, exact) once per bg column per row into a
+caller-owned scratch (`for_each_init` per rayon worker; windowed to the
+`[col_start, col_end]` columns the row actually samples, so region renders
+don't pay for the full bg width); (2) the horizontal mapping `(x0, x1, tx)`
+is render-invariant, so precompute a per-column `BilinearX` table once per
+render by replicating the exact Q48 accumulator (`precompute_bilinear_x`,
+the upscale analog of `precompute_area_avg_x`). Per pixel this leaves two
+u16 loads and two multiplies. Byte-identical by algebra (the factored form
+expands to the identical 4-term dot product with identical rounding);
+truncated-buffer zero semantics preserved via windowed `.get()` fallbacks.
+Equivalence test `composite_bilinear_one_column_table_matches_fallback`
+pins table-vs-fallback byte identity; golden render tests unchanged.
+
+**Numbers.** Criterion vs. pre-change baseline `pre115` (quiet machine,
+suspicious results re-run): `render_page/dpi` 144/300/600 **-18.4% /
+-34.1% / -39.5%**, `render_corpus_color` **-26.5..-27.8%**,
+`render_corpus_bilevel` **-32.7%** (native renders with subsampled BG44 all
+take this path), `render_compositor_only` color/bilevel/palette native
+**-28.4% / -35.7% / -39.2%**, `render_scaled_large_colorbook/lanczos3`
+**-10.6%**, `render_region_bilevel` **-31.2%** (after the column-window fix;
+the first cut pre-blended the full bg width and regressed regions +6%).
+Downscale, thumbnail, mask-decode benches: within noise, as expected — the
+change only touches the upscale/1:1 bilinear path. Full suite green
+(1424 passed), rayon-parallel render tests green (191), clippy clean.
+
+**Decision.** Kept.
+
+**Reason.** Reproducible 18-40% wins across every benchmark that exercises
+the general bilinear path — exactly the population round 114 predicted —
+with zero measurable regression, no unsafe code, and byte-identical output
+enforced by algebra plus an equivalence test.
