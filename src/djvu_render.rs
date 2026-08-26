@@ -2515,6 +2515,39 @@ fn precompute_area_avg_x(
     xs
 }
 
+/// Per-output-column bg sampling data for the bilinear (upscale / 1:1) path:
+/// clamped source columns `x0`/`x1` and the horizontal fractional weight `tx`.
+/// Column mapping never depends on the row, so this is computed once per
+/// render instead of once per pixel — the AreaAvgX analog for upscaling.
+#[derive(Clone, Copy)]
+struct BilinearX {
+    x0: u32,
+    x1: u32,
+    tx: u32,
+}
+
+/// Build the per-column table for [`composite_rows_bilinear_one`]. Walks the
+/// exact Q48 fixed-point accumulator of the in-loop fallback (`bg_fx_q`), so
+/// table lookups and the fallback produce byte-identical coordinates.
+fn precompute_bilinear_x(ctx: &CompositeContext<'_>, fx_step: u32) -> Option<Vec<BilinearX>> {
+    let bg = ctx.bg?;
+    let clamp_w = bg.width.saturating_sub(1);
+    let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
+    let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+    let mut xs = Vec::with_capacity(ctx.out_w as usize);
+    for _ in 0..ctx.out_w {
+        let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+        let x0 = (bg_fx >> FRACBITS).min(clamp_w);
+        xs.push(BilinearX {
+            x0,
+            x1: (x0 + 1).min(clamp_w),
+            tx: bg_fx & FRAC_MASK,
+        });
+        bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
+    }
+    Some(xs)
+}
+
 impl<'a> CompositeContext<'a> {
     /// Build a composite context from already-decoded layers.
     ///
@@ -2697,6 +2730,9 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
     let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
     let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
     let area_avg_x = downscale.then(|| precompute_area_avg_x(ctx, fx_step, bg_fx_step));
+    let bilinear_x = (!downscale)
+        .then(|| precompute_bilinear_x(ctx, fx_step))
+        .flatten();
 
     #[cfg(feature = "parallel")]
     {
@@ -2705,7 +2741,7 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
         buf[..n]
             .par_chunks_exact_mut(row_stride)
             .enumerate()
-            .for_each(|(oy, row)| {
+            .for_each_init(Vec::new, |vblend, (oy, row)| {
                 if downscale {
                     composite_rows_area_avg_one(
                         ctx,
@@ -2718,28 +2754,47 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
                         area_avg_x.as_deref(),
                     );
                 } else {
-                    composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
+                    composite_rows_bilinear_one(
+                        ctx,
+                        oy as u32,
+                        fx_step,
+                        fy_step,
+                        row,
+                        bilinear_x.as_deref(),
+                        vblend,
+                    );
                 }
             });
     }
     #[cfg(not(feature = "parallel"))]
-    for (oy, row) in buf[..ctx.out_h as usize * row_stride]
-        .chunks_exact_mut(row_stride)
-        .enumerate()
     {
-        if downscale {
-            composite_rows_area_avg_one(
-                ctx,
-                oy as u32,
-                fx_step,
-                fy_step,
-                bg_fx_step,
-                bg_fy_step,
-                row,
-                area_avg_x.as_deref(),
-            );
-        } else {
-            composite_rows_bilinear_one(ctx, oy as u32, fx_step, fy_step, row);
+        let mut vblend = Vec::new();
+        for (oy, row) in buf[..ctx.out_h as usize * row_stride]
+            .chunks_exact_mut(row_stride)
+            .enumerate()
+        {
+            if downscale {
+                composite_rows_area_avg_one(
+                    ctx,
+                    oy as u32,
+                    fx_step,
+                    fy_step,
+                    bg_fx_step,
+                    bg_fy_step,
+                    row,
+                    area_avg_x.as_deref(),
+                );
+            } else {
+                composite_rows_bilinear_one(
+                    ctx,
+                    oy as u32,
+                    fx_step,
+                    fy_step,
+                    row,
+                    bilinear_x.as_deref(),
+                    &mut vblend,
+                );
+            }
         }
     }
 
@@ -2789,6 +2844,10 @@ where
     let bg_fx_step = ((fx_step as u64 * ctx.bg_x_q24) >> 24) as u32;
     let bg_fy_step = ((fy_step as u64 * ctx.bg_y_q24) >> 24) as u32;
     let area_avg_x = downscale.then(|| precompute_area_avg_x(ctx, fx_step, bg_fx_step));
+    let bilinear_x = (!downscale)
+        .then(|| precompute_bilinear_x(ctx, fx_step))
+        .flatten();
+    let mut vblend = Vec::new();
 
     for oy in 0..ctx.out_h {
         if downscale {
@@ -2803,7 +2862,15 @@ where
                 area_avg_x.as_deref(),
             );
         } else {
-            composite_rows_bilinear_one(ctx, oy, fx_step, fy_step, &mut row_buf);
+            composite_rows_bilinear_one(
+                ctx,
+                oy,
+                fx_step,
+                fy_step,
+                &mut row_buf,
+                bilinear_x.as_deref(),
+                &mut vblend,
+            );
         }
         sink(oy as usize, &row_buf);
     }
@@ -2953,6 +3020,11 @@ fn composite_rows_bilevel_one(
 }
 
 /// Write one bilinear row into `row_buf` (upscale / 1:1).
+///
+/// `bx` is the optional per-column table from [`precompute_bilinear_x`]
+/// (`None` falls back to the in-loop fixed-point walk — byte-identical).
+/// `vblend` is caller-owned scratch for the vertically pre-blended bg row;
+/// reusing it across rows avoids a per-row allocation.
 #[inline]
 fn composite_rows_bilinear_one(
     ctx: &CompositeContext<'_>,
@@ -2960,6 +3032,8 @@ fn composite_rows_bilinear_one(
     fx_step: u32,
     fy_step: u32,
     row_buf: &mut [u8],
+    bx: Option<&[BilinearX]>,
+    vblend: &mut Vec<u16>,
 ) {
     let (page_w, page_h) = (ctx.page_w, ctx.page_h);
     let fy = (oy + ctx.offset_y) * fy_step;
@@ -3279,18 +3353,82 @@ fn composite_rows_bilinear_one(
         }
     };
 
-    // B2: precompute bg row slices (y0/y1 are row-invariant) to avoid repeated
-    // y-coordinate arithmetic inside sample_bilinear.
-    let bg_rows = ctx.bg.map(|bg| {
-        let bg_fy = bg_fy_hoist.unwrap_or(0);
-        let y0 = (bg_fy >> FRACBITS).min(bg.height.saturating_sub(1)) as usize;
-        let y1 = (y0 + 1).min(bg.height.saturating_sub(1) as usize);
-        let ty = bg_fy & FRAC_MASK;
-        let stride = bg.width as usize * 4;
-        let row0 = bg.data.get(y0 * stride..).unwrap_or(&[]);
-        let row1 = bg.data.get(y1 * stride..).unwrap_or(&[]);
-        (row0, row1, bg.width, ty)
-    });
+    // B2/B3: precompute bg row slices (y0/y1 are row-invariant), then run the
+    // vertical half of the separable bilinear blend once per bg column: with
+    // oy fixed, ty and both source rows never change across the row, so
+    // v = p0*ity + p1*ty (<= 255*FRAC, exact in u16) is shared by every output
+    // pixel sampling that column. The horizontal half later computes
+    // (v0*itx + v1*tx + 128) >> 8, which expands to the original 4-term dot
+    // product of `bilinear_from_rows` — byte-identical by algebra.
+    //
+    // The pre-blend only covers the bg columns this row actually samples
+    // ([col_start, col_end], from the monotonic accumulator's endpoints) —
+    // a region render must not pay for the full bg width (#region bench).
+    let vb: Option<(&[[u16; 4]], u32, u32)> = match ctx.bg {
+        None => None,
+        Some(bg) => {
+            let bg_fy = bg_fy_hoist.unwrap_or(0);
+            let clamp_h = bg.height.saturating_sub(1) as usize;
+            let y0 = ((bg_fy >> FRACBITS) as usize).min(clamp_h);
+            let y1 = (y0 + 1).min(clamp_h);
+            let ty = bg_fy & FRAC_MASK;
+            let ity = FRAC - ty;
+            let stride = bg.width as usize * 4;
+            let row0 = bg.data.get(y0 * stride..).unwrap_or(&[]);
+            let row1 = bg.data.get(y1 * stride..).unwrap_or(&[]);
+            let clamp_w = bg.width.saturating_sub(1);
+            let fx_at = |q: u64| ((q >> 24) as u32).saturating_sub(FRAC / 2);
+            let col_start = (fx_at(bg_fx_q) >> FRACBITS).min(clamp_w);
+            let last_q =
+                bg_fx_q.wrapping_add(bg_fx_step_q.wrapping_mul(ctx.out_w.saturating_sub(1) as u64));
+            let col_end = ((fx_at(last_q) >> FRACBITS).min(clamp_w) + 1).min(clamp_w);
+            let ncols = (col_end - col_start + 1) as usize;
+            vblend.clear();
+            vblend.resize(ncols * 4, 0);
+            for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                // Truncated rows (partial/streaming decode) contribute zeros,
+                // exactly like bilinear_from_rows' out-of-range corners.
+                let off = (col_start as usize + i) * 4;
+                let p0 = row0.get(off..off + 4);
+                let p1 = row1.get(off..off + 4);
+                for ch in 0..4 {
+                    let a = p0.map_or(0, |q| q[ch] as u32);
+                    let b = p1.map_or(0, |q| q[ch] as u32);
+                    v[ch] = (a * ity + b * ty) as u16;
+                }
+            }
+            Some((vblend.as_chunks::<4>().0, bg.width, col_start))
+        }
+    };
+
+    // Horizontal half of the separable blend. The column entry comes from the
+    // precomputed table when available, else from the Q48 accumulator — the
+    // same walk `precompute_bilinear_x` replicates. `col_start` shifts full-bg
+    // column indices into the windowed `vb_row`.
+    let hblend =
+        |vb_row: &[[u16; 4]], bg_w: u32, col_start: u32, e: Option<BilinearX>, bg_fx_q: u64| {
+            let e = e.unwrap_or_else(|| {
+                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+                let clamp_w = bg_w.saturating_sub(1);
+                let x0 = (bg_fx >> FRACBITS).min(clamp_w);
+                BilinearX {
+                    x0,
+                    x1: (x0 + 1).min(clamp_w),
+                    tx: bg_fx & FRAC_MASK,
+                }
+            });
+            let v0 = vb_row
+                .get(e.x0.saturating_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let v1 = vb_row
+                .get(e.x1.saturating_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let itx = FRAC - e.tx;
+            let f = |i: usize| ((v0[i] as u32 * itx + v1[i] as u32 * e.tx + 128) >> 8) as u8;
+            (f(0), f(1), f(2))
+        };
 
     // D_AA_ZOOM (opt-in): this function is only invoked when `!downscale`
     // (composite_into/composite_rows dispatch downscale to the area-average
@@ -3333,9 +3471,14 @@ fn composite_rows_bilinear_one(
         };
 
         let (r, g, b) = if coverage == 0 {
-            if let Some((row0, row1, bg_w, ty)) = bg_rows {
-                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-                bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
+            if let Some((vb_row, bg_w, col_start)) = vb {
+                hblend(
+                    vb_row,
+                    bg_w,
+                    col_start,
+                    bx.and_then(|t| t.get(ox).copied()),
+                    bg_fx_q,
+                )
             } else {
                 (255, 255, 255)
             }
@@ -3355,9 +3498,14 @@ fn composite_rows_bilinear_one(
             } else {
                 // Partial coverage (mask_aa only): blend fg/bg proportionally
                 // to the interpolated mask coverage for a smoothed glyph edge.
-                let (br, bg_g, bb) = if let Some((row0, row1, bg_w, ty)) = bg_rows {
-                    let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-                    bilinear_from_rows(row0, row1, bg_w, bg_fx, ty)
+                let (br, bg_g, bb) = if let Some((vb_row, bg_w, col_start)) = vb {
+                    hblend(
+                        vb_row,
+                        bg_w,
+                        col_start,
+                        bx.and_then(|t| t.get(ox).copied()),
+                        bg_fx_q,
+                    )
                 } else {
                     (255, 255, 255)
                 };
@@ -4771,7 +4919,7 @@ mod tests {
         let ctx = synth_ctx(&opts, 4, 2, Some(&bg), Some(&mask), &lut, 4, 2);
 
         let mut row = vec![0u8; 4 * 4];
-        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row);
+        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row, None, &mut Vec::new());
 
         for x in 0..4usize {
             let p = &row[x * 4..x * 4 + 4];
@@ -4800,7 +4948,7 @@ mod tests {
         );
 
         let mut row = vec![0u8; 8 * 4];
-        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row);
+        composite_rows_bilinear_one(&ctx, 0, FRAC, FRAC, &mut row, None, &mut Vec::new());
 
         for x in 0..8usize {
             let p = &row[x * 4..x * 4 + 4];
@@ -5134,7 +5282,7 @@ mod tests {
         let fx_step = FRAC / 2; // 2× upscale
         let fy_step = FRAC / 2;
         let mut row = vec![0u8; 4 * 4];
-        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row);
+        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row, None, &mut Vec::new());
 
         // Nearest px indices for ox=0..4 are [0,0,1,1]; only px 0 is foreground,
         // rendered black (no FG44 layer ⇒ (0,0,0)); px 1 is background colour.
@@ -5162,7 +5310,7 @@ mod tests {
         let fx_step = FRAC / 2;
         let fy_step = FRAC / 2;
         let mut row = vec![0u8; 4 * 4];
-        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row);
+        composite_rows_bilinear_one(&ctx, 0, fx_step, fy_step, &mut row, None, &mut Vec::new());
 
         // ox=0 lands exactly on the set bit → still pure (black) foreground.
         assert_eq!(
@@ -5201,7 +5349,7 @@ mod tests {
             "test must exercise subsampled bg"
         );
         let mut row_off = vec![0u8; 8 * 4];
-        composite_rows_bilinear_one(&ctx_off, 0, FRAC, FRAC, &mut row_off);
+        composite_rows_bilinear_one(&ctx_off, 0, FRAC, FRAC, &mut row_off, None, &mut Vec::new());
 
         let opts_on = RenderOptions {
             mask_aa: true,
@@ -5209,12 +5357,63 @@ mod tests {
         };
         let ctx_on = synth_ctx(&opts_on, 8, 1, Some(&bg), Some(&mask), &lut, 8, 1);
         let mut row_on = vec![0u8; 8 * 4];
-        composite_rows_bilinear_one(&ctx_on, 0, FRAC, FRAC, &mut row_on);
+        composite_rows_bilinear_one(&ctx_on, 0, FRAC, FRAC, &mut row_on, None, &mut Vec::new());
 
         assert_eq!(
             row_off, row_on,
             "mask_aa must not affect native 1:1 scale even with a subsampled bg plane"
         );
+    }
+
+    /// The precomputed `BilinearX` column table must be byte-identical to the
+    /// in-loop Q48 fallback on every row — 2× upscale, non-zero `offset_x`,
+    /// subsampled non-uniform bg so any x0/x1/tx mismatch shows up in bytes.
+    #[test]
+    fn composite_bilinear_one_column_table_matches_fallback() {
+        let opts = RenderOptions::default();
+        let mut bg = Pixmap::new(3, 2, 0, 0, 0, 255); // subsampled: page_w=8, bg_w=3
+        for (i, px) in bg.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            px[0] = (i * 40) as u8;
+            px[1] = (i * 25 + 7) as u8;
+            px[2] = (255 - i * 30) as u8;
+        }
+        let mut mask = crate::bitmap::Bitmap::new(8, 2);
+        mask.set(2, 0, true); // one fg bit so the partial/fg branches run too
+        let lut = identity_lut();
+
+        let mut ctx = synth_ctx(&opts, 8, 2, Some(&bg), Some(&mask), &lut, 16, 4);
+        ctx.offset_x = 3;
+
+        let fx_step = FRAC / 2; // 2× upscale
+        let fy_step = FRAC / 2;
+        let table = precompute_bilinear_x(&ctx, fx_step).expect("bg present");
+
+        for oy in 0..4 {
+            let mut row_table = vec![0u8; 16 * 4];
+            let mut row_fallback = vec![0u8; 16 * 4];
+            composite_rows_bilinear_one(
+                &ctx,
+                oy,
+                fx_step,
+                fy_step,
+                &mut row_table,
+                Some(&table),
+                &mut Vec::new(),
+            );
+            composite_rows_bilinear_one(
+                &ctx,
+                oy,
+                fx_step,
+                fy_step,
+                &mut row_fallback,
+                None,
+                &mut Vec::new(),
+            );
+            assert_eq!(
+                row_table, row_fallback,
+                "table and fallback sampling must agree at oy={oy}"
+            );
+        }
     }
 
     /// Integration-level: `render_pixmap` at native scale on a real bilevel
