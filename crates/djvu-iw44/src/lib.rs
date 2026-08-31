@@ -3213,7 +3213,13 @@ impl Iw44Image {
             }
             // Prevent OOM / slow decode on malformed input.
             // 64 MP allows real scanned documents (e.g. 6780×9148 ≈ 62 MP at 600 dpi)
-            // while bounding worst-case fuzz decode to ~3 s (vs 12 s at 256 MP).
+            // while bounding worst-case decode cost. Measured at the cap
+            // boundary (2026-08 fuzz slow-unit: color 1023×65535 ≈ 67.0 MP at
+            // 99.9% of the cap, 241 slices in a 13-byte chunk): ~0.8 s and
+            // ~400 MB peak (3 planes of 32×32 coefficient blocks) in a native
+            // release build. The same input needs ~11.5 s under ASan+SanCov
+            // fuzz instrumentation; that overhead is fuzz-only, not a codec
+            // gap. See PERF_EXPERIMENTS.md (near-cap slow-unit triage).
             let pixels = w as u64 * h as u64;
             if pixels > 64 * 1024 * 1024 {
                 return Err(Iw44Error::ImageTooLarge);
