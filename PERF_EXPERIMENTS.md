@@ -13524,3 +13524,45 @@ change only touches the upscale/1:1 bilinear path. Full suite green
 the general bilinear path — exactly the population round 114 predicted —
 with zero measurable regression, no unsafe code, and byte-identical output
 enforced by algebra plus an equivalence test.
+
+### IW44 near-cap slow-unit triage: sanitizer overhead, not a codec gap — **No change** (2026-08-31)
+
+**Issue.** The 2026-08 fuzz campaign (5 targets × 15 min, zero crashes)
+left one artifact: `fuzz_iw44` flagged a 13-byte input as a slow unit,
+`slow-unit-ce750939e8c7ef0ebaea735c4d757a8b4711b57f` — 11.5 s in
+`Iw44Image::decode_chunk` at 99% CPU. Question: does the 64 MP
+`ImageTooLarge` cap have a gap that needs a codec-level guard?
+
+**Approach.** Parsed the header against `decode_chunk`: serial=0,
+slices=241, majver=0x2D (color, 3 planes), w=1023, h=65535 →
+67,042,305 px = 99.9% of the 64 MiP cap (67,108,864). The fuzzer simply
+maximised the input *under* the existing cap; the cap itself held.
+Profiled the 11.5 s run (`sample`): top-of-stack is dominated by
+`__sanitizer_cov_trace_const_cmp1` + friends (SanCov comparison
+tracing), with `PlaneDecoder::decode_slice` itself a distant second.
+Re-measured with an uninstrumented release build calling the same
+`decode_chunk` on the same bytes.
+
+**Numbers.**
+
+| build | wall time |
+|-------|-----------|
+| fuzz binary (ASan + SanCov, `-runs=1`) | 11.5 s |
+| native release, no instrumentation | **0.79 s** |
+
+Peak memory is bounded by the cap: 3 planes × 65,536 blocks × 2 KiB
+≈ 400 MB of coefficient storage for a worst-case color declaration.
+
+**Decision.** No change. No codec-level guard added.
+
+**Reason.** The slowdown is ~14× sanitizer/coverage instrumentation
+overhead on the coefficient-flag hot loops, present only in fuzz builds.
+Real worst-case cost under the cap is <1 s and ~400 MB — the documented
+trade-off of the 64 MP cap (real 600 dpi scans reach 62 MP). Slice count
+cannot extend this: a u8 caps slices at 255/chunk, and `finish_slice`
+halves every quantisation step per band cycle, so late slices go null.
+An early-exit on `zp.is_exhausted()` remains off the table (see the
+2026-06-09 reverted entry: it truncates legitimate refinement).
+Follow-up: none; opt-in `ResourceLimits` stays the tighter document-level
+control. Updated the stale "~3 s" comment at the cap check in
+`crates/djvu-iw44/src/lib.rs`.
