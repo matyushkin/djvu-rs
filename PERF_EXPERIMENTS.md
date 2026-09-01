@@ -13566,3 +13566,33 @@ An early-exit on `zp.is_exhausted()` remains off the table (see the
 Follow-up: none; opt-in `ResourceLimits` stays the tighter document-level
 control. Updated the stale "~3 s" comment at the cap check in
 `crates/djvu-iw44/src/lib.rs`.
+
+### Mask reuse on re-encode (`PageEncoder::with_mask`, #601 follow-up) — **Kept** (2026-09-01)
+
+**Issue.** The #601 generation-loss study measured picture-page drift of
+ΔE ≈ 8 per decode → re-encode generation, compounding without bound: the
+layered profiles re-binarize a rendered composite, and Sauvola never
+reproduces the previous mask. The filed stabilizer: let re-encode reuse
+the source document's existing mask.
+
+**Approach.** Landed in PR #779. `PageEncoder::with_mask(&Bitmap)` takes
+the page's decoded `Sjbz` (`DjVuPage::extract_mask`) and skips
+binarization; `segment_page` was split so its background half (adaptive
+subsample, mask-excluded block means, diffusion) runs unchanged around
+the supplied mask (`segment_page_with_mask`). Invalid combinations
+(bitmap source, `Photo`, mismatched dimensions) fail with
+`EncodeError::Unsupported`.
+
+**Numbers.** Given the same mask, the reuse path reproduces
+`segment_page`'s background byte-identically (test-enforced). A
+2-generation decode → render → re-encode cycle keeps the mask
+bit-identical for both `Quality` and `Archival` — the mask layer is now
+a fixed point, eliminating the re-segmentation feedback loop that drove
+the unbounded picture-page drift. Remaining per-generation loss comes
+only from IW44/FGbz re-quantisation of the colour layers.
+
+**Decision.** Kept (feature; new API, off unless called).
+
+**Reason.** Cheap and exact when the input is already a DjVu — the mask
+is decoded, not re-estimated. Follow-up: a per-page mask variant for the
+multi-page `encode_djvm_layered_shared` bundle path.
