@@ -199,8 +199,13 @@ Layered `quality` / `archival` encodes default to fixed BT.601 thresholding.
 `--binarization sauvola` opts into adaptive local thresholding for mixed or
 uneven lighting; tune it with `--sauvola-window` and `--sauvola-k`.
 `--bg-inpaint` fills fully masked background blocks from neighbouring unmasked
-pixels, which can reduce dark boxes under heavy text strokes. These knobs are
-opt-in, only affect layered profiles, and do not change lossless JB2 defaults.
+pixels, which can reduce dark boxes under heavy text strokes.
+`--block-classify` routes photo and halftone blocks wholly to the background
+layer instead of shredding them into mask speckle (mixed text+photo layouts);
+pair it with `--adaptive-bg-subsample`, which densifies the background grid
+where unmasked detail warrants it, so routed photos keep their detail. These
+knobs are opt-in, only affect layered profiles, and do not change lossless
+JB2 defaults.
 Library callers can use the same controls with `PageEncoder::with_segment_options`.
 For newly encoded pages, `PageEncoder::with_metadata` emits a `METz` chunk;
 for existing documents, `DjVuDocumentMut::page_mut(...).set_metadata(...)`

@@ -13626,3 +13626,48 @@ callers; the residual ≤1.3% is within this machine's noise band. Lesson
 for the bench workflow: a same-runner re-check does not immunise against
 a degraded runner — cross-check the "regressions" list for benches the
 diff cannot have touched before trusting it.
+
+### Block classifier on the real tier-2 corpus + CLI exposure (#562 follow-up) — **Kept** (2026-09-02)
+
+**Issue.** Round 97 kept `SegmentOptions::block_classify` opt-in with
+synthetic-only evidence ("real mixed-scan fixtures remain #558"), and the
+adaptive-BG pairing follow-up was never measured. #558's tier-2 fixtures
+have been in the corpus since round 103; the flag was also unreachable —
+no CLI flag, no profile sets it (library callers only, via
+`with_segment_options`).
+
+**Approach.** New probe `examples/block_classify_corpus.rs`: render each
+real page's composite at native size (the re-encode scenario), segment
+with the Quality profile defaults vs `+block_classify` vs
+`+block_classify+adaptive_bg_subsample`, and record Sjbz bytes, total
+encoded bytes, mask ink, ΔE/ssim of the encode round-trip vs the rendered
+source, and mask identity. Pages: war_1812 p0 (photo) / p2 (newspaper
+text+halftone photos), goody_twoshoes p0 (illustration) / p1 (text),
+map_atlas p0 (line-art adversarial), chinese_cookbook p3 (mixed) / p1
+(text), pathogenic p146 (bilevel halftone plate), cable (typewriter text).
+
+**Numbers.** Classifier alone is the size lever: war p0 total 83.5→7.6 KB
+(**−91%**), goody p0 −55% with ΔE 14.3→6.9, chinese p3 −34%, war p2 Sjbz
+−20.5% / total −15% (small ssim dip 0.851→0.834). Pure text bit-identical
+(goody p1, cable). The **pairing** is the quality lever round 97 couldn't
+see: with photo pixels out of the mask, #569's adaptive subsample finally
+engages — war p2 (the motivating mixed-newspaper case) beats baseline on
+*every* axis (total −4.6%, ΔE 3.80→3.51, ssim 0.851→0.852); goody p0 ΔE
+14.3→**2.0** / ssim 0.613→**0.933**; war p0 ssim 0.452→**0.928**; even the
+line-art "misclassification" turns net-positive (map ΔE 4.90→2.80, ssim
+0.907→0.956). Cost: photo-heavy pages spend bytes on the denser BG (war p0
+7.6→214 KB vs 83 KB baseline; goody p0 99 vs 35 KB) — the price of the
+photo actually surviving. Bilevel-source halftone (pathogenic p146) stays
+the classifier's bad case vs a dotted source: −75% bytes but ΔE 16.5
+(descreen; such input belongs in Lossless anyway).
+
+**Decision.** Kept: probe + CLI exposure (`--block-classify`,
+`--adaptive-bg-subsample`, quality/archival only, with tests). Defaults NOT
+flipped: the #562 rule demands size *and* fidelity improvement together,
+and each variant alone trades one axis on some page class (cls-only dips
+ssim on mixed pages; +adaptive grows photo-page bytes).
+
+**Reason.** Real-corpus evidence now exists on both sides: the combination
+is strictly better on the issue's motivating class (mixed newspaper) and
+provably inert on text, so it belongs one flag away; but photo-page byte
+growth makes default-on a product decision, not a measurement call.

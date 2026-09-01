@@ -256,6 +256,14 @@ enum Cmd {
         /// Inpaint fully masked background blocks for layered encodes.
         #[arg(long)]
         bg_inpaint: bool,
+        /// Classify 32x32 blocks as text vs photo/halftone and route photo
+        /// blocks wholly to the background layer (quality/archival only).
+        #[arg(long)]
+        block_classify: bool,
+        /// Content-adaptive background subsample: densify the BG grid when
+        /// unmasked detail warrants it (pairs well with --block-classify).
+        #[arg(long)]
+        adaptive_bg_subsample: bool,
         /// IW44 background bits-per-pixel budget (quality/archival only).
         /// Encode BG44 slices until the cumulative payload reaches this many
         /// bits per pixel; overrides the default 100-slice schedule. A lower
@@ -485,6 +493,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             sauvola_window,
             sauvola_k,
             bg_inpaint,
+            block_classify,
+            adaptive_bg_subsample,
             bg_bpp,
             shared_dict_pages,
             thumbnails,
@@ -503,6 +513,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 sauvola_window,
                 sauvola_k,
                 bg_inpaint,
+                block_classify,
+                adaptive_bg_subsample,
             },
             bg_bpp,
             EncodeBundleArgs {
@@ -2218,6 +2230,8 @@ struct EncodeSegmentArgs {
     sauvola_window: u32,
     sauvola_k: f32,
     bg_inpaint: bool,
+    block_classify: bool,
+    adaptive_bg_subsample: bool,
 }
 
 impl EncodeSegmentArgs {
@@ -2228,15 +2242,17 @@ impl EncodeSegmentArgs {
         use djvu_rs::djvu_encode::EncodeQuality;
         use djvu_rs::segment::Binarization;
 
-        let has_segment_flags = self.binarization != BinarizationArg::Fixed || self.bg_inpaint;
+        let has_segment_flags = self.binarization != BinarizationArg::Fixed
+            || self.bg_inpaint
+            || self.block_classify
+            || self.adaptive_bg_subsample;
         if !has_segment_flags {
             return Ok(None);
         }
         if matches!(quality, EncodeQuality::Lossless) {
-            return Err(
-                "--binarization and --bg-inpaint require --quality quality or --quality archival"
-                    .into(),
-            );
+            return Err("--binarization, --bg-inpaint, --block-classify and \
+                 --adaptive-bg-subsample require --quality quality or --quality archival"
+                .into());
         }
 
         let mut opts = quality.default_segment_options();
@@ -2248,6 +2264,8 @@ impl EncodeSegmentArgs {
             },
         };
         opts.bg_inpaint = self.bg_inpaint;
+        opts.block_classify = self.block_classify;
+        opts.adaptive_bg_subsample = self.adaptive_bg_subsample;
         if self.bg_inpaint {
             // `--bg-inpaint` explicitly selects the ring-average fill, so turn
             // off the colour profile's default harmonic diffusion (which would
