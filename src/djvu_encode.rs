@@ -884,6 +884,7 @@ pub fn encode_djvm_layered_shared(
         segment_options,
         shared_dict_page_threshold,
         false,
+        None,
     )
 }
 
@@ -906,9 +907,73 @@ pub fn encode_djvm_layered_shared_with_thumbnails(
         segment_options,
         shared_dict_page_threshold,
         with_thumbnails,
+        None,
     )
 }
 
+/// Like [`encode_djvm_layered_shared`] but with per-page mask reuse (#779
+/// follow-up).
+///
+/// `masks[i]`, when `Some`, is reused for `pixmaps[i]` exactly as
+/// [`PageEncoder::with_mask`] reuses it for a single page: binarization is
+/// skipped and only the background half of segmentation
+/// ([`segment_page_with_mask`]) runs around the supplied mask, so a
+/// decode → re-encode cycle over a multi-page bundle keeps every page's mask
+/// bit-identical. `None` for a page falls back to normal segmentation
+/// ([`segment_page`]), so a bundle can mix reused and freshly segmented
+/// pages.
+///
+/// `masks` must have the same length as `pixmaps`, and a `Some` entry's
+/// bitmap must match its page's pixmap dimensions — otherwise this returns
+/// [`EncodeError::Unsupported`], matching `PageEncoder::with_mask`'s
+/// validation. The intended source of each mask is the corresponding page of
+/// the document being re-encoded, decoded via
+/// [`extract_mask`](crate::djvu_document::DjVuPage::extract_mask).
+pub fn encode_djvm_layered_shared_with_masks(
+    pixmaps: &[Pixmap],
+    quality: EncodeQuality,
+    dpi: u16,
+    segment_options: Option<SegmentOptions>,
+    shared_dict_page_threshold: usize,
+    masks: &[Option<&Bitmap>],
+) -> Result<Vec<u8>, EncodeError> {
+    encode_djvm_layered_shared_impl(
+        pixmaps,
+        quality,
+        dpi,
+        segment_options,
+        shared_dict_page_threshold,
+        false,
+        Some(masks),
+    )
+}
+
+/// Like [`encode_djvm_layered_shared_with_thumbnails`] but with per-page mask
+/// reuse — the union of that function and
+/// [`encode_djvm_layered_shared_with_masks`]. See the latter for the mask
+/// semantics and validation rules.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_djvm_layered_shared_with_thumbnails_and_masks(
+    pixmaps: &[Pixmap],
+    quality: EncodeQuality,
+    dpi: u16,
+    segment_options: Option<SegmentOptions>,
+    shared_dict_page_threshold: usize,
+    with_thumbnails: bool,
+    masks: &[Option<&Bitmap>],
+) -> Result<Vec<u8>, EncodeError> {
+    encode_djvm_layered_shared_impl(
+        pixmaps,
+        quality,
+        dpi,
+        segment_options,
+        shared_dict_page_threshold,
+        with_thumbnails,
+        Some(masks),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_djvm_layered_shared_impl(
     pixmaps: &[Pixmap],
     quality: EncodeQuality,
@@ -916,11 +981,28 @@ fn encode_djvm_layered_shared_impl(
     segment_options: Option<SegmentOptions>,
     shared_dict_page_threshold: usize,
     with_thumbnails: bool,
+    masks: Option<&[Option<&Bitmap>]>,
 ) -> Result<Vec<u8>, EncodeError> {
     if !matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
         return Err(EncodeError::Unsupported(
             "encode_djvm_layered_shared requires the Quality or Archival profile",
         ));
+    }
+    if let Some(masks) = masks {
+        if masks.len() != pixmaps.len() {
+            return Err(EncodeError::Unsupported(
+                "masks length must equal pixmaps length",
+            ));
+        }
+        for (pm, mask) in pixmaps.iter().zip(masks.iter()) {
+            if let Some(mask) = mask
+                && (mask.width != pm.width || mask.height != pm.height)
+            {
+                return Err(EncodeError::Unsupported(
+                    "reused mask dimensions must match its page pixmap",
+                ));
+            }
+        }
     }
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
 
@@ -937,8 +1019,15 @@ fn encode_djvm_layered_shared_impl(
         bg44: Vec<Vec<u8>>,
         th44: Vec<Vec<u8>>,
     }
-    let prepare = |pm: &Pixmap| -> PreparedPage {
-        let seg = segment_page(pm, &opts);
+    // #779 follow-up: a `Some` mask reuses `segment_page_with_mask` (skip
+    // binarization, keep background derivation) exactly like
+    // `PageEncoder::with_mask`; `None` keeps the original `segment_page` call
+    // so a bundle encoded with no `masks` argument is untouched codegen-wise.
+    let prepare = |pm: &Pixmap, reuse_mask: Option<&Bitmap>| -> PreparedPage {
+        let seg = match reuse_mask {
+            Some(mask) => segment_page_with_mask(pm, mask, &opts),
+            None => segment_page(pm, &opts),
+        };
         let bg44 = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
         let th44 = if with_thumbnails {
             crate::thumbnail::encode_th44_color(pm)
@@ -951,13 +1040,22 @@ fn encode_djvm_layered_shared_impl(
             th44,
         }
     };
+    let mask_at = |idx: usize| -> Option<&Bitmap> { masks.and_then(|m| m[idx]) };
     #[cfg(feature = "parallel")]
     let prepared: Vec<PreparedPage> = {
         use rayon::prelude::*;
-        pixmaps.par_iter().map(prepare).collect()
+        pixmaps
+            .par_iter()
+            .enumerate()
+            .map(|(idx, pm)| prepare(pm, mask_at(idx)))
+            .collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let prepared: Vec<PreparedPage> = pixmaps.iter().map(prepare).collect();
+    let prepared: Vec<PreparedPage> = pixmaps
+        .iter()
+        .enumerate()
+        .map(|(idx, pm)| prepare(pm, mask_at(idx)))
+        .collect();
 
     // Cluster over borrowed masks — no per-mask clone (#565).
     let mask_refs: Vec<&Bitmap> = prepared.iter().map(|p| &p.mask).collect();
@@ -1336,7 +1434,13 @@ mod tests {
     }
 
     fn render_native(doc: &crate::djvu_document::DjVuDocument) -> Pixmap {
-        let page = doc.page(0).unwrap();
+        render_native_page(doc, 0)
+    }
+
+    /// Like [`render_native`] but for an arbitrary page index — the
+    /// multi-page re-encode tests render every bundle page, not just page 0.
+    fn render_native_page(doc: &crate::djvu_document::DjVuDocument, index: usize) -> Pixmap {
+        let page = doc.page(index).unwrap();
         crate::djvu_render::render_pixmap(
             page,
             &crate::djvu_render::RenderOptions {
@@ -2334,6 +2438,238 @@ mod tests {
             assert!(
                 thumb.is_none(),
                 "page {i} must NOT carry a TH44 thumbnail when with_thumbnails=false"
+            );
+        }
+    }
+
+    // ── #779 follow-up: per-page mask reuse on the multi-page bundle path ──
+
+    /// Two differently-shaped colour fixtures, used as a small multi-page
+    /// bundle by the mask-reuse tests below.
+    fn two_page_bundle_fixture() -> [Pixmap; 2] {
+        [synthetic_layered_page(), mixed_lighting_fixture()]
+    }
+
+    /// (a) Given the same per-page masks, `encode_djvm_layered_shared_with_masks`
+    /// must reproduce each page's mask byte-identically in the output bundle —
+    /// the multi-page analogue of `PageEncoder::with_mask`'s single-page
+    /// guarantee. Also exercises a mixed `Some`/`None` `masks` slice: page 1
+    /// falls back to normal segmentation and must still produce a valid,
+    /// non-empty mask.
+    #[test]
+    fn layered_shared_with_masks_reproduces_supplied_masks() {
+        let pages = two_page_bundle_fixture();
+        let gen0 = encode_djvm_layered_shared(&pages, EncodeQuality::Quality, 300, None, 2)
+            .expect("gen0 encode");
+        let doc0 = crate::djvu_document::DjVuDocument::parse(&gen0).expect("parse gen0");
+        let masks0: Vec<Bitmap> = (0..pages.len())
+            .map(|i| {
+                doc0.page(i)
+                    .unwrap()
+                    .extract_mask()
+                    .unwrap()
+                    .expect("page has a mask")
+            })
+            .collect();
+        for (i, m) in masks0.iter().enumerate() {
+            assert!(
+                m.data.iter().any(|&b| b != 0),
+                "page {i} fixture mask must be non-empty"
+            );
+        }
+
+        // Reuse page 0's mask, let page 1 re-segment from scratch (`None`).
+        let mask_refs: Vec<Option<&Bitmap>> = vec![Some(&masks0[0]), None];
+        let reused = encode_djvm_layered_shared_with_masks(
+            &pages,
+            EncodeQuality::Quality,
+            300,
+            None,
+            2,
+            &mask_refs,
+        )
+        .expect("reused encode");
+        let doc1 = crate::djvu_document::DjVuDocument::parse(&reused).expect("parse reused");
+        assert_eq!(doc1.page_count(), pages.len());
+
+        let mask1_0 = doc1.page(0).unwrap().extract_mask().unwrap().unwrap();
+        assert_eq!(
+            (masks0[0].width, masks0[0].height, &masks0[0].data),
+            (mask1_0.width, mask1_0.height, &mask1_0.data),
+            "page 0: reused mask must decode back byte-identically"
+        );
+        let mask1_1 = doc1.page(1).unwrap().extract_mask().unwrap().unwrap();
+        assert!(
+            mask1_1.data.iter().any(|&b| b != 0),
+            "page 1: re-segmented (None) page must still produce a non-empty mask"
+        );
+
+        // Reusing every page's mask must reproduce all of them byte-identically.
+        let mask_refs_all: Vec<Option<&Bitmap>> = masks0.iter().map(Some).collect();
+        let reused_all = encode_djvm_layered_shared_with_masks(
+            &pages,
+            EncodeQuality::Quality,
+            300,
+            None,
+            2,
+            &mask_refs_all,
+        )
+        .expect("reused-all encode");
+        let doc_all = crate::djvu_document::DjVuDocument::parse(&reused_all).expect("parse");
+        for (i, expected) in masks0.iter().enumerate() {
+            let mask = doc_all.page(i).unwrap().extract_mask().unwrap().unwrap();
+            assert_eq!(
+                (expected.width, expected.height, &expected.data),
+                (mask.width, mask.height, &mask.data),
+                "page {i}: reused mask must decode back byte-identically"
+            );
+        }
+    }
+
+    /// (b) A 2-generation decode → render → re-encode cycle over a multi-page
+    /// bundle, feeding `encode_djvm_layered_shared_with_masks` each page's
+    /// previous-generation mask, must keep every page's mask bit-identical —
+    /// the multi-page analogue of
+    /// `layered_reencode_with_reused_mask_is_a_mask_fixed_point`.
+    #[test]
+    fn layered_shared_multipage_reencode_with_reused_masks_is_a_mask_fixed_point() {
+        let pages0 = two_page_bundle_fixture();
+        for quality in [EncodeQuality::Quality, EncodeQuality::Archival] {
+            let gen0 =
+                encode_djvm_layered_shared(&pages0, quality, 300, None, 2).expect("gen0 encode");
+            let doc0 = crate::djvu_document::DjVuDocument::parse(&gen0).expect("parse gen0");
+            let masks0: Vec<Bitmap> = (0..pages0.len())
+                .map(|i| doc0.page(i).unwrap().extract_mask().unwrap().unwrap())
+                .collect();
+
+            let mut doc = doc0;
+            let mut masks = masks0.clone();
+            for generation in 1..=2 {
+                let rendered: Vec<Pixmap> = (0..pages0.len())
+                    .map(|i| render_native_page(&doc, i))
+                    .collect();
+                let mask_refs: Vec<Option<&Bitmap>> = masks.iter().map(Some).collect();
+                let next = encode_djvm_layered_shared_with_masks(
+                    &rendered, quality, 300, None, 2, &mask_refs,
+                )
+                .expect("re-encode");
+                doc = crate::djvu_document::DjVuDocument::parse(&next).expect("parse next gen");
+                masks = (0..pages0.len())
+                    .map(|i| doc.page(i).unwrap().extract_mask().unwrap().unwrap())
+                    .collect();
+                for i in 0..pages0.len() {
+                    assert_eq!(
+                        (masks0[i].width, masks0[i].height, &masks0[i].data),
+                        (masks[i].width, masks[i].height, &masks[i].data),
+                        "{quality:?}: page {i} generation-{generation} mask must be bit-identical"
+                    );
+                }
+            }
+        }
+    }
+
+    /// (c) Error cases: `encode_djvm_layered_shared_with_masks` must reject a
+    /// `masks` slice whose length doesn't match `pixmaps`, a mask whose
+    /// dimensions don't match its page, and — through the shared `_impl` —
+    /// a non-layered profile, matching `PageEncoder::with_mask`'s validation.
+    #[test]
+    fn layered_shared_with_masks_rejects_invalid_combinations() {
+        let pages = two_page_bundle_fixture();
+        let mask0 = Bitmap::new(pages[0].width, pages[0].height);
+        let mask1 = Bitmap::new(pages[1].width, pages[1].height);
+        let wrong_size = Bitmap::new(pages[1].width + 1, pages[1].height);
+
+        // Wrong-length masks slice (one entry short).
+        assert!(matches!(
+            encode_djvm_layered_shared_with_masks(
+                &pages,
+                EncodeQuality::Quality,
+                300,
+                None,
+                2,
+                &[Some(&mask0)],
+            ),
+            Err(EncodeError::Unsupported(_))
+        ));
+
+        // Mismatched mask dimensions for page 1.
+        assert!(matches!(
+            encode_djvm_layered_shared_with_masks(
+                &pages,
+                EncodeQuality::Quality,
+                300,
+                None,
+                2,
+                &[Some(&mask0), Some(&wrong_size)],
+            ),
+            Err(EncodeError::Unsupported(_))
+        ));
+
+        // `encode_djvm_layered_shared` only supports the layered colour
+        // profiles; masks must not bypass that gate.
+        assert!(matches!(
+            encode_djvm_layered_shared_with_masks(
+                &pages,
+                EncodeQuality::Lossless,
+                300,
+                None,
+                2,
+                &[Some(&mask0), Some(&mask1)],
+            ),
+            Err(EncodeError::Unsupported(_))
+        ));
+
+        // Valid combination still succeeds (sanity check the rejects above
+        // are actually exercising the masks path, not some other failure).
+        assert!(
+            encode_djvm_layered_shared_with_masks(
+                &pages,
+                EncodeQuality::Quality,
+                300,
+                None,
+                2,
+                &[Some(&mask0), Some(&mask1)],
+            )
+            .is_ok()
+        );
+    }
+
+    /// `encode_djvm_layered_shared_with_thumbnails_and_masks` combines both
+    /// extensions: TH44 thumbnails present AND the supplied mask reused.
+    #[test]
+    fn layered_shared_with_thumbnails_and_masks_combines_both() {
+        let pages = two_page_bundle_fixture();
+        let gen0 = encode_djvm_layered_shared(&pages, EncodeQuality::Quality, 300, None, 2)
+            .expect("gen0 encode");
+        let doc0 = crate::djvu_document::DjVuDocument::parse(&gen0).expect("parse gen0");
+        let masks0: Vec<Bitmap> = (0..pages.len())
+            .map(|i| doc0.page(i).unwrap().extract_mask().unwrap().unwrap())
+            .collect();
+        let mask_refs: Vec<Option<&Bitmap>> = masks0.iter().map(Some).collect();
+
+        let bytes = encode_djvm_layered_shared_with_thumbnails_and_masks(
+            &pages,
+            EncodeQuality::Quality,
+            300,
+            None,
+            2,
+            true,
+            &mask_refs,
+        )
+        .expect("combined encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        assert_eq!(doc.page_count(), pages.len());
+        for (i, expected) in masks0.iter().enumerate() {
+            let page = doc.page(i).unwrap();
+            assert!(
+                page.thumbnail().expect("thumbnail() ok").is_some(),
+                "page {i} must carry a TH44 thumbnail"
+            );
+            let mask = page.extract_mask().unwrap().unwrap();
+            assert_eq!(
+                (expected.width, expected.height, &expected.data),
+                (mask.width, mask.height, &mask.data),
+                "page {i}: reused mask must decode back byte-identically"
             );
         }
     }

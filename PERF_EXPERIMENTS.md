@@ -13671,3 +13671,63 @@ ssim on mixed pages; +adaptive grows photo-page bytes).
 is strictly better on the issue's motivating class (mixed newspaper) and
 provably inert on text, so it belongs one flag away; but photo-page byte
 growth makes default-on a product decision, not a measurement call.
+
+### Per-page mask reuse on the multi-page bundle path (#779 follow-up) — **Kept** (2026-09-02)
+
+**Issue.** #779 gave the single-page `PageEncoder::with_mask` a stabilizer
+for the decode → re-encode generation-loss loop, and filed the multi-page
+gap as its own follow-up: `encode_djvm_layered_shared` (the shared-Djbz
+bundle path) always calls `segment_page`, so re-encoding an existing
+multi-page DjVu still re-binarizes every page and the mask can drift even
+though the single-page path is now a fixed point.
+
+**Approach.** `encode_djvm_layered_shared_impl` gained an
+`masks: Option<&[Option<&Bitmap>]>` parameter threaded through two new
+public entry points, `encode_djvm_layered_shared_with_masks` and
+`encode_djvm_layered_shared_with_thumbnails_and_masks` (the existing
+`encode_djvm_layered_shared` / `_with_thumbnails` signatures are
+untouched — both now just pass `None`). The pass-1 `prepare` closure
+matches on `masks[i]`: `Some(mask)` calls `segment_page_with_mask` (the
+same background-derivation code the single-page path reuses — no
+segmentation logic duplicated), `None` keeps the original `segment_page`
+call, so a bundle can mix reused and freshly segmented pages. Validation
+mirrors `PageEncoder::with_mask`: a `masks` slice of the wrong length or a
+mask whose dimensions don't match its page's pixmap returns
+`EncodeError::Unsupported`, checked before pass 1 runs.
+
+**Numbers.** Test-enforced: given every page's own mask,
+`encode_djvm_layered_shared_with_masks` reproduces each page's mask
+byte-identically in the decoded bundle, including a mixed `Some`/`None`
+slice; a 2-generation decode → render → re-encode cycle over a 2-page
+bundle keeps every page's mask bit-identical for both `Quality` and
+`Archival`; `encode_djvm_layered_shared_with_thumbnails_and_masks`
+combines TH44 thumbnails with reused masks; length/dimension/profile
+mismatches fail with `EncodeError::Unsupported`. Criterion, local machine,
+baseline = this commit's parent (`334fbf9`, the `#[inline]` fix in
+`bf39d5b` already applied), 100/10-sample runs:
+
+| bench | before → after | Δ |
+|---|---|---|
+| `segment_page_color` | 1.667 ms → 1.676 ms | −0.6% (no significant change) |
+| `encode_color_page_quality` | 4.225 ms → 4.024 ms | −4.8% (improved; noise) |
+| `encode_color_page_quality_bgheavy` | 31.35 ms → 30.81 ms | −1.7% (within noise) |
+| `encode_djvm_layered_shared` | 10.94 ms → 10.60 ms | −1.9% (within noise) |
+
+No bench regresses; the ≤2% band matches the noise floor bf39d5b's triage
+established for this machine. Expected: the change touches only
+`encode_djvm_layered_shared_impl`'s pass-1 closure (an added match arm and
+an `enumerate()`), and doesn't touch `segment_page`, `derive_background`,
+or `PageEncoder::encode` at all — `segment_page_color` (unrelated to this
+path) is the negative control confirming the machine, not the code, and it
+also shows no change.
+
+**Decision.** Kept (feature; new API, off unless a `masks` slice with a
+`Some` entry is passed).
+
+**Reason.** Closes the multi-page gap #779 filed: the mask layer is now a
+fixed point for both the single-page and multi-page-bundle re-encode
+paths, with the same cheap-and-exact property (the mask is decoded, not
+re-estimated) and the same zero-cost-when-unused shape as `with_mask`. No
+CLI flag exists for the single-page reuse either (#779 never exposed one),
+so none was added here — a follow-up if/when CLI mask reuse is wanted for
+either path.
