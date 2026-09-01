@@ -321,6 +321,105 @@ fn encode_quality_binarization_flags_affect_layered_mask() {
     );
 }
 
+/// Left half: dark text bars on white. Right half: a uniform mid-tone field
+/// the fixed threshold wrongly claims as ink but the block classifier routes
+/// to the background (continuous-tone signature: mid-tone, no sharp edges).
+fn write_text_photo_png(path: &Path, w: u32, h: u32) {
+    let file = std::fs::File::create(path).unwrap();
+    let writer = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let mut data = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let v = if x < w / 2 {
+                // 4px-tall dark bars every 16 rows: text-like strokes.
+                if y % 16 < 4 && x % 16 < 12 { 20 } else { 255 }
+            } else {
+                105
+            };
+            data.extend_from_slice(&[v, v, v]);
+        }
+    }
+    writer.write_image_data(&data).unwrap();
+}
+
+#[test]
+fn encode_quality_block_classify_clears_photo_ink() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("text_photo.png");
+    let plain_output = dir.path().join("plain.djvu");
+    let classified_output = dir.path().join("classified.djvu");
+    write_text_photo_png(&input, 128, 64);
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            plain_output.to_str().unwrap(),
+            "--quality",
+            "quality",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            classified_output.to_str().unwrap(),
+            "--quality",
+            "quality",
+            "--block-classify",
+            "--adaptive-bg-subsample",
+        ])
+        .assert()
+        .success();
+
+    let plain = mask_ink_pixels(&plain_output);
+    let classified = mask_ink_pixels(&classified_output);
+    // The fixed threshold claims the whole mid-tone half (128*64/2 = 4096 px)
+    // as ink; the classifier must clear that half while keeping the bars.
+    assert!(
+        plain >= 4096,
+        "plain mask should include the mid-tone field: {plain}"
+    );
+    assert!(
+        classified < plain / 2,
+        "classifier should clear the photo half: {classified} vs {plain}"
+    );
+    assert!(classified > 0, "text bars must survive classification");
+}
+
+#[test]
+fn encode_lossless_rejects_block_classify() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("text_photo.png");
+    let output = dir.path().join("out.djvu");
+    write_text_photo_png(&input, 128, 64);
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--quality",
+            "lossless",
+            "--block-classify",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--block-classify"));
+}
+
 #[test]
 fn encode_quality_fixed_binarization_keeps_default_output() {
     let dir = tempfile::tempdir().unwrap();
@@ -417,7 +516,7 @@ fn encode_lossless_rejects_segmentation_flags() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "--binarization and --bg-inpaint require --quality quality or --quality archival",
+            "require --quality quality or --quality archival",
         ));
 }
 
