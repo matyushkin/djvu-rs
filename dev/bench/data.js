@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788278402300,
+  "lastUpdate": 1788300551872,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17830,6 +17830,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40047000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "334fbf9d7d4ba48645edfb67b5b26883fc013f1b",
+          "message": "quality(segment): validate block classifier on real tier-2 corpus; expose --block-classify and --adaptive-bg-subsample (#562 follow-up) (#783)\n\nRound 97 kept block_classify opt-in on synthetic-only evidence and left\nthe adaptive-BG pairing unmeasured; the flag was also unreachable outside\nwith_segment_options. New probe examples/block_classify_corpus.rs runs\nthe re-encode scenario on 9 real corpus pages: the classifier alone is\nthe size lever (war_1812 photo page total -91%, goody illustration -55%\nwith dE 14.3->6.9, pure text bit-identical); paired with\nadaptive_bg_subsample it becomes the quality lever (mixed newspaper page\nbetter on all axes; illustration dE 14.3->2.0, ssim 0.61->0.93). CLI now\nexposes both knobs for quality/archival encodes, with tests and README\ndocs. Defaults unchanged: +adaptive grows photo-page bytes, so\ndefault-on stays a product decision.\n\nAlso pays down the EXPERIMENTS_INDEX maintenance-rule debt: rows added\nfor rounds 113-115 and the three journal entries since (IW44 slow-unit\ntriage, mask reuse, PR #779 bench triage).\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-09-01T21:45:30Z",
+          "tree_id": "88a51da8c89a3a70f21ff69398c191428eca49cd",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/334fbf9d7d4ba48645edfb67b5b26883fc013f1b"
+        },
+        "date": 1788300550299,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 124000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6789000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 42075000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40538000,
             "range": "± 0",
             "unit": "ns/iter"
           }
