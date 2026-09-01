@@ -13596,3 +13596,33 @@ only from IW44/FGbz re-quantisation of the colour layers.
 **Reason.** Cheap and exact when the input is already a DjVu — the mask
 is decoded, not re-estimated. Follow-up: a per-page mask variant for the
 multi-page `encode_djvm_layered_shared` bundle path.
+
+### PR #779 bench-failure triage: CI noise + a real ~2% outlining cost — **Kept** (`#[inline]` fix) (2026-09-01)
+
+**Issue.** The Benchmarks run on PR #779's merge commit reported 58
+regressions, confirmed by the workflow's same-runner merge-base
+re-check: `segment_page_color` +25.3%, `encode_color_page_quality`
++9.5%, `..._bgheavy` +11.3%, `encode_djvm_layered_shared` +5.9% — plus
+5–10% hits across subsystems the PR never touched (IW44 decode, render
+compositor, JB2).
+
+**Approach.** Local A/B on the same machine, criterion baselines:
+`8696f72` (the PR) vs its parent `1d610c9`, benches
+`segment_page_color` + `encode_color_page_quality*`.
+
+**Numbers.** Local delta was +1.9% / +1.6% / +2.3% / +1.1% — an order of
+magnitude below CI's claim, so the 25% is runner noise (untouched
+subsystems moving 5–10% confirms the machine, not the code). The
+consistent ~2% is real: #779 outlined `segment_page`'s tail into
+`derive_background`, changing codegen. With `#[inline]` on
+`derive_background`, `segment_page_color` and `encode_color_page_quality`
+return to no-significant-change vs the pre-#779 baseline and `bgheavy`
+halves to +1.3%.
+
+**Decision.** Kept (`#[inline]` on `derive_background`).
+
+**Reason.** One attribute recovers the pre-split codegen for both
+callers; the residual ≤1.3% is within this machine's noise band. Lesson
+for the bench workflow: a same-runner re-check does not immunise against
+a degraded runner — cross-check the "regressions" list for benches the
+diff cannot have touched before trusting it.
