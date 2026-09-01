@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788173449549,
+  "lastUpdate": 1788263341836,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17686,6 +17686,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47439000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1d610c986ce7cb07ea517ce47f6d30c5aa80869e",
+          "message": "test(ocr): fix as_chunks compile error in preprocess test; gate ocr-onnx in check.sh (#778)\n\nCommit 41f3b1a (#770) migrated chunks_exact(4) to as_chunks() in the\nocr_onnx preprocess test, but as_chunks().0 is a slice, not an\niterator — the test tree stopped compiling. The 'OCR (onnx models)' CI\njob runs only on main pushes (not PRs) and is non-required, so every\nci.yml run on main has been red since 2026-08-25, turning the README /\ncrates.io CI badge to 'failed'.\n\nAdd the missing .iter() and a 'cargo check --all-targets --features\nocr-onnx' step to scripts/check.sh so the local gates catch this class\nof breakage before push.\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-09-01T11:23:39Z",
+          "tree_id": "8e3dac7e213ec4ecb759442d66554440594b0369",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/1d610c986ce7cb07ea517ce47f6d30c5aa80869e"
+        },
+        "date": 1788263340562,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8211000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49613000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47522000,
             "range": "± 0",
             "unit": "ns/iter"
           }
