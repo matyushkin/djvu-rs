@@ -944,6 +944,46 @@ impl DjVuPage {
         Ok(None)
     }
 
+    /// Decode the foreground mask directly at 1/4 resolution (2 bits shifted
+    /// off each axis), OR-reducing (max-pooling) instead of allocating a
+    /// full-resolution [`Bitmap`] and downsampling it afterward.
+    ///
+    /// Bit-for-bit identical to `downsample_mask_4x(extract_mask()?)` (see the
+    /// `djvu-jb2` crate's `decode_downsampled` equivalence tests and
+    /// `mask_sub4_matches_extract_mask_then_downsample` below) — it exists to
+    /// skip the full-resolution JB2 canvas allocation for callers that only
+    /// ever need the coarse mask (the thumbnail / heavy-downscale compositor
+    /// path, [`crate::djvu_render::PageLayers::mask_sub4`]).
+    ///
+    /// Returns `Ok(None)` if the page has neither an Sjbz nor an Smmr chunk.
+    ///
+    /// `std`-only: its only caller, [`crate::djvu_render::PageLayers`], is
+    /// itself `std`-only (it caches decoded layers behind `std::sync::OnceLock`),
+    /// and the Smmr fallback below reuses the `std`-only
+    /// [`crate::djvu_render::downsample_mask_4x`].
+    #[cfg(feature = "std")]
+    pub(crate) fn extract_mask_sub4(&self) -> Result<Option<crate::bitmap::Bitmap>, DocError> {
+        if let Some(sjbz) = self.find_chunk(b"Sjbz") {
+            let inline_dict;
+            let dict_ref = if let Some(djbz) = self.find_chunk(b"Djbz") {
+                inline_dict = crate::jb2::decode_dict(djbz, None)?;
+                Some(&inline_dict)
+            } else {
+                self.decoded_shared_dict()
+            };
+            let bm = crate::jb2::decode_downsampled(sjbz, dict_ref, 2)?;
+            return Ok(Some(bm));
+        }
+        if let Some(smmr) = self.find_chunk(b"Smmr") {
+            // No reduced-scale G4/MMR decoder exists; fall back to a full
+            // decode + the same max-pool reduction `mask_sub4` would apply.
+            // Smmr masks are rare in practice (Sjbz is the common case).
+            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            return Ok(Some(crate::djvu_render::downsample_mask_4x(&bm)));
+        }
+        Ok(None)
+    }
+
     /// Decode the IW44 foreground layer (FG44 chunks) if present.
     ///
     /// Returns `Ok(None)` if the page has no FG44 chunks.
@@ -3268,6 +3308,66 @@ mod tests {
             bm.width > 0 && bm.height > 0,
             "mask must have non-zero dimensions"
         );
+    }
+
+    /// `extract_mask_sub4` must be bit-for-bit identical to decoding the full
+    /// mask and then max-pool-downsampling it by 4 (round 89 follow-up: this
+    /// is what lets the thumbnail path skip the full-resolution JB2 canvas).
+    #[test]
+    fn mask_sub4_matches_extract_mask_then_downsample() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/boy_jb2.djvu"),
+        )
+        .expect("boy_jb2.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc.page(0).expect("page 0 must exist");
+
+        let full = page
+            .extract_mask()
+            .expect("extract_mask must succeed")
+            .expect("boy_jb2.djvu page must have a JB2 mask");
+        let expected = crate::djvu_render::downsample_mask_4x(&full);
+
+        let actual = page
+            .extract_mask_sub4()
+            .expect("extract_mask_sub4 must succeed")
+            .expect("boy_jb2.djvu page must have a JB2 mask");
+
+        assert_eq!(expected.width, actual.width);
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.data, actual.data, "sub4 mask mismatch");
+    }
+
+    /// Same equivalence check on a page with a shared dictionary (INCL /
+    /// Djbz), which `extract_mask_sub4` resolves the same way `extract_mask`
+    /// does before decoding.
+    #[test]
+    fn mask_sub4_matches_extract_mask_then_downsample_shared_dict() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/DjVu3Spec_bundled.djvu");
+        let data = std::fs::read(&path).expect("DjVu3Spec_bundled.djvu must exist");
+        let doc = DjVuDocument::parse(&data).expect("parse must succeed");
+        let page = doc
+            .pages
+            .iter()
+            .find(|p| p.shared_djbz.is_some())
+            .expect("at least one page must have a shared dict");
+
+        let full = page
+            .extract_mask()
+            .expect("extract_mask must succeed")
+            .expect("page must have a JB2 mask");
+        let expected = crate::djvu_render::downsample_mask_4x(&full);
+
+        let actual = page
+            .extract_mask_sub4()
+            .expect("extract_mask_sub4 must succeed")
+            .expect("page must have a JB2 mask");
+
+        assert_eq!(expected.width, actual.width);
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.data, actual.data, "sub4 mask mismatch");
     }
 
     /// Pages without INCL still render correctly (no regression).

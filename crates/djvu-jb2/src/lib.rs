@@ -1195,6 +1195,69 @@ fn blit_to_bitmap(bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32) {
     }
 }
 
+/// Blit a symbol into a `1/2^shift`-resolution packed Bitmap, OR-reducing
+/// (max-pooling) each set source pixel into its downsampled destination cell.
+///
+/// Mirrors [`blit_to_bitmap`]'s coordinate flip (JB2 y=0 at the bottom,
+/// `Bitmap` y=0 at the top) but works in the full-resolution coordinate space
+/// per source pixel — `full_w`/`full_h` are the *undownsampled* page
+/// dimensions — then right-shifts by `shift` to land in the smaller `bm`.
+/// Unlike [`blit_to_bitmap`] there is no byte-aligned fast path: downsampled
+/// destination columns/rows generally don't stay byte-aligned across a
+/// symbol's width, so this always walks bit-by-bit. That is still cheap in
+/// practice — the loop is bounded by the symbol's own (typically small) area,
+/// not by the page canvas, matching the existing clipped/slow path of
+/// [`blit_to_bitmap`].
+fn blit_to_bitmap_downsampled(
+    bm: &mut Bitmap,
+    sym: &Jbm,
+    x: i32,
+    y: i32,
+    full_w: i32,
+    full_h: i32,
+    shift: u32,
+) {
+    if sym.width <= 0 || sym.height <= 0 {
+        return;
+    }
+    let dst_w = bm.width as i32;
+    let dst_h = bm.height as i32;
+    let bm_stride = bm.row_stride();
+    let sw = sym.width;
+    let sh = sym.height;
+    let sym_stride = sym.stride();
+
+    for sym_row in 0..sh {
+        // JB2 row 0 = bottom of the page; `Bitmap` row 0 = top, matching
+        // `blit_to_bitmap`'s `bm.height - 1 - y` flip before downsampling.
+        let full_y_top = full_h - 1 - (y + sym_row);
+        if full_y_top < 0 || full_y_top >= full_h {
+            continue;
+        }
+        let dy = full_y_top >> shift;
+        if dy >= dst_h {
+            continue;
+        }
+        let row_off = dy as usize * bm_stride;
+        let src_row_off = sym_row as usize * sym_stride;
+        for col in 0..sw {
+            let b = sym.data[src_row_off + (col as usize / 8)];
+            if (b >> (7 - (col as usize & 7))) & 1 == 0 {
+                continue;
+            }
+            let full_x = x + col;
+            if full_x < 0 || full_x >= full_w {
+                continue;
+            }
+            let dx = full_x >> shift;
+            if dx >= dst_w {
+                continue;
+            }
+            bm.data[row_off + dx as usize / 8] |= 0x80u8 >> (dx as usize & 7);
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Convert internal page buffer (row 0 = bottom) to Bitmap (row 0 = top)
 // ────────────────────────────────────────────────────────────────────────────
@@ -1412,6 +1475,33 @@ pub fn decode(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb2E
     decode_image(data, shared_dict)
 }
 
+/// Decode a JB2 image stream directly into a `1/2^shift`-resolution
+/// [`Bitmap`], OR-reducing (max-pooling) each decoded pixel into its
+/// downsampled cell as it is blitted, instead of allocating a full-resolution
+/// canvas and downsampling it afterward.
+///
+/// `shift = 0` is identical to [`decode`]. For `shift >= 1` this is
+/// semantically identical to decoding at full resolution and then
+/// max-pool-downsampling by `2^shift` (block-OR reduction, floor-aligned
+/// blocks, `div_ceil` output size) — it exists purely to skip the
+/// full-resolution canvas allocation and the full-canvas downsample scan
+/// when only a coarse mask is needed (e.g. a thumbnail render composited at
+/// IW44 subsample >= 4). The arithmetic decode of the symbol dictionary and
+/// page instructions is unavoidable either way — this only shrinks the
+/// output canvas the decoded symbols are blitted into.
+///
+/// # Errors
+///
+/// Returns [`Jb2Error`] on malformed input, missing dictionary, or oversized image.
+pub fn decode_downsampled(
+    data: &[u8],
+    shared_dict: Option<&Jb2Dict>,
+    shift: u32,
+) -> Result<Bitmap, Jb2Error> {
+    let mut pool = Vec::new();
+    decode_image_with_pool(data, shared_dict, &mut pool, shift)
+}
+
 /// Decode a JB2 image stream with per-pixel blit index tracking.
 ///
 /// Returns the bitmap and a blit map (`Vec<i32>`) of the same pixel dimensions.
@@ -1443,7 +1533,7 @@ pub fn decode_dict(data: &[u8], inherited: Option<&Jb2Dict>) -> Result<Jb2Dict, 
 
 fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb2Error> {
     let mut pool = Vec::new();
-    decode_image_with_pool(data, shared_dict, &mut pool)
+    decode_image_with_pool(data, shared_dict, &mut pool, 0)
 }
 
 /// Decode a JB2 image stream, reusing `pool` as a scratch buffer for symbol bitmaps.
@@ -1451,10 +1541,16 @@ fn decode_image(data: &[u8], shared_dict: Option<&Jb2Dict>) -> Result<Bitmap, Jb
 /// `pool` is resized up (never shrunk) across symbol decodes, eliminating
 /// per-symbol heap allocations. Pass `&mut Vec::new()` to use a fresh pool,
 /// or reuse a pool across multiple decode calls for additional savings.
+///
+/// `shift`: `0` blits each decoded symbol into a full-resolution page canvas
+/// (the normal path). `>= 1` blits into a `1/2^shift`-resolution canvas
+/// instead, OR-reducing each pixel into its downsampled cell — see
+/// [`decode_downsampled`].
 fn decode_image_with_pool(
     data: &[u8],
     shared_dict: Option<&Jb2Dict>,
     pool: &mut Vec<u8>,
+    shift: u32,
 ) -> Result<Bitmap, Jb2Error> {
     let mut zp = ZpDecoder::new(data).map_err(|_| Jb2Error::ZpInitFailed)?;
 
@@ -1532,7 +1628,30 @@ fn decode_image_with_pool(
     // Use a packed 1-bit-per-pixel bitmap as the page buffer instead of a
     // byte-per-pixel Vec. This is 8× smaller (~1.8 MB vs ~14.5 MB for a 600 dpi
     // page), fitting in L2 cache and dramatically reducing cache pressure during blits.
-    let mut page_bm = Bitmap::new(image_width as u32, image_height as u32);
+    //
+    // At `shift >= 1` the canvas itself is allocated at `1/2^shift` resolution
+    // (`div_ceil` so a ragged edge still gets its own partial cell) and every
+    // blit below OR-reduces into it instead of the full-resolution canvas —
+    // see `decode_downsampled`.
+    let (page_w, page_h) = if shift == 0 {
+        (image_width as u32, image_height as u32)
+    } else {
+        (
+            (image_width as u32).div_ceil(1u32 << shift),
+            (image_height as u32).div_ceil(1u32 << shift),
+        )
+    };
+    let mut page_bm = Bitmap::new(page_w, page_h);
+    // Closure so every blit call site below stays a one-liner; `shift` is
+    // invariant for the whole decode so the branch predicts perfectly, and
+    // the `shift == 0` arm is byte-for-byte the pre-existing fast path.
+    let blit = |page_bm: &mut Bitmap, sym: &Jbm, x: i32, y: i32| {
+        if shift == 0 {
+            blit_to_bitmap(page_bm, sym, x, y);
+        } else {
+            blit_to_bitmap_downsampled(page_bm, sym, x, y, image_width, image_height, shift);
+        }
+    };
 
     let mut layout = LayoutState::new(image_height);
 
@@ -1566,7 +1685,7 @@ fn decode_image_with_pool(
                 let (x, y) =
                     decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, &bm, x, y);
+                blit(&mut page_bm, &bm, x, y);
                 dict.push(bm.crop_and_recycle(pool));
             }
 
@@ -1588,7 +1707,7 @@ fn decode_image_with_pool(
                 let (x, y) =
                     decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm.width, bm.height);
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, &bm, x, y);
+                blit(&mut page_bm, &bm, x, y);
                 bm.recycle_into(pool);
             }
 
@@ -1624,7 +1743,7 @@ fn decode_image_with_pool(
                     cbm.height,
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, &cbm, x, y);
+                blit(&mut page_bm, &cbm, x, y);
                 dict.push(cbm.crop_and_recycle(pool));
             }
 
@@ -1687,7 +1806,7 @@ fn decode_image_with_pool(
                     cbm.height,
                 );
                 check_blit_budget(&cbm, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, &cbm, x, y);
+                blit(&mut page_bm, &cbm, x, y);
                 cbm.recycle_into(pool);
             }
 
@@ -1706,7 +1825,7 @@ fn decode_image_with_pool(
                 let (x, y) = decode_symbol_coords(&mut zp, &mut coord_ctx, &mut layout, bm_w, bm_h);
                 let sym = &dict[index];
                 check_blit_budget(sym, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, sym, x, y);
+                blit(&mut page_bm, sym, x, y);
             }
 
             // 8 — non-symbol (halftone), absolute coordinates
@@ -1720,7 +1839,7 @@ fn decode_image_with_pool(
                 let x = left - 1;
                 let y = top - h;
                 check_blit_budget(&bm, &mut total_blit_pixels)?;
-                blit_to_bitmap(&mut page_bm, &bm, x, y);
+                blit(&mut page_bm, &bm, x, y);
                 bm.recycle_into(pool);
             }
 
@@ -2513,7 +2632,7 @@ mod tests {
         let regular = decode(&sjbz, None).expect("regular decode");
 
         let mut pool = Vec::new();
-        let pooled = decode_image_with_pool(&sjbz, None, &mut pool).expect("pool decode");
+        let pooled = decode_image_with_pool(&sjbz, None, &mut pool, 0).expect("pool decode");
 
         assert_eq!(regular.width, pooled.width, "width must match");
         assert_eq!(regular.height, pooled.height, "height must match");
@@ -2613,6 +2732,91 @@ mod tests {
             blit_map.iter().any(|&b| b >= 0),
             "expected at least one foreground blit"
         );
+    }
+
+    // ── decode_downsampled: equivalence with decode-then-downsample ──────────
+
+    /// Reference max-pool downsample by `2^shift`, block-OR reduction,
+    /// `div_ceil` output size — the same semantics `decode_downsampled` must
+    /// match without ever materialising the full-resolution bitmap.
+    fn downsample_reference(src: &Bitmap, shift: u32) -> Bitmap {
+        let block = 1u32 << shift;
+        let out_w = src.width.div_ceil(block);
+        let out_h = src.height.div_ceil(block);
+        let mut out = Bitmap::new(out_w, out_h);
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                'outer: for dy in 0..block {
+                    for dx in 0..block {
+                        let sx = ox * block + dx;
+                        let sy = oy * block + dy;
+                        if sx < src.width && sy < src.height && src.get(sx, sy) {
+                            out.set(ox, oy, true);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `decode_downsampled(.., shift=0)` must be pixel-identical to `decode`.
+    #[test]
+    fn decode_downsampled_shift0_matches_decode() {
+        let djvu = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
+        let sjbz = extract_sjbz(&djvu);
+        let full = decode(&sjbz, None).unwrap();
+        let ds0 = decode_downsampled(&sjbz, None, 0).unwrap();
+        assert_eq!(full.width, ds0.width);
+        assert_eq!(full.height, ds0.height);
+        assert_eq!(full.data, ds0.data);
+    }
+
+    /// `decode_downsampled(.., shift=2)` (the thumbnail-path mask_sub4 case)
+    /// must be bit-for-bit identical to decoding at full resolution and then
+    /// max-pool-downsampling by 4 — on a dict-free direct-symbol fixture.
+    #[test]
+    fn decode_downsampled_matches_full_then_downsample_boy_jb2() {
+        let djvu = std::fs::read(assets_path().join("boy_jb2.djvu")).unwrap();
+        let sjbz = extract_sjbz(&djvu);
+        let full = decode(&sjbz, None).unwrap();
+        let expected = downsample_reference(&full, 2);
+        let actual = decode_downsampled(&sjbz, None, 2).unwrap();
+        assert_eq!(expected.width, actual.width);
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.data, actual.data, "downsampled mask mismatch");
+    }
+
+    /// Same equivalence check on a shared-dictionary fixture (exercises the
+    /// dict-lookup blit records, not just direct new-symbol records).
+    #[test]
+    fn decode_downsampled_matches_full_then_downsample_shared_dict() {
+        let djvu = std::fs::read(assets_path().join("DjVu3Spec_bundled.djvu")).unwrap();
+        let djbz_data = find_djvi_djbz_data(&djvu);
+        let sjbz_data = find_page_form_data(&djvu, 1);
+        let shared_dict = decode_dict(&djbz_data, None).unwrap();
+        let full = decode(&sjbz_data, Some(&shared_dict)).unwrap();
+        let expected = downsample_reference(&full, 2);
+        let actual = decode_downsampled(&sjbz_data, Some(&shared_dict), 2).unwrap();
+        assert_eq!(expected.width, actual.width);
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.data, actual.data, "downsampled mask mismatch");
+    }
+
+    /// A coarser shift (3, i.e. 1/8) must also match the reference reduction —
+    /// proves the implementation generalises beyond the hard-coded `shift=2`
+    /// the render tier actually calls.
+    #[test]
+    fn decode_downsampled_matches_full_then_downsample_shift3() {
+        let djvu = std::fs::read(assets_path().join("carte.djvu")).unwrap();
+        let sjbz = extract_first_page_sjbz(&djvu);
+        let full = decode(&sjbz, None).unwrap();
+        let expected = downsample_reference(&full, 3);
+        let actual = decode_downsampled(&sjbz, None, 3).unwrap();
+        assert_eq!(expected.width, actual.width);
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.data, actual.data, "downsampled mask mismatch");
     }
 }
 
