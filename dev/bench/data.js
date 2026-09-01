@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788263341836,
+  "lastUpdate": 1788274318268,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17734,6 +17734,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47522000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8696f72a4cf1d4984f11a17bec6efcd3e827b6da",
+          "message": "feat(encode): reuse an existing Sjbz mask on re-encode (#601 follow-up) (#779)\n\nArchival reality is decode -> edit -> re-encode; the layered colour\nprofiles re-segment a rendered composite each cycle, and #601 measured\nthe cost: picture pages drift by dE ~8 per generation, compounding\nwithout bound, because binarization never reproduces the previous mask.\n\nAdd the stabilizer the #601 close-out filed: PageEncoder::with_mask\naccepts the source page's decoded mask (DjVuPage::extract_mask) so\nre-encode skips binarization entirely and the mask layer becomes a\nbit-identical fixed point. Split segment_page so its background half\n(adaptive subsample, mask-excluded block means, diffusion) is callable\naround a supplied mask as segment_page_with_mask; given the same mask\nit is byte-identical to segment_page.\n\nInvalid combinations (bitmap source, Photo profile, mismatched\ndimensions) fail loudly with EncodeError::Unsupported.\n\nTests: decode->render->re-encode over 2 generations keeps the mask\nbit-identical for Quality and Archival; segment_page_with_mask\nreproduces segment_page byte-for-byte; error cases covered.\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-09-01T14:26:19Z",
+          "tree_id": "2aed3e1ba9a554619a5839164ac577e5fef87e29",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/8696f72a4cf1d4984f11a17bec6efcd3e827b6da"
+        },
+        "date": 1788274316020,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 118000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6304000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38682000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 37076000,
             "range": "± 0",
             "unit": "ns/iter"
           }
