@@ -193,6 +193,7 @@ mod tests {
             .data
             .as_chunks::<4>()
             .0
+            .iter()
             .flat_map(|p| p[..3].to_vec())
             .collect();
         assert_eq!(rgb, expected);
