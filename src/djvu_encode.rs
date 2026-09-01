@@ -67,7 +67,7 @@ use crate::jb2_encode::{self, Jb2EncodeOptions};
 use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
-use crate::segment::{SegmentOptions, segment_page};
+use crate::segment::{SegmentOptions, segment_page, segment_page_with_mask};
 use crate::smmr::encode_smmr;
 use crate::text::TextLayer;
 use crate::text_encode::encode_text_layer;
@@ -448,6 +448,7 @@ pub struct PageEncoder<'a> {
     quality: EncodeQuality,
     bilevel_codec: BilevelCodec,
     segment_options: Option<SegmentOptions>,
+    mask: Option<&'a Bitmap>,
     iw44_options: Option<Iw44EncodeOptions>,
     jb2_options: Option<Jb2EncodeOptions>,
     fgbz_options: FgbzPaletteOptions,
@@ -464,6 +465,7 @@ impl<'a> PageEncoder<'a> {
             quality: EncodeQuality::Lossless,
             bilevel_codec: BilevelCodec::Jb2,
             segment_options: None,
+            mask: None,
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
@@ -482,6 +484,7 @@ impl<'a> PageEncoder<'a> {
             quality: EncodeQuality::Quality,
             bilevel_codec: BilevelCodec::Jb2,
             segment_options: None,
+            mask: None,
             iw44_options: None,
             jb2_options: None,
             fgbz_options: FgbzPaletteOptions::Exact,
@@ -521,6 +524,27 @@ impl<'a> PageEncoder<'a> {
     /// encodes. Defaults remain profile-specific and fixed-threshold.
     pub fn with_segment_options(mut self, opts: SegmentOptions) -> Self {
         self.segment_options = Some(opts);
+        self
+    }
+
+    /// Reuse an existing full-resolution mask for the layered colour
+    /// profiles instead of re-binarizing the pixmap (#601).
+    ///
+    /// The intended source is the page being re-encoded: decode its `Sjbz`
+    /// with [`extract_mask`](crate::djvu_document::DjVuPage::extract_mask)
+    /// and pass it here, so repeated decode → re-encode cycles keep the mask
+    /// bit-identical instead of drifting through binarization instability.
+    ///
+    /// Only `Quality` / `Archival` pixmap encodes accept a mask, and its
+    /// dimensions must equal the pixmap's — other combinations make
+    /// [`encode`](Self::encode) return [`EncodeError::Unsupported`]. The
+    /// mask-producing segmentation knobs (`binarization`, `threshold`,
+    /// `block_classify`, `deskew`) are ignored; the background-derivation
+    /// knobs still apply. With the default lossless JB2 options the emitted
+    /// `Sjbz` decodes back bit-identically to the supplied mask; a non-zero
+    /// [`Jb2EncodeOptions::lossy_threshold`] still applies and may alter it.
+    pub fn with_mask(mut self, mask: &'a Bitmap) -> Self {
+        self.mask = Some(mask);
         self
     }
 
@@ -626,6 +650,27 @@ impl<'a> PageEncoder<'a> {
                 "Smmr bilevel codec requires Bitmap input",
             ));
         }
+        if let Some(mask) = self.mask {
+            match &self.source {
+                Source::Bitmap(_) => {
+                    return Err(EncodeError::Unsupported(
+                        "mask reuse requires colour input (from_pixmap)",
+                    ));
+                }
+                Source::Pixmap(pm) => {
+                    if matches!(self.quality, EncodeQuality::Photo) {
+                        return Err(EncodeError::Unsupported(
+                            "Photo profile has no mask layer to reuse",
+                        ));
+                    }
+                    if mask.width != pm.width || mask.height != pm.height {
+                        return Err(EncodeError::Unsupported(
+                            "reused mask dimensions must match the page pixmap",
+                        ));
+                    }
+                }
+            }
+        }
         let info = encode_info(w, h, self.dpi);
 
         match (&self.source, self.quality) {
@@ -655,7 +700,11 @@ impl<'a> PageEncoder<'a> {
                 let segment_options = self
                     .segment_options
                     .unwrap_or_else(|| self.quality.default_segment_options());
-                let seg = segment_page(pm, &segment_options);
+                let seg = match self.mask {
+                    // #601 mask reuse: skip binarization, keep bg derivation.
+                    Some(mask) => segment_page_with_mask(pm, mask, &segment_options),
+                    None => segment_page(pm, &segment_options),
+                };
                 // Use the dictionary encoder for color profiles so FGbz can
                 // address foreground colors per blitted component.
                 // Given `seg`, the Sjbz (JB2 mask) and BG44 (IW44 background)
@@ -1258,6 +1307,128 @@ mod tests {
                 .unwrap();
             assert_eq!(gen1, gen2, "{fixture}: generation 2 must be a fixed point");
         }
+    }
+
+    /// Synthetic "picture" page: a smooth colour gradient (survives in the
+    /// background layer) with dark glyph-like strokes (become the mask).
+    fn synthetic_layered_page() -> Pixmap {
+        let (w, h) = (96u32, 64u32);
+        let mut pm = Pixmap::white(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let r = 140 + (x * 90 / w) as u8;
+                let g = 160 + (y * 70 / h) as u8;
+                let b = 200u8;
+                pm.set_rgb(x, y, r, g, b);
+            }
+        }
+        for row in 0..4u32 {
+            let y0 = 8 + row * 14;
+            for x in 8..88u32 {
+                if (x / 6) % 2 == 0 {
+                    for dy in 0..3u32 {
+                        pm.set_rgb(x, y0 + dy, 20, 16, 12);
+                    }
+                }
+            }
+        }
+        pm
+    }
+
+    fn render_native(doc: &crate::djvu_document::DjVuDocument) -> Pixmap {
+        let page = doc.page(0).unwrap();
+        crate::djvu_render::render_pixmap(
+            page,
+            &crate::djvu_render::RenderOptions {
+                width: page.width() as u32,
+                height: page.height() as u32,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// #601 mask reuse: a decode → render → re-encode cycle that passes the
+    /// source mask through `with_mask` must keep the mask bit-identical
+    /// across generations (no binarization drift), for both colour profiles.
+    #[test]
+    fn layered_reencode_with_reused_mask_is_a_mask_fixed_point() {
+        let pm0 = synthetic_layered_page();
+        for quality in [EncodeQuality::Quality, EncodeQuality::Archival] {
+            let gen0 = PageEncoder::from_pixmap(&pm0)
+                .with_quality(quality)
+                .encode()
+                .unwrap();
+            let doc0 = crate::djvu_document::DjVuDocument::parse(&gen0).unwrap();
+            let mask0 = doc0.page(0).unwrap().extract_mask().unwrap().unwrap();
+            assert!(
+                mask0.data.iter().any(|&b| b != 0),
+                "synthetic page must produce a non-empty mask"
+            );
+
+            let mut doc = doc0;
+            let mut mask = mask0.clone();
+            for generation in 1..=2 {
+                let rendered = render_native(&doc);
+                let next = PageEncoder::from_pixmap(&rendered)
+                    .with_quality(quality)
+                    .with_mask(&mask)
+                    .encode()
+                    .unwrap();
+                doc = crate::djvu_document::DjVuDocument::parse(&next).unwrap();
+                mask = doc.page(0).unwrap().extract_mask().unwrap().unwrap();
+                assert_eq!(
+                    (mask0.width, mask0.height, &mask0.data),
+                    (mask.width, mask.height, &mask.data),
+                    "{quality:?}: generation-{generation} mask must be bit-identical"
+                );
+            }
+        }
+    }
+
+    /// `segment_page_with_mask` fed `segment_page`'s own mask must reproduce
+    /// its background byte-identically — the reuse path changes nothing but
+    /// the mask's origin.
+    #[test]
+    fn segment_page_with_mask_matches_segment_page() {
+        let pm = synthetic_layered_page();
+        for opts in [SegmentOptions::default(), SegmentOptions::archival()] {
+            let a = segment_page(&pm, &opts);
+            let b = segment_page_with_mask(&pm, &a.mask, &opts);
+            assert_eq!(a.mask.data, b.mask.data, "mask must pass through");
+            assert_eq!(
+                (a.bg.width, a.bg.height, &a.bg.data),
+                (b.bg.width, b.bg.height, &b.bg.data),
+                "background must be byte-identical"
+            );
+        }
+    }
+
+    /// `with_mask` is only meaningful for layered colour encodes; every other
+    /// combination must fail loudly instead of silently ignoring the mask.
+    #[test]
+    fn with_mask_rejects_invalid_combinations() {
+        let pm = Pixmap::white(16, 16);
+        let mask = Bitmap::new(16, 16);
+        let wrong_size = Bitmap::new(8, 16);
+
+        assert!(matches!(
+            PageEncoder::from_pixmap(&pm)
+                .with_mask(&wrong_size)
+                .encode(),
+            Err(EncodeError::Unsupported(_))
+        ));
+        assert!(matches!(
+            PageEncoder::from_pixmap(&pm)
+                .with_quality(EncodeQuality::Photo)
+                .with_mask(&mask)
+                .encode(),
+            Err(EncodeError::Unsupported(_))
+        ));
+        assert!(matches!(
+            PageEncoder::from_bitmap(&mask).with_mask(&mask).encode(),
+            Err(EncodeError::Unsupported(_))
+        ));
     }
 
     #[test]
