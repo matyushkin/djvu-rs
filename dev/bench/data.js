@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788274318268,
+  "lastUpdate": 1788278402300,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17782,6 +17782,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 37076000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bf39d5ba7a9b1a27bde6d84fccee26a703d81a24",
+          "message": "perf(segment): inline derive_background to restore pre-split codegen (#782)\n\nThe #779 refactor outlined segment_page's background tail into\nderive_background; local A/B benching showed a consistent ~2% cost on\nsegment_page_color / encode_color_page_quality*. #[inline] returns both\nto no-significant-change vs the pre-#779 baseline.\n\nAlso records the PR #779 Benchmarks-failure triage in\nPERF_EXPERIMENTS.md: the CI-reported +25% was a degraded runner (58\n\"regressions\" including subsystems the diff never touched), not the\ncode.\n\nClaude-Session: https://claude.ai/code/session_019M9Rcr2Un4bMX4917n9XZU",
+          "timestamp": "2026-09-01T15:36:56Z",
+          "tree_id": "48e245f697ae86dd694531c9d45321c452c70d78",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bf39d5ba7a9b1a27bde6d84fccee26a703d81a24"
+        },
+        "date": 1788278400262,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 124000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6747000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41667000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40047000,
             "range": "± 0",
             "unit": "ns/iter"
           }
