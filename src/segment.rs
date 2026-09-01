@@ -536,6 +536,12 @@ pub fn segment_page_with_mask(
 /// Derive the sub-sampled background around `mask` — the shared tail of
 /// [`segment_page`] and [`segment_page_with_mask`]: content-adaptive
 /// subsample choice, mask-excluded block means, optional diffusion.
+///
+/// `#[inline]` restores the pre-split codegen: before #779 this body was
+/// the tail of `segment_page` itself, and outlining it cost a measured
+/// ~2% on `segment_page_color` / `encode_color_page_quality*` (see
+/// PERF_EXPERIMENTS.md, bench triage of PR #779).
+#[inline]
 fn derive_background(rgba: &Pixmap, mask: Bitmap, opts: &SegmentOptions) -> SegmentedPage {
     let w = rgba.width;
     let h = rgba.height;
