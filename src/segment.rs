@@ -496,6 +496,49 @@ pub fn segment_page(rgba: &Pixmap, opts: &SegmentOptions) -> SegmentedPage {
         clear_photo_blocks(&mut mask, rgba);
     }
 
+    derive_background(rgba, mask, opts)
+}
+
+/// Segment a page around a caller-supplied mask instead of re-binarizing.
+///
+/// The re-encode path for existing DjVu pages (#601): pass the page's decoded
+/// `Sjbz` mask (e.g. from
+/// [`extract_mask`](crate::djvu_document::DjVuPage::extract_mask)) so
+/// repeated decode → re-encode cycles keep the mask bit-identical instead of
+/// drifting through binarization instability. Only the background half of
+/// segmentation runs (content-adaptive subsample, mask-excluded block means,
+/// optional diffusion) — given the same mask it produces a byte-identical
+/// background to [`segment_page`]. The mask-producing knobs (`binarization`,
+/// `threshold`, `block_classify`, `deskew`) are ignored.
+///
+/// `mask` must have exactly the page's dimensions (`true` = ink); the
+/// dimensions are debug-asserted here and validated with a proper error by
+/// [`PageEncoder::with_mask`](crate::djvu_encode::PageEncoder::with_mask).
+/// Empty input returns empty outputs.
+pub fn segment_page_with_mask(
+    rgba: &Pixmap,
+    mask: &Bitmap,
+    opts: &SegmentOptions,
+) -> SegmentedPage {
+    debug_assert!(
+        mask.width == rgba.width && mask.height == rgba.height,
+        "mask dimensions must match the page"
+    );
+    if rgba.width == 0 || rgba.height == 0 {
+        return SegmentedPage {
+            mask: mask.clone(),
+            bg: Pixmap::default(),
+        };
+    }
+    derive_background(rgba, mask.clone(), opts)
+}
+
+/// Derive the sub-sampled background around `mask` — the shared tail of
+/// [`segment_page`] and [`segment_page_with_mask`]: content-adaptive
+/// subsample choice, mask-excluded block means, optional diffusion.
+fn derive_background(rgba: &Pixmap, mask: Bitmap, opts: &SegmentOptions) -> SegmentedPage {
+    let w = rgba.width;
+    let h = rgba.height;
     // #569: content-adaptive background subsample — measured detail of the
     // non-mask pixels picks the effective factor, with `opts.bg_subsample`
     // as the ceiling. Runs after the mask so under-ink pixels don't count
