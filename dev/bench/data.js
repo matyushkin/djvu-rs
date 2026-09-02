@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788316958393,
+  "lastUpdate": 1788318503277,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17926,6 +17926,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47591000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "117c3e577e7e5d659625671dfb6074d6a0df530c",
+          "message": "perf(thumbnail): skip full-res extract_mask on the thumbnail path (round 89 follow-up) (#785)\n\nRound 89's dhat allocation map flagged extract_mask's 12.6 MB (of 47 MB\ntotal) in the thumbnails scenario: a full-resolution JB2 mask canvas\ndecoded only to be immediately max-pool-downsampled to 1/4 resolution\nand discarded, because decode_layers's #607 fast path only fired on a\nwarm re-render, never on the cold first render Document::thumbnails()\nactually does.\n\n- djvu-jb2: decode_downsampled(data, dict, shift) decodes straight into\n  a 1/2^shift-resolution canvas, OR-reducing each symbol bit during\n  blit instead of downsampling afterward. shift=0 is byte-identical to\n  decode (same fast path, zero added cost on the hot path).\n- DjVuPage::extract_mask_sub4() uses it at shift=2; PageLayers::mask_sub4\n  decodes cold via it (or downsamples an already-cached full mask when\n  warm); decode_layers's #607 gate now calls mask_sub4(page) instead of\n  only peeking at an already-warm cache, so the first eligible sub>=4\n  render also skips the full decode.\n\nBilevel thumbnail bench: -23.2% (225.8ms -> 173.3ms, reproduced).\nColor bench: flat, no regression. dhat thumbnails scenario: total\n-26.9% (46.98MB -> 34.35MB, exactly the flagged 12.6MB), peak -30.7%.\nBit-exact equivalence tests at both the jb2-crate and document-API\nlayers; a new render-level regression test proves the cold sub>=4 path\nnever touches the full-decode counter and matches the old warm-mask-sub4\noutput pixel-for-pixel.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-02T08:28:58+06:00",
+          "tree_id": "b5da8b8268a5ee99c4b9844dbb3337270a993546",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/117c3e577e7e5d659625671dfb6074d6a0df530c"
+        },
+        "date": 1788318502343,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8773000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 52704000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51171000,
             "range": "± 0",
             "unit": "ns/iter"
           }
