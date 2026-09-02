@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788300551872,
+  "lastUpdate": 1788316958393,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17878,6 +17878,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40538000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "50f71cdfcf377cfd9d8bbeabf70c11f61f09bdad",
+          "message": "feat(encode): per-page mask reuse on the multi-page bundle path (#779 follow-up) (#784)\n\nAdd encode_djvm_layered_shared_with_masks and\nencode_djvm_layered_shared_with_thumbnails_and_masks, extending the\nsingle-page PageEncoder::with_mask reuse (#779) to the multi-page\nshared-dictionary bundle path.\n\nmasks[i], when Some, is threaded through segment_page_with_mask instead\nof segment_page for pixmaps[i], skipping binarization so a decode ->\nre-encode cycle over a multi-page bundle keeps every page's mask\nbit-identical. None falls back to normal segmentation, so a bundle can\nmix reused and freshly segmented pages. Mismatched masks/pixmaps\nlengths or per-page dimension mismatches return EncodeError::Unsupported,\nmatching PageEncoder::with_mask's validation.\n\nBoth existing public entry points (encode_djvm_layered_shared and\nencode_djvm_layered_shared_with_thumbnails) keep their signatures\nunchanged and now delegate to the shared impl with masks: None.\n\nNo CLI flag is added: the single-page reuse path never exposed one\neither, so there is nothing to extend yet.\n\nBenches (segment_page_color, encode_color_page_quality,\nencode_djvm_layered_shared) show no regression vs. the parent commit,\nwithin noise. See PERF_EXPERIMENTS.md for the full comparison table.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-02T08:17:35+06:00",
+          "tree_id": "365f1b084bc82efabcaaa9d6fe05a66a8349ab9f",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/50f71cdfcf377cfd9d8bbeabf70c11f61f09bdad"
+        },
+        "date": 1788316956747,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8297000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49554000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47591000,
             "range": "± 0",
             "unit": "ns/iter"
           }
