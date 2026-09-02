@@ -13731,3 +13731,82 @@ re-estimated) and the same zero-cost-when-unused shape as `with_mask`. No
 CLI flag exists for the single-page reuse either (#779 never exposed one),
 so none was added here — a follow-up if/when CLI mask reuse is wanted for
 either path.
+
+### Thumbnail path without full-res `extract_mask` (round 89 follow-up) — **Kept** (2026-09-02)
+
+**Issue.** Round 89's `dhat` allocation map for the `thumbnails` scenario
+(`examples/alloc_profile.rs`, `watchmaker.djvu`, 12 pages) attributed
+12.6 MB of the 47 MB total to `extract_mask`'s `Bitmap::new` — a
+full-resolution JB2 canvas decoded only to be immediately max-pool
+downsampled to 1/4 resolution and discarded, plus the JB2 blit cost of
+writing that full-resolution canvas. `decode_layers`'s existing #607
+optimization (a cached 1/4-res mask lets a *warm* sub>=4 re-render skip
+the full decode) never fired on the first render of a page, which is
+`Document::thumbnails()`'s entire access pattern (one render per page,
+never warm).
+
+**Approach.** Two layers:
+1. `djvu-jb2`: new `decode_downsampled(data, dict, shift)`, sharing the
+   existing arithmetic (ZP) decode of the symbol dictionary and page
+   instructions (that cost is fixed regardless of output resolution) but
+   allocating a `1/2^shift`-resolution canvas and OR-reducing
+   (max-pooling) each symbol bit into it during blit
+   (`blit_to_bitmap_downsampled`), instead of allocating full-resolution
+   and downsampling afterward. `shift=0` is byte-identical to the
+   existing `decode` (same fast byte-aligned blit path, unchanged).
+   Bit-exact equivalence vs. decode-then-downsample proven for dict-free
+   and shared-dict-referencing streams, at shift 2 and 3.
+2. `djvu-rs`: `DjVuPage::extract_mask_sub4()` calls `decode_downsampled`
+   at shift 2 (Smmr masks fall back to full decode + existing
+   `downsample_mask_4x`, no reduced-scale G4/MMR decoder exists).
+   `PageLayers::mask_sub4()` uses it on a cold cache miss, downsampling an
+   already-decoded full mask instead when one happens to be cached. In
+   `decode_layers`, the #607 fast-path gate now calls `mask_sub4(page)`
+   (which decodes cold via `extract_mask_sub4` if needed) instead of only
+   peeking at an already-warm cache with `mask_sub4_cached()` — so the
+   *first* eligible sub>=4 render (bg_subsample >= 4, no bold, no FGbz)
+   also skips the full-resolution decode, not just re-renders.
+
+**Numbers.** `cargo bench --bench document -- thumbnails_render_only
+--baseline before` (`ThumbnailStrategy::RenderOnly`, forces the render
+path under test): bilevel grid (20 pages, `pathogenic_bacteria_1896.djvu`)
+225.81 ms → 173.34 ms, **−23.2%** (reproduced on a second run: −23.4%,
+both p < 0.05). Color grid (6 pages, `colorbook.djvu`) 24.06 ms →
+23.66 ms, −1.7% to −4.3% across two runs — within noise, no regression
+(that fixture's masks are small relative to its multi-chunk BG44, so the
+saving is proportionally smaller there).
+
+`dhat` `thumbnails` scenario (`watchmaker.djvu`, 12 pages, `alloc-profile`
+feature): Total 46,984,366 → 34,348,138 bytes (**−26.9%**, exactly the
+flagged 12,636,228 bytes), t-gmax (peak) 40,951,453 → 28,381,305 bytes
+(**−30.7%**). Re-parsing the after-fix `dhat-thumbnails.json`'s
+allocation-point table confirms `extract_mask` now attributes **0 bytes**
+in this scenario; the remaining largest allocator is the unrelated IW44
+`PlaneDecoder::new` (23.2 MB, round 89's other flagged site, out of
+scope here).
+
+Correctness: `crates/djvu-jb2/src/lib.rs` gained
+`decode_downsampled_shift0_matches_decode`,
+`decode_downsampled_matches_full_then_downsample_boy_jb2` (dict-free),
+`_shared_dict` (INCL/Djbz), and `_shift3` (generalizes beyond the
+hard-coded shift=2 the render tier calls). `src/djvu_document.rs` gained
+`mask_sub4_matches_extract_mask_then_downsample` (+ `_shared_dict`),
+proving `extract_mask_sub4()` is bit-for-bit identical to
+`downsample_mask_4x(extract_mask()?)` on real fixtures. `src/djvu_render.rs`
+gained `cold_thumbnail_sweep_skips_full_mask_decode`, proving a *cold*
+sub>=4 render (i) never touches the `JB2_MASK_DECODES` full-decode counter
+and (ii) produces pixel-identical output to the same render forced through
+the old warm-mask-sub4 path. The pre-existing #607 structural regression
+tests (`downgrade_retains_sub4_mask_and_skips_jb2_decode`,
+`downgraded_sub4_with_bold_still_full_decodes`,
+`render_progressive_ignores_mask_sub4_warmth`) still pass unmodified.
+
+**Decision.** Kept.
+
+**Reason.** Both bars clear on the case this was aimed at (bilevel-mask
+thumbnail sweep): ≥3% wall-clock (−23%) and a clear memory reduction
+(−27% total / −31% peak) with no time regression anywhere (the one
+fixture without a large win is flat, not worse). The implementation adds
+zero cost to the unmodified hot path (`shift=0` takes the exact original
+`blit_to_bitmap` branch), and correctness is pinned by bit-exact
+equivalence tests at both the codec-crate and document-API layers.

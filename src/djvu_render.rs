@@ -1727,16 +1727,27 @@ impl PageLayers {
             .as_ref()
     }
 
-    /// A 1/4-resolution max-pool downsample of the mask, decoding the mask
-    /// first if needed. Each bit is 1 if any bit in the corresponding 4×4
-    /// block is set, letting the compositor do one lookup per output pixel at
-    /// subsample ≥ 4 instead of 4–9. Purely a compositor optimisation, which
-    /// is why it lives in the render tier rather than on the page.
+    /// A 1/4-resolution max-pool downsample of the mask. Each bit is 1 if any
+    /// bit in the corresponding 4×4 block is set, letting the compositor do
+    /// one lookup per output pixel at subsample ≥ 4 instead of 4–9. Purely a
+    /// compositor optimisation, which is why it lives in the render tier
+    /// rather than on the page.
+    ///
+    /// If the full-resolution mask is already cached (e.g. a prior
+    /// native-resolution render of this page), downsamples that instead of
+    /// decoding again. Otherwise decodes straight to 1/4 resolution via
+    /// [`DjVuPage::extract_mask_sub4`] — the thumbnail / heavy-downscale
+    /// path's common case — skipping the full-resolution JB2 canvas
+    /// allocation and the full-canvas downsample scan (round 89 follow-up:
+    /// `extract_mask` was 12.6 MB of the 47 MB thumbnail-sweep allocation
+    /// total, decoded only to be immediately downsampled and discarded).
     pub(crate) fn mask_sub4(&self, page: &DjVuPage) -> Option<&crate::bitmap::Bitmap> {
         self.mask_sub4
             .get_or_init(|| {
-                let src = self.mask(page)?;
-                Some(downsample_mask_4x(src))
+                if let Some(full) = self.mask.get().and_then(|o| o.as_ref()) {
+                    return Some(downsample_mask_4x(full));
+                }
+                page.extract_mask_sub4().ok().flatten()
             })
             .as_ref()
     }
@@ -1744,6 +1755,12 @@ impl PageLayers {
     /// Peek at an already-built 1/4-resolution mask without triggering any
     /// decode. `Some` only when a previous sub>=4 render populated the slot
     /// (possibly retained across [`downgrade`](Self::downgrade), #607).
+    ///
+    /// Test-only: `decode_layers` used to gate its #607 fast path on this
+    /// (only firing when already warm); it now calls `mask_sub4` directly so
+    /// a *cold* sub>=4 render benefits too (round 89 follow-up). Kept as a
+    /// non-triggering cache-warmth probe for the structural regression tests.
+    #[cfg(test)]
     pub(crate) fn mask_sub4_cached(&self) -> Option<&crate::bitmap::Bitmap> {
         self.mask_sub4.get().and_then(|o| o.as_ref())
     }
@@ -1878,7 +1895,7 @@ fn count_zones(zones: &[crate::text::TextZone]) -> usize {
 /// is set. Used by [`PageLayers::mask_sub4`] to build the 1/4-resolution mask
 /// the compositor uses for sub=4 renders instead of `mask_box_any`.
 #[cfg(feature = "std")]
-fn downsample_mask_4x(src: &crate::bitmap::Bitmap) -> crate::bitmap::Bitmap {
+pub(crate) fn downsample_mask_4x(src: &crate::bitmap::Bitmap) -> crate::bitmap::Bitmap {
     let out_w = src.width.div_ceil(4);
     let out_h = src.height.div_ceil(4);
     let mut out = crate::bitmap::Bitmap::new(out_w, out_h);
@@ -2207,11 +2224,20 @@ fn decode_layers<'a>(
     bg_subsample: u32,
     bg_chunk_limit: usize,
 ) -> Result<DecodedLayers<'a>, RenderError> {
-    // #607: an eligible sub>=4 render with a warm retained 1/4-res mask skips
-    // the full JB2 decode entirely. Eligibility mirrors `resolve_sub4_mask`
-    // (no bold dilation, no FGbz palette — those need full-resolution mask
-    // semantics); the compositor then reads only the sub4 plane, so output is
-    // pixel-identical to the full-decode path by construction.
+    // #607 (round 89 follow-up): an eligible sub>=4 render skips the full JB2
+    // decode entirely, whether `mask_sub4` is already warm or still cold.
+    // Eligibility mirrors `resolve_sub4_mask` (no bold dilation, no FGbz
+    // palette — those need full-resolution mask semantics); the compositor
+    // then reads only the sub4 plane, so output is pixel-identical to the
+    // full-decode path by construction.
+    //
+    // `mask_sub4(page)` (rather than the passive `mask_sub4_cached()`) is what
+    // makes this fire on a *cold* first render too: when nothing is cached yet
+    // it decodes straight to 1/4 resolution via `extract_mask_sub4` instead of
+    // decoding the full-resolution canvas and downsampling it afterward — the
+    // 12.6 MB `extract_mask` allocation round 89 flagged in the thumbnail
+    // sweep. A warm full-resolution mask (from a prior sub=1 render of this
+    // page) is still reused by downsampling it in place, never re-decoded.
     //
     // Restricted to full-background decodes (`bg_chunk_limit == usize::MAX`):
     // the progressive path composites with the mask returned *here* (it never
@@ -2224,7 +2250,7 @@ fn decode_layers<'a>(
         && bg_subsample >= 4
         && opts.bold == 0
         && page.find_chunk(b"FGbz").is_none()
-        && page.render_layers().mask_sub4_cached().is_some()
+        && page.render_layers().mask_sub4(page).is_some()
     {
         let (bg, fg44) = if opts.permissive {
             (
@@ -6054,6 +6080,76 @@ mod tests {
             "back-and-forth pan hit rate too low: {:.1}%",
             rate * 100.0
         );
+    }
+
+    /// Round 89 follow-up: a *cold* thumbnail-style render (bg_subsample >= 4,
+    /// no bold, no FGbz, first render of the page — nothing warm yet) must
+    /// not run the full-resolution JB2 mask decode at all, and must still
+    /// produce output pixel-identical to the same render done the old way
+    /// (mask_sub4 built by downsampling an already-decoded full-resolution
+    /// mask). Before this change, `decode_layers`'s #607 fast path required
+    /// `mask_sub4` to already be warm, so the very first (cold) sub>=4
+    /// render — exactly `Document::thumbnails()`'s access pattern — always
+    /// paid for a full-resolution `extract_mask` canvas just to immediately
+    /// downsample and discard it.
+    #[cfg(feature = "std")]
+    #[test]
+    fn cold_thumbnail_sweep_skips_full_mask_decode() {
+        let body = || {
+            let (w, h) = {
+                let doc = load_doc("colorbook.djvu");
+                let page = doc.page(0).unwrap();
+                (page.width() as u32, page.height() as u32)
+            };
+            let opts_s4 = RenderOptions {
+                width: w / 4,
+                height: h / 4,
+                ..Default::default()
+            };
+            let opts_s1 = RenderOptions {
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+
+            // Reference: force the full-resolution mask to decode and cache
+            // first (a plain sub=1 render), then take the sub4 render — this
+            // exercises `mask_sub4`'s "downsample an already-cached full mask"
+            // branch, matching pre-fix behaviour exactly.
+            let doc_warm = load_doc("colorbook.djvu");
+            let page_warm = doc_warm.page(0).unwrap();
+            let _ = render_pixmap(page_warm, &opts_s1).unwrap();
+            let reference = render_pixmap(page_warm, &opts_s4).unwrap();
+
+            // Cold: a fresh document, straight to a sub4 render — nothing
+            // warm, must decode straight to 1/4 resolution via
+            // `extract_mask_sub4` and must not touch the full-res decoder.
+            let doc_cold = load_doc("colorbook.djvu");
+            let page_cold = doc_cold.page(0).unwrap();
+            JB2_MASK_DECODES.with(|c| c.set(0));
+            let cold_s4 = render_pixmap(page_cold, &opts_s4).unwrap();
+            assert_eq!(
+                JB2_MASK_DECODES.with(|c| c.get()),
+                0,
+                "cold sub>=4 render must not run the full-resolution JB2 decode"
+            );
+
+            assert_eq!(
+                cold_s4.data, reference.data,
+                "cold sub4 thumbnail-style render must match the warm-mask-sub4 render"
+            );
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("build single-threaded pool for deterministic thread-local counting");
+            pool.install(body);
+        }
+        #[cfg(not(feature = "parallel"))]
+        body();
     }
 
     /// #607: `downgrade` retains the 1/4-res mask, and an eligible sub>=4
