@@ -1005,63 +1005,43 @@ fn encode_djvm_layered_shared_impl(
         }
     }
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
-
-    // Pass 1 (#565): segment each page, immediately encode its background
-    // (BG44) and optional thumbnail (TH44), and DROP the segmented background
-    // pixmap. Between the passes only the 1-bit masks and the already-
-    // compressed chunk bodies are retained — previously every page's
-    // subsampled RGBA background pixmap plus a full clone of every mask
-    // survived until the end of the encode. Per-page independent; with the
-    // `parallel` feature the pages run concurrently on rayon. The emitted
-    // bytes are unchanged: same inputs, same options, same chunk order.
-    struct PreparedPage {
-        mask: Bitmap,
-        bg44: Vec<Vec<u8>>,
-        th44: Vec<Vec<u8>>,
-    }
-    // #779 follow-up: a `Some` mask reuses `segment_page_with_mask` (skip
-    // binarization, keep background derivation) exactly like
-    // `PageEncoder::with_mask`; `None` keeps the original `segment_page` call
-    // so a bundle encoded with no `masks` argument is untouched codegen-wise.
-    let prepare = |pm: &Pixmap, reuse_mask: Option<&Bitmap>| -> PreparedPage {
-        let seg = match reuse_mask {
-            Some(mask) => segment_page_with_mask(pm, mask, &opts),
-            None => segment_page(pm, &opts),
-        };
-        let bg44 = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
-        let th44 = if with_thumbnails {
-            crate::thumbnail::encode_th44_color(pm)
-        } else {
-            Vec::new()
-        };
-        PreparedPage {
-            mask: seg.mask,
-            bg44,
-            th44,
-        }
-    };
     let mask_at = |idx: usize| -> Option<&Bitmap> { masks.and_then(|m| m[idx]) };
+
+    // ── Phase 1: per-page mask + background extraction ─────────────────────
+    //
+    // Needs: each page's `&Pixmap` (and, on re-encode, its reused mask).
+    // Produces: `PreparedPage` — the packed 1-bit mask plus the already-
+    // compressed `BG44`/`TH44` chunk bodies. Per-page independent; with the
+    // `parallel` feature the pages run concurrently on rayon. The pixmap
+    // itself is not retained past this phase in `prepared` — only phase 3
+    // (`build_page`) still borrows it, straight from `pixmaps`, and only for
+    // `FGbz` colour sampling (see its doc comment below). The emitted bytes
+    // are unchanged from before this refactor: same inputs, same options,
+    // same chunk order (#565's pass split, restructured here without
+    // behavior change).
     #[cfg(feature = "parallel")]
     let prepared: Vec<PreparedPage> = {
         use rayon::prelude::*;
         pixmaps
             .par_iter()
             .enumerate()
-            .map(|(idx, pm)| prepare(pm, mask_at(idx)))
+            .map(|(idx, pm)| prepare_page(pm, mask_at(idx), &opts, with_thumbnails))
             .collect()
     };
     #[cfg(not(feature = "parallel"))]
     let prepared: Vec<PreparedPage> = pixmaps
         .iter()
         .enumerate()
-        .map(|(idx, pm)| prepare(pm, mask_at(idx)))
+        .map(|(idx, pm)| prepare_page(pm, mask_at(idx), &opts, with_thumbnails))
         .collect();
 
-    // Cluster over borrowed masks — no per-mask clone (#565).
-    let mask_refs: Vec<&Bitmap> = prepared.iter().map(|p| &p.mask).collect();
-    let shared =
-        jb2_encode::cluster_shared_symbols_from_refs(&mask_refs, shared_dict_page_threshold);
-    drop(mask_refs);
+    // ── Phase 2: shared JB2 dictionary clustering ───────────────────────────
+    //
+    // Needs: only `prepared[i].mask` for every page (~1 MB/page packed
+    // 1-bit) — no pixmap. Produces: `shared`, the dictionary's symbol
+    // bitmaps (empty when nothing qualified to share, e.g. fewer than two
+    // pages or a threshold above the page count).
+    let shared = cluster_shared_dictionary(&prepared, shared_dict_page_threshold);
     let has_shared = !shared.is_empty();
 
     let dict_id = "dict0001.djvi";
@@ -1075,55 +1055,23 @@ fn encode_djvm_layered_shared_impl(
         comps.push((djvi_body, false, dict_id.to_string()));
     }
 
+    // ── Phase 3: per-page finalize ───────────────────────────────────────────
+    //
+    // Needs: `prepared[i]` (mask/bg44/th44 from phase 1) and `shared` (from
+    // phase 2), plus — the one dependency that survives from phase 1 — the
+    // page's original `&Pixmap` again, solely for `foreground_fgbz_from_blits`'s
+    // per-blit colour sampling (`FGbz`). See that function's doc comment:
+    // this bundle path always uses `FgbzPaletteOptions::Exact`, i.e. the
+    // lossless-shape case, so today the pixmap really is needed a second
+    // time here. (Removing that second need is step 3 of the peak-memory
+    // plan this refactor prepares for — a precomputed per-CC colour table
+    // built while the pixmap is still resident in phase 1.)
+    //
     // Each page's DJVU body is independent (JB2-dict Sjbz + IW44 background + FGbz +
     // optional TH44). Build one component per page; with the `parallel` feature the
     // pages encode concurrently on rayon, since JB2 + IW44 dominate the per-page cost.
     // Order is preserved by the indexed collect.
-    let build_page = |idx: usize,
-                      pm: &Pixmap,
-                      prep: &PreparedPage|
-     -> Result<(Vec<u8>, bool, String), EncodeError> {
-        let w = u16::try_from(pm.width)
-            .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
-        let h = u16::try_from(pm.height)
-            .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
-
-        let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
-        let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits(
-            &prep.mask,
-            shared_for_encode,
-            &Jb2EncodeOptions::default(),
-        );
-        // FGbz comes straight from the emitted blits (#612) — no decode of the
-        // just-encoded stream. Shared-dict rec-7 copies are exact matches, so
-        // the blit shapes equal the decoded ones. `Exact` here (not threaded
-        // from a caller option yet): the bundle path is out of scope for
-        // FGBZ_MEDIANCUT and stays byte-identical.
-        let fgbz = foreground_fgbz_from_blits(pm, &prep.mask, &blits, FgbzPaletteOptions::Exact);
-
-        let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
-        chunks.push((*b"INFO", encode_info(w, h, dpi)));
-        if has_shared {
-            chunks.push((*b"INCL", dict_id.as_bytes().to_vec()));
-        }
-        chunks.push((*b"Sjbz", sjbz));
-        for body in &prep.bg44 {
-            chunks.push((*b"BG44", body.clone()));
-        }
-        if let Some(chunk) = fgbz
-            && let Chunk::Leaf { id, data } = chunk.into_leaf()
-        {
-            chunks.push((id, data));
-        }
-        // TH44 colour thumbnails sit inside the page's FORM:DJVU body (after
-        // FGbz); encoded in pass 1, placed here in the same position.
-        for payload in &prep.th44 {
-            chunks.push((*b"TH44", payload.clone()));
-        }
-        let body = jb2_encode::build_form_body(b"DJVU", &chunks);
-        Ok((body, true, format!("p{:04}.djvu", idx + 1)))
-    };
-
+    let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
     #[cfg(feature = "parallel")]
     let page_comps: Vec<(Vec<u8>, bool, String)> = {
         use rayon::prelude::*;
@@ -1131,7 +1079,9 @@ fn encode_djvm_layered_shared_impl(
             .par_iter()
             .zip(&prepared)
             .enumerate()
-            .map(|(idx, (pm, prep))| build_page(idx, pm, prep))
+            .map(|(idx, (pm, prep))| {
+                build_page(idx, pm, prep, shared_for_encode, has_shared, dict_id, dpi)
+            })
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
@@ -1139,12 +1089,134 @@ fn encode_djvm_layered_shared_impl(
         .iter()
         .zip(&prepared)
         .enumerate()
-        .map(|(idx, (pm, prep))| build_page(idx, pm, prep))
+        .map(|(idx, (pm, prep))| {
+            build_page(idx, pm, prep, shared_for_encode, has_shared, dict_id, dpi)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     drop(prepared);
     comps.extend(page_comps);
 
     Ok(jb2_encode::assemble_djvm_bundle(comps))
+}
+
+/// Phase-1 → phase-2/3 boundary artifact for
+/// [`encode_djvm_layered_shared_impl`]'s multi-page pipeline.
+///
+/// Holds everything later phases need from a page *other than* the pixmap:
+/// the packed 1-bit mask (input to phase 2's dictionary clustering and phase
+/// 3's JB2 encode) and the already-compressed `BG44`/`TH44` chunk bodies
+/// (phase 1 output, threaded through unchanged). At ~1 MB/page this is ~32×
+/// smaller than the RGBA pixmap it was derived from — see
+/// `PERF_EXPERIMENTS.md`'s "Encoder phase split" entry for the memory
+/// accounting this shape exists to make legible.
+struct PreparedPage {
+    mask: Bitmap,
+    bg44: Vec<Vec<u8>>,
+    th44: Vec<Vec<u8>>,
+}
+
+/// Phase 1: segment one page, immediately encode its background (`BG44`)
+/// and optional thumbnail (`TH44`), and hand back only the compact
+/// [`PreparedPage`] — the segmented background pixmap itself is dropped
+/// when this call returns.
+///
+/// `reuse_mask`, when `Some` (#779 follow-up), reuses `segment_page_with_mask`
+/// (skip binarization, keep background derivation) exactly like
+/// [`PageEncoder::with_mask`]; `None` keeps the original `segment_page` call
+/// so a bundle encoded with no `masks` argument is untouched codegen-wise.
+#[inline]
+fn prepare_page(
+    pm: &Pixmap,
+    reuse_mask: Option<&Bitmap>,
+    opts: &SegmentOptions,
+    with_thumbnails: bool,
+) -> PreparedPage {
+    let seg = match reuse_mask {
+        Some(mask) => segment_page_with_mask(pm, mask, opts),
+        None => segment_page(pm, opts),
+    };
+    let bg44 = encode_iw44_color(&seg.bg, &Iw44EncodeOptions::default());
+    let th44 = if with_thumbnails {
+        crate::thumbnail::encode_th44_color(pm)
+    } else {
+        Vec::new()
+    };
+    PreparedPage {
+        mask: seg.mask,
+        bg44,
+        th44,
+    }
+}
+
+/// Phase 2: cluster every page's mask into a shared JB2 dictionary.
+///
+/// Takes only the masks (borrowed out of `prepared`, no per-mask clone,
+/// #565) — the pixmap plays no part in this phase. Returns the dictionary's
+/// symbol bitmaps, empty when clustering found nothing to share.
+fn cluster_shared_dictionary(
+    prepared: &[PreparedPage],
+    shared_dict_page_threshold: usize,
+) -> Vec<Bitmap> {
+    let mask_refs: Vec<&Bitmap> = prepared.iter().map(|p| &p.mask).collect();
+    jb2_encode::cluster_shared_symbols_from_refs(&mask_refs, shared_dict_page_threshold)
+}
+
+/// Phase 3: finalize one page's `FORM:DJVU` body — encode `Sjbz` against the
+/// shared dictionary, rebuild `FGbz` from the emitted blits, and assemble the
+/// chunk list in emission order.
+///
+/// `pm` is the *original* pixmap, needed here (and only here, among the
+/// three phases) for [`foreground_fgbz_from_blits`]'s per-blit colour
+/// sampling — everything else (`prep.mask`, `prep.bg44`, `prep.th44`,
+/// `shared`) was already produced in phases 1/2.
+#[inline]
+fn build_page(
+    idx: usize,
+    pm: &Pixmap,
+    prep: &PreparedPage,
+    shared_for_encode: &[Bitmap],
+    has_shared: bool,
+    dict_id: &str,
+    dpi: u16,
+) -> Result<(Vec<u8>, bool, String), EncodeError> {
+    let w = u16::try_from(pm.width)
+        .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
+    let h = u16::try_from(pm.height)
+        .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
+
+    let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits(
+        &prep.mask,
+        shared_for_encode,
+        &Jb2EncodeOptions::default(),
+    );
+    // FGbz comes straight from the emitted blits (#612) — no decode of the
+    // just-encoded stream. Shared-dict rec-7 copies are exact matches, so
+    // the blit shapes equal the decoded ones. `Exact` here (not threaded
+    // from a caller option yet): the bundle path is out of scope for
+    // FGBZ_MEDIANCUT and stays byte-identical.
+    let fgbz = foreground_fgbz_from_blits(pm, &prep.mask, &blits, FgbzPaletteOptions::Exact);
+
+    let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    chunks.push((*b"INFO", encode_info(w, h, dpi)));
+    if has_shared {
+        chunks.push((*b"INCL", dict_id.as_bytes().to_vec()));
+    }
+    chunks.push((*b"Sjbz", sjbz));
+    for body in &prep.bg44 {
+        chunks.push((*b"BG44", body.clone()));
+    }
+    if let Some(chunk) = fgbz
+        && let Chunk::Leaf { id, data } = chunk.into_leaf()
+    {
+        chunks.push((id, data));
+    }
+    // TH44 colour thumbnails sit inside the page's FORM:DJVU body (after
+    // FGbz); encoded in phase 1, placed here in the same position.
+    for payload in &prep.th44 {
+        chunks.push((*b"TH44", payload.clone()));
+    }
+    let body = jb2_encode::build_form_body(b"DJVU", &chunks);
+    Ok((body, true, format!("p{:04}.djvu", idx + 1)))
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────

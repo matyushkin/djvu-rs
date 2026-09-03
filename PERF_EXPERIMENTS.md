@@ -13887,3 +13887,83 @@ step and is skipped on repeat runs against the same `--out-dir`), writes
 nothing into the repo tree, and gives every later step in the sequence a
 one-command way to get comparable numbers instead of re-deriving the
 same shell incantation by hand each time.
+
+### Encoder phase split, no-op (encoder peak-memory step 2) — **Kept** (2026-09-03)
+
+**Issue.** Follow-up to the encoder peak-memory investigation (round 89,
+`#600`'s `alloc-profile` harness): 78.6% of `encode_djvm_layered_shared`'s
+`dhat` peak is every page's full RGBA `Pixmap` held resident at once
+(forced by the `pixmaps: &[Pixmap]` API shape), and `build_page` needs the
+*original* pixmap a second time, after clustering, only for `FGbz`'s
+per-blit colour sampling. Fixing that — a streaming page source that drops
+each pixmap after phase 1, using a per-CC colour table precomputed while it
+is still resident — is a larger, riskier change (plan step 3/4). This step
+is pure preparation: restructure `encode_djvm_layered_shared_impl`'s
+existing two passes (`prepare` / `build_page`, both till now closures
+capturing shared local state) into three explicit, named, top-level
+functions with doc comments stating exactly what each needs and produces,
+so steps 3–4 become small, reviewable diffs instead of one large one. No
+behavior, signature, or output change.
+
+**Approach.** `src/djvu_encode.rs`: moved the locally-defined `PreparedPage`
+struct out to module scope with a doc comment describing it as the
+phase-1→phase-2/3 boundary artifact (~1 MB/page packed masks + BG44/TH44
+bodies, ~32× smaller than the RGBA pixmap it was derived from). Split the
+two closures into three named functions taking explicit parameters instead
+of captures:
+- `prepare_page` (phase 1: mask + background/thumbnail extraction, needs
+  `&Pixmap` + reused mask + options),
+- `cluster_shared_dictionary` (phase 2: dictionary clustering, needs only
+  `&[PreparedPage]`'s masks — no pixmap at all),
+- `build_page` (phase 3: per-page finalize, needs `prep: &PreparedPage` +
+  `shared` + — the one real cross-phase pixmap dependency — the original
+  `&Pixmap` again, for `foreground_fgbz_from_blits`'s `FGbz` colour
+  sampling; its own doc comment now points at this as exactly the
+  dependency step 3 of the plan removes).
+`encode_djvm_layered_shared_impl` itself becomes three `// ── Phase N ──`
+labeled blocks that call these functions from the same `parallel`/
+non-`parallel` `par_iter`/`iter` shapes as before — same collect order,
+same chunk emission order. Given PR #779's precedent (outlining
+`segment_page`'s tail into `derive_background` cost ~2% until `#[inline]`
+was added), marked both `prepare_page` and `build_page` `#[inline]` up
+front rather than discover a regression after the fact.
+
+**Numbers.** No memory number is expected to move at this step — peak
+residency is still driven entirely by the caller's `&[Pixmap]` slice
+outside this function; that only changes in step 4 (the streaming/
+bounded-window entry point). This step is groundwork, verified two ways:
+
+1. *Byte-identity.* Built the release CLI (`--features cli`) at the parent
+   commit (`117c3e5`) and after this refactor. Rendered every multi-page
+   corpus fixture with a manageable page count to PNG directories and
+   re-encoded each with `djvu encode <dir> -o out.djvu --quality
+   {quality,archival}`: `cable_1973_100133` (2p), `map_atlas_sample` (2p),
+   `chinese_cookbook_sample` (5p), `war_1812` (8p, +archival),
+   `cyrillic_simonovich_co2` (12p), `watchmaker` (12p, +archival,
+   +`--thumbnails`), `goody_twoshoes` (16p), `conquete_paix` (22p) — 11
+   output files across 8 fixtures and both `Quality`/`Archival` profiles
+   plus a thumbnails run. `cmp` reported **zero diffs** on all 11.
+   (`pathogenic_bacteria_1896.djvu`, 520 pages, was skipped for run time;
+   its per-page shape doesn't differ from the other scanned-text fixtures
+   already covered.)
+2. *Benches* (`cargo bench --bench codecs`, `--baseline before` from the
+   parent commit): `encode_djvm_layered_shared` −0.3%,
+   `segment_page_color` −0.8%, `encode_color_page_quality` −0.1% — all
+   within noise once the machine's load (other concurrent agent workloads
+   pushed load average over 30 mid-run, producing spurious +20–40%
+   readings on a first pass, exactly PR #779's bench-triage lesson) was
+   allowed to settle before measuring; re-run at load ≈8 confirmed no
+   regression. `make check` (fmt, clippy `-D warnings`, no_std, wasm32 ×3,
+   full test suite incl. the `encode_djvm_layered_shared_with_masks`/
+   `_with_thumbnails_and_masks` unit tests) passed clean.
+
+**Decision.** Kept.
+
+**Reason.** Exactly the outcome the plan calls for at this step: zero
+behavior/output change (byte-identical across 8 fixtures, both profiles,
+thumbnails), zero measurable performance change once noise is controlled
+for, and the real deliverable — the phase-1/phase-2/phase-3 data
+dependency (masks only vs. masks + one more pixmap read) is now stated in
+code, not just in this file, ready for step 3 (precomputed per-CC colour
+table) and step 4 (bounded-window streaming entry point) to change one
+function each instead of the whole 170-line body.
