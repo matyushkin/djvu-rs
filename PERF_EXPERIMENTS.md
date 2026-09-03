@@ -14167,3 +14167,109 @@ this triage — still passes (guard still bounds the 7-byte amplifying input
 well under 50 ms), so the security property is intact. Lesson reinforced:
 always check whether a "regression" benchmark's code path can even reach
 the diff before spending time on a fix.
+
+### Benchmark workflow: detect cross-runner drift instead of reporting phantom regressions — **Kept** (infra) (2026-09-03)
+
+**Issue.** The Benchmark CI workflow has produced two false-alarm regression
+reports, each investigated at real cost:
+
+1. PR #779: CI flagged 58 "regressions", including `segment_page_color`
+   +25.3%; local A/B showed the real cost was +1.9%. The triage's own
+   closing lesson: a same-runner re-check does not immunise against a
+   degraded runner — the "regressions" list has to be cross-checked against
+   benches the diff cannot have touched before it's trusted.
+2. PR #787 (branch `test/fuzz-throughput`, not yet merged to main): CI
+   flagged 6 regressions up to +44.3%, on a diff touching only
+   `crates/djvu-bzz`. The same report showed roughly **−8% on almost every
+   unrelated benchmark** (render, IW44, PDF export) — the runner was
+   uniformly *faster* on the "current" side that run, and against that
+   floor a few benches moving the other way is exactly what plain
+   measurement variance looks like. Local interleaved A/B reproduced none
+   of the six.
+
+Both triages independently found the same signature: when a large fraction
+of *all* benchmarks move together, in the same direction, by a similar
+amount — including ones the diff structurally cannot touch — the runner
+changed speed between measurements, not the code. Neither the artifact
+baseline nor the existing same-runner merge-base re-check (added after
+#779) catches this, because both only ever look at the individually
+flagged benches, never at the shape of the whole table.
+
+**Approach.** Taught `scripts/bench_compare.py` (the script both the
+artifact-baseline compare and the same-runner re-check already call) to
+compute the *machine drift*: the median delta across every benchmark
+present in both baseline and current (median, not mean, so a handful of
+real/noisy outliers — the ones that would get flagged — don't drag the
+estimate away from the shared floor the rest of the table sits on).
+Median is only computed over the full, unrestricted comparison (≥5
+overlapping benchmarks) — the same-runner re-check's `--restrict` pass is
+already a handful of cherry-picked benches, so a "median" over 2-6 entries
+would be meaningless and is skipped there by construction.
+
+If `|drift| > 3%`, the run is marked a *drift suspect*. Flagged
+regressions are still listed in full — raw baseline/current numbers,
+unmodified 5% threshold, plus a `Corrected` (delta − drift) column for
+context — but `bench_compare.py` now exits `3` instead of `1`, and
+`bench.yml`'s "Fail on benchmark comparison" step treats exit `3` as
+fail-soft: the PR comment still posts, still lists every flagged bench,
+but the job passes instead of failing. A single real regression against an
+otherwise-flat table (drift ≈ 0) is untouched by any of this and still
+exits `1` and still fails. The same-runner re-check step is also skipped
+when the artifact-compare already came back drift-suspect (exit `3`) —
+`bench_compare.py`'s own drift check already explains the flagged benches,
+so paying for another full rebuild+rerun to reconfirm the same conclusion
+isn't worth the CI time.
+
+Deliberately *not* done: mapping the diff's changed files to the benches
+it could plausibly touch, to auto-clear only those. That mapping is
+brittle — #787's own triage is the counterexample: `bzz_encode`'s flagged
+call to `bzz_decode` runs once as setup *outside* its own timed loop, and
+two of the six flagged benches (`jb2_decode_corpus_bilevel`,
+`mask_decode/cable_bilevel`) exercise JB2 code the BZZ-only diff cannot
+touch via any shared code path at all — a naive "did the diff touch this
+subsystem" filter would have gotten both of those *wrong* in the "still
+suspicious" direction. The comment lists every benchmark that moved and
+lets a human weigh which ones plausibly relate to the diff, same as the
+existing table always did.
+
+**Numbers — synthetic validation** (`scripts/test_bench_compare.py`, 9
+unit tests against the extracted `Comparison` class, all passing):
+
+- **(a) single regression, rest flat**: one bench +20%, 29 others
+  identical. Drift ≈ 0% (well under 5-bench minimum noise), `suspect =
+  False`, 1 regression reported, `exit_code == 1` — still fails, as
+  before.
+- **(b) uniform drift + outliers (the #787 shape)**: 37 benches −8%, 3
+  benches +40%. Median across all 40 = −8% (`|drift| > 3%` threshold),
+  `suspect = True`, all 3 outliers still listed as regressions but
+  `exit_code == 3` — reported, does not fail the job. Comment includes the
+  drift banner, the `Corrected` column, and states plainly that flagged
+  regressions did not fail the job.
+- **(c) flat table**: 25 benches unchanged (also checked with uniform +1%
+  noise, under the 5% regression threshold). No regressions, `suspect =
+  False`, `exit_code == 0`.
+- Plus: `--restrict` (same-runner re-check) never computes drift over its
+  own biased subset even when fed the #787-shaped inputs (`drift is None`,
+  `suspect = False`, real deltas still fail with `exit_code == 1`); fewer
+  than 5 overlapping benchmarks never trigger drift even under a uniform
+  −20% shift; new/removed benches don't skew the median or crash the
+  comparison.
+
+`make check` passed (fmt, clippy `-D warnings`, no_std, wasm32 ×3, full
+test suite) — this change touches only `scripts/bench_compare.py`,
+`scripts/test_bench_compare.py` (new), `.github/workflows/bench.yml`, and
+`BENCHMARKS.md`, none of which `make check` compiles, but the gate is kept
+green as a baseline sanity check on the rest of the tree.
+
+**Decision.** Kept.
+
+**Reason.** This directly targets the two false-alarm investigations
+without weakening the workflow's ability to catch a real regression: cases
+(a) and (c) above are bit-for-bit the old behavior (fail on a real
+regression, pass on a flat table), and case (b) is exactly the shape that
+cost real investigation time twice. Benchmarks are already not a required
+merge gate (see `CLAUDE.md`); this change doesn't add one — it makes the
+existing signal trustworthy enough that a human doesn't have to re-derive
+the "check for uniform drift" heuristic by hand a third time. The
+same-runner re-check added after #779 stays in place for the case it
+still helps: a real regression not accompanied by uniform drift.
