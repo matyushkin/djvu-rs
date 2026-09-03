@@ -13810,3 +13810,80 @@ fixture without a large win is flat, not worse). The implementation adds
 zero cost to the unmodified hot path (`shift=0` takes the exact original
 `blit_to_bitmap` branch), and correctness is pinned by bit-exact
 equivalence tests at both the codec-crate and document-API layers.
+
+### Encoder peak-memory measurement harness (`scripts/encode_rss_scaling.sh`) — **Kept** (infra) (2026-09-03)
+
+**Issue.** Step 1 of the encoder peak-memory reduction plan (follow-up to
+round 89's `alloc-profile` harness): the plan's "independent confirmation"
+section measured `djvu encode`'s max RSS scaling with page count
+(6/12/24-page directories assembled from `watchmaker.djvu`, `/usr/bin/time
+-l`) by hand. Every later step in that plan (no-op refactor, per-CC colour
+table, streaming entry point, CLI switch-over) needs the same measurement
+re-run and compared against a baseline — ad hoc shell one-liners don't
+give that reproducibly. Decision rule, mirroring round 89: the harness
+lands as infra regardless of what any individual downstream step measures;
+each later step stands or falls on its own numbers against this baseline.
+
+**Approach.** New `scripts/encode_rss_scaling.sh` + `make
+encode-rss-scaling`. Renders a fixture's pages to PNG once via the `djvu`
+CLI (`djvu render --all`, cached under a scratch dir keyed by DPI so
+repeat runs skip re-rendering), assembles N-page input directories for a
+configurable page-count list (default `6 12 24`, cycling through the
+rendered pages when N exceeds the source page count — same "pure
+page-count scaling" trick the plan used for its 24-page case), and runs
+`djvu encode` on each under the platform's peak-RSS tool: macOS
+`/usr/bin/time -l` ("peak memory footprint", bytes) or Linux
+`/usr/bin/time -v` ("Maximum resident set size", KB), falling back to
+`-f %M` if `-v` is unsupported — detected via `uname`, not assumed.
+Reports a table of N → peak RSS (MB, normalized from whichever unit) and
+wall-clock, the successive-difference marginal MB/page, and an
+independent least-squares linear-fit slope as a cross-check. Everything
+lives under a `mktemp -d` scratch dir by default (or a caller-supplied
+`--out-dir`, kept across runs with `--keep` to reuse the cached PNGs) —
+nothing is written into the repo tree. All parameters (fixture, page
+counts, quality profile, render DPI, djvu binary path, output dir)
+override via env var or flag; `--help` documents them. Not wired into any
+CI gate (matches the plan's "CI-runnable on demand", not "CI-required").
+Uses only POSIX/bash-3.2-portable constructs (no `mapfile`, since macOS's
+system `/bin/bash` is 3.2) and is shellcheck-clean.
+
+**Numbers.** Ran `scripts/encode_rss_scaling.sh` end-to-end on this
+machine (macOS, `/usr/bin/time -l`), default fixture/page-counts/quality
+(`watchmaker.djvu`, 6/12/24 pages, `--quality quality`, render at the
+fixture's native 300 dpi):
+
+```
+== Peak RSS scaling: watchmaker.djvu, quality=quality, dpi=300 ==
+Pages    Peak RSS     Marginal MB/pg   Wall (s)
+6        247.6 MB     —              0.61
+12       448.6 MB     33.5             1.16
+24       853.4 MB     33.7             2.28
+
+Linear fit: peak RSS (MB) ~= 33.67 * pages + 45.2  (slope 33.67 MB/page)
+```
+
+Reproduces the plan's hand-measured baseline (259.2 / 470.9 / 895.4 MB,
+slope ≈35.3–35.4 MB/page) to within ~4–5% — same linear shape, same
+order-of-magnitude slope, consistent with the plan's own attribution (one
+page's raw RGBA pixmap ≈33.7 MB, `2550×3301×4` bytes, plus small
+segmentation transients). The gap (33.7 vs. ≈35.3 MB/page measured here
+vs. in the original investigation) is within normal run-to-run `/usr/bin/
+time` peak-footprint noise on this machine (background load, allocator
+page-reclaim timing) — not a sign the harness measures something
+different; both runs used the same CLI path (`djvu encode <dir>`, no
+`djvu-render` re-decode noise) and the same fixture/profile.
+
+**Decision.** Kept (infra), same rule as round 89's `alloc-profile`
+harness: this step is measurement-only, no behavior change to the
+encoder. No individual memory-reduction fix is claimed or landed here —
+each later step in the plan (no-op refactor, per-CC colour table,
+streaming entry point, CLI switch-over) is measured against this script's
+baseline and stands or falls on its own ≥50%-t-gmax-and-slope /
+byte-identical-output / ≤3%-wall-clock bars from the plan.
+
+**Reason.** The script reproduces the plan's hand-measured numbers within
+noise, is re-runnable and cache-friendly (PNG render is the expensive
+step and is skipped on repeat runs against the same `--out-dir`), writes
+nothing into the repo tree, and gives every later step in the sequence a
+one-command way to get comparable numbers instead of re-deriving the
+same shell incantation by hand each time.
