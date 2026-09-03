@@ -13967,3 +13967,123 @@ dependency (masks only vs. masks + one more pixmap read) is now stated in
 code, not just in this file, ready for step 3 (precomputed per-CC colour
 table) and step 4 (bounded-window streaming entry point) to change one
 function each instead of the whole 170-line body.
+
+### Fuzz throughput: `fuzz_bzz` / `fuzz_iw44` at 6-8 exec/s — **Kept** (2026-09-03)
+
+**Issue.** An overnight local fuzz campaign ran all 11 libFuzzer targets for
+1200 s each (`cargo +nightly fuzz run <target> -- -max_total_time=1200
+-timeout=10 -rss_limit_mb=4096`). No crashes, timeouts, OOMs, or new crash
+artifacts — but two targets explored almost nothing per unit time:
+
+```
+fuzz_iff         cov: 90    corp: 20    exec/s: 118584
+fuzz_metadata    cov: 2562  corp: 982   exec/s: 2662
+fuzz_g4          cov: 647   corp: 307   exec/s: 764
+fuzz_bzz_encode  cov: 828   corp: 415   exec/s: 689
+fuzz_graph       cov: 919   corp: 482   exec/s: 504
+fuzz_jb2         cov: 1072  corp: 538   exec/s: 267
+fuzz_encode      cov: 4411  corp: 1020  exec/s: 133
+fuzz_validate    cov: 1062  corp: 258   exec/s: 74
+fuzz_full        cov: 1599  corp: 468   exec/s: 18
+fuzz_iw44        cov: 479   corp: 233   exec/s: 8
+fuzz_bzz         cov: 573   corp: 337   exec/s: 6
+```
+
+At 6 exec/s, a 1200 s `fuzz_bzz` run is ~7,000 executions — close to
+useless as a fuzzing campaign. Timing every file in the locally-grown
+`fuzz_bzz` corpus (467 files, all ≤256 bytes) found the cause: a
+`fuzz_bzz` decompression bomb, not an input-size problem. `bzz_decode`
+already bounds a single block to `MAX_BLOCK_SIZE` (4 MB) and the whole
+stream to `MAX_OUTPUT_SIZE` (256 MB), but nothing stopped the ZP
+arithmetic decoder from manufacturing those bytes for free: once real
+input is exhausted, `ZpDecoder::read_byte` pads with synthetic `0xff`
+bytes forever (by design — `djvu-jb2` relies on the same padding for its
+own valid trailing symbols), and `bzz_decode`'s block loop never checked
+for it. A **7-byte** corpus file decoded to 3,089,151 bytes in 192 ms; a
+**14-byte** file decoded to 3,746,299 bytes in 258 ms — a ~270,000:1
+amplification with no crash, OOM, or timeout to flag it, only wall-clock
+cost. This is a genuine DoS-shaped finding (bounded by the existing 256 MB
+cap, so not an unbounded OOM, but a real one-request-hangs-the-service
+amplification for a decoder any DjVu consumer runs on untrusted DIRM/NAVM/
+ANTz/TXTz/FGbz chunks) — not merely a fuzzing-harness artifact.
+
+`fuzz_iw44` is a different shape: `Iw44Image::decode_chunk` already caps
+declared image size at 64 MP (`Iw44Error::ImageTooLarge`), a *deliberate*
+tradeoff (see the #182 history in this file and the in-code comment on why
+`zp.is_exhausted()`/`synthetic_bytes()` must **not** early-exit the slice
+loop — doing so previously truncated real images' high-frequency detail).
+Timing the local corpus found 13-41 byte inputs that legitimately decode a
+near-64 MP image in up to 854 ms — expected, bounded, already-tuned worst
+case, not a bug. `fuzz_full`'s low exec/s is likewise explained without a
+bug: its committed seed (`seed_color`, a real 183 KB DjVu file) sets
+libFuzzer's auto `-max_len` to 183,352, so mutated inputs legitimately grow
+to full-document size and pay full parse+render cost per execution.
+`fuzz_validate` at 74 exec/s was unremarkable.
+
+**Approach.** Library fix only for `fuzz_bzz`: `crates/djvu-bzz/src/decode.rs`
+adds a periodic spin guard inside `decode_mtf_phase`'s per-symbol hot loop,
+mirroring the `ZP_EOF_SLACK_BYTES` pattern `djvu-jb2` already uses
+(`check_symbol_decode_budget`). Every `SPIN_CHECK_INTERVAL` (4096) decoded
+symbols, if `zp.pos - data.len()` (synthetic padding already read) exceeds
+`ZP_EOF_SLACK_BYTES` (16, matching jb2's look-ahead-drain margin), decode
+bails with a new `BzzError::Truncated` instead of continuing to manufacture
+a full block from padding. This bounds decode cost by *real* input size
+(with the same small multiplicative margin jb2 already accepts) instead of
+only by the absolute 4 MB/256 MB ceilings, while adding a single cheap
+`sym_idx % 4096 == 0` branch to the hot loop rather than a per-symbol check.
+
+No library change for `fuzz_iw44`, `fuzz_full`, or `fuzz_validate`: their
+cost is legitimate, already-bounded, already-documented work (or, for
+`fuzz_validate`, not a problem at all), and #182's history shows the one
+plausible-looking fix (early-exit on ZP exhaustion in the IW44 slice loop)
+was already tried and reverted for correctness. `cargo +nightly fuzz cmin
+fuzz_iw44` was tried as a harness-only lever (419 → 218 corpus files, no
+coverage lost) but a follow-up 120 s run showed no measurable exec/s
+improvement — the cost is intrinsic to the declared image size in each
+newly-generated mutation, not to corpus replay, so minimizing the corpus
+doesn't touch it.
+
+**Numbers.** 120 s `cargo +nightly fuzz run <target> --release -- -max_total_time=120
+-timeout=10 -rss_limit_mb=4096`, same 467-file locally-grown `fuzz_bzz`
+corpus copied for both runs (before/after built from the same corpus
+snapshot, only the binary differs):
+
+| target | build | execs | wall | exec/s | cov (DONE) |
+|---|---|---|---|---|---|
+| `fuzz_bzz` | before (no spin guard) | 933 | 169 s | ~5.5 | 560 |
+| `fuzz_bzz` | after (spin guard) | 6862 | 121 s | ~56.7 | 566 |
+| `fuzz_iw44` | unchanged (420-file corpus) | 839 | 183 s | ~4.6 | 454 |
+| `fuzz_iw44` | unchanged, cmin'd corpus (218 files) | 818 | 123 s | ~6.6 | 454 |
+
+`fuzz_bzz`: **~10x** exec/s, coverage *up* slightly (560 → 566), not down —
+consistent with the overnight campaign's 6 exec/s and matching the 13x
+drop in total corpus-scan decode time measured directly
+(`bzz_decode` over the full 467-file corpus: 23.9 s → 1.79 s; worst single
+file 423 ms → 89 ms). `crates/djvu-bzz`'s 19 unit/roundtrip tests
+(including a 100 KB random roundtrip and a block-boundary case) all still
+pass, so the guard doesn't reject legitimate multi-block streams.
+
+`fuzz_iw44`: no meaningful change either way (~4.6 vs ~6.6 exec/s, within
+run-to-run noise for a 120 s sample) — confirms this is bounded, expected
+cost rather than something a harness-only fix can move.
+
+**Decision.** Kept (the `fuzz_bzz` spin guard); no change to `fuzz_iw44`,
+`fuzz_full`, `fuzz_validate`, or `.github/workflows/fuzz.yml`.
+
+**Reason.** The `fuzz_bzz` fix closes a real, previously-unguarded
+amplification (a decoder any DjVu consumer runs on untrusted chunks could
+be made to spend hundreds of milliseconds on single-digit-byte input) using
+a pattern the codebase already trusts (`djvu-jb2`'s `ZP_EOF_SLACK_BYTES`),
+with no coverage loss and all existing roundtrip tests green. `fuzz_iw44`'s
+slowness is a different, already-litigated tradeoff (#182): its only
+plausible code fix was already tried and reverted for correctness, so
+leaving it alone is the right call rather than re-opening that regression.
+`fuzz_full` and `fuzz_validate` were investigated ("look at… while you are
+there") and found to be paying legitimate, bounded costs (real-document
+parse+render, and unremarkable validator cost respectively) — not bugs, so
+no change. The CI workflow's 60 s per-target budget is left as-is: it was
+not asked to expand, and `fuzz_bzz`'s ~10x local win should already lift
+its CI executions from ~360/run to ~3,000+/run for free once merged;
+`fuzz_iw44`'s CI budget (60 s × ~5-8 exec/s ≈ 300-500 executions/run) is a
+judgment call for a maintainer to make deliberately (e.g. raising it) since
+it is not something this fix changes.
