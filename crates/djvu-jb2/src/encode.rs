@@ -1543,7 +1543,7 @@ pub struct SymbolBox {
 /// [`encode_jb2_dict_with_blits`] would produce for that `bitmap`, `opts`,
 /// and `shared_symbols` (see [`symbol_boxes_in_emission_order`]'s doc
 /// comment for the lossless-only caveat), but this entry point skips
-/// [`extract_ccs`] entirely.
+/// `extract_ccs` entirely.
 ///
 /// `symbols` is already in emission order (that's what
 /// [`symbol_boxes_in_emission_order`] returns), so `order` here is just the
@@ -1641,7 +1641,7 @@ pub fn encode_jb2_dict_with_blits(
 /// Encode a JB2 symbol dictionary from an *already-extracted* geometric
 /// decomposition (`ccs`/`order`, from `extract_and_order_ccs` or converted
 /// from a caller-held [`SymbolBox`] list via [`encode_jb2_dict_with_symbols`]),
-/// skipping [`extract_ccs`]'s connected-component pass entirely.
+/// skipping `extract_ccs`'s connected-component pass entirely.
 ///
 /// This is the shared tail [`encode_jb2_dict_with_blits`] uses after its own
 /// extraction — factored out so a caller that already ran the geometric
