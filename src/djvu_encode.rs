@@ -1007,32 +1007,46 @@ fn encode_djvm_layered_shared_impl(
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
     let mask_at = |idx: usize| -> Option<&Bitmap> { masks.and_then(|m| m[idx]) };
 
+    // JB2 options for the per-page Sjbz encode in phase 3. Not yet threaded
+    // as a caller-facing knob for this bundle path (unlike `PageEncoder`'s
+    // `self.jb2_options`) — always the lossless default, same as before this
+    // step. Named and passed explicitly (rather than re-hardcoded at each
+    // call site) so `prepare_page`'s colour-table precomputation and
+    // `build_page`'s FGbz sampling agree on the same options, and so a
+    // future caller-facing knob only needs to change this one binding.
+    let page_jb2_options = Jb2EncodeOptions::default();
+
     // ── Phase 1: per-page mask + background extraction ─────────────────────
     //
     // Needs: each page's `&Pixmap` (and, on re-encode, its reused mask).
-    // Produces: `PreparedPage` — the packed 1-bit mask plus the already-
-    // compressed `BG44`/`TH44` chunk bodies. Per-page independent; with the
+    // Produces: `PreparedPage` — the packed 1-bit mask, the already-
+    // compressed `BG44`/`TH44` chunk bodies, and (step 3 of the peak-memory
+    // plan) a precomputed per-symbol colour table for `FGbz`, sampled from
+    // `pm` while it is still resident here. Per-page independent; with the
     // `parallel` feature the pages run concurrently on rayon. The pixmap
-    // itself is not retained past this phase in `prepared` — only phase 3
-    // (`build_page`) still borrows it, straight from `pixmaps`, and only for
-    // `FGbz` colour sampling (see its doc comment below). The emitted bytes
-    // are unchanged from before this refactor: same inputs, same options,
-    // same chunk order (#565's pass split, restructured here without
-    // behavior change).
+    // itself is not retained past this phase in `prepared` — phase 3
+    // (`build_page`) still borrows it too, straight from `pixmaps`, but (for
+    // the lossless default case) only to keep the signature simple; the
+    // colour table removes its *need* for `pm`. The emitted bytes are
+    // unchanged from before this refactor: same inputs, same options, same
+    // chunk order (#565's pass split, #788's phase split, restructured here
+    // without behavior change).
     #[cfg(feature = "parallel")]
     let prepared: Vec<PreparedPage> = {
         use rayon::prelude::*;
         pixmaps
             .par_iter()
             .enumerate()
-            .map(|(idx, pm)| prepare_page(pm, mask_at(idx), &opts, with_thumbnails))
+            .map(|(idx, pm)| {
+                prepare_page(pm, mask_at(idx), &opts, with_thumbnails, &page_jb2_options)
+            })
             .collect()
     };
     #[cfg(not(feature = "parallel"))]
     let prepared: Vec<PreparedPage> = pixmaps
         .iter()
         .enumerate()
-        .map(|(idx, pm)| prepare_page(pm, mask_at(idx), &opts, with_thumbnails))
+        .map(|(idx, pm)| prepare_page(pm, mask_at(idx), &opts, with_thumbnails, &page_jb2_options))
         .collect();
 
     // ── Phase 2: shared JB2 dictionary clustering ───────────────────────────
@@ -1077,23 +1091,40 @@ fn encode_djvm_layered_shared_impl(
         use rayon::prelude::*;
         pixmaps
             .par_iter()
-            .zip(&prepared)
+            .zip(prepared)
             .enumerate()
             .map(|(idx, (pm, prep))| {
-                build_page(idx, pm, prep, shared_for_encode, has_shared, dict_id, dpi)
+                build_page(
+                    idx,
+                    pm,
+                    prep,
+                    shared_for_encode,
+                    has_shared,
+                    dict_id,
+                    dpi,
+                    &page_jb2_options,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
     let page_comps: Vec<(Vec<u8>, bool, String)> = pixmaps
         .iter()
-        .zip(&prepared)
+        .zip(prepared)
         .enumerate()
         .map(|(idx, (pm, prep))| {
-            build_page(idx, pm, prep, shared_for_encode, has_shared, dict_id, dpi)
+            build_page(
+                idx,
+                pm,
+                prep,
+                shared_for_encode,
+                has_shared,
+                dict_id,
+                dpi,
+                &page_jb2_options,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    drop(prepared);
     comps.extend(page_comps);
 
     Ok(jb2_encode::assemble_djvm_bundle(comps))
@@ -1113,23 +1144,55 @@ struct PreparedPage {
     mask: Bitmap,
     bg44: Vec<Vec<u8>>,
     th44: Vec<Vec<u8>>,
+    /// Precomputed per-symbol colour accumulators for `FGbz` (encoder
+    /// peak-memory step 3), in the same order
+    /// [`jb2_encode::encode_jb2_dict_with_blits`]'s blit list will use for
+    /// `mask` — see [`jb2_encode::symbol_boxes_in_emission_order`]'s doc
+    /// comment: the geometric decomposition it is built from does not
+    /// depend on the shared dictionary, so this can be computed here in
+    /// phase 1, before phase 2 (dictionary clustering) has run, and lets
+    /// phase 3 skip re-sampling `pm` for the common (lossless) case.
+    ///
+    /// `None` when [`Jb2EncodeOptions::lossy_threshold`] is nonzero — lossy
+    /// rec-7 substitution can blit a near-twin dict entry whose true
+    /// decoded pixels differ from the original component, the same
+    /// restriction [`foreground_fgbz_from_blits`] documents for itself.
+    /// Phase 3 then falls back to the decode-based [`foreground_fgbz`],
+    /// exactly as [`PageEncoder::encode`] already does for that case.
+    cc_colors: Option<Vec<ColorAccum>>,
+    /// Precomputed geometric decomposition (connected components, despeckle,
+    /// reading-order sort) of `mask` under the same `jb2_options` phase 3
+    /// will encode with — see [`jb2_encode::symbol_boxes_in_emission_order`].
+    /// Same `None`-ness condition as `cc_colors` (lossy fallback). Threading
+    /// this through phase 3 lets [`jb2_encode::encode_jb2_dict_with_symbols`]
+    /// skip re-running connected-component extraction a second time —
+    /// without it, phase 1's extraction for `cc_colors` would be pure
+    /// overhead duplicating phase 3's own extraction inside
+    /// `encode_jb2_dict_with_blits`.
+    cc_symbols: Option<Vec<jb2_encode::SymbolBox>>,
 }
 
 /// Phase 1: segment one page, immediately encode its background (`BG44`)
-/// and optional thumbnail (`TH44`), and hand back only the compact
-/// [`PreparedPage`] — the segmented background pixmap itself is dropped
-/// when this call returns.
+/// and optional thumbnail (`TH44`), precompute the `FGbz` colour table
+/// (step 3), and hand back only the compact [`PreparedPage`] — the
+/// segmented background pixmap itself is dropped when this call returns.
 ///
 /// `reuse_mask`, when `Some` (#779 follow-up), reuses `segment_page_with_mask`
 /// (skip binarization, keep background derivation) exactly like
 /// [`PageEncoder::with_mask`]; `None` keeps the original `segment_page` call
 /// so a bundle encoded with no `masks` argument is untouched codegen-wise.
+///
+/// `jb2_options` must be the same options phase 3's `build_page` will pass
+/// to `encode_jb2_dict_with_blits` for this page — both the despeckle
+/// pre-pass (which changes which components exist at all) and the
+/// lossy-threshold fallback decision need to agree between the two phases.
 #[inline]
 fn prepare_page(
     pm: &Pixmap,
     reuse_mask: Option<&Bitmap>,
     opts: &SegmentOptions,
     with_thumbnails: bool,
+    jb2_options: &Jb2EncodeOptions,
 ) -> PreparedPage {
     let seg = match reuse_mask {
         Some(mask) => segment_page_with_mask(pm, mask, opts),
@@ -1141,11 +1204,76 @@ fn prepare_page(
     } else {
         Vec::new()
     };
+    let (cc_symbols, cc_colors) = match precompute_cc_data(pm, &seg.mask, jb2_options) {
+        Some((symbols, colors)) => (Some(symbols), Some(colors)),
+        None => (None, None),
+    };
     PreparedPage {
         mask: seg.mask,
         bg44,
         th44,
+        cc_colors,
+        cc_symbols,
     }
+}
+
+/// Precompute the geometric decomposition of `mask` (its emission-order
+/// symbol list) together with per-symbol colour accumulators for `FGbz`,
+/// both in the same order [`jb2_encode::encode_jb2_dict_with_blits`]'s blit
+/// list will use for `mask` under `jb2_options`.
+///
+/// Uses [`jb2_encode::symbol_boxes_in_emission_order`] — the geometric
+/// decomposition (connected components, despeckle, reading-order sort)
+/// *without* running the entropy encoder or knowing the shared dictionary —
+/// then accumulates colours the same way [`foreground_fgbz_from_blits`]
+/// does, so the two produce byte-identical `FGbz` output whenever both
+/// apply. Handing the symbol list back too (not just the colours) lets phase
+/// 3 feed it straight into [`jb2_encode::encode_jb2_dict_with_symbols`],
+/// skipping a second, redundant connected-component extraction there.
+/// Returns `None` when `jb2_options.lossy_threshold > 0.0`: lossy rec-7
+/// substitution can blit a near-twin dict entry whose true decoded pixels
+/// differ from the original component, so this pixel-identity assumption
+/// (an emitted blit's pixels equal the source component's pixels) doesn't
+/// hold — the same restriction `foreground_fgbz_from_blits` documents for
+/// itself.
+fn precompute_cc_data(
+    pm: &Pixmap,
+    mask: &Bitmap,
+    jb2_options: &Jb2EncodeOptions,
+) -> Option<(Vec<jb2_encode::SymbolBox>, Vec<ColorAccum>)> {
+    if jb2_options.lossy_threshold > 0.0 {
+        return None;
+    }
+    let boxes = jb2_encode::symbol_boxes_in_emission_order(mask, jb2_options);
+    let w = mask.width as usize;
+    let mstride = mask.row_stride();
+    let mut by_blit = vec![ColorAccum::default(); boxes.len()];
+    for (accum, sbox) in by_blit.iter_mut().zip(&boxes) {
+        let bstride = sbox.bitmap.row_stride();
+        for by in 0..sbox.bitmap.height as usize {
+            let y = sbox.y as usize + by;
+            if y >= mask.height as usize {
+                break;
+            }
+            let brow = &sbox.bitmap.data[by * bstride..(by + 1) * bstride];
+            let mrow = &mask.data[y * mstride..(y + 1) * mstride];
+            let prow = &pm.data[y * w * 4..(y + 1) * w * 4];
+            for bx in 0..sbox.bitmap.width as usize {
+                if (brow[bx >> 3] >> (7 - (bx & 7))) & 1 == 0 {
+                    continue;
+                }
+                let x = sbox.x as usize + bx;
+                if x >= w {
+                    break;
+                }
+                if (mrow[x >> 3] >> (7 - (x & 7))) & 1 != 0 {
+                    let px = &prow[x * 4..x * 4 + 3];
+                    accum.add(px[0], px[1], px[2]);
+                }
+            }
+        }
+    }
+    Some((boxes, by_blit))
 }
 
 /// Phase 2: cluster every page's mask into a shared JB2 dictionary.
@@ -1165,36 +1293,83 @@ fn cluster_shared_dictionary(
 /// shared dictionary, rebuild `FGbz` from the emitted blits, and assemble the
 /// chunk list in emission order.
 ///
-/// `pm` is the *original* pixmap, needed here (and only here, among the
-/// three phases) for [`foreground_fgbz_from_blits`]'s per-blit colour
-/// sampling — everything else (`prep.mask`, `prep.bg44`, `prep.th44`,
-/// `shared`) was already produced in phases 1/2.
+/// `pm` is the *original* pixmap. For the lossless default case (step 3 of
+/// the peak-memory plan), `prep.cc_colors` already holds the sampled `FGbz`
+/// colours from phase 1, so this no longer *needs* `pm` a second time —
+/// it's still threaded through (unchanged signature-shape-wise vs. before
+/// this step) for the lossy fallback and as a defensive net if the
+/// precomputed table is ever missing/mismatched. Everything else
+/// (`prep.mask`, `prep.bg44`, `prep.th44`, `shared`) was already produced in
+/// phases 1/2.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn build_page(
     idx: usize,
     pm: &Pixmap,
-    prep: &PreparedPage,
+    prep: PreparedPage,
     shared_for_encode: &[Bitmap],
     has_shared: bool,
     dict_id: &str,
     dpi: u16,
+    jb2_options: &Jb2EncodeOptions,
 ) -> Result<(Vec<u8>, bool, String), EncodeError> {
     let w = u16::try_from(pm.width)
         .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
     let h = u16::try_from(pm.height)
         .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
 
-    let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits(
-        &prep.mask,
-        shared_for_encode,
-        &Jb2EncodeOptions::default(),
-    );
-    // FGbz comes straight from the emitted blits (#612) — no decode of the
-    // just-encoded stream. Shared-dict rec-7 copies are exact matches, so
-    // the blit shapes equal the decoded ones. `Exact` here (not threaded
-    // from a caller option yet): the bundle path is out of scope for
-    // FGBZ_MEDIANCUT and stays byte-identical.
-    let fgbz = foreground_fgbz_from_blits(pm, &prep.mask, &blits, FgbzPaletteOptions::Exact);
+    // Sjbz + FGbz: prefer phase 1's precomputed geometric decomposition and
+    // colour table (step 3) — both were built from `pm`/`prep.mask` while
+    // phase 1 held the pixmap, using the same emission-order decomposition
+    // `encode_jb2_dict_with_blits` would otherwise recompute from scratch
+    // here (see `symbol_boxes_in_emission_order`'s doc comment). Feeding
+    // `cc_symbols` straight into `encode_jb2_dict_with_symbols` skips that
+    // redundant connected-component extraction, and `cc_colors` skips
+    // resampling `pm`. Lossy rec-7 substitution
+    // (`jb2_options.lossy_threshold > 0.0`) invalidates both precomputed
+    // tables (a copied blit's true decoded pixels can differ from the
+    // source component they were built from) — `prepare_page` already
+    // signals that by leaving them `None`, so fall back to the full
+    // extraction plus the decode-based `foreground_fgbz`, exactly like
+    // `PageEncoder::encode` does for the same case. A `None` in the
+    // (currently unreachable) lossless case is a defensive fallback to the
+    // direct blit-based sampler, not a silent bug swallow.
+    let (sjbz, fgbz) = if jb2_options.lossy_threshold <= 0.0
+        && let (Some(symbols), Some(cc_colors)) = (prep.cc_symbols, prep.cc_colors)
+    {
+        let (sjbz, _blits) = jb2_encode::encode_jb2_dict_with_symbols(
+            prep.mask.width,
+            prep.mask.height,
+            symbols,
+            shared_for_encode,
+            jb2_options,
+        );
+        let fgbz = fgbz_from_accums(cc_colors, FgbzPaletteOptions::Exact);
+        (sjbz, fgbz)
+    } else {
+        let (sjbz, blits) =
+            jb2_encode::encode_jb2_dict_with_blits(&prep.mask, shared_for_encode, jb2_options);
+        let fgbz = if jb2_options.lossy_threshold > 0.0 {
+            let shared_dict = if has_shared {
+                crate::jb2::decode_dict(&jb2_encode::encode_jb2_djbz(shared_for_encode), None).ok()
+            } else {
+                None
+            };
+            foreground_fgbz(
+                pm,
+                &prep.mask,
+                &sjbz,
+                shared_dict.as_ref(),
+                FgbzPaletteOptions::Exact,
+            )
+        } else {
+            // `Exact` here (not threaded from a caller option yet): the
+            // bundle path is out of scope for FGBZ_MEDIANCUT and stays
+            // byte-identical.
+            foreground_fgbz_from_blits(pm, &prep.mask, &blits, FgbzPaletteOptions::Exact)
+        };
+        (sjbz, fgbz)
+    };
 
     let mut chunks: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     chunks.push((*b"INFO", encode_info(w, h, dpi)));
@@ -2917,5 +3092,116 @@ mod tests {
         let pm = bitmap_to_pixmap(&bm);
         assert_eq!(pm.get_rgb(1, 0), (0, 0, 0));
         assert_eq!(pm.get_rgb(0, 0), (255, 255, 255));
+    }
+
+    /// Encoder peak-memory step 3: the phase-1 precomputed colour table
+    /// (`precompute_cc_data`, sampled via
+    /// `jb2_encode::symbol_boxes_in_emission_order` — no dictionary, no
+    /// entropy encode) must produce byte-identical `FGbz` to the existing
+    /// decode-based-order sampler (`foreground_fgbz_from_blits`, sampled
+    /// from the real emitted blits) for the lossless default case. This
+    /// pins the "geometric decomposition is independent of the shared
+    /// dictionary" claim the precomputation relies on.
+    #[test]
+    fn precomputed_cc_colors_match_blit_based_fgbz_sampling() {
+        let pm = mixed_lighting_fixture();
+        let opts = EncodeQuality::Quality.default_segment_options();
+        let seg = segment_page(&pm, &opts);
+        let jb2_options = Jb2EncodeOptions::default();
+
+        let (_symbols, cc_colors) =
+            precompute_cc_data(&pm, &seg.mask, &jb2_options).expect("lossless: table computed");
+        let (_, blits) = jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &jb2_options);
+        assert_eq!(
+            cc_colors.len(),
+            blits.len(),
+            "precomputed table must align 1:1 with the real emitted blit list"
+        );
+
+        let from_table = fgbz_from_accums(cc_colors, FgbzPaletteOptions::Exact);
+        let from_blits =
+            foreground_fgbz_from_blits(&pm, &seg.mask, &blits, FgbzPaletteOptions::Exact);
+
+        match (from_table, from_blits) {
+            (Some(a), Some(b)) => {
+                let (
+                    Chunk::Leaf {
+                        id: a_id,
+                        data: a_data,
+                    },
+                    Chunk::Leaf {
+                        id: b_id,
+                        data: b_data,
+                    },
+                ) = (a.into_leaf(), b.into_leaf())
+                else {
+                    panic!("FGbz encodes to a leaf chunk");
+                };
+                assert_eq!(a_id, b_id);
+                assert_eq!(a_data, b_data, "FGbz payload must be byte-identical");
+            }
+            (None, None) => {}
+            (Some(_), None) => panic!("table produced FGbz but blit-based sampler produced none"),
+            (None, Some(_)) => panic!("blit-based sampler produced FGbz but table produced none"),
+        }
+    }
+
+    /// Same equivalence, exercised through the full multi-page bundle
+    /// pipeline (`prepare_page` → `build_page`) rather than the two
+    /// sampling functions directly, and across two pages sharing a
+    /// dictionary — the case the precomputation exists for.
+    #[test]
+    fn layered_shared_bundle_fgbz_unaffected_by_precomputed_colour_table() {
+        let pm = mixed_lighting_fixture();
+        let pages = [pm.clone(), pm.clone()];
+        let bytes = encode_djvm_layered_shared(&pages, EncodeQuality::Quality, 300, None, 2)
+            .expect("layered shared encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        for i in 0..2 {
+            let page = doc.page(i).expect("page");
+            assert!(page.raw_chunk(b"FGbz").is_some(), "page {i} FGbz present");
+        }
+    }
+
+    /// `prepare_page` must not attempt the precomputed-table shortcut when
+    /// `Jb2EncodeOptions::lossy_threshold > 0` — lossy rec-7 substitution can
+    /// blit a near-twin dict entry whose true decoded pixels differ from the
+    /// component the table was sampled from. `build_page` must still
+    /// produce an `FGbz` chunk in that case (via the decode-based fallback),
+    /// not silently drop it.
+    #[test]
+    fn lossy_threshold_falls_back_to_decode_based_fgbz_sampling() {
+        let pm = mixed_lighting_fixture();
+        let opts = EncodeQuality::Quality.default_segment_options();
+        let lossy_jb2_options = Jb2EncodeOptions {
+            lossy_threshold: 0.05,
+            ..Jb2EncodeOptions::default()
+        };
+
+        // Phase 1: the fallback signal is `None`, not a (possibly wrong) table.
+        let prepared = prepare_page(&pm, None, &opts, false, &lossy_jb2_options);
+        assert!(
+            prepared.cc_colors.is_none(),
+            "lossy_threshold > 0 must skip the precomputed colour table"
+        );
+
+        // Phase 3: FGbz must still be emitted, via the decode-based path.
+        let (body, is_page, name) = build_page(
+            0,
+            &pm,
+            prepared,
+            &[],
+            false,
+            "dict0001.djvi",
+            300,
+            &lossy_jb2_options,
+        )
+        .expect("build_page");
+        assert!(is_page);
+        assert_eq!(name, "p0001.djvu");
+        assert!(
+            body.windows(4).any(|w| w == b"FGbz"),
+            "FGbz chunk present despite lossy_threshold fallback"
+        );
     }
 }

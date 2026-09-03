@@ -14273,3 +14273,125 @@ existing signal trustworthy enough that a human doesn't have to re-derive
 the "check for uniform drift" heuristic by hand a third time. The
 same-runner re-check added after #779 stays in place for the case it
 still helps: a real regression not accompanied by uniform drift.
+### Per-CC colour table precomputed in phase 1 (encoder peak-memory step 3) — **Kept** (2026-09-03)
+
+**Issue.** Step 3 of the encoder peak-memory plan (follow-up to
+`ENCODE_PHASE_SPLIT`/#788): `build_page` (phase 3 of
+`encode_djvm_layered_shared_impl`) still needs the original `&Pixmap` a
+second time, purely to sample each JB2 symbol's average colour for `FGbz`
+(`foreground_fgbz_from_blits`). That pixmap is only needed there because
+the colour sampling happens *after* clustering, once the real blit list
+exists. But `foreground_fgbz_from_blits`'s own doc comment already
+establishes the geometric decomposition (connected-component extraction,
+despeckle, reading-order sort) that produces the blit list does not depend
+on the shared dictionary — only *which* dict-lookup action (new/copy/
+refine) each blit takes does. So the colour sampling can run in phase 1,
+while the pixmap is still resident, using the same decomposition — as long
+as `Jb2EncodeOptions::lossy_threshold` is 0 (lossy rec-7 substitution can
+blit a near-twin dict entry whose true decoded pixels differ from the
+component the table would have sampled, the same restriction
+`foreground_fgbz_from_blits` documents for itself).
+
+**Approach.** `crates/djvu-jb2/src/encode.rs`: factored the CC extraction +
+despeckle + reading-order sort out of `encode_jb2_dict_with_blits` into a
+private `extract_and_order_ccs`, and added a public
+`symbol_boxes_in_emission_order(bitmap, opts) -> Vec<SymbolBox>` that runs
+just that geometric decomposition, without the entropy encoder, returning
+each symbol's shape/position in the same order the real blit list will use.
+`src/djvu_encode.rs`: added `precompute_cc_data` (phase 1), which calls
+`symbol_boxes_in_emission_order` on the segmented mask and accumulates each
+symbol's average colour from `pm` — mirroring
+`foreground_fgbz_from_blits`'s inner loop byte-for-byte — returning `None`
+when `lossy_threshold > 0.0`. `PreparedPage` (the phase-1→phase-3 boundary
+type from #788) gained `cc_symbols: Option<Vec<SymbolBox>>` and
+`cc_colors: Option<Vec<ColorAccum>>`. `build_page` (phase 3) prefers the
+precomputed pair when present: it no longer calls
+`encode_jb2_dict_with_blits` (which would redo the CC extraction) — a new
+`jb2_encode::encode_jb2_dict_with_symbols` entry point accepts the
+already-extracted `cc_symbols` directly and skips extraction entirely,
+while `fgbz_from_accums(cc_colors, …)` replaces the pixmap-sampling call.
+Falls back to today's full-extraction-plus-decode-based path
+(`foreground_fgbz`) whenever `lossy_threshold > 0.0` or the precomputed
+table is unexpectedly absent — matching `PageEncoder::encode`'s existing
+branch for the same case.
+
+A first pass stored only `cc_colors` (not `cc_symbols`) and still called
+`encode_jb2_dict_with_blits` unchanged in phase 3 — correct, but it paid
+for connected-component extraction *twice* per page (once in phase 1 for
+the colour table, once in phase 3 for the real encode), a real
+architectural cost with no matching saving. That version measured
+**+28%** on `encode_djvm_layered_shared` (`encode_color_page_quality` and
+`segment_page_color` were unaffected, as expected — neither touches this
+code path). Storing `cc_symbols` too and feeding it into the new
+`encode_jb2_dict_with_symbols` entry point removes the duplicate
+extraction; see Numbers below for the corrected result.
+
+**Numbers.**
+
+1. *Byte-identity* (parent `HEAD` before this change vs. this branch, both
+   release CLI builds with `--features cli`, built into scratch
+   `--target-dir`s so neither disturbs `target/`): 78 encode cases,
+   byte-compared with `cmp`. Single-page (page 1 of every fixture rendered
+   to PNG) × `{quality, archival}`: all 10 `tests/corpus/*.djvu` +
+   all 22 `tests/fixtures/*.djvu` = 32 fixtures × 2 profiles = 64 cases.
+   Multi-page (naturally multi-page fixtures' full page sets, used as
+   `djvu encode <dir>` input directly): `cable_1973_100133` (2p),
+   `watchmaker` (12p), `war_1812` (8p), `cyrillic_simonovich_co2` (12p),
+   each × `{quality, archival}` × `{plain, --thumbnails}` = 16 cases. Plus
+   one all-bilevel multi-page case (`boy_jb2` + `chicken`, `-q lossless`,
+   exercises the separate JB2-only bundle path) and one `-q auto`
+   multi-page case (`watchmaker`, exercises per-page auto-classification).
+   **78/78 byte-identical.** The lossy-threshold fallback branch has no CLI
+   flag reaching it in this pipeline yet (`build_page`'s call site still
+   hardcodes `Jb2EncodeOptions::default()` — same as before this change),
+   so it's covered by two permanent unit tests instead (below), matching
+   how `ENCODE_PHASE_SPLIT` scoped the same gap.
+2. *Permanent tests* (`src/djvu_encode.rs`):
+   `precomputed_cc_colors_match_blit_based_fgbz_sampling` asserts
+   `precompute_cc_data`'s table produces a byte-identical `FGbz` chunk to
+   `foreground_fgbz_from_blits` sampling the real emitted blits — pinning
+   the shared-dictionary-independence claim. `lossy_threshold_falls_back_to_decode_based_fgbz_sampling`
+   asserts `prepare_page` leaves `cc_colors`/`cc_symbols` `None` and
+   `build_page` still emits `FGbz` (via the decode-based fallback) when
+   `lossy_threshold > 0`. `layered_shared_bundle_fgbz_unaffected_by_precomputed_colour_table`
+   exercises the full bundle pipeline end to end.
+3. *Memory* — dhat (`--features "alloc-profile pdf"`, 12-page
+   `encode_djvm_layered_shared` scenario): t-gmax **514,057,857 → 518,635,718
+   bytes** (+0.9%) — small, as expected: `cc_symbols` holds each page's
+   cropped symbol bitmaps (comparable in size to the JB2 mask itself, ~1 MB/
+   page) alongside `cc_colors` a bit longer than before, on top of the
+   pixmap the caller still holds for the whole call. Total allocated bytes
+   actually *dropped slightly* (899M → 789M in the symbols-duplicated first
+   pass vs. 789M here, matching the parent's 787M) once the duplicate CC
+   extraction was removed. `scripts/encode_rss_scaling.sh` (`watchmaker`,
+   6/12/24 pages, `--quality quality`): slope **33.68 → 33.96 MB/page**
+   (+0.8%), intercept 45.2 → 46.0 MB — both within the run-to-run noise
+   already visible between the 6/12/24 sample points themselves. No number
+   moved in the direction of a reduction, as expected — that's step 4's
+   job, not this one's.
+4. *Benches* (`cargo bench --bench codecs`, `--baseline before` from the
+   parent commit, machine quiet — `uptime` load ≈3.5 throughout):
+   `segment_page_color` +0.34% (p=0.20, no change detected),
+   `encode_color_page_quality` −0.22% (p=0.80, no change detected),
+   `encode_djvm_layered_shared` +0.63% (p=0.26, no change detected) — all
+   three comfortably inside the ≤3% bar once `cc_symbols` closed the
+   duplicate-extraction gap the first pass left open.
+5. `make check` (fmt, clippy `-D warnings` across feature combinations,
+   no_std build, wasm32 ×3, full workspace test suite, doctests) passed
+   clean.
+
+**Decision.** Kept.
+
+**Reason.** Bit-identical output on 78 cases across every corpus/fixture
+file, both quality profiles, single- and multi-page, with and without
+thumbnails, plus the lossless-bilevel and auto-classification paths;
+memory unchanged (as this step is specified to do — peak residency is
+still the caller's `&[Pixmap]`, unchanged until step 4); CPU-neutral once
+the decomposition was threaded through instead of only its colour output.
+The mid-course correction (storing `cc_symbols`, not just `cc_colors`) is
+the real lesson: precomputing *data derived from* a decomposition without
+also reusing the decomposition itself just relocates cost from phase 3 to
+phase 1 without removing it — the `≤3%` bench bar caught that
+before it shipped. `PreparedPage.cc_symbols`/`cc_colors` are ready for
+step 4 (a streaming/bounded-window entry point) to consume without a
+pixmap in scope at all.

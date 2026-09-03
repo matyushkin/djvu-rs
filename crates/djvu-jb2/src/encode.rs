@@ -1469,24 +1469,20 @@ pub struct EncodedBlit {
     pub bitmap: Bitmap,
 }
 
-/// Encode like [`encode_jb2_dict_with_options`] and also return the emitted
-/// blits (shape + placement, in emission order).
+/// Extract `bitmap`'s connected components, apply the despeckle pre-pass
+/// (`opts.despeckle`), and return them together with the reading-order
+/// permutation `encode_jb2_dict_with_blits` uses to decide coordinate coding
+/// and blit emission order.
 ///
-/// The byte stream is identical to [`encode_jb2_dict_with_options`] — the
-/// blit list is metadata the encoder already owns, handed back so callers
-/// (e.g. the FGbz palette builder, #612) don't have to decode the stream
-/// they just produced to recover the per-blit layout.
-pub fn encode_jb2_dict_with_blits(
-    bitmap: &Bitmap,
-    shared_symbols: &[Bitmap],
-    opts: &Jb2EncodeOptions,
-) -> (Vec<u8>, Vec<EncodedBlit>) {
-    let w = bitmap.width as i32;
-    let h = bitmap.height as i32;
-    if w == 0 || h == 0 {
-        return (Vec::new(), Vec::new());
-    }
-
+/// This is the *geometric decomposition* step: connected-component
+/// extraction, despeckle filtering, and the baseline-bucket reading-order
+/// sort. None of it depends on `shared_symbols` — dictionary lookups (exact
+/// match / lossy near-twin / refinement) only happen after this point, per
+/// `cc_idx` in `order`. So for a fixed `bitmap` and `opts`, this function's
+/// output — hence [`symbol_boxes_in_emission_order`]'s and
+/// [`encode_jb2_dict_with_blits`]'s blit list — is identical regardless of
+/// what dictionary (if any) is supplied.
+fn extract_and_order_ccs(bitmap: &Bitmap, opts: &Jb2EncodeOptions) -> (Vec<Cc>, Vec<usize>) {
     let mut ccs = extract_ccs(bitmap);
 
     // Despeckle pre-pass (JB2_DESPECKLE): drop isolated small components
@@ -1520,6 +1516,149 @@ pub fn encode_jb2_dict_with_blits(
         (bottom / bucket, cc.x)
     });
 
+    (ccs, order)
+}
+
+/// One symbol's raw shape/position (before any dictionary encoding) — the
+/// geometric decomposition [`encode_jb2_dict_with_blits`] uses to build its
+/// blit list, computed independent of any shared dictionary.
+///
+/// Same shape as [`EncodedBlit`], with the same lossless-vs-lossy caveat: it
+/// always carries the original connected component's pixels, never a
+/// substituted dict entry, so it matches the real emitted blit only when the
+/// component is emitted byte-exact (see [`symbol_boxes_in_emission_order`]).
+pub struct SymbolBox {
+    /// Top-left x of the symbol in the page (0 = left edge).
+    pub x: u32,
+    /// Top-left y of the symbol in the page (0 = top edge, top-down).
+    pub y: u32,
+    /// Cropped component bitmap (tight bbox, this component's pixels only).
+    pub bitmap: Bitmap,
+}
+
+/// Encode a JB2 symbol dictionary from a `symbols` list already produced by
+/// [`symbol_boxes_in_emission_order`] for the *same* `(bitmap, opts)`,
+/// instead of re-running connected-component extraction on `bitmap` — the
+/// entropy-encoded byte stream and blit list are identical to what
+/// [`encode_jb2_dict_with_blits`] would produce for that `bitmap`, `opts`,
+/// and `shared_symbols` (see [`symbol_boxes_in_emission_order`]'s doc
+/// comment for the lossless-only caveat), but this entry point skips
+/// `extract_ccs` entirely.
+///
+/// `symbols` is already in emission order (that's what
+/// [`symbol_boxes_in_emission_order`] returns), so `order` here is just the
+/// identity permutation.
+pub fn encode_jb2_dict_with_symbols(
+    mask_width: u32,
+    mask_height: u32,
+    symbols: Vec<SymbolBox>,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
+    let w = mask_width as i32;
+    let h = mask_height as i32;
+    if w == 0 || h == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let order: Vec<usize> = (0..symbols.len()).collect();
+    let ccs: Vec<Cc> = symbols
+        .into_iter()
+        .map(|s| Cc {
+            x: s.x,
+            y: s.y,
+            bitmap: s.bitmap,
+            // Despeckle filtering already ran when `symbols` was produced by
+            // `symbol_boxes_in_emission_order`; `pixel_count` is only read
+            // by that filter, never past this point, so it's dead here.
+            pixel_count: 0,
+        })
+        .collect();
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts)
+}
+
+/// Extract `bitmap`'s connected components in the same emission order (after
+/// despeckle) that [`encode_jb2_dict_with_blits`] will use for its blit list
+/// — *without* running the entropy encoder.
+///
+/// The geometric decomposition (connected-component extraction, despeckle,
+/// reading-order sort) depends only on `bitmap` and `opts`, never on a
+/// shared dictionary (see `extract_and_order_ccs`'s doc comment). So for
+/// any `shared_symbols`,
+/// `symbol_boxes_in_emission_order(bitmap, opts)[i]` describes the same
+/// `(x, y, bitmap)` as `encode_jb2_dict_with_blits(bitmap, shared_symbols,
+/// opts).1[i]` — **provided every emitted blit is byte-exact** (the
+/// lossless case: `opts.lossy_threshold == 0.0`, no experimental cross-size
+/// refinement). Under lossy rec-7 substitution the *emitted* blit can be a
+/// near-twin dict entry instead of this original shape (same restriction
+/// [`EncodedBlit`] and `foreground_fgbz_from_blits` in the main crate
+/// document), so callers must not treat these as the true emitted shapes in
+/// that case.
+///
+/// This lets a caller precompute per-symbol data (e.g. average colour under
+/// each component, for `FGbz`) before the shared dictionary is known —
+/// letting the pixmap that data is sampled from be dropped earlier in a
+/// multi-page pipeline. See `djvu_encode.rs`'s `PreparedPage::cc_colors`.
+pub fn symbol_boxes_in_emission_order(bitmap: &Bitmap, opts: &Jb2EncodeOptions) -> Vec<SymbolBox> {
+    if bitmap.width == 0 || bitmap.height == 0 {
+        return Vec::new();
+    }
+    let (mut ccs, order) = extract_and_order_ccs(bitmap, opts);
+    order
+        .iter()
+        .map(|&i| {
+            let cc = &mut ccs[i];
+            SymbolBox {
+                x: cc.x,
+                y: cc.y,
+                bitmap: core::mem::replace(&mut cc.bitmap, Bitmap::new(0, 0)),
+            }
+        })
+        .collect()
+}
+
+/// Encode like [`encode_jb2_dict_with_options`] and also return the emitted
+/// blits (shape + placement, in emission order).
+///
+/// The byte stream is identical to [`encode_jb2_dict_with_options`] — the
+/// blit list is metadata the encoder already owns, handed back so callers
+/// (e.g. the FGbz palette builder, #612) don't have to decode the stream
+/// they just produced to recover the per-blit layout.
+pub fn encode_jb2_dict_with_blits(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
+    let w = bitmap.width as i32;
+    let h = bitmap.height as i32;
+    if w == 0 || h == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let (ccs, order) = extract_and_order_ccs(bitmap, opts);
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts)
+}
+
+/// Encode a JB2 symbol dictionary from an *already-extracted* geometric
+/// decomposition (`ccs`/`order`, from `extract_and_order_ccs` or converted
+/// from a caller-held [`SymbolBox`] list via [`encode_jb2_dict_with_symbols`]),
+/// skipping `extract_ccs`'s connected-component pass entirely.
+///
+/// This is the shared tail [`encode_jb2_dict_with_blits`] uses after its own
+/// extraction — factored out so a caller that already ran the geometric
+/// decomposition once (e.g. to precompute per-symbol colour data before the
+/// shared dictionary is known, #step-3 of the encoder peak-memory plan) does
+/// not have to pay for a second, redundant extraction pass in the real
+/// encode. `w`/`h` are the source bitmap's dimensions (needed for the header
+/// and bottom-up `y_jb2` coordinate conversion, since this entry point no
+/// longer has the full bitmap).
+fn encode_jb2_dict_with_ccs(
+    w: i32,
+    h: i32,
+    mut ccs: Vec<Cc>,
+    order: Vec<usize>,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
     let mut zp = ZpEncoder::new();
     let mut record_type_ctx = NumContext::new();
     let mut image_size_ctx = NumContext::new();
