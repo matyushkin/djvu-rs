@@ -19,6 +19,22 @@ Results require `tests/corpus/` files for document and corpus benchmarks. See `C
 CI benchmarks run automatically on every release tag via [`.github/workflows/bench.yml`](.github/workflows/bench.yml).
 Full Criterion HTML reports are uploaded as workflow artifacts (90-day retention).
 
+### Cross-runner drift detection
+
+Benchmarks are hosted-runner-noisy: PRs #779 and #787 both got flagged
+"regressions" that turned out to be the whole runner running faster or
+slower that particular run, not the code (see PERF_EXPERIMENTS.md for both
+triages). The tell each time: almost every benchmark, including ones the
+diff couldn't have touched, moved together in the same direction.
+
+[`scripts/bench_compare.py`](scripts/bench_compare.py) now detects this: it
+computes the median delta across every benchmark in the comparison (the
+*machine drift*), and if that exceeds 3% across at least 5 benchmarks, the
+whole run is marked a **drift suspect**. Flagged regressions are still
+listed in the PR comment, but the CI job reports them without failing —
+see the script's module docstring for the full heuristic and thresholds.
+A genuine regression against an otherwise-flat table still fails normally.
+
 ### WASM scalar vs simd128
 
 The local Node.js harness builds two `wasm-pack --target nodejs` bundles and
