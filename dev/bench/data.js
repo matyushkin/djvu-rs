@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788318503277,
+  "lastUpdate": 1788429713405,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -17974,6 +17974,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51171000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bfd9999b282ce871b7135ae0360556df8094fed9",
+          "message": "refactor(encode): split the multi-page encode into named phases (encoder peak-memory step 2) (#788)\n\nencode_djvm_layered_shared_impl's two passes (a `prepare` closure and a\n`build_page` closure, both capturing shared local state) become three\nexplicit, named, top-level functions with doc comments stating exactly\nwhat each phase needs and produces:\n\n- prepare_page (phase 1: per-page mask + background/thumbnail extraction)\n- cluster_shared_dictionary (phase 2: shared JB2 dictionary clustering —\n  needs only the masks, no pixmap)\n- build_page (phase 3: per-page finalize — needs the original pixmap\n  again, only for FGbz colour sampling)\n\nNo behavior, signature, or output change. This is pure preparation for\nthe encoder peak-memory reduction plan's steps 3-4 (precomputing the\nper-CC colour table so the pixmap can be dropped after phase 1, then a\nbounded-window streaming entry point), so those land as small,\nreviewable diffs against a codebase that already states the real\ncross-phase data dependency in code.\n\nVerified byte-identical output across 8 multi-page corpus fixtures (11\nencode runs spanning Quality/Archival profiles and thumbnails) against\nthe parent commit's CLI, and no bench delta (encode_djvm_layered_shared,\nsegment_page_color, encode_color_page_quality all within noise once\nmachine load settled). See PERF_EXPERIMENTS.md for details.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-03T11:36:07+02:00",
+          "tree_id": "e884792a86ed4ba3c1ead504356cbec786c17992",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bfd9999b282ce871b7135ae0360556df8094fed9"
+        },
+        "date": 1788429712076,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 9169000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53800000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51502000,
             "range": "± 0",
             "unit": "ns/iter"
           }
