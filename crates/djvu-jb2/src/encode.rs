@@ -1536,28 +1536,6 @@ pub struct SymbolBox {
     pub bitmap: Bitmap,
 }
 
-/// Extract `bitmap`'s connected components in the same emission order (after
-/// despeckle) that [`encode_jb2_dict_with_blits`] will use for its blit list
-/// — *without* running the entropy encoder.
-///
-/// The geometric decomposition (connected-component extraction, despeckle,
-/// reading-order sort) depends only on `bitmap` and `opts`, never on a
-/// shared dictionary (see [`extract_and_order_ccs`]'s doc comment). So for
-/// any `shared_symbols`,
-/// `symbol_boxes_in_emission_order(bitmap, opts)[i]` describes the same
-/// `(x, y, bitmap)` as `encode_jb2_dict_with_blits(bitmap, shared_symbols,
-/// opts).1[i]` — **provided every emitted blit is byte-exact** (the
-/// lossless case: `opts.lossy_threshold == 0.0`, no experimental cross-size
-/// refinement). Under lossy rec-7 substitution the *emitted* blit can be a
-/// near-twin dict entry instead of this original shape (same restriction
-/// [`EncodedBlit`] and `foreground_fgbz_from_blits` in the main crate
-/// document), so callers must not treat these as the true emitted shapes in
-/// that case.
-///
-/// This lets a caller precompute per-symbol data (e.g. average colour under
-/// each component, for `FGbz`) before the shared dictionary is known —
-/// letting the pixmap that data is sampled from be dropped earlier in a
-/// multi-page pipeline. See `djvu_encode.rs`'s `PreparedPage::cc_colors`.
 /// Encode a JB2 symbol dictionary from a `symbols` list already produced by
 /// [`symbol_boxes_in_emission_order`] for the *same* `(bitmap, opts)`,
 /// instead of re-running connected-component extraction on `bitmap` — the
@@ -1598,6 +1576,28 @@ pub fn encode_jb2_dict_with_symbols(
     encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts)
 }
 
+/// Extract `bitmap`'s connected components in the same emission order (after
+/// despeckle) that [`encode_jb2_dict_with_blits`] will use for its blit list
+/// — *without* running the entropy encoder.
+///
+/// The geometric decomposition (connected-component extraction, despeckle,
+/// reading-order sort) depends only on `bitmap` and `opts`, never on a
+/// shared dictionary (see `extract_and_order_ccs`'s doc comment). So for
+/// any `shared_symbols`,
+/// `symbol_boxes_in_emission_order(bitmap, opts)[i]` describes the same
+/// `(x, y, bitmap)` as `encode_jb2_dict_with_blits(bitmap, shared_symbols,
+/// opts).1[i]` — **provided every emitted blit is byte-exact** (the
+/// lossless case: `opts.lossy_threshold == 0.0`, no experimental cross-size
+/// refinement). Under lossy rec-7 substitution the *emitted* blit can be a
+/// near-twin dict entry instead of this original shape (same restriction
+/// [`EncodedBlit`] and `foreground_fgbz_from_blits` in the main crate
+/// document), so callers must not treat these as the true emitted shapes in
+/// that case.
+///
+/// This lets a caller precompute per-symbol data (e.g. average colour under
+/// each component, for `FGbz`) before the shared dictionary is known —
+/// letting the pixmap that data is sampled from be dropped earlier in a
+/// multi-page pipeline. See `djvu_encode.rs`'s `PreparedPage::cc_colors`.
 pub fn symbol_boxes_in_emission_order(bitmap: &Bitmap, opts: &Jb2EncodeOptions) -> Vec<SymbolBox> {
     if bitmap.width == 0 || bitmap.height == 0 {
         return Vec::new();
@@ -1639,7 +1639,7 @@ pub fn encode_jb2_dict_with_blits(
 }
 
 /// Encode a JB2 symbol dictionary from an *already-extracted* geometric
-/// decomposition (`ccs`/`order`, from [`extract_and_order_ccs`] or converted
+/// decomposition (`ccs`/`order`, from `extract_and_order_ccs` or converted
 /// from a caller-held [`SymbolBox`] list via [`encode_jb2_dict_with_symbols`]),
 /// skipping [`extract_ccs`]'s connected-component pass entirely.
 ///
