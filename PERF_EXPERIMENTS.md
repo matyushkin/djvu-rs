@@ -14087,3 +14087,83 @@ its CI executions from ~360/run to ~3,000+/run for free once merged;
 `fuzz_iw44`'s CI budget (60 s × ~5-8 exec/s ≈ 300-500 executions/run) is a
 judgment call for a maintainer to make deliberately (e.g. raising it) since
 it is not something this fix changes.
+
+### PR #787 bench-failure triage: all six "regressions" phantom — **No fix needed** (2026-09-03)
+
+**Issue.** The Benchmarks run on PR #787 (post-EOF spin guard for BZZ
+decode, `crates/djvu-bzz/src/decode.rs`/`lib.rs` only) reported 6
+regressions, confirmed by the same-runner merge-base re-check, sitting on
+top of a table dominated by a roughly uniform **−8%** across almost every
+unrelated benchmark (render, IW44, PDF export, encode paths — nothing this
+diff can touch), which by the #779 lesson means the CI runner itself was
+faster on the "current" side that run. Against that floor, six stood out
+as going the *wrong* way: `bzz_decode` 97 ns → 105 ns (+8.2%), `bzz_encode`
+130.5 → 171.0 µs (+31.0%), `jb2_decode_corpus_bilevel` 413.2 → 580.3 µs
+(+40.4%), `jb2_encode` 153.0 → 164.0 µs (+7.2%),
+`render_native_stages/mask_decode/cable_bilevel` 400.3 → 577.9 µs (+44.3%).
+
+**Correctness check (hypothesis (c), done first).** Two of the five —
+`jb2_decode_corpus_bilevel` and `mask_decode/cable_bilevel` — exercise JB2
+only (`djvu_rs::jb2::decode` / `Page::extract_mask` on an `Sjbz` chunk); the
+diff never touches `djvu-jb2`, and the two crates share no decoder code, so
+there is no code path by which this diff could change their output —
+ruling out (b). To rule out (c) (the new `Truncated` error changing control
+flow via some indirect path), a throwaway harness (`examples/bzz_corpus_scan.rs`,
+not committed) walked every `tests/**/*.djvu` fixture, extracted every
+BZZ-compressed chunk (`ANTz`, `TXTz`, `DIRM`/`NAVM` minus their 1-byte flag
+byte — 1,518 payloads across 32 files), and ran `bzz_decode` under the
+merge-base (`e5ad127`) and the PR head (`ad8531d`), comparing success/failure
+and an FNV-1a checksum of the output. Byte-for-byte identical on every real
+BZZ chunk. (A first pass also fed `Djbz`/`Sjbz`/`FGbz` chunks in — those are
+JB2/foreground formats, not BZZ, so `bzz_decode` on them is garbage-in by
+construction; one `Djbz` payload that used to decode "successfully" into
+1.6 MB of garbage now correctly returns `Truncated` — exactly the guard
+working as designed on non-BZZ input, not a regression on any real BZZ
+input.) Hypothesis (c) is ruled out: no fixture's BZZ decode behavior
+changed.
+
+**Approach.** Local A/B on the same (busy — `uptime` hovered 4.3–5.5
+1-min load throughout, this machine's usual multi-agent baseline) machine:
+two worktrees at the merge-base `e5ad127` and the PR head `ad8531d`, each
+built once (`cargo build --release --bench codecs --bench render`), then
+`bzz_decode`, `bzz_encode`, `jb2_encode`, `jb2_decode_corpus_bilevel`, and
+`render_native_stages/mask_decode` run twice each, interleaved
+(old → new → old → new), reading criterion's own `[low mid high]` estimate
+each time rather than trusting a single number.
+
+**Numbers** (old / new, both runs, µs unless noted):
+- `bzz_decode`: 64.68–65.39 / 63.84–64.32 ns → 63.51–63.96 / 63.44–63.79 ns.
+  New is *not slower* on either run — CI's local baseline (97 ns) doesn't
+  even match this machine's ~64 ns, confirming a different runner shape.
+- `bzz_encode`: 116.06–118.99 / 113.71–115.90 → 119.68–121.61 / 114.21–116.89.
+  Overlapping ranges both directions, no consistent delta. Also: reading
+  `benches/codecs.rs::bench_bzz_encode`, the `bzz_decode` call that produces
+  the plaintext runs once as setup *outside* `b.iter`, so a per-call decode
+  cost cannot show up in this benchmark's measured loop at all — the +31%
+  had no possible causal path back to the diff.
+- `jb2_decode_corpus_bilevel`: 417.93–421.05 / (not measured old run 1) →
+  415.31–419.85 / 415.82–420.94. Old and new overlap completely.
+- `jb2_encode`: 98.65–103.16 (cold first-compile run, discarded) then
+  91.67–92.39 / 91.79–92.63 then 90.32–90.74. No consistent direction once
+  past the first-run warmup outlier.
+- `render_native_stages/mask_decode/cable_bilevel`: 405.88–423.21 /
+  404.04–423.96. Fully overlapping; nowhere near CI's 400→578 µs claim.
+- `render_native_stages/mask_decode/watchmaker_color` (sanity check, not in
+  the flagged list): 2.556–2.614 / 2.556–2.650 ms, same story.
+
+**Decision.** No fix needed — all six were phantom.
+
+**Reason.** None of the six reproduce locally in either direction; several
+(`jb2_decode_corpus_bilevel`, `mask_decode/cable_bilevel`) exercise code
+this diff cannot touch at all, and `bzz_encode`'s flagged decode call runs
+outside its own benchmark loop. Combined with the -8% floor across
+untouched subsystems, this is the #779 pattern again: a degraded CI runner
+on the "current" side of that run, not a real cost from the spin guard.
+The guard's inner-loop check (`sym_idx % SPIN_CHECK_INTERVAL == 0`, already
+a power-of-two mask under the hood) stays as committed; no branchless or
+coarser-granularity variant was needed since there was no measured cost to
+recover. Re-ran `spin_guard_bounds_decode_time_on_amplifying_input` after
+this triage — still passes (guard still bounds the 7-byte amplifying input
+well under 50 ms), so the security property is intact. Lesson reinforced:
+always check whether a "regression" benchmark's code path can even reach
+the diff before spending time on a fix.
