@@ -44,6 +44,27 @@ const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 /// Maximum allowed total decompressed output size (256 MB).
 const MAX_OUTPUT_SIZE: usize = 256 * 1024 * 1024;
 
+/// Post-EOF spin guard, mirroring `djvu-jb2`'s `ZP_EOF_SLACK_BYTES` (see that
+/// crate for the full rationale). The ZP coder buffers a few bytes of
+/// look-ahead, so its byte cursor runs a handful of bytes past the real input
+/// before a *valid* stream's last symbol is done decoding; `zp.pos - data.len()`
+/// stays within that margin for legitimate input and climbs without bound once
+/// the stream is exhausted and the decoder is reading synthetic `0xff` padding.
+/// 16 bytes covers the look-ahead drain with margin.
+const ZP_EOF_SLACK_BYTES: usize = 16;
+
+/// How often (in decoded MTF symbols) [`decode_mtf_phase`]'s hot loop checks
+/// for post-EOF spinning. #785-fuzz found 7–133 byte BZZ inputs that decode to
+/// 3–8.5 MB of output — hundreds of milliseconds per `fuzz_bzz` execution —
+/// because a handful of real bytes plus unbounded synthetic zero-padding can
+/// walk the ZP coder through a full `MAX_BLOCK_SIZE` (4 MB) block. The absolute
+/// `MAX_BLOCK_SIZE` / `MAX_OUTPUT_SIZE` caps only stop the amplification after
+/// megabytes of *legitimate-looking* work; checking every 4096 symbols (a cheap
+/// mask on the loop counter) bails within a few thousand decoded bytes of the
+/// real input running out, without adding a per-symbol branch to the
+/// perf-critical path.
+const SPIN_CHECK_INTERVAL: usize = 4096;
+
 /// Decode a BZZ-compressed byte slice.
 ///
 /// BZZ streams consist of one or more blocks. Each block is preceded by a
@@ -330,6 +351,16 @@ fn decode_mtf_phase(
     let mut bwt_data = vec![0u8; block_size];
 
     for (sym_idx, output_byte) in bwt_data.iter_mut().enumerate() {
+        // Spin guard: bail out once the ZP coder has been reading synthetic
+        // post-EOF padding for a while, rather than decoding a full
+        // `MAX_BLOCK_SIZE` block out of a handful of real input bytes. Checked
+        // periodically (not every symbol) to keep the hot loop branch-free in
+        // the common case. See `SPIN_CHECK_INTERVAL` / `ZP_EOF_SLACK_BYTES`.
+        if sym_idx % SPIN_CHECK_INTERVAL == 0 && pos.saturating_sub(data.len()) > ZP_EOF_SLACK_BYTES
+        {
+            return Err(BzzError::Truncated);
+        }
+
         let ctx_id = (last_mtf_pos.min(LEVEL_CTXIDS as u32 - 1)) as usize;
 
         let mtf_position;
@@ -614,6 +645,40 @@ mod tests {
         assert_eq!(seq, expected, "sequential output mismatch");
         assert_eq!(par, expected, "parallel output mismatch");
         assert_eq!(seq, par, "parallel and sequential outputs differ");
+    }
+
+    /// Fuzz-found (#785 follow-up, `fuzz_bzz`) decompression bomb: this
+    /// 7-byte input decoded to 3,089,151 bytes in ~192 ms before the spin
+    /// guard was added (a real corpus file from a local overnight fuzz
+    /// campaign, `54639f1a0360665359dcce4805aa0ea2536b7715`). The ZP coder
+    /// pads reads past real input with synthetic `0xff` bytes (by design —
+    /// `djvu-jb2` relies on the same padding for legitimate trailing
+    /// symbols), and nothing stopped `bzz_decode`'s block loop from riding
+    /// that padding all the way to a full `MAX_BLOCK_SIZE` block. The spin
+    /// guard must bound decode time to a small fraction of what a full
+    /// block would cost, regardless of whether it returns `Ok` (a short,
+    /// legitimately-sized block) or `Err(Truncated)`.
+    #[test]
+    fn spin_guard_bounds_decode_time_on_amplifying_input() {
+        let data = [0xd0, 0xdc, 0xff, 0xff, 0xff, 0xff, 0x1a];
+        let start = std::time::Instant::now();
+        let result = bzz_decode(&data);
+        let elapsed = start.elapsed();
+        // Pre-fix this took ~192ms and produced 3+ MB of output; the spin
+        // guard should catch it within a few thousand symbols. 50ms is a
+        // generous margin on any CI runner while still failing loudly if
+        // the guard regresses back to riding padding for megabytes.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "decode of a small amplifying input took {elapsed:?}, expected the spin guard to bound it well under 50ms"
+        );
+        if let Ok(ref out) = result {
+            assert!(
+                out.len() < 100_000,
+                "expected the spin guard to keep output well under a full MAX_BLOCK_SIZE block, got {} bytes",
+                out.len()
+            );
+        }
     }
 
     #[test]

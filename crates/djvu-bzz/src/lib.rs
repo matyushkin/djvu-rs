@@ -50,6 +50,11 @@ pub enum BzzError {
     /// The total decompressed output exceeds the safety limit (256 MB).
     #[error("BZZ total output size exceeds maximum allowed (256 MB)")]
     OutputTooLarge,
+
+    /// The ZP coder ran past the real input and is decoding synthetic
+    /// padding as if it were data (a truncated or hostile stream).
+    #[error("BZZ stream is truncated (decoder is spinning on synthetic padding)")]
+    Truncated,
 }
 
 /// Map ZP-coder init errors into [`BzzError`] so callers using `?` keep working.
