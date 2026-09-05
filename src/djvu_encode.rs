@@ -75,7 +75,16 @@ use crate::text_encode::encode_text_layer;
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors returned by [`PageEncoder::encode`].
+///
+/// `#[non_exhaustive]`: `docs/api-compatibility.md` §1 already declares error
+/// enums "`#[non_exhaustive]` in spirit" — consumers must not rely on the
+/// absence of variants, and adding one is a compatible change. This makes
+/// that literal, so the next variant (there will be one) does not trip the
+/// API-breakage gate again; the gate's own TODO in
+/// `.github/workflows/api-stability.yml` names this as the intended end
+/// state. Downstream code must match with a `_` arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EncodeError {
     /// The requested combination of input + quality profile is not
     /// implemented yet. The message names the missing dependency
