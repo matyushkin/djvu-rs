@@ -14658,6 +14658,37 @@ to have a lazy "give me page i" mechanic once found:
     two consumers — still one linear pass per pass, not per-page-squared,
     and (after the fix above) only one disk read total regardless of how
     many passes borrow the buffer.
+  - **Stated trade (2026-09-06, pre-merge review): TIFF `-q auto` genuinely
+    decodes every page's pixels twice** where the directory-input path does
+    not. Before this step, the eager `Vec<Pixmap>` decoded each TIFF page
+    once and reused it for both classification and encoding. The streaming
+    replacement's classify pass and its lossless-mask/layered-encode pass
+    are two separate `LazyTiffPages` readers, each doing a full pixel
+    decode — so unlike the directory path's doc comment (which correctly
+    says it "pays the same one extra decode per page" it already paid), the
+    TIFF path pays a **new** extra decode that did not exist before. The
+    classify loop breaks on the first non-`Lossless` page, so a mixed
+    document barely notices; the worst case is an all-bilevel multipage
+    TIFF, where classification runs to completion and the doubling is
+    total, not partial. Measured directly (two synthetic all-bilevel
+    multipage TIFFs — 8 pages at 1600×2200, 24 pages at 1600×2200 — parent
+    910641f vs. this branch, `hyperfine --warmup 2 -m 15`, both outputs also
+    reconfirmed byte-identical): **8 pages 649.8ms → 651.0ms (+0.18%), 24
+    pages 1.948s → 1.948s (~0%)** — both within `hyperfine`'s own measured
+    noise band (±0.6%/±0.4%), i.e. no detectable regression even in the
+    worst case, because JB2 mask encoding (segmentation + arithmetic coding)
+    dominates total wall time far more than TIFF `Group4` pixel decode
+    does. Decision: **kept as-is, not specially optimized** — the doubled
+    decode is real and TIFF-specific (the doc comment on
+    `encode_tiff_page_bundle` now says so explicitly, not the directory
+    path's "same cost" framing), but it is not a measurable wall-clock cost
+    on this workload, so adding complexity (sharing pixmaps across two
+    passes, which `LazyTiffPages`'s forward-only, non-`Clone`, single-
+    consumer design does not support without buffering — reintroducing the
+    memory this whole step removes) is not justified by a number that isn't
+    there. If a future workload makes TIFF decode itself expensive relative
+    to JB2 encoding (e.g. very large pages, or a faster mask encoder), this
+    trade should be re-measured.
 - **Error handling.** `EncodeError::PageSource` needs `E: std::error::Error +
   Send + Sync + 'static`, but `png_io`'s decode errors (from `png`/`zune-
   jpeg`/`tiff`, boxed as `Box<dyn std::error::Error>`) aren't guaranteed
@@ -14743,6 +14774,24 @@ to have a lazy "give me page i" mechanic once found:
    regression bar. (Plausible: the streaming path never allocates the
    whole-document `Vec<Pixmap>` up front, so there's less allocator/copy
    overhead even setting memory aside.)
+
+   *TIFF `-q auto` worst case* (2026-09-06, pre-merge review — see the
+   Approach's "Stated trade" note): the classify pass and the encode pass
+   are separate `LazyTiffPages` readers for TIFF input, so this input shape
+   pays a genuine second full page decode that the directory path does not.
+   Measured on two synthetic all-bilevel multipage TIFFs (classification
+   cannot break early, so both passes run to completion — the actual worst
+   case), parent 910641f vs. this branch, `hyperfine --warmup 2 -m 15`:
+
+   | Pages | Parent (single decode) | This branch (double decode) | Δ |
+   |---:|---:|---:|---:|
+   | 8  | 649.8 ms | 651.0 ms | **+0.18%** |
+   | 24 | 1.948 s  | 1.948 s  | **~0%** |
+
+   Both within `hyperfine`'s own noise band — no detectable regression, even
+   doubling the decode work, because JB2 mask encoding dominates total time
+   far more than TIFF `Group4` pixel decode does on this workload. Kept as a
+   stated, not silently absorbed, trade (see Approach).
 5. *Benches* (`cargo bench --bench codecs`, `--save-baseline` on this branch
    and on parent 910641f in a separate worktree, machine load `uptime` ≈
    2.3–3.3 throughout, under the plan's "wait if above ~4" threshold):

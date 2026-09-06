@@ -2187,14 +2187,29 @@ fn input_is_tiff(path: &Path) -> bool {
 /// [`djvu_rs::png_io::LazyTiffPages`] instead of the caller holding every
 /// page's `Pixmap` in one `Vec` — `page_count` is already known (a cheap
 /// IFD-only pass; see the call site) so this never needs to buffer more than
-/// the current page. `--quality auto` reads every page once to classify
-/// (mirroring the directory path's own auto-classify pre-pass, which pays
-/// the same one extra decode per page), then a second `LazyTiffPages` pass
-/// re-reads the file for the actual encode — `LazyTiffPages` is strictly
-/// forward-only and cannot rewind, so a fresh reader is opened per pass
-/// rather than trying to buffer pages across two consumers. All readers
-/// borrow the same `file_bytes` (read once by the caller), so re-opening a
-/// reader costs nothing beyond re-parsing the TIFF header, not another disk
+/// the current page.
+///
+/// `--quality auto` reads every page once to classify, then (for a lossless
+/// or layered bundle) a second `LazyTiffPages` pass re-reads the file for the
+/// actual encode — `LazyTiffPages` is strictly forward-only and cannot
+/// rewind, so a fresh reader is opened per pass rather than trying to buffer
+/// pages across two consumers. Unlike the directory-input path (which reused
+/// its one already-decoded `Pixmap` per page for both classification and
+/// encoding before this step, and still does), **this is a genuine second
+/// full pixel decode of every page for TIFF input specifically** — the
+/// eager `Vec<Pixmap>` this step replaced decoded each TIFF page once and
+/// reused it for both passes. Measured worst case (an all-bilevel multipage
+/// TIFF, where the classify loop cannot break early and both passes run to
+/// completion): 8 pages 649.8ms → 651.0ms (+0.18%), 24 pages 1.948s → 1.948s
+/// (~0%) — within measurement noise both times, because JB2 mask encoding
+/// dominates total time far more than TIFF decode does. Accepted as a
+/// deliberate trade, not fixed: TIFF `-q auto`'s doubled decode is real but
+/// currently unmeasurable in wall clock, against a 94%-plus memory win: see
+/// `PERF_EXPERIMENTS.md`'s "Stream pages in the CLI encoder" entry.
+///
+/// All readers borrow the same `file_bytes` (read once by the caller), so
+/// re-opening a reader for a second pass costs nothing beyond re-parsing the
+/// TIFF header (the IFD directory), not another disk
 /// read.
 #[cfg(feature = "tiff")]
 #[allow(clippy::too_many_arguments)]
