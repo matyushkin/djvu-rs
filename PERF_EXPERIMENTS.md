@@ -14395,3 +14395,204 @@ phase 1 without removing it — the `≤3%` bench bar caught that
 before it shipped. `PreparedPage.cc_symbols`/`cc_colors` are ready for
 step 4 (a streaming/bounded-window entry point) to consume without a
 pixmap in scope at all.
+### Bounded-window streaming entry point (encoder peak-memory step 4) — **Kept** (2026-09-05)
+
+**Issue.** Step 4 of the encoder peak-memory plan (`ENCODE_CC_COLOR_TABLE`/
+#792 follow-up): the plan's own keep bar — t-gmax and RSS-slope-per-page must
+drop ≥50% — is written for *this* step, because it is the one that finally
+stops the caller from having to hold every page's `&[Pixmap]` at once.
+Everything steps 2–3 built (the `prepare_page`/`cluster_shared_dictionary`/
+`build_page` phase split, and phase 1's precomputed `FGbz` colour table) was
+plumbing for this: phase 3 (`build_page`) no longer *needs* the pixmap in the
+lossless default case, so the only thing still forcing `O(page_count)` pixmap
+residency was the public API shape itself (`&[Pixmap]`).
+
+**Approach.** New public entry point,
+`encode_djvm_layered_shared_streaming<F, E>(page_count, source, quality, dpi,
+segment_options, shared_dict_page_threshold, with_thumbnails, masks,
+window)`, in `src/djvu_encode.rs`.
+
+- **Page source shape: a plain closure, not a trait.** `source: F where F:
+  FnMut(usize) -> Result<Pixmap, E>` — a design decision made before this PR
+  started, not reopened here. Rationale recorded on the function's own doc
+  comment: the contract is "hand me page `i`", nothing more; it adds no new
+  public type; and a `PageSource` trait can still be layered on top later
+  (e.g. a blanket `impl<F, E> Source for F where F: FnMut(usize) ->
+  Result<Pixmap, E>`) without breaking this signature. `F` is a plain
+  `FnMut`, not `Fn + Sync`: it is called strictly from the calling thread, in
+  increasing index order, one page at a time, *before* each window's pixmaps
+  are handed to rayon — the parallelism this step preserves is over the CPU
+  work in phase 1/3 on an already-fetched `Vec<Pixmap>` window (exactly what
+  the eager path already parallelizes over its whole slice), not over
+  fetching itself. That sidesteps the `Sync`/`Send` requirement rayon would
+  otherwise force onto the source closure entirely.
+- **Error plumbing: a new boxed `EncodeError::PageSource` variant, not `E:
+  Into<EncodeError>`.** A generic bound `E: Into<EncodeError>` looks
+  idiomatic but is a trap here: it requires a downstream crate to implement
+  `From<TheirError> for EncodeError`, and the orphan rule forbids that (both
+  types — `TheirError` momentarily aside — are foreign to that crate; neither
+  `EncodeError` nor `From` is local to it). `EncodeError::PageSource(Box<dyn
+  std::error::Error + Send + Sync>)` needs only `E: std::error::Error + Send
+  + Sync + 'static` from the caller — the standard shape for a boxable
+  error, satisfiable by any real error type — and boxing is a conversion
+  every caller can actually perform themselves. Adding a variant to an error
+  enum is a compatible change under `docs/api-compatibility.md`'s error-
+  stability rule.
+- **Bounded window.** At most `window` pages' pixmaps resident at once
+  (`window: Option<usize>`; `None` → `default_streaming_window()`:
+  `rayon::current_num_threads().min(4)` under `parallel`, `1` without it).
+  Phase 1 runs over one window (in parallel under `parallel`, same
+  `par_iter` shape the eager path already uses, just over a `window`-sized
+  slice instead of the whole document), the window's `Vec<Pixmap>` is
+  dropped (`drop(chunk_pixmaps)`, explicit) before the next window starts,
+  and only the compact `PreparedPage`s accumulate across the whole document.
+  Phases 2/3 then run exactly as in the eager path, from `PreparedPage`
+  alone.
+- **`PreparedPage` gained `width`/`height` (`u32`, copied from `pm` in phase
+  1).** `INFO`'s dimensions and `build_page`'s `u16` bounds check now read
+  `prep.width`/`prep.height`, not `pm.width`/`pm.height` — cheap, and it
+  means phase 3 no longer needs the pixmap *at all* for the common case, in
+  both the streaming and eager paths (the eager path's values are unchanged,
+  just resourced from `prep` instead of `pm`, verified byte-identical below).
+- **The lossy fallback: refuse, don't re-fetch.** `build_page` needs `pm` a
+  second time only when `Jb2EncodeOptions::lossy_threshold > 0.0` (not a
+  caller-facing knob on this bundle path yet — always `0.0` today) or in the
+  defensive, currently-unreachable case where phase 1's precomputed table is
+  unexpectedly missing for a lossless page. `build_page` was changed to take
+  `pm: Option<&Pixmap>`; the eager entry points still pass `Some(pm)`
+  (unchanged behavior), the streaming entry point passes `None` and refuses
+  up front with `EncodeError::Unsupported` if `lossy_threshold > 0.0`, before
+  fetching a single page. Rejected the alternative (re-fetch the page from
+  `source` a second time in phase 3): `source` is a plain, non-`Clone`,
+  non-restartable `FnMut` — re-requesting an index a previous window already
+  consumed isn't something this contract can express safely (the closure
+  might be reading a stream, not indexing a directory) — so a caller needing
+  the lossy path uses the eager `&[Pixmap]` entry points instead, which never
+  drop a page's pixmap before phase 3 needs it. If the defensive branch is
+  ever actually reached in the streaming path (should be unreachable),
+  `build_page` returns `EncodeError::Unsupported` rather than silently
+  emitting a wrong/missing `FGbz`.
+- **Existing entry points unchanged in implementation, not rerouted through
+  the new closure.** `encode_djvm_layered_shared`,
+  `..._with_thumbnails`, `..._with_masks`, `..._with_thumbnails_and_masks`
+  keep their original zero-copy `&[Pixmap]` code path in
+  `encode_djvm_layered_shared_impl` verbatim — they are *not* implemented by
+  wrapping the new closure-based entry point with `window = page_count`.
+  Doing that literally would force cloning every page's pixmap into an owned
+  `Vec<Pixmap>` for the closure to return (the closure contract hands back
+  an owned `Pixmap`, and a borrowed slice can't produce one without a copy),
+  which would transiently *double* peak memory for exactly the callers this
+  step must leave at zero risk — the opposite of the plan's intent for this
+  case. `encode_djvm_layered_shared_streaming(page_count, source, …,
+  window: Some(page_count))` is still a documented, correct way to get the
+  eager entry points' shape from a lazy source that isn't a `&[Pixmap]`
+  (e.g. a directory listing) — it's just not how the four pre-existing
+  functions are wired internally. Both paths share the same `prepare_page`/
+  `cluster_shared_dictionary`/`build_page` phase functions, so the
+  differential test below is what actually pins their equivalence, not code
+  sharing at the entry-point layer.
+
+**Numbers.**
+
+1. *Peak memory* (`examples/alloc_profile.rs`, new `encode-streaming`
+   scenario added alongside the existing `encode`; both render 12 pages of
+   `watchmaker.djvu` and encode Quality profile; dhat, `--features
+   "alloc-profile pdf"`, release):
+
+   | Scenario | t-gmax |
+   |---|---:|
+   | `encode` (eager `&[Pixmap]`, unchanged) | 518,635,814 bytes |
+   | `encode-streaming` (new, default window) | 143,612,385 bytes |
+
+   **−72.3%**, clearing the ≥50% bar with room to spare. The eager number
+   (518,635,814) matches `ENCODE_CC_COLOR_TABLE`'s own dhat run
+   (518,635,718) within noise, confirming the eager path is untouched by
+   this step's refactor.
+
+2. *RSS-scaling slope* — the CLI still drives the eager path (step 5, not
+   this PR, switches it), so `scripts/encode_rss_scaling.sh` alone can't show
+   the streaming path's slope. Wrote a scratch dev harness (not committed —
+   `examples/streaming_rss_probe.rs` during this investigation, kept as a
+   scratchpad file per the plan's "keep it in scratchpad and report the
+   numbers" option) that calls `encode_djvm_layered_shared_streaming` with a
+   lazy per-PNG-path loader (`png_io::decode_image_to_pixmap`) over the same
+   6/12/24-page directories `encode_rss_scaling.sh` builds, measured with
+   `/usr/bin/time -l` the same way:
+
+   | Pages | Eager (`djvu encode`, unchanged) | Streaming (new entry point, default window) |
+   |---:|---:|---:|
+   | 6  | 249.4 MB | 228.3 MB |
+   | 12 | 452.9 MB | 274.5 MB |
+   | 24 | 862.2 MB | 297.1 MB |
+
+   Eager slope: **34.05 MB/page** (matches `ENCODE_CC_COLOR_TABLE`'s 33.96
+   within noise — confirms zero risk to existing callers). Streaming slope
+   (least-squares over the 3 points): **≈3.5 MB/page** (pairwise marginals:
+   7.7 MB/page 6→12, 1.9 MB/page 12→24 — the curve flattens as window-fill
+   startup cost amortizes). **≈−90%**, clearing the ≥50% bar by a wide
+   margin; the small remaining per-page slope is the plan's flagged-open
+   mask term (`prepared: Vec<PreparedPage>` still holds every page's ~1 MB
+   mask for phase 2's clustering — open question 3 in the plan, out of scope
+   for this step).
+3. *Byte-identity.*
+   - Whole-corpus differential (parent commit `c100fc8` vs. this branch,
+     both release CLI builds, separate scratch `--target-dir`s): single-page
+     (page 1 of every fixture rendered to PNG) × `{quality, archival}` = all
+     10 `tests/corpus/*.djvu` + all 22 `tests/fixtures/*.djvu` = 32 × 2 = 64
+     cases (2 fixtures — `czech.djvu`, `irish.djvu` — could not be
+     single-page-rendered by either binary, a pre-existing shared-dictionary
+     single-page-render limitation unrelated to this change, so excluded
+     from the count on both sides) plus the naturally multi-page fixtures'
+     full page sets as `djvu encode <dir>`: `cable_1973_100133` (2p),
+     `watchmaker` (12p), `war_1812` (8p), `cyrillic_simonovich_co2` (12p),
+     each × `{quality, archival}` × `{plain, --thumbnails}` = 16 cases, plus
+     one `-q auto` case (`watchmaker`) = 17. **60/60 + 17/17 = 77/77
+     byte-identical** — same shape as `ENCODE_CC_COLOR_TABLE`'s 78-case
+     matrix (this run's single-page pass hit 2 pre-existing render failures
+     `ENCODE_CC_COLOR_TABLE` didn't specifically call out, hence 77 vs. 78).
+     This exercises only the eager entry points (the new streaming entry
+     point has no CLI wiring yet — step 5), which is exactly the point: it
+     re-confirms the eager path is unchanged by this step's `Option<&Pixmap>`
+     / `prep.width`/`height` refactor of shared internals.
+   - New in-repo tests (`src/djvu_encode.rs`):
+     `streaming_matches_eager_output_across_window_sizes` encodes a 4-page
+     mixed bundle via the eager `encode_djvm_layered_shared` and via the
+     streaming entry point at `window ∈ {None, 1, 2, 3, page_count}`,
+     asserting byte-for-byte equality every time — the direct test that a
+     narrow window doesn't change output, only residency.
+     `streaming_matches_eager_with_thumbnails_and_masks` does the same for
+     the `with_thumbnails_and_masks` union path (thumbnails on, per-page
+     mask reuse) at `window = 1`, the narrowest possible.
+     `streaming_source_error_surfaces_as_page_source_error` asserts a
+     failing source surfaces as `EncodeError::PageSource` with the original
+     error's message preserved, not a panic or silent truncation.
+4. *Benches* (`cargo bench --bench codecs`, `--save-baseline` on this branch
+   and on parent `c100fc8` in the same worktree, machine load `uptime` ≈
+   3.7–4.2 throughout — at the plan's "wait if above ~4" edge but stable
+   across both runs, not the >20% swings seen on a genuinely loaded machine
+   in earlier rounds):
+   `segment_page_color` 859.55 → 868.81 µs (**+1.08%**),
+   `encode_color_page_quality` 3.0061 → 2.9657 ms (**−1.34%**),
+   `encode_djvm_layered_shared` 3.2918 → 3.2671 ms (**−0.75%**) — all three
+   comfortably inside the ≤3% bar and consistent with "no change": these
+   benchmarks only exercise the eager entry points, whose implementation is
+   untouched (only its `pm`/`Option<&Pixmap>` plumbing and where `INFO`'s
+   dimensions come from changed, both no-ops for behavior or hot-path cost).
+5. `make check` (fmt, clippy `-D warnings` across feature combinations,
+   no_std build, wasm32 ×3, full workspace test suite incl. doctests)
+   passed clean, both with and without the `parallel` feature.
+
+**Decision.** Kept.
+
+**Reason.** This is the step the plan's keep bar exists for, and it clears
+both halves by a wide margin (−72.3% t-gmax, ≈−90% RSS slope, vs. the ≥50%
+bar) while leaving the existing `&[Pixmap]` entry points byte-identical and
+CPU-neutral (77/77 differential cases, three benches all within noise). The
+two design calls made along the way — a closure over a new `PageSource`
+trait, and a boxed error variant over `E: Into<EncodeError>` — both trade a
+theoretically cleaner shape for one that compiles without extra bounds and
+costs callers nothing extra to satisfy; either can still be generalized
+later (a trait wrapping the closure, a `From` impl added for a specific `E`)
+without breaking this signature. The CLI itself does not switch over in this
+PR — that is step 5, a separate change — so no user sees this win yet; this
+PR only proves the entry point and its numbers are real.
