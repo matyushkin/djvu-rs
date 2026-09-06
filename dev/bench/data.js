@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788676721413,
+  "lastUpdate": 1788686991852,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18706,6 +18706,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 34053000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9b1c782e36c1bc551ab2fa01d6228ce532082810",
+          "message": "perf(encode): stream pages in the CLI encoder (encoder peak-memory step 5) (#794)\n\n* perf(encode): stream pages in the CLI encoder (encoder peak-memory step 5)\n\nSwitch cmd_encode's directory and multi-page TIFF ingestion off the eager\nVec<Pixmap> loop onto encode_djvm_layered_shared_streaming (step 4),\ncutting the CLI's RSS scaling slope from 34.00 to 1.93 MB/page (-94.3%)\nwith zero behavior change: 82/82 differential cases byte-identical, error\nwording unchanged, and wall clock/benches unaffected.\n\nTIFF pages decode lazily via a new LazyTiffPages forward-only reader\n(src/png_io.rs), matching the tiff crate's own forward-only decoder and\nthe streaming source's calling contract exactly; count_pages does a cheap\nIFD-only pass to learn page_count up front without decoding pixels.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* fix(encode): stop leaking TIFF file bytes in LazyTiffPages\n\nPre-merge review of #794 flagged a real defect: LazyTiffPages::open used\nBox::leak to give the decoder a 'static byte buffer, justified by \"the CLI\nexits shortly after encoding\" — but the type is public library API\nre-exported from png_io, and a long-running caller converting many TIFFs\nthrough it would leak every file's compressed size, unboundedly, in a PR\nwhose whole point is bounding memory growth.\n\nFix: give LazyTiffPages a lifetime instead of owning a leaked 'static\nslice. FileDecoder<'a> = Decoder<Cursor<&'a [u8]>> is already\nlifetime-parameterised, so LazyTiffPages<'a> just borrows caller-owned\nbytes. The CLI now reads the TIFF file once with std::fs::read, keeps the\nVec<u8> alive on the stack for the whole encode, and passes borrows of it\nto count_pages (which also now takes &[u8] instead of re-reading the file)\nand to every LazyTiffPages::new it opens across the auto-classify /\nlossless-mask / streaming-encode passes. No leak, no unsafe, no\nself-reference, and one disk read instead of up to four.\n\nRe-verified: make check clean, the 5-case TIFF differential matrix still\nbyte-identical against the rebuilt binary, and the RSS-scaling slope\nunchanged within noise (1.93 -> 1.85 MB/page — the fix only touches the\nTIFF path, which the directory-based scaling script doesn't exercise).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* docs(perf): measure TIFF -q auto's doubled decode instead of assuming parity\n\nThe doc comment on encode_tiff_page_bundle claimed TIFF input pays the\nsame one-extra-decode-per-page cost as directory input under -q auto,\nbut for TIFF this is a genuinely new doubled pixel decode (classify\npass + streaming encode pass), not a reuse of one decode. Measured the\nworst case (an all-bilevel multi-page TIFF, where the classify loop\ncannot break early) with hyperfine: 8 pages 649.8ms -> 651.0ms\n(+0.18%), 24 pages 1.948s -> 1.948s (~0%) -- within noise, since JB2\nmask encoding dominates wall clock far more than TIFF decode does.\nKept as a stated, measured trade rather than optimized, against the\n94%+ per-page memory win from step 5.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-06T11:06:42+02:00",
+          "tree_id": "d381d26ecbd53ad52b8936af102c27b41f3b329a",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/9b1c782e36c1bc551ab2fa01d6228ce532082810"
+        },
+        "date": 1788686990292,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6939000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41385000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 39804000,
             "range": "± 0",
             "unit": "ns/iter"
           }
