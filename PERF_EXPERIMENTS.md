@@ -14822,3 +14822,107 @@ produce, and it landed with zero behavior change (82/82 byte-identical,
 identical error wording) and zero performance cost (wall clock faster, all
 three benches within noise).
 
+
+### Flat-peak regression guard for the streaming encoder (encoder peak-memory step 6) — **Kept** (infra) (2026-09-06)
+
+**Issue.** Steps 4 and 5 (`ENCODE_STREAMING_WINDOW` #793,
+`ENCODE_CLI_STREAMING` #794) cut whole-document encoding from "every page's
+`Pixmap` resident at once" to "at most `window` resident at once", taking the
+CLI's peak-RSS slope from 34.00 to 1.85 MB/page. Nothing in the test suite
+observed that change, which means nothing would observe it being undone. The
+regression is easy to reintroduce and invisible to every existing test: a
+future refactor that does `let all: Vec<Pixmap> = (0..n).map(&mut source)
+.collect()` before phase 1 — for convenience, or to make the source
+restartable — restores the old peak exactly, and the output stays
+byte-identical, so the byte-identity gates (`tests/encode_size_regression.rs`,
+the golden corpus) all stay green. The win was measured once, by hand, in a
+scratch worktree; it was not defended.
+
+**Approach.** New `tests/encode_peak_memory.rs`: measure the peak instead of
+the output.
+
+- **Counting global allocator.** A `GlobalAlloc` wrapper over `System` keeping
+  two relaxed atomics — `LIVE` (bytes currently allocated, summed across
+  threads) and `PEAK` (high-water mark of `LIVE`). `alloc`/`alloc_zeroed`/
+  `dealloc`/`realloc` all forward unchanged and only add the bookkeeping, so
+  the allocator contract is `System`'s. Chosen over dhat (`alloc-profile`
+  feature) because dhat's profiler writes a JSON file and is built for
+  interactive inspection, and over `/usr/bin/time -l` max RSS because RSS is
+  not portable, not reproducible under a test harness, and cannot be reset
+  between measurements. The counter is installed for the whole test binary, so
+  every block that is ever freed was also counted on the way in — `fetch_sub`
+  cannot underflow, and `LIVE` needs no reset (each measurement records
+  `base = LIVE` and reports `PEAK - base`).
+- **One `#[test]` in the file, deliberately.** `cargo test` runs a binary's
+  tests on parallel threads, and the counter is process-global; a second test
+  function would allocate inside the first's high-water window and corrupt
+  both. The file's module doc says so explicitly so the next person does not
+  add one.
+- **The measurement.** Identical synthetic 240×320 text-like pages (rows of
+  hollow blocks — realistic connected-component count without filling the page
+  with ink), encoded at 12 / 48 / 96 pages through
+  `encode_djvm_layered_shared_streaming` with `window` passed **explicitly**
+  as `Some(2)` rather than left to `default_streaming_window`'s
+  `min(threads, 4)`, so the expected peak does not depend on the machine's
+  core count. `shared_dict_page_threshold` is 2, matching the CLI, so every
+  page count exercises the same three-phase path users take. One discarded
+  2-page warm-up encode absorbs the one-off costs (lazily built tables, rayon
+  pool spin-up) that would otherwise be charged to the smallest page count and
+  artificially flatten the slope.
+- **The assertion is a slope, not a ceiling.** An absolute byte ceiling would
+  be brittle across allocators and platforms and would need a ratchet. What
+  the streaming contract actually promises is that the peak does not grow with
+  the page count, so the test asserts on `(peak₉₆ − peak₁₂) / 84` — extra peak
+  bytes per extra page — against one page's pixmap size (307 200 B).
+- **A control, so a broken meter cannot pass silently.** The eager entry point
+  `encode_djvm_layered_shared` runs at 12 and 48 pages in the same test. Its
+  slope *must* come out near a full pixmap per page; if it does not, the
+  allocator counter is not seeing pixmap residency and the streaming verdict
+  would be meaningless, so that assertion fires first with a message saying
+  exactly that.
+
+**Numbers.** Debug build (the profile CI's `Test (stable)` job uses),
+`cargo test --test encode_peak_memory --features cli,tiff`:
+
+| Pages | Streaming peak | Eager peak |
+|---:|---:|---:|
+| 12 | 948 352 B | 4 132 864 B |
+| 48 | 1 715 584 B | 16 148 896 B |
+| 96 | 2 738 560 B | — |
+
+- One page's pixmap: **307 200 B**.
+- Streaming slope: **21 312 B/page = 6.9 % of a pixmap.**
+- Eager slope (control): **333 779 B/page = 108.7 % of a pixmap.**
+- Ratio: streaming is **15.7×** flatter.
+
+Thresholds and their headroom: streaming `< 25 %` of a pixmap (measured 6.9 %,
+**3.6× margin**); control `> 50 %` (measured 108.7 %, **2.2× margin**);
+streaming `< 20 %` of the eager slope (measured 6.4 %, **3.1× margin**). The
+effect is a ~16× difference, not a few percent, so worker-thread scratch
+buffers and allocator noise cannot flip the verdict.
+
+*Test runtime:* **2.06 s** in debug — cheap enough for the default `cargo test`
+run, no `#[ignore]`. Keeping the pages small (240×320) is what buys that; the
+guard needs a *ratio*, not realistic page dimensions.
+
+*Sabotage check (does the guard actually catch the regression it names?).*
+Temporarily replaced the source closure with the exact refactor the failure
+message warns about — collect all pages into a `Vec<Pixmap>` up front, index
+into it — and re-ran: streaming peaks became 4 635 136 / 16 462 720 /
+32 232 832 B, slope **328 544 B/page (106.9 % of a pixmap)**, indistinguishable
+from the eager control, and the test failed with the intended message. Reverted
+before committing.
+
+**Decision.** Kept. Pure test infra: no library or CLI code changes, no
+behaviour change, nothing on any hot path, so there is nothing for the
+benchmark suite to regress. The plan's step 6.
+
+**Related.** `ENCODE_STREAMING_WINDOW` (step 4, #793) and
+`ENCODE_CLI_STREAMING` (step 5, #794) are the entries this defends.
+`examples/alloc_profile.rs`'s `encode` / `encode-streaming` scenarios remain
+the tool for *investigating* a peak (dhat attributes it to call sites); this
+test only answers yes/no, in CI, for free. Plan step 7 (an incremental/staged
+DJVM writer, candidate C) stays unopened: the plan gates it on evidence that
+the accumulated component buffer has become the largest contributor, and this
+guard's 21 312 B/page residual — against 307 200 B of pixmap avoided — is not
+that evidence.
