@@ -2053,11 +2053,23 @@ fn cmd_encode(
     // IFD-only pass (no pixel decode) instead of eagerly decoding every page
     // just to check `len() > 1` — the actual pixel decoding happens lazily,
     // one page at a time, in `encode_tiff_page_bundle` / below.
+    //
+    // The file's bytes are read into `tiff_bytes` exactly once here (not
+    // once per `LazyTiffPages` pass): `count_pages` and every
+    // `LazyTiffPages` reader `encode_tiff_page_bundle` opens borrow the same
+    // `Vec<u8>`, which this function keeps alive on the stack for the whole
+    // encode and frees on return — no leak, unlike an earlier version of
+    // this change.
     #[cfg(feature = "tiff")]
-    let tiff_page_count: Option<usize> = if input_is_tiff(input) {
-        Some(djvu_rs::png_io::tiff_file_page_count(input)?)
+    let tiff_bytes: Option<Vec<u8>> = if input_is_tiff(input) {
+        Some(std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?)
     } else {
         None
+    };
+    #[cfg(feature = "tiff")]
+    let tiff_page_count: Option<usize> = match &tiff_bytes {
+        Some(bytes) => Some(djvu_rs::png_io::tiff_file_page_count(bytes, input)?),
+        None => None,
     };
     #[cfg(feature = "tiff")]
     if tiff_page_count.is_some_and(|n| n > 1) {
@@ -2065,6 +2077,7 @@ fn cmd_encode(
             return Err("--bilevel-codec smmr is supported only for single-image input".into());
         }
         return encode_tiff_page_bundle(
+            tiff_bytes.as_deref().unwrap(),
             input,
             output,
             dpi,
@@ -2177,12 +2190,16 @@ fn input_is_tiff(path: &Path) -> bool {
 /// the current page. `--quality auto` reads every page once to classify
 /// (mirroring the directory path's own auto-classify pre-pass, which pays
 /// the same one extra decode per page), then a second `LazyTiffPages` pass
-/// re-reads the file for the actual encode — `LazyTiffPages` is
-/// strictly forward-only and cannot rewind, so a fresh reader is opened per
-/// pass rather than trying to buffer pages across two consumers.
+/// re-reads the file for the actual encode — `LazyTiffPages` is strictly
+/// forward-only and cannot rewind, so a fresh reader is opened per pass
+/// rather than trying to buffer pages across two consumers. All readers
+/// borrow the same `file_bytes` (read once by the caller), so re-opening a
+/// reader costs nothing beyond re-parsing the TIFF header, not another disk
+/// read.
 #[cfg(feature = "tiff")]
 #[allow(clippy::too_many_arguments)]
 fn encode_tiff_page_bundle(
+    file_bytes: &[u8],
     input: &Path,
     output: &Path,
     dpi: u16,
@@ -2199,7 +2216,7 @@ fn encode_tiff_page_bundle(
     use djvu_rs::segment::{SegmentOptions, segment_page};
 
     let quality = if matches!(quality, EncodeQualityArg::Auto) {
-        let mut reader = LazyTiffPages::open(input, policy)?;
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
         let mut all_bilevel = true;
         for _ in 0..page_count {
             let pm = reader.next_page()?;
@@ -2225,7 +2242,7 @@ fn encode_tiff_page_bundle(
         if thumbnails {
             eprintln!("--thumbnails is ignored for lossless (JB2-only) bundles");
         }
-        let mut reader = LazyTiffPages::open(input, policy)?;
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
         let mut masks = Vec::with_capacity(page_count);
         for _ in 0..page_count {
             let pm = reader.next_page()?;
@@ -2233,7 +2250,7 @@ fn encode_tiff_page_bundle(
         }
         encode_djvm_bundle_jb2(&masks, shared_dict_pages, dpi)
     } else {
-        let mut reader = LazyTiffPages::open(input, policy)?;
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
         djvu_rs::djvu_encode::encode_djvm_layered_shared_streaming(
             page_count,
             |_idx| {

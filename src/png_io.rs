@@ -305,22 +305,31 @@ pub fn decode_tiff_file_to_pixmaps(
     tiff_ingest::decode_pages(path, policy, None)
 }
 
-/// Count a (possibly multipage) TIFF file's pages without decoding pixel
-/// data (step 5 of the encoder peak-memory plan): a cheap, IFD-only pass
-/// used to learn `page_count` before pulling pages one at a time via
+/// Count a (possibly multipage) TIFF's pages without decoding pixel data
+/// (step 5 of the encoder peak-memory plan): a cheap, IFD-only pass used to
+/// learn `page_count` before pulling pages one at a time via
 /// [`LazyTiffPages`].
+///
+/// Takes the file's already-read bytes rather than a path, so a caller that
+/// also opens a [`LazyTiffPages`] on the same file reads it from disk only
+/// once (see that type's doc comment: it borrows `file_bytes` too, for the
+/// duration of the encode).
 ///
 /// Requires the `tiff` feature.
 #[cfg(feature = "tiff")]
-pub fn tiff_file_page_count(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
-    tiff_ingest::count_pages(path)
+pub fn tiff_file_page_count(
+    file_bytes: &[u8],
+    path: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    tiff_ingest::count_pages(file_bytes, path)
 }
 
 /// A lazily-decoding, strictly-forward reader over a (possibly multipage)
 /// TIFF file's pages, for feeding a streaming encode entry point without
-/// materializing every page's [`Pixmap`] at once. See the type's own doc
-/// comment in `tiff_ingest` for why the decoder holds a leaked `'static`
-/// byte buffer.
+/// materializing every page's [`Pixmap`] at once. Borrows the caller-owned
+/// file bytes (`'a`) rather than owning them — see the type's own doc
+/// comment in `tiff_ingest` for why no leak or unsafe self-reference is
+/// needed.
 ///
 /// Requires the `tiff` feature.
 #[cfg(feature = "tiff")]
@@ -509,9 +518,12 @@ mod tiff_ingest {
     /// regardless. Used by the lazy per-page source ([`LazyTiffPages`]) to
     /// learn `page_count` up front, since the streaming encode entry point
     /// needs the total before pulling the first page.
-    pub(super) fn count_pages(path: &Path) -> Result<usize, BoxError> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
+    ///
+    /// Takes the file's bytes directly (rather than re-reading `path`) so a
+    /// caller that also opens a [`LazyTiffPages`] on the same bytes pays for
+    /// exactly one `std::fs::read`.
+    pub(super) fn count_pages(file_bytes: &[u8], path: &Path) -> Result<usize, BoxError> {
+        let mut decoder = Decoder::new(Cursor::new(file_bytes))
             .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
         let mut count = 1;
         while decoder.more_images() {
@@ -536,36 +548,37 @@ mod tiff_ingest {
     /// order, one at a time) — so this reader has no need to support random
     /// access or re-decoding an earlier page.
     ///
-    /// The file's raw bytes are read once and leaked (`Box::leak`) to give
-    /// the decoder a `'static` borrow without an unsafe self-referential
-    /// struct: the sub-byte/palette raw-strip fast path (`decode_raw_page`)
-    /// borrows directly into those bytes for zero-copy strip reads, so the
-    /// decoder can't own a plain `Vec<u8>` cursor instead without
-    /// duplicating that logic. This is a bounded, one-time leak of the
-    /// *compressed source file's* size (typically far smaller than even one
-    /// decoded RGBA page, let alone all of them) for the remaining lifetime
-    /// of the process — the CLI exits shortly after encoding, so the OS
-    /// reclaims it; unlike the `Vec<Pixmap>` this reader replaces, it does
-    /// not scale with page count.
-    pub struct LazyTiffPages {
-        decoder: FileDecoder<'static>,
-        file_bytes: &'static [u8],
+    /// Borrows the caller-owned file bytes (`'a`) instead of owning them:
+    /// the sub-byte/palette raw-strip fast path (`decode_raw_page`) borrows
+    /// directly into those bytes for zero-copy strip reads, so `FileDecoder`
+    /// is already lifetime-parameterised over exactly this borrow — no
+    /// `Box::leak`, no unsafe self-reference, and no memory retained past
+    /// the caller's own `Vec<u8>` going out of scope. The caller (e.g. the
+    /// CLI) reads the file once with `std::fs::read`, keeps that buffer
+    /// alive on the stack for the encode's duration, and passes a borrow of
+    /// it to [`Self::new`].
+    pub struct LazyTiffPages<'a> {
+        decoder: FileDecoder<'a>,
+        file_bytes: &'a [u8],
         path: std::path::PathBuf,
         policy: IngestPolicy,
         next_index: usize,
     }
 
-    impl LazyTiffPages {
-        /// Open `path` and position at page 0. Reads and leaks the whole
-        /// file's bytes once (see the type doc); decodes no pixel data yet.
-        pub fn open(path: &Path, policy: IngestPolicy) -> Result<Self, BoxError> {
-            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            let decoder = Decoder::new(Cursor::new(leaked))
+    impl<'a> LazyTiffPages<'a> {
+        /// Open a reader over `file_bytes` (the whole TIFF file, already
+        /// read by the caller) and position at page 0. `path` is used only
+        /// for error messages. Decodes no pixel data yet.
+        pub fn new(
+            file_bytes: &'a [u8],
+            path: &Path,
+            policy: IngestPolicy,
+        ) -> Result<Self, BoxError> {
+            let decoder = Decoder::new(Cursor::new(file_bytes))
                 .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
             Ok(Self {
                 decoder,
-                file_bytes: leaked,
+                file_bytes,
                 path: path.to_path_buf(),
                 policy,
                 next_index: 0,

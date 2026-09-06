@@ -14624,25 +14624,40 @@ to have a lazy "give me page i" mechanic once found:
   source closure guarantees (called in strictly increasing index order, one
   page at a time), so no re-parsing or seeking-back is ever asked of it.
   Two new pieces in `src/png_io.rs`:
-  - `count_pages` — an IFD (tag-directory)-only pass that walks
-    `decoder.next_image()`/`more_images()` without decoding any pixel data,
-    to learn `page_count` up front (the streaming entry point needs the
-    total before pulling page 0). This is one extra linear pass of cheap
-    metadata reads, not pixel decodes — verified not quadratic (see Numbers).
-  - `LazyTiffPages` — a forward-only page reader wrapping a `FileDecoder`.
-    Its raw-strip fast path (`decode_raw_page`) borrows zero-copy into the
-    whole file's byte buffer, so giving the decoder a `'static` buffer via
-    `Box::leak` (documented, not `unsafe`) was chosen over either an unsafe
-    self-referential struct or duplicating that zero-copy decode logic with
-    an owned buffer. The leak is bounded to one compressed source file's
-    size, once, for the process's remaining (short) CLI lifetime — the OS
-    reclaims it at exit, and it does not scale with page count the way the
-    `Vec<Pixmap>` it replaces did.
+  - `count_pages(file_bytes: &[u8], path: &Path)` — an IFD (tag-directory)-
+    only pass that walks `decoder.next_image()`/`more_images()` without
+    decoding any pixel data, to learn `page_count` up front (the streaming
+    entry point needs the total before pulling page 0). This is one extra
+    linear pass of cheap metadata reads, not pixel decodes — verified not
+    quadratic (see Numbers).
+  - `LazyTiffPages<'a>` — a forward-only page reader wrapping a
+    `FileDecoder<'a>`. Its raw-strip fast path (`decode_raw_page`) borrows
+    zero-copy into the whole file's byte buffer, and `FileDecoder` is
+    already lifetime-parameterised over exactly that borrow (`Decoder<
+    Cursor<&'a [u8]>>`) — so `LazyTiffPages::new(file_bytes: &'a [u8], path,
+    policy)` simply borrows the caller's already-owned bytes for `'a`.
+    **Revision (2026-09-06, pre-merge review):** the first version of this
+    made the struct own its bytes via `Box::leak`'d `&'static [u8]`,
+    reasoning that the CLI process exits shortly after encoding so the OS
+    reclaims the leak. That reasoning does not extend to `LazyTiffPages`
+    being public library API (re-exported from `png_io`): a long-running
+    service converting many TIFFs through it would leak every file's
+    compressed size, unboundedly, for the life of the process — exactly the
+    unbounded-growth failure mode this whole plan exists to eliminate.
+    Fixed by giving the struct the `'a` lifetime instead — no leak, no
+    `unsafe`, no self-reference; the CLI now does the one `std::fs::read`
+    itself, keeps that `Vec<u8>` alive on the stack for the encode's
+    duration, and passes borrows of it into `count_pages` and every
+    `LazyTiffPages` it opens (see below — `encode_tiff_page_bundle` opens up
+    to three readers across the auto-classify/lossless-mask/streaming-encode
+    passes, all borrowing the same one-time read).
   - `-q auto`'s classification pre-pass and the lossless (JB2-only) bundle
     path each need every page's pixmap once before the real encode; each
-    opens its own fresh `LazyTiffPages` (forward-only, can't rewind) rather
-    than trying to share one reader across two consumers — still one linear
-    pass per pass, not per-page-squared.
+    opens its own fresh `LazyTiffPages` (forward-only, can't rewind) over
+    the same borrowed bytes rather than trying to share one reader across
+    two consumers — still one linear pass per pass, not per-page-squared,
+    and (after the fix above) only one disk read total regardless of how
+    many passes borrow the buffer.
 - **Error handling.** `EncodeError::PageSource` needs `E: std::error::Error +
   Send + Sync + 'static`, but `png_io`'s decode errors (from `png`/`zune-
   jpeg`/`tiff`, boxed as `Box<dyn std::error::Error>`) aren't guaranteed
@@ -14677,6 +14692,19 @@ to have a lazy "give me page i" mechanic once found:
    because the CLI's directory path has no extra `djvu_render` re-decode step
    in front of it the way step 4's own probe harness did.
 
+   Re-measured after the pre-merge `LazyTiffPages` lifetime fix (see
+   Approach's Revision note): the scaling script drives the *directory*
+   ingestion path, which the fix never touched (the leak was TIFF-only), so
+   the number is expected to be unchanged and it is — **1.85 MB/page** on
+   the re-measured run, the same slope within the noise of a `/usr/bin/time
+   -l` measurement (1.93 vs. 1.85, both single-digit and far below the
+   34.00 MB/page baseline). The fix's own real, non-scaling cost — the CLI
+   now keeps one TIFF file's compressed bytes on the stack for the whole
+   encode, instead of a transient leaked copy — applies only to the TIFF
+   path and does not appear in this directory-based measurement at all;
+   it is bounded by one file's size regardless of page count, so it cannot
+   produce a per-page slope.
+
 2. *Byte-identity.* Same corpus/fixtures matrix steps 3/4 used, run against
    both release binaries with `cmp`:
    - Single-page (page 1 of every fixture rendered to PNG) × `{quality,
@@ -14694,7 +14722,11 @@ to have a lazy "give me page i" mechanic once found:
 
    **Directory/single-page matrix: 77/77 byte-identical** (60 + 16 + 1, same
    count as step 4's own run). **TIFF matrix: 5/5 byte-identical.** Total
-   **82/82, zero failures.**
+   **82/82, zero failures.** The TIFF matrix (the one exercising
+   `LazyTiffPages`) was re-run against the release binary rebuilt from the
+   pre-merge lifetime fix (Approach's Revision note) — still 5/5
+   byte-identical, confirming the borrow-based reader produces the same
+   output as the original leaked-`'static` version it replaced.
 3. *Error wording*, directory input with one corrupt PNG among valid pages —
    unchanged before and after:
    ```
