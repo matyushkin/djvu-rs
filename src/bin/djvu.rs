@@ -1791,6 +1791,42 @@ fn cmd_bzz_decode(file: &Path, output: &Path) -> Result<(), Box<dyn std::error::
 
 // ── encode ───────────────────────────────────────────────────────────────────
 
+/// Wraps a page-ingestion error's rendered message so it satisfies
+/// `std::error::Error + Send + Sync + 'static`, the bound
+/// `encode_djvm_layered_shared_streaming`'s page-source closure requires.
+///
+/// Carries only the original error's `Display` text, not the error value
+/// itself: `png_io`'s decode errors (from the `png`/`zune-jpeg`/`tiff`
+/// crates, boxed as `Box<dyn std::error::Error>`) aren't guaranteed
+/// `Send + Sync`, but that rendered message is all the CLI ever showed the
+/// user for a failed page anyway (see `describe_layered_encode_error`,
+/// below, for how it's unwrapped back out on the way to the user).
+#[derive(Debug)]
+struct PageDecodeError(String);
+
+impl std::fmt::Display for PageDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PageDecodeError {}
+
+/// Format an [`djvu_rs::djvu_encode::EncodeError`] from the streaming entry
+/// point the way the eager per-path decode loop it replaces reported page
+/// failures: [`EncodeError::PageSource`](djvu_rs::djvu_encode::EncodeError::PageSource)
+/// (a page that failed to decode) surfaces the original ingestion message
+/// verbatim, with no extra prefix — that decode error used to propagate
+/// straight out of the eager loop via `?`, before any encode call existed to
+/// prefix it. Any other `EncodeError` keeps the "layered encode: " prefix
+/// the eager entry points' own error already used.
+fn describe_layered_encode_error(e: djvu_rs::djvu_encode::EncodeError) -> String {
+    match e {
+        djvu_rs::djvu_encode::EncodeError::PageSource(inner) => inner.to_string(),
+        other => format!("layered encode: {other}"),
+    }
+}
+
 fn cmd_encode(
     input: &Path,
     output: &Path,
@@ -1919,21 +1955,26 @@ fn cmd_encode(
 
         // #452: layered multi-page now shares a Djbz dictionary across pages,
         // honoring --shared-dict-pages (was: per-page independent masks).
-        let mut pixmaps = Vec::with_capacity(entries.len());
-        for path in &entries {
-            pixmaps.push(djvu_rs::png_io::decode_image_to_pixmap_with_policy(
-                path, policy,
-            )?);
-        }
-        let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared_with_thumbnails(
-            &pixmaps,
+        //
+        // Step 5 (encoder peak-memory plan): pages decode lazily, one window
+        // at a time, through the streaming entry point instead of building
+        // the whole `Vec<Pixmap>` up front — a directory of scanned pages is
+        // exactly the case that plan's RSS-scaling numbers targeted.
+        let bytes = djvu_rs::djvu_encode::encode_djvm_layered_shared_streaming(
+            entries.len(),
+            |idx| {
+                djvu_rs::png_io::decode_image_to_pixmap_with_policy(&entries[idx], policy)
+                    .map_err(|e| PageDecodeError(e.to_string()))
+            },
             q,
             dpi,
             segment_options,
             shared_dict_pages,
             thumbnails,
+            None,
+            None,
         )
-        .map_err(|e| format!("layered encode: {e}"))?;
+        .map_err(describe_layered_encode_error)?;
         std::fs::write(output, &bytes)?;
         eprintln!(
             "{} pages → {} ({} bytes, layered {:?}, shared-dict threshold = {}, thumbnails = {})",
@@ -2007,20 +2048,36 @@ fn cmd_encode(
     // #694 slice 2: a multipage TIFF file maps to a multi-page bundle — one
     // DjVu page per TIFF page (IFD), in stored order, same bundle rules as a
     // directory input.
+    //
+    // Step 5 (encoder peak-memory plan): learn the page count from a cheap
+    // IFD-only pass (no pixel decode) instead of eagerly decoding every page
+    // just to check `len() > 1` — the actual pixel decoding happens lazily,
+    // one page at a time, in `encode_tiff_page_bundle` / below.
+    //
+    // The file's bytes are read into `tiff_bytes` exactly once here (not
+    // once per `LazyTiffPages` pass): `count_pages` and every
+    // `LazyTiffPages` reader `encode_tiff_page_bundle` opens borrow the same
+    // `Vec<u8>`, which this function keeps alive on the stack for the whole
+    // encode and frees on return — no leak, unlike an earlier version of
+    // this change.
     #[cfg(feature = "tiff")]
-    let tiff_pages: Option<Vec<djvu_rs::Pixmap>> = if input_is_tiff(input) {
-        Some(djvu_rs::png_io::decode_tiff_file_to_pixmaps(input, policy)?)
+    let tiff_bytes: Option<Vec<u8>> = if input_is_tiff(input) {
+        Some(std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?)
     } else {
         None
     };
     #[cfg(feature = "tiff")]
-    if tiff_pages.as_ref().is_some_and(|p| p.len() > 1) {
+    let tiff_page_count: Option<usize> = match &tiff_bytes {
+        Some(bytes) => Some(djvu_rs::png_io::tiff_file_page_count(bytes, input)?),
+        None => None,
+    };
+    #[cfg(feature = "tiff")]
+    if tiff_page_count.is_some_and(|n| n > 1) {
         if bilevel_codec != BilevelCodecArg::Jb2 {
             return Err("--bilevel-codec smmr is supported only for single-image input".into());
         }
-        let pixmaps = tiff_pages.unwrap();
-        return encode_pixmap_bundle(
-            &pixmaps,
+        return encode_tiff_page_bundle(
+            tiff_bytes.as_deref().unwrap(),
             input,
             output,
             dpi,
@@ -2029,6 +2086,8 @@ fn cmd_encode(
             segment_options,
             shared_dict_pages,
             thumbnails,
+            policy,
+            tiff_page_count.unwrap(),
         );
     }
 
@@ -2036,8 +2095,8 @@ fn cmd_encode(
         eprintln!("--thumbnails applies to multi-page bundles only — ignored");
     }
     #[cfg(feature = "tiff")]
-    let pixmap = match tiff_pages {
-        Some(mut pages) => pages.remove(0),
+    let pixmap = match tiff_page_count {
+        Some(_) => djvu_rs::png_io::decode_tiff_file_to_pixmap_with_policy(input, policy)?,
         None => djvu_rs::png_io::decode_image_to_pixmap_with_policy(input, policy)?,
     };
     #[cfg(not(feature = "tiff"))]
@@ -2120,13 +2179,42 @@ fn input_is_tiff(path: &Path) -> bool {
     header.starts_with(b"II\x2A\x00") || header.starts_with(b"MM\x00\x2A")
 }
 
-/// Encode already-decoded pages as a multi-page bundle, mirroring the
-/// directory-input rules of `cmd_encode` (auto classification, lossless JB2
-/// bundle, or layered bundle with a shared dictionary).
+/// Encode a multipage TIFF file's pages as a multi-page bundle, mirroring
+/// the directory-input rules of `cmd_encode` (auto classification, lossless
+/// JB2 bundle, or layered bundle with a shared dictionary).
+///
+/// Step 5 (encoder peak-memory plan): pages decode lazily via
+/// [`djvu_rs::png_io::LazyTiffPages`] instead of the caller holding every
+/// page's `Pixmap` in one `Vec` — `page_count` is already known (a cheap
+/// IFD-only pass; see the call site) so this never needs to buffer more than
+/// the current page.
+///
+/// `--quality auto` reads every page once to classify, then (for a lossless
+/// or layered bundle) a second `LazyTiffPages` pass re-reads the file for the
+/// actual encode — `LazyTiffPages` is strictly forward-only and cannot
+/// rewind, so a fresh reader is opened per pass rather than trying to buffer
+/// pages across two consumers. Unlike the directory-input path (which reused
+/// its one already-decoded `Pixmap` per page for both classification and
+/// encoding before this step, and still does), **this is a genuine second
+/// full pixel decode of every page for TIFF input specifically** — the
+/// eager `Vec<Pixmap>` this step replaced decoded each TIFF page once and
+/// reused it for both passes. Measured worst case (an all-bilevel multipage
+/// TIFF, where the classify loop cannot break early and both passes run to
+/// completion): 8 pages 649.8ms → 651.0ms (+0.18%), 24 pages 1.948s → 1.948s
+/// (~0%) — within measurement noise both times, because JB2 mask encoding
+/// dominates total time far more than TIFF decode does. Accepted as a
+/// deliberate trade, not fixed: TIFF `-q auto`'s doubled decode is real but
+/// currently unmeasurable in wall clock, against a 94%-plus memory win: see
+/// `PERF_EXPERIMENTS.md`'s "Stream pages in the CLI encoder" entry.
+///
+/// All readers borrow the same `file_bytes` (read once by the caller), so
+/// re-opening a reader for a second pass costs nothing beyond re-parsing the
+/// TIFF header (the IFD directory), not another disk
+/// read.
 #[cfg(feature = "tiff")]
 #[allow(clippy::too_many_arguments)]
-fn encode_pixmap_bundle(
-    pixmaps: &[djvu_rs::Pixmap],
+fn encode_tiff_page_bundle(
+    file_bytes: &[u8],
     input: &Path,
     output: &Path,
     dpi: u16,
@@ -2135,15 +2223,25 @@ fn encode_pixmap_bundle(
     segment_options: Option<djvu_rs::segment::SegmentOptions>,
     shared_dict_pages: usize,
     thumbnails: bool,
+    policy: djvu_rs::ingest::IngestPolicy,
+    page_count: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use djvu_rs::jb2_encode::encode_djvm_bundle_jb2;
+    use djvu_rs::png_io::LazyTiffPages;
     use djvu_rs::segment::{SegmentOptions, segment_page};
 
     let quality = if matches!(quality, EncodeQualityArg::Auto) {
-        let all_bilevel = pixmaps.iter().all(|pm| {
-            djvu_rs::djvu_encode::classify_content(pm)
-                == djvu_rs::djvu_encode::EncodeQuality::Lossless
-        });
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
+        let mut all_bilevel = true;
+        for _ in 0..page_count {
+            let pm = reader.next_page()?;
+            if djvu_rs::djvu_encode::classify_content(&pm)
+                != djvu_rs::djvu_encode::EncodeQuality::Lossless
+            {
+                all_bilevel = false;
+                break;
+            }
+        }
         let picked = if all_bilevel {
             EncodeQualityArg::Lossless
         } else {
@@ -2159,27 +2257,36 @@ fn encode_pixmap_bundle(
         if thumbnails {
             eprintln!("--thumbnails is ignored for lossless (JB2-only) bundles");
         }
-        let masks: Vec<_> = pixmaps
-            .iter()
-            .map(|pm| segment_page(pm, &SegmentOptions::default()).mask)
-            .collect();
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
+        let mut masks = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            let pm = reader.next_page()?;
+            masks.push(segment_page(&pm, &SegmentOptions::default()).mask);
+        }
         encode_djvm_bundle_jb2(&masks, shared_dict_pages, dpi)
     } else {
-        djvu_rs::djvu_encode::encode_djvm_layered_shared_with_thumbnails(
-            pixmaps,
+        let mut reader = LazyTiffPages::new(file_bytes, input, policy)?;
+        djvu_rs::djvu_encode::encode_djvm_layered_shared_streaming(
+            page_count,
+            |_idx| {
+                reader
+                    .next_page()
+                    .map_err(|e| PageDecodeError(e.to_string()))
+            },
             q,
             dpi,
             segment_options,
             shared_dict_pages,
             thumbnails,
+            None,
+            None,
         )
-        .map_err(|e| format!("layered encode: {e}"))?
+        .map_err(describe_layered_encode_error)?
     };
     std::fs::write(output, &bytes)?;
     eprintln!(
-        "{} ({} TIFF pages) → {} ({} bytes, shared-dict threshold = {})",
+        "{} ({page_count} TIFF pages) → {} ({} bytes, shared-dict threshold = {})",
         input.display(),
-        pixmaps.len(),
         output.display(),
         bytes.len(),
         shared_dict_pages,

@@ -644,6 +644,33 @@ fn encode_empty_directory_fails() {
         .stderr(predicates::str::contains("no image files found"));
 }
 
+/// Step 5 (encoder peak-memory plan): a directory page that fails to decode
+/// must still surface a useful message naming the problem, unchanged by the
+/// switch from an eager `Vec<Pixmap>` loop to the lazy streaming encode
+/// entry point (`EncodeError::PageSource` is unwrapped back to the original
+/// ingestion error text at the CLI layer, with no extra prefix).
+#[test]
+fn encode_directory_bad_page_reports_decode_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let input_dir = dir.path().join("pages");
+    std::fs::create_dir(&input_dir).unwrap();
+    write_test_png(&input_dir.join("a.png"), 8, 8);
+    std::fs::write(input_dir.join("b.png"), b"not a png").unwrap();
+    let output = dir.path().join("out.djvu");
+
+    Command::cargo_bin("djvu")
+        .unwrap()
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Invalid PNG signature"));
+}
+
 #[test]
 fn encode_missing_input_fails() {
     let dir = tempfile::tempdir().unwrap();
