@@ -14596,3 +14596,148 @@ later (a trait wrapping the closure, a `From` impl added for a specific `E`)
 without breaking this signature. The CLI itself does not switch over in this
 PR — that is step 5, a separate change — so no user sees this win yet; this
 PR only proves the entry point and its numbers are real.
+
+### Stream pages in the CLI encoder (encoder peak-memory step 5) — **Kept** (2026-09-06)
+
+**Issue.** Step 4 (`ENCODE_STREAMING_WINDOW`, #793) added
+`encode_djvm_layered_shared_streaming`, a bounded-window entry point that
+stops requiring the caller to hold every page's `Pixmap` at once — but left
+the CLI itself on the old eager path. Nobody using `djvu encode` on a
+directory or a multi-page TIFF felt any of step 4's win: `cmd_encode` still
+built a whole `Vec<Pixmap>` (`Vec::with_capacity(entries.len())` plus a
+decode-everything loop) before calling the eager
+`encode_djvm_layered_shared_with_thumbnails`. This is the step users
+actually feel.
+
+**Approach.** Switched both of `cmd_encode`'s multi-page ingestion shapes to
+pull pages lazily through the streaming entry point. Nothing was left on the
+eager path — both shapes the CLI supports for a multi-page bundle turned out
+to have a lazy "give me page i" mechanic once found:
+
+- **Directory of images.** Each page is an independent file; the per-page
+  closure is just `png_io::decode_image_to_pixmap_with_policy(&entries[idx],
+  policy)`, one `open()`+decode per call, O(1) work per page — no container
+  to re-parse, so no quadratic risk here.
+- **Multi-page TIFF.** The harder case: the `tiff` crate's decoder is
+  strictly forward-only (page *i+1* requires having already visited page
+  *i*) — which happens to be *exactly* the calling contract the streaming
+  source closure guarantees (called in strictly increasing index order, one
+  page at a time), so no re-parsing or seeking-back is ever asked of it.
+  Two new pieces in `src/png_io.rs`:
+  - `count_pages` — an IFD (tag-directory)-only pass that walks
+    `decoder.next_image()`/`more_images()` without decoding any pixel data,
+    to learn `page_count` up front (the streaming entry point needs the
+    total before pulling page 0). This is one extra linear pass of cheap
+    metadata reads, not pixel decodes — verified not quadratic (see Numbers).
+  - `LazyTiffPages` — a forward-only page reader wrapping a `FileDecoder`.
+    Its raw-strip fast path (`decode_raw_page`) borrows zero-copy into the
+    whole file's byte buffer, so giving the decoder a `'static` buffer via
+    `Box::leak` (documented, not `unsafe`) was chosen over either an unsafe
+    self-referential struct or duplicating that zero-copy decode logic with
+    an owned buffer. The leak is bounded to one compressed source file's
+    size, once, for the process's remaining (short) CLI lifetime — the OS
+    reclaims it at exit, and it does not scale with page count the way the
+    `Vec<Pixmap>` it replaces did.
+  - `-q auto`'s classification pre-pass and the lossless (JB2-only) bundle
+    path each need every page's pixmap once before the real encode; each
+    opens its own fresh `LazyTiffPages` (forward-only, can't rewind) rather
+    than trying to share one reader across two consumers — still one linear
+    pass per pass, not per-page-squared.
+- **Error handling.** `EncodeError::PageSource` needs `E: std::error::Error +
+  Send + Sync + 'static`, but `png_io`'s decode errors (from `png`/`zune-
+  jpeg`/`tiff`, boxed as `Box<dyn std::error::Error>`) aren't guaranteed
+  `Send + Sync`. Added a small wrapper, `PageDecodeError(String)`, that
+  carries only the rendered `Display` text — which is all the CLI ever
+  showed the user anyway — and `describe_layered_encode_error` unwraps
+  `EncodeError::PageSource` back to that bare message with no added prefix
+  (matching what the old eager `?`-propagated decode error used to print
+  verbatim), while any other `EncodeError` keeps the pre-existing "layered
+  encode: " prefix. Verified byte-identical stderr for the same bad-PNG-in-
+  directory failure before and after (see Numbers) — wording did not change.
+- `--thumbnails` / `--shared-dict-pages` continue to pass straight through
+  to the streaming entry point's own `with_thumbnails` / `shared_dict_page_threshold`
+  parameters, unchanged.
+
+**Numbers.**
+
+1. *RSS-scaling slope* (`scripts/encode_rss_scaling.sh`, 6/12/24-page
+   directories, release CLI, parent commit 910641f vs. this branch, separate
+   scratch `--target-dir`s):
+
+   | Pages | Parent (eager) | This branch (streaming) |
+   |---:|---:|---:|
+   | 6  | 250.2 MB | 88.1 MB |
+   | 12 | 452.8 MB | 99.6 MB |
+   | 24 | 862.0 MB | 122.8 MB |
+
+   Parent slope: **34.00 MB/page** (matches step 4's own 34.05 figure for the
+   still-eager CLI within noise). New slope: **1.93 MB/page**. **≈−94.3%**,
+   clearing the plan's "single digits" target and the ≥50% keep bar by a wide
+   margin — better than even step 4's own library-level ≈3.5 MB/page number,
+   because the CLI's directory path has no extra `djvu_render` re-decode step
+   in front of it the way step 4's own probe harness did.
+
+2. *Byte-identity.* Same corpus/fixtures matrix steps 3/4 used, run against
+   both release binaries with `cmp`:
+   - Single-page (page 1 of every fixture rendered to PNG) × `{quality,
+     archival}`: all `tests/corpus/*.djvu` + `tests/fixtures/*.djvu` = 60
+     cases (2 fixtures — `czech.djvu`, `irish.djvu` — can't be single-page-
+     rendered by either binary, a pre-existing shared-dictionary limitation
+     unrelated to this change, excluded on both sides, same as step 4).
+   - Natural multi-page fixtures (`cable_1973_100133`, `watchmaker`,
+     `war_1812`, `cyrillic_simonovich_co2`) as `djvu encode <dir>` ×
+     `{quality, archival}` × `{plain, --thumbnails}` = 16 cases.
+   - One `-q auto` case (`watchmaker` directory).
+   - A synthetic 6-page multi-page TIFF (Python/PIL-generated) as `djvu
+     encode file.tif` × `{quality, archival}` × `{plain, --thumbnails}` plus
+     one `-q auto` case = 5 cases.
+
+   **Directory/single-page matrix: 77/77 byte-identical** (60 + 16 + 1, same
+   count as step 4's own run). **TIFF matrix: 5/5 byte-identical.** Total
+   **82/82, zero failures.**
+3. *Error wording*, directory input with one corrupt PNG among valid pages —
+   unchanged before and after:
+   ```
+   error: Invalid PNG signature.
+   ```
+4. *Wall clock*, 12-page directory encode (`-q quality`), release binary,
+   5 repetitions each:
+
+   | | Parent (eager) | This branch (streaming) |
+   |---|---:|---:|
+   | mean `real` | 1.12 s | 1.07 s |
+
+   **≈−4.5%** — faster, not a regression, comfortably inside the ≤3%-
+   regression bar. (Plausible: the streaming path never allocates the
+   whole-document `Vec<Pixmap>` up front, so there's less allocator/copy
+   overhead even setting memory aside.)
+5. *Benches* (`cargo bench --bench codecs`, `--save-baseline` on this branch
+   and on parent 910641f in a separate worktree, machine load `uptime` ≈
+   2.3–3.3 throughout, under the plan's "wait if above ~4" threshold):
+   `segment_page_color` 1.9038 → 1.9003 ms (**−0.18%**),
+   `encode_color_page_quality` 4.5971 → 4.5879 ms (**−0.20%**),
+   `encode_djvm_layered_shared` 12.430 → 12.410 ms (**−0.16%**) — all three
+   within noise, as expected: these benches exercise only the library's
+   eager entry points and in-memory `Vec<Pixmap>` inputs, which this PR does
+   not touch at all — only `src/bin/djvu.rs` and `src/png_io.rs` changed.
+6. `make check` (fmt, clippy `-D warnings`, no_std build, wasm32 ×3, full
+   workspace test suite) passed clean on this branch's diff. One pre-existing,
+   unrelated clippy lint (`clippy::manual_unwrap_or` in `png_io.rs`'s
+   `page_orientation`, a function untouched by this PR) also fails identically
+   on the unmodified parent commit — confirmed via `git stash` — a local
+   toolchain/clippy-version drift issue, not introduced here.
+
+**Decision.** Kept.
+
+**Reason.** Both ingestion shapes `cmd_encode` supports for a multi-page
+bundle — directory and multi-page TIFF — turned out to have a genuinely
+lazy per-page mechanic once traced through, so nothing was left on the eager
+path and nothing needed a documented "stays eager" carve-out. The TIFF
+decoder's forward-only API is not a limitation here — it is exactly the
+shape the streaming source's calling contract already requires, so
+`LazyTiffPages` needed no extra bookkeeping to fit it. The RSS-scaling win
+(34.00 → 1.93 MB/page, −94.3%) is the number the whole plan was written to
+produce, and it landed with zero behavior change (82/82 byte-identical,
+identical error wording) and zero performance cost (wall clock faster, all
+three benches within noise).
+

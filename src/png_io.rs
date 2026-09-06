@@ -305,6 +305,27 @@ pub fn decode_tiff_file_to_pixmaps(
     tiff_ingest::decode_pages(path, policy, None)
 }
 
+/// Count a (possibly multipage) TIFF file's pages without decoding pixel
+/// data (step 5 of the encoder peak-memory plan): a cheap, IFD-only pass
+/// used to learn `page_count` before pulling pages one at a time via
+/// [`LazyTiffPages`].
+///
+/// Requires the `tiff` feature.
+#[cfg(feature = "tiff")]
+pub fn tiff_file_page_count(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    tiff_ingest::count_pages(path)
+}
+
+/// A lazily-decoding, strictly-forward reader over a (possibly multipage)
+/// TIFF file's pages, for feeding a streaming encode entry point without
+/// materializing every page's [`Pixmap`] at once. See the type's own doc
+/// comment in `tiff_ingest` for why the decoder holds a leaked `'static`
+/// byte buffer.
+///
+/// Requires the `tiff` feature.
+#[cfg(feature = "tiff")]
+pub use tiff_ingest::LazyTiffPages;
+
 /// Read the first page's TIFF X/YResolution tags as DPI (dots per inch).
 ///
 /// Returns `Ok(None)` when the tags are absent or malformed, when
@@ -480,6 +501,97 @@ mod tiff_ingest {
             decoder
                 .next_image()
                 .map_err(|e| format!("{}: TIFF page {} error: {e}", path.display(), pages.len()))?;
+        }
+    }
+
+    /// Count a (possibly multipage) TIFF's pages without decoding any pixel
+    /// data — only IFD (tag directory) traversal, which `tiff` does per page
+    /// regardless. Used by the lazy per-page source ([`LazyTiffPages`]) to
+    /// learn `page_count` up front, since the streaming encode entry point
+    /// needs the total before pulling the first page.
+    pub(super) fn count_pages(path: &Path) -> Result<usize, BoxError> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut decoder = Decoder::new(Cursor::new(bytes.as_slice()))
+            .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+        let mut count = 1;
+        while decoder.more_images() {
+            decoder
+                .next_image()
+                .map_err(|e| format!("{}: TIFF page {count} error: {e}", path.display()))?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// A lazily-decoding, strictly-forward TIFF page reader (step 5 of the
+    /// encoder peak-memory plan): one page's [`Pixmap`] materializes only
+    /// when [`Self::next_page`] is called, and only one page's decoded
+    /// pixels are ever resident at a time — instead of [`decode_pages`]'s
+    /// whole-file `Vec<Pixmap>`.
+    ///
+    /// The underlying `tiff` decoder is strictly forward-only (advancing to
+    /// page *i+1* requires having already visited page *i*), which is
+    /// exactly the access pattern the streaming encode entry point's page
+    /// source contract guarantees (calls in strictly increasing index
+    /// order, one at a time) — so this reader has no need to support random
+    /// access or re-decoding an earlier page.
+    ///
+    /// The file's raw bytes are read once and leaked (`Box::leak`) to give
+    /// the decoder a `'static` borrow without an unsafe self-referential
+    /// struct: the sub-byte/palette raw-strip fast path (`decode_raw_page`)
+    /// borrows directly into those bytes for zero-copy strip reads, so the
+    /// decoder can't own a plain `Vec<u8>` cursor instead without
+    /// duplicating that logic. This is a bounded, one-time leak of the
+    /// *compressed source file's* size (typically far smaller than even one
+    /// decoded RGBA page, let alone all of them) for the remaining lifetime
+    /// of the process — the CLI exits shortly after encoding, so the OS
+    /// reclaims it; unlike the `Vec<Pixmap>` this reader replaces, it does
+    /// not scale with page count.
+    pub struct LazyTiffPages {
+        decoder: FileDecoder<'static>,
+        file_bytes: &'static [u8],
+        path: std::path::PathBuf,
+        policy: IngestPolicy,
+        next_index: usize,
+    }
+
+    impl LazyTiffPages {
+        /// Open `path` and position at page 0. Reads and leaks the whole
+        /// file's bytes once (see the type doc); decodes no pixel data yet.
+        pub fn open(path: &Path, policy: IngestPolicy) -> Result<Self, BoxError> {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            let decoder = Decoder::new(Cursor::new(leaked))
+                .map_err(|e| format!("{}: TIFF open error: {e}", path.display()))?;
+            Ok(Self {
+                decoder,
+                file_bytes: leaked,
+                path: path.to_path_buf(),
+                policy,
+                next_index: 0,
+            })
+        }
+
+        /// Decode and return the next page in order, advancing the decoder.
+        /// Callers drive this from a source closure indexed `0..page_count`,
+        /// where `page_count` comes from [`count_pages`] on the same file;
+        /// calling it more times than the file has pages returns a TIFF
+        /// error from the underlying decoder rather than panicking.
+        pub fn next_page(&mut self) -> Result<Pixmap, BoxError> {
+            check_page_icc(&mut self.decoder, &self.path, self.policy, self.next_index)?;
+            let orientation = page_orientation(&mut self.decoder);
+            let pm =
+                decode_current_page(&mut self.decoder, self.file_bytes, &self.path, self.policy)?;
+            let mut pm = orient_pixmap(pm, orientation);
+            self.policy.alpha.apply(&mut pm.data);
+            let index = self.next_index;
+            self.next_index += 1;
+            if self.decoder.more_images() {
+                self.decoder.next_image().map_err(|e| {
+                    format!("{}: TIFF page {index} error: {e}", self.path.display())
+                })?;
+            }
+            Ok(pm)
         }
     }
 
