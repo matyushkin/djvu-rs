@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788469658228,
+  "lastUpdate": 1788676721413,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18658,6 +18658,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47067000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "910641f8e3b2adee674a55003c9fc5c10c59b2d2",
+          "message": "perf(encode)!: bounded-window streaming entry point (encoder peak-memory step 4) (#793)\n\n* perf(encode): bounded-window streaming entry point (encoder peak-memory step 4)\n\nAdds encode_djvm_layered_shared_streaming: a new public entry point that\npulls pixmaps one at a time (via a caller FnMut(usize) -> Result<Pixmap, E>\nclosure) up to a small window instead of requiring the whole &[Pixmap]\nup front, so phase 1 can drop each page's pixmap before the next window\nis fetched. PreparedPage now carries width/height so phase 3 (build_page)\nno longer needs the pixmap for INFO sizing; the lossy fallback path\n(which still needs the pixmap) is refused up front rather than silently\nproducing wrong output.\n\nClears the plan's keep bar: dhat t-gmax -72.3% (518.6M -> 143.6M bytes),\nRSS slope -90% (34.05 -> ~3.5 MB/page), 77/77 differential cases\nbyte-identical, and the three tracked benchmarks all within +/-1.5%.\nThe four existing eager entry points are left as-is (not rerouted\nthrough the new closure, which would force per-page cloning); the CLI\nitself is not switched over in this change (step 5).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* refactor(encode)!: mark EncodeError non_exhaustive\n\ndocs/api-compatibility.md §1 already declares error enums non_exhaustive\n\"in spirit\". Making it literal means the streaming entry point's new\nPageSource variant is the last one to trip the API-breakage gate, which is\nthe end state that gate's own TODO asks for.\n\nBREAKING CHANGE: EncodeError is now #[non_exhaustive]; downstream matches\nneed a _ arm. It also gained the PageSource variant.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-06T08:13:20+02:00",
+          "tree_id": "3facac0afe6abbbfc4eb3b7999a8774eba58ea7f",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/910641f8e3b2adee674a55003c9fc5c10c59b2d2"
+        },
+        "date": 1788676719764,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 121000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6036000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35606000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34053000,
             "range": "± 0",
             "unit": "ns/iter"
           }
