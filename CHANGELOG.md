@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0](https://github.com/matyushkin/djvu-rs/compare/v0.30.2...v0.31.0) (2026-09-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **encode:** EncodeError is now #[non_exhaustive]; downstream matches need a _ arm. It also gained the PageSource variant.
+
+### Features
+
+* **encode:** per-page mask reuse on the multi-page bundle path ([#779](https://github.com/matyushkin/djvu-rs/issues/779) follow-up) ([#784](https://github.com/matyushkin/djvu-rs/issues/784)) ([50f71cd](https://github.com/matyushkin/djvu-rs/commit/50f71cdfcf377cfd9d8bbeabf70c11f61f09bdad))
+* **encode:** reuse an existing Sjbz mask on re-encode ([#601](https://github.com/matyushkin/djvu-rs/issues/601) follow-up) ([#779](https://github.com/matyushkin/djvu-rs/issues/779)) ([8696f72](https://github.com/matyushkin/djvu-rs/commit/8696f72a4cf1d4984f11a17bec6efcd3e827b6da))
+
+
+### Performance Improvements
+
+* **encode:** bounded-window streaming entry point (encoder peak-memory step 4) ([#793](https://github.com/matyushkin/djvu-rs/issues/793)) ([910641f](https://github.com/matyushkin/djvu-rs/commit/910641f8e3b2adee674a55003c9fc5c10c59b2d2))
+* **encode:** commit the peak-RSS scaling harness (encoder peak-memory step 1) ([#786](https://github.com/matyushkin/djvu-rs/issues/786)) ([e5ad127](https://github.com/matyushkin/djvu-rs/commit/e5ad127d6d1e2d020fad686bddf392ca541e010f))
+* **encode:** precompute the per-CC colour table in phase 1 (encoder peak-memory step 3) ([#792](https://github.com/matyushkin/djvu-rs/issues/792)) ([c100fc8](https://github.com/matyushkin/djvu-rs/commit/c100fc802b067f444a82c5face4449cf2c3f85dc))
+* **encode:** stream pages in the CLI encoder (encoder peak-memory step 5) ([#794](https://github.com/matyushkin/djvu-rs/issues/794)) ([9b1c782](https://github.com/matyushkin/djvu-rs/commit/9b1c782e36c1bc551ab2fa01d6228ce532082810))
+* **segment:** inline derive_background to restore pre-split codegen ([#782](https://github.com/matyushkin/djvu-rs/issues/782)) ([bf39d5b](https://github.com/matyushkin/djvu-rs/commit/bf39d5ba7a9b1a27bde6d84fccee26a703d81a24))
+* **thumbnail:** skip full-res extract_mask on the thumbnail path (round 89 follow-up) ([#785](https://github.com/matyushkin/djvu-rs/issues/785)) ([117c3e5](https://github.com/matyushkin/djvu-rs/commit/117c3e577e7e5d659625671dfb6074d6a0df530c))
+
 ## [0.30.2](https://github.com/matyushkin/djvu-rs/compare/v0.30.1...v0.30.2) (2026-08-31)
 
 
