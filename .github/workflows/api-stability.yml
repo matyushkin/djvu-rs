@@ -32,20 +32,19 @@ jobs:
     name: Public API breakage (cargo-semver-checks)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # TODO(#695): one release away from becoming a hard gate. Both original
-    # preconditions are now met — releases have shipped (the v0.27.0 baseline
-    # this TODO was written against is long gone), and every public error enum
-    # carries #[non_exhaustive] per docs/api-compatibility.md §1 ("Error
-    # stability rule"), so an added variant no longer reports as breakage and
-    # the gate stops crying wolf.
+    # Blocking since v0.32.0 (#695). It ran with continue-on-error from #695
+    # until then, for one reason: the error enums were exhaustive, so every
+    # intended new variant reported as breakage and the gate could not tell that
+    # apart from a real break. #796 marked all 34 public error enums
+    # #[non_exhaustive] (docs/api-compatibility.md §1, "Error stability rule")
+    # and v0.32.0 shipped them, which reset the baseline this job compares
+    # against. A finding here is now an unintended break of the stable surface.
     #
-    # It cannot be flipped in the same PR that marks them: cargo-semver-checks
-    # compares against the last *published* release, so marking 33 enums reads
-    # as 33 intended breaks until the accompanying minor bump ships. Delete
-    # continue-on-error in a follow-up PR once v0.32.0 is on crates.io — the
-    # gate then compares like against like and any remaining finding is a real,
-    # unintended break.
-    continue-on-error: true
+    # If this job goes red on an *intended* break, the fix is the version bump
+    # the break requires (a `!` commit or a BREAKING CHANGE footer, which
+    # release-please turns into a minor bump on 0.x) — not re-adding
+    # continue-on-error. Adding a variant to an error enum is not a break and
+    # does not trip this.
     steps:
       - uses: actions/checkout@v6
 
