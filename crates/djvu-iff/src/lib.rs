@@ -41,6 +41,7 @@ use std::{string::String, vec::Vec};
 
 /// Errors that can occur while parsing the IFF container.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IffError {
     /// Input data is too short to contain a valid IFF file.
     #[error("input is too short to be a valid IFF file")]
@@ -92,6 +93,7 @@ pub enum IffError {
 
 /// Original error type used by the legacy implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LegacyError {
     /// Input data is shorter than expected.
     UnexpectedEof,

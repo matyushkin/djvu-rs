@@ -43,6 +43,7 @@ use crate::{
 
 /// Errors from TIFF conversion.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TiffError {
     /// Document model error.
     #[error("document error: {0}")]

@@ -26,6 +26,7 @@ static SPOOL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Error type for DJVM merge, split, and conversion operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DjvmError {
     /// IFF container parse error.
     #[error("IFF parse error: {0}")]

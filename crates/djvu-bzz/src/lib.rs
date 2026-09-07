@@ -22,6 +22,7 @@ pub use encode::bzz_encode;
 
 /// BZZ compression decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BzzError {
     /// Input is too short to be a valid BZZ stream (fewer than 2 bytes).
     #[error("BZZ input is too short")]

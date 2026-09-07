@@ -49,6 +49,7 @@ pub mod encode;
 
 /// JB2 bitonal image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Jb2Error {
     /// Input ended before the JB2 stream was complete.
     #[error("JB2 stream is truncated")]

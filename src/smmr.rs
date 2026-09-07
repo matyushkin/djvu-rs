@@ -27,6 +27,7 @@ use crate::bitmap::Bitmap;
 
 /// Error returned by [`decode_smmr`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SmmrError {
     TooShort,
     BadHeader,

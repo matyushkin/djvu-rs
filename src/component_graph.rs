@@ -55,6 +55,7 @@ pub struct ComponentNode {
 
 /// Structural problems found while building or validating a component graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphError {
     /// An INCL payload names no DIRM component.
     MissingTarget {

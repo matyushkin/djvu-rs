@@ -45,6 +45,7 @@ use tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 
 /// Errors that can occur while initializing or decoding a ZP stream.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ZpError {
     /// Input is too short — the ZP coder needs at least 2 bytes to load the
     /// initial code register.

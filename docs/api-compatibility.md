@@ -48,11 +48,19 @@ bump). This includes:
 - The writer surfaces behind their feature gates (`pdf`, `epub`, `cbz`,
   `tiff`): once a `djvu_to_*` entry point ships, its signature is stable.
 
-**Error stability rule.** Error *enums* are `#[non_exhaustive]` in spirit:
-consumers must not rely on the absence of variants, and adding a new variant is
-a compatible change. Renaming or removing an existing variant, or changing the
-data it carries, is breaking. Matching on a stable variant and reading its
-documented fields is supported.
+**Error stability rule.** Every public error *enum* carries
+`#[non_exhaustive]`: consumers must not rely on the absence of variants, and
+adding a new variant is a compatible change. Renaming or removing an existing
+variant, or changing the data it carries, is breaking. Matching on a stable
+variant and reading its documented fields is supported; a `match` on an error
+enum must include a `_` arm.
+
+This was a rule "in spirit" until 0.32.0, enforced only by review. It is now
+literal, which is what lets the `Public API breakage` CI gate be a hard failure
+instead of an advisory one: before, every intended new variant reported as
+breakage, so the gate had to run with `continue-on-error` and could not block a
+real, unintended break either. Any new public error enum must be marked the same
+way.
 
 ### Experimental
 

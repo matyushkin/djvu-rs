@@ -172,6 +172,7 @@ pub struct OptimizationReport {
 
 /// Errors returned while planning or applying an optimization.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OptimizeError {
     /// The input did not parse as an IFF document.
     #[error("optimizer input parse failed: {0}")]

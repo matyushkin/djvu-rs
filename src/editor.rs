@@ -157,6 +157,7 @@ pub struct EditPlan {
 
 /// Errors from request validation, application, or atomic output.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EditError {
     /// The request version is not supported by this editor.
     #[error("unsupported editor schema version {found}; expected {EDIT_SCHEMA_VERSION}")]
