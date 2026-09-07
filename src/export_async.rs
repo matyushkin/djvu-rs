@@ -117,6 +117,7 @@ where
 /// Errors from [`djvu_to_pdf_to_async_writer`].
 #[cfg(feature = "pdf")]
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncPdfError {
     /// The synchronous PDF exporter failed, including rendering, cancellation,
     /// and its own output errors.
@@ -170,6 +171,7 @@ pub async fn djvu_to_pdf_to_async_writer<W: AsyncWrite + Unpin>(
 
 /// Errors from [`stream_djvm_to_async_writer`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncDjvmError {
     /// The synchronous DJVM stream writer or its spool failed.
     #[error("DJVM export error: {0}")]

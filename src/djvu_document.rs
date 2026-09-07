@@ -84,6 +84,7 @@ impl ComponentId {
 
 /// Typed failures returned by a [`ComponentResolver`].
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum ComponentResolveError {
     /// The requested component is not available to the resolver.
     #[error("indirect component {component:?} is missing")]
@@ -126,6 +127,7 @@ where
 
 /// Errors that can occur when working with the DjVuDocument API.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DocError {
     /// IFF container parse error.
     #[error("IFF error: {0}")]

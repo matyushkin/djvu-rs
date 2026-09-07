@@ -84,6 +84,7 @@ fn count_jb2_mask_decode() {
 
 /// Errors that can occur during DjVuPage rendering.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RenderError {
     /// IW44 wavelet decode error.
     #[error("IW44 decode error: {0}")]

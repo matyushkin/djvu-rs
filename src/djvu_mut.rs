@@ -64,6 +64,7 @@ use crate::text_encode::encode_text_layer;
 
 /// Errors produced by [`DjVuDocumentMut`] operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MutError {
     /// IFF parse error during [`DjVuDocumentMut::from_bytes`].
     #[error("IFF parse error: {0}")]

@@ -34,6 +34,7 @@ use crate::{
 
 /// Errors from PDF conversion.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PdfError {
     /// Document model error.
     #[error("document error: {0}")]

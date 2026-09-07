@@ -20,6 +20,7 @@ use crate::export_control::{ExportObserver, NoOpObserver};
 
 /// Errors during CBZ conversion.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CbzError {
     /// Document model error.
     #[error("document error: {0}")]

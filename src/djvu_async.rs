@@ -61,6 +61,7 @@ use crate::{
 
 /// Errors from async rendering.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncRenderError {
     /// The underlying render failed.
     #[error("render error: {0}")]
@@ -73,6 +74,7 @@ pub enum AsyncRenderError {
 
 /// Errors from async tile rendering (#691).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncTileError {
     /// The underlying tile render failed — including
     /// [`TileError::Cancelled`] when the token fired.
@@ -88,6 +90,7 @@ pub enum AsyncTileError {
 /// lazy loader). One enum spans the whole async "couldn't get the document /
 /// page" seam (#369).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AsyncLazyError {
     /// I/O error from the underlying async reader.
     #[error("I/O error: {0}")]

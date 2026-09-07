@@ -59,6 +59,7 @@ use crate::pixmap::Pixmap;
 
 /// Error type for the tile API.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TileError {
     /// The underlying region render failed.
     #[error(transparent)]

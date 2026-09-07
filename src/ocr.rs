@@ -26,6 +26,7 @@ use crate::text::TextLayer;
 
 /// Error type for OCR operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OcrError {
     /// The OCR engine failed to initialize.
     #[error("OCR init failed: {0}")]

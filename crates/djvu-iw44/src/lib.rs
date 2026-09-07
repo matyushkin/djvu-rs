@@ -42,6 +42,7 @@ pub mod encode;
 
 /// IW44 wavelet image decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Iw44Error {
     /// Input ended before the IW44 stream was complete.
     #[error("IW44 stream is truncated")]

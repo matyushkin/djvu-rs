@@ -1267,6 +1267,12 @@ fn iff_error_code(error: &iff::IffError) -> &'static str {
         iff::IffError::UnknownFormType { .. } => "iff.unknown-form",
         iff::IffError::DepthLimitExceeded { .. } => "iff.depth-limit",
         iff::IffError::UnsupportedVersion { .. } => "iff.unsupported-version",
+        // `IffError` is `#[non_exhaustive]` (see `docs/api-compatibility.md`
+        // §1): a variant added in `djvu-iff` must not fail this crate's build.
+        // A new parse failure is still a malformed container, so it reports as
+        // the generic IFF code rather than being silently dropped from the
+        // report.
+        _ => "iff.invalid",
     }
 }
 
