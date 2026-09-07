@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788721908226,
+  "lastUpdate": 1788805154167,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18802,6 +18802,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47817000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a9edf571594364419d912fffbd2c7b1f5a995953",
+          "message": "feat(api)!: mark every public error enum #[non_exhaustive] (#796)\n\ndocs/api-compatibility.md §1 has always said error enums are\n\"#[non_exhaustive] in spirit\" — consumers must not rely on the absence of\nvariants, and adding one is a compatible change. Only EncodeError (#793)\nactually carried the attribute; the other 33 relied on review alone.\n\nThe cost of the gap is the API-breakage gate. cargo-semver-checks cannot tell an\nintended new variant from an unintended break on an exhaustive enum, so\napi-stability.yml has run with continue-on-error since #695: it reports findings\nbut blocks nothing, which means a real, unintended break passes CI just as\nquietly as an intended one. Marking the enums is what lets that gate become a\nhard failure.\n\nMarks all 33 remaining public error enums across the facade crate and the five\nworkspace codec crates. Right after the 0.31.0 release is the cheapest possible\nmoment: the whole batch rides one minor bump instead of 33 separate ones.\n\nOne in-crate fallout: validate.rs's iff_error_code matched IffError (a different\ncrate) exhaustively. Added a `_` arm mapping to a generic \"iff.invalid\" code —\na future parse failure is still a malformed container, so it belongs in the\nreport rather than being dropped from it.\n\napi-stability.yml's TODO(#695) is updated, not resolved. The gate cannot be\nflipped in this PR: cargo-semver-checks compares against the last *published*\nrelease, so until 0.32.0 ships this reads as 33 intended breaks. The follow-up\nPR that deletes continue-on-error is the one that closes #695.\n\nBREAKING CHANGE: every public error enum is now #[non_exhaustive]. Downstream\ncode that matches on one exhaustively must add a `_` arm. Variant names, their\npayloads, and every Display/Error impl are unchanged.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-07T19:55:27+02:00",
+          "tree_id": "16a8ceee3fa81ceddb14fef193a822da2b2c2e2a",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/a9edf571594364419d912fffbd2c7b1f5a995953"
+        },
+        "date": 1788805152479,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 122000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6144000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 36258000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34725000,
             "range": "± 0",
             "unit": "ns/iter"
           }
