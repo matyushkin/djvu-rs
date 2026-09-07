@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0](https://github.com/matyushkin/djvu-rs/compare/v0.31.0...v0.32.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** every public error enum is now #[non_exhaustive]. Downstream code that matches on one exhaustively must add a `_` arm. Variant names, their payloads, and every Display/Error impl are unchanged.
+
+### Features
+
+* **api:** mark every public error enum #[non_exhaustive] ([#796](https://github.com/matyushkin/djvu-rs/issues/796)) ([a9edf57](https://github.com/matyushkin/djvu-rs/commit/a9edf571594364419d912fffbd2c7b1f5a995953))
+
 ## [0.31.0](https://github.com/matyushkin/djvu-rs/compare/v0.30.2...v0.31.0) (2026-09-06)
 
 
