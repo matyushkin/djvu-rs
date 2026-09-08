@@ -15023,3 +15023,114 @@ write-path counterpart and the source of the instrument.
    retains, because the sub=4 path still caches the partial BG44 coefficient
    image. A thumbnail strip over a 500-page book is the worst case in the
    codebase.
+
+### Thumbnails retained a full-size page decode — **Kept** (2026-09-09)
+
+**THUMB_PARTIAL_MEMO**
+
+**Issue.** The DECODE_CACHE_ACCOUNTING entry left an open number: a 128 px
+thumbnail retained 5.85 MB per page — 96 % of what a full 150 dpi render
+retains (6.08 MB). Drawing a thumbnail grid therefore cost as much memory as
+opening every page. Measured peaks for one grid pass (`ThumbnailStrategy::RenderOnly`,
+128x128, counting global allocator):
+
+| File | Pages | On disk | Peak |
+|---|---|---|---|
+| `tests/fixtures/colorbook.djvu` | 62 | 2.9 MB | 377 234 457 B (129x the file) |
+| `tests/corpus/conquete_paix.djvu` | 22 | 1.7 MB | 473 514 659 B (276x the file) |
+| `tests/fixtures/czech.djvu` | 85 (all fail, see below) | — | 116 413 137 B |
+| `tests/corpus/goody_twoshoes.djvu` | 16 | — | 88 913 371 B |
+| `tests/corpus/pathogenic_bacteria_1896.djvu` (bilevel) | 520 | — | 136 457 349 B |
+
+`czech.djvu` is the sharpest case: it is an indirect document, so every page's
+mask fails with "requires shared dict but none provided" and **no thumbnail is
+produced at all** — yet the grid still peaked at 116 MB, because each page had
+already cached its background decode before the mask failed.
+
+**Cause.** Two separate facts meet on the thumbnail path.
+
+1. A 128 px thumbnail of a ~2500 px page lands on `subsample > 4`. The render
+   path has terminal pixmap caches for `subsample` 1, 2 and 4 only, so this
+   branch cached nothing it produced and re-did the work on every call.
+2. To decode faster it used `PageLayers::bg44_partial` — the first BG44 chunk
+   only. A partial image decodes ~4x faster than a full one but is **exactly
+   as large**: `PlaneDecoder::new` allocates the whole coefficient grid up
+   front, and later chunks only refine values in place. Memoising it bought
+   time and paid a full image's memory.
+
+Per-field breakdown of what a thumbnail retained (colorbook.djvu, one page):
+
+```
+bg44=0 bg44_partial=5750784 mask=0 mask_sub4=65178 fg44=231336
+s1=0 s2=0 s4=0 tiles=0 total=6047298
+```
+
+`bg44_partial` alone is 95.1 % of the total.
+
+**Fix.** Two halves, both in `src/djvu_render.rs`:
+
+- The `subsample > 4` branch no longer *populates* `bg44_partial`. It still
+  *reuses* one that another code path (the IW44_CHECKPOINT flow, #608) already
+  cached, so no existing fast path regresses; otherwise it decodes into a local
+  `Iw44Image` and drops it with the call. The initialiser body was factored out
+  into a free `decode_bg44_partial(page)` so both callers share one decode and
+  one dimension cross-check.
+- A new `PageLayers::bg_rgb_subhi: OnceLock<Option<(u32, Pixmap)>>` memoises the
+  *result* instead — one small pixmap, keyed by its subsample factor, alongside
+  the existing `bg_rgb_s1/s2/s4` tiers. At 128 px that is ~90 KB, not 5.75 MB.
+
+**Numbers (after).** Same probe, same machine:
+
+| File | Peak before | Peak after | Change |
+|---|---|---|---|
+| `colorbook.djvu` | 377 234 457 | 32 672 453 | **−91.3 %** |
+| `conquete_paix.djvu` | 473 514 659 | 49 238 249 | **−89.6 %** |
+| `czech.djvu` | 116 413 137 | 4 365 955 | **−96.2 %** |
+| `goody_twoshoes.djvu` | 88 913 371 | 12 289 663 | **−86.2 %** |
+| `watchmaker.djvu` | 28 395 369 | 6 941 913 | **−75.6 %** |
+| `map_atlas_sample.djvu` | 9 950 370 | 5 111 254 | **−48.6 %** |
+| `pathogenic_bacteria_1896.djvu` (bilevel) | 136 457 349 | 136 506 501 | +0.04 % |
+| `cyrillic_simonovich_co2.djvu` | 1 416 922 | 1 417 690 | +0.05 % |
+| `big_scanned_page.djvu` (1 page) | 382 910 091 | 382 861 467 | −0.01 % |
+
+Per page on colorbook.djvu: retained 5.93 MB -> 0.386 MB (6 % of a full
+render), peak 0.338 MB.
+
+**No time trade.** The dropped memo was expected to cost time on the second
+pass; the new pixmap memo more than pays it back, because it skips the wavelet
+reconstruction the old one still repeated:
+
+| File | Sweep 1 before -> after | Sweep 2 (repeat) before -> after |
+|---|---|---|
+| `colorbook.djvu` | 740 -> 918 ms (noise, ±25 %) | 31.3 -> 7.2 ms (**4.3x faster**) |
+| `conquete_paix.djvu` | 359 -> 371 ms | 18.4 -> 4.0 ms (**4.6x faster**) |
+| `czech.djvu` | 55.8 -> 46.7 ms | 6.46 -> 0.39 ms (**16x faster**) |
+| `goody_twoshoes.djvu` | 158 -> 162 ms | 5.77 -> 2.26 ms (**2.6x faster**) |
+| `big_scanned_page.djvu` | 235 -> 234 ms | 8.23 -> 0.67 ms (**12x faster**) |
+
+**Output unchanged.** Every thumbnail is byte-identical before and after: an
+FNV-1a hash over all pixmap bytes plus dimensions matches on all nine files
+above. The path still decodes the same partial image and calls the same
+`to_rgb_subsample`; only who owns the result changed.
+
+**Guard.** `tests/thumbnail_peak_memory.rs` — counting global allocator, slope
+over 1 and 4 pages, asserts a thumbnail's retained bytes *and* peak stay under
+a quarter of a full render's retained bytes (measured share 6 %), plus a control
+that the fixture really is a colour book costing megabytes per page. 0.17 s
+release. Sabotage-checked: reverting the fix fails it with "a thumbnail retains
+5 932 807 B/page against a full render's 6 157 767 B/page (96 %)".
+
+**Decision.** Kept. Peak down 75–96 % on every colour document, repeat grids
+2.6–16x faster, output byte-identical, bilevel unaffected.
+
+**Related.** DECODE_CACHE_ACCOUNTING (the measurement that found this),
+IW44_CHECKPOINT / #608 (the flow that still populates `bg44_partial` and is
+still reused here), D5_TH44_PREVIEW (the `TH44` fast path this does not touch).
+
+**Open.** `big_scanned_page.djvu` shows the remaining shape of the problem: one
+very large page still peaks at 383 MB, because decoding even its first BG44
+chunk allocates the whole coefficient grid. That is a per-page floor, not a
+per-document slope, and needs a different fix (a truly reduced decode). The read
+path also remains unbounded by default — `enforce_cache_budget`,
+`retain_render_caches` and `evict_render_cache` are all opt-in and all need
+`&mut self`, while rendering takes `&self`.

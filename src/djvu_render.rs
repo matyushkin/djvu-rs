@@ -1334,6 +1334,14 @@ pub(crate) struct PageLayers {
     // plain `mask` cache does not cover the indexed variant, so without this
     // every warm render of a palette page re-runs the full JB2 ZP decode and
     // re-allocates the page-sized blit map. Only populated for palette pages.
+    // THUMB_PARTIAL_MEMO: the converted RGB for the first subsample > 4 this
+    // page was rendered at, stored as `(subsample, pixmap)`. Thumbnail grids
+    // and zoomed-out pans land here, and they land on the *same* subsample for
+    // a given page, so one slot serves them. Tiny — ~90 KB for a 128 px
+    // thumbnail of a colorbook.djvu page — and it lets the sub > 4 path stop
+    // memoising the full-size `bg44_partial` coefficient image (5.75 MB) it
+    // derives from. A render at a different sub > 4 misses and reconverts.
+    bg_rgb_subhi: std::sync::OnceLock<Option<(u32, Pixmap)>>,
     mask_indexed: std::sync::OnceLock<Option<(crate::bitmap::Bitmap, Vec<i32>)>>,
     // Decoded page metadata (#605): the TXTz/ANTz payloads are BZZ-compressed
     // and rebuilt into full zone/annotation trees on every access, yet viewers
@@ -1362,6 +1370,36 @@ pub(crate) struct PageLayers {
 /// Process-global monotonic source for the per-page LRU access tick.
 #[cfg(feature = "std")]
 static ACCESS_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Decode the first BG44 chunk of `page` into a fresh `Iw44Image`.
+///
+/// The body of [`PageLayers::bg44_partial`]'s initialiser, factored out so the
+/// subsample > 4 path can produce the same image without memoising it (see
+/// [`PageLayers::bg44_partial_cached`]).
+#[cfg(feature = "std")]
+fn decode_bg44_partial(page: &DjVuPage) -> Option<Iw44Image> {
+    let chunks = page.bg44_chunks();
+    if chunks.is_empty() {
+        return None;
+    }
+    let mut img = Iw44Image::new();
+    if img.decode_chunk(chunks[0]).is_err() {
+        return None;
+    }
+    if img.width == 0 {
+        return None;
+    }
+    // Same dimension cross-check as `PageLayers::bg44`.
+    if !iw44_reduction_is_legal(
+        page.width() as u32,
+        page.height() as u32,
+        img.width,
+        img.height,
+    ) {
+        return None;
+    }
+    Some(img)
+}
 
 #[cfg(feature = "std")]
 impl PageLayers {
@@ -1429,6 +1467,11 @@ impl PageLayers {
             + px(&self.bg_rgb_s1)
             + px(&self.bg_rgb_s2)
             + px(&self.bg_rgb_s4)
+            + self
+                .bg_rgb_subhi
+                .get()
+                .and_then(|x| x.as_ref())
+                .map_or(0, |(_, p)| p.data.len())
             + bm(&self.mask)
             + bm(&self.mask_sub4)
             + iw(&self.bg44)
@@ -1477,7 +1520,9 @@ impl PageLayers {
             budget,
             ..TileCacheState::default()
         });
-        // bg_rgb_s2 / bg_rgb_s4 / access tick intentionally preserved.
+        // bg_rgb_s2 / bg_rgb_s4 / bg_rgb_subhi / access tick intentionally
+        // preserved — all three are the cheap downscaled tiers a later
+        // zoomed-out render reuses.
     }
 
     /// Bytes currently held by the composited-tile cache (see `tile_cache`).
@@ -1698,30 +1743,39 @@ impl PageLayers {
     /// high-frequency refinement chunks are imperceptible.
     pub(crate) fn bg44_partial(&self, page: &DjVuPage) -> Option<&Iw44Image> {
         self.bg44_partial
-            .get_or_init(|| {
-                let chunks = page.bg44_chunks();
-                if chunks.is_empty() {
-                    return None;
-                }
-                let mut img = Iw44Image::new();
-                if img.decode_chunk(chunks[0]).is_err() {
-                    return None;
-                }
-                if img.width == 0 {
-                    return None;
-                }
-                // Same dimension cross-check as `bg44` above.
-                if !iw44_reduction_is_legal(
-                    page.width() as u32,
-                    page.height() as u32,
-                    img.width,
-                    img.height,
-                ) {
-                    return None;
-                }
-                Some(img)
-            })
+            .get_or_init(|| decode_bg44_partial(page))
             .as_ref()
+    }
+
+    /// The first-chunk BG44 image **only if it is already cached** — never
+    /// decodes, never populates the slot.
+    ///
+    /// THUMB_PARTIAL_MEMO: the subsample > 4 render path uses this instead of
+    /// [`bg44_partial`](Self::bg44_partial). A "partial" `Iw44Image` decodes ~4x
+    /// faster than a full one but is exactly as large: `PlaneDecoder` allocates
+    /// every 32x32 coefficient block up front, whichever chunks are decoded
+    /// into them. Memoising it costs a full-size image per page (5.75 MB on
+    /// `colorbook.djvu`) and buys nothing at sub > 4, where the derived RGB is
+    /// not cached either — so a thumbnail sweep retained the whole book's
+    /// backgrounds and re-ran the conversion anyway. See PERF_EXPERIMENTS.md
+    /// THUMB_PARTIAL_MEMO.
+    pub(crate) fn bg44_partial_cached(&self) -> Option<&Iw44Image> {
+        self.bg44_partial.get().and_then(|x| x.as_ref())
+    }
+
+    /// The cached RGB conversion for `subsample`, when this page's single
+    /// `sub > 4` slot holds exactly that subsample. Never decodes.
+    pub(crate) fn bg_rgb_subhi(&self, subsample: u32) -> Option<&Pixmap> {
+        match self.bg_rgb_subhi.get()?.as_ref()? {
+            (s, px) if *s == subsample => Some(px),
+            _ => None,
+        }
+    }
+
+    /// Fill the `sub > 4` slot if it is still empty. No-op once set, so the
+    /// first subsample a page is rendered at wins.
+    pub(crate) fn store_bg_rgb_subhi(&self, subsample: u32, px: &Pixmap) {
+        let _ = self.bg_rgb_subhi.set(Some((subsample, px.clone())));
     }
 
     /// The decoded JB2 / G4 foreground mask, decoding on first call. `None`
@@ -2022,13 +2076,44 @@ fn decode_background_chunks<'a>(
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
                 return Ok(page.decoded_bg_rgb_s4().map(Cow::Borrowed));
             }
+            // subsample > 4 (subsample == 4 returned above). THUMB_PARTIAL_MEMO:
+            // reuse an already-cached partial image, but do not *populate* the
+            // cache from here. A partial `Iw44Image` is exactly as large as a
+            // full one (see `PageLayers::bg44_partial_cached`) and this branch
+            // caches nothing it derives, so memoising it made a thumbnail sweep
+            // retain the whole book's backgrounds for no repeat saving.
+            #[cfg(feature = "std")]
+            if let Some(cached) = page.cached_bg_rgb_subhi(subsample) {
+                return Ok(Some(Cow::Borrowed(cached)));
+            }
+            // Decoded here and dropped with this call when the page has no
+            // cached partial image. `no_std` has no layer cache at all, so it
+            // keeps the plain accessor (which is a stub returning `None`).
+            #[cfg(feature = "std")]
+            let owned = if subsample >= 4 && page.cached_bg44_partial().is_none() {
+                decode_bg44_partial(page)
+            } else {
+                None
+            };
             let img = if subsample >= 4 {
-                page.decoded_bg44_partial()
+                #[cfg(feature = "std")]
+                {
+                    page.cached_bg44_partial().or(owned.as_ref())
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    page.decoded_bg44_partial()
+                }
             } else {
                 page.decoded_bg44()
             };
             let img = img.ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-            return Ok(Some(Cow::Owned(img.to_rgb_subsample(subsample)?)));
+            let rgb = img.to_rgb_subsample(subsample)?;
+            #[cfg(feature = "std")]
+            if subsample > 4 {
+                page.store_bg_rgb_subhi(subsample, &rgb);
+            }
+            return Ok(Some(Cow::Owned(rgb)));
         }
         // No BG44 chunks — fall through to the JPEG fallback below.
     } else {
