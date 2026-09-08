@@ -1381,12 +1381,20 @@ impl PageLayers {
         self.access.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Approximate resident bytes held by this page's decoded caches.
+    /// Resident bytes held by this page's decoded caches.
     ///
-    /// Exact for the RGB/mask pixmaps and blit map (which dominate); the BG44
-    /// coefficient images are estimated from their dimensions (`w·h·2` per
-    /// image). Used only to compare pages for budget eviction, so an estimate is
-    /// sufficient. Reads caches without initialising them.
+    /// Every pixel cache is measured from the `Vec` it owns, not estimated:
+    /// [`DjVuDocument::enforce_cache_budget`](crate::djvu_document::DjVuDocument::enforce_cache_budget)
+    /// turns this number into a memory ceiling, so an estimate here becomes a
+    /// wrong ceiling for the caller. The BG44 coefficient images used to be
+    /// sized as `w·h·2`, which counts the luma plane and drops the two chroma
+    /// planes a colour page also keeps — the whole cache reported at ~38 % of
+    /// the truth, and a 16 MiB budget held ~52 MB (PERF_EXPERIMENTS.md
+    /// DECODE_CACHE_ACCOUNTING; guarded by `tests/decode_cache_accounting.rs`).
+    /// The text/annotation trees stay approximate — they are node counts, not
+    /// buffers, and are small next to the pixel caches.
+    ///
+    /// Reads caches without initialising them.
     pub(crate) fn cached_bytes(&self) -> usize {
         let px = |o: &std::sync::OnceLock<Option<Pixmap>>| {
             o.get().and_then(|x| x.as_ref()).map_or(0, |p| p.data.len())
@@ -1397,7 +1405,7 @@ impl PageLayers {
         let iw = |o: &std::sync::OnceLock<Option<Iw44Image>>| {
             o.get()
                 .and_then(|x| x.as_ref())
-                .map_or(0, |i| (i.width as usize) * (i.height as usize) * 2)
+                .map_or(0, |i| i.heap_bytes())
         };
         let mi = self
             .mask_indexed

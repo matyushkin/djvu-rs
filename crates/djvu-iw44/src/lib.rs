@@ -1341,6 +1341,11 @@ fn band0_dispatch(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
 }
 
 impl PlaneDecoder {
+    /// Heap bytes held by this plane's coefficient array.
+    fn heap_bytes(&self) -> usize {
+        self.blocks.capacity() * core::mem::size_of::<[i16; 1024]>()
+    }
+
     fn new(width: usize, height: usize) -> Self {
         let block_cols = width.div_ceil(32);
         let block_rows = height.div_ceil(32);
@@ -3118,6 +3123,26 @@ impl Default for Iw44Image {
 }
 
 impl Iw44Image {
+    /// Heap bytes held by this image's decoded coefficient planes.
+    ///
+    /// A cache-budget accounting helper: an `Iw44Image` keeps one
+    /// [`PlaneDecoder`] per colour plane, and each holds `ceil(w/32) *
+    /// ceil(h/32)` blocks of 1024 `i16` coefficients. A colour image therefore
+    /// costs roughly `1.5 x w x h x 2` bytes (luma at full resolution plus two
+    /// half-resolution chroma planes), not `w x h x 2` — see
+    /// `PageLayers::cached_bytes` in the parent crate, which used the latter
+    /// and under-reported colour pages by ~2.6x (PERF_EXPERIMENTS.md
+    /// DECODE_CACHE_ACCOUNTING).
+    ///
+    /// Returns 0 before the first chunk is decoded (no plane is allocated yet).
+    pub fn heap_bytes(&self) -> usize {
+        [self.y.as_ref(), self.cb.as_ref(), self.cr.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(PlaneDecoder::heap_bytes)
+            .sum()
+    }
+
     /// Create a new, empty decoder.
     pub fn new() -> Self {
         Iw44Image {
