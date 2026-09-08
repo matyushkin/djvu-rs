@@ -3064,9 +3064,22 @@ fn composite_rows_bilevel_one(
         }
 
         // Fallback: branchless per-pixel expansion with .min() clamp for partial/offset views.
+        //
+        // `mask_row` is `mask.width` pixels wide, not `page_w` wide: an INFO chunk that
+        // declares a page wider than the bilevel mask it ships (a fuzzed or malformed file)
+        // used to walk `px` past the end of `mask_row` here and panic on the index. The
+        // fast path above already guards this (`ox0 + out_w <= mask.width`); clamp to the
+        // mask's own width too, and read the byte through `get` so no shape of the two
+        // widths can index out of bounds.
+        let last_col = ctx
+            .page_w
+            .saturating_sub(1)
+            .min(mask.width.saturating_sub(1));
         for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let px = (ox as u32 + ctx.offset_x).min(ctx.page_w.saturating_sub(1)) as usize;
-            let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
+            let px = (ox as u32 + ctx.offset_x).min(last_col) as usize;
+            let is_fg = mask_row
+                .get(px >> 3)
+                .map_or(0, |b| ((b >> (7 - (px & 7))) & 1) as u32);
             let ch = (is_fg.wrapping_sub(1) & 0xFF) as u8; // 0 when fg, 255 when bg
             pixel[0] = ch;
             pixel[1] = ch;
