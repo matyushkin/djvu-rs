@@ -14926,3 +14926,100 @@ DJVM writer, candidate C) stays unopened: the plan gates it on evidence that
 the accumulated component buffer has become the largest contributor, and this
 guard's 21 312 B/page residual — against 307 200 B of pixmap avoided — is not
 that evidence.
+
+### Decode-side cache accounting: `render_cache_bytes` counted one plane of three — **Kept** (2026-09-08)
+
+**Issue.** The read path had never been measured. The encoder plan flattened
+the write path's peak (steps 1–6); nobody had asked what happens when a viewer
+opens a big book and renders its pages. `DjVuPage::evict_render_cache`'s own doc
+comment already said "the peak RSS grows linearly with pages rendered", and
+`DjVuDocument::enforce_cache_budget` exists as the automatic bound — the caller
+names a ceiling in bytes and least-recently-rendered pages are evicted until the
+*reported* total fits. So the ceiling is only ever as good as the accounting,
+and the accounting had never been checked against reality.
+
+**Approach.** A counting global allocator (same instrument as
+`ENCODE_PEAK_GUARD`, step 6) over a temporary `examples/decode_peak_probe.rs`:
+parse a document, render the first *N* pages at 150 dpi, and report three
+numbers with the document still alive — peak live heap, bytes still retained,
+and `DjVuDocument::render_cache_bytes()`. Sweeping *N* removes the constant
+parse term and leaves the per-page cost. Release build, macOS arm64.
+
+**Numbers (before).** `tests/fixtures/colorbook.djvu` — 2.9 MB on disk,
+16 colour pages at 400 dpi:
+
+| pages | peak | retained | reported |
+|---|---|---|---|
+| 1 | 14.88 MB | 9.47 MB | 2.37 MB |
+| 4 | 33.10 MB | 27.82 MB | 9.29 MB |
+| 8 | 57.56 MB | 52.29 MB | 18.52 MB |
+| 16 | 106.00 MB | 100.72 MB | 36.98 MB |
+
+Retained slope **6 083 234 B/page**; reported slope **2 307 447 B/page** —
+`render_cache_bytes()` was reporting **38 %** of the truth. A 2.9 MB file cost
+106 MB of peak to page through, **36× the file size**. A caller asking
+`enforce_cache_budget` for a 16 MiB ceiling actually held ~52 MB.
+
+`tests/corpus/pathogenic_bacteria_1896.djvu` (26.6 MB, 520 bilevel pages) for
+contrast: parse alone peaks at 30.7 MB, and rendering 4→256 pages moves the peak
+34.11→65.69 MB — slope **0.125 MB/page**, projecting ~98 MB for the whole book.
+Bilevel pages carry no BG44, so the defect below does not touch them.
+
+**Cause.** `PageLayers::cached_bytes` sized a cached `Iw44Image` as
+`width * height * 2`. That is the luma plane alone. A colour page's
+`Iw44Image` holds three `PlaneDecoder`s — luma at full resolution plus two
+half-resolution chroma planes — each storing `ceil(w/32) * ceil(h/32)` blocks of
+1024 `i16`, so the real cost is about **1.5×** the formula, and the blocks round
+up. Every other term in `cached_bytes` measures a real `Vec`'s length; this one
+was the only estimate, and it was the largest field.
+
+**Fix.** New `Iw44Image::heap_bytes()` (additive public API on `djvu-iw44`)
+sums the three planes' actual `Vec` capacities; `cached_bytes` calls it.
+
+**Numbers (after).** Same sweep, same subject: reported slope
+**6 083 170 B/page** against a retained slope of **6 083 234 B/page** — the
+accounting now tracks reality to within **0.001 %** (totals: 97.5 MB reported
+of 100.7 MB retained, 96.8 %; the remainder is the parsed document, which is not
+cache and correctly not counted). Bilevel numbers are byte-identical before and
+after (2 812 040 / 11 832 812 B at 32 / 128 pages), as expected.
+
+The point of the fix is that the budget now works as documented.
+`enforce_cache_budget(16 MiB)` over the same 16-page colour book:
+
+| | retained | peak |
+|---|---|---|
+| before | 52.29 MB | 57.56 MB |
+| after | 15.43 MB | 26.98 MB |
+| | **−70.5 %** | **−53.1 %** |
+
+Nothing about the eviction policy changed — it was being fed a number 2.6× too
+small.
+
+**Guard.** New `tests/decode_cache_accounting.rs`: one `#[test]`, same
+one-test-per-binary rule as `tests/encode_peak_memory.rs` (the counter is
+process-global, `cargo test` runs a binary's tests on parallel threads). It
+asserts a **slope ratio** in both directions — reported must be 85–115 % of
+retained — plus a control that the subject really costs megabytes per page, so
+a fixture swap fails loudly instead of passing on two near-zero numbers. Runs in
+**2.71 s** debug, no `#[ignore]`. Sabotage-checked: restoring the
+`width * height * 2` formula fails it with the intended message ("under-reports:
+2306434 B/page reported vs 6116948 B/page really retained (37 %)").
+
+**Decision.** Kept. `make check` green. No hot-path code changed —
+`cached_bytes` runs only when a caller asks for the number or calls
+`enforce_cache_budget`, so there is nothing for the benchmark suite to move.
+
+**Related.** `C5_COMPRESS` (`downgrade_render_cache`) and `C4_TILE_CACHE` are
+the entries that built this cache; `ENCODE_PEAK_GUARD` (step 6, #795) is the
+write-path counterpart and the source of the instrument.
+
+**Open follow-ups this measurement found, not fixed here.**
+1. *The default path is still unbounded.* `enforce_cache_budget` /
+   `retain_render_caches` / `evict_render_cache` are all opt-in: a caller who
+   never calls one grows at 6.1 MB/page on a colour book. The encoder answered
+   the same shape of problem with a bounded window that is on by default.
+2. *Thumbnails cost as much as full renders.* A 128 px render of a colorbook
+   page retains **5.85 MB/page** — 96 % of the 6.08 MB a full 150 dpi render
+   retains, because the sub=4 path still caches the partial BG44 coefficient
+   image. A thumbnail strip over a 500-page book is the worst case in the
+   codebase.
