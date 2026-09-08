@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788807048668,
+  "lastUpdate": 1788905313431,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18898,6 +18898,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47861000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0d4748db092b71718d4453e48d939a2e6a581a88",
+          "message": "fix(render): count IW44 chroma planes in the render-cache budget (#799)\n\n`PageLayers::cached_bytes` sized a cached `Iw44Image` as `width * height * 2`.\nThat is the luma plane alone. A colour page's `Iw44Image` holds three\n`PlaneDecoder`s — luma at full resolution plus two half-resolution chroma\nplanes — so the real cost is ~1.5x the formula, and it was the largest field in\nthe sum. `DjVuDocument::render_cache_bytes()` reported 38% of the memory really\nheld on a colour book.\n\nThat number is not cosmetic: `enforce_cache_budget` is the read path's only\nautomatic memory bound, and it evicts until the *reported* total fits. A caller\nasking for a 16 MiB ceiling actually held ~52 MB.\n\nNew additive `Iw44Image::heap_bytes()` sums the three planes' real `Vec`\ncapacities; `cached_bytes` calls it. The eviction policy is untouched — it was\nbeing fed a number 2.6x too small.\n\nMeasured on tests/fixtures/colorbook.djvu (2.9 MB, 16 colour pages, rendered\nat 150 dpi), with a counting global allocator:\n\n  reported slope  2 307 447 -> 6 083 170 B/page\n  real slope      6 083 234 B/page (unchanged)\n  accuracy        38% -> within 0.001%\n\n  enforce_cache_budget(16 MiB), all 16 pages:\n  retained  52.29 MB -> 15.43 MB  (-70.5%)\n  peak      57.56 MB -> 26.98 MB  (-53.1%)\n\nBilevel pages carry no BG44 and are byte-identical before and after.\n\nNew tests/decode_cache_accounting.rs guards it: one #[test] (the allocator\ncounter is process-global), asserting the reported slope stays within 85-115%\nof the real one, plus a control that the fixture really is a colour book. Runs\nin 2.71 s debug. Sabotage-checked against the old formula.\n\nNo hot path changed: `cached_bytes` runs only when a caller asks for the number.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-08T23:41:50+02:00",
+          "tree_id": "8cdae06f4a8354f39c8a0b167d2690f01dc0e224",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0d4748db092b71718d4453e48d939a2e6a581a88"
+        },
+        "date": 1788905311915,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 162000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8670000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53520000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51063000,
             "range": "± 0",
             "unit": "ns/iter"
           }
