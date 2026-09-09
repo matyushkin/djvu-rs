@@ -114,13 +114,18 @@ fn render_cache_bytes_tracks_the_memory_really_held() {
     let retained_slope = retained_hi.saturating_sub(retained_lo) / span;
     let reported_slope = reported_hi.saturating_sub(reported_lo) / span;
 
-    // Control: the subject must really cost megabytes per page. If the fixture
-    // is ever replaced by a bilevel or much smaller book, this fires first and
-    // says so, rather than letting the ratio pass on two near-zero numbers.
+    // Control: the subject must really cost a few hundred kilobytes per page.
+    // If the fixture is ever replaced by a bilevel or much smaller book, this
+    // fires first and says so, rather than letting the ratio pass on two
+    // near-zero numbers. The floor was a megabyte until IW44_SPARSE_BLOCKS made
+    // a coefficient block keep only its non-zero buckets; a colorbook page then
+    // fell from ~3 MB to ~0.7 MB of real cache. Lower it again only with a
+    // measurement, and prefer a larger fixture over a floor near zero.
     assert!(
-        retained_slope > 1 << 20,
+        retained_slope > 1 << 18,
         "{SUBJECT} now retains only {retained_slope} B/page; this guard needs a \
-         colour book whose pages cost megabytes. Replace the fixture or the test."
+         colour book whose pages cost hundreds of kilobytes. Replace the \
+         fixture or the test."
     );
 
     // The real assertion, both ways: the reported number must not drift from

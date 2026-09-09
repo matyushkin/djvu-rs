@@ -139,28 +139,38 @@ fn a_thumbnail_sweep_does_not_grow_with_the_page_count() {
          full render retained {full_held} B"
     );
 
-    // Control: a full render of this subject must really cost megabytes per
-    // page. If the fixture is ever replaced by a bilevel or much smaller book,
-    // this fires first and says so, rather than letting the ratios pass on
-    // near-zero numbers.
+    // Control: a full render of this subject must really cost something. If
+    // the fixture is ever replaced by a much smaller book, this fires first and
+    // says so, rather than letting the assertions pass on near-zero numbers.
+    // The floor was a megabyte until IW44_SPARSE_BLOCKS cut a coefficient
+    // block down to its non-zero buckets and a colorbook page fell to ~0.77 MB.
     assert!(
-        full_held > 1 << 20,
+        full_held > 1 << 18,
         "a full render of {SUBJECT} now retains only {full_held} B/page; this \
-         guard needs a colour book whose pages cost megabytes. Replace the \
-         fixture or the test."
+         guard needs a colour book whose pages cost hundreds of kilobytes. \
+         Replace the fixture or the test."
     );
 
-    // A thumbnail keeps the cheap downscaled tiers (the 128 px pixmap, the
-    // subsampled mask) and nothing full-size. A quarter of a full render's
-    // cost is a generous ceiling: the measured share is about 6 %.
-    let ceiling = full_held / 4;
+    // The ceiling is a property of the page, not of what the render path
+    // happens to cache: `w * h * 2` is one `i16` per pixel, the cost of a
+    // full-resolution coefficient plane. A thumbnail keeps only the cheap
+    // downscaled tiers — the 128 px pixmap, the subsampled mask — so a
+    // sixteenth of that is generous. The measured share is about 2 %; the
+    // defect this guards read 35 %.
+    //
+    // Do not rebase this on `full_held`. A full render's cost now moves with
+    // the image content (IW44_SPARSE_BLOCKS), and the ratio moved with it even
+    // though the thumbnail path had not changed at all.
+    let page = doc_page_bytes(&data);
+    let ceiling = page / 16;
     assert!(
         thumb_held <= ceiling,
-        "a thumbnail retains {thumb_held} B/page against a full render's \
-         {full_held} B/page ({}%). The subsample > 4 render path is memoising \
-         a full-size decode again — most likely PageLayers::bg44_partial, which \
-         costs as much as a complete image and is useless at this scale.",
-        thumb_held * 100 / full_held.max(1)
+        "a thumbnail retains {thumb_held} B/page against {page} B for one \
+         full-resolution coefficient plane of the page ({}%). The subsample > 4 \
+         render path is memoising a full-size decode again — most likely \
+         PageLayers::bg44_partial, which costs as much as a complete image and \
+         is useless at this scale.",
+        thumb_held * 100 / page.max(1)
     );
 
     // Peak, not just retained: a sweep that frees each page's decode still
@@ -168,9 +178,18 @@ fn a_thumbnail_sweep_does_not_grow_with_the_page_count() {
     // drawing a thumbnail grid actually feels.
     assert!(
         thumb_peak <= ceiling,
-        "a thumbnail sweep peaks at {thumb_peak} B/page against a full \
-         render's retained {full_held} B/page ({}%). Peak that grows with the \
-         page count means each page leaves a full-size decode behind.",
-        thumb_peak * 100 / full_held.max(1)
+        "a thumbnail sweep peaks at {thumb_peak} B/page against {page} B for \
+         one full-resolution coefficient plane of the page ({}%). Peak that \
+         grows with the page count means each page leaves a full-size decode \
+         behind.",
+        thumb_peak * 100 / page.max(1)
     );
+}
+
+/// `w * h * 2` for the subject's first page: one `i16` per pixel, the size of a
+/// single full-resolution coefficient plane.
+fn doc_page_bytes(data: &[u8]) -> usize {
+    let doc = Document::from_bytes(data.to_vec()).expect("fixture must parse");
+    let page = doc.page(0).expect("fixture must have a page");
+    page.width() as usize * page.height() as usize * 2
 }

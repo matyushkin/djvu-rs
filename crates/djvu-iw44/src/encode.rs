@@ -2315,7 +2315,7 @@ mod loss_diagnostics {
         }
 
         assert_eq!(enc.recon[0][coefficient], 1);
-        assert_eq!(dec.blocks[0][coefficient], 1);
+        assert_eq!(dec.blocks[0].coef(coefficient), 1);
     }
 
     #[test]
@@ -2341,7 +2341,7 @@ mod loss_diagnostics {
 
         // s=8192 activation reconstruction: s + s/2 - s/8 = 11264.
         assert_eq!(enc.recon[0][coefficient], 11_264);
-        assert_eq!(dec.blocks[0][coefficient], 11_264);
+        assert_eq!(dec.blocks[0].coef(coefficient), 11_264);
     }
 
     // ---- Tests ---------------------------------------------------------------
