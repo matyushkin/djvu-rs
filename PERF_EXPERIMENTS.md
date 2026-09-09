@@ -15323,3 +15323,99 @@ should take the page from about 1 490 MB to about 780 MB.
 The read path also remains unbounded by default — `enforce_cache_budget`,
 `retain_render_caches` and `evict_render_cache` are all opt-in and all need
 `&mut self`, while rendering takes `&self`.
+
+### Encoding one large page peaked at 1 490 MB — narrow and sparse `recon` — **Kept** (2026-09-10)
+
+**ENCODE_SPARSE_RECON**
+
+**Issue.** The open item left by IW44_SPARSE_BLOCKS. Decoding
+`big-scanned-page.djvu` no longer allocates dense coefficient grids, but
+*encoding* the same page at the `Photo` profile still peaked at
+1 490 945 254 B. Half of that was one field.
+
+**Cause.** `PlaneEncoder` mirrors the decoder step by step: for every
+coefficient it encodes, it keeps the value the decoder will hold after that
+step. That mirror is `recon`. It was `Vec<[i32; 1024]>` — 4 KB per 32x32 block,
+for every block of every plane, allocated before a bit was written. On this page
+that is 60 632 blocks x 4096 B x 3 planes = 745 MB, exactly half the peak.
+
+Two separate faults, measured over the corpus:
+
+| Fault | Measurement |
+|---|---|
+| Too wide | `i32`, but the largest value ever stored is **24 448** — the decoder truncates every store with `as i16`, so the encoder held a precision the decoder never has |
+| Too dense | only **0.6 %-12.7 %** of buckets are ever written |
+
+The sibling field `blocks` is genuinely dense (43.6-100 % occupied) and needs
+nothing.
+
+**Approach.** Two changes, in that order.
+
+1. `recon` becomes `i16`. Both stores now say `as i16` where the decoder says
+   it, so the mirror is exact by construction rather than by luck.
+2. `recon` becomes `Vec<CoefBlock>` — the same type the decoder got in
+   IW44_SPARSE_BLOCKS. Bucket 0 stays inline in a `[i16; 16]`, the rest is a
+   heap prefix tail grown per band. The growth logic moved out of
+   `PlaneDecoder::bucket_mut` into `CoefBlock::grow_through`, so encoder and
+   decoder share one implementation.
+
+This is exact, not approximate, for the reason the decoder change was: the
+UNK/ACTIVE/ZERO/NEW flags are derived *from whether a coefficient is zero*, so
+an absent bucket and a zero-filled one are identical to every pass. The
+refinement pass gets an early `continue` on an absent bucket — a coefficient
+that is ACTIVE is non-zero by definition, so its bucket was written, and an
+absent bucket has nothing to refine.
+
+The two encoder-only NEON helpers (`prelim_flags_bucket_enc_neon`,
+`prelim_flags_band0_enc_neon`) are **deleted**. They existed only to read `i32`
+coefficients; with `recon` at `i16` the encoder calls the decoder's own
+`prelim_flags_bucket` and `band0_dispatch`, which are already vectorised.
+
+**Numbers.** Peak live heap for one full-resolution page encode, counting global
+allocator, seven fixtures:
+
+| Fixture | Size | `Photo` before | `Photo` after | Change |
+|---|---|---|---|---|
+| big-scanned-page | 6780x9148 | 1 490 945 254 | 766 749 958 | **-48.6 %** |
+| colorbook | 2260x3669 | 201 027 081 | 104 781 297 | **-47.9 %** |
+| irish | 2479x3504 | 212 335 351 | 116 146 615 | **-45.3 %** |
+| malliavin | 2862x4916 | 127 666 167 | 71 833 911 | **-43.7 %** |
+| carte | 4200x2556 | 262 117 838 | 155 757 998 | **-40.6 %** |
+| chicken | 181x240 | 1 200 706 | 723 586 | -39.7 % |
+| vega | 1628x1000 | 15 470 752 | 11 211 040 | -27.5 % |
+
+The `Quality` profile is unchanged on all seven, to the byte: it subsamples the
+background, so `PlaneEncoder` never gets the large grid and the peak lives
+elsewhere.
+
+Output is byte-identical on all fourteen encodes (FNV-1a over the produced
+file, both profiles, before and after).
+
+Encode speed **improves** — the mirror is half as wide, so it costs half the
+cache. Two paired rounds, Apple M-series:
+
+| Benchmark | main | sparse `recon` | Change |
+|---|---|---|---|
+| `iw44_encode_large_1024x1024` | 32.53 / 32.75 ms | 28.61 / 28.53 ms | **-12.0 % / -12.9 %** |
+| `iw44_encode_gray_1024x1024` | 11.26 / 11.17 ms | 10.13 / 10.20 ms | **-10.0 % / -8.7 %** |
+| `iw44_encode_color` | 2.375 / 2.364 ms | 2.387 / 2.379 ms | +0.5 % / +0.6 % |
+
+`iw44_encode_color` works on a small pixmap whose grid fits in cache either way,
+so it sees the indirection without the saving. It stays inside the CI noise
+band.
+
+**Guard.** New `tests/encode_recon_peak_memory.rs`. Write `page_bytes` for
+`w * h * 2`, the cost of one full-resolution `i16` plane. A `Photo` encode must
+hold the three input planes and the dense `blocks` grid — six `page_bytes`
+together — and a dense `i32` `recon` would double that to twelve. The ceiling is
+eight. Measured 6.3; sabotage-checked by reverting both source files, which
+reads 12.1 and fails the assertion.
+
+**Decision.** Kept.
+
+**Open.** The remaining 766 MB on the big page is `blocks` (372 MB, genuinely
+dense) plus the input wavelet planes (372 MB). Neither is waste in the sense
+`recon` was; cutting them needs a banded or tiled encode, which is a different
+change. The read path also remains unbounded by default —
+`enforce_cache_budget`, `retain_render_caches` and `evict_render_cache` are all
+opt-in and all need `&mut self`, while rendering takes `&self`.

@@ -18,7 +18,10 @@ use djvu_zp::encoder::ZpEncoder;
 
 // Band/quant/state-flag/zigzag spec data is shared with the decoder (one source
 // of truth) rather than re-declared here — see the `pub(crate)` items in `lib.rs`.
-use crate::{ACTIVE, BAND_BUCKETS, NEW, QUANT_HI_INIT, QUANT_LO_INIT, UNK, ZERO};
+use crate::{
+    ACTIVE, BAND_BUCKETS, CoefBlock, NEW, QUANT_HI_INIT, QUANT_LO_INIT, UNK, ZERO, band0_dispatch,
+    prelim_flags_bucket,
+};
 
 #[cfg(feature = "iw44-probe")]
 pub mod probe {
@@ -1108,107 +1111,19 @@ fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (i16, i16, i16) {
 //   - When encoding a previously-active coefficient: apply the same delta that
 //     the decoder will apply, choosing the bit that minimises |true - decoded|.
 
-// ---- NEON helpers for preliminary_flag_computation --------------------------
-
-/// NEON-vectorized band≠0 bucket flag update for the encoder.
-///
-/// Reads 16 i32 reconstruction values at `base`, writes 16 u8 flags (UNK or
-/// ACTIVE), and returns the bitwise-OR of all written flags.
-///
-/// Mirrors `prelim_flags_bucket_neon` in iw44_new but uses 4 × `vld1q_s32`
-/// (i32 input) instead of 2 × `vld1q_s16` (i16 input).
-#[cfg(all(feature = "std", target_arch = "aarch64"))]
-#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
-#[target_feature(enable = "neon")]
-unsafe fn prelim_flags_bucket_enc_neon(
-    recon: &[i32; 1024],
-    base: usize,
-    bucket: &mut [u8; 16],
-) -> u8 {
-    use core::arch::aarch64::*;
-    let ptr = recon.as_ptr().add(base);
-    let c0 = vld1q_s32(ptr);
-    let c1 = vld1q_s32(ptr.add(4));
-    let c2 = vld1q_s32(ptr.add(8));
-    let c3 = vld1q_s32(ptr.add(12));
-    // eq: 0xFFFFFFFF where coef == 0, 0x00000000 where coef != 0
-    let zero32 = vdupq_n_s32(0);
-    let eq0 = vceqq_s32(c0, zero32); // uint32x4_t
-    let eq1 = vceqq_s32(c1, zero32);
-    let eq2 = vceqq_s32(c2, zero32);
-    let eq3 = vceqq_s32(c3, zero32);
-    // Narrow u32x4 → u16x4 → u8x8 in two steps (low bytes: 0xFF or 0x00)
-    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1)); // uint16x8_t
-    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
-    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23)); // 0xFF where ==0
-    let is_nonzero = vmvnq_u8(is_zero); // 0xFF where !=0
-    // result = UNK(8) if zero, ACTIVE(2) if nonzero
-    // = UNK ^ ((UNK ^ ACTIVE) & is_nonzero) = 8 ^ (10 & is_nonzero)
-    let xv = vdupq_n_u8(10);
-    let uv = vdupq_n_u8(8);
-    let out = veorq_u8(uv, vandq_u8(xv, is_nonzero));
-    vst1q_u8(bucket.as_mut_ptr(), out);
-    // Horizontal OR of 16 lanes
-    let lo = vget_low_u8(out);
-    let hi = vget_high_u8(out);
-    let v4 = vorr_u8(lo, hi);
-    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
-    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
-    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
-    vget_lane_u8::<0>(v0)
-}
-
-/// NEON-vectorized band-0 flag update for the encoder.
-///
-/// Like `prelim_flags_bucket_enc_neon` but only updates entries where the
-/// existing flag is not ZERO (1) — matches the decoder's `prelim_flags_band0_neon`.
-#[cfg(all(feature = "std", target_arch = "aarch64"))]
-#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
-#[target_feature(enable = "neon")]
-unsafe fn prelim_flags_band0_enc_neon(recon: &[i32; 1024], old_flags: &mut [u8; 16]) -> u8 {
-    use core::arch::aarch64::*;
-    // Load old flags; build mask: 0xFF where flag != ZERO(1), else 0x00
-    let old_u8 = vld1q_u8(old_flags.as_ptr());
-    let one_u8 = vdupq_n_u8(1);
-    let is_zero_state = vceqq_u8(old_u8, one_u8); // 0xFF where old==ZERO
-    let should_update = vmvnq_u8(is_zero_state); // 0xFF where should update
-    // Load 16 i32 reconstruction values for band 0 (indices 0..16)
-    let ptr = recon.as_ptr();
-    let c0 = vld1q_s32(ptr);
-    let c1 = vld1q_s32(ptr.add(4));
-    let c2 = vld1q_s32(ptr.add(8));
-    let c3 = vld1q_s32(ptr.add(12));
-    let zero32 = vdupq_n_s32(0);
-    let eq0 = vceqq_s32(c0, zero32);
-    let eq1 = vceqq_s32(c1, zero32);
-    let eq2 = vceqq_s32(c2, zero32);
-    let eq3 = vceqq_s32(c3, zero32);
-    let n01 = vcombine_u16(vmovn_u32(eq0), vmovn_u32(eq1));
-    let n23 = vcombine_u16(vmovn_u32(eq2), vmovn_u32(eq3));
-    let is_zero = vcombine_u8(vmovn_u16(n01), vmovn_u16(n23));
-    let is_nonzero = vmvnq_u8(is_zero);
-    let xv = vdupq_n_u8(10);
-    let uv = vdupq_n_u8(8);
-    let new_flags = veorq_u8(uv, vandq_u8(xv, is_nonzero)); // UNK or ACTIVE
-    // Blend: where should_update==0xFF take new_flags, else keep old_u8
-    let out = vbslq_u8(should_update, new_flags, old_u8);
-    vst1q_u8(old_flags.as_mut_ptr(), out);
-    // Horizontal OR
-    let lo = vget_low_u8(out);
-    let hi = vget_high_u8(out);
-    let v4 = vorr_u8(lo, hi);
-    let v2 = vorr_u8(v4, vext_u8::<4>(v4, v4));
-    let v1 = vorr_u8(v2, vext_u8::<2>(v2, v2));
-    let v0 = vorr_u8(v1, vext_u8::<1>(v1, v1));
-    vget_lane_u8::<0>(v0)
-}
-
 #[cfg(feature = "std")]
 struct PlaneEncoder {
     /// True wavelet coefficients (read-only after `gather`).
     blocks: Vec<[i16; 1024]>,
     /// Decoder's running reconstruction (all-zero initially).
-    recon: Vec<[i32; 1024]>,
+    ///
+    /// `i16`, like the decoder's own coefficients. The encoder has to mirror
+    /// the decoder bit for bit, and the decoder truncates every store to `i16`;
+    /// holding these in `i32` kept a precision the decoder never has.
+    ///
+    /// Sparse, for the same reason the decoder's grid is: only 0.6-12.7 % of
+    /// its buckets are ever written (PERF_EXPERIMENTS.md ENCODE_SPARSE_RECON).
+    recon: Vec<CoefBlock>,
     block_cols: usize,
 
     quant_lo: [u32; 16],
@@ -1236,7 +1151,7 @@ impl PlaneEncoder {
         let n_blocks = block_cols * block_rows;
         PlaneEncoder {
             blocks: vec![[0i16; 1024]; n_blocks],
-            recon: vec![[0i32; 1024]; n_blocks],
+            recon: vec![CoefBlock::default(); n_blocks],
             block_cols,
             quant_lo: QUANT_LO_INIT,
             quant_hi: QUANT_HI_INIT,
@@ -1316,57 +1231,17 @@ impl PlaneEncoder {
         let (from, to) = BAND_BUCKETS[self.curband];
         if self.curband != 0 {
             for (boff, j) in (from..=to).enumerate() {
-                let base = j << 4;
-                #[cfg(target_arch = "aarch64")]
-                // SAFETY: NEON always available on aarch64; base+16 <= 1024 (max j=63).
-                #[allow(unsafe_code)]
-                let bstatetmp = unsafe {
-                    prelim_flags_bucket_enc_neon(
-                        &self.recon[block_idx],
-                        base,
-                        &mut self.coeffstate[boff],
-                    )
-                };
-                #[cfg(not(target_arch = "aarch64"))]
-                let bstatetmp = {
-                    let mut b = 0u8;
-                    for k in 0..16 {
-                        let f = if self.recon[block_idx][base + k] == 0 {
-                            UNK
-                        } else {
-                            ACTIVE
-                        };
-                        self.coeffstate[boff][k] = f;
-                        b |= f;
-                    }
-                    b
-                };
+                // `recon` is now `i16`, so this is the decoder's own helper —
+                // same flags, and the encoder picks up its AVX2 path too.
+                let coefs = self.recon[block_idx].bucket(j);
+                let bstatetmp = prelim_flags_bucket(coefs, &mut self.coeffstate[boff]);
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
         } else {
             // Band 0: coeffstate[0] is pre-initialized by is_null_slice
-            #[cfg(target_arch = "aarch64")]
-            // SAFETY: NEON always available on aarch64; recon[0..16] is valid.
-            #[allow(unsafe_code)]
-            let bstatetmp = unsafe {
-                prelim_flags_band0_enc_neon(&self.recon[block_idx], &mut self.coeffstate[0])
-            };
-            #[cfg(not(target_arch = "aarch64"))]
-            let bstatetmp = {
-                let mut b = 0u8;
-                for k in 0..16 {
-                    if self.coeffstate[0][k] != ZERO {
-                        self.coeffstate[0][k] = if self.recon[block_idx][k] == 0 {
-                            UNK
-                        } else {
-                            ACTIVE
-                        };
-                    }
-                    b |= self.coeffstate[0][k];
-                }
-                b
-            };
+            let coefs = self.recon[block_idx].bucket(0);
+            let bstatetmp = band0_dispatch(coefs, &mut self.coeffstate[0]);
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
@@ -1460,7 +1335,7 @@ impl PlaneEncoder {
             if self.curband != 0 {
                 let t = 4 * i;
                 for j in t..t + 4 {
-                    if self.recon[block_idx][j] != 0 {
+                    if self.recon[block_idx].coef(j) != 0 {
                         n += 1;
                     }
                 }
@@ -1536,8 +1411,11 @@ impl PlaneEncoder {
                         zp.encode_passthrough_iw44(negative);
                         // Mirror decoder: recon = sign * (s + s>>1 - s>>3)
                         let decoded_val = s + (s >> 1) - (s >> 3);
-                        self.recon[block_idx][coef_idx] =
-                            if negative { -decoded_val } else { decoded_val };
+                        // `as i16` exactly as the decoder writes it.
+                        let val = if negative { -decoded_val } else { decoded_val } as i16;
+                        let block = &mut self.recon[block_idx];
+                        block.grow_through(BAND_BUCKETS[self.curband].1);
+                        block.bucket_mut(i)[k] = val;
                         np = 0;
                     }
                     np = np.saturating_sub(1);
@@ -1553,6 +1431,11 @@ impl PlaneEncoder {
         let (from, to) = BAND_BUCKETS[self.curband];
         let mut step = self.quant_hi[self.curband];
         for (boff, i) in (from..=to).enumerate() {
+            // An ACTIVE coefficient is non-zero by definition, so its bucket was
+            // written. An absent bucket has nothing to refine.
+            if self.recon[block_idx].bucket_mut_if_present(i).is_none() {
+                continue;
+            }
             for k in 0..16 {
                 if (self.coeffstate[boff][k] & ACTIVE) == 0 {
                     continue;
@@ -1563,7 +1446,7 @@ impl PlaneEncoder {
                 let coef_idx = if self.curband == 0 { k } else { (i << 4) | k };
                 let s = step as i32;
                 let true_v = self.blocks[block_idx][coef_idx] as i32;
-                let d = self.recon[block_idx][coef_idx]; // decoder's current value
+                let d = self.recon[block_idx].coef(coef_idx) as i32; // decoder's current value
                 let abs_d = d.unsigned_abs() as i32;
                 let abs_v = true_v.unsigned_abs() as i32;
 
@@ -1603,7 +1486,8 @@ impl PlaneEncoder {
                 }
                 // Update recon with the decoder's new value
                 let sign = if d < 0 { -1i32 } else { 1i32 };
-                self.recon[block_idx][coef_idx] = sign * new_abs_d.max(0);
+                // `as i16` exactly as the decoder writes it.
+                self.recon[block_idx].bucket_mut(i)[k] = (sign * new_abs_d.max(0)) as i16;
             }
         }
     }
@@ -2262,7 +2146,7 @@ mod loss_diagnostics {
             for blk in 0..enc.blocks.len() {
                 for idx in lo..hi {
                     let t = enc.blocks[blk][idx] as i64;
-                    let r = enc.recon[blk][idx] as i64;
+                    let r = enc.recon[blk].coef(idx) as i64;
                     energy += t.abs();
                     resid += (t - r).abs();
                 }
@@ -2314,7 +2198,7 @@ mod loss_diagnostics {
             dec.decode_slice(&mut zp_dec);
         }
 
-        assert_eq!(enc.recon[0][coefficient], 1);
+        assert_eq!(enc.recon[0].coef(coefficient), 1);
         assert_eq!(dec.blocks[0].coef(coefficient), 1);
     }
 
@@ -2340,7 +2224,7 @@ mod loss_diagnostics {
         }
 
         // s=8192 activation reconstruction: s + s/2 - s/8 = 11264.
-        assert_eq!(enc.recon[0][coefficient], 11_264);
+        assert_eq!(enc.recon[0].coef(coefficient), 11_264);
         assert_eq!(dec.blocks[0].coef(coefficient), 11_264);
     }
 
