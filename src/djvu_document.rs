@@ -753,6 +753,28 @@ impl DjVuPage {
         None
     }
 
+    /// This page's cached RGB conversion for a `subsample > 4` render, when
+    /// the slot holds exactly that subsample. Never decodes.
+    #[cfg(feature = "std")]
+    pub(crate) fn cached_bg_rgb_subhi(&self, subsample: u32) -> Option<&Pixmap> {
+        self.render_layers.get()?.bg_rgb_subhi(subsample)
+    }
+
+    /// Memoise the RGB conversion for a `subsample > 4` render. The first
+    /// subsample a page is rendered at wins; later ones reconvert.
+    #[cfg(feature = "std")]
+    pub(crate) fn store_bg_rgb_subhi(&self, subsample: u32, px: &Pixmap) {
+        self.render_layers().store_bg_rgb_subhi(subsample, px);
+    }
+
+    /// This page's first-chunk BG44 image **only if it is already cached** —
+    /// never decodes. See `PageLayers::bg44_partial_cached` for why the
+    /// subsample > 4 render path peeks instead of memoising.
+    #[cfg(feature = "std")]
+    pub(crate) fn cached_bg44_partial(&self) -> Option<&Iw44Image> {
+        self.render_layers.get()?.bg44_partial_cached()
+    }
+
     /// Return the decoded JB2 shared dictionary, decoding and caching on first call.
     ///
     /// Returns `None` if the page has no shared dictionary (no INCL reference).
