@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788905313431,
+  "lastUpdate": 1788936078220,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18946,6 +18946,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51063000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "92dc1c40eb99ca245744fc4584a82e483fcb3d11",
+          "message": "perf(render): stop thumbnails from retaining a full-size page decode (#802)\n\nA 128 px thumbnail lands on the `subsample > 4` render branch. That branch\nmemoised `PageLayers::bg44_partial` — the first BG44 chunk — and cached\nnothing it derived from it. A \"partial\" `Iw44Image` decodes about 4x faster\nthan a full one but is exactly as large: `PlaneDecoder` allocates the whole\ncoefficient grid up front. So a thumbnail retained 5.85 MB per page, 96 % of\nwhat a full 150 dpi render retains, and re-ran the RGB conversion anyway.\n\nThe branch now reuses an already-cached partial image but never populates the\nslot itself; otherwise it decodes into a local image that drops with the call.\nA new `bg_rgb_subhi: OnceLock<Option<(u32, Pixmap)>>` memoises the ~90 KB\n*result* instead, keyed by its subsample, alongside the existing s1/s2/s4\ntiers.\n\nThumbnail-grid peak, counting global allocator:\n\n  colorbook.djvu       377 234 457 -> 32 672 453 B  (-91.3 %)\n  conquete_paix.djvu   473 514 659 -> 49 238 249 B  (-89.6 %)\n  czech.djvu           116 413 137 ->  4 365 955 B  (-96.2 %)\n  goody_twoshoes.djvu   88 913 371 -> 12 289 663 B  (-86.2 %)\n  bilevel / 1-page     unchanged (within 0.05 %)\n\nNo time trade: the new memo also skips the repeated wavelet reconstruction,\nso a repeat grid is 2.6-16x faster (colorbook 31.3 -> 7.2 ms). Every\nthumbnail is byte-identical before and after (FNV hash over all pixmaps and\ndimensions, nine documents).\n\nGuarded by tests/thumbnail_peak_memory.rs: retained *and* peak slope must\nstay under a quarter of a full render's retained slope (measured share 6 %),\nwith a control that the fixture really is a colour book. Sabotage-checked —\nreverting the fix fails it at 96 %.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-09T08:18:02+02:00",
+          "tree_id": "eccf5d2f2febb55ec94f9c1768d4f6b878fb5d79",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/92dc1c40eb99ca245744fc4584a82e483fcb3d11"
+        },
+        "date": 1788936077054,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 122000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6020000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35479000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 33772000,
             "range": "± 0",
             "unit": "ns/iter"
           }
