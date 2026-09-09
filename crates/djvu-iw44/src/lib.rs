@@ -1097,9 +1097,13 @@ struct PlaneDecoder {
     width: usize,
     height: usize,
     block_cols: usize,
-    /// Row-major array of 32×32 blocks; each block holds 1024 i16 coefficients
-    /// in zigzag-scan order.
-    blocks: Vec<[i16; 1024]>,
+    /// Row-major array of 32×32 blocks. A block addresses 1024 i16
+    /// coefficients in zigzag-scan order but stores only the buckets it really
+    /// uses — see [`CoefBlock`].
+    blocks: Vec<CoefBlock>,
+    /// Running total of the `CoefBlock::hi` lengths, so [`PlaneDecoder::heap_bytes`]
+    /// stays O(1) instead of walking every block on each cache-budget query.
+    hi_len: usize,
     quant_lo: [u32; 16],
     quant_hi: [u32; 10],
     /// Current band index (0..10, wraps around).
@@ -1115,23 +1119,22 @@ struct PlaneDecoder {
     bbstate: u8,
 }
 
-/// Map 16 i16 coefficients at `block[base..]` to UNK/ACTIVE flags, store in `bucket`,
+/// Map one bucket's 16 i16 coefficients to UNK/ACTIVE flags, store in `bucket`,
 /// and return the OR of all flag bytes (bstatetmp).
 ///
 /// Dispatches to NEON on aarch64, AVX2 on x86_64 when available, else scalar.
 #[allow(unsafe_code)]
 #[inline(always)]
-fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+fn prelim_flags_bucket(coefs: &[i16; 16], bucket: &mut [u8; 16]) -> u8 {
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: NEON is mandatory on aarch64; `base + 16 <= 1024` is guaranteed by
-    // BAND_BUCKETS (max bucket index 63, so base = 63 * 16 = 1008, 1008 + 16 = 1024).
-    return unsafe { prelim_flags_bucket_neon(block, base, bucket) };
+    // SAFETY: NEON is mandatory on aarch64; `coefs` is exactly 16 i16 wide.
+    return unsafe { prelim_flags_bucket_neon(coefs, bucket) };
 
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     {
         if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: AVX2 was just feature-detected; `base + 16 <= 1024` per BAND_BUCKETS.
-            return unsafe { prelim_flags_bucket_avx2(block, base, bucket) };
+            // SAFETY: AVX2 was just feature-detected; `coefs` is exactly 16 i16 wide.
+            return unsafe { prelim_flags_bucket_avx2(coefs, bucket) };
         }
     }
 
@@ -1139,7 +1142,7 @@ fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) 
     {
         let mut bstate = 0u8;
         for k in 0..16 {
-            let f = if block[base + k] == 0 { UNK } else { ACTIVE };
+            let f = if coefs[k] == 0 { UNK } else { ACTIVE };
             bucket[k] = f;
             bstate |= f;
         }
@@ -1154,9 +1157,9 @@ fn prelim_flags_bucket(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) 
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "neon")]
-unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+unsafe fn prelim_flags_bucket_neon(coefs: &[i16; 16], bucket: &mut [u8; 16]) -> u8 {
     use core::arch::aarch64::*;
-    let ptr = block.as_ptr().add(base);
+    let ptr = coefs.as_ptr();
     // Load as u16 — zero-comparison is the same for signed and unsigned 16-bit.
     let c0 = vreinterpretq_u16_s16(vld1q_s16(ptr));
     let c1 = vreinterpretq_u16_s16(vld1q_s16(ptr.add(8)));
@@ -1195,10 +1198,10 @@ unsafe fn prelim_flags_bucket_neon(block: &[i16; 1024], base: usize, bucket: &mu
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "avx2")]
-unsafe fn prelim_flags_bucket_avx2(block: &[i16; 1024], base: usize, bucket: &mut [u8; 16]) -> u8 {
+unsafe fn prelim_flags_bucket_avx2(coefs: &[i16; 16], bucket: &mut [u8; 16]) -> u8 {
     use core::arch::x86_64::*;
-    // Load 16 contiguous i16 (32 bytes) at block[base..base+16].
-    let coefs = _mm256_loadu_si256(block.as_ptr().add(base) as *const __m256i);
+    // Load the bucket's 16 contiguous i16 (32 bytes).
+    let coefs = _mm256_loadu_si256(coefs.as_ptr() as *const __m256i);
     // eq: 0xFFFF where coef == 0, 0x0000 where != 0.
     let zero = _mm256_setzero_si256();
     let eq = _mm256_cmpeq_epi16(coefs, zero);
@@ -1230,7 +1233,7 @@ unsafe fn prelim_flags_bucket_avx2(block: &[i16; 1024], base: usize, bucket: &mu
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "neon")]
-unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+unsafe fn prelim_flags_band0_neon(block: &[i16; 16], old_flags: &mut [u8; 16]) -> u8 {
     use core::arch::aarch64::*;
     // Load old coeffstate[0] (u8 flags: ZERO=1, UNK=8, ACTIVE=2).
     let old_u8 = vld1q_u8(old_flags.as_ptr());
@@ -1271,7 +1274,7 @@ unsafe fn prelim_flags_band0_neon(block: &[i16; 1024], old_flags: &mut [u8; 16])
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
 #[target_feature(enable = "avx2")]
-unsafe fn prelim_flags_band0_avx2(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+unsafe fn prelim_flags_band0_avx2(block: &[i16; 16], old_flags: &mut [u8; 16]) -> u8 {
     use core::arch::x86_64::*;
     // Load old coeffstate[0] (16 u8 flags: ZERO=1, UNK=8, ACTIVE=2).
     let old_u8 = _mm_loadu_si128(old_flags.as_ptr() as *const __m128i);
@@ -1314,7 +1317,7 @@ unsafe fn prelim_flags_band0_avx2(block: &[i16; 1024], old_flags: &mut [u8; 16])
 /// Picks NEON on aarch64, AVX2 on x86_64 when available, scalar otherwise.
 #[allow(unsafe_code)]
 #[inline(always)]
-fn band0_dispatch(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
+fn band0_dispatch(block: &[i16; 16], old_flags: &mut [u8; 16]) -> u8 {
     #[cfg(target_arch = "aarch64")]
     // SAFETY: NEON always available on aarch64; block[0..16] valid by construction.
     return unsafe { prelim_flags_band0_neon(block, old_flags) };
@@ -1340,10 +1343,120 @@ fn band0_dispatch(block: &[i16; 1024], old_flags: &mut [u8; 16]) -> u8 {
     }
 }
 
+/// A bucket that was never written. Reading an absent bucket yields this —
+/// exactly what a zero-filled one held before (see [`CoefBlock`]).
+const ZERO_BUCKET: [i16; 16] = [0; 16];
+
+/// One 32x32 IW44 coefficient block, stored as the prefix of buckets that
+/// actually holds data.
+///
+/// A block is 1024 coefficients in zigzag order, grouped into 64 buckets of 16.
+/// Storing all of them costs a flat 2 KB per block whatever the image really
+/// contains: 124 MB for one plane of a 6780x9148 page, and three such planes
+/// made a single-page thumbnail peak at 383 MB. Almost all of it is zeros —
+/// measured on that page, a complete four-chunk decode leaves **9.3 %** of the
+/// luma buckets non-zero and **1.6 %** of the chroma ones; a first-chunk
+/// preview leaves 3.5 % (PERF_EXPERIMENTS.md IW44_SPARSE_BLOCKS).
+///
+/// A block only ever needs a *prefix* of its buckets, so `lo` holds bucket 0
+/// inline — every block has one — and `hi` covers buckets `1..=n`, growing on
+/// the first write above bucket 0. An absent bucket reads as zero, which is
+/// what a never-written bucket already held, so the decoder's behaviour is
+/// unchanged: the UNK/ACTIVE flags it derives depend only on whether a
+/// coefficient is zero.
+#[derive(Clone, Debug, Default)]
+struct CoefBlock {
+    /// Bucket 0 — coefficients 0..16. Always present.
+    lo: [i16; 16],
+    /// Buckets 1..=n — coefficients 16..16*(n+1). Empty until a coefficient
+    /// above bucket 0 is written; `len()` is always a multiple of 16.
+    hi: Vec<i16>,
+}
+
+impl CoefBlock {
+    /// Coefficient `i` in zigzag order; zero when its bucket is absent.
+    #[inline(always)]
+    fn coef(&self, i: usize) -> i16 {
+        if i < 16 {
+            self.lo[i]
+        } else {
+            self.hi.get(i - 16).copied().unwrap_or(0)
+        }
+    }
+
+    /// Bucket `b`'s 16 coefficients, or [`ZERO_BUCKET`] when absent.
+    #[inline(always)]
+    fn bucket(&self, b: usize) -> &[i16; 16] {
+        if b == 0 {
+            return &self.lo;
+        }
+        let off = (b - 1) * 16;
+        match self.hi.get(off..off + 16) {
+            // `expect` cannot fire: the slice is 16 long by construction.
+            Some(s) => s.try_into().expect("16-wide bucket slice"),
+            None => &ZERO_BUCKET,
+        }
+    }
+
+    /// Copy this block's coefficients `0..n` into `out`, zero-filling the rest.
+    ///
+    /// `reconstruct` scatters coefficients by zigzag index in a tight loop, so
+    /// it materialises the prefix it needs once per block rather than paying
+    /// [`coef`](Self::coef)'s bounds test per coefficient.
+    #[inline]
+    fn materialize(&self, out: &mut [i16]) {
+        let n = out.len();
+        let lo = n.min(16);
+        out[..lo].copy_from_slice(&self.lo[..lo]);
+        if n > 16 {
+            let hi = self.hi.len().min(n - 16);
+            out[16..16 + hi].copy_from_slice(&self.hi[..hi]);
+            out[16 + hi..].fill(0);
+        }
+    }
+}
+
 impl PlaneDecoder {
-    /// Heap bytes held by this plane's coefficient array.
+    /// Heap bytes held by this plane's coefficient array: the block index plus
+    /// the buckets that were actually written (see [`CoefBlock`]).
     fn heap_bytes(&self) -> usize {
-        self.blocks.capacity() * core::mem::size_of::<[i16; 1024]>()
+        self.blocks.capacity() * core::mem::size_of::<CoefBlock>()
+            + self.hi_len * core::mem::size_of::<i16>()
+    }
+
+    /// Bucket `b` of block `block_idx`, growing the block to reach it.
+    ///
+    /// Every write above bucket 0 goes through here so `hi_len` stays exact.
+    #[inline]
+    fn bucket_mut(&mut self, block_idx: usize, b: usize) -> &mut [i16; 16] {
+        // Grow to the end of the band `b` belongs to, not to `b` itself. A
+        // block is walked bucket by bucket in band order, so growing per bucket
+        // meant up to 64 reallocations per block and cost 10 % on
+        // `iw44_decode_first_chunk`; per band there are at most 10. The band is
+        // also the natural unit: the passes that follow read every bucket in it.
+        let band_top = BAND_BUCKETS[self.curband].1;
+        debug_assert!(
+            b >= BAND_BUCKETS[self.curband].0 && b <= band_top,
+            "bucket {b} is outside band {}",
+            self.curband
+        );
+        {
+            let block = &mut self.blocks[block_idx];
+            let need = band_top * 16;
+            if block.hi.len() < need {
+                let grow = need - block.hi.len();
+                block.hi.reserve_exact(grow);
+                block.hi.resize(need, 0);
+                self.hi_len += grow;
+            }
+        }
+        let block = &mut self.blocks[block_idx];
+        if b == 0 {
+            return &mut block.lo;
+        }
+        let off = (b - 1) * 16;
+        // `expect` cannot fire: the slice is 16 long by construction.
+        <&mut [i16; 16]>::try_from(&mut block.hi[off..off + 16]).expect("16-wide bucket slice")
     }
 
     fn new(width: usize, height: usize) -> Self {
@@ -1354,7 +1467,8 @@ impl PlaneDecoder {
             width,
             height,
             block_cols,
-            blocks: vec![[0i16; 1024]; block_count],
+            blocks: vec![CoefBlock::default(); block_count],
+            hi_len: 0,
             quant_lo: QUANT_LO_INIT,
             quant_hi: QUANT_HI_INIT,
             curband: 0,
@@ -1409,17 +1523,24 @@ impl PlaneDecoder {
         let (from, to) = BAND_BUCKETS[self.curband];
 
         if self.curband != 0 {
+            // The band's buckets are consecutive in the block's tail, so resolve
+            // the block and its tail length once instead of per bucket: this
+            // loop runs for every band of every block and the indexing showed up
+            // as a few percent on `iw44_decode_first_chunk`.
+            let hi = &self.blocks[block_idx].hi[..];
             for (boff, j) in (from..=to).enumerate() {
-                let bstatetmp = prelim_flags_bucket(
-                    &self.blocks[block_idx],
-                    j << 4,
-                    &mut self.coeffstate[boff],
-                );
+                let off = (j - 1) * 16;
+                let coefs = match hi.get(off..off + 16) {
+                    Some(s) => <&[i16; 16]>::try_from(s).expect("16-wide bucket slice"),
+                    None => &ZERO_BUCKET,
+                };
+                let bstatetmp = prelim_flags_bucket(coefs, &mut self.coeffstate[boff]);
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
         } else {
-            let bstatetmp = band0_dispatch(&self.blocks[block_idx], &mut self.coeffstate[0]);
+            let bstatetmp =
+                band0_dispatch(self.blocks[block_idx].bucket(0), &mut self.coeffstate[0]);
             self.bucketstate[0] = bstatetmp;
             self.bbstate |= bstatetmp;
         }
@@ -1449,7 +1570,7 @@ impl PlaneDecoder {
             if self.curband != 0 {
                 let t = 4 * i;
                 for j in t..t + 4 {
-                    if self.blocks[block_idx][j] != 0 {
+                    if self.blocks[block_idx].coef(j) != 0 {
                         n += 1;
                     }
                 }
@@ -1499,7 +1620,7 @@ impl PlaneDecoder {
                             }
                             let s = step as i32;
                             let val = sign * (s + (s >> 1) - (s >> 3));
-                            self.blocks[block_idx][(i << 4) | j] = val as i16;
+                            self.bucket_mut(block_idx, i)[j] = val as i16;
                         }
                         np = np.saturating_sub(1);
                     }
@@ -1619,12 +1740,30 @@ impl PlaneDecoder {
         let (from, to) = BAND_BUCKETS[self.curband];
         let mut step = self.quant_hi[self.curband];
         for (boff, i) in (from..=to).enumerate() {
-            for j in 0..16 {
-                if (self.coeffstate[boff][j] & ACTIVE) != 0 {
+            // An ACTIVE coefficient is by definition non-zero, so its bucket
+            // was written and `bucket_mut` never grows the block here. Skipping
+            // buckets with none also skips that call entirely.
+            // An ACTIVE coefficient is by definition non-zero, so its bucket
+            // was written. An absent bucket therefore has nothing to refine.
+            let bucket = {
+                let block = &mut self.blocks[block_idx];
+                let off = i * 16;
+                if i == 0 {
+                    &mut block.lo
+                } else if off <= block.hi.len() {
+                    <&mut [i16; 16]>::try_from(&mut block.hi[off - 16..off])
+                        .expect("16-wide bucket slice")
+                } else {
+                    continue;
+                }
+            };
+            let flags = &self.coeffstate[boff];
+            for (j, slot) in bucket.iter_mut().enumerate() {
+                if (flags[j] & ACTIVE) != 0 {
                     if self.curband == 0 {
                         step = self.quant_lo[j];
                     }
-                    let coef = self.blocks[block_idx][(i << 4) | j];
+                    let coef = *slot;
                     let mut abs_coef = coef.unsigned_abs() as i32;
                     let s = step as i32;
                     let des = if abs_coef <= 3 * s {
@@ -1639,7 +1778,7 @@ impl PlaneDecoder {
                     } else {
                         abs_coef += -s + (s >> 1);
                     }
-                    self.blocks[block_idx][(i << 4) | j] = if coef < 0 {
+                    *slot = if coef < 0 {
                         -abs_coef as i16
                     } else {
                         abs_coef as i16
@@ -1730,10 +1869,16 @@ impl PlaneDecoder {
                 4 => &ZIGZAG_INV_SUB4,
                 _ => &ZIGZAG_INV_SUB8, // sub=8
             };
+            // The compact tables only ever name zigzag indices < sub_block², so
+            // each block is materialised into that prefix once (see
+            // `CoefBlock::materialize`) and the scatter below stays a tight
+            // read of a contiguous array.
+            let mut prefix = [0i16; 256];
             #[allow(unsafe_code)]
             for r in 0..block_rows {
                 for c in 0..self.block_cols {
                     let block = &self.blocks[r * self.block_cols + c];
+                    block.materialize(&mut prefix[..sub_block * sub_block]);
                     let base_row = r * sub_block;
                     let base_col = c * sub_block;
                     for row in 0..sub_block {
@@ -1744,7 +1889,7 @@ impl PlaneDecoder {
                             let i = unsafe { *compact_inv.get_unchecked(inv_base + col) } as usize;
                             unsafe {
                                 *plane.data.get_unchecked_mut(dst_base + col) =
-                                    *block.get_unchecked(i);
+                                    *prefix.get_unchecked(i);
                             }
                         }
                     }
@@ -1777,9 +1922,10 @@ impl PlaneDecoder {
         // (= 1 cache line) before advancing, maximising write-combine efficiency.
         // block[ZIGZAG_INV[row*32+col]] is a gathered read from a 2 KB array
         // that fits in L1, so the scatter cost is minimal.
+        let mut full = [0i16; 1024];
         for r in 0..block_rows {
             for c in 0..self.block_cols {
-                let block = &self.blocks[r * self.block_cols + c];
+                self.blocks[r * self.block_cols + c].materialize(&mut full);
                 let row_base = r << 5;
                 let col_base = c << 5;
                 for row in 0..32usize {
@@ -1787,7 +1933,7 @@ impl PlaneDecoder {
                     let inv_base = row * 32;
                     for col in 0..32usize {
                         let i = ZIGZAG_INV[inv_base + col] as usize;
-                        plane.data[dst_base + col] = block[i];
+                        plane.data[dst_base + col] = full[i];
                     }
                 }
             }
@@ -3127,12 +3273,17 @@ impl Iw44Image {
     ///
     /// A cache-budget accounting helper: an `Iw44Image` keeps one
     /// [`PlaneDecoder`] per colour plane, and each holds `ceil(w/32) *
-    /// ceil(h/32)` blocks of 1024 `i16` coefficients. A colour image therefore
-    /// costs roughly `1.5 x w x h x 2` bytes (luma at full resolution plus two
-    /// half-resolution chroma planes), not `w x h x 2` — see
-    /// `PageLayers::cached_bytes` in the parent crate, which used the latter
-    /// and under-reported colour pages by ~2.6x (PERF_EXPERIMENTS.md
-    /// DECODE_CACHE_ACCOUNTING).
+    /// ceil(h/32)` blocks. A block stores its first 16 coefficients inline and
+    /// grows a heap tail only up to its highest non-zero bucket, so the cost
+    /// tracks how much detail the chunks actually carried, not `w x h`
+    /// (PERF_EXPERIMENTS.md IW44_SPARSE_BLOCKS). Both terms are reported: the
+    /// inline block array and the sum of the heap tails.
+    ///
+    /// Call it after every chunk, not once: the tails grow as later chunks
+    /// refine the image. A colour image also costs more than its luma plane
+    /// alone — `PageLayers::cached_bytes` in the parent crate once sized a
+    /// cached image as `w x h x 2` and under-reported colour pages by ~2.6x
+    /// (PERF_EXPERIMENTS.md DECODE_CACHE_ACCOUNTING).
     ///
     /// Returns 0 before the first chunk is decoded (no plane is allocated yet).
     pub fn heap_bytes(&self) -> usize {
@@ -4600,37 +4751,30 @@ mod tests {
             ],
         ];
         for &coefs in test_vectors {
-            let mut block = [0i16; 1024];
-            // Place the 16 coefs at base = 0 *and* at a non-zero base to test the offset.
-            for &base in &[0usize, 16, 32, 1008] {
-                block[base..base + 16].copy_from_slice(&coefs);
+            let mut bucket_avx2 = [0u8; 16];
+            #[allow(unsafe_code)]
+            let bstate_avx2 = unsafe { super::prelim_flags_bucket_avx2(&coefs, &mut bucket_avx2) };
 
-                let mut bucket_avx2 = [0u8; 16];
-                #[allow(unsafe_code)]
-                let bstate_avx2 =
-                    unsafe { super::prelim_flags_bucket_avx2(&block, base, &mut bucket_avx2) };
-
-                let mut bucket_scalar = [0u8; 16];
-                let mut bstate_scalar = 0u8;
-                for k in 0..16 {
-                    let f = if block[base + k] == 0 {
-                        super::UNK
-                    } else {
-                        super::ACTIVE
-                    };
-                    bucket_scalar[k] = f;
-                    bstate_scalar |= f;
-                }
-
-                assert_eq!(
-                    bucket_avx2, bucket_scalar,
-                    "bucket mismatch at base={base} coefs={coefs:?}"
-                );
-                assert_eq!(
-                    bstate_avx2, bstate_scalar,
-                    "bstatetmp mismatch at base={base}"
-                );
+            let mut bucket_scalar = [0u8; 16];
+            let mut bstate_scalar = 0u8;
+            for k in 0..16 {
+                let f = if coefs[k] == 0 {
+                    super::UNK
+                } else {
+                    super::ACTIVE
+                };
+                bucket_scalar[k] = f;
+                bstate_scalar |= f;
             }
+
+            assert_eq!(
+                bucket_avx2, bucket_scalar,
+                "bucket mismatch for coefs={coefs:?}"
+            );
+            assert_eq!(
+                bstate_avx2, bstate_scalar,
+                "bstatetmp mismatch for coefs={coefs:?}"
+            );
         }
     }
 
@@ -4679,19 +4823,16 @@ mod tests {
 
         for &old in old_patterns {
             for &coefs in coef_patterns {
-                let mut block = [0i16; 1024];
-                block[..16].copy_from_slice(&coefs);
-
                 let mut flags_avx2 = old;
                 #[allow(unsafe_code)]
                 let bstate_avx2 =
-                    unsafe { super::prelim_flags_band0_avx2(&block, &mut flags_avx2) };
+                    unsafe { super::prelim_flags_band0_avx2(&coefs, &mut flags_avx2) };
 
                 let mut flags_scalar = old;
                 let mut bstate_scalar = 0u8;
                 for k in 0..16 {
                     if flags_scalar[k] != super::ZERO {
-                        flags_scalar[k] = if block[k] == 0 {
+                        flags_scalar[k] = if coefs[k] == 0 {
                             super::UNK
                         } else {
                             super::ACTIVE

@@ -15134,3 +15134,192 @@ per-document slope, and needs a different fix (a truly reduced decode). The read
 path also remains unbounded by default — `enforce_cache_budget`,
 `retain_render_caches` and `evict_render_cache` are all opt-in and all need
 `&mut self`, while rendering takes `&self`.
+
+### One large page peaked at 383 MB — sparse IW44 coefficient blocks — **Kept** (2026-09-09)
+
+**IW44_SPARSE_BLOCKS**
+
+**Issue.** The open item left by THUMB_PARTIAL_MEMO. A thumbnail grid no longer
+grows with the page count, but one very large page still cost 383 MB on its own.
+`big_scanned_page.djvu` is 6780x9148 at 254 dpi, its BG44 background covers the
+whole page at full resolution, and its chroma planes are not halved.
+
+**Cause.** dhat named three allocations of 124 174 336 B each — 96 % of the peak,
+all from `PlaneDecoder::new`. A plane is a grid of 32x32 blocks; a block holds
+1024 `i16` coefficients (2 KB) in 64 buckets of 16. `new` allocated
+`vec![[0i16; 1024]; blocks]` up front, for every block and every plane, whatever
+the chunks then wrote into it. 60 632 blocks per plane x 2048 B x 3 planes =
+372 MB before a single bit was decoded.
+
+Real pages leave nearly all of that empty. Measured bucket occupancy on this page:
+
+| Chunks decoded | Luma | Cb | Cr |
+|---|---|---|---|
+| first only | 3.5 % | 1.5 % | 1.6 % |
+| all four | 9.3 % | 1.7 % | 1.6 % |
+
+**Approach.** A block now keeps its first 16 coefficients inline and grows a heap
+tail only as far as its highest written bucket:
+
+```rust
+struct CoefBlock {
+    lo: [i16; 16],   // bucket 0, always present
+    hi: Vec<i16>,    // buckets 1..=n, empty until something above bucket 0 is written
+}
+```
+
+The tail is a prefix, not a sparse map, so bucket `b` still lands at a computed
+offset and the hot loops keep their `&[i16; 16]` slices. Reads of an absent
+bucket return zeros. That is exactly right and not an approximation: the decoder
+derives its UNK / ACTIVE / ZERO / NEW flags *from whether a coefficient is zero*,
+so an absent bucket and a zero-filled one are the same thing to every pass.
+
+The tail grows to the top of the band being decoded, not to the bucket asked
+for. A block is walked bucket by bucket in band order, so per-bucket growth
+meant up to 64 reallocations per block and cost 10 % on
+`iw44_decode_first_chunk`; per band there are at most 10, and the band is the
+natural unit because the passes that follow read every bucket in it.
+
+Two smaller changes came with it. The refinement pass skips an absent bucket
+outright — an ACTIVE coefficient is non-zero by definition, so an absent bucket
+has nothing to refine — and holds the bucket reference across the inner loop
+instead of indexing per coefficient. The preliminary flag pass resolves the
+block's tail once per band rather than once per bucket.
+
+`reconstruct` materialises a block into a stack array — 256 `i16` on the compact
+subsample 2/4/8 path, 1024 on the full path — so nothing downstream changed.
+
+**Numbers.** `Iw44Image::heap_bytes` for that page:
+
+| State | Before | After | Change |
+|---|---|---|---|
+| after the first chunk | 372 523 008 | 12 640 736 | **−96.6 %** |
+| after all four chunks | 372 523 008 | 20 075 680 | **−94.6 %** |
+
+Peak bytes for one 128 px thumbnail grid, counting global allocator, same probe
+as THUMB_PARTIAL_MEMO:
+
+| File | Peak before | Peak after | Change |
+|---|---|---|---|
+| `big_scanned_page.djvu` (1 page) | 382 861 467 | 22 979 243 | **−94.0 %** |
+| `map_atlas_sample.djvu` | 5 111 254 | 2 096 592 | **−59.0 %** |
+| `czech.djvu` | 4 365 955 | 3 011 363 | **−31.0 %** |
+| `goody_twoshoes.djvu` | 12 289 663 | 7 779 447 | **−36.7 %** |
+| `conquete_paix.djvu` | 49 238 249 | 32 215 987 | **−34.6 %** |
+| `watchmaker.djvu` | 6 941 913 | 5 793 569 | **−16.5 %** |
+| `colorbook.djvu` | 32 672 453 | 29 687 157 | **−9.1 %** |
+| `pathogenic_bacteria_1896.djvu` (bilevel) | 136 506 501 | 136 555 653 | +0.04 % |
+| `cyrillic_simonovich_co2.djvu` | 1 417 690 | 1 418 458 | +0.05 % |
+
+Peak bytes for a full 150 dpi render of the first four pages — the path that
+decodes every chunk, where the tails grow furthest:
+
+| File | Peak before | Peak after | Change |
+|---|---|---|---|
+| `big_scanned_page.djvu` (1 page) | 614 784 291 | 262 337 011 | **−57.3 %** |
+| `goody_twoshoes.djvu` | 26 297 429 | 6 204 773 | **−76.4 %** |
+| `colorbook.djvu` | 30 311 083 | 8 343 275 | **−72.5 %** |
+| `conquete_paix.djvu` | 142 033 572 | 64 988 348 | **−54.2 %** |
+| `czech.djvu` | 7 418 650 | 3 707 242 | **−50.0 %** |
+| `map_atlas_sample.djvu` | 18 907 779 | 12 820 803 | **−32.2 %** |
+| `watchmaker.djvu` | 25 447 958 | 17 830 366 | **−29.9 %** |
+| `pathogenic_bacteria_1896.djvu` (bilevel) | 9 278 489 | 9 327 641 | +0.5 % |
+| `cyrillic_simonovich_co2.djvu` | 5 390 460 | 5 391 228 | +0.01 % |
+
+**No time trade.** Decode time is unchanged to slightly better; the big page
+gains most, because it stops touching 372 MB of fresh zeroed pages:
+
+| File | Thumbnail | Full render (4 pages) |
+|---|---|---|
+| `big_scanned_page.djvu` | 234 -> 145 ms (**1.6x faster**) | 686 -> 617 ms |
+| `colorbook.djvu` | 676 -> 664 ms | 118 -> 101 ms |
+| `conquete_paix.djvu` | 289 -> 287 ms | 514 -> 503 ms |
+| `watchmaker.djvu` | 74.0 -> 73.6 ms | 169.3 -> 168.7 ms |
+| `map_atlas_sample.djvu` | 103 -> 102 ms | 170.6 -> 172.1 ms |
+
+**Output unchanged.** An FNV-1a hash over all pixmap bytes plus dimensions
+matches before and after on all nine files, on **both** paths — the 128 px
+thumbnail grid and the full 150 dpi render.
+
+**Guards.**
+
+- `tests/decode_peak_memory.rs` (new). One 128 px thumbnail of
+  `big-scanned-page.djvu`; asserts peak stays under half of `w * h * 2`, the
+  cost of a single full-resolution coefficient plane. Measured 23 563 568 B =
+  19 %. 0.29 s release. Sabotage-checked: the dense decoder fails it at
+  383 445 792 B, **309 %**. The ceiling is a property of the page, so a dense
+  decoder cannot pass it — it needs three such planes.
+- `tests/thumbnail_peak_memory.rs` and `tests/decode_cache_accounting.rs` were
+  rebased, not weakened. Both had controls asserting a colorbook page costs
+  megabytes; it now costs 0.77 MB, so both floors dropped to 256 KiB with the
+  measurement written down. The thumbnail guard's real ceiling moved off
+  "a quarter of a full render" — a moving target now that a full render's cost
+  tracks image content — onto `w * h * 2 / 16`, a property of the page. The
+  defect it was written for read 5 932 807 B/page against that 1 036 492 B
+  ceiling, 5.7x over; today's measurement is 386 023 B, 2.3 % of the page.
+
+**Cost.** This one is not free. Paired A/B, two rounds, aarch64, medians
+(round 1 in brackets where it differs):
+
+| Benchmark | Before | After | Change |
+|---|---|---|---|
+| `iw44_decode_corpus_color` | 672.13 µs | 629.50 µs | **−6.3 %** |
+| `iw44_gray_decode_large/rgb_then_gray` | 6.1554 ms | 5.9601 ms | −3.2 % |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | 5.4331 ms | 5.3217 ms | −2.1 % |
+| `iw44_decode_first_chunk` | 581.04 µs | 618.16 µs | **+6.4 %** [+3.5 %] |
+| `render_coarse` | 730.27 µs | 772.84 µs | **+5.8 %** [+6.4 %] |
+| `iw44_to_rgb_colorbook/sub4_partial_decode` | 331.33 µs | 348.51 µs | +5.2 % |
+| `iw44_gray_decode_large/gray_direct_sub4` | 152.27 µs | 158.59 µs | +4.2 % |
+| `iw44_gray_decode_large/rgb_then_gray_sub4` | 369.92 µs | 384.95 µs | +4.1 % |
+
+The split is by workload, not by noise. Large decodes get faster — less memory
+touched, fewer cache misses. Small and coarse ones get slower for two reasons:
+a plane's blocks now sit behind one `Vec` each, so a linear walk chases pointers
+instead of striding a single array; and a short block makes `reconstruct` pad a
+copy where it used to read a full one in place.
+
+Seven attempts to close the gap, all measured, all on `iw44_decode_first_chunk`
+and `render_coarse`:
+
+| Attempt | Result |
+|---|---|
+| Grow per band instead of per bucket | **kept**, +10 % → +6 % |
+| Grow the tail in three steps (4/16/64 buckets) | no change, and more memory |
+| Grow once to the full 64 buckets | −2 %, but that is the dense grid again |
+| Resolve the tail once per band in the flag pass | **kept**, no measurable change |
+| Hoist the bucket out of `bucket_decoding_pass` | worse, +4 % |
+| One growing array per block instead of inline bucket 0 + tail | worse on four benchmarks of six |
+| Gather in place with a per-element zero test, no padded copy | much worse: sub4 +17 %, sub1 +17 % — the gather stops vectorising |
+
+The floor for a per-block heap tail is about +3 % on `iw44_decode_first_chunk`:
+the dense-blocks-in-separate-allocations control measures 616.76 µs against
+581.04 µs for one contiguous array. Removing the rest needs a per-plane arena,
+and an arena has to pick one stride for every block, which is the dense grid
+this entry removed.
+
+**Decision.** Kept. Peak down 9–94 % on the thumbnail path and 30–76 % on the
+full-render path, output byte-identical on both, bilevel unaffected. The time
+cost above is the price: about 6 % on small and coarse decodes against 16x less
+memory on a large page, and 6 % *faster* on the colour corpus. Benchmarks are
+not a merge gate in this repo, and a 383 MB peak for one page is the defect
+users actually hit.
+
+**Related.** THUMB_PARTIAL_MEMO (the entry that left this open),
+DECODE_CACHE_ACCOUNTING (`Iw44Image::heap_bytes`, whose doc comment and formula
+this rewrites), IW44_CHECKPOINT / #608.
+
+**Open.** The encode side keeps an over-allocation, but not the same one. One
+6780x9148 page encodes at a peak of 1 490 945 244 B. Measured: `PlaneEncoder`'s
+`recon` (the decoder's running reconstruction, `Vec<[i32; 1024]>`) is
+745 046 016 B, half the peak, and only 0.6–12.7 % of its buckets are ever
+written — as sparse as the decoder's grid was. `blocks` (the true wavelet
+coefficients) is 372 523 008 B but 43.6–100 % occupied, so it is genuinely
+dense and this technique buys nothing there. `recon` is also two bytes wider
+than it needs to be: it must mirror the decoder bit for bit, the decoder holds
+these values in `i16`, and the measured maximum is 24 448 against an `i16`
+limit of 32 767. Narrowing `recon` to `i16` and then giving it `CoefBlock`
+should take the page from about 1 490 MB to about 780 MB.
+
+The read path also remains unbounded by default — `enforce_cache_budget`,
+`retain_render_caches` and `evict_render_cache` are all opt-in and all need
+`&mut self`, while rendering takes `&self`.
