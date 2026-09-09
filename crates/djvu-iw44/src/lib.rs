@@ -1365,7 +1365,7 @@ const ZERO_BUCKET: [i16; 16] = [0; 16];
 /// unchanged: the UNK/ACTIVE flags it derives depend only on whether a
 /// coefficient is zero.
 #[derive(Clone, Debug, Default)]
-struct CoefBlock {
+pub(crate) struct CoefBlock {
     /// Bucket 0 — coefficients 0..16. Always present.
     lo: [i16; 16],
     /// Buckets 1..=n — coefficients 16..16*(n+1). Empty until a coefficient
@@ -1376,7 +1376,7 @@ struct CoefBlock {
 impl CoefBlock {
     /// Coefficient `i` in zigzag order; zero when its bucket is absent.
     #[inline(always)]
-    fn coef(&self, i: usize) -> i16 {
+    pub(crate) fn coef(&self, i: usize) -> i16 {
         if i < 16 {
             self.lo[i]
         } else {
@@ -1386,7 +1386,7 @@ impl CoefBlock {
 
     /// Bucket `b`'s 16 coefficients, or [`ZERO_BUCKET`] when absent.
     #[inline(always)]
-    fn bucket(&self, b: usize) -> &[i16; 16] {
+    pub(crate) fn bucket(&self, b: usize) -> &[i16; 16] {
         if b == 0 {
             return &self.lo;
         }
@@ -1396,6 +1396,46 @@ impl CoefBlock {
             Some(s) => s.try_into().expect("16-wide bucket slice"),
             None => &ZERO_BUCKET,
         }
+    }
+
+    /// Make buckets `0..=top` exist, and report how many coefficients that added.
+    ///
+    /// Growth is per band, not per bucket: a block is walked bucket by bucket in
+    /// band order, so growing to the bucket asked for meant up to 64
+    /// reallocations per block and cost 10 % on `iw44_decode_first_chunk`.
+    #[inline]
+    pub(crate) fn grow_through(&mut self, top: usize) -> usize {
+        let need = top * 16;
+        if self.hi.len() >= need {
+            return 0;
+        }
+        let grow = need - self.hi.len();
+        self.hi.reserve_exact(grow);
+        self.hi.resize(need, 0);
+        grow
+    }
+
+    /// Bucket `b`, which must already exist (see [`grow_through`](Self::grow_through)).
+    #[inline]
+    pub(crate) fn bucket_mut(&mut self, b: usize) -> &mut [i16; 16] {
+        if b == 0 {
+            return &mut self.lo;
+        }
+        let off = (b - 1) * 16;
+        // `expect` cannot fire: the slice is 16 long by construction.
+        <&mut [i16; 16]>::try_from(&mut self.hi[off..off + 16]).expect("16-wide bucket slice")
+    }
+
+    /// Bucket `b` when it exists, else `None` — for a caller that knows an
+    /// absent bucket has nothing to do.
+    #[inline]
+    pub(crate) fn bucket_mut_if_present(&mut self, b: usize) -> Option<&mut [i16; 16]> {
+        if b == 0 {
+            return Some(&mut self.lo);
+        }
+        let off = (b - 1) * 16;
+        let s = self.hi.get_mut(off..off + 16)?;
+        Some(<&mut [i16; 16]>::try_from(s).expect("16-wide bucket slice"))
     }
 
     /// Copy this block's coefficients `0..n` into `out`, zero-filling the rest.
@@ -1440,23 +1480,9 @@ impl PlaneDecoder {
             "bucket {b} is outside band {}",
             self.curband
         );
-        {
-            let block = &mut self.blocks[block_idx];
-            let need = band_top * 16;
-            if block.hi.len() < need {
-                let grow = need - block.hi.len();
-                block.hi.reserve_exact(grow);
-                block.hi.resize(need, 0);
-                self.hi_len += grow;
-            }
-        }
         let block = &mut self.blocks[block_idx];
-        if b == 0 {
-            return &mut block.lo;
-        }
-        let off = (b - 1) * 16;
-        // `expect` cannot fire: the slice is 16 long by construction.
-        <&mut [i16; 16]>::try_from(&mut block.hi[off..off + 16]).expect("16-wide bucket slice")
+        self.hi_len += block.grow_through(band_top);
+        block.bucket_mut(b)
     }
 
     fn new(width: usize, height: usize) -> Self {
@@ -1745,17 +1771,9 @@ impl PlaneDecoder {
             // buckets with none also skips that call entirely.
             // An ACTIVE coefficient is by definition non-zero, so its bucket
             // was written. An absent bucket therefore has nothing to refine.
-            let bucket = {
-                let block = &mut self.blocks[block_idx];
-                let off = i * 16;
-                if i == 0 {
-                    &mut block.lo
-                } else if off <= block.hi.len() {
-                    <&mut [i16; 16]>::try_from(&mut block.hi[off - 16..off])
-                        .expect("16-wide bucket slice")
-                } else {
-                    continue;
-                }
+            let bucket = match self.blocks[block_idx].bucket_mut_if_present(i) {
+                Some(b) => b,
+                None => continue,
             };
             let flags = &self.coeffstate[boff];
             for (j, slot) in bucket.iter_mut().enumerate() {
