@@ -1429,13 +1429,22 @@ impl PlaneDecoder {
     /// Every write above bucket 0 goes through here so `hi_len` stays exact.
     #[inline]
     fn bucket_mut(&mut self, block_idx: usize, b: usize) -> &mut [i16; 16] {
-        let need = b * 16;
+        // Grow to the end of the band `b` belongs to, not to `b` itself. A
+        // block is walked bucket by bucket in band order, so growing per bucket
+        // meant up to 64 reallocations per block and cost 10 % on
+        // `iw44_decode_first_chunk`; per band there are at most 10. The band is
+        // also the natural unit: the passes that follow read every bucket in it.
+        let band_top = BAND_BUCKETS[self.curband].1;
+        debug_assert!(
+            b >= BAND_BUCKETS[self.curband].0 && b <= band_top,
+            "bucket {b} is outside band {}",
+            self.curband
+        );
         {
             let block = &mut self.blocks[block_idx];
+            let need = band_top * 16;
             if block.hi.len() < need {
                 let grow = need - block.hi.len();
-                // `reserve_exact` before `resize`: the default amortised growth
-                // would round capacity up and make `hi_len` an under-count.
                 block.hi.reserve_exact(grow);
                 block.hi.resize(need, 0);
                 self.hi_len += grow;
@@ -1445,7 +1454,7 @@ impl PlaneDecoder {
         if b == 0 {
             return &mut block.lo;
         }
-        let off = need - 16;
+        let off = (b - 1) * 16;
         // `expect` cannot fire: the slice is 16 long by construction.
         <&mut [i16; 16]>::try_from(&mut block.hi[off..off + 16]).expect("16-wide bucket slice")
     }
@@ -1514,11 +1523,18 @@ impl PlaneDecoder {
         let (from, to) = BAND_BUCKETS[self.curband];
 
         if self.curband != 0 {
+            // The band's buckets are consecutive in the block's tail, so resolve
+            // the block and its tail length once instead of per bucket: this
+            // loop runs for every band of every block and the indexing showed up
+            // as a few percent on `iw44_decode_first_chunk`.
+            let hi = &self.blocks[block_idx].hi[..];
             for (boff, j) in (from..=to).enumerate() {
-                let bstatetmp = prelim_flags_bucket(
-                    self.blocks[block_idx].bucket(j),
-                    &mut self.coeffstate[boff],
-                );
+                let off = (j - 1) * 16;
+                let coefs = match hi.get(off..off + 16) {
+                    Some(s) => <&[i16; 16]>::try_from(s).expect("16-wide bucket slice"),
+                    None => &ZERO_BUCKET,
+                };
+                let bstatetmp = prelim_flags_bucket(coefs, &mut self.coeffstate[boff]);
                 self.bucketstate[boff] = bstatetmp;
                 self.bbstate |= bstatetmp;
             }
@@ -1727,22 +1743,21 @@ impl PlaneDecoder {
             // An ACTIVE coefficient is by definition non-zero, so its bucket
             // was written and `bucket_mut` never grows the block here. Skipping
             // buckets with none also skips that call entirely.
-            let flags = self.coeffstate[boff];
-            if flags.iter().all(|f| (f & ACTIVE) == 0) {
-                continue;
-            }
+            // An ACTIVE coefficient is by definition non-zero, so its bucket
+            // was written. An absent bucket therefore has nothing to refine.
             let bucket = {
                 let block = &mut self.blocks[block_idx];
                 let off = i * 16;
-                debug_assert!(i == 0 || block.hi.len() >= off, "ACTIVE bucket missing");
                 if i == 0 {
                     &mut block.lo
-                } else {
-                    let start = off - 16;
-                    <&mut [i16; 16]>::try_from(&mut block.hi[start..start + 16])
+                } else if off <= block.hi.len() {
+                    <&mut [i16; 16]>::try_from(&mut block.hi[off - 16..off])
                         .expect("16-wide bucket slice")
+                } else {
+                    continue;
                 }
             };
+            let flags = &self.coeffstate[boff];
             for (j, slot) in bucket.iter_mut().enumerate() {
                 if (flags[j] & ACTIVE) != 0 {
                     if self.curband == 0 {
@@ -4736,37 +4751,30 @@ mod tests {
             ],
         ];
         for &coefs in test_vectors {
-            let mut block = [0i16; 1024];
-            // Place the 16 coefs at base = 0 *and* at a non-zero base to test the offset.
-            for &base in &[0usize, 16, 32, 1008] {
-                block[base..base + 16].copy_from_slice(&coefs);
+            let mut bucket_avx2 = [0u8; 16];
+            #[allow(unsafe_code)]
+            let bstate_avx2 = unsafe { super::prelim_flags_bucket_avx2(&coefs, &mut bucket_avx2) };
 
-                let mut bucket_avx2 = [0u8; 16];
-                #[allow(unsafe_code)]
-                let bstate_avx2 =
-                    unsafe { super::prelim_flags_bucket_avx2(&block, base, &mut bucket_avx2) };
-
-                let mut bucket_scalar = [0u8; 16];
-                let mut bstate_scalar = 0u8;
-                for k in 0..16 {
-                    let f = if block[base + k] == 0 {
-                        super::UNK
-                    } else {
-                        super::ACTIVE
-                    };
-                    bucket_scalar[k] = f;
-                    bstate_scalar |= f;
-                }
-
-                assert_eq!(
-                    bucket_avx2, bucket_scalar,
-                    "bucket mismatch at base={base} coefs={coefs:?}"
-                );
-                assert_eq!(
-                    bstate_avx2, bstate_scalar,
-                    "bstatetmp mismatch at base={base}"
-                );
+            let mut bucket_scalar = [0u8; 16];
+            let mut bstate_scalar = 0u8;
+            for k in 0..16 {
+                let f = if coefs[k] == 0 {
+                    super::UNK
+                } else {
+                    super::ACTIVE
+                };
+                bucket_scalar[k] = f;
+                bstate_scalar |= f;
             }
+
+            assert_eq!(
+                bucket_avx2, bucket_scalar,
+                "bucket mismatch for coefs={coefs:?}"
+            );
+            assert_eq!(
+                bstate_avx2, bstate_scalar,
+                "bstatetmp mismatch for coefs={coefs:?}"
+            );
         }
     }
 
@@ -4815,19 +4823,16 @@ mod tests {
 
         for &old in old_patterns {
             for &coefs in coef_patterns {
-                let mut block = [0i16; 1024];
-                block[..16].copy_from_slice(&coefs);
-
                 let mut flags_avx2 = old;
                 #[allow(unsafe_code)]
                 let bstate_avx2 =
-                    unsafe { super::prelim_flags_band0_avx2(&block, &mut flags_avx2) };
+                    unsafe { super::prelim_flags_band0_avx2(&coefs, &mut flags_avx2) };
 
                 let mut flags_scalar = old;
                 let mut bstate_scalar = 0u8;
                 for k in 0..16 {
                     if flags_scalar[k] != super::ZERO {
-                        flags_scalar[k] = if block[k] == 0 {
+                        flags_scalar[k] = if coefs[k] == 0 {
                             super::UNK
                         } else {
                             super::ACTIVE
