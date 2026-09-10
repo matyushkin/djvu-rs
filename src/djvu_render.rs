@@ -3023,8 +3023,19 @@ fn composite_rows_bilevel_one(
     // 1:1 scale fast path.
     if fx_step == FRAC && fy_step == FRAC {
         let stride = mask.row_stride();
-        let py = (oy + ctx.offset_y).min(ctx.page_h.saturating_sub(1)) as usize;
-        let mask_row = &mask.data[py * stride..(py + 1) * stride];
+        // Same shape as the column clamp below: `mask.data` holds `mask.height`
+        // rows, not `page_h` rows. An INFO chunk that declares a page taller
+        // than the bilevel mask it ships walked `py` past the end of the data
+        // and panicked on the range. Clamp to the mask's own height too, and
+        // take the row through `get`, so a short or empty mask renders white
+        // instead of unwinding.
+        let py = (oy + ctx.offset_y)
+            .min(ctx.page_h.saturating_sub(1))
+            .min(mask.height.saturating_sub(1)) as usize;
+        let Some(mask_row) = mask.data.get(py * stride..(py + 1) * stride) else {
+            row_buf.fill(255);
+            return;
+        };
 
         // I3: whole-row white fast path. If the mask row has no foreground bits (page
         // margins, blank inter-line gaps — typically 25-35% of rows in text scans),
