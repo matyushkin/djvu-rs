@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.1](https://github.com/matyushkin/djvu-rs/compare/v0.32.0...v0.32.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **render:** count IW44 chroma planes in the render-cache budget ([#799](https://github.com/matyushkin/djvu-rs/issues/799)) ([0d4748d](https://github.com/matyushkin/djvu-rs/commit/0d4748db092b71718d4453e48d939a2e6a581a88))
+* **render:** keep the 1:1 bilevel fast path inside the mask ([#805](https://github.com/matyushkin/djvu-rs/issues/805)) ([2bba3c8](https://github.com/matyushkin/djvu-rs/commit/2bba3c88501d8ef8054c84cb05b03c51ee5f40c2))
+
+
+### Performance Improvements
+
+* **decode:** keep only the non-zero buckets of an IW44 block ([#803](https://github.com/matyushkin/djvu-rs/issues/803)) ([558e2fe](https://github.com/matyushkin/djvu-rs/commit/558e2fe39ca8fa6d0a904c13468f44aeeb90e2f7))
+* **encode:** narrow and sparsify PlaneEncoder::recon ([#804](https://github.com/matyushkin/djvu-rs/issues/804)) ([f622725](https://github.com/matyushkin/djvu-rs/commit/f6227251fa2bae8463ff45983267b2d9bf11a945))
+* **render:** stop thumbnails from retaining a full-size page decode ([#802](https://github.com/matyushkin/djvu-rs/issues/802)) ([92dc1c4](https://github.com/matyushkin/djvu-rs/commit/92dc1c40eb99ca245744fc4584a82e483fcb3d11))
+
 ## [0.32.0](https://github.com/matyushkin/djvu-rs/compare/v0.31.0...v0.32.0) (2026-09-07)
 
 
