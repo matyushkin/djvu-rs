@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788936078220,
+  "lastUpdate": 1789034220188,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -18994,6 +18994,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 33772000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2bba3c88501d8ef8054c84cb05b03c51ee5f40c2",
+          "message": "fix(render): keep the 1:1 bilevel fast path inside the mask (#805)\n\nINFO declares the page size; the JB2 mask carries its own, and nothing\nmakes the two agree. The 1:1 bilevel fast path followed the declared\nsize on both indices and walked off the end of the mask data. On\ntests/fixtures/boy_jb2.djvu with the declared size raised by 64 px:\nwidth +64 panicked on the column index, height +64 on the row range.\n\nClamp both to the mask's own dimensions. Well-formed files, where the\nsizes agree, render byte-identically. Found by LunarWerxs with a\nstructure-aware mutation fuzzer, and reported from a Windows thumbnail\nhost built with panic = \"abort\", where the panic took the shell's\nthumbnail process down.\n\nRegression test in tests/panic_free_corpus.rs, one case per index,\nrendering at the size the mutated INFO chunk declares — the only size\nthat reaches this path.\n\nSupersedes #801.\n\nCo-authored-by: LunarWerxs <duhjipadm@gmail.com>\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-10T11:30:39+02:00",
+          "tree_id": "424bd82de14d5cd96ff87e86c11f5fa9a4cc45be",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2bba3c88501d8ef8054c84cb05b03c51ee5f40c2"
+        },
+        "date": 1789034218845,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8678000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53236000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51422000,
             "range": "± 0",
             "unit": "ns/iter"
           }
