@@ -3029,6 +3029,13 @@ fn composite_rows_bilevel_one(
         // and panicked on the range. Clamp to the mask's own height too, and
         // take the row through `get`, so a short or empty mask renders white
         // instead of unwinding.
+        //
+        // Both bounds checks for this row are here, once, rather than per
+        // pixel: `mask_row` is exactly `stride` bytes and `stride` is
+        // `ceil(mask.width / 8)`, so once a column is clamped to
+        // `mask.width - 1` its byte index cannot leave the row. That is what
+        // lets the fallback loop below keep indexing directly. A zero-width
+        // mask has no byte to read at all, so it leaves with the empty row.
         let py = (oy + ctx.offset_y)
             .min(ctx.page_h.saturating_sub(1))
             .min(mask.height.saturating_sub(1)) as usize;
@@ -3036,6 +3043,10 @@ fn composite_rows_bilevel_one(
             row_buf.fill(255);
             return;
         };
+        if mask_row.is_empty() {
+            row_buf.fill(255);
+            return;
+        }
 
         // I3: whole-row white fast path. If the mask row has no foreground bits (page
         // margins, blank inter-line gaps — typically 25-35% of rows in text scans),
@@ -3080,17 +3091,20 @@ fn composite_rows_bilevel_one(
         // declares a page wider than the bilevel mask it ships (a fuzzed or malformed file)
         // used to walk `px` past the end of `mask_row` here and panic on the index. The
         // fast path above already guards this (`ox0 + out_w <= mask.width`); clamp to the
-        // mask's own width too, and read the byte through `get` so no shape of the two
-        // widths can index out of bounds.
+        // mask's own width too.
+        //
+        // The clamp is the bounds check, and it is the only one this loop needs:
+        // `last_col <= mask.width - 1` and `mask_row` is `ceil(mask.width / 8)`
+        // bytes, so `px >> 3` is always a byte of this row. Reading it through
+        // `get(..).map_or(..)` instead cost 5.7 % on `render_region_bilevel` —
+        // the per-pixel branch is what the word "branchless" above is about.
         let last_col = ctx
             .page_w
             .saturating_sub(1)
             .min(mask.width.saturating_sub(1));
         for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let px = (ox as u32 + ctx.offset_x).min(last_col) as usize;
-            let is_fg = mask_row
-                .get(px >> 3)
-                .map_or(0, |b| ((b >> (7 - (px & 7))) & 1) as u32);
+            let is_fg = ((mask_row[px >> 3] >> (7 - (px & 7))) & 1) as u32;
             let ch = (is_fg.wrapping_sub(1) & 0xFF) as u8; // 0 when fg, 255 when bg
             pixel[0] = ch;
             pixel[1] = ch;
