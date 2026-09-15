@@ -1960,7 +1960,254 @@ impl PlaneDecoder {
         inverse_wavelet_transform(&mut plane, self.width, self.height, subsample);
         plane
     }
+
+    /// Reconstruct a horizontal band of the full-resolution plane.
+    ///
+    /// The band covers block rows `[first_block, last_block)`; the returned
+    /// plane's row 0 is the image's absolute row `first_block * 32`, and its
+    /// stride is the same as `reconstruct(1)` would give.
+    ///
+    /// The inverse wavelet couples rows: a pass at scale `s` reads three
+    /// samples either side, so an output row depends on rows up to
+    /// `3 * (16 + 8 + 4 + 2 + 1) = 93` away, doubled to `186` by the two
+    /// lifting stages of each pass. A caller therefore asks for more block rows
+    /// than it keeps — see [`BAND_HALO_BLOCKS`] — and uses only the interior.
+    /// The edges of the band carry the transform's own boundary handling, which
+    /// is correct only where the band edge is the image edge.
+    ///
+    /// Callers must keep `first_block` on a block boundary, which is what makes
+    /// the band's row coordinates agree with the full plane's on every scale:
+    /// 32 is a multiple of the coarsest pass's 16.
+    fn reconstruct_band(&self, first_block: usize, last_block: usize) -> FlatPlane {
+        debug_assert!(first_block < last_block);
+        let block_rows = self.height.div_ceil(32);
+        let last_block = last_block.min(block_rows);
+        let full_width = self.width.div_ceil(32) * 32;
+        let band_rows = (last_block - first_block) * 32;
+
+        // Safety: as in `reconstruct` — the scatter below writes every element
+        // before the wavelet reads any of them.
+        #[allow(unsafe_code)]
+        let mut plane = FlatPlane {
+            data: unsafe { uninit_i16_vec(full_width * band_rows) },
+            stride: full_width,
+        };
+
+        let mut full = [0i16; 1024];
+        for r in first_block..last_block {
+            for c in 0..self.block_cols {
+                self.blocks[r * self.block_cols + c].materialize(&mut full);
+                let row_base = (r - first_block) << 5;
+                let col_base = c << 5;
+                for row in 0..32usize {
+                    let dst_base = (row_base + row) * full_width + col_base;
+                    let inv_base = row * 32;
+                    for col in 0..32usize {
+                        let i = ZIGZAG_INV[inv_base + col] as usize;
+                        plane.data[dst_base + col] = full[i];
+                    }
+                }
+            }
+        }
+
+        // The logical height decides where the transform applies its boundary
+        // handling. A band that reaches the bottom of the image must report the
+        // image's own remaining height, so that boundary is the real one.
+        let logical = if last_block == block_rows {
+            self.height - first_block * 32
+        } else {
+            band_rows
+        };
+        inverse_wavelet_transform(&mut plane, self.width, logical, 1);
+        plane
+    }
 }
+
+/// Reconstruct the three colour planes.
+///
+/// With the `parallel` feature the three independent inverse wavelet
+/// transforms run concurrently on separate rayon threads, cutting the
+/// reconstruction wall time from Y+Cb+Cr sequential to max(Y, Cb, Cr) —
+/// roughly 1.5-2x faster on large pages, where Y dominates.
+fn reconstruct_planes(
+    y_dec: &PlaneDecoder,
+    cb_dec: &PlaneDecoder,
+    cr_dec: &PlaneDecoder,
+    sub: usize,
+    chroma_sub: usize,
+) -> (FlatPlane, FlatPlane, FlatPlane) {
+    #[cfg(feature = "parallel")]
+    {
+        let (y, (cb, cr)) = rayon::join(
+            || y_dec.reconstruct(sub),
+            || {
+                rayon::join(
+                    || cb_dec.reconstruct(chroma_sub),
+                    || cr_dec.reconstruct(chroma_sub),
+                )
+            },
+        );
+        (y, cb, cr)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (
+            y_dec.reconstruct(sub),
+            cb_dec.reconstruct(chroma_sub),
+            cr_dec.reconstruct(chroma_sub),
+        )
+    }
+}
+
+/// Write image rows `rows` of a full-resolution colour page into `pm`.
+///
+/// The planes need not cover the whole image: `y_row0` and `c_row0` say which
+/// image row each plane's row 0 holds, which is what lets a banded caller pass
+/// a slice of the page. DjVu stores rows bottom-to-top, so image row `r` is
+/// written to output row `ph - 1 - r`.
+#[allow(clippy::too_many_arguments)]
+fn convert_rgb_rows(
+    chroma_half: bool,
+    y: &FlatPlane,
+    y_row0: usize,
+    cb: &FlatPlane,
+    cr: &FlatPlane,
+    c_row0: usize,
+    rows: core::ops::Range<usize>,
+    pw: usize,
+    ph: usize,
+    pm: &mut Pixmap,
+) {
+    // #422: half-resolution chroma dimensions, for bilinear upsampling.
+    let cw = pw.div_ceil(2);
+    let ch = ph.div_ceil(2);
+    let out_lo = ph - rows.end;
+    let out_hi = ph - rows.start;
+    let out = &mut pm.data[out_lo * pw * 4..out_hi * pw * 4];
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        out.par_chunks_mut(pw * 4)
+            .enumerate()
+            .for_each(|(i, row_data)| {
+                let row = ph - 1 - (out_lo + i); // DjVu rows are bottom-to-top
+                let y_off = (row - y_row0) * y.stride;
+                if chroma_half {
+                    let c0 = row / 2;
+                    let c1 = (c0 + 1).min(ch - 1);
+                    let v_blend = row & 1 == 1;
+                    let mut cb_full = vec![0i16; pw];
+                    let mut cr_full = vec![0i16; pw];
+                    upsample_chroma_row_bilinear(
+                        &cb.data[(c0 - c_row0) * cb.stride..],
+                        &cb.data[(c1 - c_row0) * cb.stride..],
+                        v_blend,
+                        &mut cb_full,
+                        cw,
+                    );
+                    upsample_chroma_row_bilinear(
+                        &cr.data[(c0 - c_row0) * cr.stride..],
+                        &cr.data[(c1 - c_row0) * cr.stride..],
+                        v_blend,
+                        &mut cr_full,
+                        cw,
+                    );
+                    ycbcr_row_from_i16(&y.data[y_off..y_off + pw], &cb_full, &cr_full, row_data);
+                } else {
+                    let c_off = (row - c_row0) * cb.stride;
+                    ycbcr_row_from_i16(
+                        &y.data[y_off..y_off + pw],
+                        &cb.data[c_off..c_off + pw],
+                        &cr.data[c_off..c_off + pw],
+                        row_data,
+                    );
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut cb_full = vec![0i16; pw];
+        let mut cr_full = vec![0i16; pw];
+        for (i, row_data) in out.chunks_mut(pw * 4).enumerate() {
+            let row = ph - 1 - (out_lo + i); // DjVu rows are bottom-to-top
+            let y_off = (row - y_row0) * y.stride;
+            if chroma_half {
+                let c0 = row / 2;
+                let c1 = (c0 + 1).min(ch - 1);
+                let v_blend = row & 1 == 1;
+                upsample_chroma_row_bilinear(
+                    &cb.data[(c0 - c_row0) * cb.stride..],
+                    &cb.data[(c1 - c_row0) * cb.stride..],
+                    v_blend,
+                    &mut cb_full,
+                    cw,
+                );
+                upsample_chroma_row_bilinear(
+                    &cr.data[(c0 - c_row0) * cr.stride..],
+                    &cr.data[(c1 - c_row0) * cr.stride..],
+                    v_blend,
+                    &mut cr_full,
+                    cw,
+                );
+                ycbcr_row_from_i16(&y.data[y_off..y_off + pw], &cb_full, &cr_full, row_data);
+            } else {
+                let c_off = (row - c_row0) * cb.stride;
+                ycbcr_row_from_i16(
+                    &y.data[y_off..y_off + pw],
+                    &cb.data[c_off..c_off + pw],
+                    &cr.data[c_off..c_off + pw],
+                    row_data,
+                );
+            }
+        }
+    }
+}
+
+/// Planes smaller than this reconstruct whole: banding would cost work and
+/// save memory nobody is short of. 128 MiB is about a 4600x4600 colour page.
+const BAND_MIN_PLANE_BYTES: usize = 128 * 1024 * 1024;
+
+/// What one band of planes may cost. A band holds its kept rows plus a halo on
+/// each side, so this is the real working set, not the kept part.
+const BAND_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// The smallest band worth keeping: four halos, so the doubled halo work is at
+/// most half of the band's own.
+const BAND_MIN_KEEP_BLOCKS: usize = 4 * BAND_HALO_BLOCKS;
+
+/// How many block rows one band keeps, or `None` to reconstruct whole planes.
+///
+/// Banding trades work for memory. The halo rows are transformed twice, so a
+/// band keeping `k` block rows does `(k + 2 * BAND_HALO_BLOCKS) / k` of the
+/// whole-plane work. Only a page whose planes are genuinely large is worth
+/// that; under [`BAND_MIN_PLANE_BYTES`] the whole-plane path runs exactly as
+/// it did before.
+fn band_keep_blocks(y_dec: &PlaneDecoder, chroma_half: bool) -> Option<usize> {
+    let stride = y_dec.width.div_ceil(32) * 32;
+    // Bytes the three planes hold per luma row. Luma is two bytes a pixel; the
+    // two chroma planes add two more each, or one more together when chroma is
+    // stored at half resolution in both directions.
+    let per_row = if chroma_half { stride * 3 } else { stride * 6 };
+    let block_rows = y_dec.height.div_ceil(32);
+    if per_row.saturating_mul(block_rows * 32) <= BAND_MIN_PLANE_BYTES {
+        return None;
+    }
+    let per_block_row = per_row * 32;
+    let affordable = (BAND_BUDGET_BYTES / per_block_row).saturating_sub(2 * BAND_HALO_BLOCKS);
+    let keep = affordable.max(BAND_MIN_KEEP_BLOCKS);
+    // Band only when a band really is a part of the page. A `keep` just under
+    // `block_rows` would split the page into two bands that each carry almost
+    // all of it: the halo work doubles and the memory saving is nearly zero.
+    // Half the page is the point where the saving pays for the extra pass.
+    (keep * 2 <= block_rows).then_some(keep)
+}
+
+/// Block rows of overlap a band needs on each side before its interior is
+/// exact. The transform's vertical reach is 186 rows (see
+/// [`PlaneDecoder::reconstruct_band`]); 8 block rows is 256, the next block
+/// multiple above it with margin to spare.
+const BAND_HALO_BLOCKS: usize = 8;
 
 // ---- Flat plane helper -------------------------------------------------------
 
@@ -3531,140 +3778,42 @@ impl Iw44Image {
             let cb_dec = self.cb.as_ref().ok_or(Iw44Error::MissingCodec)?;
             let cr_dec = self.cr.as_ref().ok_or(Iw44Error::MissingCodec)?;
 
-            // Reconstruct Y, Cb and Cr planes.  With the `parallel` feature the
-            // three independent inverse-wavelet-transforms run concurrently on
-            // separate rayon threads, cutting the reconstruction wall-time from
-            // Y+Cb+Cr sequential to max(Y, Cb, Cr) — roughly 1.5–2× faster on
-            // large pages where Y dominates.
-            #[cfg(feature = "parallel")]
-            let (y_plane, cb_plane, cr_plane) = {
-                let (y, (cb, cr)) = rayon::join(
-                    || y_dec.reconstruct(sub),
-                    || {
-                        rayon::join(
-                            || cb_dec.reconstruct(chroma_sub),
-                            || cr_dec.reconstruct(chroma_sub),
-                        )
-                    },
-                );
-                (y, cb, cr)
-            };
-            #[cfg(not(feature = "parallel"))]
-            let (y_plane, cb_plane, cr_plane) = (
-                y_dec.reconstruct(sub),
-                cb_dec.reconstruct(chroma_sub),
-                cr_dec.reconstruct(chroma_sub),
-            );
-
             let pw = w as usize;
             let ph = h as usize;
-            let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
 
             // Fast path: sub=1 (most common — full-resolution render).
             // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
             // YCbCr→RGBA formula 8 pixels at a time with SIMD.
             if sub == 1 {
-                // #422: half-resolution chroma dimensions, for bilinear upsampling.
-                let cw = pw.div_ceil(2);
-                let ch = ph.div_ceil(2);
-                #[cfg(feature = "parallel")]
-                {
-                    use rayon::prelude::*;
-                    let chroma_half = self.chroma_half;
-                    pm.data
-                        .par_chunks_mut(pw * 4)
-                        .enumerate()
-                        .for_each(|(out_row, row_data)| {
-                            let row = ph - 1 - out_row; // DjVu rows are bottom-to-top
-                            let y_off = row * y_plane.stride;
-                            if chroma_half {
-                                let c_row0 = row / 2;
-                                let c_row1 = (c_row0 + 1).min(ch - 1);
-                                let v_blend = row & 1 == 1;
-                                let mut cb_full = vec![0i16; pw];
-                                let mut cr_full = vec![0i16; pw];
-                                let cb_s = cb_plane.stride;
-                                let cr_s = cr_plane.stride;
-                                upsample_chroma_row_bilinear(
-                                    &cb_plane.data[c_row0 * cb_s..],
-                                    &cb_plane.data[c_row1 * cb_s..],
-                                    v_blend,
-                                    &mut cb_full,
-                                    cw,
-                                );
-                                upsample_chroma_row_bilinear(
-                                    &cr_plane.data[c_row0 * cr_s..],
-                                    &cr_plane.data[c_row1 * cr_s..],
-                                    v_blend,
-                                    &mut cr_full,
-                                    cw,
-                                );
-                                ycbcr_row_from_i16(
-                                    &y_plane.data[y_off..y_off + pw],
-                                    &cb_full,
-                                    &cr_full,
-                                    row_data,
-                                );
-                            } else {
-                                let c_off = row * cb_plane.stride;
-                                ycbcr_row_from_i16(
-                                    &y_plane.data[y_off..y_off + pw],
-                                    &cb_plane.data[c_off..c_off + pw],
-                                    &cr_plane.data[c_off..c_off + pw],
-                                    row_data,
-                                );
-                            }
-                        });
+                let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
+                // A very large page is reconstructed a band at a time. The three
+                // full-resolution `i16` planes cost 6 bytes per pixel — more
+                // than the 4-byte output they feed — and are dropped the moment
+                // the RGB is written. See `band_keep_blocks`.
+                if let Some(keep) = band_keep_blocks(y_dec, self.chroma_half) {
+                    self.rgb_sub1_banded(y_dec, cb_dec, cr_dec, keep, pw, ph, &mut pm);
+                    return Ok(pm);
                 }
-                #[cfg(not(feature = "parallel"))]
-                {
-                    let mut cb_full = vec![0i16; pw];
-                    let mut cr_full = vec![0i16; pw];
-                    for row in 0..ph {
-                        let out_row = ph - 1 - row; // DjVu rows are bottom-to-top
-                        let y_off = row * y_plane.stride;
-                        let row_start = out_row * pw * 4;
-
-                        if self.chroma_half {
-                            // #422: bilinear chroma upsample (vertical + horizontal).
-                            let c_row0 = row / 2;
-                            let c_row1 = (c_row0 + 1).min(ch - 1);
-                            let v_blend = row & 1 == 1;
-                            let cb_s = cb_plane.stride;
-                            let cr_s = cr_plane.stride;
-                            upsample_chroma_row_bilinear(
-                                &cb_plane.data[c_row0 * cb_s..],
-                                &cb_plane.data[c_row1 * cb_s..],
-                                v_blend,
-                                &mut cb_full,
-                                cw,
-                            );
-                            upsample_chroma_row_bilinear(
-                                &cr_plane.data[c_row0 * cr_s..],
-                                &cr_plane.data[c_row1 * cr_s..],
-                                v_blend,
-                                &mut cr_full,
-                                cw,
-                            );
-                            ycbcr_row_from_i16(
-                                &y_plane.data[y_off..y_off + pw],
-                                &cb_full,
-                                &cr_full,
-                                &mut pm.data[row_start..row_start + pw * 4],
-                            );
-                        } else {
-                            let c_off = row * cb_plane.stride;
-                            ycbcr_row_from_i16(
-                                &y_plane.data[y_off..y_off + pw],
-                                &cb_plane.data[c_off..c_off + pw],
-                                &cr_plane.data[c_off..c_off + pw],
-                                &mut pm.data[row_start..row_start + pw * 4],
-                            );
-                        }
-                    }
-                }
+                let (y_plane, cb_plane, cr_plane) =
+                    reconstruct_planes(y_dec, cb_dec, cr_dec, sub, chroma_sub);
+                convert_rgb_rows(
+                    self.chroma_half,
+                    &y_plane,
+                    0,
+                    &cb_plane,
+                    &cr_plane,
+                    0,
+                    0..ph,
+                    pw,
+                    ph,
+                    &mut pm,
+                );
                 return Ok(pm);
             }
+
+            let (y_plane, cb_plane, cr_plane) =
+                reconstruct_planes(y_dec, cb_dec, cr_dec, sub, chroma_sub);
+            let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
 
             // Compact path: sub ≥ 2 with power-of-two subsample.
             //
@@ -3747,6 +3896,84 @@ impl Iw44Image {
                 }
             }
             Ok(pm)
+        }
+    }
+
+    /// Convert a full-resolution colour page into `pm`, one band of block rows
+    /// at a time, so the `i16` planes never exist whole.
+    ///
+    /// `keep` is how many block rows each band contributes to the output; each
+    /// band reconstructs [`BAND_HALO_BLOCKS`] more on each side and throws them
+    /// away, because only the interior of a band is exact.
+    #[allow(clippy::too_many_arguments)]
+    fn rgb_sub1_banded(
+        &self,
+        y_dec: &PlaneDecoder,
+        cb_dec: &PlaneDecoder,
+        cr_dec: &PlaneDecoder,
+        keep: usize,
+        pw: usize,
+        ph: usize,
+        pm: &mut Pixmap,
+    ) {
+        let block_rows = (self.height as usize).div_ceil(32);
+        let c_block_rows = cb_dec.height.div_ceil(32);
+        let ch = ph.div_ceil(2);
+        let mut first = 0usize;
+        while first < block_rows {
+            let last = (first + keep).min(block_rows);
+            let (r0, r1) = (first * 32, (last * 32).min(ph));
+            if r0 >= r1 {
+                break;
+            }
+            let lo = first.saturating_sub(BAND_HALO_BLOCKS);
+            let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
+
+            // Chroma rows this band reads. At half resolution luma row `r` takes
+            // chroma rows `r / 2` and `r / 2 + 1`, so the band needs one row past
+            // its own half — except at the image bottom, where that row is
+            // clamped away.
+            let (c_r0, c_r1) = if self.chroma_half {
+                (r0 / 2, (r1.div_ceil(2) + 1).min(ch))
+            } else {
+                (r0, r1)
+            };
+            let c_lo = (c_r0 / 32).saturating_sub(BAND_HALO_BLOCKS);
+            let c_hi = (c_r1.div_ceil(32) + BAND_HALO_BLOCKS).min(c_block_rows);
+
+            #[cfg(feature = "parallel")]
+            let (y_band, cb_band, cr_band) = {
+                let (y, (cb, cr)) = rayon::join(
+                    || y_dec.reconstruct_band(lo, hi),
+                    || {
+                        rayon::join(
+                            || cb_dec.reconstruct_band(c_lo, c_hi),
+                            || cr_dec.reconstruct_band(c_lo, c_hi),
+                        )
+                    },
+                );
+                (y, cb, cr)
+            };
+            #[cfg(not(feature = "parallel"))]
+            let (y_band, cb_band, cr_band) = (
+                y_dec.reconstruct_band(lo, hi),
+                cb_dec.reconstruct_band(c_lo, c_hi),
+                cr_dec.reconstruct_band(c_lo, c_hi),
+            );
+
+            convert_rgb_rows(
+                self.chroma_half,
+                &y_band,
+                lo * 32,
+                &cb_band,
+                &cr_band,
+                c_lo * 32,
+                r0..r1,
+                pw,
+                ph,
+                pm,
+            );
+            first = last;
         }
     }
 
@@ -4115,6 +4342,94 @@ mod tests {
     }
 
     // ---- Pixel-exact golden tests -------------------------------------------
+
+    /// The banded reconstruction must be exact, not close: every interior row
+    /// of a band must equal the row the whole-plane transform produces.
+    ///
+    /// A band carries the transform's own boundary handling at its edges, which
+    /// is only correct where the band edge is the image edge. `BAND_HALO_BLOCKS`
+    /// is what buys the interior its correctness, so this test also walks the
+    /// halo down: the smallest halo that still matches tells a later reader how
+    /// much margin the constant really has.
+    #[test]
+    fn reconstruct_band_matches_the_whole_plane() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu");
+        let file = djvu_iff::parse(&data).expect("parse");
+        let mut img = Iw44Image::new();
+        for c in &extract_bg44_chunks(&file) {
+            img.decode_chunk(c).expect("decode_chunk");
+        }
+        let y = img.y.as_ref().expect("luma plane");
+        let block_rows = y.height.div_ceil(32);
+        assert!(
+            block_rows >= 2 * BAND_HALO_BLOCKS + 2,
+            "the fixture must be tall enough to hold an interior band"
+        );
+        let full = y.reconstruct(1);
+
+        for keep in [1usize, 2, 4] {
+            let mut first = 0;
+            while first < block_rows {
+                let last = (first + keep).min(block_rows);
+                let lo = first.saturating_sub(BAND_HALO_BLOCKS);
+                let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
+                let band = y.reconstruct_band(lo, hi);
+                for r in first * 32..(last * 32).min(y.height) {
+                    let a = &full.data[r * full.stride..r * full.stride + y.width];
+                    let b = &band.data[(r - lo * 32) * band.stride..][..y.width];
+                    assert_eq!(
+                        a, b,
+                        "band [{lo}..{hi}) block rows, keeping [{first}..{last}): \
+                         image row {r} differs from the whole-plane transform"
+                    );
+                }
+                first = last;
+            }
+        }
+    }
+
+    /// End-to-end: the banded colour conversion must produce the same pixels as
+    /// the whole-plane one, byte for byte, including the chroma upsample that
+    /// reads one row past each band.
+    ///
+    /// `band_keep_blocks` only turns banding on for pages far larger than any
+    /// fixture, so this calls both paths directly. Every fixture here stores
+    /// full-resolution chroma, which is all the decoder ever produces today
+    /// (`chroma_half` is pinned to `false` — see `decode_chunk`); the banded
+    /// half-resolution arithmetic mirrors the whole-plane branch beside it.
+    #[test]
+    fn banded_rgb_matches_whole_plane_rgb() {
+        for asset in ["carte.djvu", "chicken.djvu", "colorbook.djvu"] {
+            let data = std::fs::read(assets_path().join(asset)).expect("asset");
+            let file = djvu_iff::parse(&data).expect("parse");
+            let chunks = extract_bg44_chunks(&file);
+            if chunks.is_empty() {
+                continue;
+            }
+            let mut img = Iw44Image::new();
+            for c in &chunks {
+                img.decode_chunk(c).expect("decode_chunk");
+            }
+            if !img.is_color {
+                continue;
+            }
+            let whole = img.to_rgb().expect("to_rgb");
+
+            let y_dec = img.y.as_ref().unwrap();
+            let cb_dec = img.cb.as_ref().unwrap();
+            let cr_dec = img.cr.as_ref().unwrap();
+            let (pw, ph) = (img.width as usize, img.height as usize);
+            for keep in [1usize, 3, 8] {
+                let mut banded = Pixmap::new(img.width, img.height, 0, 0, 0, 255);
+                img.rgb_sub1_banded(y_dec, cb_dec, cr_dec, keep, pw, ph, &mut banded);
+                assert_eq!(
+                    banded.data, whole.data,
+                    "{asset}: banded conversion keeping {keep} block rows per \
+                     band differs from the whole-plane conversion"
+                );
+            }
+        }
+    }
 
     #[test]
     fn iw44_new_decode_boy_bg() {
