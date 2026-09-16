@@ -629,6 +629,17 @@ impl Document {
         Ok(Document { doc })
     }
 
+    /// The parsed document this handle owns.
+    ///
+    /// The export entry points — [`crate::pdf::djvu_to_pdf_with_options`],
+    /// [`crate::epub::djvu_to_epub`], [`crate::cbz::djvu_to_cbz`],
+    /// [`crate::tiff_export::djvu_to_tiff`] and their writer forms — all take a
+    /// [`DjVuDocument`]. This hands them the one this `Document` already
+    /// parsed, instead of asking a caller to parse the bytes a second time.
+    pub fn inner(&self) -> &DjVuDocument {
+        &self.doc
+    }
+
     /// Configurable resource limits supplied at parse/open time, if any.
     pub fn resource_limits(&self) -> Option<crate::resource_limits::ResourceLimits> {
         self.doc.resource_limits()

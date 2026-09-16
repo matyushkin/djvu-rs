@@ -9,7 +9,7 @@ PYTHON_VERSION ?= 3.12
 
 ## Create the uv-managed venv and install maturin + test deps (numpy, Pillow, pytest).
 py-venv:
-	uv venv $(VENV) --python $(PYTHON_VERSION)
+	uv venv $(VENV) --python $(PYTHON_VERSION) --allow-existing
 	uv pip install --python $(VENV)/bin/python maturin pytest numpy pillow
 
 ## Build djvu-py in release mode and install it into the venv (editable).
