@@ -1,10 +1,18 @@
 use std::ffi::{CString, c_int, c_void};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+use djvu_rs::cbz::CbzOptions;
+use djvu_rs::djvu_render::UserRotation;
+use djvu_rs::epub::EpubOptions;
+use djvu_rs::pdf::PdfOptions;
+use djvu_rs::tiff_export::{TiffBilevelCompression, TiffMode, TiffOptions};
 
 create_exception!(
     djvu_rs,
@@ -26,10 +34,117 @@ create_exception!(
 );
 create_exception!(
     djvu_rs,
+    ExportError,
+    Error,
+    "Conversion to PDF, EPUB, CBZ or TIFF failed."
+);
+create_exception!(
+    djvu_rs,
     PageIndexError,
     pyo3::exceptions::PyIndexError,
     "Page index is out of range for this document."
 );
+
+// ---- Export ------------------------------------------------------------------
+//
+// Every converter below takes the document this handle already parsed and hands
+// it to the matching entry point in the Rust crate. Each comes in two forms:
+// `to_x()` returns the bytes, `write_x(path)` streams straight to a file and
+// holds only one page at a time. Prefer `write_x` for a long book.
+//
+// All of them release the GIL: an export renders every page, which is the most
+// CPU-heavy thing this module does.
+
+/// Open `path` for writing, buffered.
+fn create(path: &str) -> PyResult<BufWriter<File>> {
+    File::create(path)
+        .map(BufWriter::new)
+        .map_err(|e| IoError::new_err(format!("cannot write {path}: {e}")))
+}
+
+/// Finish a buffered write and report a failed flush, which `Drop` would eat.
+fn finish(mut sink: BufWriter<File>, path: &str) -> PyResult<()> {
+    sink.flush()
+        .map_err(|e| IoError::new_err(format!("cannot write {path}: {e}")))
+}
+
+fn pdf_options(
+    dpi: u32,
+    jpeg_quality: Option<u8>,
+    adaptive: bool,
+    ccitt_g4: bool,
+    mrc: bool,
+) -> PdfOptions {
+    PdfOptions {
+        jpeg_quality,
+        output_dpi: dpi,
+        adaptive_raster: adaptive,
+        ccitt_g4,
+        mrc,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn epub_options(
+    dpi: u32,
+    title: String,
+    author: String,
+    language: String,
+    modified: Option<String>,
+    reflowable_text: bool,
+    jpeg_quality: Option<u8>,
+    adaptive: bool,
+) -> EpubOptions {
+    EpubOptions {
+        title,
+        author,
+        dpi,
+        language,
+        modified,
+        reflowable_text,
+        jpeg_quality,
+        adaptive,
+    }
+}
+
+/// Map a rotation in degrees onto the render enum. Only quarter turns exist.
+fn user_rotation(degrees: i32) -> PyResult<UserRotation> {
+    match degrees.rem_euclid(360) {
+        0 => Ok(UserRotation::None),
+        90 => Ok(UserRotation::Cw90),
+        180 => Ok(UserRotation::Rot180),
+        270 => Ok(UserRotation::Ccw90),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "rotation must be 0, 90, 180 or 270 degrees, not {other}"
+        ))),
+    }
+}
+
+fn tiff_options(mode: &str, scale: f32, bilevel_compression: &str) -> PyResult<TiffOptions> {
+    let mode = match mode {
+        "color" => TiffMode::Color,
+        "bilevel" => TiffMode::Bilevel,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "mode must be 'color' or 'bilevel', not {other:?}"
+            )));
+        }
+    };
+    let bilevel_compression = match bilevel_compression {
+        "deflate" => TiffBilevelCompression::Deflate,
+        "g4" => TiffBilevelCompression::G4,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "bilevel_compression must be 'deflate' or 'g4', not {other:?}"
+            )));
+        }
+    };
+    Ok(TiffOptions {
+        mode,
+        scale,
+        bilevel_compression,
+    })
+}
 
 /// A DjVu document.
 #[pyclass]
@@ -86,6 +201,253 @@ impl Document {
             dpi: p.dpi(),
             doc: Arc::clone(&self.inner),
             index,
+        })
+    }
+
+    /// Convert the document to PDF and return the bytes.
+    ///
+    /// Args:
+    ///     dpi: Output resolution. 0 means the page's own DPI (largest,
+    ///         slowest). 150 is screen quality, 300 is print quality.
+    ///     jpeg_quality: 1-100 for JPEG page images, or None for lossless
+    ///         Deflate (larger files).
+    ///     adaptive: Encode each page both ways and keep the smaller one.
+    ///         Only meaningful with a jpeg_quality.
+    ///     ccitt_g4: Also try CCITT Group 4 for bilevel masks and keep
+    ///         whichever is smaller.
+    ///     mrc: Embed the background layer alone and repaint the text from
+    ///         the mask, instead of embedding the composited page.
+    ///
+    /// The PDF carries an invisible text layer, the bookmarks and the links.
+    /// Use `write_pdf` for a long book: it holds one page at a time.
+    #[pyo3(signature = (dpi=150, jpeg_quality=80, adaptive=false, ccitt_g4=false, mrc=false))]
+    fn to_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: u32,
+        jpeg_quality: Option<u8>,
+        adaptive: bool,
+        ccitt_g4: bool,
+        mrc: bool,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let opts = pdf_options(dpi, jpeg_quality, adaptive, ccitt_g4, mrc);
+        let buf = py.detach(|| {
+            djvu_rs::pdf::djvu_to_pdf_with_options(self.inner.inner(), &opts)
+                .map_err(|e| ExportError::new_err(format!("PDF export failed: {e}")))
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Convert the document to PDF, straight into the file at `path`.
+    ///
+    /// Takes the same arguments as `to_pdf`. Holds one page at a time, so the
+    /// memory it needs does not grow with the page count.
+    #[pyo3(signature = (path, dpi=150, jpeg_quality=80, adaptive=false, ccitt_g4=false, mrc=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn write_pdf(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        dpi: u32,
+        jpeg_quality: Option<u8>,
+        adaptive: bool,
+        ccitt_g4: bool,
+        mrc: bool,
+    ) -> PyResult<()> {
+        let opts = pdf_options(dpi, jpeg_quality, adaptive, ccitt_g4, mrc);
+        let sink = create(path)?;
+        py.detach(|| {
+            let mut sink = sink;
+            djvu_rs::pdf::djvu_to_pdf_to_writer(self.inner.inner(), &opts, &mut sink)
+                .map_err(|e| ExportError::new_err(format!("PDF export failed: {e}")))?;
+            finish(sink, path)
+        })
+    }
+
+    /// Convert the document to EPUB 3 and return the bytes.
+    ///
+    /// Args:
+    ///     dpi: Resolution of the page images.
+    ///     title, author, language: OPF metadata. `language` is a BCP-47 tag.
+    ///     modified: ISO 8601 timestamp for `dcterms:modified`. None uses the
+    ///         current UTC time.
+    ///     reflowable_text: Append the extracted paragraphs after each page
+    ///         image, for readers that prefer flowing text.
+    ///     jpeg_quality: 1-100 for JPEG page images, or None for PNG.
+    ///     adaptive: Encode each page both ways and keep the smaller one.
+    #[pyo3(signature = (dpi=150, title="DjVu Document".to_owned(), author=String::new(),
+                        language="en".to_owned(), modified=None, reflowable_text=false,
+                        jpeg_quality=None, adaptive=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn to_epub<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: u32,
+        title: String,
+        author: String,
+        language: String,
+        modified: Option<String>,
+        reflowable_text: bool,
+        jpeg_quality: Option<u8>,
+        adaptive: bool,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let opts = epub_options(
+            dpi,
+            title,
+            author,
+            language,
+            modified,
+            reflowable_text,
+            jpeg_quality,
+            adaptive,
+        );
+        let buf = py.detach(|| {
+            djvu_rs::epub::djvu_to_epub(self.inner.inner(), &opts)
+                .map_err(|e| ExportError::new_err(format!("EPUB export failed: {e}")))
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Convert the document to EPUB 3, straight into the file at `path`.
+    ///
+    /// Takes the same arguments as `to_epub`.
+    #[pyo3(signature = (path, dpi=150, title="DjVu Document".to_owned(), author=String::new(),
+                        language="en".to_owned(), modified=None, reflowable_text=false,
+                        jpeg_quality=None, adaptive=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn write_epub(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        dpi: u32,
+        title: String,
+        author: String,
+        language: String,
+        modified: Option<String>,
+        reflowable_text: bool,
+        jpeg_quality: Option<u8>,
+        adaptive: bool,
+    ) -> PyResult<()> {
+        let opts = epub_options(
+            dpi,
+            title,
+            author,
+            language,
+            modified,
+            reflowable_text,
+            jpeg_quality,
+            adaptive,
+        );
+        let sink = create(path)?;
+        py.detach(|| {
+            let mut sink = sink;
+            djvu_rs::epub::djvu_to_epub_writer(self.inner.inner(), &opts, &mut sink)
+                .map_err(|e| ExportError::new_err(format!("EPUB export failed: {e}")))?;
+            finish(sink, path)
+        })
+    }
+
+    /// Convert the document to a CBZ archive and return the bytes.
+    ///
+    /// Each page becomes one PNG entry, named `page_0001.png` and upward.
+    ///
+    /// Args:
+    ///     dpi: Resolution of the page images.
+    ///     rotation: Extra rotation in degrees: 0, 90, 180 or 270. It applies
+    ///         on top of the rotation the page itself declares.
+    ///     pages: 0-based page numbers to export, in the order given. None
+    ///         exports every page.
+    #[pyo3(signature = (dpi=150, rotation=0, pages=None))]
+    fn to_cbz<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: u32,
+        rotation: i32,
+        pages: Option<Vec<usize>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let opts = CbzOptions {
+            dpi,
+            rotation: user_rotation(rotation)?,
+            pages,
+        };
+        let buf = py.detach(|| {
+            djvu_rs::cbz::djvu_to_cbz(self.inner.inner(), &opts)
+                .map_err(|e| ExportError::new_err(format!("CBZ export failed: {e}")))
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Convert the document to a CBZ archive, straight into the file at `path`.
+    ///
+    /// Takes the same arguments as `to_cbz`.
+    #[pyo3(signature = (path, dpi=150, rotation=0, pages=None))]
+    fn write_cbz(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        dpi: u32,
+        rotation: i32,
+        pages: Option<Vec<usize>>,
+    ) -> PyResult<()> {
+        let opts = CbzOptions {
+            dpi,
+            rotation: user_rotation(rotation)?,
+            pages,
+        };
+        let sink = create(path)?;
+        py.detach(|| {
+            let mut sink = sink;
+            djvu_rs::cbz::djvu_to_cbz_writer(self.inner.inner(), &opts, &mut sink)
+                .map_err(|e| ExportError::new_err(format!("CBZ export failed: {e}")))?;
+            finish(sink, path)
+        })
+    }
+
+    /// Convert the document to a multi-page TIFF and return the bytes.
+    ///
+    /// Args:
+    ///     mode: "color" for full-colour pages, "bilevel" for the black and
+    ///         white mask alone.
+    ///     scale: Size factor against the page's own resolution.
+    ///     bilevel_compression: "deflate" or "g4". "g4" is the archival
+    ///         choice for scans and is usually much smaller. It applies only
+    ///         in "bilevel" mode.
+    #[pyo3(signature = (mode="color", scale=1.0, bilevel_compression="deflate"))]
+    fn to_tiff<'py>(
+        &self,
+        py: Python<'py>,
+        mode: &str,
+        scale: f32,
+        bilevel_compression: &str,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let opts = tiff_options(mode, scale, bilevel_compression)?;
+        let buf = py.detach(|| {
+            djvu_rs::tiff_export::djvu_to_tiff(self.inner.inner(), &opts)
+                .map_err(|e| ExportError::new_err(format!("TIFF export failed: {e}")))
+        })?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Convert the document to a multi-page TIFF, straight into the file at
+    /// `path`.
+    ///
+    /// Takes the same arguments as `to_tiff`.
+    #[pyo3(signature = (path, mode="color", scale=1.0, bilevel_compression="deflate"))]
+    fn write_tiff(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        mode: &str,
+        scale: f32,
+        bilevel_compression: &str,
+    ) -> PyResult<()> {
+        let opts = tiff_options(mode, scale, bilevel_compression)?;
+        let sink = create(path)?;
+        py.detach(|| {
+            let mut sink = sink;
+            djvu_rs::tiff_export::djvu_to_tiff_writer(self.inner.inner(), &opts, &mut sink)
+                .map_err(|e| ExportError::new_err(format!("TIFF export failed: {e}")))?;
+            finish(sink, path)
         })
     }
 }
@@ -445,6 +807,7 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Error", m.py().get_type::<Error>())?;
     m.add("DecodeError", m.py().get_type::<DecodeError>())?;
     m.add("IoError", m.py().get_type::<IoError>())?;
+    m.add("ExportError", m.py().get_type::<ExportError>())?;
     m.add("PageIndexError", m.py().get_type::<PageIndexError>())?;
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;

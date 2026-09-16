@@ -12,7 +12,7 @@ name = "djvu_rs_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-djvu-rs = { path = "..", features = ["std"] }
+djvu-rs = { path = "..", features = ["std", "pdf", "epub", "cbz", "tiff"] }
 pyo3 = { version = "0.29", features = ["extension-module"] }
 
 [build-dependencies]
