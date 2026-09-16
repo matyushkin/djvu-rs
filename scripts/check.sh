@@ -11,6 +11,7 @@ run() { printf '\n==> %s\n' "$*"; "$@"; }
 run cargo fmt --check
 run cargo clippy --all-targets -- -D warnings
 run cargo clippy --all-targets --features cli,epub -- -D warnings  # pdf/epub writers (#509)
+run cargo clippy --all-targets --features tiff -- -D warnings      # tiff ingest/export tree, which djvu-py now compiles
 run cargo check --all-targets --features ocr-onnx           # ocr_onnx test tree; its CI job runs only on main push, so PRs never gate it
 run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
 run scripts/check_package_versions.sh                       # py/npm versions track crate (#692)
