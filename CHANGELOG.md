@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0](https://github.com/matyushkin/djvu-rs/compare/v0.32.1...v0.33.0) (2026-09-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **render:** `DjVuPage::decoded_bg44`, `decoded_bg44_partial`, `decoded_mask` and `decoded_fg44` return `Option<Arc<T>>` instead of `Option<&T>`. `Arc<T>` derefs to `T`, so most call sites are unchanged. Six eviction methods relax `&mut self` to `&self`, which only admits more callers. Recorded in docs/api-compatibility.md §2 and §7.
+
+### Features
+
+* **python:** export documents to PDF, EPUB, CBZ and TIFF ([#809](https://github.com/matyushkin/djvu-rs/issues/809)) ([bffcf36](https://github.com/matyushkin/djvu-rs/commit/bffcf36e27bb575503f10f9227447057bf496007))
+* **render:** bound the page render caches by default ([#807](https://github.com/matyushkin/djvu-rs/issues/807)) ([a031d32](https://github.com/matyushkin/djvu-rs/commit/a031d32a8a2dec6e09f04f7264ab8cb0272bff2f))
+
+
+### Performance Improvements
+
+* **decode:** reconstruct large IW44 planes in bands ([#808](https://github.com/matyushkin/djvu-rs/issues/808)) ([b921a81](https://github.com/matyushkin/djvu-rs/commit/b921a8184860c3a57247e960dc793c550f504a02))
+
 ## [0.32.1](https://github.com/matyushkin/djvu-rs/compare/v0.32.0...v0.32.1) (2026-09-10)
 
 
