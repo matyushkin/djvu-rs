@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789541602802,
+  "lastUpdate": 1789576871061,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19138,6 +19138,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47565000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bffcf36e27bb575503f10f9227447057bf496007",
+          "message": "feat(python): export documents to PDF, EPUB, CBZ and TIFF (#809)\n\n* chore(lint): run clippy over the tiff feature tree\n\n`scripts/check.sh` lints the default tree and `cli,epub`. Nothing linted\n`tiff`, so `png_io`'s TIFF ingest path never saw clippy. The Python\nbindings now compile that feature, and it fails `-D warnings` at once.\n\nThe finding is real but its suggestion is not: clippy reads\n`match v.into_u16() { Ok(o @ 1..=8) => o, _ => 1 }` as `unwrap_or(1)`,\nwhich would pass 0 and 9 straight through. The range check is the point —\nTIFF defines orientation 1..=8 and files carry other values. Split the\nread from the check so both are visible.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* feat(python): export documents to PDF, EPUB, CBZ and TIFF\n\nThe bindings covered reading only. Converting a document meant leaving\nPython for the Rust crate or the `djvu` CLI, which is the one thing a\nPython caller is least able to do from inside a script.\n\nEight methods on `Document`, two per format. `to_pdf()`, `to_epub()`,\n`to_cbz()` and `to_tiff()` return the bytes. `write_pdf(path)` and its\nthree siblings stream the same output into a file and hold one page at a\ntime, so a long book costs what one page costs. All eight release the\nGIL for the whole conversion — an export renders every page, and that is\nthe heaviest thing this module does.\n\nOptions follow the Rust ones, named as Python keywords: `dpi`,\n`jpeg_quality`, `adaptive`, `ccitt_g4` and `mrc` for PDF; `title`,\n`author`, `language`, `modified` and `reflowable_text` for EPUB;\n`rotation` in degrees and a `pages` subset for CBZ; `mode` and\n`bilevel_compression` as plain strings for TIFF. A bad string or a\ndiagonal rotation raises `ValueError` before any work starts. A failed\nconversion raises the new `djvu_rs.ExportError`, under `djvu_rs.Error`.\n\nTwo additions on the Rust side carry it:\n\n- `Document::inner()` hands the export entry points the `DjVuDocument`\n  this handle already parsed, instead of parsing the bytes twice.\n- `cbz::djvu_to_cbz_writer` is the streaming counterpart of\n  `djvu_to_cbz`, the form the other three formats already had.\n\nBoth are additive.\n\n18 new tests in djvu-py/tests/test_export.py: magic bytes for each\nformat, byte-for-byte equality between `to_x()` and `write_x()` (the\nin-memory form wraps the streaming one, so a difference means the file\npath took another route), the EPUB title reaching the OPF metadata, the\nCBZ page subset and entry names, and every rejected argument.\n\n`make -C djvu-py py-test` also runs twice in a row now: `uv venv` failed\non an existing directory.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-16T18:15:09+02:00",
+          "tree_id": "c99e04c97aeaaf2c8047368fc283f26855aaf6e4",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bffcf36e27bb575503f10f9227447057bf496007"
+        },
+        "date": 1789576869429,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8186999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49638000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47547000,
             "range": "± 0",
             "unit": "ns/iter"
           }
