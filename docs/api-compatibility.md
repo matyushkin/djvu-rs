@@ -116,6 +116,44 @@ Unintended breakage of the **stable** surface is caught by
 [`cargo-semver-checks`](#enforcement) in CI, which compares the PR against the
 latest published version and understands the `0.x` breaking axis.
 
+### Intentional breaks, by release
+
+#### 0.33.0 — the render caches became self-bounding
+
+Rendering memoises what it decoded. Before 0.33 nothing ever gave that memory
+back on its own: every eviction entry point wanted `&mut`, and every render
+entry point holds a shared `&DjVuPage`, so a program that only rendered grew
+until it ran out. See `PERF_EXPERIMENTS.md` (`READ_CACHE_BOUNDED`).
+
+Letting a cache drop a layer while a render is in flight means the render must
+hold its own handle on that layer, not a borrow of the cache's copy. That is
+the break:
+
+| Item | Was | Is |
+|------|-----|-----|
+| [`DjVuPage::decoded_bg44`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+| [`DjVuPage::decoded_bg44_partial`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+| [`DjVuPage::decoded_mask`](../src/djvu_document.rs) | `Option<&Bitmap>` | `Option<Arc<Bitmap>>` |
+| [`DjVuPage::decoded_fg44`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+
+`Arc<T>` derefs to `T`, so most call sites need no change; a site that stored
+the returned reference now stores an owned handle instead, which is what makes
+it safe.
+
+The eviction methods now take a shared borrow, which only ever admits more
+callers — existing `&mut` call sites keep compiling:
+
+| Item | Was | Is |
+|------|-----|-----|
+| `DjVuPage::evict_render_cache` | `&mut self` | `&self` |
+| `DjVuPage::downgrade_render_cache` | `&mut self` | `&self` |
+| `DjVuDocument::retain_render_caches` | `&mut self` | `&self` |
+| `DjVuDocument::enforce_cache_budget` | `&mut self` | `&self` |
+| `DjVuDocument::enforce_cache_budget_with` | `&mut self` | `&self` |
+| `DjVuDocument::downgrade_render_caches` | `&mut self` | `&self` |
+
+Behaviour also changed: the render caches are now bounded by default. See §7.
+
 ## 3. Minimum supported Rust version (MSRV)
 
 - MSRV is **Rust 1.88** (edition 2024; let-chains). It is declared in
@@ -225,6 +263,26 @@ unset, render output inherits [`DEFAULT_MAX_RENDER_PIXELS`]. Use
 [`ResourceLimits::inherited`] for the documented default render ceiling only.
 Per-render tightening uses [`render_pixmap_with_limits`](../../src/djvu_render.rs).
 The validator and `djvu validate --limits` use the same type.
+
+**Render caches are bounded by default (since 0.33).** The decode results a
+render memoises are held against a process-wide ceiling,
+[`render_cache::DEFAULT_BUDGET`](../src/render_cache.rs) = 256 MiB. When a
+cache fill takes the total over the ceiling, the least-recently-rendered page
+caches are dropped until it is under again; the page being rendered is never
+dropped, so the resident total can exceed the ceiling by at most one page's
+cache. This axis is a **policy** ceiling, not a decode ceiling: crossing it
+frees memory, it never fails a render.
+
+| Axis | Bound | Constant |
+|------|-------|----------|
+| Resident page render caches (process-wide) | 256 MiB | [`render_cache::DEFAULT_BUDGET`](../src/render_cache.rs) |
+
+Set your own ceiling with [`render_cache::set_budget`](../src/render_cache.rs),
+read the current total with `render_cache::resident_bytes`, and sweep on demand
+with `render_cache::enforce` or `render_cache::clear`. Pass `usize::MAX` to
+`set_budget` to render without a ceiling — the behaviour of 0.32 and earlier.
+Per-document control stays available through `DjVuDocument::enforce_cache_budget`.
+The module is `std`-only; a `no_std` build memoises nothing across pages.
 
 **Limit failures are typed and identify the operation.** When a ceiling is hit,
 the failing entry point returns a typed error naming the axis and operation:

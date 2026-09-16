@@ -15419,3 +15419,94 @@ dense) plus the input wavelet planes (372 MB). Neither is waste in the sense
 change. The read path also remains unbounded by default —
 `enforce_cache_budget`, `retain_render_caches` and `evict_render_cache` are all
 opt-in and all need `&mut self`, while rendering takes `&self`.
+
+### The read path never gave memory back — a default ceiling on the render caches — **Kept** (2026-09-16)
+
+**Issue.** Rendering a page memoises what it decoded: the IW44 background, the
+JB2 mask, the converted RGB pixmaps, the composited tiles. That is why a second
+render of the same page is nearly free. Nothing bounded it. A reader that only
+renders grew about 5.3 MB per page of a colour book and never gave any of it
+back; the previous entry (ENCODE_SPARSE_RECON) closed with exactly this as the
+open item.
+
+The eviction API existed — `enforce_cache_budget`, `retain_render_caches`,
+`downgrade_render_caches`, `evict_render_cache` — and could not be reached from
+a render. Every one of them took `&mut self`, and every render entry point holds
+a shared `&DjVuPage`. The cause is the storage: `PageLayers` held twelve
+`OnceLock<Option<T>>` slots, and `OnceLock` fills through `&self` but empties
+only through `&mut self`. The cache could grow under a shared borrow and could
+not shrink under one.
+
+**Numbers.** `tests/fixtures/colorbook.djvu`, 62 pages, full-resolution render
+of every page, resident bytes read from the new `render_cache::resident_bytes`.
+
+| Run | Peak resident | Note |
+|---|---|---|
+| Whole book, no ceiling (0.32 behaviour) | 338 241 721 B | climbs monotonically, 5.3 MB/page |
+| Whole book, default 256 MiB ceiling | 268 021 244 B | under the 268 435 456 B ceiling |
+| First 8 pages, no ceiling | 42 849 264 B | still climbing |
+| First 8 pages, 16 MiB ceiling | 16 486 397 B | held from page 3 on |
+
+The 16 MiB run is the shape of the thing: pages 0-2 fill to 15 331 445 B, and
+from page 3 the total stays between 15 740 637 and 16 486 397 B for the rest of
+the run. The small overshoot is by design — the page being filled is never a
+candidate for eviction, so the total may exceed the ceiling by at most one
+page's cache.
+
+**Approach.** Three parts.
+
+*Storage.* `OnceLock<Option<T>>` becomes `CacheSlot<T>` =
+`RwLock<Option<Option<Arc<T>>>>`. The outer `Option` answers "computed?", the
+inner "did it produce a value?". The initialiser runs outside the lock, so a
+slow decode never blocks a reader of another slot; two threads racing on the
+same slot may both compute and the first store wins, which is what `OnceLock`
+already did.
+
+*Handles.* A cached layer is now handed out as `Arc<T>`, not `&T`. This is the
+whole safety argument, and it is the public break: eviction under a shared
+borrow is only sound if the reader owns what it was given. A returned reference
+would outlive the eviction. `Arc: Deref`, so nearly every consumer compiles
+unchanged. The internal layer helpers moved from `Cow<'a, T>` to `Arc<T>` for
+the same reason — once the cache hands out `Arc`, `Cow::Borrowed` is never
+constructed, and an unreachable variant does not survive `-D warnings`.
+
+*Accounting.* New `src/render_cache.rs`. Each page cache registers a `Weak`
+handle on first use. Each fill re-measures **only its own page** and folds the
+delta into one global `AtomicUsize` — the hot path never walks the registry.
+When that total crosses the ceiling the sweep runs: measure the live caches,
+sort by access tick, drop least-recently-rendered first until under. Locks are
+released before eviction, so a sweep cannot deadlock against a fill.
+
+Per-page cost of the accounting is one atomic swap and one atomic add per cache
+fill, so a program under the ceiling pays no sweep at all. Render benchmarks are
+unchanged within the noise band.
+
+**Guard.** New `tests/render_cache_budget.rs`, five tests, serialised on a mutex
+because the ceiling is process-global. It asserts the ceiling is on by default;
+that a ten-page read against a three-page ceiling peaks at no more than
+`ceiling + one page`; that `set_budget(usize::MAX)` really lifts it; that a
+layer held across `render_cache::clear()` survives and is then the caller's only
+handle (`Arc::strong_count == 1`, which is what proves the cache let go); and
+that `evict_render_cache()` works through a shared borrow.
+
+**Decision.** Kept, and shipped as a breaking release (0.33.0). Four public
+methods change their return type from `Option<&T>` to `Option<Arc<T>>`:
+`DjVuPage::decoded_bg44`, `decoded_bg44_partial`, `decoded_mask`,
+`decoded_fg44`. Six eviction methods relax `&mut self` to `&self`, which only
+admits more callers. Recorded in `docs/api-compatibility.md` §2.
+
+**Reason.** A library that grows without bound on its most ordinary path is
+wrong by default, and every alternative to the break was worse. Interior
+mutability alone cannot help: whatever hands out a borrow of a cached layer
+pins that layer for the life of the borrow. A deprecation path would mean
+shipping two parallel accessors and leaving the defect in place for two more
+minor releases. The ceiling is process-wide because memory is a process-wide
+resource and a page does not know which document it belongs to; per-document
+control stays available, and `set_budget(usize::MAX)` restores the old
+behaviour exactly for a caller that manages memory itself.
+
+**Open.** The sweep evicts a whole page cache, not individual layers, so a page
+that is 90 % background pixmap loses its cheap mask too. Layer-granular
+eviction would need a per-layer tick. The encode path still peaks at 766 MB on
+a large page (`blocks` 372 MB plus the input wavelet planes 372 MB); that needs
+a banded encode and is untouched here.

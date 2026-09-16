@@ -253,6 +253,16 @@ pub mod semantic_diff;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// Process-wide ceiling for the page render caches (READ_CACHE_BOUNDED).
+///
+/// Provides `render_cache::budget`, `render_cache::set_budget`,
+/// `render_cache::resident_bytes`, `render_cache::enforce` and
+/// `render_cache::clear`. Since 0.33 the render caches are bounded by default
+/// (`render_cache::DEFAULT_BUDGET`, 256 MiB); `set_budget(usize::MAX)` restores
+/// the unbounded behaviour of earlier releases.
+#[cfg(feature = "std")]
+pub mod render_cache;
+
 /// Tile-first rendering API for viewer engines (#691).
 ///
 /// Provides `djvu_tile::TileLayout`, `djvu_tile::TileRect`,
