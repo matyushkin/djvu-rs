@@ -15510,3 +15510,105 @@ that is 90 % background pixmap loses its cheap mask too. Layer-granular
 eviction would need a per-layer tick. The encode path still peaks at 766 MB on
 a large page (`blocks` 372 MB plus the input wavelet planes 372 MB); that needs
 a banded encode and is untouched here.
+---
+
+### Rendering one large page held three whole coefficient planes — banded IW44 reconstruction — **Kept** (2026-09-16)
+
+**IW44_BANDED_RECONSTRUCT**
+
+**Issue.** The open item left by IW44_SPARSE_BLOCKS and READ_CACHE_BOUNDED: one
+very large page still costs most of a gigabyte to draw once. A full-resolution
+render of `tests/fixtures/big-scanned-page.djvu` (6780x9148) peaks at
+890 761 440 B. dhat attributes it:
+
+| Site | Bytes | Share |
+|---|---|---|
+| `PlaneDecoder::reconstruct` x3, inside `to_rgb_subsample` | 372 523 008 | 41.7 % |
+| `Iw44Image::to_rgb_subsample` background RGBA pixmap | 248 093 760 | 27.8 % |
+| `render_pixmap_with_limits` output pixmap | 248 093 760 | 27.8 % |
+
+The two pixmaps are the picture itself — `w * h * 4` each, the render's real
+product. The three `i16` planes are not. `to_rgb_subsample` reconstructs Y, Cb
+and Cr whole, then walks them once, row by row, and never looks back. It holds
+372 MB to read each row a single time.
+
+**Approach.** Reconstruct a band of rows, convert it, drop it, take the next.
+
+Three pieces:
+
+- `PlaneDecoder::reconstruct_band(first_block, last_block)` scatters only the
+  block rows of the band through `ZIGZAG_INV` and runs the inverse wavelet over
+  them. The last band passes its real logical height, so the transform applies
+  true boundary handling exactly where the page really ends.
+- A **halo**. Each inverse pass reads +/-3s rows around a row for s = 16, 8, 4,
+  2, 1, so the vertical reach is about 186 rows. A band therefore transforms
+  extra rows above and below and keeps only its interior. Band starts stay
+  block-aligned (32 rows) so scale alignment for s <= 16 is preserved.
+- `convert_rgb_rows` takes a plane slice and a row range instead of a whole
+  plane, so the same code serves the banded and the whole-plane path.
+
+`band_keep_blocks` decides. Under `BAND_MIN_PLANE_BYTES` (128 MiB of planes)
+it returns `None` and the old whole-plane path runs unchanged. Above it, one
+band may cost `BAND_BUDGET_BYTES` (128 MiB) including both halos, and banding
+is refused unless a band keeps at most half the page — a `keep` just under
+`block_rows` would split the page into two bands that each carry nearly all of
+it, doubling the halo work for no saving.
+
+**Halo size.** Probed on `carte.djvu` against the whole-plane reconstruction,
+row by row: 1, 2 and 3 block rows **fail**; 4, 5, 6 and 7 **pass**. The measured
+minimum is 4 block rows (128 rows). `BAND_HALO_BLOCKS` is **8** (256 rows) —
+above the 186-row analytic reach and twice the measured minimum.
+
+**Numbers.** Full-resolution render of the 6780x9148 page. Peak from a counting
+global allocator; time is the median of nine samples, three interleaved rounds
+of pre-built binaries so machine drift cancels. `w * h * 2` — one
+full-resolution `i16` plane — is 124 046 880 B.
+
+| `BAND_BUDGET_BYTES` | Peak | x one plane | Time |
+|---|---|---|---|
+| whole planes (before) | 890 761 440 | 7.18 | 650 ms |
+| 64 MiB | 584 721 600 | 4.71 | 814 ms |
+| **128 MiB (chosen)** | **652 453 056** | **5.26** | **717 ms** |
+| 160 MiB | 685 016 256 | 5.52 | 697 ms |
+
+128 MiB is the knee. Against 64 MiB it gives back 68 MB of the saving and buys
+back 97 ms; against 160 MiB it saves a further 33 MB for 20 ms. The floor is
+about four planes (496 MB) — the two RGBA pixmaps — so the chosen point spends
+156 MB on bands where the old path spent 372 MB.
+
+Ordinary pages are untouched, and measured so:
+
+| Benchmark | before | banded | Change |
+|---|---|---|---|
+| `render_colorbook` | 7.5896 ms | 7.5889 ms | -0.01 % (p = 0.97) |
+| `render_corpus_color` | 32.087 ms | 32.085 ms | -0.01 % (p = 0.96) |
+
+**Exactness.** Two new in-crate tests. `reconstruct_band_matches_the_whole_plane`
+compares every row of every band against `reconstruct(1)` on `carte.djvu` for
+band sizes 1, 2 and 4 block rows. `banded_rgb_matches_whole_plane_rgb` compares
+`Pixmap::data` byte for byte against `to_rgb()` on carte, chicken and colorbook
+for band sizes 1, 3 and 8. The rendered checksum of the big page is
+50 694 640 841 on both paths.
+
+Half-resolution chroma is not exercised: `decode_chunk` pins `chroma_half` to
+`false` on purpose, because DjVuLibre decodes these files with full-resolution
+chroma. The banded branch mirrors the whole-plane arithmetic beside it.
+
+**Guard.** New `tests/render_peak_memory.rs`. One `#[test]` per file, as in
+`tests/decode_peak_memory.rs`: the allocator counters are process-global and
+`cargo test` runs a binary's tests on parallel threads. The ceiling is six
+`page_bytes`; measured 5.25. Sabotage-checked by setting `BAND_MIN_PLANE_BYTES`
+to `usize::MAX`, which reads 7.18 and fails with the intended message. Two
+controls fire first if the measurement is meaningless: the fixture must be
+larger than 64 MiB per plane, and the render must produce a non-empty pixmap
+identical to the warm-up render.
+
+**Decision.** Kept. A tenth of the time on the largest pages in the corpus, and
+nothing at all on the rest, for a quarter of their peak.
+
+**Open.** The remaining 652 MB is the two RGBA pixmaps (496 MB) plus the bands.
+Cutting the pixmaps needs a banded *render*, not a banded reconstruction —
+`render_streaming` already avoids the second one but still materialises the
+background whole. The encoder has the mirror-image problem: ENCODE_SPARSE_RECON
+left 766 MB on this page, of which 372 MB is the input wavelet planes, and the
+same banding idea applies there.
