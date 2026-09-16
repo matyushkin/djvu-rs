@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789035727156,
+  "lastUpdate": 1789541602802,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19090,6 +19090,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47674000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a031d32a8a2dec6e09f04f7264ab8cb0272bff2f",
+          "message": "feat(render)!: bound the page render caches by default (#807)\n\nRendering a page memoises what it decoded — the IW44 background, the JB2\nmask, the converted RGB pixmaps, the composited tiles. Nothing bounded it.\nA reader that only renders grew about 5.3 MB per page of a colour book and\nnever gave any of it back: the whole 62-page colorbook fixture peaked at\n338 241 721 B.\n\nThe eviction API existed and could not be reached from a render. Every\nentry point took `&mut self`, every render holds a shared `&DjVuPage`. The\ncause is the storage: twelve `OnceLock<Option<T>>` slots, and `OnceLock`\nfills through `&self` but empties only through `&mut self`.\n\nThree parts:\n\n- `CacheSlot<T>` = `RwLock<Option<Option<Arc<T>>>>` replaces `OnceLock`.\n  The initialiser runs outside the lock; racing threads may both compute\n  and the first store wins, as `OnceLock` already did.\n- Cached layers are handed out as `Arc<T>`, not `&T`. This is the safety\n  argument and the break: eviction under a shared borrow is only sound if\n  the reader owns what it was given. The internal layer helpers move from\n  `Cow<'a, T>` to `Arc<T>` for the same reason.\n- New `src/render_cache.rs`: a process-wide ceiling, 256 MiB by default.\n  Each page cache registers a `Weak` handle; each fill re-measures only\n  its own page into one global counter, so the hot path never walks the\n  registry; a sweep drops least-recently-rendered caches when the total\n  crosses the ceiling. `set_budget(usize::MAX)` restores 0.32 behaviour.\n\nMeasured on colorbook.djvu, 62 pages at full resolution: 338 241 721 B\nuncapped against 268 021 244 B under the default ceiling. Against a\n16 MiB ceiling the first 8 pages fill to 15 331 445 B over pages 0-2 and\nthen hold 15 740 637…16 486 397 B; uncapped the same 8 reach 42 849 264 B\nand keep climbing. The overshoot of at most one page's cache is by design:\nthe page being filled is never an eviction candidate.\n\nBREAKING CHANGE: `DjVuPage::decoded_bg44`, `decoded_bg44_partial`,\n`decoded_mask` and `decoded_fg44` return `Option<Arc<T>>` instead of\n`Option<&T>`. `Arc<T>` derefs to `T`, so most call sites are unchanged.\nSix eviction methods relax `&mut self` to `&self`, which only admits more\ncallers. Recorded in docs/api-compatibility.md §2 and §7.\n\nGuarded by tests/render_cache_budget.rs (5 tests).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-16T08:27:59+02:00",
+          "tree_id": "46f3ccde6086f027d1edc273b6c2a28418b39595",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/a031d32a8a2dec6e09f04f7264ab8cb0272bff2f"
+        },
+        "date": 1789541600988,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 166000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49324000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47565000,
             "range": "± 0",
             "unit": "ns/iter"
           }
