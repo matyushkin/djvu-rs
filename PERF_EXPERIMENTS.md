@@ -15612,3 +15612,90 @@ Cutting the pixmaps needs a banded *render*, not a banded reconstruction —
 background whole. The encoder has the mirror-image problem: ENCODE_SPARSE_RECON
 left 766 MB on this page, of which 372 MB is the input wavelet planes, and the
 same banding idea applies there.
+
+### Rendering one large page held its background whole — banded composite — **Kept** (2026-09-20)
+
+**RENDER_BANDED_BG**
+
+**Issue.** #811, the open item of IW44_BANDED_RECONSTRUCT. The reconstruction
+was banded, but `decode_background_chunks` still asked the codec for the whole
+RGBA background (248 MB on the 6780x9148 page) and the compositor read it row
+by row into a second pixmap of the same size. `render_streaming` paid the
+background pixmap too, although it never keeps the output.
+
+**Approach.** The codec exposes its bands. `Iw44Image::rgb_band_rows()` says how
+many rows a caller should take at a time (`Some` only for a colour picture whose
+full-resolution planes exceed `BAND_MIN_PLANE_BYTES`), and
+`Iw44Image::rgb_rows(a..b)` reconstructs just the block rows covering `a..b`
+plus the halo and converts them. Both reuse `reconstruct_band` and the exact-slice
+`convert_rgb_rows`, so a band is byte-identical to the same rows of `to_rgb`.
+
+The render side keeps the background as a `Background` enum: `None`,
+`Whole(Arc<Pixmap>)` (the old path, unchanged for every page that fits) or
+`Banded { image, band_rows }`. `for_each_bg_band` walks the *output* in bands:
+`bg_rows_needed` mirrors the bilinear and area-average sampling arithmetic to
+find the plane rows one output range reads, `bg_band_out_rows` sizes an output
+band so those rows fit in `band_rows`, and each band is composited through a
+`CompositeContext` whose background is a `PlaneView` — a pixmap plus the height
+of the whole plane and the row it starts at, so every sampler's `y` stays in
+plane coordinates. Whole backgrounds go through the same loop as a single band.
+The tiled viewer path reconstructs one band per tile row, lazily, on the first
+cache miss. `bg_rgb_s1` returns `None` for such a page, so the 248 MB pixmap is
+never cached either.
+
+**Numbers.** Counting global allocator, full-resolution render of the
+6780x9148 page. One `i16` plane is 124 046 880 B.
+
+| Path | before | banded | x one plane |
+|---|---|---|---|
+| `render_pixmap` | 652 451 496 B | **405 118 040 B (-37.9 %)** | 5.26 -> **3.26** |
+| `render_streaming` | about 409 MB (3.3 planes, whole-pixmap path) | **157 024 280 B** | 3.3 -> **1.27** |
+
+The render floor is now the output pixmap (248 MB) plus one band and the
+coefficient blocks. Streaming holds one band of background and one band of
+output.
+
+Time. Median of five, two interleaved rounds of pre-built binaries.
+
+| Case | before | banded |
+|---|---|---|
+| big page, first render (cold codec) | 1.07-1.10 s | 1.11-1.38 s |
+| big page, repeated render (warm codec) | 325 ms | **900 ms** |
+| big page, `render_streaming` | 320 ms | **885 ms** |
+| watchmaker 2550x3301 (`render_pixmap`) | 74 ms | 74 ms |
+| `render_colorbook` (criterion) | 7.56 / 7.60 ms | 6.30 / 6.30 ms (-16.7 %) |
+| `render_corpus_color` (criterion) | 31.71 / 32.14 ms | 31.44 / 31.69 ms |
+| `render_streaming_discard/watchmaker_color` | 31.25 / 31.55 ms | 31.35 / 31.72 ms |
+| `render_streaming_discard/cable_bilevel` | 27.83 / 28.18 ms | 27.22 / 27.87 ms |
+
+The warm big-page cost is the trade. Before, the second render found the RGB
+background in the page cache; now the bands are reconstructed on every render,
+so a repeated full-page draw costs what a first draw did. Only pages above the
+128 MiB plane threshold pay it; the tiled viewer path memoises composited tiles,
+so pan and zoom after the first paint are unchanged. The `render_colorbook` gain
+comes from the compositor cleanup that the refactor forced (the 1x1 fast path
+in `sample_area_avg_bounds` and the dropped `AreaAvgX.bg_fx`), not from banding
+— colorbook's planes are far below the threshold.
+
+**Exactness.** 870 output hashes (pixmap at three sizes, streaming, region,
+tiled, coarse, progressive) over the fixtures and the corpus are identical
+between `main` and this branch. The big page's checksum stays 50 694 640 841.
+New tests: `rgb_rows_match_the_whole_picture` in the codec (every band of two
+sizes against `to_rgb`), `banded_background_composites_like_the_whole_one`
+(four pages, three scales, flat and sink outputs, forced band sizes 9..300) and
+`bg_band_planning_stays_inside_the_plane_and_the_budget` in the render module.
+
+**Guard.** `tests/render_peak_memory.rs` now caps a full render at four planes
+(measured 3.26; sabotage with `rgb_band_rows` returning `None` reads 5.25 and
+fails with the intended message). New `tests/render_streaming_peak_memory.rs`
+caps a full stream at two planes (measured 1.27).
+
+**Decision.** Kept. A large page renders in 38 % less memory and streams in
+a quarter of what it did, at the price of a slower *repeated* full-page draw on
+those pages only.
+
+**Open.** A repeated full-page render of a banded page could cache the
+composited output instead of the background. The progressive decoder and
+`render_coarse` still hold their pixmaps whole, but they are subsampled. The
+overflow panic in `render_coarse` on pages above 30 Mpx at 1.3x is
+pre-existing (`Pixmap::new` returns empty data on overflow) and untouched.

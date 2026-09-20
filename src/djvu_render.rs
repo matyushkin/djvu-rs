@@ -723,18 +723,20 @@ fn fg_q24(fg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
     }
 }
 
+/// `bg` is the background plane's `(width, height)` — the whole plane's, even
+/// when the compositor holds only a band of its rows (#811).
 #[inline]
-fn bg_q24(bg: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
+fn bg_q24(bg: Option<(u32, u32)>, page_w: u32, page_h: u32) -> (u64, u64) {
     match bg {
-        Some(p) if page_w > 0 && page_h > 0 && p.width > 0 && p.height > 0 => {
+        Some((w, h)) if page_w > 0 && page_h > 0 && w > 0 && h > 0 => {
             // BG44 planes are cell grids too (usually page/3 for scans).  Use
             // the inferred integer subsample pitch so the padded right/bottom
             // edge cells do not stretch across the page during native render.
-            let sx = page_w.div_ceil(p.width).max(1);
-            let sy = page_h.div_ceil(p.height).max(1);
+            let sx = page_w.div_ceil(w).max(1);
+            let sy = page_h.div_ceil(h).max(1);
             ((1u64 << 24) / sx as u64, (1u64 << 24) / sy as u64)
         }
-        _ => plane_q24(bg, page_w, page_h),
+        _ => (0, 0),
     }
 }
 
@@ -835,28 +837,31 @@ fn sample_nearest(pm: &Pixmap, fx: u32, fy: u32) -> (u8, u8, u8) {
 fn sample_area_avg(pm: &Pixmap, fx: u32, fy: u32, fx_step: u32, fy_step: u32) -> (u8, u8, u8) {
     let (x0, x1) = area_range(pm.width, fx, fx_step);
     let (y0, y1) = area_range(pm.height, fy, fy_step);
-    sample_area_avg_bounds(pm, x0, x1, y0, y1)
+    sample_area_avg_bounds(PlaneView::whole(pm), x0, x1, y0, y1)
 }
 
 #[inline]
-fn sample_area_avg_bounds(pm: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> (u8, u8, u8) {
+fn sample_area_avg_bounds(pm: PlaneView<'_>, x0: u32, x1: u32, y0: u32, y1: u32) -> (u8, u8, u8) {
     let cols = (x1 - x0) as usize;
     let rows = (y1 - y0) as usize;
 
     // Fast path: 1x1 box -> direct read.
     if cols <= 1 && rows <= 1 {
-        return pm.get_rgb(x0, y0);
+        let off = x0 as usize * 4;
+        return pm
+            .row(y0)
+            .get(off..off + 4)
+            .map_or((0, 0, 0), |q| (q[0], q[1], q[2]));
     }
 
     let mut r_sum = 0u32;
     let mut g_sum = 0u32;
     let mut b_sum = 0u32;
 
-    let pw = pm.width as usize;
     // One bounds check per row (not per pixel) to let the inner loop vectorize.
     for sy in y0..y1 {
-        let row_off = sy as usize * pw * 4 + x0 as usize * 4;
-        if let Some(row) = pm.data.get(row_off..row_off + cols * 4) {
+        let x_off = x0 as usize * 4;
+        if let Some(row) = pm.row(sy).get(x_off..x_off + cols * 4) {
             for chunk in row.as_chunks::<4>().0 {
                 r_sum += chunk[0] as u32;
                 g_sum += chunk[1] as u32;
@@ -2023,10 +2028,16 @@ impl PageLayers {
     /// conversion (≈2–3 ms for a typical A4 scan) is cached here so that
     /// repeated renders at native resolution skip it entirely.
     ///
-    /// `None` when the page has no BG44 layer or the conversion fails.
+    /// `None` when the page has no BG44 layer or the conversion fails — and
+    /// for a page so large that the renderer composites it from bands of the
+    /// wavelet image instead (#811, [`Iw44Image::rgb_band_rows`]): such a
+    /// pixmap would cost hundreds of megabytes and no render would read it.
     pub(crate) fn bg_rgb_s1(&self, page: &DjVuPage) -> Option<std::sync::Arc<Pixmap>> {
         self.fill(&self.bg_rgb_s1, || {
             let img = self.bg44(page)?;
+            if img.rgb_band_rows().is_some() {
+                return None;
+            }
             img.to_rgb_subsample(1).ok()
         })
     }
@@ -2199,7 +2210,7 @@ fn decode_background_chunks(
     page: &DjVuPage,
     max_chunks: usize,
     subsample: u32,
-) -> Result<Option<Arc<Pixmap>>, RenderError> {
+) -> Result<Background, RenderError> {
     // Fast path: use a cached Iw44Image when all chunks are wanted.
     // For sub >= 4 we use the partial cache (first chunk only) — the high-frequency
     // refinement in later chunks is imperceptible at quarter-scale output, and skipping
@@ -2212,10 +2223,19 @@ fn decode_background_chunks(
             if subsample == 1 {
                 // Strict-mode error propagation: if BG44 failed to decode,
                 // decoded_bg44() returns None; treat that as a hard error.
-                let _ = page
+                let img = page
                     .decoded_bg44()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-                return Ok(page.decoded_bg_rgb_s1());
+                // #811: a very large page is composited from bands of the
+                // wavelet image; its whole RGB pixmap is never built (and
+                // `bg_rgb_s1` never caches one).
+                if let Some(band_rows) = img.rgb_band_rows() {
+                    return Ok(Background::Banded {
+                        image: img,
+                        band_rows,
+                    });
+                }
+                return Ok(Background::from(page.decoded_bg_rgb_s1()));
             }
             if subsample == 2 {
                 // C5_COMPRESS: `PageLayers::downgrade` can clear `bg44` while
@@ -2226,7 +2246,7 @@ fn decode_background_chunks(
                 // populated `Some` here can only follow a prior successful
                 // decode — no need to force `decoded_bg44()` again.
                 if let Some(cached) = page.decoded_bg_rgb_s2() {
-                    return Ok(Some(cached));
+                    return Ok(Background::Whole(cached));
                 }
                 // Same memoization as sub=1 for the common 150-from-300-DPI render.
                 // Strict-mode error propagation: if BG44 failed to decode,
@@ -2234,13 +2254,13 @@ fn decode_background_chunks(
                 let _ = page
                     .decoded_bg44()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-                return Ok(page.decoded_bg_rgb_s2());
+                return Ok(Background::from(page.decoded_bg_rgb_s2()));
             }
             if subsample == 4 {
                 // C5_COMPRESS: mirrors the subsample==2 short-circuit above for
                 // `bg_rgb_s4` / `bg44_partial`.
                 if let Some(cached) = page.decoded_bg_rgb_s4() {
-                    return Ok(Some(cached));
+                    return Ok(Background::Whole(cached));
                 }
                 // Cache the sub=4 RGB conversion (built from the partial image,
                 // matching the sub>=4 path) so repeated thumbnail / downscale
@@ -2248,7 +2268,7 @@ fn decode_background_chunks(
                 let _ = page
                     .decoded_bg44_partial()
                     .ok_or(RenderError::Iw44(crate::Iw44Error::Invalid))?;
-                return Ok(page.decoded_bg_rgb_s4());
+                return Ok(Background::from(page.decoded_bg_rgb_s4()));
             }
             // subsample > 4 (subsample == 4 returned above). THUMB_PARTIAL_MEMO:
             // reuse an already-cached partial image, but do not *populate* the
@@ -2258,7 +2278,7 @@ fn decode_background_chunks(
             // retain the whole book's backgrounds for no repeat saving.
             #[cfg(feature = "std")]
             if let Some(cached) = page.cached_bg_rgb_subhi(subsample) {
-                return Ok(Some(cached));
+                return Ok(Background::Whole(cached));
             }
             let img = if subsample >= 4 {
                 #[cfg(feature = "std")]
@@ -2285,7 +2305,7 @@ fn decode_background_chunks(
             if subsample > 4 {
                 page.store_bg_rgb_subhi(subsample, rgb.clone());
             }
-            return Ok(Some(rgb));
+            return Ok(Background::Whole(rgb));
         }
         // No BG44 chunks — fall through to the JPEG fallback below.
     } else {
@@ -2306,17 +2326,17 @@ fn decode_background_chunks(
             ) {
                 return Err(RenderError::Iw44(crate::Iw44Error::Invalid));
             }
-            return Ok(Some(Arc::new(img.to_rgb_subsample(subsample)?)));
+            return Background::from_iw44(img, subsample);
         }
     }
 
     // Fall back to JPEG-encoded background if present.
     #[cfg(feature = "std")]
     if let Some(pm) = decode_bgjp(page)? {
-        return Ok(Some(Arc::new(pm)));
+        return Ok(Background::Whole(Arc::new(pm)));
     }
 
-    Ok(None)
+    Ok(Background::None)
 }
 
 /// Permissive variant: decode BG44 chunks until the first error, then stop.
@@ -2328,7 +2348,7 @@ fn decode_background_chunks_permissive(
     page: &DjVuPage,
     max_chunks: usize,
     subsample: u32,
-) -> Option<Arc<Pixmap>> {
+) -> Background {
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
         let mut img = Iw44Image::new();
@@ -2356,16 +2376,16 @@ fn decode_background_chunks_permissive(
                 break;
             }
         }
-        return img.to_rgb_subsample(subsample).ok().map(Arc::new);
+        return Background::from_iw44(img, subsample).unwrap_or(Background::None);
     }
 
     // Fall back to JPEG-encoded background if present.
     #[cfg(feature = "std")]
     {
-        decode_bgjp(page).ok().flatten().map(Arc::new)
+        Background::from(decode_bgjp(page).ok().flatten().map(Arc::new))
     }
     #[cfg(not(feature = "std"))]
-    None
+    Background::None
 }
 
 /// Decode the JB2 mask (Sjbz chunk) without blit tracking.
@@ -2464,11 +2484,131 @@ fn decode_fg44(page: &DjVuPage) -> Result<Option<Arc<Pixmap>>, RenderError> {
 /// foreground palette, mask, optional indexed blit map, and the FG44/FGjp
 /// foreground pixmap.
 struct DecodedLayers {
-    bg: Option<Arc<Pixmap>>,
+    bg: Background,
     fg_palette: Option<FgbzPalette>,
     mask: Option<Arc<crate::bitmap::Bitmap>>,
     blit_map: Option<Arc<Vec<i32>>>,
     fg44: Option<Arc<Pixmap>>,
+}
+
+/// The page background a composite reads (#811).
+enum Background {
+    /// No background layer: the compositor paints white.
+    None,
+    /// The whole background as one RGB pixmap — the ordinary case.
+    Whole(Arc<Pixmap>),
+    /// A page too large to hold its background as one RGB pixmap. The
+    /// compositor pulls `band_rows` output rows at a time from the wavelet
+    /// image with [`Iw44Image::rgb_rows`] and never holds more than one band;
+    /// see [`for_each_bg_band`].
+    Banded {
+        image: Arc<Iw44Image>,
+        band_rows: u32,
+    },
+}
+
+impl Background {
+    /// The whole pixmap, when the background is held whole.
+    fn whole(&self) -> Option<&Pixmap> {
+        match self {
+            Background::Whole(px) => Some(px),
+            _ => None,
+        }
+    }
+
+    /// `true` when there is any background at all.
+    fn is_some(&self) -> bool {
+        !matches!(self, Background::None)
+    }
+
+    /// The background a freshly decoded (uncached) wavelet image gives at
+    /// `subsample`: banded when the image asks for it at full resolution,
+    /// else converted whole.
+    fn from_iw44(img: Iw44Image, subsample: u32) -> Result<Self, RenderError> {
+        Self::from_shared_iw44(&Arc::new(img), subsample)
+    }
+
+    /// [`Self::from_iw44`] for an image the caller keeps (the streaming
+    /// [`ProgressiveDecoder`] refines the same image chunk after chunk).
+    fn from_shared_iw44(img: &Arc<Iw44Image>, subsample: u32) -> Result<Self, RenderError> {
+        if subsample == 1
+            && let Some(band_rows) = img.rgb_band_rows()
+        {
+            return Ok(Background::Banded {
+                image: img.clone(),
+                band_rows,
+            });
+        }
+        Ok(Background::Whole(Arc::new(
+            img.to_rgb_subsample(subsample)?,
+        )))
+    }
+}
+
+impl From<Option<Arc<Pixmap>>> for Background {
+    fn from(px: Option<Arc<Pixmap>>) -> Self {
+        px.map_or(Background::None, Background::Whole)
+    }
+}
+
+/// The rows of a colour plane the compositor reads: the whole plane, or one
+/// band of its rows when the page is too large to hold whole (#811).
+///
+/// Row lookups take plane coordinates either way, so the compositor is the
+/// same code for both. `height` is the whole plane's, which keeps the row
+/// clamping at the plane's edge rather than the band's.
+#[derive(Clone, Copy)]
+struct PlaneView<'a> {
+    px: &'a Pixmap,
+    /// Height of the whole plane; `px.height` when the plane is held whole.
+    height: u32,
+    /// The plane row held in row 0 of `px`.
+    row0: u32,
+}
+
+impl<'a> PlaneView<'a> {
+    fn whole(px: &'a Pixmap) -> Self {
+        PlaneView {
+            px,
+            height: px.height,
+            row0: 0,
+        }
+    }
+
+    /// One band of a plane `height` rows tall, holding plane rows
+    /// `row0..row0 + px.height`.
+    fn band(px: &'a Pixmap, height: u32, row0: u32) -> Self {
+        PlaneView { px, height, row0 }
+    }
+
+    #[inline]
+    fn width(&self) -> u32 {
+        self.px.width
+    }
+
+    #[inline]
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Plane row `y` as RGBA bytes, or an empty slice when it is not in
+    /// memory. Every caller clamps `y` to the plane first; a row outside the
+    /// band would mean [`bg_rows_needed`] planned the band wrong, which debug
+    /// builds report rather than paint as black.
+    #[inline]
+    fn row(&self, y: u32) -> &'a [u8] {
+        let i = y.wrapping_sub(self.row0) as usize;
+        debug_assert!(
+            y >= self.row0 && i < self.px.height as usize,
+            "plane row {y} is outside the band {}..{}",
+            self.row0,
+            self.row0 + self.px.height
+        );
+        let stride = self.px.width as usize * 4;
+        i.checked_mul(stride)
+            .and_then(|off| self.px.data.get(off..off + stride))
+            .unwrap_or(&[])
+    }
 }
 
 /// Decode every layer needed for a full composite at `bg_subsample` — the one
@@ -2734,7 +2874,7 @@ struct CompositeContext<'a> {
     opts: &'a RenderOptions,
     page_w: u32,
     page_h: u32,
-    bg: Option<&'a Pixmap>,
+    bg: Option<PlaneView<'a>>,
     /// Q24 ratio for converting page-space FRACBITS coordinates to BG-plane
     /// FRACBITS coordinates.  Uses the inferred integer BG44 cell pitch so
     /// padded edge cells do not stretch across the native render.  `0` when
@@ -2771,7 +2911,6 @@ struct CompositeContext<'a> {
 #[derive(Clone, Copy)]
 struct AreaAvgX {
     fx: u32,
-    bg_fx: u32,
     bg_x0: u32,
     bg_x1: u32,
 }
@@ -2792,17 +2931,12 @@ fn precompute_area_avg_x(
     bg_fx_step: u32,
 ) -> Vec<AreaAvgX> {
     let mut xs = Vec::with_capacity(ctx.out_w as usize);
-    let bg_w = ctx.bg.map_or(0, |bg| bg.width);
+    let bg_w = ctx.bg.map_or(0, |bg| bg.width());
     for ox in 0..ctx.out_w {
         let fx = (ox + ctx.offset_x) * fx_step;
         let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
         let (bg_x0, bg_x1) = area_range(bg_w, bg_fx, bg_fx_step);
-        xs.push(AreaAvgX {
-            fx,
-            bg_fx,
-            bg_x0,
-            bg_x1,
-        });
+        xs.push(AreaAvgX { fx, bg_x0, bg_x1 });
     }
     xs
 }
@@ -2823,7 +2957,7 @@ struct BilinearX {
 /// table lookups and the fallback produce byte-identical coordinates.
 fn precompute_bilinear_x(ctx: &CompositeContext<'_>, fx_step: u32) -> Option<Vec<BilinearX>> {
     let bg = ctx.bg?;
-    let clamp_w = bg.width.saturating_sub(1);
+    let clamp_w = bg.width().saturating_sub(1);
     let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
     let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
     let mut xs = Vec::with_capacity(ctx.out_w as usize);
@@ -2858,7 +2992,7 @@ impl<'a> CompositeContext<'a> {
     fn from_layers(
         page: &DjVuPage,
         opts: &'a RenderOptions,
-        bg: Option<&'a Pixmap>,
+        bg: Option<PlaneView<'a>>,
         mask: Option<&'a crate::bitmap::Bitmap>,
         mask_shift: u32,
         fg_palette: Option<&'a FgbzPalette>,
@@ -2871,7 +3005,7 @@ impl<'a> CompositeContext<'a> {
         let page_w = page.width() as u32;
         let page_h = page.height() as u32;
         let (fg_x_q24, fg_y_q24) = fg_q24(fg44, page_w, page_h);
-        let (bg_x_q24, bg_y_q24) = bg_q24(bg, page_w, page_h);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg.map(|b| (b.width(), b.height())), page_w, page_h);
         CompositeContext {
             opts,
             page_w,
@@ -2892,6 +3026,26 @@ impl<'a> CompositeContext<'a> {
             offset_y: offset.1,
             out_w: out.0,
             out_h: out.1,
+        }
+    }
+
+    /// The same context reading `bg` instead — a band of the plane, or a
+    /// different band. `bg` must report the whole plane's size so the
+    /// plane pitch stays what [`Self::from_layers`] computed.
+    fn with_bg<'b>(&self, bg: Option<PlaneView<'b>>) -> CompositeContext<'b>
+    where
+        'a: 'b,
+    {
+        let (bg_x_q24, bg_y_q24) = bg_q24(
+            bg.map(|b| (b.width(), b.height())),
+            self.page_w,
+            self.page_h,
+        );
+        CompositeContext {
+            bg,
+            bg_x_q24,
+            bg_y_q24,
+            ..*self
         }
     }
 }
@@ -2995,6 +3149,150 @@ fn lookup_palette_color(
     }
     // Fallback: first palette color or black
     pal.colors.first().copied().unwrap_or_default()
+}
+
+/// The background-plane rows the compositor reads for output rows `rows`
+/// (absolute rows of the `full_w × full_h` render), as `lo..hi` (#811).
+///
+/// Mirrors the row arithmetic of [`composite_rows_bilinear_one`] and
+/// [`composite_rows_area_avg_one`] for the first and last output row; both
+/// mappings are monotone, so the rows in between fall inside. The bilinear
+/// path reads rows `y0` and `y0 + 1` (clamped); the area path reads
+/// `[y0, y1)` with at least `y0` itself.
+fn bg_rows_needed(
+    (page_w, page_h): (u32, u32),
+    (full_w, full_h): (u32, u32),
+    plane: (u32, u32),
+    rows: core::ops::Range<u32>,
+) -> (u32, u32) {
+    let plane_h = plane.1;
+    if rows.is_empty() || plane_h == 0 {
+        return (0, 0);
+    }
+    let fx_step = ((page_w as u64 * FRAC as u64) / full_w.max(1) as u64) as u32;
+    let fy_step = ((page_h as u64 * FRAC as u64) / full_h.max(1) as u64) as u32;
+    let (_, bg_y_q24) = bg_q24(Some(plane), page_w, page_h);
+    let first = rows.start;
+    let last = rows.end - 1;
+    if fx_step > FRAC || fy_step > FRAC {
+        let bg_fy_step = ((fy_step as u64 * bg_y_q24) >> 24) as u32;
+        let row_of = |oy: u32| (((oy * fy_step) as u64 * bg_y_q24) >> 24) as u32;
+        let (lo, _) = area_range(plane_h, row_of(first), bg_fy_step);
+        let (y0, y1) = area_range(plane_h, row_of(last), bg_fy_step);
+        (lo, y1.max(y0 + 1))
+    } else {
+        let clamp_h = plane_h - 1;
+        let row_of =
+            |oy: u32| (map_plane_center_frac(oy * fy_step, bg_y_q24) >> FRACBITS).min(clamp_h);
+        let lo = row_of(first);
+        let hi = (row_of(last) + 1).min(clamp_h) + 1;
+        (lo, hi)
+    }
+}
+
+/// How many output rows one background band covers, so that the plane rows
+/// [`bg_rows_needed`] asks for stay within `band_rows` — the memory budget
+/// [`Iw44Image::rgb_band_rows`] sized. `offset_y`/`out_h` are the output
+/// rows of the whole composite.
+fn bg_band_out_rows(
+    page: (u32, u32),
+    full: (u32, u32),
+    plane: (u32, u32),
+    offset_y: u32,
+    out_h: u32,
+    band_rows: u32,
+) -> u32 {
+    let fy_step = ((page.1 as u64 * FRAC as u64) / full.1.max(1) as u64) as u32;
+    let (_, bg_y_q24) = bg_q24(Some(plane), page.0, page.1);
+    // Plane rows per output row, Q(FRACBITS + 24); a few rows of slack for
+    // the clamped neighbour rows the samplers read.
+    let per_out = (fy_step as u64 * bg_y_q24).max(1);
+    let rows = ((band_rows.saturating_sub(4) as u64) << (FRACBITS + 24)) / per_out;
+    let mut rows = (rows.min(out_h as u64) as u32).max(1);
+    // Safety net: never exceed the budget, whatever rounding did above.
+    loop {
+        let (lo, hi) = bg_rows_needed(page, full, plane, offset_y..offset_y + rows);
+        if hi - lo <= band_rows || rows == 1 {
+            return rows;
+        }
+        rows = (rows * 7 / 8).max(1);
+    }
+}
+
+/// Run `f` once per background band of a composite (#811).
+///
+/// For a whole (or missing) background this is one call with the ordinary
+/// context. For a [`Background::Banded`] page the output rows are walked in
+/// bands: each band pulls exactly the plane rows it reads with
+/// [`Iw44Image::rgb_rows`], composites through a context whose `offset_y`
+/// and `out_h` are narrowed to that band, and is dropped before the next
+/// one, so the peak memory is one band, not the whole background pixmap.
+/// `f` receives the context and the band's first output row relative to
+/// `out`; it writes those rows of its own output.
+#[allow(clippy::too_many_arguments)]
+fn for_each_bg_band<F>(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    bg: &Background,
+    mask: Option<&crate::bitmap::Bitmap>,
+    mask_shift: u32,
+    fg_palette: Option<&FgbzPalette>,
+    blit_map: Option<&[i32]>,
+    fg44: Option<&Pixmap>,
+    gamma_lut: &[u8; 256],
+    offset: (u32, u32),
+    out: (u32, u32),
+    mut f: F,
+) -> Result<(), RenderError>
+where
+    F: FnMut(&CompositeContext<'_>, u32) -> Result<(), RenderError>,
+{
+    let (image, band_rows) = match bg {
+        Background::Banded { image, band_rows } => (image, *band_rows),
+        _ => {
+            let ctx = CompositeContext::from_layers(
+                page,
+                opts,
+                bg.whole().map(PlaneView::whole),
+                mask,
+                mask_shift,
+                fg_palette,
+                blit_map,
+                fg44,
+                gamma_lut,
+                offset,
+                out,
+            );
+            return f(&ctx, 0);
+        }
+    };
+    let plane = (image.width, image.height);
+    let page_dims = (page.width() as u32, page.height() as u32);
+    let full = (opts.width, opts.height);
+    let template = CompositeContext::from_layers(
+        page, opts, None, mask, mask_shift, fg_palette, blit_map, fg44, gamma_lut, offset, out,
+    );
+    let mut oy0 = 0u32;
+    while oy0 < out.1 {
+        let rows = bg_band_out_rows(
+            page_dims,
+            full,
+            plane,
+            offset.1 + oy0,
+            out.1 - oy0,
+            band_rows,
+        );
+        let oy1 = oy0 + rows;
+        let (lo, hi) = bg_rows_needed(page_dims, full, plane, offset.1 + oy0..offset.1 + oy1);
+        let band = image.rgb_rows(lo..hi)?;
+        let view = PlaneView::band(&band, plane.1, lo);
+        let mut ctx = template.with_bg(Some(view));
+        ctx.offset_y = offset.1 + oy0;
+        ctx.out_h = rows;
+        f(&ctx, oy0)?;
+        oy0 = oy1;
+    }
+    Ok(())
 }
 
 /// Composite one page into `buf` (RGBA, pre-allocated) using the given context.
@@ -3408,9 +3706,7 @@ fn composite_rows_bilinear_one(
             && ctx.fg44.is_none()
             && let Some(bg) = ctx.bg
         {
-            let bg_py = py.min(bg.height.saturating_sub(1)) as usize;
-            let bg_stride = bg.width as usize * 4;
-            let bg_row = bg.data.get(bg_py * bg_stride..).unwrap_or(&[]);
+            let bg_row = bg.row(py.min(bg.height().saturating_sub(1)));
             let lut = &ctx.gamma_lut;
 
             if let Some(mask) = ctx.mask {
@@ -3420,7 +3716,7 @@ fn composite_rows_bilinear_one(
                 let mask_row = mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
 
                 // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
-                let bg_max_px = (bg.width as usize).saturating_sub(1);
+                let bg_max_px = (bg.width() as usize).saturating_sub(1);
                 let mask_limit = mask.width as usize;
                 let out_w = row_buf.len() / 4;
                 // D1: hoist gamma identity check outside the pixel loop.
@@ -3470,11 +3766,11 @@ fn composite_rows_bilinear_one(
                     let out_w = row_buf.len() / 4;
                     // E1: when bg covers the full output width, bulk-copy the row
                     // via memcpy — bg Pixmap always has alpha=255 from YCbCr decode.
-                    if bg.width as usize >= out_w {
+                    if bg.width() as usize >= out_w {
                         row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
                     } else {
                         for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                            let px = ox.min((bg.width as usize).saturating_sub(1));
+                            let px = ox.min((bg.width() as usize).saturating_sub(1));
                             let off = px * 4;
                             if let Some(q) = bg_row.get(off..off + 4) {
                                 pixel[0] = q[0];
@@ -3490,7 +3786,7 @@ fn composite_rows_bilinear_one(
                     }
                 } else {
                     for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                        let px = ox.min((bg.width as usize).saturating_sub(1));
+                        let px = ox.min((bg.width() as usize).saturating_sub(1));
                         let off = px * 4;
                         if let Some(q) = bg_row.get(off..off + 4) {
                             pixel[0] = lut[q[0] as usize];
@@ -3524,11 +3820,9 @@ fn composite_rows_bilinear_one(
         });
         // C2b: Pre-hoist bg row slice (bg_x_q24 == bg_y_q24 == 1<<24 guaranteed by outer
         // condition, so bg_fx == fx and the bg row index == py clamped to bg.height).
-        let bg_row_1x1 = ctx.bg.and_then(|bg| {
-            let by = (py as usize).min(bg.height.saturating_sub(1) as usize);
-            let stride = bg.width as usize * 4;
-            bg.data.get(by * stride..).map(|row| (row, bg.width))
-        });
+        let bg_row_1x1 = ctx
+            .bg
+            .map(|bg| (bg.row(py.min(bg.height().saturating_sub(1))), bg.width()));
         // C3: Pre-hoist mask row (py is row-invariant; eliminates y*stride multiply per pixel).
         let mask_row_1x1 = ctx.mask.and_then(|m| {
             if py >= m.height {
@@ -3722,15 +4016,14 @@ fn composite_rows_bilinear_one(
         None => None,
         Some(bg) => {
             let bg_fy = bg_fy_hoist.unwrap_or(0);
-            let clamp_h = bg.height.saturating_sub(1) as usize;
-            let y0 = ((bg_fy >> FRACBITS) as usize).min(clamp_h);
+            let clamp_h = bg.height().saturating_sub(1);
+            let y0 = (bg_fy >> FRACBITS).min(clamp_h);
             let y1 = (y0 + 1).min(clamp_h);
             let ty = bg_fy & FRAC_MASK;
             let ity = FRAC - ty;
-            let stride = bg.width as usize * 4;
-            let row0 = bg.data.get(y0 * stride..).unwrap_or(&[]);
-            let row1 = bg.data.get(y1 * stride..).unwrap_or(&[]);
-            let clamp_w = bg.width.saturating_sub(1);
+            let row0 = bg.row(y0);
+            let row1 = bg.row(y1);
+            let clamp_w = bg.width().saturating_sub(1);
             let fx_at = |q: u64| ((q >> 24) as u32).saturating_sub(FRAC / 2);
             let col_start = (fx_at(bg_fx_q) >> FRACBITS).min(clamp_w);
             let last_q =
@@ -3751,7 +4044,7 @@ fn composite_rows_bilinear_one(
                     v[ch] = (a * ity + b * ty) as u16;
                 }
             }
-            Some((vblend.as_chunks::<4>().0, bg.width, col_start))
+            Some((vblend.as_chunks::<4>().0, bg.width(), col_start))
         }
     };
 
@@ -3901,7 +4194,7 @@ fn composite_rows_area_avg_one(
 ) {
     let fy = (oy + ctx.offset_y) * fy_step;
     let bg_fy = ((fy as u64 * ctx.bg_y_q24) >> 24) as u32;
-    let bg_y = ctx.bg.map(|bg| area_range(bg.height, bg_fy, bg_fy_step));
+    let bg_y = ctx.bg.map(|bg| area_range(bg.height(), bg_fy, bg_fy_step));
 
     // #438: row-level all-bg fast path (F2/I3 analog for the area-avg path). The
     // mask footprint's y-band [y0, y1) is row-invariant; if it has no foreground
@@ -3924,13 +4217,8 @@ fn composite_rows_area_avg_one(
         } else {
             let fx = (ox as u32 + ctx.offset_x) * fx_step;
             let bg_fx = ((fx as u64 * ctx.bg_x_q24) >> 24) as u32;
-            let (bg_x0, bg_x1) = area_range(ctx.bg.map_or(0, |bg| bg.width), bg_fx, bg_fx_step);
-            fallback = AreaAvgX {
-                fx,
-                bg_fx,
-                bg_x0,
-                bg_x1,
-            };
+            let (bg_x0, bg_x1) = area_range(ctx.bg.map_or(0, |bg| bg.width()), bg_fx, bg_fx_step);
+            fallback = AreaAvgX { fx, bg_x0, bg_x1 };
             fallback
         };
         let fx = ax.fx;
@@ -3960,14 +4248,12 @@ fn composite_rows_area_avg_one(
         };
 
         let bg_sample = || -> (u8, u8, u8) {
-            if let Some(bg) = ctx.bg {
-                if let Some((bg_y0, bg_y1)) = bg_y {
+            // `bg_y` is `Some` exactly when `ctx.bg` is.
+            match (ctx.bg, bg_y) {
+                (Some(bg), Some((bg_y0, bg_y1))) => {
                     sample_area_avg_bounds(bg, ax.bg_x0, ax.bg_x1, bg_y0, bg_y1)
-                } else {
-                    sample_area_avg(bg, ax.bg_fx, bg_fy, bg_fx_step, bg_fy_step)
                 }
-            } else {
-                (255, 255, 255)
+                _ => (255, 255, 255),
             }
         };
         let fg_sample = || -> (u8, u8, u8) {
@@ -4060,10 +4346,11 @@ where
         fg_palette.as_ref(),
     );
     let ctx_mask = mask_plane.get();
-    let ctx = CompositeContext::from_layers(
+    let mut sink = sink;
+    for_each_bg_band(
         page,
         opts,
-        bg.as_deref(),
+        &bg,
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -4072,8 +4359,8 @@ where
         &gamma_lut,
         (0, 0),
         (w, h),
-    );
-    composite_rows(&ctx, sink)
+        |ctx, oy0| composite_rows(ctx, |y, row| sink(y + oy0 as usize, row)),
+    )
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -4143,10 +4430,10 @@ pub fn render_into_with_limits(
         fg_palette.as_ref(),
     );
     let ctx_mask = mask_plane.get();
-    let ctx = CompositeContext::from_layers(
+    for_each_bg_band(
         page,
         opts,
-        bg.as_deref(),
+        &bg,
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -4155,10 +4442,15 @@ pub fn render_into_with_limits(
         &gamma_lut,
         (0, 0),
         (w, h),
-    );
-    composite_into(&ctx, buf)?;
+        |ctx, oy0| composite_into(ctx, band_rows_mut(buf, w, oy0, ctx.out_h)),
+    )
+}
 
-    Ok(())
+/// Output rows `oy0..oy0 + rows` of an RGBA buffer `w` pixels wide.
+#[inline]
+fn band_rows_mut(buf: &mut [u8], w: u32, oy0: u32, rows: u32) -> &mut [u8] {
+    let stride = w as usize * 4;
+    &mut buf[oy0 as usize * stride..(oy0 as usize + rows as usize) * stride]
 }
 
 /// Build the options for the native-resolution pre-pass that feeds the
@@ -4320,7 +4612,11 @@ pub fn render_pixmap_with_limits(
 /// browser `OffscreenCanvas` row blit). Internally it allocates a single
 /// `opts.width * 4` byte scratch row and reuses it across all rows; peak heap
 /// usage during compositing is bounded by that scratch plus the decoded
-/// background (BG44) and mask (JB2) buffers.
+/// background (BG44) and mask (JB2) buffers. For a page whose full-resolution
+/// background would not fit the `djvu-iw44` band budget (128 MiB) the
+/// background is never built whole: the rows are composited from bands of the
+/// wavelet image, one band in memory at a time (#811), so the peak stays near
+/// one band regardless of the page size.
 ///
 /// Output is byte-identical to [`render_pixmap`] when both produce a result.
 ///
@@ -4442,10 +4738,10 @@ pub fn render_region(
         fg_palette.as_ref(),
     );
     let ctx_mask = mask_plane.get();
-    let ctx = CompositeContext::from_layers(
+    for_each_bg_band(
         page,
         &region_opts,
-        bg.as_deref(),
+        &bg,
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -4454,8 +4750,8 @@ pub fn render_region(
         &gamma_lut,
         (region.x, region.y),
         (out_w, out_h),
-    );
-    composite_into(&ctx, &mut pm.data)?;
+        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, out_w, oy0, ctx.out_h)),
+    )?;
 
     // Shared Lanczos-3 post-pass: scaling is judged against the full render
     // size (full_w/full_h) but the result is scaled to the region (out_w/out_h).
@@ -4562,10 +4858,10 @@ pub(crate) fn render_region_progressive(
         height: full_h,
         ..*opts
     };
-    let ctx = CompositeContext::from_layers(
+    for_each_bg_band(
         page,
         &region_opts,
-        bg.as_deref(),
+        &bg,
         mask.as_deref(),
         0,
         fg_palette.as_ref(),
@@ -4574,8 +4870,8 @@ pub(crate) fn render_region_progressive(
         &gamma_lut,
         (region.x, region.y),
         (out_w, out_h),
-    );
-    composite_into(&ctx, &mut pm.data)?;
+        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, out_w, oy0, ctx.out_h)),
+    )?;
 
     Ok(Some(rotate_pixmap(
         pm,
@@ -4709,7 +5005,7 @@ pub(crate) fn render_region_tiled_cancellable(
     let ctx_template = CompositeContext::from_layers(
         page,
         &region_opts,
-        bg.as_deref(),
+        bg.whole().map(PlaneView::whole),
         ctx_mask,
         mask_shift,
         fg_palette.as_ref(),
@@ -4719,6 +5015,12 @@ pub(crate) fn render_region_tiled_cancellable(
         (0, 0),
         (full_w, full_h),
     );
+    // #811: a banded background is fetched one tile row at a time, on the
+    // first cache miss in that row, and dropped with the row.
+    let banded = match &bg {
+        Background::Banded { image, .. } => Some(image),
+        _ => None,
+    };
 
     let out_w = region.width;
     let out_h = region.height;
@@ -4742,6 +5044,8 @@ pub(crate) fn render_region_tiled_cancellable(
     for ty in ty0..=ty1 {
         let tile_y0 = ty * TILE_SIZE;
         let tile_h = TILE_SIZE.min(full_h - tile_y0);
+        // The background band for this tile row: `(pixmap, first plane row)`.
+        let mut row_band: Option<(Pixmap, u32)> = None;
         for tx in tx0..=tx1 {
             if is_cancelled(cancel) {
                 return Ok(None);
@@ -4753,7 +5057,23 @@ pub(crate) fn render_region_tiled_cancellable(
             let tile = match layers.get_tile(key) {
                 Some(t) => t,
                 None => {
-                    let mut tile_ctx = ctx_template;
+                    if let Some(image) = banded
+                        && row_band.is_none()
+                    {
+                        let (lo, hi) = bg_rows_needed(
+                            (page.width() as u32, page.height() as u32),
+                            (full_w, full_h),
+                            (image.width, image.height),
+                            tile_y0..tile_y0 + tile_h,
+                        );
+                        row_band = Some((image.rgb_rows(lo..hi)?, lo));
+                    }
+                    let mut tile_ctx = match (banded, &row_band) {
+                        (Some(image), Some((band, lo))) => {
+                            ctx_template.with_bg(Some(PlaneView::band(band, image.height, *lo)))
+                        }
+                        _ => ctx_template,
+                    };
                     tile_ctx.offset_x = tile_x0;
                     tile_ctx.offset_y = tile_y0;
                     tile_ctx.out_w = tile_w;
@@ -4851,30 +5171,27 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
 
     let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
     let bg = decode_background_chunks(page, 1, bg_subsample)?;
-    let bg = match bg {
-        Some(b) => b,
-        None => return Ok(None),
-    };
+    if !bg.is_some() {
+        return Ok(None);
+    }
 
     let gamma_lut = build_gamma_lut(page.gamma());
     let mut pm = Pixmap::white(w, h);
 
-    {
-        let ctx = CompositeContext::from_layers(
-            page,
-            opts,
-            Some(&bg),
-            None,
-            0,
-            None,
-            None,
-            None,
-            &gamma_lut,
-            (0, 0),
-            (w, h),
-        );
-        composite_into(&ctx, &mut pm.data)?;
-    }
+    for_each_bg_band(
+        page,
+        opts,
+        &bg,
+        None,
+        0,
+        None,
+        None,
+        None,
+        &gamma_lut,
+        (0, 0),
+        (w, h),
+        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, w, oy0, ctx.out_h)),
+    )?;
 
     Ok(Some(rotate_pixmap(
         pm,
@@ -4927,22 +5244,20 @@ pub fn render_progressive(
     } = decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
 
     let mut pm = Pixmap::white(w, h);
-    {
-        let ctx = CompositeContext::from_layers(
-            page,
-            opts,
-            bg.as_deref(),
-            mask.as_deref(),
-            0,
-            fg_palette.as_ref(),
-            blit_map.as_deref().map(Vec::as_slice),
-            fg44.as_deref(),
-            &gamma_lut,
-            (0, 0),
-            (w, h),
-        );
-        composite_into(&ctx, &mut pm.data)?;
-    }
+    for_each_bg_band(
+        page,
+        opts,
+        &bg,
+        mask.as_deref(),
+        0,
+        fg_palette.as_ref(),
+        blit_map.as_deref().map(Vec::as_slice),
+        fg44.as_deref(),
+        &gamma_lut,
+        (0, 0),
+        (w, h),
+        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, w, oy0, ctx.out_h)),
+    )?;
 
     // Shared Lanczos-3 post-pass; the native re-render decodes the same
     // `chunk_n` refinement level.
@@ -5012,7 +5327,9 @@ pub struct ProgressiveDecoder<'a> {
     blit_map: Option<Arc<Vec<i32>>>,
     fg44: Option<Arc<Pixmap>>,
     rotation: crate::info::Rotation,
-    img: Iw44Image,
+    /// Shared so a very large page can hand bands of it to the compositor
+    /// (#811); nobody else holds it between frames.
+    img: Arc<Iw44Image>,
     chunks_fed: usize,
 }
 
@@ -5067,7 +5384,7 @@ impl<'a> ProgressiveDecoder<'a> {
             blit_map,
             fg44,
             rotation,
-            img: Iw44Image::new(),
+            img: Arc::new(Iw44Image::new()),
             chunks_fed: 0,
         })
     }
@@ -5079,30 +5396,28 @@ impl<'a> ProgressiveDecoder<'a> {
     pub fn push_bg44_chunk(&mut self, chunk: &[u8]) -> Result<Pixmap, RenderError> {
         #[cfg(test)]
         count_bg44_chunk_decode();
-        self.img.decode_chunk(chunk).map_err(RenderError::Iw44)?;
-        self.chunks_fed += 1;
-        let bg = self
-            .img
-            .to_rgb_subsample(self.bg_subsample)
+        // Never shared between frames, so this is the in-place path.
+        Arc::make_mut(&mut self.img)
+            .decode_chunk(chunk)
             .map_err(RenderError::Iw44)?;
+        self.chunks_fed += 1;
+        let bg = Background::from_shared_iw44(&self.img, self.bg_subsample)?;
 
         let mut pm = Pixmap::white(self.w, self.h);
-        {
-            let ctx = CompositeContext::from_layers(
-                self.page,
-                &self.opts,
-                Some(&bg),
-                self.mask.as_deref(),
-                0,
-                self.fg_palette.as_ref(),
-                self.blit_map.as_deref().map(Vec::as_slice),
-                self.fg44.as_deref(),
-                &self.gamma_lut,
-                (0, 0),
-                (self.w, self.h),
-            );
-            composite_into(&ctx, &mut pm.data)?;
-        }
+        for_each_bg_band(
+            self.page,
+            &self.opts,
+            &bg,
+            self.mask.as_deref(),
+            0,
+            self.fg_palette.as_ref(),
+            self.blit_map.as_deref().map(Vec::as_slice),
+            self.fg44.as_deref(),
+            &self.gamma_lut,
+            (0, 0),
+            (self.w, self.h),
+            |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, self.w, oy0, ctx.out_h)),
+        )?;
         Ok(rotate_pixmap(pm, self.rotation))
     }
 
@@ -5184,6 +5499,159 @@ mod tests {
         DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"))
     }
 
+    // ── Banded background (#811) ─────────────────────────────────────────────
+
+    /// Composite `page` at `opts` over `out` output rows starting at `offset`,
+    /// through `for_each_bg_band` with the given background, into a flat
+    /// buffer (`rows == false`) or through the row sink (`rows == true`).
+    fn composite_with_bg(
+        page: &DjVuPage,
+        opts: &RenderOptions,
+        bg: &Background,
+        offset: (u32, u32),
+        out: (u32, u32),
+        rows: bool,
+    ) -> Vec<u8> {
+        let gamma_lut = build_gamma_lut(page.gamma());
+        let DecodedLayers {
+            bg: _,
+            fg_palette,
+            mask,
+            blit_map,
+            fg44,
+        } = decode_layers(page, opts, 1, usize::MAX).unwrap();
+        let stride = out.0 as usize * 4;
+        let mut buf = vec![0u8; stride * out.1 as usize];
+        for_each_bg_band(
+            page,
+            opts,
+            bg,
+            mask.as_deref(),
+            0,
+            fg_palette.as_ref(),
+            blit_map.as_deref().map(Vec::as_slice),
+            fg44.as_deref(),
+            &gamma_lut,
+            offset,
+            out,
+            |ctx, oy0| {
+                if rows {
+                    composite_rows(ctx, |y, row| {
+                        let at = (y + oy0 as usize) * stride;
+                        buf[at..at + stride].copy_from_slice(row);
+                    })
+                } else {
+                    composite_into(ctx, band_rows_mut(&mut buf, out.0, oy0, ctx.out_h))
+                }
+            },
+        )
+        .unwrap();
+        buf
+    }
+
+    /// A background composited from bands of the wavelet image is
+    /// byte-identical to one composited from the whole RGB pixmap: at 1:1, on
+    /// an upscale, on a downscale, with a region offset, through the flat
+    /// buffer and through the row sink, with bands far smaller than the
+    /// production budget so every seam is exercised.
+    #[test]
+    fn banded_background_composites_like_the_whole_one() {
+        // chicken: a small page, composited whole at every size. colorbook:
+        // BG44 + JB2 mask, plane at page/3. history: plane at page/3 with a
+        // ragged edge. carte: a wide page with a page/3 plane. The large pages
+        // are composited as regions — the mapping is what matters, not the
+        // area. (All four have colour backgrounds; banding is colour-only.)
+        let subjects = [
+            ("chicken.djvu", true),
+            ("colorbook.djvu", false),
+            ("history.djvu", false),
+            ("carte.djvu", false),
+        ];
+        for (file, small) in subjects {
+            let started = std::time::Instant::now();
+            let doc = load_doc(file);
+            let page = doc.page(0).unwrap();
+            let img = page.decoded_bg44().expect("fixture has a BG44 background");
+            assert!(
+                img.rgb_band_rows().is_none(),
+                "{file} is small: the production path must hold it whole"
+            );
+            let whole = Background::Whole(Arc::new(img.to_rgb_subsample(1).unwrap()));
+            let (pw, ph) = (page.width() as u32, page.height() as u32);
+            let sizes = [(pw, ph), (pw * 7 / 5, ph * 7 / 5), (pw * 5 / 7, ph * 5 / 7)];
+            let band_sizes: &[u32] = if small { &[9, 37] } else { &[37, 300] };
+            for (w, h) in sizes {
+                let opts = RenderOptions {
+                    width: w,
+                    height: h,
+                    ..Default::default()
+                };
+                // The whole output, or two regions: one off the top-left
+                // corner and one at the bottom-right edge, with a ragged
+                // height so the last band is a partial one.
+                let cases: Vec<((u32, u32), (u32, u32))> = if small {
+                    vec![((0, 0), (w, h)), ((13, 29), (w - 40, h - 61))]
+                } else {
+                    let (rw, rh) = (200, 333);
+                    vec![((13, 29), (rw, rh)), ((w - rw, h - rh), (rw, rh))]
+                };
+                for (offset, out) in cases {
+                    let expect = composite_with_bg(page, &opts, &whole, offset, out, false);
+                    for &band_rows in band_sizes {
+                        let banded = Background::Banded {
+                            image: img.clone(),
+                            band_rows,
+                        };
+                        for rows in [false, true] {
+                            let got = composite_with_bg(page, &opts, &banded, offset, out, rows);
+                            assert!(
+                                got == expect,
+                                "{file} at {w}x{h}, offset {offset:?}, out {out:?}, \
+                                 band_rows {band_rows}, rows={rows}: banded composite differs"
+                            );
+                        }
+                    }
+                }
+            }
+            println!("{file}: checked in {:?}", started.elapsed());
+        }
+    }
+
+    /// `bg_rows_needed` returns the rows the samplers read, and they lie
+    /// inside the plane; bands from `bg_band_out_rows` respect the budget.
+    #[test]
+    fn bg_band_planning_stays_inside_the_plane_and_the_budget() {
+        let page = (2260u32, 3669u32);
+        let plane = (754u32, 1223u32);
+        for full in [(2260, 3669), (3164, 5137), (1614, 2621), (753, 1223)] {
+            let (lo, hi) = bg_rows_needed(page, full, plane, 0..full.1);
+            assert_eq!(lo, 0);
+            assert!(
+                hi <= plane.1,
+                "full render at {full:?} reads {hi} > {} rows",
+                plane.1
+            );
+            if full == page {
+                assert_eq!(hi, plane.1, "a 1:1 render reads every plane row");
+            }
+            let mut oy = 0;
+            while oy < full.1 {
+                let rows = bg_band_out_rows(page, full, plane, oy, full.1 - oy, 64);
+                let (lo, hi) = bg_rows_needed(page, full, plane, oy..oy + rows);
+                assert!(
+                    lo < hi && hi <= plane.1,
+                    "{full:?} band at {oy}: {lo}..{hi}"
+                );
+                assert!(
+                    hi - lo <= 64,
+                    "{full:?} band at {oy}: {lo}..{hi} exceeds 64 rows"
+                );
+                oy += rows;
+            }
+        }
+        assert_eq!(bg_rows_needed(page, page, plane, 5..5), (0, 0));
+    }
+
     // ── Compositor hot-path unit tests ───────────────────────────────────────
     //
     // The three `composite_rows_*_one` functions are the compositor's hot
@@ -5214,7 +5682,8 @@ mod tests {
         out_h: u32,
     ) -> CompositeContext<'a> {
         let (fg_x_q24, fg_y_q24) = fg_q24(None, page_w, page_h);
-        let (bg_x_q24, bg_y_q24) = bg_q24(bg, page_w, page_h);
+        let bg = bg.map(PlaneView::whole);
+        let (bg_x_q24, bg_y_q24) = bg_q24(bg.map(|b| (b.width(), b.height())), page_w, page_h);
         CompositeContext {
             opts,
             page_w,
@@ -5384,17 +5853,16 @@ mod tests {
     #[test]
     fn bg_q24_maps_non_pow2_subsample() {
         // Page 2260×3669 with BG plane 754×1223 (DjVu's padded 1/3-page layout).
-        let bg = Pixmap::white(754, 1223);
-        let (qx, qy) = bg_q24(Some(&bg), 2260, 3669);
+        let (qx, qy) = bg_q24(Some((754, 1223)), 2260, 3669);
         assert_eq!(qx, (1u64 << 24) / 3);
         assert_eq!(qy, (1u64 << 24) / 3);
 
         let last_x = 2259u32 * FRAC;
         let bg_px = (map_plane_center_frac(last_x, qx) as u64) >> FRACBITS;
-        assert!(bg_px < bg.width as u64);
+        assert!(bg_px < 754);
         let last_y = 3668u32 * FRAC;
         let bg_py = (map_plane_center_frac(last_y, qy) as u64) >> FRACBITS;
-        assert!(bg_py < bg.height as u64);
+        assert!(bg_py < 1223);
     }
 
     #[test]
@@ -5424,8 +5892,7 @@ mod tests {
 
     #[test]
     fn bg_q24_uses_integer_cell_pitch_for_padded_edges() {
-        let bg = Pixmap::white(754, 1223);
-        let (qx, qy) = bg_q24(Some(&bg), 2260, 3669);
+        let (qx, qy) = bg_q24(Some((754, 1223)), 2260, 3669);
         assert_eq!(qx, (1u64 << 24) / 3);
         assert_eq!(qy, (1u64 << 24) / 3);
     }

@@ -1854,7 +1854,8 @@ impl DjVuDocument {
             // chain: mask/fg44 are independent of bg; bg_rgb_s1 subsumes the
             // bg44 ZP arithmetic decode (see `PageLayers::bg_rgb_s1`), so this
             // warms every cache slot a native-resolution `render_pixmap` call
-            // reads from.
+            // reads from. (A page too large to hold its background whole
+            // gets no RGB pixmap — #811 — but the bg44 slot is still warmed.)
             let _ = page.decoded_mask();
             let _ = page.decoded_fg44();
             let _ = page.decoded_bg_rgb_s1();

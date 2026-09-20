@@ -2059,12 +2059,13 @@ fn reconstruct_planes(
     }
 }
 
-/// Write image rows `rows` of a full-resolution colour page into `pm`.
+/// Write image rows `rows` of a full-resolution colour page into `out`.
 ///
-/// The planes need not cover the whole image: `y_row0` and `c_row0` say which
-/// image row each plane's row 0 holds, which is what lets a banded caller pass
-/// a slice of the page. DjVu stores rows bottom-to-top, so image row `r` is
-/// written to output row `ph - 1 - r`.
+/// `out` holds exactly those rows as RGBA, top to bottom. The planes need not
+/// cover the whole image: `y_row0` and `c_row0` say which image row each
+/// plane's row 0 holds, which is what lets a banded caller pass a slice of the
+/// page. DjVu stores rows bottom-to-top, so image row `r` is the output row
+/// `ph - 1 - r` of the whole picture, and the first row of `out`.
 #[allow(clippy::too_many_arguments)]
 fn convert_rgb_rows(
     chroma_half: bool,
@@ -2076,14 +2077,13 @@ fn convert_rgb_rows(
     rows: core::ops::Range<usize>,
     pw: usize,
     ph: usize,
-    pm: &mut Pixmap,
+    out: &mut [u8],
 ) {
     // #422: half-resolution chroma dimensions, for bilinear upsampling.
     let cw = pw.div_ceil(2);
     let ch = ph.div_ceil(2);
     let out_lo = ph - rows.end;
-    let out_hi = ph - rows.start;
-    let out = &mut pm.data[out_lo * pw * 4..out_hi * pw * 4];
+    debug_assert_eq!(out.len(), rows.len() * pw * 4);
 
     #[cfg(feature = "parallel")]
     {
@@ -2183,7 +2183,16 @@ const BAND_MIN_KEEP_BLOCKS: usize = 4 * BAND_HALO_BLOCKS;
 /// whole-plane work. Only a page whose planes are genuinely large is worth
 /// that; under [`BAND_MIN_PLANE_BYTES`] the whole-plane path runs exactly as
 /// it did before.
-fn band_keep_blocks(y_dec: &PlaneDecoder, chroma_half: bool) -> Option<usize> {
+///
+/// `out_bytes_per_px` is what the caller keeps per kept pixel beside the
+/// planes: 0 when the RGB goes into a picture that exists anyway, 4 when the
+/// caller holds one band of RGB rows and nothing else (#811). Those bytes come
+/// out of the same budget, so such a band keeps fewer block rows.
+fn band_keep_blocks(
+    y_dec: &PlaneDecoder,
+    chroma_half: bool,
+    out_bytes_per_px: usize,
+) -> Option<usize> {
     let stride = y_dec.width.div_ceil(32) * 32;
     // Bytes the three planes hold per luma row. Luma is two bytes a pixel; the
     // two chroma planes add two more each, or one more together when chroma is
@@ -2194,7 +2203,11 @@ fn band_keep_blocks(y_dec: &PlaneDecoder, chroma_half: bool) -> Option<usize> {
         return None;
     }
     let per_block_row = per_row * 32;
-    let affordable = (BAND_BUDGET_BYTES / per_block_row).saturating_sub(2 * BAND_HALO_BLOCKS);
+    // The halos are pure plane rows; every kept block row also carries the
+    // caller's output bytes.
+    let halo_bytes = 2 * BAND_HALO_BLOCKS * per_block_row;
+    let per_kept_block_row = per_block_row + stride * 32 * out_bytes_per_px;
+    let affordable = BAND_BUDGET_BYTES.saturating_sub(halo_bytes) / per_kept_block_row;
     let keep = affordable.max(BAND_MIN_KEEP_BLOCKS);
     // Band only when a band really is a part of the page. A `keep` just under
     // `block_rows` would split the page into two bands that each carry almost
@@ -3790,7 +3803,7 @@ impl Iw44Image {
                 // full-resolution `i16` planes cost 6 bytes per pixel — more
                 // than the 4-byte output they feed — and are dropped the moment
                 // the RGB is written. See `band_keep_blocks`.
-                if let Some(keep) = band_keep_blocks(y_dec, self.chroma_half) {
+                if let Some(keep) = band_keep_blocks(y_dec, self.chroma_half, 0) {
                     self.rgb_sub1_banded(y_dec, cb_dec, cr_dec, keep, pw, ph, &mut pm);
                     return Ok(pm);
                 }
@@ -3806,7 +3819,7 @@ impl Iw44Image {
                     0..ph,
                     pw,
                     ph,
-                    &mut pm,
+                    &mut pm.data,
                 );
                 return Ok(pm);
             }
@@ -3917,8 +3930,6 @@ impl Iw44Image {
         pm: &mut Pixmap,
     ) {
         let block_rows = (self.height as usize).div_ceil(32);
-        let c_block_rows = cb_dec.height.div_ceil(32);
-        let ch = ph.div_ceil(2);
         let mut first = 0usize;
         while first < block_rows {
             let last = (first + keep).min(block_rows);
@@ -3926,55 +3937,143 @@ impl Iw44Image {
             if r0 >= r1 {
                 break;
             }
-            let lo = first.saturating_sub(BAND_HALO_BLOCKS);
-            let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
-
-            // Chroma rows this band reads. At half resolution luma row `r` takes
-            // chroma rows `r / 2` and `r / 2 + 1`, so the band needs one row past
-            // its own half — except at the image bottom, where that row is
-            // clamped away.
-            let (c_r0, c_r1) = if self.chroma_half {
-                (r0 / 2, (r1.div_ceil(2) + 1).min(ch))
-            } else {
-                (r0, r1)
-            };
-            let c_lo = (c_r0 / 32).saturating_sub(BAND_HALO_BLOCKS);
-            let c_hi = (c_r1.div_ceil(32) + BAND_HALO_BLOCKS).min(c_block_rows);
-
-            #[cfg(feature = "parallel")]
-            let (y_band, cb_band, cr_band) = {
-                let (y, (cb, cr)) = rayon::join(
-                    || y_dec.reconstruct_band(lo, hi),
-                    || {
-                        rayon::join(
-                            || cb_dec.reconstruct_band(c_lo, c_hi),
-                            || cr_dec.reconstruct_band(c_lo, c_hi),
-                        )
-                    },
-                );
-                (y, cb, cr)
-            };
-            #[cfg(not(feature = "parallel"))]
-            let (y_band, cb_band, cr_band) = (
-                y_dec.reconstruct_band(lo, hi),
-                cb_dec.reconstruct_band(c_lo, c_hi),
-                cr_dec.reconstruct_band(c_lo, c_hi),
-            );
-
-            convert_rgb_rows(
-                self.chroma_half,
-                &y_band,
-                lo * 32,
-                &cb_band,
-                &cr_band,
-                c_lo * 32,
-                r0..r1,
-                pw,
-                ph,
-                pm,
-            );
+            let out = &mut pm.data[(ph - r1) * pw * 4..(ph - r0) * pw * 4];
+            self.rgb_sub1_band(y_dec, cb_dec, cr_dec, r0, r1, pw, ph, out);
             first = last;
         }
+    }
+
+    /// Write image rows `r0..r1` of the full-resolution colour picture into
+    /// `out`, reconstructing only the block rows that cover them plus a halo.
+    ///
+    /// `out` holds exactly those rows as RGBA, top to bottom (see
+    /// [`convert_rgb_rows`]). The band may start on any row: the halo below
+    /// and above is what makes its rows exact, wherever it starts.
+    #[allow(clippy::too_many_arguments)]
+    fn rgb_sub1_band(
+        &self,
+        y_dec: &PlaneDecoder,
+        cb_dec: &PlaneDecoder,
+        cr_dec: &PlaneDecoder,
+        r0: usize,
+        r1: usize,
+        pw: usize,
+        ph: usize,
+        out: &mut [u8],
+    ) {
+        let block_rows = (self.height as usize).div_ceil(32);
+        let c_block_rows = cb_dec.height.div_ceil(32);
+        let ch = ph.div_ceil(2);
+        let (first, last) = (r0 / 32, r1.div_ceil(32));
+        let lo = first.saturating_sub(BAND_HALO_BLOCKS);
+        let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
+
+        // Chroma rows this band reads. At half resolution luma row `r` takes
+        // chroma rows `r / 2` and `r / 2 + 1`, so the band needs one row past
+        // its own half — except at the image bottom, where that row is
+        // clamped away.
+        let (c_r0, c_r1) = if self.chroma_half {
+            (r0 / 2, (r1.div_ceil(2) + 1).min(ch))
+        } else {
+            (r0, r1)
+        };
+        let c_lo = (c_r0 / 32).saturating_sub(BAND_HALO_BLOCKS);
+        let c_hi = (c_r1.div_ceil(32) + BAND_HALO_BLOCKS).min(c_block_rows);
+
+        #[cfg(feature = "parallel")]
+        let (y_band, cb_band, cr_band) = {
+            let (y, (cb, cr)) = rayon::join(
+                || y_dec.reconstruct_band(lo, hi),
+                || {
+                    rayon::join(
+                        || cb_dec.reconstruct_band(c_lo, c_hi),
+                        || cr_dec.reconstruct_band(c_lo, c_hi),
+                    )
+                },
+            );
+            (y, cb, cr)
+        };
+        #[cfg(not(feature = "parallel"))]
+        let (y_band, cb_band, cr_band) = (
+            y_dec.reconstruct_band(lo, hi),
+            cb_dec.reconstruct_band(c_lo, c_hi),
+            cr_dec.reconstruct_band(c_lo, c_hi),
+        );
+
+        convert_rgb_rows(
+            self.chroma_half,
+            &y_band,
+            lo * 32,
+            &cb_band,
+            &cr_band,
+            c_lo * 32,
+            r0..r1,
+            pw,
+            ph,
+            out,
+        );
+    }
+
+    /// How many rows a caller that composites straight from bands of
+    /// [`rgb_rows`](Self::rgb_rows) should take at a time, or `None` when the
+    /// picture is small enough to convert whole with [`to_rgb`](Self::to_rgb).
+    ///
+    /// `Some` only for a colour picture whose full-resolution planes are large
+    /// enough that `to_rgb` itself reconstructs them in bands. Such a caller
+    /// never holds the whole RGB picture, so its band pays for its own RGB
+    /// rows out of the same budget and keeps fewer rows than `to_rgb` does.
+    pub fn rgb_band_rows(&self) -> Option<u32> {
+        if !self.is_color {
+            return None;
+        }
+        let y_dec = self.y.as_ref()?;
+        band_keep_blocks(y_dec, self.chroma_half, 4).map(|keep| (keep * 32) as u32)
+    }
+
+    /// Rows `rows` of the full-resolution colour picture, top to bottom, as a
+    /// pixmap of `self.width` by `rows.len()`.
+    ///
+    /// Byte-identical to the same rows of [`to_rgb`](Self::to_rgb), but only
+    /// the block rows covering `rows` (plus a halo on each side) are
+    /// reconstructed, so a caller that walks the picture in bands never holds
+    /// more than one band of planes and one band of RGB. See
+    /// [`rgb_band_rows`](Self::rgb_band_rows) for the band size that keeps
+    /// within the reconstruction budget.
+    ///
+    /// # Errors
+    ///
+    /// [`Iw44Error::MissingCodec`] when the picture is not colour or has no
+    /// planes yet; [`Iw44Error::Invalid`] when `rows` is not within the
+    /// picture's height.
+    pub fn rgb_rows(&self, rows: core::ops::Range<u32>) -> Result<Pixmap, Iw44Error> {
+        if !self.is_color {
+            return Err(Iw44Error::MissingCodec);
+        }
+        let y_dec = self.y.as_ref().ok_or(Iw44Error::MissingCodec)?;
+        let cb_dec = self.cb.as_ref().ok_or(Iw44Error::MissingCodec)?;
+        let cr_dec = self.cr.as_ref().ok_or(Iw44Error::MissingCodec)?;
+        let (pw, ph) = (self.width as usize, self.height as usize);
+        let (o0, o1) = (rows.start as usize, rows.end as usize);
+        if o0 > o1 || o1 > ph {
+            return Err(Iw44Error::Invalid);
+        }
+        let mut pm = Pixmap::new(self.width, (o1 - o0) as u32, 0, 0, 0, 255);
+        if o0 == o1 {
+            return Ok(pm);
+        }
+        // Output row `o` is image row `ph - 1 - o`, so output rows `o0..o1`
+        // are image rows `ph - o1..ph - o0`.
+        self.rgb_sub1_band(
+            y_dec,
+            cb_dec,
+            cr_dec,
+            ph - o1,
+            ph - o0,
+            pw,
+            ph,
+            &mut pm.data,
+        );
+        Ok(pm)
     }
 
     /// Convert to a grayscale [`GrayPixmap`] at full resolution.
@@ -4428,6 +4527,58 @@ mod tests {
                      band differs from the whole-plane conversion"
                 );
             }
+        }
+    }
+
+    /// `rgb_rows` must give the same bytes as the same rows of `to_rgb`, for
+    /// any row range: a whole band, a band starting mid-block, one row, the
+    /// first and the last row. This is what lets a renderer composite straight
+    /// from bands (#811).
+    #[test]
+    fn rgb_rows_match_the_whole_picture() {
+        for asset in ["carte.djvu", "chicken.djvu", "colorbook.djvu"] {
+            let data = std::fs::read(assets_path().join(asset)).expect("asset");
+            let file = djvu_iff::parse(&data).expect("parse");
+            let chunks = extract_bg44_chunks(&file);
+            if chunks.is_empty() {
+                continue;
+            }
+            let mut img = Iw44Image::new();
+            for c in &chunks {
+                img.decode_chunk(c).expect("decode_chunk");
+            }
+            if !img.is_color {
+                continue;
+            }
+            let whole = img.to_rgb().expect("to_rgb");
+            let (w, h) = (img.width, img.height);
+            let stride = w as usize * 4;
+            assert!(h > 40, "{asset}: fixture must be taller than one test band");
+            assert!(
+                img.rgb_band_rows().is_none(),
+                "{asset}: a small picture must not ask to be banded"
+            );
+
+            let mut ranges = vec![0..h, 0..1, h - 1..h, 37..h - 5, 3..4];
+            let mut o = 0;
+            while o < h {
+                ranges.push(o..(o + 37).min(h));
+                o += 37;
+            }
+            for r in ranges {
+                let band = img.rgb_rows(r.clone()).expect("rgb_rows");
+                assert_eq!((band.width, band.height), (w, r.end - r.start));
+                assert_eq!(
+                    band.data,
+                    &whole.data[r.start as usize * stride..r.end as usize * stride],
+                    "{asset}: rows {r:?} differ from the whole-picture conversion"
+                );
+            }
+
+            let empty = img.rgb_rows(5..5).expect("an empty range is fine");
+            assert_eq!((empty.width, empty.height), (w, 0));
+            assert!(matches!(img.rgb_rows(0..h + 1), Err(Iw44Error::Invalid)));
+            assert!(matches!(img.rgb_rows(7..6), Err(Iw44Error::Invalid)));
         }
     }
 
