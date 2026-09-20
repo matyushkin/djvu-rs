@@ -974,6 +974,4 @@ mod native_tests {
     }
 }
 
-// WASM browser tests (wasm-pack test --headless --firefox) are defined in
-// tests/wasm_browser.rs to keep them separate from the build path.
-// See examples/wasm/README.md for how to run them.
+// Browser-side WASM checks live under examples/wasm; see examples/wasm/README.md.
