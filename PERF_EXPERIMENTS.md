@@ -15699,3 +15699,112 @@ composited output instead of the background. The progressive decoder and
 `render_coarse` still hold their pixmaps whole, but they are subsampled. The
 overflow panic in `render_coarse` on pages above 30 Mpx at 1.3x is
 pre-existing (`Pixmap::new` returns empty data on overflow) and untouched.
+### Encoding one large page held three whole input planes — banded forward transform — **Kept** (2026-09-20)
+
+**ENCODE_BANDED_PLANES**
+
+**Issue.** #812, the mirror image of IW44_BANDED_RECONSTRUCT and the last
+open item of ENCODE_SPARSE_RECON. A `Photo` encode of
+`tests/fixtures/big-scanned-page.djvu` (6780x9148) peaked at 766 749 958 B.
+Half of it — 372 MB — was the three `i16` input planes: `encode_iw44_color`
+converted the whole pixmap to Y, Cb and Cr, ran `forward_wavelet_transform`
+over each plane whole, and only then scattered the coefficients into the
+`blocks` grid. The planes are dead the moment `gather` has read them, but they
+sit beside the grid (another 372 MB) until then.
+
+**Approach.** Never build a plane. Transform a band of rows, gather it, reuse
+the buffer for the next band.
+
+- `PlaneEncoder::gather_rows(plane, stride, buf_first_block, first_block,
+  last_block)` scatters only the block rows of one band; `gather` is now the
+  one-band call over the whole plane.
+- `forward_gather_banded` owns three (or one) buffers of `keep + 2 * halo`
+  block rows. For each band it asks the caller to fill them straight from the
+  pixmap (`fill_color_band` / `fill_gray_band`: RGB to YCbCr, x64, padding
+  rows and columns zeroed per row), runs `forward_wavelet_transform` over the
+  buffer, and gathers the kept block rows. Under `parallel` the three planes
+  of one band run in a `rayon::scope`.
+- A **halo**, as on the decode side. Each lifting pass reads +/-3s rows for
+  s = 1..16, so a band transforms `BAND_HALO_BLOCKS` = 8 extra block rows on
+  each side and keeps only the interior. Band starts stay block-aligned so
+  scale alignment holds. A band that reaches the bottom of the plane passes
+  the image's own remaining height as `logical`, so the transform's boundary
+  handling lands where the image ends, not at the padded edge.
+
+`encode_band_keep_blocks(stride, block_rows, planes)` decides, with the
+decoder's thresholds: planes under `BAND_MIN_PLANE_BYTES` (128 MiB together)
+are transformed whole, exactly as before — this covers every other fixture in
+the corpus, and the grey plane of the big page (124 MB). Above it a band may
+cost `ENCODE_BAND_BUDGET_BYTES` (32 MiB, all planes, halos included), never
+fewer than `BAND_MIN_KEEP_BLOCKS` (32) kept block rows, and banding is refused
+unless a band keeps at most half the page. On the big page the minimum decides:
+9 bands of 32 kept block rows, each buffer 48 block rows, 62.5 MB for the
+three of them where the whole planes cost 372 MB.
+
+**Halo size.** Probed against the whole-plane transform on a 203x1131 noisy
+pixmap (every coefficient carries energy, so a halo one row short shows up as
+a differing coefficient), keep 8, halo from 0 up: 0, 1, 2, 3, 4 block rows
+**fail** (108, 106, 98, 46, 6 differing block rows of 36), 5 is the first to
+**pass**. The forward transform reaches further than the inverse (the decode
+probe passed at 4). `BAND_HALO_BLOCKS` = 8 stays above the 186-row analytic
+reach and leaves three block rows over the measured minimum.
+
+**Numbers.** `Photo` encode of the 6780x9148 page. Peak from a counting
+global allocator with the pixmap already built; time is the median of eight
+samples, two interleaved rounds of pre-built release binaries. One
+full-resolution `i16` plane, `w * h * 2`, is 124 046 880 B.
+
+| | Peak | x one plane | Time (IW44 only) |
+|---|---|---|---|
+| whole planes (before) | 766 749 958 | 6.18 | 2.005 s |
+| **banded (kept)** | **445 271 218** | **3.59** | **2.324 s** |
+
+-321 478 740 B (**-41.9 %**) for **+15.9 %** time on this one page. The time
+is the halo: 8 bands of 48 transformed block rows plus a last one of 38 for
+286 kept, 1.48x the transform and colour-conversion work. A first version that
+converted pixels through an index closure cost +24 %; writing the fills as
+straight row slices (`chunks_exact(4)`) brought it to +16 %. The remaining
+445 MB is the dense `blocks` grid (372 MB, one `[i16; 1024]` per block of
+every plane, walked by every slice) plus the 62.5 MB of band buffers and the
+sparse `recon`.
+
+Pages under the threshold run the old path and are unchanged to the byte and
+to the allocation: `watchmaker.djvu` (2550x3301) peaks at 109 850 063 B both
+ways; its time reads 410 -> 420 ms, +2.4 %, in the same paired runs, with
+`gather` now one extra call deep. The criterion benches, two interleaved
+rounds of pre-built binaries, put that inside noise:
+
+| Benchmark | before (r1 / r2) | banded (r1 / r2) | Change |
+|---|---|---|---|
+| `iw44_encode_color` | 2.3824 / 2.3732 ms | 2.3909 / 2.4057 ms | +0.4 % / +1.4 % |
+| `iw44_encode_large_1024x1024` | 28.886 / 28.599 ms | 28.884 / 28.946 ms | 0.0 % / +1.2 % |
+| `iw44_encode_gray_1024x1024` | 10.233 / 10.227 ms | 10.153 / 10.200 ms | -0.8 % / -0.3 % |
+
+**Exactness.** Fourteen encodes — seven fixtures x `Photo` and `Quality` —
+plus the big page and watchmaker as bare IW44 chunks hash identically (FNV-1a)
+before and after. Five new in-crate tests:
+`banded_forward_transform_matches_the_whole_plane` (keep 1, 3, 8, 17, 35 block
+rows against `encode_iw44_color` on a 203x1131 noisy pixmap),
+`banded_gray_forward_transform_matches_the_whole_plane` (197x1000, keep 1, 5,
+16, and one band equal to `encode_iw44_gray`), `a_missing_halo_is_detected`
+(halo 0 must differ, so the comparison has teeth),
+`one_band_is_the_whole_plane_path` (a small page is refused and encodes as
+before) and `encode_band_policy` (the thresholds above, pinned).
+
+**Guard.** New `tests/encode_banded_peak_memory.rs`, one `#[test]` per file as
+the other peak guards. The subject is a drawn 6780x9148 page — two gradients
+and a diagonal texture — rather than the rendered fixture: the peak depends on
+the page's size, not its content (both read 445 271 218 B), and rendering the
+fixture costs 40 s of the debug build's time that the render guards already
+spend. The ceiling is four `page_bytes`; measured 3.58. Sabotage-checked by
+forcing `encode_band_keep_blocks` to `None`, which reads 6.18 and fails with
+the intended message. A control fires first if the subject is ever shrunk
+under the banding threshold.
+
+**Decision.** Kept. A sixth more time on the largest page in the corpus, and
+nothing at all on the rest, for 42 % of its peak.
+
+**Open.** The floor is now the dense `blocks` grid, three times the page
+(372 MB): every progressive slice walks every block, so it must stay resident
+as long as the grid is dense. A sparse or run-length grid, or slices produced
+from bands, would be the next step; both change `encode_slice`.
