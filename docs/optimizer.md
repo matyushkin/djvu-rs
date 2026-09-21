@@ -56,5 +56,22 @@ terminal, and clears it before printing the JSON. A pipe or a redirect sees
 neither the line nor its escape codes. Nothing in the JSON plan or report
 changes for this slice.
 
-The remaining roadmap is cancellation throughout a long-running codec pass,
-quality-aware archival re-encoding, and target-size search.
+## Cancellation ([#814](https://github.com/matyushkin/djvu-rs/issues/814), slice 2)
+
+`Optimizer::with_cancel(hook)` installs a `Fn() -> bool + Send + Sync` hook,
+the same cooperative contract as `ExportObserver::cancelled` for the export
+writers. The optimizer polls it on the calling thread before parsing the input
+and before each component of each phase. Once it returns `true`, `plan` and
+`optimize` return `OptimizeError::Cancelled`. Work already begun on a
+component completes first; no partial output is ever returned, and the
+progress events reported before the stop are exactly those of the components
+that were handled.
+
+Rewrites are applied one component at a time in plan order, so a stop in the
+`rewrite` phase lands on a component boundary. The `djvu` binary stages its
+output only after `optimize` succeeds, so a cancelled run leaves no file
+behind. The binary installs no signal handler of its own: an interrupt ends the
+process before anything is staged.
+
+The remaining roadmap is quality-aware archival re-encoding and target-size
+search.
