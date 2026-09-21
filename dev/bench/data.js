@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789986879758,
+  "lastUpdate": 1789990957924,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19330,6 +19330,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47355000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "42749b4fadbd1d3df813f495cc40ba4cd2d70206",
+          "message": "perf(render-cache): evict per layer, not per page (#813) (#820)\n\nThe process-wide governor ranked pages by one tick each and dropped the\nleast-recently-rendered page's cache whole, so a page's warm mask went\nwith its stale full-resolution pixmap, and the documented overshoot was a\npage's cache (5.3 MB on colorbook).\n\nEach `CacheSlot` now records its size, resident bytes and a last-used\ntick; a `CacheLayer` trait covers the twelve slots and the tile store, and\n`render_cache::sweep` drops the stalest layers across all pages until the\ntotal is under the ceiling, protecting only the layer being filled. The\novershoot bound shrinks from one page to one layer. A reader that turns\npages at full resolution while refreshing an eight-thumbnail strip under a\n16 MiB ceiling renders its thumbnails in 3.92 ms instead of 7.95 ms\n(-51 %), the same as with no ceiling; the render benches are within\nnoise. `DjVuDocument::enforce_cache_budget` stays page-granular; no public\nAPI changed.\n\nGuards: `tests/render_cache_budget.rs` gains the 16 MiB band test, the\n\"stale background goes, warm mask stays\" test and the held-layer test;\nthe long-read overshoot allowance tightens to one layer.\n\nPERF_EXPERIMENTS.md RENDER_CACHE_LAYER_EVICT + EXPERIMENTS_INDEX.md row;\ndocs/api-compatibility.md §7 says \"at most one layer\".\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-21T13:19:00+02:00",
+          "tree_id": "a345fb044a20afa6ac0f7a24610285950d7ab2f6",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/42749b4fadbd1d3df813f495cc40ba4cd2d70206"
+        },
+        "date": 1789990956488,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 121000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6027000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35763000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 33874000,
             "range": "± 0",
             "unit": "ns/iter"
           }
