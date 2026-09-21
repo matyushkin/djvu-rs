@@ -1167,8 +1167,25 @@ impl PlaneEncoder {
     }
 
     /// Gather wavelet coefficients from a flat plane into zigzag blocks.
-    #[allow(unsafe_code)]
     fn gather(&mut self, plane: &[i16], stride: usize) {
+        let block_rows = self.blocks.len() / self.block_cols;
+        self.gather_rows(plane, stride, 0, 0, block_rows);
+    }
+
+    /// Gather block rows `first_block..last_block` from `plane`, whose row 0
+    /// is the plane's absolute row `buf_first_block * 32`.
+    ///
+    /// This is what lets [`forward_gather_banded`] feed the grid one band at a
+    /// time: the band's buffer starts at its halo, not at the page's top.
+    #[allow(unsafe_code)]
+    fn gather_rows(
+        &mut self,
+        plane: &[i16],
+        stride: usize,
+        buf_first_block: usize,
+        first_block: usize,
+        last_block: usize,
+    ) {
         // Read the large plane in row-major (sequential) order and scatter into
         // the small 2 KB, L1-resident block via `ZIGZAG_INV`, rather than reading
         // the plane in scattered zigzag order (ZIGZAG_ROW/COL) with a sequential
@@ -1178,17 +1195,24 @@ impl PlaneEncoder {
         // time. Byte-identical — same (row, col) → block-index mapping, only the
         // iteration order changes.
         //
-        // Safety invariant: `stride` = block_cols*32, `plane.len()` = stride *
-        // block_rows*32. For any r < block_rows, c < block_cols, row,col < 32:
-        //   src = (r*32 + row) * stride + (c*32 + col) ≤ plane.len() - 1
+        // Safety invariant: `stride` = block_cols*32 and `plane` holds at least
+        // `(last_block - buf_first_block) * 32` rows of it, which the asserts
+        // below check once. For any r in first_block..last_block,
+        // c < block_cols, row,col < 32:
+        //   src = ((r - buf_first_block)*32 + row) * stride + (c*32 + col)
+        //       ≤ plane.len() - 1
         //   i   = ZIGZAG_INV[row*32 + col] ∈ [0, 1024) = block.len()
         // Both indices are therefore always in bounds; `get_unchecked` drops the
         // dead branches from the inner loop.
         let block_rows = self.blocks.len() / self.block_cols;
-        for r in 0..block_rows {
+        assert!(buf_first_block <= first_block && first_block <= last_block);
+        assert!(last_block <= block_rows);
+        assert_eq!(stride, self.block_cols * 32);
+        assert!(plane.len() >= (last_block - buf_first_block) * 32 * stride);
+        for r in first_block..last_block {
             for c in 0..self.block_cols {
                 let block = &mut self.blocks[r * self.block_cols + c];
-                let row_base = r << 5;
+                let row_base = (r - buf_first_block) << 5;
                 let col_base = c << 5;
                 for row in 0..32usize {
                     let src_base = (row_base + row) * stride + col_base;
@@ -1506,6 +1530,219 @@ impl PlaneEncoder {
     }
 }
 
+// ---- Banded forward transform ------------------------------------------------
+//
+// A large page's input planes cost as much as its block grid: three
+// full-resolution `i16` planes beside three dense grids of the same size
+// (PERF_EXPERIMENTS.md ENCODE_SPARSE_RECON). The grid has to stay — every
+// slice walks every block — but the planes are read exactly once, by
+// `gather`, and only after the transform. So the transform runs over bands of
+// block rows, mirroring `PlaneDecoder::reconstruct_band` on the decode side:
+// each band carries [`crate::BAND_HALO_BLOCKS`] extra block rows on each side,
+// which absorb the transform's vertical reach and are thrown away.
+
+/// Bytes of forward-transform bands the encoder may hold at once, all planes
+/// together. Chosen so a page at the banding threshold keeps the smallest band
+/// [`crate::BAND_MIN_KEEP_BLOCKS`] allows: the grid is the memory that matters
+/// on such a page, and a band is the only other thing of any size.
+#[cfg(feature = "std")]
+const ENCODE_BAND_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// How many block rows one forward-transform band keeps, or `None` to
+/// transform whole planes.
+///
+/// Same policy as the decoder's `band_keep_blocks`: planes under
+/// [`crate::BAND_MIN_PLANE_BYTES`] together are transformed whole, exactly as
+/// before; larger ones are banded only when a band is at most half the page.
+/// `planes` is how many planes share the budget (three for colour, one for
+/// grey), each `stride * 32 * 2` bytes per block row.
+#[cfg(feature = "std")]
+fn encode_band_keep_blocks(stride: usize, block_rows: usize, planes: usize) -> Option<usize> {
+    let per_block_row = stride * 32 * 2 * planes;
+    if per_block_row.saturating_mul(block_rows) <= crate::BAND_MIN_PLANE_BYTES {
+        return None;
+    }
+    let affordable =
+        (ENCODE_BAND_BUDGET_BYTES / per_block_row).saturating_sub(2 * crate::BAND_HALO_BLOCKS);
+    let keep = affordable.max(crate::BAND_MIN_KEEP_BLOCKS);
+    (keep * 2 <= block_rows).then_some(keep)
+}
+
+/// One band of the forward transform: the block rows it keeps and the buffer
+/// rows, halo included, it transforms to get them.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EncodeBand {
+    /// Kept block rows `first..last`.
+    first: usize,
+    last: usize,
+    /// Buffered block rows `lo..hi`: the kept rows plus the halo, clipped to
+    /// the plane.
+    lo: usize,
+    hi: usize,
+    /// Rows the transform treats as data. A band that reaches the bottom of
+    /// the plane reports the image's own remaining height, so the transform's
+    /// boundary handling lands where the image really ends.
+    logical: usize,
+}
+
+#[cfg(feature = "std")]
+impl EncodeBand {
+    fn new(first: usize, keep: usize, halo: usize, block_rows: usize, height: usize) -> Self {
+        let last = (first + keep).min(block_rows);
+        let lo = first.saturating_sub(halo);
+        let hi = (last + halo).min(block_rows);
+        let logical = if hi == block_rows {
+            height - lo * 32
+        } else {
+            (hi - lo) * 32
+        };
+        EncodeBand {
+            first,
+            last,
+            lo,
+            hi,
+            logical,
+        }
+    }
+
+    /// Rows the band's buffer holds.
+    fn rows(&self) -> usize {
+        (self.hi - self.lo) * 32
+    }
+}
+
+/// Transform `planes` one band at a time and gather each band into its
+/// encoder.
+///
+/// `fill(band, bufs)` writes the band's buffer rows for every plane: row `i`
+/// of a buffer is the plane's absolute row `band.lo * 32 + i`, with the
+/// padding rows and columns beyond the image zero, exactly as the whole-plane
+/// path leaves them. `keep` and `halo` are in block rows; production passes
+/// [`encode_band_keep_blocks`] and [`crate::BAND_HALO_BLOCKS`], the tests
+/// force smaller values. Rows a band keeps are byte-identical to the
+/// whole-plane transform when `halo` covers the transform's reach.
+#[cfg(feature = "std")]
+fn forward_gather_banded<const N: usize>(
+    encs: &mut [PlaneEncoder; N],
+    width: usize,
+    height: usize,
+    stride: usize,
+    keep: usize,
+    halo: usize,
+    mut fill: impl FnMut(&EncodeBand, &mut [Vec<i16>; N]),
+) {
+    debug_assert!(keep >= 1);
+    let block_rows = height.div_ceil(32);
+    let buf_rows = (keep + 2 * halo).min(block_rows) * 32;
+    let mut bufs: [Vec<i16>; N] = core::array::from_fn(|_| vec![0i16; stride * buf_rows]);
+
+    let mut first = 0usize;
+    while first < block_rows {
+        let band = EncodeBand::new(first, keep, halo, block_rows, height);
+        fill(&band, &mut bufs);
+
+        let rows = band.rows();
+        let transform_one = |buf: &mut Vec<i16>, enc: &mut PlaneEncoder| {
+            forward_wavelet_transform(&mut buf[..stride * rows], width, band.logical, stride);
+            enc.gather_rows(
+                &buf[..stride * rows],
+                stride,
+                band.lo,
+                band.first,
+                band.last,
+            );
+        };
+
+        // The planes are independent; with the `parallel` feature they run
+        // concurrently, as the whole-plane path does, and the threshold that
+        // path uses is far below any page large enough to be banded.
+        #[cfg(feature = "parallel")]
+        {
+            let mut pairs: Vec<(&mut Vec<i16>, &mut PlaneEncoder)> =
+                bufs.iter_mut().zip(encs.iter_mut()).collect();
+            rayon::scope(|s| {
+                for (buf, enc) in pairs.iter_mut() {
+                    let (buf, enc): (&mut Vec<i16>, &mut PlaneEncoder) = (buf, enc);
+                    s.spawn(move |_| transform_one(buf, enc));
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        for (buf, enc) in bufs.iter_mut().zip(encs.iter_mut()) {
+            transform_one(buf, enc);
+        }
+
+        first = band.last;
+    }
+}
+
+/// Write one band of the three colour planes from `pixmap`. See
+/// [`forward_gather_banded`] for the buffer layout.
+#[cfg(feature = "std")]
+fn fill_color_band(pixmap: &Pixmap, band: &EncodeBand, stride: usize, bufs: &mut [Vec<i16>; 3]) {
+    let w = pixmap.width as usize;
+    let h = pixmap.height as usize;
+    let rows = band.rows();
+    let [y_buf, cb_buf, cr_buf] = bufs;
+    // DjVu stores images bottom-to-top: wavelet row `wr` is image row
+    // `h - 1 - wr`. Scale by 64 because `normalize()` divides by 64 on decode.
+    // Rows below the image and columns right of it are the zero padding the
+    // whole-plane path has; the buffer is reused, so they are written every
+    // band.
+    for i in 0..rows {
+        let wavelet_row = band.lo * 32 + i;
+        let off = i * stride;
+        if wavelet_row >= h {
+            y_buf[off..off + stride].fill(0);
+            cb_buf[off..off + stride].fill(0);
+            cr_buf[off..off + stride].fill(0);
+            continue;
+        }
+        let row = h - 1 - wavelet_row;
+        let src = &pixmap.data[row * w * 4..(row + 1) * w * 4];
+        let y_row = &mut y_buf[off..off + stride];
+        let cb_row = &mut cb_buf[off..off + stride];
+        let cr_row = &mut cr_buf[off..off + stride];
+        for (col, px) in src.as_chunks::<4>().0.iter().enumerate() {
+            let (y, cb, cr) = rgb_to_ycbcr(px[0], px[1], px[2]);
+            y_row[col] = (y as i32 * 64) as i16;
+            cb_row[col] = (cb as i32 * 64) as i16;
+            cr_row[col] = (cr as i32 * 64) as i16;
+        }
+        y_row[w..].fill(0);
+        cb_row[w..].fill(0);
+        cr_row[w..].fill(0);
+    }
+}
+
+/// Write one band of the grey plane from `pixmap`. See
+/// [`forward_gather_banded`] for the buffer layout.
+#[cfg(feature = "std")]
+fn fill_gray_band(pixmap: &GrayPixmap, band: &EncodeBand, stride: usize, bufs: &mut [Vec<i16>; 1]) {
+    let w = pixmap.width as usize;
+    let h = pixmap.height as usize;
+    let rows = band.rows();
+    let [y_buf] = bufs;
+    // Bottom-to-top, as above; grey is `(127 - p) * 64` because the decoder
+    // gives `gray = 127 - normalize(coeff)`.
+    for i in 0..rows {
+        let wavelet_row = band.lo * 32 + i;
+        let off = i * stride;
+        let y_row = &mut y_buf[off..off + stride];
+        if wavelet_row >= h {
+            y_row.fill(0);
+            continue;
+        }
+        let row = h - 1 - wavelet_row;
+        let src = &pixmap.data[row * w..(row + 1) * w];
+        for (dst, &p) in y_row[..w].iter_mut().zip(src) {
+            *dst = ((127 - p as i32) * 64) as i16;
+        }
+        y_row[w..].fill(0);
+    }
+}
+
 // ---- Public encoder API (requires std for ZpEncoder) -------------------------
 
 #[cfg(feature = "std")]
@@ -1582,6 +1819,36 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
     let h = pixmap.height as usize;
     let stride = w.div_ceil(32) * 32;
     let plane_h = h.div_ceil(32) * 32;
+
+    // A page whose three planes would cost more than the grid is worth holding
+    // beside it transforms one band at a time and never allocates them whole.
+    // Every other page takes the path below, unchanged.
+    if let Some(keep) = encode_band_keep_blocks(stride, plane_h / 32, 3) {
+        let mut encs = [
+            PlaneEncoder::new(w, h),
+            PlaneEncoder::new(w, h),
+            PlaneEncoder::new(w, h),
+        ];
+        forward_gather_banded(
+            &mut encs,
+            w,
+            h,
+            stride,
+            keep,
+            crate::BAND_HALO_BLOCKS,
+            |band, bufs| fill_color_band(pixmap, band, stride, bufs),
+        );
+        let [mut y_enc, mut cb_enc, mut cr_enc] = encs;
+        return encode_chunks(
+            &mut y_enc,
+            Some(&mut cb_enc),
+            Some(&mut cr_enc),
+            w as u16,
+            h as u16,
+            true,
+            opts,
+        );
+    }
 
     let mut y_plane = vec![0i16; stride * plane_h];
 
@@ -1714,6 +1981,24 @@ pub fn encode_iw44_gray(pixmap: &GrayPixmap, opts: &Iw44EncodeOptions) -> Vec<Ve
     let h = pixmap.height as usize;
     let stride = w.div_ceil(32) * 32;
     let plane_h = h.div_ceil(32) * 32;
+
+    // As in `encode_iw44_color`: a plane too large to hold beside its grid is
+    // transformed in bands.
+    if let Some(keep) = encode_band_keep_blocks(stride, plane_h / 32, 1) {
+        let mut encs = [PlaneEncoder::new(w, h)];
+        forward_gather_banded(
+            &mut encs,
+            w,
+            h,
+            stride,
+            keep,
+            crate::BAND_HALO_BLOCKS,
+            |band, bufs| fill_gray_band(pixmap, band, stride, bufs),
+        );
+        let [mut y_enc] = encs;
+        return encode_chunks(&mut y_enc, None, None, w as u16, h as u16, false, opts);
+    }
+
     let mut y_plane = vec![0i16; stride * plane_h];
 
     // DjVu stores images bottom-to-top: wavelet row 0 = image bottom row.
@@ -2436,6 +2721,160 @@ mod tests {
             img.decode_chunk(c).unwrap();
         }
         img.to_rgb().unwrap().to_gray8()
+    }
+
+    /// Colour noise over a slow gradient: every band of the transform carries
+    /// energy, so a halo one row too short shows up as a differing coefficient.
+    fn noisy_pixmap(w: u32, h: u32) -> Pixmap {
+        make_pixmap(w, h, |x, y| {
+            let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503))
+                .wrapping_mul(2_246_822_519)
+                >> 8;
+            let g = ((x + 2 * y) % 251) as u8;
+            (
+                (v as u8) / 2 + g / 2,
+                ((v >> 8) as u8) / 2 + g / 2,
+                ((v >> 16) as u8) / 2 + g / 2,
+            )
+        })
+    }
+
+    /// The three colour encoders after `forward_gather_banded` with the given
+    /// band size, in block rows. `keep` at or above the block-row count is
+    /// one band with no halo — the whole-plane transform by another route.
+    fn banded_color_encoders(px: &Pixmap, keep: usize, halo: usize) -> [PlaneEncoder; 3] {
+        let w = px.width as usize;
+        let h = px.height as usize;
+        let stride = w.div_ceil(32) * 32;
+        let mut encs = [
+            PlaneEncoder::new(w, h),
+            PlaneEncoder::new(w, h),
+            PlaneEncoder::new(w, h),
+        ];
+        forward_gather_banded(&mut encs, w, h, stride, keep, halo, |band, bufs| {
+            fill_color_band(px, band, stride, bufs)
+        });
+        encs
+    }
+
+    /// Block rows that differ between two gathered grids, for the messages.
+    fn differing_block_rows(a: &PlaneEncoder, b: &PlaneEncoder) -> Vec<usize> {
+        assert_eq!(a.blocks.len(), b.blocks.len());
+        let mut rows: Vec<usize> = a
+            .blocks
+            .iter()
+            .zip(&b.blocks)
+            .enumerate()
+            .filter(|(_, (x, y))| x[..] != y[..])
+            .map(|(i, _)| i / a.block_cols)
+            .collect();
+        rows.dedup();
+        rows
+    }
+
+    /// A single band with no halo is the whole-plane path: the chunks it
+    /// produces are the bytes `encode_iw44_color` writes for a page below the
+    /// banding threshold.
+    #[test]
+    fn one_band_is_the_whole_plane_path() {
+        let px = noisy_pixmap(203, 371);
+        let opts = Iw44EncodeOptions::default();
+        let expected = encode_iw44_color(&px, &opts);
+        assert!(
+            encode_band_keep_blocks(224, 12, 3).is_none(),
+            "a 203x371 page must take the whole-plane path"
+        );
+        let [mut y, mut cb, mut cr] = banded_color_encoders(&px, 12, 0);
+        let got = encode_chunks(&mut y, Some(&mut cb), Some(&mut cr), 203, 371, true, &opts);
+        assert_eq!(got, expected);
+    }
+
+    /// Every band size, with the production halo, gathers the same grid as
+    /// one band over the whole plane. The forward transform's vertical reach
+    /// is the inverse one's, 186 rows. Probed on this page with a band of 3
+    /// block rows and `halo` from 0 up: 0..4 block rows fail (108, 106, 98,
+    /// 46 and 6 differing block rows) and 5 is the first that passes.
+    /// `BAND_HALO_BLOCKS` is 8, above the 186-row reach with the margin the
+    /// decoder keeps.
+    #[test]
+    fn banded_forward_transform_matches_the_whole_plane() {
+        let px = noisy_pixmap(203, 1131); // 36 block rows, last one partial
+        let whole = banded_color_encoders(&px, usize::MAX, 0);
+        for keep in [1usize, 3, 8, 17, 35] {
+            let banded = banded_color_encoders(&px, keep, crate::BAND_HALO_BLOCKS);
+            for (name, w, b) in [
+                ("Y", &whole[0], &banded[0]),
+                ("Cb", &whole[1], &banded[1]),
+                ("Cr", &whole[2], &banded[2]),
+            ] {
+                let bad = differing_block_rows(w, b);
+                assert!(
+                    bad.is_empty(),
+                    "keep {keep}: {name} block rows {bad:?} differ from the whole plane"
+                );
+            }
+        }
+    }
+
+    /// A halo that is too short must be visible to the test above: with none
+    /// at all, the band edges carry the transform's boundary handling and the
+    /// grid differs. Guards the guard.
+    #[test]
+    fn a_missing_halo_is_detected() {
+        let px = noisy_pixmap(203, 1131);
+        let whole = banded_color_encoders(&px, usize::MAX, 0);
+        let banded = banded_color_encoders(&px, 8, 0);
+        assert!(!differing_block_rows(&whole[0], &banded[0]).is_empty());
+    }
+
+    /// The grey path, same shape.
+    #[test]
+    fn banded_gray_forward_transform_matches_the_whole_plane() {
+        let px = make_gray(197, 1000, |x, y| {
+            ((x * 7 + y * 13) % 256) as u8 ^ ((x ^ y) as u8)
+        });
+        let w = 197usize;
+        let h = 1000usize;
+        let stride = w.div_ceil(32) * 32;
+        let run = |keep: usize, halo: usize| {
+            let mut encs = [PlaneEncoder::new(w, h)];
+            forward_gather_banded(&mut encs, w, h, stride, keep, halo, |band, bufs| {
+                fill_gray_band(&px, band, stride, bufs)
+            });
+            let [enc] = encs;
+            enc
+        };
+        let whole = run(usize::MAX, 0);
+        for keep in [1usize, 5, 16] {
+            let banded = run(keep, crate::BAND_HALO_BLOCKS);
+            let bad = differing_block_rows(&whole, &banded);
+            assert!(bad.is_empty(), "keep {keep}: block rows {bad:?} differ");
+        }
+        // The single-band route is the production whole-plane path.
+        let opts = Iw44EncodeOptions::default();
+        let mut one = run(usize::MAX, 0);
+        let got = encode_chunks(&mut one, None, None, w as u16, h as u16, false, &opts);
+        assert_eq!(got, encode_iw44_gray(&px, &opts));
+    }
+
+    /// The sizing policy: small planes are never banded, large ones keep at
+    /// least the minimum band, and a band is never more than half the page.
+    #[test]
+    fn encode_band_policy() {
+        // colorbook-sized: 2272 x 3680 x 2 x 3 = 50 MB, under the threshold.
+        assert_eq!(encode_band_keep_blocks(2272, 115, 3), None);
+        // The big fixture: 6784 x 9152: 372 MB of planes.
+        let keep = encode_band_keep_blocks(6784, 286, 3).unwrap();
+        assert_eq!(keep, crate::BAND_MIN_KEEP_BLOCKS);
+        assert!((keep + 2 * crate::BAND_HALO_BLOCKS) * 6784 * 32 * 2 * 3 <= 64 << 20);
+        // One grey plane of the same page is 124 MB: under the threshold, as
+        // it is for the decoder. A grey page half as large again is banded,
+        // with a wider band because it has the budget to itself.
+        assert_eq!(encode_band_keep_blocks(6784, 286, 1), None);
+        let g = encode_band_keep_blocks(6784, 430, 1).unwrap();
+        assert!(g > keep && g * 2 <= 430, "grey keep {g}");
+        // A plane just over the threshold but too short to split in two.
+        assert_eq!(encode_band_keep_blocks(32 * 3000, 40, 3), None);
     }
 
     #[test]
