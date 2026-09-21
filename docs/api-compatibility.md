@@ -115,7 +115,11 @@ they can outlive the minimum window without cost.
 
 Unintended breakage of the **stable** surface is caught by
 [`cargo-semver-checks`](#enforcement) in CI, which compares the PR against the
-latest published version and understands the `0.x` breaking axis.
+latest published version and understands the `0.x` breaking axis. An
+intended break is declared with a `!` in the PR title (`feat(scope)!: …`) or
+a `BREAKING CHANGE:` footer, the same marker release-please reads; the gate
+then checks the PR as the minor bump it will produce and still fails on any
+break the PR does not declare. The version itself is never bumped by hand.
 
 ### Intentional breaks, by release
 
