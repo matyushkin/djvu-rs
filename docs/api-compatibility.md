@@ -267,11 +267,14 @@ The validator and `djvu validate --limits` use the same type.
 **Render caches are bounded by default (since 0.33).** The decode results a
 render memoises are held against a process-wide ceiling,
 [`render_cache::DEFAULT_BUDGET`](../src/render_cache.rs) = 256 MiB. When a
-cache fill takes the total over the ceiling, the least-recently-rendered page
-caches are dropped until it is under again; the page being rendered is never
-dropped, so the resident total can exceed the ceiling by at most one page's
-cache. This axis is a **policy** ceiling, not a decode ceiling: crossing it
-frees memory, it never fails a render.
+cache fill takes the total over the ceiling, the least-recently-used cached
+*layers* — a decoded background, a mask, a converted pixmap, a page's tile
+store — are dropped across all pages until it is under again (#813;
+0.33 dropped whole page caches). Only the layer being filled is never dropped,
+so the resident total can exceed the ceiling by at most one layer, and a
+page's recently used layers survive while its stale ones go. This axis is a
+**policy** ceiling, not a decode ceiling: crossing it frees memory, it never
+fails a render.
 
 | Axis | Bound | Constant |
 |------|-------|----------|

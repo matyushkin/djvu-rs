@@ -1252,6 +1252,9 @@ struct TileCacheState {
     /// [`TILE_CACHE_MAX_BYTES`]. Kept as an `Option` so `derive(Default)`
     /// stays valid and "still on the default" remains observable.
     budget: Option<usize>,
+    /// Last-used tick from [`ACCESS_TICK`], stamped on every hit and insert,
+    /// so the governor can rank the tile store against the decoded layers.
+    tick: u64,
     /// Hit/miss/eviction telemetry (#576). Test-only so the release lock
     /// section stays exactly as cheap as before.
     #[cfg(test)]
@@ -1332,22 +1335,54 @@ pub(crate) type SharedAnnotations = std::sync::Arc<(
 /// computation produce a value?" — a decode that legitimately yields `None`
 /// (no such chunk on this page) is memoised as a miss, exactly as the
 /// `OnceLock<Option<T>>` it replaces did.
+///
+/// Each slot is one evictable layer to the process-wide governor (#813,
+/// PERF_EXPERIMENTS.md RENDER_CACHE_LAYER_EVICT): it records its own resident
+/// size the moment it fills and stamps itself with the global tick on every
+/// use, so a sweep can rank layers across pages and drop the stalest one
+/// without touching the others on the same page.
 #[cfg(feature = "std")]
 pub(crate) struct CacheSlot<T> {
     inner: std::sync::RwLock<Option<Option<std::sync::Arc<T>>>>,
-}
-
-#[cfg(feature = "std")]
-impl<T> Default for CacheSlot<T> {
-    fn default() -> Self {
-        Self {
-            inner: std::sync::RwLock::new(None),
-        }
-    }
+    /// How to measure a stored value. Fixed at construction so the slot can
+    /// record its size when it fills rather than re-measure on every sweep.
+    size: fn(&T) -> usize,
+    /// Resident bytes of the stored value; 0 when empty or a memoised miss.
+    /// Kept beside the lock, not behind it, so the byte accounting and the
+    /// governor read it without contending with a decode in progress.
+    bytes: std::sync::atomic::AtomicUsize,
+    /// Last-used tick from [`ACCESS_TICK`]: stamped on every hit, fill and
+    /// store. Higher is more recent. A `peek` that finds nothing leaves it.
+    tick: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "std")]
 impl<T> CacheSlot<T> {
+    /// An empty slot whose values are measured by `size`.
+    pub(crate) fn new(size: fn(&T) -> usize) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(None),
+            size,
+            bytes: std::sync::atomic::AtomicUsize::new(0),
+            tick: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Stamp the slot as just used.
+    fn touch(&self) {
+        let t = ACCESS_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tick.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Store `value` under an already-held write lock, recording its size.
+    fn store(&self, w: &mut Option<Option<std::sync::Arc<T>>>, value: Option<std::sync::Arc<T>>) {
+        let bytes = value.as_deref().map_or(0, self.size);
+        self.bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+        *w = Some(value);
+        self.touch();
+    }
+
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Option<Option<std::sync::Arc<T>>>> {
         self.inner
             .read()
@@ -1362,7 +1397,11 @@ impl<T> CacheSlot<T> {
 
     /// The cached value, without ever running the initialiser.
     pub(crate) fn peek(&self) -> Option<std::sync::Arc<T>> {
-        self.read().as_ref()?.clone()
+        let v = self.read().as_ref()?.clone();
+        if v.is_some() {
+            self.touch();
+        }
+        v
     }
 
     /// Whether the slot has been computed (even to a cached `None`).
@@ -1383,14 +1422,16 @@ impl<T> CacheSlot<T> {
         init: impl FnOnce() -> Option<T>,
     ) -> Option<std::sync::Arc<T>> {
         if let Some(v) = self.read().as_ref() {
+            self.touch();
             return v.clone();
         }
         let computed = init().map(std::sync::Arc::new);
         let mut w = self.write();
         if let Some(v) = w.as_ref() {
+            self.touch();
             return v.clone();
         }
-        *w = Some(computed.clone());
+        self.store(&mut w, computed.clone());
         computed
     }
 
@@ -1399,7 +1440,7 @@ impl<T> CacheSlot<T> {
     pub(crate) fn set_if_empty(&self, value: Option<T>) {
         let mut w = self.write();
         if w.is_none() {
-            *w = Some(value.map(std::sync::Arc::new));
+            self.store(&mut w, value.map(std::sync::Arc::new));
         }
     }
 
@@ -1409,28 +1450,78 @@ impl<T> CacheSlot<T> {
     pub(crate) fn set_if_empty_arc(&self, value: Option<std::sync::Arc<T>>) {
         let mut w = self.write();
         if w.is_none() {
-            *w = Some(value);
+            self.store(&mut w, value);
         }
     }
 
     /// Drop the cached value, reclaiming its memory. The slot goes back to
     /// "not computed", so the next access decodes again.
     pub(crate) fn clear(&self) {
-        *self.write() = None;
+        let mut w = self.write();
+        *w = None;
+        self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Resident bytes held by the cached value, measured by `size`. Never
-    /// computes.
-    pub(crate) fn bytes(&self, size: impl Fn(&T) -> usize) -> usize {
-        self.read()
-            .as_ref()
-            .and_then(|v| v.as_ref())
-            .map_or(0, |v| size(v))
+    /// Resident bytes held by the cached value, as recorded when it was
+    /// stored. Never computes and never locks.
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// One evictable unit of a page cache, as the process-wide governor sees it
+/// (#813). Every [`CacheSlot`] is one, and so is the composited-tile store,
+/// which the governor treats as a single layer with the tick of its last hit.
+#[cfg(feature = "std")]
+pub(crate) trait CacheLayer {
+    /// Last-used tick from [`ACCESS_TICK`]; higher is more recent.
+    fn last_used(&self) -> u64;
+    /// Resident bytes, 0 when empty.
+    fn resident_bytes(&self) -> usize;
+    /// Drop the cached data through a shared borrow. The next access rebuilds
+    /// it; a reader that already holds a handle is unaffected.
+    fn drop_cached(&self);
+}
+
+#[cfg(feature = "std")]
+impl<T> CacheLayer for CacheSlot<T> {
+    fn last_used(&self) -> u64 {
+        self.tick.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn resident_bytes(&self) -> usize {
+        self.bytes()
+    }
+    fn drop_cached(&self) {
+        self.clear();
     }
 }
 
 #[cfg(feature = "std")]
-#[derive(Default)]
+impl CacheLayer for std::sync::Mutex<TileCacheState> {
+    fn last_used(&self) -> u64 {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tick
+    }
+    fn resident_bytes(&self) -> usize {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes
+    }
+    /// Tiles go, but a per-page budget override survives — it is
+    /// configuration, not cached data (same rule as `downgrade`).
+    fn drop_cached(&self) {
+        let mut tiles = self
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *tiles = TileCacheState {
+            budget: tiles.budget,
+            ..TileCacheState::default()
+        };
+    }
+}
+
+#[cfg(feature = "std")]
 pub(crate) struct PageLayers {
     bg44: CacheSlot<Iw44Image>,
     bg44_partial: CacheSlot<Iw44Image>,
@@ -1512,7 +1603,9 @@ impl Drop for PageLayers {
     }
 }
 
-/// Process-global monotonic source for the per-page LRU access tick.
+/// Process-global monotonic source for the LRU access ticks: one per page
+/// (`PageLayers::access`, read by the per-document sweep) and one per layer
+/// (`CacheSlot::tick`, read by the process-wide governor, #813).
 #[cfg(feature = "std")]
 static ACCESS_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1549,8 +1642,62 @@ fn decode_bg44_partial(page: &DjVuPage) -> Option<Iw44Image> {
 #[cfg(feature = "std")]
 impl PageLayers {
     /// An empty cache. Layers are decoded on first access.
+    ///
+    /// Every pixel layer is measured from the `Vec` it owns, not estimated:
+    /// [`DjVuDocument::enforce_cache_budget`](crate::djvu_document::DjVuDocument::enforce_cache_budget)
+    /// and the process-wide governor turn these numbers into a memory ceiling,
+    /// so an estimate here becomes a wrong ceiling for the caller. The BG44
+    /// coefficient images used to be sized as `w·h·2`, which counts the luma
+    /// plane and drops the two chroma planes a colour page also keeps — the
+    /// whole cache reported at ~38 % of the truth, and a 16 MiB budget held
+    /// ~52 MB (PERF_EXPERIMENTS.md DECODE_CACHE_ACCOUNTING; guarded by
+    /// `tests/decode_cache_accounting.rs`). The text/annotation trees stay
+    /// approximate — they are node counts, not buffers, and are small next to
+    /// the pixel caches.
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            bg44: CacheSlot::new(Iw44Image::heap_bytes),
+            bg44_partial: CacheSlot::new(Iw44Image::heap_bytes),
+            mask: CacheSlot::new(|b| b.data.len()),
+            mask_sub4: CacheSlot::new(|b| b.data.len()),
+            fg44: CacheSlot::new(|p| p.data.len()),
+            bg_rgb_s1: CacheSlot::new(|p| p.data.len()),
+            bg_rgb_s2: CacheSlot::new(|p| p.data.len()),
+            bg_rgb_s4: CacheSlot::new(|p| p.data.len()),
+            bg_rgb_subhi: CacheSlot::new(|(_, p)| p.data.len()),
+            mask_indexed: CacheSlot::new(|(b, v)| b.data.len() + v.len() * 4),
+            // Metadata caches (#605): approximate — text bytes + a fixed cost
+            // per zone/map-area node.
+            text_layer: CacheSlot::new(|t| t.text.len() + count_zones(&t.zones) * 64),
+            annotations: CacheSlot::new(|a| a.1.len() * 96 + 64),
+            reported: std::sync::atomic::AtomicUsize::new(0),
+            access: std::sync::atomic::AtomicU64::new(0),
+            tile_cache: std::sync::Mutex::new(TileCacheState::default()),
+        }
+    }
+
+    /// The number of layers [`layers`](Self::layers) returns.
+    pub(crate) const LAYER_COUNT: usize = 13;
+
+    /// Every layer of this cache as the governor sees it (#813): the twelve
+    /// decoded/derived slots and the composited-tile store as the thirteenth.
+    /// Order is fixed but carries no meaning; the sweep ranks by tick.
+    pub(crate) fn layers(&self) -> [&dyn CacheLayer; Self::LAYER_COUNT] {
+        [
+            &self.bg44,
+            &self.bg44_partial,
+            &self.mask,
+            &self.mask_sub4,
+            &self.fg44,
+            &self.bg_rgb_s1,
+            &self.bg_rgb_s2,
+            &self.bg_rgb_s4,
+            &self.bg_rgb_subhi,
+            &self.mask_indexed,
+            &self.text_layer,
+            &self.annotations,
+            &self.tile_cache,
+        ]
     }
 
     /// Record an access, stamping this cache with the next global tick (LRU).
@@ -1566,43 +1713,11 @@ impl PageLayers {
 
     /// Resident bytes held by this page's decoded caches.
     ///
-    /// Every pixel cache is measured from the `Vec` it owns, not estimated:
-    /// [`DjVuDocument::enforce_cache_budget`](crate::djvu_document::DjVuDocument::enforce_cache_budget)
-    /// turns this number into a memory ceiling, so an estimate here becomes a
-    /// wrong ceiling for the caller. The BG44 coefficient images used to be
-    /// sized as `w·h·2`, which counts the luma plane and drops the two chroma
-    /// planes a colour page also keeps — the whole cache reported at ~38 % of
-    /// the truth, and a 16 MiB budget held ~52 MB (PERF_EXPERIMENTS.md
-    /// DECODE_CACHE_ACCOUNTING; guarded by `tests/decode_cache_accounting.rs`).
-    /// The text/annotation trees stay approximate — they are node counts, not
-    /// buffers, and are small next to the pixel caches.
-    ///
-    /// Reads caches without initialising them.
+    /// The sum of what every layer recorded when it filled (see
+    /// [`new`](Self::new) for how each is measured). Reads no lock but the
+    /// tile store's, and never initialises anything.
     pub(crate) fn cached_bytes(&self) -> usize {
-        let px = |o: &CacheSlot<Pixmap>| o.bytes(|p| p.data.len());
-        let bm = |o: &CacheSlot<crate::bitmap::Bitmap>| o.bytes(|b| b.data.len());
-        let iw = |o: &CacheSlot<Iw44Image>| o.bytes(Iw44Image::heap_bytes);
-        let mi = self.mask_indexed.bytes(|(b, v)| b.data.len() + v.len() * 4);
-        // Metadata caches (#605): approximate — text bytes + a fixed cost per
-        // zone/map-area node. Small next to the pixel caches, but accounted so
-        // the budget sweep sees them.
-        let tl = self
-            .text_layer
-            .bytes(|t| t.text.len() + count_zones(&t.zones) * 64);
-        let an = self.annotations.bytes(|a| a.1.len() * 96 + 64);
-        px(&self.fg44)
-            + px(&self.bg_rgb_s1)
-            + px(&self.bg_rgb_s2)
-            + px(&self.bg_rgb_s4)
-            + self.bg_rgb_subhi.bytes(|(_, p)| p.data.len())
-            + bm(&self.mask)
-            + bm(&self.mask_sub4)
-            + iw(&self.bg44)
-            + iw(&self.bg44_partial)
-            + mi
-            + tl
-            + an
-            + self.tile_cache_bytes()
+        self.layers().iter().map(|l| l.resident_bytes()).sum()
     }
 
     /// C5_COMPRESS: drop the expensive full-resolution derivations —
@@ -1634,18 +1749,10 @@ impl PageLayers {
         self.bg_rgb_s1.clear();
         // Tiles are dropped, but a per-page budget override (#691 slice 2)
         // survives the downgrade — it is configuration, not cached data.
-        let mut tiles = self
-            .tile_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *tiles = TileCacheState {
-            budget: tiles.budget,
-            ..TileCacheState::default()
-        };
+        self.tile_cache.drop_cached();
         // bg_rgb_s2 / bg_rgb_s4 / bg_rgb_subhi / access tick intentionally
         // preserved — all three are the cheap downscaled tiers a later
         // zoomed-out render reuses.
-        drop(tiles);
         self.report_bytes();
     }
 
@@ -1660,29 +1767,9 @@ impl PageLayers {
     /// A render that already holds a layer keeps it until it finishes; the
     /// next access decodes again.
     pub(crate) fn evict_shared(&self) {
-        self.bg44.clear();
-        self.bg44_partial.clear();
-        self.mask.clear();
-        self.mask_sub4.clear();
-        self.fg44.clear();
-        self.bg_rgb_s1.clear();
-        self.bg_rgb_s2.clear();
-        self.bg_rgb_s4.clear();
-        self.bg_rgb_subhi.clear();
-        self.mask_indexed.clear();
-        self.text_layer.clear();
-        self.annotations.clear();
-        // Tiles go too, but a per-page budget override survives — it is
-        // configuration, not cached data (same rule as `downgrade`).
-        let mut tiles = self
-            .tile_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *tiles = TileCacheState {
-            budget: tiles.budget,
-            ..TileCacheState::default()
-        };
-        drop(tiles);
+        for layer in self.layers() {
+            layer.drop_cached();
+        }
         self.report_bytes();
     }
 
@@ -1700,15 +1787,22 @@ impl PageLayers {
     /// Fill `slot` through `init`, then keep the byte accounting current.
     ///
     /// Every layer accessor goes through here, so one place both memoises the
-    /// decode and tells the governor the cache grew (READ_CACHE_BOUNDED).
+    /// decode and tells the governor the cache grew (READ_CACHE_BOUNDED). The
+    /// governor may then drop any layer but the one just filled — including
+    /// another layer of this page, if it is the stalest in the process (#813).
     fn fill<T>(&self, slot: &CacheSlot<T>, init: impl FnOnce() -> Option<T>) -> Option<Arc<T>> {
         let was_computed = slot.is_computed();
         let value = slot.get_or_init(init);
         if !was_computed {
             let total = self.report_bytes();
-            crate::render_cache::sweep_if_over(total, self);
+            crate::render_cache::sweep_if_over(total, Self::layer_id(slot));
         }
         value
+    }
+
+    /// The address the governor uses to recognise the layer being filled.
+    fn layer_id<L: CacheLayer>(layer: &L) -> *const () {
+        (layer as *const L).cast()
     }
 
     /// Bytes currently held by the composited-tile cache (see `tile_cache`).
@@ -1745,6 +1839,7 @@ impl PageLayers {
         {
             state.order.remove(pos);
             state.order.push_back(key);
+            state.tick = ACCESS_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         hit
     }
@@ -1762,12 +1857,13 @@ impl PageLayers {
         state.bytes += entry.data.len();
         state.map.insert(key, entry);
         state.order.push_back(key);
+        state.tick = ACCESS_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state.evict_to_budget();
         drop(state);
         // Tiles are bounded per page already, but they still count against the
         // process-wide ceiling (READ_CACHE_BOUNDED).
         let total = self.report_bytes();
-        crate::render_cache::sweep_if_over(total, self);
+        crate::render_cache::sweep_if_over(total, Self::layer_id(&self.tile_cache));
     }
 
     /// The tile-cache budget this page currently enforces (#691 slice 2).
@@ -1963,7 +2059,7 @@ impl PageLayers {
     pub(crate) fn store_bg_rgb_subhi(&self, subsample: u32, px: Arc<Pixmap>) {
         self.bg_rgb_subhi.set_if_empty(Some((subsample, px)));
         let total = self.report_bytes();
-        crate::render_cache::sweep_if_over(total, self);
+        crate::render_cache::sweep_if_over(total, Self::layer_id(&self.bg_rgb_subhi));
     }
 
     /// The decoded JB2 / G4 foreground mask, decoding on first call. `None`

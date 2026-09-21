@@ -15808,3 +15808,118 @@ nothing at all on the rest, for 42 % of its peak.
 (372 MB): every progressive slice walks every block, so it must stay resident
 as long as the grid is dense. A sparse or run-length grid, or slices produced
 from bands, would be the next step; both change `encode_slice`.
+
+### The cache governor dropped whole pages — per-layer eviction — **Kept** (2026-09-21)
+
+**RENDER_CACHE_LAYER_EVICT**
+
+**Issue.** #813, the open item of READ_CACHE_BOUNDED. The process-wide sweep
+ranked pages by one tick each and dropped the least-recently-rendered page's
+cache whole: its `bg44`, its RGB pixmaps, its mask, its tiles. A page whose
+mask had just been used lost it together with the full-resolution pixmap
+nobody had looked at since. The sweep also protected the whole page being
+rendered, so the documented overshoot was one page's cache, 5.3 MB on
+`colorbook.djvu`.
+
+**Approach.** Make the layer the unit the governor sees.
+
+- `CacheSlot<T>` now carries its size function (fixed at construction, so
+  `PageLayers::new` names each measure once), the resident bytes of what it
+  holds (an atomic written when the slot fills or clears) and a last-used tick
+  from the global `ACCESS_TICK`, stamped on every hit, fill, store and
+  successful `peek`. `cached_bytes()` became thirteen atomic loads and one
+  mutex; it used to take twelve read locks.
+- A `CacheLayer` trait (`last_used`, `resident_bytes`, `drop_cached`) over
+  every slot and over the tile store, which is one layer with the tick of
+  its last hit or insert. `PageLayers::layers()` returns the thirteen.
+- `render_cache::sweep` collects `(tick, bytes, page, layer)` across every
+  live page, sorts by tick, drops layers until the total is under the
+  ceiling, and re-reports each page it touched. Only the layer being filled is
+  protected (`sweep_if_over(total, layer_id)`), so the overshoot is at most one
+  layer.
+- `DjVuDocument::enforce_cache_budget` keeps its page tick and its
+  page-granular sweep; no public API changed.
+
+**Numbers.** One `colorbook.djvu` page at full resolution caches 5 307 191 B:
+`bg_rgb_s1` 3 688 568, mask 1 038 327, `bg44` 348 960, `fg44` 231 336. A
+128 px-wide thumbnail (sub 4) of the same page costs about 0.73 MB.
+
+The acceptance figure, 16 MiB ceiling over the first eight pages at full
+resolution (`tests/render_cache_budget.rs`, `--nocapture`):
+
+| | peak | held minimum after crossing | bound |
+|---|---|---|---|
+| page-granular (READ_CACHE_BOUNDED) | 16 486 397 B | 15 740 637 B | one page, 5 307 191 B |
+| **per layer (kept)** | **16 711 357 B** | **15 331 445 B** | **one layer, 3 688 568 B** |
+
+Both stay under the 16 777 216 B ceiling after every page; the band was
+already narrower than its guarantee before. What changed is the guarantee,
+and what the band contains.
+
+That shows in a reader's pattern rather than a sequential pass. The probe:
+turn a page at full resolution, then refresh a strip of eight thumbnails
+(sub 4) of the same eight pages, sixteen turns, 16 MiB ceiling. Three runs
+each, release, pre-built binaries; the no-ceiling row is the all-warm
+reference.
+
+| | per thumbnail | per full render | resident band |
+|---|---|---|---|
+| page-granular (before) | 7.30 / 7.95 / 7.99 ms | 47.2 / 49.0 / 50.4 ms | 5 821 785 .. 16 731 828 B |
+| **per layer (kept)** | **3.57 / 3.92 / 4.21 ms** | 49.3 / 54.2 / 56.8 ms | 5 821 785 .. 16 499 691 B |
+| no ceiling | 3.94 / 4.70 ms | 43.4 / 49.4 ms | .. 46 930 238 B |
+
+Thumbnails **-51 %** (median 7.95 -> 3.92 ms), the same as with no ceiling:
+every thumbnail is a hit. Each full render adds 5.3 MB; the page-granular
+sweep answered by dropping the two or three stalest pages whole, thumbnail
+layers included, and the next strip re-decoded them (JB2 mask, partial
+BG44). The per-layer sweep drops the stale `bg_rgb_s1`, mask and `fg44` of
+the older full renders — 5 MB per old page — and the 0.7 MB thumbnail sets
+stay. Full-render times are within their own noise both ways (the runs
+alternate 47..57 ms with no ordering); the criterion benches decide:
+
+| Benchmark | before (r1 / r2) | per layer (r1 / r2) | Change |
+|---|---|---|---|
+| `render_colorbook` (warm) | 7.310 / 6.917 ms | 6.569 / 7.039 ms | -10.1 % / +1.8 % |
+| `render_colorbook_cold` | 21.49 / 15.94 ms | 15.93 / 15.97 ms | -25.9 % / +0.2 % |
+| `render_corpus_color` | 40.54 / 39.29 ms | 35.23 / 32.29 ms | -13.1 % / -17.8 % |
+
+Two interleaved rounds of pre-built binaries in separate target directories
+(main in a worktree). Round 1 of `main` ran first and cold, hence its wide
+intervals; round 2 puts the warm and cold single-page renders within 2 %.
+`render_corpus_color` reads lower both rounds; `cached_bytes()` no longer
+takes twelve read locks per fill, but the margin is wider than that explains
+and is not claimed. Nothing got slower.
+
+A working set larger than the ceiling still thrashes at any granularity: a
+probe that cycles eight pages at half resolution (2.5 MB a page, 20 MB for
+the set) under 16 MiB re-decodes on every pass before and after, the classic
+LRU scan. Granularity does not change that; it changes what a sweep keeps
+when the hot set does fit.
+
+**Exactness.** The cache decides only what is re-decoded, never what is
+drawn; `evict_render_cache_preserves_output` and the 31 cache unit tests pass
+unchanged, as does `tests/decode_cache_accounting.rs`.
+
+**Guard.** `tests/render_cache_budget.rs`:
+`a_long_read_stays_under_the_ceiling` now allows one layer of overshoot, not
+one page; new `a_tight_ceiling_holds_the_total_within_one_layer` (the 16 MiB
+band above, both sides), `a_sweep_drops_the_stale_background_and_keeps_the_warm_mask`
+(touch the mask last, set the ceiling to the mask's size plus one: the page
+keeps exactly its mask, same `Arc`; a page-granular sweep leaves nothing) and
+`a_held_layer_survives_the_sweep_that_evicts_it` (a held `Arc<Iw44Image>`
+is intact and the only handle after its slot is dropped, and decodes again as
+a fresh handle). Sabotage-checked by making the sweep call
+`evict_shared()` on the page that owns the stalest layer: the mask test fails
+with its intended message (`left: 0, right: 1038327`) while the 16 MiB band
+test still passes — the band guards the bound, the mask test guards the
+granularity.
+
+**Decision.** Kept. The overshoot bound shrinks from a page to a layer, a
+page's warm layers outlive its stale ones, and a reader with a thumbnail
+strip stops re-decoding under a tight ceiling. No public API changed; the
+hot path pays one relaxed atomic increment per layer touched.
+
+**Open.** The sweep still walks every layer of every live page when the
+total is over the ceiling — thirteen atomic loads a page instead of twelve
+read locks, so cheaper than before, but O(pages). A heap keyed by tick would
+make it O(evicted); nothing measured asks for it yet.

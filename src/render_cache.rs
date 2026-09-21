@@ -14,24 +14,38 @@
 //!
 //! This module closes that: every page cache registers itself here, every cache
 //! fill reports its new size, and when the total goes over
-//! [`budget`] the least-recently-rendered caches are dropped until it is under
+//! [`budget`] the least-recently-used layers are dropped until it is under
 //! again. The default ceiling is [`DEFAULT_BUDGET`]; set your own with
 //! [`set_budget`], or lift it entirely with `set_budget(usize::MAX)`.
 //!
+//! The unit of eviction is a *layer*, not a page (#813): each decoded
+//! background, mask, converted pixmap and tile store carries its own last-used
+//! tick and size, and a sweep ranks them across every live page. A page whose
+//! mask was just used keeps its mask while its stale background goes. Only the
+//! layer being filled at that moment is protected, so the resident total can
+//! exceed the ceiling by at most one layer. (Until this change the sweep
+//! dropped whole pages and protected the whole page being rendered, so the
+//! overshoot was a page's cache and a warm layer went with its cold
+//! neighbours.)
+//!
 //! Eviction is safe at any moment. A cached layer is handed to a render as a
 //! shared handle, so dropping the cache's own handle mid-render only means the
-//! render finishes with the copy it already holds.
+//! render finishes with the copy it already holds. A render in progress
+//! therefore holds the layers it has already fetched whether or not the cache
+//! still does; that memory is the render's, not the cache's, and is not part
+//! of the resident total.
 //!
 //! The ceiling is process-wide on purpose: memory is a process-wide resource,
 //! and a page does not know which document it belongs to. Per-document control
-//! is still available through [`crate::DjVuDocument::enforce_cache_budget`].
+//! is still available through [`crate::DjVuDocument::enforce_cache_budget`],
+//! which stays page-granular.
 //!
-//! See PERF_EXPERIMENTS.md READ_CACHE_BOUNDED.
+//! See PERF_EXPERIMENTS.md READ_CACHE_BOUNDED and RENDER_CACHE_LAYER_EVICT.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use crate::djvu_render::PageLayers;
+use crate::djvu_render::{CacheLayer, PageLayers};
 
 /// The ceiling applied when the program sets none: 256 MiB.
 ///
@@ -75,7 +89,7 @@ pub fn resident_bytes() -> usize {
     RESIDENT.load(Ordering::Relaxed)
 }
 
-/// Drop least-recently-rendered page caches until the total is at most
+/// Drop least-recently-used cached layers until the total is at most
 /// [`budget`]. Returns the bytes freed; 0 when already under the ceiling.
 ///
 /// Renders call this on their own. Call it directly after freeing documents, or
@@ -127,12 +141,13 @@ pub(crate) fn adjust_resident(previous: usize, current: usize) -> usize {
 
 /// The hot-path check: sweep only when `total` is already over the ceiling.
 ///
-/// `keep` is the cache the caller is filling right now. It is never evicted —
-/// evicting the page being rendered would drop the layer the caller is about to
-/// return and guarantee a re-decode on the very next access.
-pub(crate) fn sweep_if_over(total: usize, keep: &PageLayers) {
+/// `keep` identifies the layer the caller is filling right now (see
+/// `PageLayers::layer_id`). It is never evicted — evicting it would drop the
+/// value the caller is about to return and guarantee a re-decode on the very
+/// next access. Every other layer, on the same page or another, is fair game.
+pub(crate) fn sweep_if_over(total: usize, keep: *const ()) {
     if total > budget() {
-        sweep(Some(keep as *const PageLayers));
+        sweep(Some(keep));
     }
 }
 
@@ -143,40 +158,59 @@ fn live_caches() -> Vec<Arc<PageLayers>> {
     reg.iter().filter_map(Weak::upgrade).collect()
 }
 
-/// Evict least-recently-rendered caches until the total is within the ceiling.
-fn sweep(keep: Option<*const PageLayers>) -> usize {
+/// Evict least-recently-used layers, across all pages, until the total is
+/// within the ceiling.
+fn sweep(keep: Option<*const ()>) -> usize {
     let budget = budget();
     if budget == usize::MAX {
         return 0;
     }
     let live = live_caches();
 
-    // Measured once per cache here rather than read from RESIDENT: the global
+    // Measured once per layer here rather than read from RESIDENT: the global
     // counter is updated per fill and can lag a concurrent report by one step,
-    // and a sweep that evicts on a stale number throws away warm pages.
+    // and a sweep that evicts on a stale number throws away warm layers.
     let mut total: usize = 0;
-    let mut cands: Vec<(u64, usize, &Arc<PageLayers>)> = Vec::with_capacity(live.len());
-    for layers in &live {
-        let bytes = layers.cached_bytes();
-        total += bytes;
-        if bytes > 0 && keep != Some(Arc::as_ptr(layers)) {
-            cands.push((layers.access_tick(), bytes, layers));
+    // (tick, bytes, index into `live`, index into that page's layers)
+    let mut cands: Vec<(u64, usize, usize, usize)> = Vec::new();
+    for (page, layers) in live.iter().enumerate() {
+        for (index, layer) in layers.layers().into_iter().enumerate() {
+            let bytes = layer.resident_bytes();
+            if bytes == 0 {
+                continue;
+            }
+            total += bytes;
+            let id: *const () = (layer as *const dyn CacheLayer).cast();
+            if keep != Some(id) {
+                cands.push((layer.last_used(), bytes, page, index));
+            }
         }
     }
     if total <= budget {
         return 0;
     }
 
-    // Least-recently-rendered first, the same order the per-document sweep uses.
-    cands.sort_by_key(|&(tick, _, _)| tick);
+    // Least-recently-used first. A layer's tick is bumped on every hit, so a
+    // page's warm mask outranks its own cold background as much as it outranks
+    // another page's.
+    cands.sort_by_key(|&(tick, _, _, _)| tick);
     let mut freed = 0;
-    for (_, bytes, layers) in cands {
+    let mut touched = vec![false; live.len()];
+    for (_, bytes, page, index) in cands {
         if total <= budget {
             break;
         }
-        layers.evict_shared();
+        live[page].layers()[index].drop_cached();
+        touched[page] = true;
         freed += bytes;
         total = total.saturating_sub(bytes);
+    }
+    // One re-measure per page that lost something, so the global counter and
+    // each page's own `reported` figure follow the eviction.
+    for (page, touched) in touched.into_iter().enumerate() {
+        if touched {
+            live[page].report_bytes();
+        }
     }
     freed
 }
