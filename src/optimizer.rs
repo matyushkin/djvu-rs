@@ -7,6 +7,12 @@
 //! Archival codec selection and target-size search remain explicit follow-up
 //! work; the plan reports that boundary instead of silently recompressing a
 //! document.
+//!
+//! A long run can be observed through [`Optimizer::with_progress`]: the
+//! optimizer reports one [`ProgressEvent`] per component in each of the
+//! [`OptimizationPhase`]s `plan`, `rewrite` and `verify` (#814).
+
+use std::sync::Arc;
 
 use crate::djvu_mut::{DjVuDocumentMut, MutError};
 use crate::iff::Chunk;
@@ -180,24 +186,148 @@ pub enum OptimizeError {
     /// A request constraint is invalid.
     #[error("invalid optimization request: {0}")]
     InvalidRequest(&'static str),
+    /// The rewritten output did not pass the post-rewrite check.
+    ///
+    /// The optimizer re-parses what it produced and compares the page count
+    /// with the input's. A mismatch means the rewrite is wrong, so the bytes
+    /// are withheld rather than returned.
+    #[error("optimized output failed verification: {0}")]
+    Verification(String),
 }
 
+/// The stage of an optimization run a [`ProgressEvent`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OptimizationPhase {
+    /// Walking the input's components to select rewrites.
+    Plan,
+    /// Applying the selected rewrites.
+    Rewrite,
+    /// Re-parsing the output and checking it against the input.
+    Verify,
+}
+
+impl OptimizationPhase {
+    /// Stable machine-readable spelling used by the CLI progress line.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Rewrite => "rewrite",
+            Self::Verify => "verify",
+        }
+    }
+}
+
+/// One progress report from an optimization run.
+///
+/// Delivered to the hook installed with [`Optimizer::with_progress`], on the
+/// thread that called [`Optimizer::plan`] or [`Optimizer::optimize`], after
+/// the component it names has been handled. Within one phase the index
+/// increases by one per event and `bytes_so_far` never decreases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProgressEvent {
+    /// Which stage of the run this event belongs to.
+    pub phase: OptimizationPhase,
+    /// Zero-based position of the component within its phase.
+    pub component_index: usize,
+    /// How many components this phase handles in total.
+    pub component_count: usize,
+    /// Four-byte IFF identifier of the component: the secondary ID of a
+    /// `FORM` (`DJVU`, `DJVI`, `THUM`), or the chunk ID of a leaf (`DIRM`,
+    /// `NAVM`, `FREE`).
+    pub component_id: [u8; 4],
+    /// Bytes accounted for so far in this phase, this component included.
+    ///
+    /// In `plan` and `verify` that is the encoded size of the components
+    /// walked; in `rewrite` it is the input payload of the components
+    /// rewritten.
+    pub bytes_so_far: usize,
+}
+
+/// A progress hook shared by an [`Optimizer`] and its clones.
+pub type ProgressHook = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
+
 /// High-level optimizer configured with one typed request.
-#[derive(Debug, Clone)]
+///
+/// The optimizer stays `UnwindSafe` and `RefUnwindSafe` with a hook
+/// installed: it holds no state a panic can leave half-updated, and a
+/// panicking hook unwinds through a run that borrows the optimizer only
+/// immutably. The explicit impls below record that reasoning; the `dyn Fn`
+/// behind the hook would otherwise drop both auto traits.
+#[derive(Clone)]
 pub struct Optimizer {
     request: OptimizationRequest,
+    on_progress: Option<ProgressHook>,
+}
+
+impl std::panic::UnwindSafe for Optimizer {}
+impl std::panic::RefUnwindSafe for Optimizer {}
+
+impl core::fmt::Debug for Optimizer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Optimizer")
+            .field("request", &self.request)
+            .field("on_progress", &self.on_progress.is_some())
+            .finish()
+    }
 }
 
 impl Optimizer {
     /// Create an optimizer from a typed request.
     pub const fn new(request: OptimizationRequest) -> Self {
-        Self { request }
+        Self {
+            request,
+            on_progress: None,
+        }
+    }
+
+    /// Install a progress hook.
+    ///
+    /// `hook` receives one [`ProgressEvent`] per component per phase, on the
+    /// calling thread. [`Optimizer::plan`] reports the `plan` phase;
+    /// [`Optimizer::optimize`] reports `plan`, then `rewrite`, then `verify`.
+    /// A phase with nothing to do (no rewrites selected) reports no events.
+    /// The hook lives on the optimizer, not on [`OptimizationRequest`], so the
+    /// request stays a plain comparable value.
+    pub fn with_progress<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&ProgressEvent) + Send + Sync + 'static,
+    {
+        self.on_progress = Some(Arc::new(hook));
+        self
+    }
+
+    fn report_progress(&self, event: ProgressEvent) {
+        if let Some(hook) = &self.on_progress {
+            hook(&event);
+        }
+    }
+
+    /// Report every component of `document` under `phase`, in order.
+    fn report_components(&self, phase: OptimizationPhase, document: &DjVuDocumentMut) {
+        if self.on_progress.is_none() {
+            return;
+        }
+        let components = components(document);
+        let mut bytes_so_far = 0usize;
+        for (index, (id, bytes)) in components.iter().enumerate() {
+            bytes_so_far += bytes;
+            self.report_progress(ProgressEvent {
+                phase,
+                component_index: index,
+                component_count: components.len(),
+                component_id: *id,
+                bytes_so_far,
+            });
+        }
     }
 
     /// Inspect the input and produce a side-effect-free rewrite plan.
     pub fn plan(&self, input: &[u8]) -> Result<OptimizationPlan, OptimizeError> {
         self.validate_request()?;
         let document = DjVuDocumentMut::from_bytes(input)?;
+        self.report_components(OptimizationPhase::Plan, &document);
         let mut candidates = Vec::new();
         let mut path = Vec::new();
         collect_free_chunks(document.root_chunk(), &mut path, &mut candidates);
@@ -241,7 +371,7 @@ impl Optimizer {
         }
         if matches!(self.request.preset, OptimizationPreset::Archival) {
             warnings.push(
-                "archival codec re-encode, quality search, and progress/cancellation are not yet selected; output remains pixel-exact".to_string(),
+                "archival codec re-encode, quality search, and cancellation are not yet selected; output remains pixel-exact".to_string(),
             );
         }
         if !target_size_met {
@@ -270,6 +400,27 @@ impl Optimizer {
         let plan = self.plan(input)?;
         let document = DjVuDocumentMut::from_bytes(input)?;
         let bytes = apply_rewrites(&document, &plan.rewritten_components)?;
+        let mut bytes_so_far = 0usize;
+        for (index, component) in plan.rewritten_components.iter().enumerate() {
+            bytes_so_far += component.input_bytes;
+            self.report_progress(ProgressEvent {
+                phase: OptimizationPhase::Rewrite,
+                component_index: index,
+                component_count: plan.rewritten_components.len(),
+                component_id: component.chunk_id,
+                bytes_so_far,
+            });
+        }
+        let output = DjVuDocumentMut::from_bytes(&bytes)
+            .map_err(|e| OptimizeError::Verification(format!("output does not parse: {e}")))?;
+        self.report_components(OptimizationPhase::Verify, &output);
+        let output_pages = page_count(&output);
+        if output_pages != plan.page_count {
+            return Err(OptimizeError::Verification(format!(
+                "input has {} pages, output has {output_pages}",
+                plan.page_count
+            )));
+        }
         let report = OptimizationReport {
             preset: plan.preset,
             input_bytes: plan.input_bytes,
@@ -350,6 +501,28 @@ fn page_count(document: &DjVuDocumentMut) -> usize {
             })
             .count(),
         _ => 0,
+    }
+}
+
+/// The components progress is reported over: the root's children of a bundled
+/// `DJVM`, or the root itself for a single-page `DJVU` (and any other root).
+/// Each entry is the component's IFF identifier and its encoded size, header
+/// included.
+fn components(document: &DjVuDocumentMut) -> Vec<([u8; 4], usize)> {
+    const HEADER: usize = 8;
+    let id_and_size = |chunk: &Chunk| -> ([u8; 4], usize) {
+        let id = match chunk {
+            Chunk::Form { secondary_id, .. } => *secondary_id,
+            Chunk::Leaf { id, .. } => *id,
+        };
+        (id, HEADER + chunk.payload_length() as usize)
+    };
+    match document.root_form_type() {
+        Some(form_type) if *form_type == *b"DJVM" => (0..document.root_child_count())
+            .filter_map(|index| document.chunk_at_path(&[index]).ok())
+            .map(id_and_size)
+            .collect(),
+        _ => vec![id_and_size(document.root_chunk())],
     }
 }
 
@@ -467,4 +640,20 @@ fn json_escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The semver gate compares auto traits against the published crate. An
+    /// installed hook must not cost `Optimizer` its unwind safety (#814).
+    #[test]
+    fn optimizer_stays_unwind_safe_with_a_hook() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>(_: &T) {}
+        let optimizer =
+            Optimizer::new(OptimizationRequest::lossless_cleanup()).with_progress(|_| {});
+        assert_unwind_safe(&optimizer);
+        assert!(format!("{optimizer:?}").contains("on_progress: true"));
+    }
 }
