@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789729975939,
+  "lastUpdate": 1789986879758,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19282,6 +19282,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47566000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8bf8436763aeac1483f2c88c2472e0cbe296da62",
+          "message": "perf(render): composite large backgrounds in bands (#811) (#817)\n\nA page whose IW44 planes exceed the 128 MiB banding threshold no longer\nmaterialises its whole RGBA background. `Iw44Image::rgb_band_rows()` and\n`rgb_rows(a..b)` expose the banded reconstruction, and the compositor\nwalks the output in bands (`Background::Banded`, `for_each_bg_band`,\n`PlaneView`) sized so each band's plane rows fit the budget. Pages below\nthe threshold keep the whole-pixmap path and are byte-identical.\n\nFull-resolution render of the 6780x9148 fixture: 652 451 496 ->\n405 118 040 B (-37.9 %); `render_streaming` 157 024 280 B (1.27 planes,\nnew guard). Repeated full draws of such a page are slower (325 -> 900 ms)\nbecause the 248 MB background is no longer cached; first draws and all\nordinary pages are unchanged. 870 output hashes match `main`.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-21T12:09:43+02:00",
+          "tree_id": "406caee40b566a07239f0b3c0b6404cc87f427dd",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/8bf8436763aeac1483f2c88c2472e0cbe296da62"
+        },
+        "date": 1789986878064,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8247999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49261000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47355000,
             "range": "± 0",
             "unit": "ns/iter"
           }
