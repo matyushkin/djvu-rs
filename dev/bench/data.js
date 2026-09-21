@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789990957924,
+  "lastUpdate": 1790010166051,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19378,6 +19378,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 33874000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "aa043beb419b63804f3e811431619c8a501ca479",
+          "message": "feat(pixmap): add fallible Pixmap::try_new, deprecate new (#815) (#821)\n\n`Pixmap::new` returned an empty 0x0 pixmap when `width * height`\noverflowed `usize` or exceeded the 64 Mi-pixel cap, so a runaway size\nbecame a blank image downstream instead of an error.\n\n- `Pixmap::try_new` / `Pixmap::try_white` return `Result<Pixmap,\n  PixmapError>`; `PixmapError` (`#[non_exhaustive]`) has `Overflow\n  { width, height }` and `TooLarge { width, height, pixels, max }`,\n  implements `Display` and `core::error::Error`, no new dependency.\n- `Pixmap::MAX_PIXELS` is public.\n- `Pixmap::new` stays, deprecated since 0.34.0, implemented as\n  `try_new(..).unwrap_or_default()`. `Pixmap::white` keeps its lenient\n  behaviour and routes through `try_white`.\n- IW44 decode paths (`to_rgb_subsample`, `rgb_rows`) use `try_new` and\n  map `PixmapError` into `Iw44Error::ImageTooLarge`.\n- `scale_lanczos3` is fallible; the Lanczos render post-pass reports a\n  refused output as `RenderError::ResourceLimit` (axis\n  `RenderOutputPixels`, limit `MAX_PIXELS`) via `From<PixmapError> for\n  RenderError`; `Overflow` maps to `InvalidDimensions`. The thumbnail\n  encoder's call is bounded by `THUMBNAIL_MAX_SIDE` and `expect`s.\n- Every in-tree `Pixmap::new` call (tests, examples, benches, README\n  example) migrated to `try_new(..).expect(..)`.\n- Unit tests for both `PixmapError` variants (`Overflow` is only\n  reachable on 32-bit targets; the test is `cfg`-gated), the boundary\n  at exactly `MAX_PIXELS`, the deprecated `new` fallback, and the two\n  error mappings. Coverage comment at the old lines 42/45 updated.\n- `docs/api-compatibility.md`: `Pixmap::new` added to the deprecated\n  surfaces table.\n\nCloses #815\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-21T18:39:19+02:00",
+          "tree_id": "109274b51c0d4f597b1ef02cb00013f8aaaca38d",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/aa043beb419b63804f3e811431619c8a501ca479"
+        },
+        "date": 1790010163344,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6757000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41760000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 39673000,
             "range": "± 0",
             "unit": "ns/iter"
           }
