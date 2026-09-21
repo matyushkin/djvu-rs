@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790010166051,
+  "lastUpdate": 1790011689806,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19426,6 +19426,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 39673000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "db0ffcce39e39c0cbd24feda6ef56b8e2f06f02c",
+          "message": "feat(optimizer): report progress per component and phase (#814) (#822)\n\n* feat(optimizer): report progress per component and phase (#814)\n\nSlice 1 of #814: progress callbacks.\n\n`Optimizer::with_progress(hook)` installs an `Fn(&ProgressEvent) + Send +\nSync` hook. The optimizer calls it on the calling thread, once per\ncomponent per phase, after the component is handled. `plan` reports the\n`plan` phase; `optimize` reports `plan`, then `rewrite`, then `verify`.\nComponents are the root's children of a bundled DJVM, or the single root\nFORM otherwise. Within one phase the index increases by one per event and\n`bytes_so_far` never decreases.\n\nThe `verify` phase is new: `optimize` re-parses its own output and fails\nwith the new `OptimizeError::Verification` variant instead of returning\nbytes whose page count differs from the input's.\n\nThe hook lives on `Optimizer` (a private field, manual `Debug`), not on\n`OptimizationRequest`: a new pub field on the constructible request would\nbe a semver break and would cost it `PartialEq`. No plan/report field and\nno JSON output changes in this slice.\n\n`djvu optimize` shows a one-line progress indicator on stderr when stderr\nis a terminal and clears it before printing the JSON; a pipe sees neither\nthe line nor its escape codes.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* fix(optimizer): keep Optimizer unwind-safe with a hook installed (#814)\n\nThe `dyn Fn` behind the progress hook dropped `UnwindSafe` and\n`RefUnwindSafe` from `Optimizer`, which the semver gate reports as a major\nbreak against 0.33.0. The optimizer holds no state a panic can leave\nhalf-updated, so the auto traits are implemented explicitly, with a unit\ntest that pins them.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-21T18:39:58+02:00",
+          "tree_id": "8f68d8b4e777103404cd09a56fba6fa0a62bddb4",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/db0ffcce39e39c0cbd24feda6ef56b8e2f06f02c"
+        },
+        "date": 1790011688901,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8236000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49229000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47861000,
             "range": "± 0",
             "unit": "ns/iter"
           }
