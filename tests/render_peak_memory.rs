@@ -11,11 +11,19 @@
 //! it starts the next one. A band carries a halo of extra rows above and below,
 //! because the inverse wavelet passes reach about 186 rows away.
 //!
+//! Since #811 the renderer does not build the background pixmap either: a page
+//! this large is composited from bands of the wavelet image, each band
+//! reconstructed and converted to RGB just before the compositor reads it and
+//! dropped after. See `tests/render_streaming_peak_memory.rs` for the row
+//! streaming path, which has no output pixmap at all.
+//!
 //! The ceiling below is a multiple of `w * h * 2` — one `i16` per pixel, the
-//! cost of a single full-resolution plane. A render cannot go under about four
-//! of those: the output pixmap and the background pixmap are `w * h * 4` each.
-//! Three extra whole planes put it over seven. The guard sits between: banding
-//! measures 5.3, whole planes measured 7.2.
+//! cost of a single full-resolution plane. The output pixmap alone is two of
+//! those; a background band is about 1.3 (128 MiB plus its halo). Holding the
+//! background pixmap whole added two more; holding the three coefficient
+//! planes whole added three on top of that. The guard sits between: banded
+//! reconstruction with a banded composite measures 3.3, a whole background
+//! pixmap measured 5.3, whole planes measured 7.2.
 //!
 //! The whole measurement is one `#[test]` on purpose. The allocator counters
 //! below are process-global and `cargo test` runs a binary's tests on parallel
@@ -99,15 +107,15 @@ fn measure(data: &[u8]) -> (usize, usize, u64) {
         ..Default::default()
     };
     let pixmap = render_pixmap(page, &opts).expect("page must render");
-    let sum = pixmap.data.iter().map(|&b| b as u64).sum();
     let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let sum = pixmap.data.iter().map(|&b| b as u64).sum();
     drop(pixmap);
     drop(doc);
     (peak, page_bytes, sum)
 }
 
 #[test]
-fn a_full_resolution_render_stays_under_six_coefficient_planes() {
+fn a_full_resolution_render_stays_under_four_coefficient_planes() {
     let data = std::fs::read(SUBJECT).expect("fixture must exist");
 
     // Warm-up: first-touch allocations (lazy statics, SIMD dispatch tables,
@@ -118,8 +126,8 @@ fn a_full_resolution_render_stays_under_six_coefficient_planes() {
     // Printed for the reader who runs this with `--nocapture` after changing
     // the reconstruction: the ratio below is what the assertion is about.
     println!(
-        "one full-resolution render of {SUBJECT}: peak {peak} B, {} x the \
-         {page_bytes} B of one coefficient plane",
+        "one full-resolution render of {SUBJECT}: peak {peak} B, {} % of the \
+         {page_bytes} B of one coefficient plane; byte sum {sum}",
         peak * 100 / page_bytes.max(1)
     );
 
@@ -137,15 +145,19 @@ fn a_full_resolution_render_stays_under_six_coefficient_planes() {
     assert!(sum > 0, "the render produced an empty pixmap");
     assert_eq!(sum, warm_sum, "two renders of one page must be identical");
 
-    // Six planes. The banded reconstruction measures about 5.3; holding the
-    // three planes whole measured 7.2.
-    let ceiling = page_bytes * 6;
+    // Four planes. Banded reconstruction with a banded composite measures
+    // about 3.3; a whole background pixmap measured 5.3; whole coefficient
+    // planes measured 7.2.
+    let ceiling = page_bytes * 4;
     assert!(
         peak <= ceiling,
         "a full-resolution render peaks at {peak} B, which is {} % of the \
-         {page_bytes} B a single full-resolution coefficient plane costs. The \
-         IW44 reconstruction is holding whole planes again: it must build one \
-         band of block rows, convert it, and drop it before the next band.",
+         {page_bytes} B a single full-resolution coefficient plane costs. \
+         Either the renderer builds the whole background pixmap again (a page \
+         this large must be composited from bands: `Background::Banded`, \
+         `for_each_bg_band`), or the IW44 reconstruction holds whole planes \
+         again (it must build one band of block rows, convert it, and drop it \
+         before the next band).",
         peak * 100 / page_bytes.max(1)
     );
 }
