@@ -93,7 +93,7 @@ const BANDING_THRESHOLD: usize = 128 * 1024 * 1024;
 /// out of the measured region.
 fn page_pixmap() -> Pixmap {
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
-    let mut px = Pixmap::new(WIDTH, HEIGHT, 0, 0, 0, 255);
+    let mut px = Pixmap::try_new(WIDTH, HEIGHT, 0, 0, 0, 255).expect("fits the pixmap limit");
     for (y, row) in px.data.chunks_exact_mut(w * 4).enumerate() {
         for (x, p) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             p[0] = (x * 255 / w) as u8;

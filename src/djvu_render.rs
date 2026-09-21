@@ -132,6 +132,40 @@ pub enum RenderError {
     UnsupportedOption(&'static str),
 }
 
+/// A refused output pixmap is a render-output limit.
+///
+/// [`Pixmap::try_new`] caps one pixmap at [`Pixmap::MAX_PIXELS`]; on the render
+/// paths that ceiling belongs to the same axis as the configurable
+/// `max_render_pixels`, so it surfaces as [`RenderError::ResourceLimit`]. A
+/// `usize` overflow of `width * height` is an invalid size, not a limit.
+impl From<crate::pixmap::PixmapError> for RenderError {
+    fn from(e: crate::pixmap::PixmapError) -> Self {
+        match e {
+            crate::pixmap::PixmapError::Overflow { width, height } => {
+                RenderError::InvalidDimensions { width, height }
+            }
+            crate::pixmap::PixmapError::TooLarge {
+                width,
+                height,
+                pixels,
+                max,
+            } => RenderError::ResourceLimit(crate::resource_limits::ResourceLimitExceeded {
+                operation: "render",
+                axis: crate::resource_limits::ResourceLimitAxis::RenderOutputPixels,
+                found: pixels as u64,
+                limit: max as u64,
+                page_number: None,
+                width: Some(width),
+                height: Some(height),
+            }),
+            // `PixmapError` is `#[non_exhaustive]` in a sibling crate; a
+            // variant this version does not know is still a refused size.
+            #[allow(unreachable_patterns)]
+            _ => RenderError::UnsupportedOption("output pixmap size refused"),
+        }
+    }
+}
+
 // ── RenderOptions ─────────────────────────────────────────────────────────────
 
 /// User-requested rotation, applied on top of the INFO chunk rotation.
@@ -4590,23 +4624,25 @@ fn apply_lanczos_postpass<F>(
     full: (u32, u32),
     out: (u32, u32),
     render_native: F,
-) -> Pixmap
+) -> Result<Pixmap, RenderError>
 where
     F: FnOnce(&RenderOptions) -> Result<Pixmap, RenderError>,
 {
     if opts.resampling != Resampling::Lanczos3 {
-        return pm;
+        return Ok(pm);
     }
     let (full_w, full_h) = full;
     let need_scale = page.width() as u32 != full_w || page.height() as u32 != full_h;
     if !need_scale {
-        return pm;
+        return Ok(pm);
     }
     let native_opts = native_render_opts(page, opts);
     match render_native(&native_opts) {
-        Ok(native_pm) => crate::pixmap::scale_lanczos3(&native_pm, out.0, out.1),
+        // The scaler refuses an output above `Pixmap::MAX_PIXELS`; that is a
+        // render-output limit, reported as one rather than as a blank page.
+        Ok(native_pm) => Ok(crate::pixmap::scale_lanczos3(&native_pm, out.0, out.1)?),
         // Native render failed — keep the bilinear result already in `pm`.
-        Err(_) => pm,
+        Err(_) => Ok(pm),
     }
 }
 
@@ -4691,7 +4727,7 @@ pub fn render_pixmap_with_limits(
     // downscale) when requested and scaling actually happened.
     let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
         render_pixmap_with_limits(page, native_opts, limits)
-    });
+    })?;
 
     Ok(rotate_pixmap(
         pm,
@@ -4858,7 +4894,7 @@ pub fn render_region(
         (full_w, full_h),
         (out_w, out_h),
         |native_opts| render_region(page, region, native_opts),
-    );
+    )?;
 
     Ok(rotate_pixmap(
         pm,
@@ -5359,7 +5395,7 @@ pub fn render_progressive(
     // `chunk_n` refinement level.
     let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
         render_progressive(page, native_opts, chunk_n)
-    });
+    })?;
 
     Ok(rotate_pixmap(
         pm,
@@ -5582,6 +5618,44 @@ pub fn render_progressive_all(
 mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
+
+    /// #815: a refused output pixmap surfaces as the render-output limit, not
+    /// as a blank page.
+    #[test]
+    fn pixmap_too_large_maps_to_render_output_limit() {
+        let e = RenderError::from(crate::pixmap::PixmapError::TooLarge {
+            width: 10000,
+            height: 10000,
+            pixels: 100_000_000,
+            max: Pixmap::MAX_PIXELS,
+        });
+        match e {
+            RenderError::ResourceLimit(x) => {
+                assert_eq!(
+                    x.axis,
+                    crate::resource_limits::ResourceLimitAxis::RenderOutputPixels
+                );
+                assert_eq!((x.found, x.limit), (100_000_000, Pixmap::MAX_PIXELS as u64));
+                assert_eq!((x.width, x.height), (Some(10000), Some(10000)));
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixmap_overflow_maps_to_invalid_dimensions() {
+        let e = RenderError::from(crate::pixmap::PixmapError::Overflow {
+            width: u32::MAX,
+            height: u32::MAX,
+        });
+        assert!(matches!(
+            e,
+            RenderError::InvalidDimensions {
+                width: u32::MAX,
+                height: u32::MAX
+            }
+        ));
+    }
 
     fn assets_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5836,7 +5910,7 @@ mod tests {
         // background is at page resolution). Identity gamma + all-background
         // mask ⇒ the bg pixels must be reproduced exactly.
         let opts = RenderOptions::default();
-        let bg = Pixmap::new(4, 2, 10, 20, 30, 255);
+        let bg = Pixmap::try_new(4, 2, 10, 20, 30, 255).expect("fits the pixmap limit");
         let mask = crate::bitmap::Bitmap::new(4, 2); // all background
         let lut = identity_lut();
         let ctx = synth_ctx(&opts, 4, 2, Some(&bg), Some(&mask), &lut, 4, 2);
@@ -5859,7 +5933,7 @@ mod tests {
         // so every output pixel must equal the bg colour exactly — proving the
         // sampler addresses the bg correctly without corrupting it.
         let opts = RenderOptions::default();
-        let bg = Pixmap::new(4, 2, 70, 90, 110, 255); // half page resolution
+        let bg = Pixmap::try_new(4, 2, 70, 90, 110, 255).expect("fits the pixmap limit"); // half page resolution
         let mask = crate::bitmap::Bitmap::new(8, 2); // page-res, all background
         let lut = identity_lut();
         let ctx = synth_ctx(&opts, 8, 2, Some(&bg), Some(&mask), &lut, 8, 2);
@@ -5885,7 +5959,7 @@ mod tests {
         // 2× downscale of a solid background: every 2×2 source block averages to
         // the same colour, so the output cells equal that colour exactly.
         let opts = RenderOptions::default();
-        let bg = Pixmap::new(4, 2, 40, 80, 120, 255);
+        let bg = Pixmap::try_new(4, 2, 40, 80, 120, 255).expect("fits the pixmap limit");
         let mask = crate::bitmap::Bitmap::new(4, 2); // all background
         let lut = identity_lut();
         let ctx = synth_ctx(&opts, 4, 2, Some(&bg), Some(&mask), &lut, 2, 1);
@@ -5972,7 +6046,7 @@ mod tests {
         // zero width (so fg_q24's inner guard p.width > 0 fails, falling through
         // to plane_q24). With page_w > 0 && page_h > 0, plane_q24 takes its
         // Some arm and returns (0/page_w, 0/page_h) = (0, 0).
-        let zero_width_fg = Pixmap::new(0, 10, 0, 0, 0, 0);
+        let zero_width_fg = Pixmap::try_new(0, 10, 0, 0, 0, 0).expect("fits the pixmap limit");
         let (qx, qy) = fg_q24(Some(&zero_width_fg), 100, 100);
         assert_eq!(qx, 0); // (0 << 24) / 100 = 0
         assert_eq!(qy, (10u64 << 24) / 100); // height-based ratio
@@ -6004,7 +6078,7 @@ mod tests {
 
     #[test]
     fn sample_bilinear_rounds_to_nearest() {
-        let mut pm = Pixmap::new(2, 2, 0, 0, 0, 255);
+        let mut pm = Pixmap::try_new(2, 2, 0, 0, 0, 255).expect("fits the pixmap limit");
         pm.set_rgb(1, 1, 255, 255, 255);
 
         // At the exact centre, bilinear interpolation is 63.75, which should
@@ -6014,7 +6088,7 @@ mod tests {
 
     #[test]
     fn sample_nearest_rounds_to_nearest_pixel() {
-        let mut pm = Pixmap::new(2, 1, 10, 20, 30, 255);
+        let mut pm = Pixmap::try_new(2, 1, 10, 20, 30, 255).expect("fits the pixmap limit");
         pm.set_rgb(1, 0, 200, 210, 220);
 
         assert_eq!(sample_nearest(&pm, FRAC / 2 - 1, 0), (10, 20, 30));
@@ -6194,7 +6268,7 @@ mod tests {
     #[test]
     fn composite_bilinear_one_mask_aa_disabled_matches_nearest_at_upscale() {
         let opts = RenderOptions::default();
-        let bg = Pixmap::new(8, 1, 200, 150, 100, 255);
+        let bg = Pixmap::try_new(8, 1, 200, 150, 100, 255).expect("fits the pixmap limit");
         let mut mask = crate::bitmap::Bitmap::new(8, 1);
         mask.set(0, 0, true); // only x=0 is foreground
         let lut = identity_lut();
@@ -6222,7 +6296,7 @@ mod tests {
             mask_aa: true,
             ..Default::default()
         };
-        let bg = Pixmap::new(8, 1, 200, 150, 100, 255);
+        let bg = Pixmap::try_new(8, 1, 200, 150, 100, 255).expect("fits the pixmap limit");
         let mut mask = crate::bitmap::Bitmap::new(8, 1);
         mask.set(0, 0, true);
         let lut = identity_lut();
@@ -6257,7 +6331,7 @@ mod tests {
     /// still be a no-op there because there is no genuine axis upscale.
     #[test]
     fn composite_bilinear_one_mask_aa_is_noop_when_bg_subsampled_at_native_scale() {
-        let bg = Pixmap::new(4, 1, 200, 150, 100, 255); // subsampled: page_w=8, bg_w=4
+        let bg = Pixmap::try_new(4, 1, 200, 150, 100, 255).expect("fits the pixmap limit"); // subsampled: page_w=8, bg_w=4
         let mut mask = crate::bitmap::Bitmap::new(8, 1);
         mask.set(0, 0, true);
         let lut = identity_lut();
@@ -6292,7 +6366,7 @@ mod tests {
     #[test]
     fn composite_bilinear_one_column_table_matches_fallback() {
         let opts = RenderOptions::default();
-        let mut bg = Pixmap::new(3, 2, 0, 0, 0, 255); // subsampled: page_w=8, bg_w=3
+        let mut bg = Pixmap::try_new(3, 2, 0, 0, 0, 255).expect("fits the pixmap limit"); // subsampled: page_w=8, bg_w=3
         for (i, px) in bg.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px[0] = (i * 40) as u8;
             px[1] = (i * 25 + 7) as u8;

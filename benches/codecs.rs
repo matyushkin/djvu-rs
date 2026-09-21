@@ -536,7 +536,7 @@ fn bench_iw44_encode_color(c: &mut Criterion) {
 fn bench_iw44_encode_large(c: &mut Criterion) {
     const W: u32 = 1024;
     const H: u32 = 1024;
-    let mut pixmap = djvu_rs::Pixmap::new(W, H, 0, 0, 0, 255);
+    let mut pixmap = djvu_rs::Pixmap::try_new(W, H, 0, 0, 0, 255).expect("fits the pixmap limit");
     for y in 0..H {
         for x in 0..W {
             let r = ((x * 255) / W) as u8;

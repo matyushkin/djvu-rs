@@ -503,7 +503,7 @@ use djvu_rs::{Pixmap, iw44_encode::{encode_iw44_color, encode_iw44_gray, Iw44Enc
 
 fn main() {
     // Color: encode a Pixmap (RGBA) into BG44 chunk payloads.
-    let pixmap = Pixmap::new(640, 480, 255, 255, 255, 255);
+    let pixmap = Pixmap::try_new(640, 480, 255, 255, 255, 255).expect("640x480 fits");
     let chunks: Vec<Vec<u8>> = encode_iw44_color(&pixmap, &Iw44EncodeOptions::default());
     // Each Vec<u8> is a BG44 chunk payload; wrap each in a BG44 IFF tag.
 

@@ -530,7 +530,7 @@ pub(crate) mod bitmap;
 pub(crate) mod pixmap;
 
 pub use bitmap::Bitmap;
-pub use pixmap::{GrayPixmap, Pixmap};
+pub use pixmap::{GrayPixmap, Pixmap, PixmapError};
 
 // Re-export text types from the new pipeline
 #[cfg(feature = "std")]
@@ -954,10 +954,10 @@ impl<'a> Page<'a> {
                         self.index
                     ))
                 })?;
-                Ok(Self::fit_within(pm, max_w, max_h))
+                Self::fit_within(pm, max_w, max_h)
             }
             ThumbnailStrategy::Auto => match self.thumbnail()? {
-                Some(pm) => Ok(Self::fit_within(pm, max_w, max_h)),
+                Some(pm) => Self::fit_within(pm, max_w, max_h),
                 None => self.render_fit_to_box(max_w, max_h),
             },
         }
@@ -976,11 +976,11 @@ impl<'a> Page<'a> {
     /// so this is a no-op whenever the caller's box is at least that big —
     /// the common case for a thumbnail grid. It is never *upscaled* to fill
     /// a larger box: doing so would add cost without adding real detail.
-    fn fit_within(pm: Pixmap, max_w: u32, max_h: u32) -> Pixmap {
+    fn fit_within(pm: Pixmap, max_w: u32, max_h: u32) -> Result<Pixmap, Error> {
         let max_w = max_w.max(1);
         let max_h = max_h.max(1);
         if pm.width <= max_w && pm.height <= max_h {
-            return pm;
+            return Ok(pm);
         }
         let scale_w = max_w as f64 / pm.width.max(1) as f64;
         let scale_h = max_h as f64 / pm.height.max(1) as f64;
@@ -988,6 +988,7 @@ impl<'a> Page<'a> {
         let tw = ((pm.width as f64 * scale).round() as u32).max(1);
         let th = ((pm.height as f64 * scale).round() as u32).max(1);
         crate::pixmap::scale_lanczos3(&pm, tw, th)
+            .map_err(|e| Self::render_err(djvu_render::RenderError::from(e)))
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
