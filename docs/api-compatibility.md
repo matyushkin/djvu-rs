@@ -100,6 +100,7 @@ Current deprecated surfaces:
 | `bzz_new` module | re-export alias | `bzz` |
 | `iw44_new` module | re-export alias | `iw44` |
 | `ocr-neural-candle` feature | no-op feature alias | `ocr-neural` |
+| `Pixmap::new` (since 0.34.0) | constructor that returns an empty pixmap on an oversized request | `Pixmap::try_new` (reports `PixmapError`) |
 
 These aliases are kept intentionally cheap (a `pub use` or a no-op feature) so
 they can outlive the minimum window without cost.

@@ -29,7 +29,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::{vec, vec::Vec};
 
-use djvu_pixmap::{GrayPixmap, Pixmap};
+use djvu_pixmap::{GrayPixmap, Pixmap, PixmapError};
 use djvu_zp::ZpDecoder;
 
 /// IW44 wavelet image encoder — produces BG44/FG44/TH44 chunk payloads (std-only).
@@ -93,6 +93,17 @@ pub enum Iw44Error {
     /// silently decoded into the wrong refinement slot.
     #[error("IW44 chunk does not bear expected serial number")]
     UnexpectedSerial,
+}
+
+/// The decoder's output pixmap is bounded like its input planes.
+///
+/// [`Pixmap::try_new`] refuses more than [`Pixmap::MAX_PIXELS`]; the decoder
+/// already rejects an image that large at the header, so this is the same
+/// limit reported from the other end.
+impl From<PixmapError> for Iw44Error {
+    fn from(_: PixmapError) -> Self {
+        Iw44Error::ImageTooLarge
+    }
 }
 
 // ---- Band-bucket mapping: 10 bands, each mapped to a range of buckets --------
@@ -3798,7 +3809,7 @@ impl Iw44Image {
             // Pre-normalize Y/Cb/Cr into flat row buffers and apply the
             // YCbCr→RGBA formula 8 pixels at a time with SIMD.
             if sub == 1 {
-                let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
+                let mut pm = Pixmap::try_new(w, h, 0, 0, 0, 255)?;
                 // A very large page is reconstructed a band at a time. The three
                 // full-resolution `i16` planes cost 6 bytes per pixel — more
                 // than the 4-byte output they feed — and are dropped the moment
@@ -3826,7 +3837,7 @@ impl Iw44Image {
 
             let (y_plane, cb_plane, cr_plane) =
                 reconstruct_planes(y_dec, cb_dec, cr_dec, sub, chroma_sub);
-            let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
+            let mut pm = Pixmap::try_new(w, h, 0, 0, 0, 255)?;
 
             // Compact path: sub ≥ 2 with power-of-two subsample.
             //
@@ -3892,7 +3903,7 @@ impl Iw44Image {
             // is full-resolution.  Use compact-aware indexing.
             let y_plane = y_dec.reconstruct(sub);
             let is_compact = (2..=8).contains(&sub) && sub.is_power_of_two();
-            let mut pm = Pixmap::new(w, h, 0, 0, 0, 255);
+            let mut pm = Pixmap::try_new(w, h, 0, 0, 0, 255)?;
             for row in 0..h {
                 let out_row = h - 1 - row;
                 for col in 0..w {
@@ -4057,7 +4068,7 @@ impl Iw44Image {
         if o0 > o1 || o1 > ph {
             return Err(Iw44Error::Invalid);
         }
-        let mut pm = Pixmap::new(self.width, (o1 - o0) as u32, 0, 0, 0, 255);
+        let mut pm = Pixmap::try_new(self.width, (o1 - o0) as u32, 0, 0, 0, 255)?;
         if o0 == o1 {
             return Ok(pm);
         }
@@ -4154,6 +4165,18 @@ impl Iw44Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #815: a refused output pixmap is the decoder's own size limit.
+    #[test]
+    fn pixmap_error_maps_to_image_too_large() {
+        let e = PixmapError::TooLarge {
+            width: 10000,
+            height: 10000,
+            pixels: 100_000_000,
+            max: Pixmap::MAX_PIXELS,
+        };
+        assert_eq!(Iw44Error::from(e), Iw44Error::ImageTooLarge);
+    }
 
     fn assets_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4519,7 +4542,8 @@ mod tests {
             let cr_dec = img.cr.as_ref().unwrap();
             let (pw, ph) = (img.width as usize, img.height as usize);
             for keep in [1usize, 3, 8] {
-                let mut banded = Pixmap::new(img.width, img.height, 0, 0, 0, 255);
+                let mut banded = Pixmap::try_new(img.width, img.height, 0, 0, 0, 255)
+                    .expect("fits the pixmap limit");
                 img.rgb_sub1_banded(y_dec, cb_dec, cr_dec, keep, pw, ph, &mut banded);
                 assert_eq!(
                     banded.data, whole.data,
