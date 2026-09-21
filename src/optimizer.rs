@@ -249,11 +249,20 @@ pub struct ProgressEvent {
 pub type ProgressHook = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 
 /// High-level optimizer configured with one typed request.
+///
+/// The optimizer stays `UnwindSafe` and `RefUnwindSafe` with a hook
+/// installed: it holds no state a panic can leave half-updated, and a
+/// panicking hook unwinds through a run that borrows the optimizer only
+/// immutably. The explicit impls below record that reasoning; the `dyn Fn`
+/// behind the hook would otherwise drop both auto traits.
 #[derive(Clone)]
 pub struct Optimizer {
     request: OptimizationRequest,
     on_progress: Option<ProgressHook>,
 }
+
+impl std::panic::UnwindSafe for Optimizer {}
+impl std::panic::RefUnwindSafe for Optimizer {}
 
 impl core::fmt::Debug for Optimizer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -631,4 +640,20 @@ fn json_escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The semver gate compares auto traits against the published crate. An
+    /// installed hook must not cost `Optimizer` its unwind safety (#814).
+    #[test]
+    fn optimizer_stays_unwind_safe_with_a_hook() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>(_: &T) {}
+        let optimizer =
+            Optimizer::new(OptimizationRequest::lossless_cleanup()).with_progress(|_| {});
+        assert_unwind_safe(&optimizer);
+        assert!(format!("{optimizer:?}").contains("on_progress: true"));
+    }
 }
