@@ -10,7 +10,10 @@
 //!
 //! A long run can be observed through [`Optimizer::with_progress`]: the
 //! optimizer reports one [`ProgressEvent`] per component in each of the
-//! [`OptimizationPhase`]s `plan`, `rewrite` and `verify` (#814).
+//! [`OptimizationPhase`]s `plan`, `rewrite` and `verify` (#814). It can be
+//! stopped through [`Optimizer::with_cancel`]: the optimizer polls the hook
+//! before each component and returns [`OptimizeError::Cancelled`] instead of
+//! partial output.
 
 use std::sync::Arc;
 
@@ -193,6 +196,10 @@ pub enum OptimizeError {
     /// are withheld rather than returned.
     #[error("optimized output failed verification: {0}")]
     Verification(String),
+    /// The run was stopped by the hook installed with
+    /// [`Optimizer::with_cancel`]. No output was produced.
+    #[error("optimization cancelled")]
+    Cancelled,
 }
 
 /// The stage of an optimization run a [`ProgressEvent`] belongs to.
@@ -248,17 +255,22 @@ pub struct ProgressEvent {
 /// A progress hook shared by an [`Optimizer`] and its clones.
 pub type ProgressHook = Arc<dyn Fn(&ProgressEvent) + Send + Sync>;
 
+/// A cancellation hook shared by an [`Optimizer`] and its clones. It returns
+/// `true` once the run should stop.
+pub type CancelHook = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// High-level optimizer configured with one typed request.
 ///
-/// The optimizer stays `UnwindSafe` and `RefUnwindSafe` with a hook
+/// The optimizer stays `UnwindSafe` and `RefUnwindSafe` with hooks
 /// installed: it holds no state a panic can leave half-updated, and a
 /// panicking hook unwinds through a run that borrows the optimizer only
 /// immutably. The explicit impls below record that reasoning; the `dyn Fn`
-/// behind the hook would otherwise drop both auto traits.
+/// behind a hook would otherwise drop both auto traits.
 #[derive(Clone)]
 pub struct Optimizer {
     request: OptimizationRequest,
     on_progress: Option<ProgressHook>,
+    cancelled: Option<CancelHook>,
 }
 
 impl std::panic::UnwindSafe for Optimizer {}
@@ -269,6 +281,7 @@ impl core::fmt::Debug for Optimizer {
         f.debug_struct("Optimizer")
             .field("request", &self.request)
             .field("on_progress", &self.on_progress.is_some())
+            .field("cancelled", &self.cancelled.is_some())
             .finish()
     }
 }
@@ -279,6 +292,7 @@ impl Optimizer {
         Self {
             request,
             on_progress: None,
+            cancelled: None,
         }
     }
 
@@ -298,20 +312,50 @@ impl Optimizer {
         self
     }
 
+    /// Install a cancellation hook.
+    ///
+    /// `hook` is polled on the calling thread before the input is parsed and
+    /// before each component of each phase, the same cooperative contract as
+    /// [`crate::export_control::ExportObserver::cancelled`]. Once it returns
+    /// `true`, [`Optimizer::plan`] and [`Optimizer::optimize`] return
+    /// [`OptimizeError::Cancelled`]. Work already begun on a component
+    /// completes first; no partial output is ever returned.
+    pub fn with_cancel<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        self.cancelled = Some(Arc::new(hook));
+        self
+    }
+
+    /// Stop the run here if the cancellation hook asks for it.
+    fn check_cancelled(&self) -> Result<(), OptimizeError> {
+        match &self.cancelled {
+            Some(hook) if hook() => Err(OptimizeError::Cancelled),
+            _ => Ok(()),
+        }
+    }
+
     fn report_progress(&self, event: ProgressEvent) {
         if let Some(hook) = &self.on_progress {
             hook(&event);
         }
     }
 
-    /// Report every component of `document` under `phase`, in order.
-    fn report_components(&self, phase: OptimizationPhase, document: &DjVuDocumentMut) {
-        if self.on_progress.is_none() {
-            return;
+    /// Walk every component of `document` under `phase`, in order: poll for
+    /// cancellation before each one, report it after.
+    fn walk_components(
+        &self,
+        phase: OptimizationPhase,
+        document: &DjVuDocumentMut,
+    ) -> Result<(), OptimizeError> {
+        if self.on_progress.is_none() && self.cancelled.is_none() {
+            return Ok(());
         }
         let components = components(document);
         let mut bytes_so_far = 0usize;
         for (index, (id, bytes)) in components.iter().enumerate() {
+            self.check_cancelled()?;
             bytes_so_far += bytes;
             self.report_progress(ProgressEvent {
                 phase,
@@ -321,13 +365,15 @@ impl Optimizer {
                 bytes_so_far,
             });
         }
+        Ok(())
     }
 
     /// Inspect the input and produce a side-effect-free rewrite plan.
     pub fn plan(&self, input: &[u8]) -> Result<OptimizationPlan, OptimizeError> {
         self.validate_request()?;
+        self.check_cancelled()?;
         let document = DjVuDocumentMut::from_bytes(input)?;
-        self.report_components(OptimizationPhase::Plan, &document);
+        self.walk_components(OptimizationPhase::Plan, &document)?;
         let mut candidates = Vec::new();
         let mut path = Vec::new();
         collect_free_chunks(document.root_chunk(), &mut path, &mut candidates);
@@ -352,7 +398,14 @@ impl Optimizer {
             })
             .collect::<Vec<_>>();
 
-        let output = apply_rewrites(&document, &rewritten_components)?;
+        // A dry application, to size the output; it is polled for
+        // cancellation like every other per-component step.
+        let output = apply_rewrites(
+            &document,
+            &rewritten_components,
+            |_, _| self.check_cancelled(),
+            |_, _| {},
+        )?;
         let output_bytes = output.len();
         // FREE removal is pixel-exact by construction. SSIM measurement applies
         // only once archival re-encode exists; keep the floor "met" here and
@@ -399,21 +452,26 @@ impl Optimizer {
     pub fn optimize(&self, input: &[u8]) -> Result<OptimizationResult, OptimizeError> {
         let plan = self.plan(input)?;
         let document = DjVuDocumentMut::from_bytes(input)?;
-        let bytes = apply_rewrites(&document, &plan.rewritten_components)?;
         let mut bytes_so_far = 0usize;
-        for (index, component) in plan.rewritten_components.iter().enumerate() {
-            bytes_so_far += component.input_bytes;
-            self.report_progress(ProgressEvent {
-                phase: OptimizationPhase::Rewrite,
-                component_index: index,
-                component_count: plan.rewritten_components.len(),
-                component_id: component.chunk_id,
-                bytes_so_far,
-            });
-        }
+        let bytes = apply_rewrites(
+            &document,
+            &plan.rewritten_components,
+            |_, _| self.check_cancelled(),
+            |index, component| {
+                bytes_so_far += component.input_bytes;
+                self.report_progress(ProgressEvent {
+                    phase: OptimizationPhase::Rewrite,
+                    component_index: index,
+                    component_count: plan.rewritten_components.len(),
+                    component_id: component.chunk_id,
+                    bytes_so_far,
+                });
+            },
+        )?;
+        self.check_cancelled()?;
         let output = DjVuDocumentMut::from_bytes(&bytes)
             .map_err(|e| OptimizeError::Verification(format!("output does not parse: {e}")))?;
-        self.report_components(OptimizationPhase::Verify, &output);
+        self.walk_components(OptimizationPhase::Verify, &output)?;
         let output_pages = page_count(&output);
         if output_pages != plan.page_count {
             return Err(OptimizeError::Verification(format!(
@@ -474,19 +532,38 @@ fn collect_free_chunks(chunk: &Chunk, path: &mut Vec<usize>, candidates: &mut Ve
     }
 }
 
+/// Apply `rewrites` to a copy of `document`, one component at a time in plan
+/// order. `before` runs ahead of each rewrite and can stop the run; `after`
+/// runs once the rewrite is applied.
+///
+/// Plan paths name positions in the *input*. Removing a leaf shifts the later
+/// siblings of the same parent down by one, so each path is adjusted by the
+/// removals already made ahead of it. Rewrites only remove leaves, so no
+/// removed path is a prefix of another.
 fn apply_rewrites(
     document: &DjVuDocumentMut,
     rewrites: &[RewrittenComponent],
+    mut before: impl FnMut(usize, &RewrittenComponent) -> Result<(), OptimizeError>,
+    mut after: impl FnMut(usize, &RewrittenComponent),
 ) -> Result<Vec<u8>, OptimizeError> {
     let mut edited = document.clone();
-    let mut paths = rewrites
-        .iter()
-        .map(|item| item.path.clone())
-        .collect::<Vec<_>>();
-    // Removing siblings from high to low keeps every lower path valid.
-    paths.sort_by(|left, right| right.cmp(left));
-    for path in paths {
-        edited.remove_leaf(&path)?;
+    let mut removed: Vec<&[usize]> = Vec::with_capacity(rewrites.len());
+    for (index, component) in rewrites.iter().enumerate() {
+        before(index, component)?;
+        let path = &component.path;
+        let Some((&last, parent)) = path.split_last() else {
+            return Err(OptimizeError::InvalidRequest("a rewrite path is empty"));
+        };
+        let shift = removed
+            .iter()
+            .filter(|done| done.len() == path.len() && done.starts_with(parent))
+            .filter(|done| done[done.len() - 1] < last)
+            .count();
+        let mut current = path.clone();
+        current[path.len() - 1] = last - shift;
+        edited.remove_leaf(&current)?;
+        removed.push(path);
+        after(index, component);
     }
     Ok(edited.try_into_bytes()?)
 }
@@ -649,11 +726,14 @@ mod tests {
     /// The semver gate compares auto traits against the published crate. An
     /// installed hook must not cost `Optimizer` its unwind safety (#814).
     #[test]
-    fn optimizer_stays_unwind_safe_with_a_hook() {
+    fn optimizer_stays_unwind_safe_with_hooks() {
         fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>(_: &T) {}
-        let optimizer =
-            Optimizer::new(OptimizationRequest::lossless_cleanup()).with_progress(|_| {});
+        let optimizer = Optimizer::new(OptimizationRequest::lossless_cleanup())
+            .with_progress(|_| {})
+            .with_cancel(|| false);
         assert_unwind_safe(&optimizer);
-        assert!(format!("{optimizer:?}").contains("on_progress: true"));
+        let debug = format!("{optimizer:?}");
+        assert!(debug.contains("on_progress: true"));
+        assert!(debug.contains("cancelled: true"));
     }
 }

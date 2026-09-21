@@ -7,8 +7,10 @@ use djvu_rs::Bitmap;
 use djvu_rs::djvu_encode::PageEncoder;
 use djvu_rs::iff::{self, Chunk};
 use djvu_rs::optimizer::{
-    OptimizationPhase, OptimizationPreset, OptimizationRequest, Optimizer, ProgressEvent,
+    OptimizationPhase, OptimizationPreset, OptimizationRequest, OptimizeError, Optimizer,
+    ProgressEvent,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -178,6 +180,152 @@ fn optimizer_without_hook_is_unchanged() {
     assert_eq!(
         silent.optimize(&input).unwrap(),
         observed.optimize(&input).unwrap()
+    );
+}
+
+/// An optimizer that records events and cancels once `after` of them have
+/// been reported; the hook is polled before the next component.
+fn cancelling_after(after: usize) -> (Optimizer, Arc<Mutex<Vec<ProgressEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let sink = Arc::clone(&events);
+    let counter = Arc::clone(&seen);
+    let optimizer = Optimizer::new(OptimizationRequest::lossless_cleanup())
+        .with_progress(move |event| {
+            sink.lock().unwrap().push(event.clone());
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .with_cancel(move || seen.load(Ordering::SeqCst) >= after);
+    (optimizer, events)
+}
+
+#[test]
+fn cancel_before_start_reports_nothing() {
+    let input = bundle_with_free_chunk();
+    let (optimizer, events) = cancelling_after(0);
+    assert!(matches!(
+        optimizer.plan(&input),
+        Err(OptimizeError::Cancelled)
+    ));
+    assert!(matches!(
+        optimizer.optimize(&input),
+        Err(OptimizeError::Cancelled)
+    ));
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn cancel_stops_at_a_component_boundary_in_plan() {
+    let input = bundle_with_free_chunk();
+    let (optimizer, events) = cancelling_after(3);
+    assert!(matches!(
+        optimizer.optimize(&input),
+        Err(OptimizeError::Cancelled)
+    ));
+    let events = events.lock().unwrap().clone();
+    // Exactly the three components handled before the poll saw the stop.
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.phase == OptimizationPhase::Plan)
+    );
+    assert_eq!(events[2].component_index, 2);
+}
+
+#[test]
+fn cancel_after_rewrite_withholds_output_and_skips_verify() {
+    let input = bundle_with_free_chunk();
+    let root_children = match iff::parse(&input).unwrap().root {
+        Chunk::Form { children, .. } => children.len(),
+        Chunk::Leaf { .. } => unreachable!(),
+    };
+    // Stop once the single rewrite has been reported: the next poll is the
+    // one ahead of verification.
+    let (optimizer, events) = cancelling_after(root_children + 1);
+    assert!(matches!(
+        optimizer.optimize(&input),
+        Err(OptimizeError::Cancelled)
+    ));
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events.len(), root_children + 1);
+    assert_eq!(events.last().unwrap().phase, OptimizationPhase::Rewrite);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.phase != OptimizationPhase::Verify)
+    );
+}
+
+#[test]
+fn cancel_hook_that_never_fires_changes_nothing() {
+    let input = bundle_with_free_chunk();
+    let plain = Optimizer::new(OptimizationRequest::lossless_cleanup());
+    let (polite, _) = cancelling_after(usize::MAX);
+    assert_eq!(
+        plain.optimize(&input).unwrap(),
+        polite.optimize(&input).unwrap()
+    );
+}
+
+#[test]
+fn several_free_chunks_in_one_parent_are_all_removed_in_plan_order() {
+    // Two FREE leaves ahead of the Xtra chunk and one after it: removing the
+    // earlier ones shifts the later paths, which the optimizer must track.
+    let bitmap = Bitmap::new(8, 8);
+    let encoded = PageEncoder::from_bitmap(&bitmap).encode().unwrap();
+    let mut file = iff::parse(&encoded).unwrap();
+    let free = |len: usize| Chunk::Leaf {
+        id: *b"FREE",
+        data: vec![0; len],
+    };
+    match &mut file.root {
+        Chunk::Form { children, .. } => {
+            children.insert(1, free(5));
+            children.insert(2, free(6));
+            children.push(Chunk::Leaf {
+                id: *b"Xtra",
+                data: b"preserve me".to_vec(),
+            });
+            children.push(free(7));
+        }
+        Chunk::Leaf { .. } => unreachable!(),
+    }
+    let input = iff::emit(&file);
+    let (optimizer, events) = recording_optimizer(OptimizationRequest::lossless_cleanup());
+
+    let result = optimizer.optimize(&input).unwrap();
+
+    let rewrites = &result.report.rewritten_components;
+    assert_eq!(rewrites.len(), 3);
+    assert_eq!(
+        rewrites
+            .iter()
+            .map(|item| item.input_bytes)
+            .collect::<Vec<_>>(),
+        [5, 6, 7]
+    );
+    let output = iff::parse(&result.bytes).unwrap();
+    let ids: Vec<[u8; 4]> = match output.root {
+        Chunk::Form { children, .. } => children
+            .iter()
+            .map(|chunk| match chunk {
+                Chunk::Leaf { id, .. } => *id,
+                Chunk::Form { secondary_id, .. } => *secondary_id,
+            })
+            .collect(),
+        Chunk::Leaf { .. } => unreachable!(),
+    };
+    assert!(!ids.contains(b"FREE"));
+    assert!(ids.contains(b"Xtra"));
+    // Rewrite events come in plan order with increasing bytes.
+    let rewrite = phase_events(&events.lock().unwrap(), OptimizationPhase::Rewrite);
+    assert_eq!(
+        rewrite
+            .iter()
+            .map(|event| event.bytes_so_far)
+            .collect::<Vec<_>>(),
+        [5, 11, 18]
     );
 }
 
