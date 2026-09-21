@@ -139,9 +139,10 @@ djvu split book.djvu --pages 10-25 --output chapter.djvu
 djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup --dry-run
 djvu optimize book.djvu --output optimized.djvu --preset lossless-cleanup
 djvu optimize book.djvu --output optimized.djvu --preset archival --target-size 26214400
-# (--max-ssim-loss is reserved for the planned archival re-encode; the current
-#  lossless cleanup is pixel-exact by construction and reports this)
-djvu optimize book.djvu --output optimized.djvu --max-ssim-loss 0.001
+# Archival re-encode: shrink each page background as far as an SSIM loss of
+# 0.02 against the input allows; --lossy-text lets the JB2 text mask join in.
+djvu optimize book.djvu --output optimized.djvu --preset archival --max-ssim-loss 0.02
+djvu optimize book.djvu --output optimized.djvu --preset archival --max-ssim-loss 0.02 --lossy-text
 
 # Encode an image (PNG, JPEG, or TIFF) into a single-page DjVu (bilevel JB2, lossless)
 # TIFF input requires building/installing with --features tiff (cli alone does not enable it).

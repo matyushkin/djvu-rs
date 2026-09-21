@@ -160,9 +160,15 @@ enum Cmd {
         /// meet the target without lossy re-encoding.
         #[arg(long)]
         target_size: Option<u64>,
-        /// Maximum permitted SSIM loss.
+        /// Maximum permitted SSIM loss of a lossy re-encode against the
+        /// input's own decode (archival preset). Without it the archival
+        /// preset re-encodes nothing.
         #[arg(long)]
         max_ssim_loss: Option<f32>,
+        /// Let the archival preset re-encode JB2 text masks with lossy
+        /// symbol matching, under the same --max-ssim-loss floor.
+        #[arg(long)]
+        lossy_text: bool,
         /// Print the machine-readable plan without writing the output.
         #[arg(long)]
         dry_run: bool,
@@ -324,7 +330,9 @@ enum TextFormat {
 enum OptimizePresetArg {
     /// Remove semantically inert IFF FREE padding.
     LosslessCleanup,
-    /// Prefer archival fidelity; this slice remains pixel-exact.
+    /// Prefer archival fidelity: re-encode page backgrounds (and, with
+    /// --lossy-text, masks) only within --max-ssim-loss and only when
+    /// smaller. Pixel-exact without a floor.
     Archival,
 }
 
@@ -472,8 +480,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             preset,
             target_size,
             max_ssim_loss,
+            lossy_text,
             dry_run,
-        } => cmd_optimize(&file, &output, preset, target_size, max_ssim_loss, dry_run),
+        } => cmd_optimize(
+            &file,
+            &output,
+            preset,
+            target_size,
+            max_ssim_loss,
+            lossy_text,
+            dry_run,
+        ),
         Cmd::Text {
             file,
             page,
@@ -548,6 +565,7 @@ fn cmd_optimize(
     preset: OptimizePresetArg,
     target_size: Option<u64>,
     max_ssim_loss: Option<f32>,
+    lossy_text: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input_bytes = std::fs::read(input)?;
@@ -569,6 +587,9 @@ fn cmd_optimize(
     }
     if let Some(loss) = max_ssim_loss {
         request = request.with_max_ssim_loss(loss);
+    }
+    if lossy_text {
+        request = request.with_lossy_text(true);
     }
 
     // A progress line on an interactive stderr only: the JSON on stdout is
