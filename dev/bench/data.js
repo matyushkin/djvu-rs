@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790011689806,
+  "lastUpdate": 1790025760605,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19474,6 +19474,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47861000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "47156ff026d4b95a7a58aec3b3baf2deac5bc6b5",
+          "message": "feat(optimizer): cooperative cancellation between components (#814) (#823)\n\nSlice 2 of #814: cancellation.\n\n`Optimizer::with_cancel(hook)` installs an `Fn() -> bool + Send + Sync`\nhook, the same cooperative contract as `ExportObserver::cancelled`. The\noptimizer polls it before parsing the input and before each component of\neach phase. Once it returns `true`, `plan` and `optimize` return the new\n`OptimizeError::Cancelled` variant; no partial output is ever returned\nand the progress events reported before the stop are exactly those of\nthe components that were handled.\n\nRewrites are now applied one component at a time in plan order, so a\nstop in the `rewrite` phase lands on a component boundary. Plan paths\nname positions in the input, so each removal is adjusted by the earlier\nremovals in the same parent; a test with three FREE chunks around an\nunknown chunk pins that.\n\nThe `djvu` binary stages its output only after `optimize` succeeds, so a\ncancelled run leaves no file behind; it installs no signal handler.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-21T22:58:58+02:00",
+          "tree_id": "1431efc48e9cdf82be920655d2872ec03dc1c140",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/47156ff026d4b95a7a58aec3b3baf2deac5bc6b5"
+        },
+        "date": 1790025759121,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 121000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6023000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35798000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 33873000,
             "range": "± 0",
             "unit": "ns/iter"
           }
