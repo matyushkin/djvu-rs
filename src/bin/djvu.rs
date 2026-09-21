@@ -571,13 +571,38 @@ fn cmd_optimize(
         request = request.with_max_ssim_loss(loss);
     }
 
-    let optimizer = djvu_rs::optimizer::Optimizer::new(request);
+    // A progress line on an interactive stderr only: the JSON on stdout is
+    // the machine-readable contract and a pipe must not see the line either.
+    use std::io::IsTerminal;
+    let show_progress = std::io::stderr().is_terminal();
+    let mut optimizer = djvu_rs::optimizer::Optimizer::new(request);
+    if show_progress {
+        optimizer = optimizer.with_progress(|event| {
+            eprint!(
+                "\r\x1b[K{} {}/{} {} {} B",
+                event.phase.as_str(),
+                event.component_index + 1,
+                event.component_count,
+                String::from_utf8_lossy(&event.component_id),
+                event.bytes_so_far
+            );
+        });
+    }
+    let end_progress = || {
+        if show_progress {
+            eprint!("\r\x1b[K");
+        }
+    };
     if dry_run {
-        println!("{}", optimizer.plan(&input_bytes)?.to_json());
+        let plan = optimizer.plan(&input_bytes);
+        end_progress();
+        println!("{}", plan?.to_json());
         return Ok(());
     }
 
-    let result = optimizer.optimize(&input_bytes)?;
+    let result = optimizer.optimize(&input_bytes);
+    end_progress();
+    let result = result?;
     write_atomic(output, &result.bytes)?;
     println!("{}", result.report.to_json());
     Ok(())

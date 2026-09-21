@@ -6,7 +6,10 @@ use assert_cmd::Command;
 use djvu_rs::Bitmap;
 use djvu_rs::djvu_encode::PageEncoder;
 use djvu_rs::iff::{self, Chunk};
-use djvu_rs::optimizer::{OptimizationPreset, OptimizationRequest, Optimizer};
+use djvu_rs::optimizer::{
+    OptimizationPhase, OptimizationPreset, OptimizationRequest, Optimizer, ProgressEvent,
+};
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 fn page_with_free_and_unknown_chunk() -> Vec<u8> {
@@ -30,6 +33,152 @@ fn page_with_free_and_unknown_chunk() -> Vec<u8> {
         Chunk::Leaf { .. } => panic!("page encoder must emit a FORM"),
     }
     iff::emit(&file)
+}
+
+/// The bundled spec with a `FREE` chunk inserted at the root, so a run has
+/// several components to walk and one rewrite to apply.
+fn bundle_with_free_chunk() -> Vec<u8> {
+    let bytes = fs::read("tests/fixtures/DjVu3Spec_bundled.djvu").unwrap();
+    let mut file = iff::parse(&bytes).unwrap();
+    match &mut file.root {
+        Chunk::Form { children, .. } => children.insert(
+            2,
+            Chunk::Leaf {
+                id: *b"FREE",
+                data: vec![0; 33],
+            },
+        ),
+        Chunk::Leaf { .. } => panic!("bundle must be a FORM"),
+    }
+    iff::emit(&file)
+}
+
+/// Collect every event a run reports, in order.
+fn recording_optimizer(
+    request: OptimizationRequest,
+) -> (Optimizer, Arc<Mutex<Vec<ProgressEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let optimizer = Optimizer::new(request)
+        .with_progress(move |event| sink.lock().unwrap().push(event.clone()));
+    (optimizer, events)
+}
+
+/// Every event of `phase`, checked for one-step indices and monotone bytes.
+fn phase_events(events: &[ProgressEvent], phase: OptimizationPhase) -> Vec<ProgressEvent> {
+    let phase_events: Vec<ProgressEvent> = events
+        .iter()
+        .filter(|event| event.phase == phase)
+        .cloned()
+        .collect();
+    for (position, event) in phase_events.iter().enumerate() {
+        assert_eq!(event.component_index, position, "{phase:?} index order");
+        assert_eq!(event.component_count, phase_events.len(), "{phase:?} count");
+        if position > 0 {
+            assert!(
+                event.bytes_so_far >= phase_events[position - 1].bytes_so_far,
+                "{phase:?} bytes must not decrease"
+            );
+        }
+    }
+    phase_events
+}
+
+#[test]
+fn progress_reports_plan_then_rewrite_then_verify_per_component() {
+    let input = bundle_with_free_chunk();
+    let (optimizer, events) = recording_optimizer(OptimizationRequest::lossless_cleanup());
+
+    let result = optimizer.optimize(&input).unwrap();
+    let events = events.lock().unwrap().clone();
+
+    // Phases arrive in order and never interleave.
+    let order: Vec<OptimizationPhase> = events.iter().map(|event| event.phase).collect();
+    let mut sorted = order.clone();
+    sorted.sort_by_key(|phase| match phase {
+        OptimizationPhase::Plan => 0,
+        OptimizationPhase::Rewrite => 1,
+        OptimizationPhase::Verify => 2,
+        _ => 3,
+    });
+    assert_eq!(order, sorted, "phases must not interleave");
+
+    // Plan: one event per root child of the DJVM, the FREE chunk included.
+    let plan = phase_events(&events, OptimizationPhase::Plan);
+    let root_children = match iff::parse(&input).unwrap().root {
+        Chunk::Form { children, .. } => children.len(),
+        Chunk::Leaf { .. } => unreachable!(),
+    };
+    assert_eq!(plan.len(), root_children);
+    assert_eq!(plan[0].component_id, *b"DIRM");
+    assert_eq!(plan[2].component_id, *b"FREE");
+    assert!(plan.iter().any(|event| event.component_id == *b"DJVU"));
+    // The header-inclusive sizes add up to the root payload minus its
+    // secondary ID, short of one pad byte per odd-length child.
+    let walked = plan.last().unwrap().bytes_so_far;
+    let payload = input.len() - 16;
+    assert!(
+        walked <= payload && walked + root_children >= payload,
+        "plan walked {walked} B of a {payload} B payload"
+    );
+
+    // Rewrite: exactly the one FREE removal, its input payload as bytes.
+    let rewrite = phase_events(&events, OptimizationPhase::Rewrite);
+    assert_eq!(rewrite.len(), 1);
+    assert_eq!(rewrite[0].component_id, *b"FREE");
+    assert_eq!(rewrite[0].bytes_so_far, 33);
+
+    // Verify: the output's components, one fewer than the input's.
+    let verify = phase_events(&events, OptimizationPhase::Verify);
+    assert_eq!(verify.len(), root_children - 1);
+    assert!(verify.iter().all(|event| event.component_id != *b"FREE"));
+    let walked = verify.last().unwrap().bytes_so_far;
+    let payload = result.bytes.len() - 16;
+    assert!(
+        walked <= payload && walked + root_children >= payload,
+        "verify walked {walked} B of a {payload} B payload"
+    );
+}
+
+#[test]
+fn plan_alone_reports_only_the_plan_phase() {
+    let input = page_with_free_and_unknown_chunk();
+    let (optimizer, events) = recording_optimizer(OptimizationRequest::lossless_cleanup());
+
+    optimizer.plan(&input).unwrap();
+    let events = events.lock().unwrap().clone();
+
+    // A single-page DJVU is one component: the root FORM itself.
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].phase, OptimizationPhase::Plan);
+    assert_eq!(events[0].component_id, *b"DJVU");
+    assert_eq!(events[0].component_count, 1);
+    assert_eq!(events[0].bytes_so_far, input.len() - 4);
+}
+
+#[test]
+fn pass_through_run_reports_no_rewrite_events() {
+    let input = PageEncoder::from_bitmap(&Bitmap::new(8, 8))
+        .encode()
+        .unwrap();
+    let (optimizer, events) = recording_optimizer(OptimizationRequest::lossless_cleanup());
+
+    optimizer.optimize(&input).unwrap();
+    let events = events.lock().unwrap().clone();
+
+    let phases: Vec<OptimizationPhase> = events.iter().map(|event| event.phase).collect();
+    assert_eq!(phases, [OptimizationPhase::Plan, OptimizationPhase::Verify]);
+}
+
+#[test]
+fn optimizer_without_hook_is_unchanged() {
+    let input = bundle_with_free_chunk();
+    let silent = Optimizer::new(OptimizationRequest::lossless_cleanup());
+    let (observed, _) = recording_optimizer(OptimizationRequest::lossless_cleanup());
+    assert_eq!(
+        silent.optimize(&input).unwrap(),
+        observed.optimize(&input).unwrap()
+    );
 }
 
 #[test]
@@ -153,6 +302,8 @@ fn cli_dry_run_does_not_write_and_normal_run_is_atomic() {
         ])
         .assert()
         .success()
+        // stderr is a pipe here, so no progress line and no escape codes.
+        .stderr(predicates::str::is_empty())
         .get_output()
         .stdout
         .clone();
@@ -171,7 +322,8 @@ fn cli_dry_run_does_not_write_and_normal_run_is_atomic() {
             "lossless-cleanup",
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::is_empty());
     assert!(output.exists());
     assert_eq!(
         fs::read(&input).unwrap(),
