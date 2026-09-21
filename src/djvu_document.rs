@@ -708,8 +708,9 @@ impl DjVuPage {
             crate::render_cache::register(&layers);
             layers
         });
-        // Stamp the LRU access tick so `enforce_cache_budget` can evict the
-        // least-recently-rendered pages first.
+        // Stamp the page's LRU access tick so `enforce_cache_budget` can evict
+        // the least-recently-rendered pages first. The process-wide governor
+        // ranks individual layers by their own ticks instead (#813).
         layers.bump_access();
         layers
     }
