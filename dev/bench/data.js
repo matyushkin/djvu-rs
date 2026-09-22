@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790025760605,
+  "lastUpdate": 1790079548900,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19522,6 +19522,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 33873000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7944c8a231e66f7b963892abef646a6bb5b4784e",
+          "message": "feat(optimizer)!: quality-aware archival re-encode (#814) (#824)\n\n* feat(optimizer)!: quality-aware archival re-encode (#814)\n\nThe archival preset now does measured lossy work. With a quality floor\n(`--max-ssim-loss L` / `OptimizationRequest::with_max_ssim_loss`) it\nre-encodes each page's IW44 background and keeps the result only when it\nis both smaller than the input and within the floor: `1 - ssim <= L`,\nSSIM measured between the layer decoded from the input and the layer\ndecoded from its replacement. The search is a bisection over the IW44\nslice count from one slice up to the count the input carries, so the\n`plan` phase carries the cost; `optimize` reuses the payloads its plan\nencoded and never encodes a page twice.\n\nJB2 text masks are re-encoded only on request (`--lossy-text` /\n`with_lossy_text(true)`), with lossy symbol matching under the same\nfloor, measured on the mask rendered as ink on paper. Masks that use a\nshared (INCL) or page (Djbz) dictionary are skipped. Without a floor the\narchival preset re-encodes nothing and warns which knob enables it.\nPages left untouched are counted in one warning per reason.\n\nPlan and report gain per-component `quality` (`ssim`, `ssim_loss`,\n`slices`) and a top-level `min_ssim`. `quality_floor_met` is now\nmeasured rather than declared.\n\n`DjVuDocumentMut::replace_leaves_by_id` (crate-private) replaces every\nleaf of one ID inside a FORM by a new list of payloads, so a re-encode\ncan change the number of BG44 chunks. `apply_rewrites` now shifts a\npath at every depth by the FREE chunks removed ahead of it; before, a\nFREE at the root ahead of a page plus a FREE inside that page would have\nremoved the wrong leaf.\n\nReal fixtures, `--preset archival --max-ssim-loss 0.02 --lossy-text`:\nboy 4803 -> 3362 B, chicken 12440 -> 9150 B, carte 154282 -> 147736 B,\ncolorbook 2925013 -> 2442462 B (62 pages, min_ssim 0.980, 17.6 s).\n\nBREAKING CHANGE: `OptimizationRequest`, `RewriteAction`,\n`RewrittenComponent`, `OptimizationPlan` and `OptimizationReport` are\nnow `#[non_exhaustive]`. `RewriteAction` gains `ReencodeBackground`\nand `ReencodeMask`; `RewrittenComponent` gains `quality:\nOption<ComponentQuality>` and drops `Eq`; `OptimizationPlan` and\n`OptimizationReport` gain `min_ssim: Option<f64>`;\n`OptimizationRequest` gains `lossy_text` (`with_lossy_text`). Match\narms on `RewriteAction` need a wildcard; struct literals must go\nthrough the constructors. JSON adds `\"quality\"` per component and\n`\"min_ssim\"` at the top level. Recorded in docs/api-compatibility.md §2.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* ci(api-stability): let a declared break set the semver release type (#814)\n\nThe semver gate derived its release type from Cargo.toml alone, so a\nPR that declares an intended break the way release-please reads it (a\n`!` in the title or a `BREAKING CHANGE:` footer) went red with no way\nto go green except a hand bump of the version, which\nscripts/check_package_versions.sh and the release-please manifest both\nforbid. A new step reads the declaration (PR title on pull_request,\nsquash subject on push) and passes `release-type: minor`, the breaking\naxis on 0.x; undeclared PRs keep the version-derived type, and a\ndeclared PR still fails on any break beyond a minor bump.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* ci(api-stability): a declared break is release-type major, not minor (#814)\n\ncargo-semver-checks takes an explicit `--release-type` literally: `minor`\nallows only additive changes even on a 0.x crate, and the first run with\nthe declaration still reported \"semver requires new major version\". Its\nname for the breaking axis is `major`; on 0.x that is the minor version\nbump release-please makes. Pass `major` for a declared break.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-22T13:56:35+02:00",
+          "tree_id": "b32546a0df53ca3ad8b776d9b0709a43638d85dd",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/7944c8a231e66f7b963892abef646a6bb5b4784e"
+        },
+        "date": 1790079547556,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 98000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 4871000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30773000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 28796000,
             "range": "± 0",
             "unit": "ns/iter"
           }
