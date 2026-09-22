@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790083692181,
+  "lastUpdate": 1790086064528,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19618,6 +19618,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47806000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "027279fe1a87649f15461abbc3d4f1c84659d169",
+          "message": "feat(optimizer): target-size search (#814) (#825)\n\nWith `--preset archival --max-ssim-loss L --target-size N` the optimizer\nnow bisects one loss ceiling in (0, L], shared by every layer of the\ndocument, for the least loss whose output fits in N bytes. The floor stays\nthe outer bound: a target the floor selection cannot reach is reported as\nunreachable and the floor selection is kept, `target_met = false`. A\ntarget that FREE cleanup alone meets re-encodes nothing and says so.\n\nThe size of each candidate is predicted exactly by a dry emission with\nplaceholder payloads of the chosen chunk lengths, so the search does no\ncodec work beyond the probes it needs; background probes are memoised per\nslice count, the mask is probed once, and `optimize` reuses the chunks the\nplan held for the final selection.\n\nThe plan-phase walk still reports one event per component; the search\nitself reports none and polls the cancel hook before each layer at each\nstep. Warnings and reasons print the floor as given (0.02, not the f32\nwidened to f64).\n\nTests: target met with the least loss (more slices, higher SSIM than at\nthe floor, output exactly as planned), unreachable target, target met by\ncleanup alone, target at the input size, a two-page bundle under one\nceiling, JSON fields, cancellation inside the search, CLI `--target-size`\nwith `--max-ssim-loss`. Docs: `docs/optimizer.md` section, README example,\nCLI help. No public shape change; no PERF_EXPERIMENTS entry (feature work).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-22T15:40:25+02:00",
+          "tree_id": "73d491425ecfefba954571ee45598157806eafeb",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/027279fe1a87649f15461abbc3d4f1c84659d169"
+        },
+        "date": 1790086063648,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 166000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8257999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49668000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47603000,
             "range": "± 0",
             "unit": "ns/iter"
           }
