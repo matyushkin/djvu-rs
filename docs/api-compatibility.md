@@ -115,9 +115,37 @@ they can outlive the minimum window without cost.
 
 Unintended breakage of the **stable** surface is caught by
 [`cargo-semver-checks`](#enforcement) in CI, which compares the PR against the
-latest published version and understands the `0.x` breaking axis.
+latest published version and understands the `0.x` breaking axis. An
+intended break is declared with a `!` in the PR title (`feat(scope)!: …`) or
+a `BREAKING CHANGE:` footer, the same marker release-please reads; the gate
+then checks the PR as the breaking bump it will produce (`0.Y` on 0.x) and
+still fails on any break the PR does not declare. The version itself is never
+bumped by hand.
 
 ### Intentional breaks, by release
+
+#### 0.34.0 — the optimizer's request and report types became extensible
+
+The archival preset now re-encodes page backgrounds and, on request, masks
+under a measured SSIM floor (#814, slice 3; `docs/optimizer.md`). That needs
+a new rewrite action, a measured-quality record on each rewritten component,
+a `min_ssim` summary and a `lossy_text` knob. Adding any of those to an
+exhaustive enum or a struct with all-public fields is a break, so the types
+are marked `#[non_exhaustive]` once, now, and later slices (target-size
+search) add to them without another one:
+
+| Item | Was | Is |
+|------|-----|-----|
+| [`optimizer::OptimizationRequest`](../src/optimizer.rs) | constructible struct literal | `#[non_exhaustive]`; build with `new`/`lossless_cleanup`/`archival` and `with_*`; new field `lossy_text` |
+| [`optimizer::RewriteAction`](../src/optimizer.rs) | exhaustive enum, one variant | `#[non_exhaustive]`; new variants `ReencodeBackground`, `ReencodeMask` |
+| [`optimizer::RewrittenComponent`](../src/optimizer.rs) | constructible, `Eq` | `#[non_exhaustive]`, `PartialEq` only; new field `quality: Option<ComponentQuality>` |
+| [`optimizer::OptimizationPlan`](../src/optimizer.rs) | constructible | `#[non_exhaustive]`; new field `min_ssim: Option<f64>` |
+| [`optimizer::OptimizationReport`](../src/optimizer.rs) | constructible | `#[non_exhaustive]`; new field `min_ssim: Option<f64>` |
+
+Reading fields is unchanged. A `match` on `RewriteAction` needs a wildcard
+arm; code that built any of these structs by literal switches to the
+constructors. The JSON plan and report gain `min_ssim` and a per-component
+`quality` object; existing keys keep their meaning.
 
 #### 0.33.0 — the render caches became self-bounding
 
