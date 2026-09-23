@@ -2770,6 +2770,9 @@ unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, width: usize) {
             next1 = next3;
             next3 = if k + 3 <= kmax {
                 *data.get_unchecked(row_off + k + 3) as i32
+            } else if k == 2 || k == 4 {
+                // DjVuLibre `filter_bh` keeps the previous a3 here.
+                next1
             } else {
                 0
             };
@@ -2962,6 +2965,9 @@ pub(crate) fn row_pass_inner(
             next1v = next3v;
             next3v = if k + 3 <= kmax {
                 load_rows8(data, &o, (k + 3) << sd)
+            } else if k == 2 || k == 4 {
+                // DjVuLibre `filter_bh` keeps the previous a3 here.
+                next1v
             } else {
                 i32x8::splat(0)
             };
@@ -2990,7 +2996,7 @@ pub(crate) fn row_pass_inner(
                 next1v = i32x8::splat(0);
             }
 
-            next3v = if border >= 3 {
+            next3v = if kmax >= 4 {
                 load_rows8(data, &o, (k + 3) << sd)
             } else {
                 i32x8::splat(0)
@@ -3048,6 +3054,9 @@ pub(crate) fn row_pass_inner(
             next1 = next3;
             next3 = if k + 3 <= kmax {
                 data[off + ((k + 3) << sd)] as i32
+            } else if k == 2 || k == 4 {
+                // DjVuLibre `filter_bh` keeps the previous a3 here.
+                next1
             } else {
                 0
             };
@@ -3071,7 +3080,7 @@ pub(crate) fn row_pass_inner(
                 data[idx] = (data[idx] as i32 + prev1) as i16;
             }
 
-            next3 = if border >= 3 {
+            next3 = if kmax >= 4 {
                 data[off + ((k + 3) << sd)] as i32
             } else {
                 0
@@ -3350,7 +3359,7 @@ fn inverse_wavelet_transform_from(
                     }
                 }
 
-                if border >= 3 {
+                if kmax >= 4 {
                     let off = (4 << sd) * stride;
                     if use_simd {
                         let mut ci = 0usize;
@@ -5447,5 +5456,247 @@ mod tests {
             }
             assert_eq!(buf_simd128, buf_scalar, "simd128 store8s_s1 mismatch");
         }
+    }
+
+    // ---- DjVuLibre reference inverse transform --------------------------
+
+    /// DjVuLibre `filter_bv` (IW44Image.cpp), ported line for line: the
+    /// vertical lifting and interpolation at one scale, with every border
+    /// special case.
+    fn reference_filter_bv(
+        d: &mut [i16],
+        p0: isize,
+        w: isize,
+        h: isize,
+        rowsize: isize,
+        scale: isize,
+    ) {
+        let at = |d: &[i16], i: isize| d[i as usize] as i32;
+        let mut y = 0isize;
+        let mut p = p0;
+        let s = scale * rowsize;
+        let s3 = s + s + s;
+        let h = ((h - 1) / scale) + 1;
+        while y - 3 < h {
+            // 1-Lifting
+            {
+                let mut q = p;
+                let e = q + w;
+                if y >= 3 && y + 3 < h {
+                    while q < e {
+                        let a = at(d, q - s) + at(d, q + s);
+                        let b = at(d, q - s3) + at(d, q + s3);
+                        d[q as usize] = (at(d, q) - (((a << 3) + a - b + 16) >> 5)) as i16;
+                        q += scale;
+                    }
+                } else if y < h {
+                    let mut q1 = (y + 1 < h).then_some(q + s);
+                    let mut q3 = (y + 3 < h).then_some(q + s3);
+                    while q < e {
+                        let n1 = q1.map_or(0, |i| at(d, i));
+                        let n3 = q3.map_or(0, |i| at(d, i));
+                        let p1 = if y >= 1 { at(d, q - s) } else { 0 };
+                        let p3 = if y >= 3 { at(d, q - s3) } else { 0 };
+                        let a = p1 + n1;
+                        let b = p3 + n3;
+                        d[q as usize] = (at(d, q) - (((a << 3) + a - b + 16) >> 5)) as i16;
+                        q += scale;
+                        q1 = q1.map(|i| i + scale);
+                        q3 = q3.map(|i| i + scale);
+                    }
+                }
+            }
+            // 2-Interpolation
+            {
+                let mut q = p - s3;
+                let e = q + w;
+                if y >= 6 && y < h {
+                    while q < e {
+                        let a = at(d, q - s) + at(d, q + s);
+                        let b = at(d, q - s3) + at(d, q + s3);
+                        d[q as usize] = (at(d, q) + (((a << 3) + a - b + 8) >> 4)) as i16;
+                        q += scale;
+                    }
+                } else if y >= 3 {
+                    let mut q1 = if y - 2 < h { q + s } else { q - s };
+                    while q < e {
+                        let a = at(d, q - s) + at(d, q1);
+                        d[q as usize] = (at(d, q) + ((a + 1) >> 1)) as i16;
+                        q += scale;
+                        q1 += scale;
+                    }
+                }
+            }
+            y += 2;
+            p += s + s;
+        }
+    }
+
+    /// DjVuLibre `filter_bh` (IW44Image.cpp), ported line for line.
+    fn reference_filter_bh(
+        d: &mut [i16],
+        p0: isize,
+        w: isize,
+        h: isize,
+        rowsize: isize,
+        scale: isize,
+    ) {
+        let at = |d: &[i16], i: isize| d[i as usize] as i32;
+        let mut y = 0isize;
+        let mut p = p0;
+        let s = scale;
+        let s3 = s + s + s;
+        let rowsize = rowsize * scale;
+        while y < h {
+            let mut q = p;
+            let e = p + w;
+            let (mut a0, mut a1, mut a2, mut a3) = (0i32, 0i32, 0i32, 0i32);
+            let (mut b0, mut b1, mut b2, mut b3) = (0i32, 0i32, 0i32, 0i32);
+            if q < e {
+                // x = 0
+                if q + s < e {
+                    a2 = at(d, q + s);
+                }
+                if q + s3 < e {
+                    a3 = at(d, q + s3);
+                }
+                b3 = at(d, q) - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 16) >> 5);
+                b2 = b3;
+                d[q as usize] = b3 as i16;
+                q += s + s;
+            }
+            if q < e {
+                // x = 2
+                a0 = a1;
+                a1 = a2;
+                a2 = a3;
+                if q + s3 < e {
+                    a3 = at(d, q + s3);
+                }
+                b3 = at(d, q) - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 16) >> 5);
+                d[q as usize] = b3 as i16;
+                q += s + s;
+            }
+            if q < e {
+                // x = 4
+                b1 = b2;
+                b2 = b3;
+                a0 = a1;
+                a1 = a2;
+                a2 = a3;
+                if q + s3 < e {
+                    a3 = at(d, q + s3);
+                }
+                b3 = at(d, q) - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 16) >> 5);
+                d[q as usize] = b3 as i16;
+                d[(q - s3) as usize] = (at(d, q - s3) + ((b1 + b2 + 1) >> 1)) as i16;
+                q += s + s;
+            }
+            while q + s3 < e {
+                a0 = a1;
+                a1 = a2;
+                a2 = a3;
+                a3 = at(d, q + s3);
+                b0 = b1;
+                b1 = b2;
+                b2 = b3;
+                b3 = at(d, q) - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 16) >> 5);
+                d[q as usize] = b3 as i16;
+                d[(q - s3) as usize] =
+                    (at(d, q - s3) + ((((b1 + b2) << 3) + (b1 + b2) - b0 - b3 + 8) >> 4)) as i16;
+                q += s + s;
+            }
+            while q < e {
+                a0 = a1;
+                a1 = a2;
+                a2 = a3;
+                a3 = 0;
+                b0 = b1;
+                b1 = b2;
+                b2 = b3;
+                b3 = at(d, q) - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 16) >> 5);
+                d[q as usize] = b3 as i16;
+                d[(q - s3) as usize] =
+                    (at(d, q - s3) + ((((b1 + b2) << 3) + (b1 + b2) - b0 - b3 + 8) >> 4)) as i16;
+                q += s + s;
+            }
+            while q - s3 < e {
+                b1 = b2;
+                b2 = b3;
+                if q - s3 >= p {
+                    d[(q - s3) as usize] = (at(d, q - s3) + ((b1 + b2 + 1) >> 1)) as i16;
+                }
+                q += s + s;
+            }
+            let _ = b0;
+            y += scale;
+            p += rowsize;
+        }
+    }
+
+    /// DjVuLibre `Transform::Decode::backward(p, w, h, rowsize, 32, 1)`.
+    fn reference_backward(d: &mut [i16], w: usize, h: usize, rowsize: usize) {
+        let mut scale = 16isize;
+        while scale >= 1 {
+            reference_filter_bv(d, 0, w as isize, h as isize, rowsize as isize, scale);
+            reference_filter_bh(d, 0, w as isize, h as isize, rowsize as isize, scale);
+            scale >>= 1;
+        }
+    }
+
+    /// The inverse wavelet transform matches DjVuLibre's for every page size,
+    /// including planes narrower or shorter than 128 pixels, where the coarse
+    /// scales have too few samples for the generic lifting stencil.
+    #[test]
+    fn inverse_transform_matches_djvulibre_at_every_size() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            ((seed % 4001) as i32 - 2000) as i16
+        };
+        let sizes: [(usize, usize); 19] = [
+            (1, 1),
+            (2, 3),
+            (7, 5),
+            (16, 16),
+            (31, 17),
+            (32, 32),
+            (33, 33),
+            (40, 500),
+            (64, 64),
+            (65, 65),
+            (77, 100),
+            (96, 96),
+            (100, 77),
+            (127, 127),
+            (128, 128),
+            (129, 129),
+            (181, 240),
+            (200, 13),
+            (500, 40),
+        ];
+        let mut failures = Vec::new();
+        for &(w, h) in &sizes {
+            let stride = w.div_ceil(32) * 32;
+            let rows = h.div_ceil(32) * 32;
+            let data: Vec<i16> = (0..stride * rows).map(|_| next()).collect();
+            let mut ours = FlatPlane {
+                data: data.clone(),
+                stride,
+            };
+            inverse_wavelet_transform(&mut ours, w, h, 1);
+            let mut reference = data;
+            reference_backward(&mut reference, w, h, stride);
+            let differing = (0..h)
+                .flat_map(|r| (0..w).map(move |c| r * stride + c))
+                .filter(|&i| ours.data[i] != reference[i])
+                .count();
+            if differing != 0 {
+                failures.push(format!("{w}x{h}: {differing} of {} samples differ", w * h));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

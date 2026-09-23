@@ -17,8 +17,8 @@ full PyPI/npm publish matrix are intentionally **not** planned here.
 > (v0.33.0). The plan is kept as a record; nothing here is left to execute.
 > The deferred findings in the "rejected" table now have issues: banded
 > render #811, banded encode #812, per-layer cache eviction #813, optimizer
-> roadmap #814, fallible `Pixmap::new` #815. BM44/PM44 in the conformance
-> corpus still needs an issue.
+> roadmap #814, fallible `Pixmap::new` #815, BM44/PM44 in the conformance
+> corpus #827.
 
 ## Execution order & status
 
@@ -60,7 +60,7 @@ Then **04** (needs 03), then **05**/**06** for #695, then **07**/**08** anytime.
 | Full PyPI wheel matrix + npm OIDC publish (#692) | L+ release infra; do version sync (**01**) and smoke later, not this pass. |
 | Tile-first progressive viewer API (#691) | Shipped in #744/#746/#747/#748; issue closed. |
 | Model-specific neural OCR (#693) | Shipped in four slices (#745, #749, …); issue closed. |
-| Add BM44/PM44 to `conformance/corpus.json` | Valid gap; fixtures `legacy_bm44.djvu` / `legacy_pm44.djvu` exist, corpus has no rows. Needs an issue. |
+| Add BM44/PM44 to `conformance/corpus.json` | Landed in #827: both fixtures are corpus rows. Adding them exposed an IW44 inverse-transform edge bug on planes under 128 px; after the fix they match DjVuLibre with zero mismatched pixels. |
 | Make quality.yml fail-closed / remove `\|\| true` | Intentional non-gating quality channel; do not change without maintainer ask. |
 | Open-ended "make JB2/IW44 faster" | Forbidden without measurement harness + `PERF_EXPERIMENTS.md` entry. |
 | README source-only Python/WASM install text | Accurate today, not drift; change only after real publish. |
