@@ -15923,3 +15923,66 @@ hot path pays one relaxed atomic increment per layer touched.
 total is over the ceiling — thirteen atomic loads a page instead of twelve
 read locks, so cheaper than before, but O(pages). A heap keyed by tick would
 make it O(evicted); nothing measured asks for it yet.
+
+### IW44 ignored the half-chroma flag at render time — DjVuLibre `crcb_half` reconstruction — **Kept** (2026-09-23)
+
+**Issue.** #830. IW44 colour chunks (major version 1, minor ≥ 2) carry a
+`crcb_half` flag: the high bit of the delay byte is clear. #561
+(CARTE_CHROMA_HEADER) established that the Cb/Cr planes are still decoded at
+full size, which is true. It then concluded that the flag means nothing. That
+part was wrong. DjVuLibre's `IWPixmap::get_pixmap()` passes `fast=crcb_half`
+to `Map::image()`. In fast mode the chroma planes are inverse-transformed only
+down to scale 2 (`backward(..., 32, 2)`), and each surviving sample is repeated
+over its 2×2 block. The finest chroma detail band is decoded but never drawn.
+The flag acts only at subsample 1; for subsample ≥ 2 the `i >= 4` guard makes
+it a no-op.
+
+We rendered such chroma at full resolution, so every half-chroma image
+differed from `ddjvu`. On a 127×127 synthetic `c44 -crcbhalf` image, 74.6 %
+of pixels differed by more than 4, max Δ 140, mean Δ 16.3.
+
+**Approach.** `crates/djvu-iw44/src/lib.rs`:
+
+- `decode_chunk` records `chroma_half = minor >= 2 && delay_byte & 0x80 == 0`.
+  Cb/Cr `PlaneDecoder`s stay full size (the #561 finding stands).
+- At subsample 1 with `chroma_half`, chroma reconstructs through the existing
+  compact scale-2 path (`ZIGZAG_INV_SUB2` + the transform stopped at step 2),
+  which is exactly DjVuLibre's even samples. Luma is unchanged.
+- `convert_rgb_rows` reads chroma row `row/2`, column `col/2` via
+  `ycbcr_row_from_i16_half` (nearest neighbour, the 2×2 repeat). Its old
+  `#[allow(dead_code)]` is gone; `upsample_chroma_row_bilinear` (#422) is
+  removed — DjVuLibre never interpolates here.
+- `reconstruct_band` takes a subsample (1 or 2), so the banded path (#813
+  family) reconstructs the chroma band on the compact plane. Banded output
+  equals whole-plane output (tested with keep 1 and 3 bands).
+
+**Numbers.**
+
+- 104 synthetic `c44` colour files (sizes × delay × `-crcbhalf`): all
+  bit-exact vs `ddjvu` at tolerance 0, including every half-chroma file.
+- `carte.djvu` BG44 at native size: bit-exact (was 21 % off at tolerance 0).
+  Full page at tolerance 4: 3.54 % / mean 0.528 → **1.17 % / 0.324**. The rest
+  is #831 (BG upscale origin), a separate bug.
+- New fixture `tests/fixtures/chicken_crcbhalf.djvu` (181×239, `c44
+  -crcbhalf`): bit-exact, added to `conformance/corpus.json`.
+- `to_rgb`, release, best of 7×10, main → branch: carte 7.155 → **3.832 ms
+  (−46 %)**, colorbook 5.581 → 5.427/5.679 ms, chicken 0.256 → 0.252/0.265
+  ms, history 9.197 → 9.260/9.387 ms. Pages without the flag are within noise;
+  carte is faster because two of its three planes stop one transform level
+  early and are a quarter the size.
+
+**Guard.** `compact_scale2_transform_matches_djvulibre_fast_mode` (10 plane
+sizes against a port of DjVuLibre's `backward` with `end=2`),
+`crcb_half_page_matches_ddjvu` (fixture digest = `ddjvu` pixels, banded ==
+whole), `carte_v12_allocates_full_size_chroma_planes` (now also asserts the
+flag), carte digest `0xb00a_964b_8159_1671` = `ddjvu`'s render of BG44 alone.
+
+**Decision.** Kept. Correctness fix with a speed-up on the affected pages.
+
+**Corrections to older entries.** ENCODER_INTEROP_FIX ("full-resolution
+chroma, never `crcb_half`") and CARTE_CHROMA_HEADER (#561) are right about
+plane size but wrong that the flag is inert. CHROMA_BILINEAR (#422) had the
+right premise (half-resolution chroma exists) but the wrong filter:
+DjVuLibre repeats, it does not interpolate. The encoder's `chroma_half`
+option still emits full chroma; emitting a real `crcb_half` stream is now
+possible and could be a future size experiment.
