@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790121400843,
+  "lastUpdate": 1790125222129,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19714,6 +19714,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47878000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2f04a0df109702ab3c321d6515076c129bc4783c",
+          "message": "docs(plans): mark the 2026-07 plan complete, link deferred work to issues (#816)\n\nAll eight rows of plans/README.md are done on main as of v0.33.0; the\ntable said seven were still \"ready\". Record the status audit, point the\n\"rejected\" findings at their new issues (#811-#815), and drop the comment\nin src/wasm.rs that referenced a tests/wasm_browser.rs file that no\nlonger exists (plan row 08).\n\nClaude-Session: https://claude.ai/code/session_01UgV74uCBri3keS11wBLCNo",
+          "timestamp": "2026-09-23T02:33:18+02:00",
+          "tree_id": "1e081a282bfdf958d0fa2113c81c3cb60bcbf8e9",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2f04a0df109702ab3c321d6515076c129bc4783c"
+        },
+        "date": 1790125221076,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7275000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 46110000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43933000,
             "range": "± 0",
             "unit": "ns/iter"
           }
