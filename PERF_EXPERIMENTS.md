@@ -16030,13 +16030,26 @@ was this bug.
     — forcing the old mapping through the new code was *slower* (+37…46 %).
     The per-pixel `bg_at` closure was compiled out of line
     (`composite_rows_bilinear_one::{closure#17}` in `nm`).
-  - Fix: the per-pixel step is a free `#[inline(always)]` function
-    (`bg_row_pixel`). Result: `render_corpus_color` −2.9 %,
-    `render_native_stages/*/watchmaker_color` −1.6…−2.5 %,
-    `color_native_cached` −0.9 %, `bilevel_native_cached` −0.2 %,
-    `render_colorbook` (150 dpi, downscale) −0.2 %, downscale cases within
-    ±1.3 %; **`palette_native_cached` +4.2…+7.7 %** over five runs (typical
-    +4.5 %), navm_fgbz with a BG reduced 12×.
+  - Second version: the per-pixel step became a free `#[inline(always)]`
+    function (`bg_row_pixel`) that matched on a three-way `BgRow` enum.
+    Native renders came back to −0.2…−2.9 %, but `palette_native_cached`
+    stayed at +4.2…+7.7 %, and CI's same-runner re-check flagged the *zoom*
+    path: `render_page/dpi/144…600` (boy.djvu, 100 dpi, so 1.44–6× zoom)
+    **+8.9…+18.8 %**, locally +11…+13 %. On a page without a mask every pixel
+    is background, so the per-pixel `match` on the enum sat in the hottest
+    loop and LLVM did not unswitch it.
+  - Fix: the pixel loop is a local `macro_rules!` expanded once per `BgRow`
+    variant; each copy calls its own sampler (`bg_scaled_pixel` /
+    `bg_blend_pixel`) directly. Criterion vs the same `main` baselines:
+    `render_page/dpi/*` within ±0.7 % (p > 0.05),
+    `render_corpus_color` **−15.8 %**,
+    `render_native_stages/render_pixmap/watchmaker_color` **−16.5 %**,
+    `…/cable_bilevel` **−20.6 %**, `color_native_cached` **−15.2 %**,
+    `bilevel_native_cached` **−18.9 %**, `palette_native_cached` **−13.0 %**,
+    `render_colorbook` and the downscale cases within ±1.0 % (no change).
+    The loop on `main` also tested `Option<vb>` per pixel; specialising it
+    away is where the native gain comes from. Output unchanged: 360/360
+    pages still bit-exact vs `ddjvu`.
   - Rejected: a whole-row eager horizontal pass (one load per pixel) —
     **+3.6…+10 %**; most of the row is background, but the extra pass and
     store cost more than the lazy blend.
@@ -16051,8 +16064,8 @@ was this bug.
 `scaler_rows` (bottom origin), `scaler_lerp` (floor, not truncation),
 `fg_native_frac`, `compute_red`.
 
-**Decision.** Kept. Correctness fix; speed within noise except a +4.5 %
-palette case with a 12× background.
+**Decision.** Kept. Correctness fix, and native renders are 13–21 % faster
+than `main`; zoom and downscale unchanged.
 
 **Corrections to older entries.** #279's centre-aligned BG sampling and
 nearest-cell FG44 (see `tests/diff_tolerance.md`) were close approximations

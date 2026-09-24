@@ -3950,58 +3950,60 @@ fn composite_rows_bilevel_one(
     }
 }
 
-/// The background pixel of one output column in
-/// [`composite_rows_bilinear_one`]: the horizontal half of the separable
-/// blend. `e` is the column's table entry; without one the column comes from
-/// the Q48 accumulator `bg_fx_q`, the same walk `precompute_bilinear_x`
-/// replicates. A free `#[inline(always)]` function, not a closure: the
-/// closure was compiled out of line and cost up to 37 % on native renders
-/// (#831).
+/// The background pixel of one output column for [`BgRow::Scaled`]: the
+/// horizontal half of DjVuLibre's `GPixmapScaler` (#831). The #831 arm always
+/// has a column table (`precompute_bilinear_x`).
 #[inline(always)]
-fn bg_row_pixel(src: Option<BgRow<'_>>, e: Option<BilinearX>, bg_fx_q: u64) -> (u8, u8, u8) {
-    match src {
-        None => (255, 255, 255),
-        Some(BgRow::Scaled(vert, col_start)) => {
-            // The #831 arm always has a table (`precompute_bilinear_x`).
-            let Some(e) = e else {
-                return (255, 255, 255);
-            };
-            let v0 = vert
-                .get(e.x0.wrapping_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let v1 = vert
-                .get(e.x1.wrapping_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let f = |i: usize| scaler_lerp(v0[i] as u32, v1[i] as u32, e.tx) as u8;
-            (f(0), f(1), f(2))
+fn bg_scaled_pixel(vert: &[[u16; 4]], col_start: u32, e: Option<BilinearX>) -> (u8, u8, u8) {
+    let Some(e) = e else {
+        return (255, 255, 255);
+    };
+    let v0 = vert
+        .get(e.x0.wrapping_sub(col_start) as usize)
+        .copied()
+        .unwrap_or([0; 4]);
+    let v1 = vert
+        .get(e.x1.wrapping_sub(col_start) as usize)
+        .copied()
+        .unwrap_or([0; 4]);
+    let f = |i: usize| scaler_lerp(v0[i] as u32, v1[i] as u32, e.tx) as u8;
+    (f(0), f(1), f(2))
+}
+
+/// The background pixel of one output column for [`BgRow::Blend`]: the
+/// horizontal half of the separable blend. `e` is the column's table entry;
+/// without one the column comes from the Q48 accumulator `bg_fx_q`, the same
+/// walk `precompute_bilinear_x` replicates.
+#[inline(always)]
+fn bg_blend_pixel(
+    vb_row: &[[u16; 4]],
+    bg_w: u32,
+    col_start: u32,
+    e: Option<BilinearX>,
+    bg_fx_q: u64,
+) -> (u8, u8, u8) {
+    let e = e.unwrap_or_else(|| {
+        let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+        let clamp_w = bg_w.saturating_sub(1);
+        let x0 = (bg_fx >> FRACBITS).min(clamp_w);
+        BilinearX {
+            x0,
+            x1: (x0 + 1).min(clamp_w),
+            tx: bg_fx & FRAC_MASK,
         }
-        Some(BgRow::Blend(vb_row, bg_w, col_start)) => {
-            let e = e.unwrap_or_else(|| {
-                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-                let clamp_w = bg_w.saturating_sub(1);
-                let x0 = (bg_fx >> FRACBITS).min(clamp_w);
-                BilinearX {
-                    x0,
-                    x1: (x0 + 1).min(clamp_w),
-                    tx: bg_fx & FRAC_MASK,
-                }
-            });
-            // `col_start` shifts full-bg column indices into the windowed row.
-            let v0 = vb_row
-                .get(e.x0.saturating_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let v1 = vb_row
-                .get(e.x1.saturating_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let itx = FRAC - e.tx;
-            let f = |i: usize| ((v0[i] as u32 * itx + v1[i] as u32 * e.tx + 128) >> 8) as u8;
-            (f(0), f(1), f(2))
-        }
-    }
+    });
+    // `col_start` shifts full-bg column indices into the windowed row.
+    let v0 = vb_row
+        .get(e.x0.saturating_sub(col_start) as usize)
+        .copied()
+        .unwrap_or([0; 4]);
+    let v1 = vb_row
+        .get(e.x1.saturating_sub(col_start) as usize)
+        .copied()
+        .unwrap_or([0; 4]);
+    let itx = FRAC - e.tx;
+    let f = |i: usize| ((v0[i] as u32 * itx + v1[i] as u32 * e.tx + 128) >> 8) as u8;
+    (f(0), f(1), f(2))
 }
 
 /// Write one bilinear row into `row_buf` (upscale / 1:1).
@@ -4432,10 +4434,6 @@ fn composite_rows_bilinear_one(
         }
     };
 
-    let bg_at = |ox: usize, bg_fx_q: u64| {
-        bg_row_pixel(bg_src, bx.and_then(|t| t.get(ox).copied()), bg_fx_q)
-    };
-
     // D_AA_ZOOM (opt-in): this function is only invoked when `!downscale`
     // (composite_into/composite_rows dispatch downscale to the area-average
     // path), but that includes an exact page-level 1:1 render whose *bg*
@@ -4447,80 +4445,105 @@ fn composite_rows_bilinear_one(
     let mask_upscale =
         ctx.opts.mask_aa && ctx.mask_shift == 0 && (fx_step < FRAC || fy_step < FRAC);
 
-    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let fx = (ox as u32 + ctx.offset_x) * fx_step;
-        let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
+    // The loop is expanded once per `BgRow` variant, so each copy calls its
+    // background sampler directly. A per-pixel match on the variant cost
+    // 11-13 % on zoomed renders (#831).
+    macro_rules! pixel_loop {
+        ($bg_at:expr) => {{
+            let bg_at = $bg_at;
+            for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let fx = (ox as u32 + ctx.offset_x) * fx_step;
+                let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
 
-        // `coverage` generalises the binary `is_fg` lookup to a 0..=255
-        // foreground fraction: 0 = fully background, 255 = fully foreground,
-        // matching `mask_bilinear_coverage`'s convention. With `mask_aa`
-        // disabled (default) it only ever takes the values 0 or 255 via the
-        // exact same nearest-bit test as before, and the two special cases
-        // below reproduce the original is_fg true/false branches exactly —
-        // byte-identical output.
-        let coverage: u8 = if mask_upscale {
-            if mask_all_bg {
-                0
-            } else {
-                ctx.mask.map_or(0, |m| mask_bilinear_coverage(m, fx, fy))
-            }
-        } else if !mask_all_bg
-            && mask_hoist.is_some_and(|(mask_row, mask_w)| {
-                let pxu = px as usize;
-                pxu < mask_w as usize
-                    && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
-            })
-        {
-            255
-        } else {
-            0
-        };
-
-        let (r, g, b) = if coverage == 0 {
-            bg_at(ox, bg_fx_q)
-        } else {
-            let (fr, fg_g, fb) = if let Some(pal) = ctx.fg_palette {
-                let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
-                (color.r, color.g, color.b)
-            } else if let Some(fg) = ctx.fg44 {
-                let (fg_fx, fg_fy) = if ctx.fg_red != 0 {
-                    fg_native_frac(px, py, page_h, ctx.fg_red, fg)
+                // `coverage` generalises the binary `is_fg` lookup to a 0..=255
+                // foreground fraction: 0 = fully background, 255 = fully foreground,
+                // matching `mask_bilinear_coverage`'s convention. With `mask_aa`
+                // disabled (default) it only ever takes the values 0 or 255 via the
+                // exact same nearest-bit test as before, and the two special cases
+                // below reproduce the original is_fg true/false branches exactly —
+                // byte-identical output.
+                let coverage: u8 = if mask_upscale {
+                    if mask_all_bg {
+                        0
+                    } else {
+                        ctx.mask.map_or(0, |m| mask_bilinear_coverage(m, fx, fy))
+                    }
+                } else if !mask_all_bg
+                    && mask_hoist.is_some_and(|(mask_row, mask_w)| {
+                        let pxu = px as usize;
+                        pxu < mask_w as usize
+                            && (mask_row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1
+                                != 0
+                    })
+                {
+                    255
                 } else {
-                    (
-                        map_plane_center_frac(fx, ctx.fg_x_q24),
-                        map_plane_center_frac(fy, ctx.fg_y_q24),
-                    )
+                    0
                 };
-                sample_bilinear(fg, fg_fx, fg_fy)
-            } else {
-                (0, 0, 0)
-            };
-            if coverage == 255 {
-                (fr, fg_g, fb)
-            } else {
-                // Partial coverage (mask_aa only): blend fg/bg proportionally
-                // to the interpolated mask coverage for a smoothed glyph edge.
-                let (br, bg_g, bb) = bg_at(ox, bg_fx_q);
-                let cov = coverage as u32;
-                let inv = 255 - cov;
-                let blend =
-                    |f: u8, b: u8| -> u8 { ((f as u32 * cov + b as u32 * inv + 127) / 255) as u8 };
-                (blend(fr, br), blend(fg_g, bg_g), blend(fb, bb))
-            }
-        };
 
-        // D1: skip LUT scatter reads when gamma is the identity mapping.
-        if ctx.gamma_is_identity {
-            pixel[0] = r;
-            pixel[1] = g;
-            pixel[2] = b;
-        } else {
-            pixel[0] = ctx.gamma_lut[r as usize];
-            pixel[1] = ctx.gamma_lut[g as usize];
-            pixel[2] = ctx.gamma_lut[b as usize];
-        }
-        pixel[3] = 255;
-        bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
+                let (r, g, b) = if coverage == 0 {
+                    bg_at(ox, bg_fx_q)
+                } else {
+                    let (fr, fg_g, fb) = if let Some(pal) = ctx.fg_palette {
+                        let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
+                        (color.r, color.g, color.b)
+                    } else if let Some(fg) = ctx.fg44 {
+                        let (fg_fx, fg_fy) = if ctx.fg_red != 0 {
+                            fg_native_frac(px, py, page_h, ctx.fg_red, fg)
+                        } else {
+                            (
+                                map_plane_center_frac(fx, ctx.fg_x_q24),
+                                map_plane_center_frac(fy, ctx.fg_y_q24),
+                            )
+                        };
+                        sample_bilinear(fg, fg_fx, fg_fy)
+                    } else {
+                        (0, 0, 0)
+                    };
+                    if coverage == 255 {
+                        (fr, fg_g, fb)
+                    } else {
+                        // Partial coverage (mask_aa only): blend fg/bg proportionally
+                        // to the interpolated mask coverage for a smoothed glyph edge.
+                        let (br, bg_g, bb) = bg_at(ox, bg_fx_q);
+                        let cov = coverage as u32;
+                        let inv = 255 - cov;
+                        let blend = |f: u8, b: u8| -> u8 {
+                            ((f as u32 * cov + b as u32 * inv + 127) / 255) as u8
+                        };
+                        (blend(fr, br), blend(fg_g, bg_g), blend(fb, bb))
+                    }
+                };
+
+                // D1: skip LUT scatter reads when gamma is the identity mapping.
+                if ctx.gamma_is_identity {
+                    pixel[0] = r;
+                    pixel[1] = g;
+                    pixel[2] = b;
+                } else {
+                    pixel[0] = ctx.gamma_lut[r as usize];
+                    pixel[1] = ctx.gamma_lut[g as usize];
+                    pixel[2] = ctx.gamma_lut[b as usize];
+                }
+                pixel[3] = 255;
+                bg_fx_q = bg_fx_q.wrapping_add(bg_fx_step_q);
+            }
+        }};
+    }
+    match bg_src {
+        None => pixel_loop!(|_: usize, _: u64| (255, 255, 255)),
+        Some(BgRow::Scaled(vert, col_start)) => pixel_loop!(|ox: usize, _: u64| {
+            bg_scaled_pixel(vert, col_start, bx.and_then(|t| t.get(ox).copied()))
+        }),
+        Some(BgRow::Blend(vb_row, bg_w, col_start)) => pixel_loop!(|ox: usize, q: u64| {
+            bg_blend_pixel(
+                vb_row,
+                bg_w,
+                col_start,
+                bx.and_then(|t| t.get(ox).copied()),
+                q,
+            )
+        }),
     }
 }
 
