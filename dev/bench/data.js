@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790266949308,
+  "lastUpdate": 1790290288359,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19906,6 +19906,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 27039000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "25f74c059ab22f5a7edf8dec622cb071b998077a",
+          "message": "fix(dirm): read the shared annotation like DjVuLibre (#833) (#837)\n\nDIRM flag 3 marks the document's shared annotation. The reader folded it\ninto plain includes, so component_directory() showed `I` where\n`djvused ls` shows `A`, and a bundled rewrite saved it back as flag 0.\n\n- Decode flag 3 as DirmComponentKind::SharedAnno; encode it back as 3.\n  It still maps to the public ComponentKind::Shared (no API break).\n- component_directory() lists it as `A`.\n- metadata() falls back to the (metadata ...) block of the shared\n  annotation when METa/METz is absent. This is the only source\n  `djvused print-meta` reads. Bundled, indirect and component-resolver\n  parses keep its ANTa/ANTz chunks.\n- Semantic gate: collapse thumbnail rows into one trailing\n  `T <thumbnails>` like `djvused ls`, and decode octal escapes in\n  print-meta values.\n- Add czech.djvu (85 pages) and carte.djvu (1) to the conformance\n  corpus.\n\nCloses #833\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T00:26:42+02:00",
+          "tree_id": "ee1992b24b219d7a7e23659f48a78ca26649d781",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/25f74c059ab22f5a7edf8dec622cb071b998077a"
+        },
+        "date": 1790290286600,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8180999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49180000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47351000,
             "range": "± 0",
             "unit": "ns/iter"
           }
