@@ -560,6 +560,14 @@ pub fn emitted_size(chunk: &Chunk) -> usize {
     emitted_size_inner(chunk, false)
 }
 
+/// Byte length of `chunk` as [`emit`] frames it, without the trailing
+/// word-alignment pad: the 8-byte header plus the declared length.
+///
+/// This is the component size a bundled `DIRM` records for a `FORM`.
+pub fn framed_size(chunk: &Chunk) -> usize {
+    emitted_size_inner(chunk, true)
+}
+
 fn emitted_size_inner(chunk: &Chunk, suppress_inner_pad: bool) -> usize {
     match chunk {
         Chunk::Form {

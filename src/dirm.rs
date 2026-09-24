@@ -236,6 +236,44 @@ impl DirmPayload {
         }
     }
 
+    /// Rewrite the 24-bit size table in the metadata to `sizes`.
+    ///
+    /// DjVuLibre trusts these sizes when it reads a bundled component, so an
+    /// edit that changes a component's length must update them. A size is the
+    /// component's `FORM` header plus its declared length, without the pad
+    /// byte. The metadata stays byte-identical when the table already matches,
+    /// when it is all zeros (sizes unknown, readers use `FORM` boundaries), or
+    /// when it cannot be decoded. Returns whether the metadata changed.
+    #[cfg(feature = "std")]
+    pub fn update_sizes(&mut self, sizes: &[u32]) -> bool {
+        let n = self.nfiles as usize;
+        if sizes.len() != n {
+            return false;
+        }
+        let Ok(mut meta) = crate::bzz::bzz_decode(&self.metadata) else {
+            return false;
+        };
+        let Some(table) = meta.get_mut(..n * 3) else {
+            return false;
+        };
+        if table.iter().all(|&b| b == 0) {
+            return false;
+        }
+        let new: Vec<u8> = sizes
+            .iter()
+            .flat_map(|&size| {
+                let [_, a, b, c] = size.min(0xff_ffff).to_be_bytes();
+                [a, b, c]
+            })
+            .collect();
+        if *table == *new {
+            return false;
+        }
+        table.copy_from_slice(&new);
+        self.metadata = crate::bzz_encode::bzz_encode(&meta);
+        true
+    }
+
     /// Build an indirect `DIRM` (no offset table) from component descriptors.
     #[cfg(feature = "std")]
     pub fn build_indirect(count: usize, flags: &[u8], ids: &[String]) -> Self {
@@ -483,5 +521,27 @@ mod tests {
         assert!(comps.iter().all(|c| c.kind == DirmComponentKind::Page));
         assert_eq!(comps[0].id, "p0000");
         assert_eq!(comps[1].id, "p0001");
+    }
+
+    #[test]
+    fn update_sizes_rewrites_only_a_known_changed_table() {
+        let ids = ["a.djvu".to_string(), "b.djvu".to_string()];
+        let sizes = |p: &DirmPayload| p.components().iter().map(|c| c.size).collect::<Vec<_>>();
+
+        let mut known = DirmPayload::build_bundled(2, &[1, 1], &ids, &[100, 200]);
+        let before = known.metadata.clone();
+        assert!(!known.update_sizes(&[100, 200]), "matching table is kept");
+        assert_eq!(known.metadata, before);
+        assert!(known.update_sizes(&[100, 301]));
+        assert_eq!(sizes(&known), [100, 301]);
+        assert_eq!(known.components()[1].id, "b.djvu");
+
+        let mut unknown = DirmPayload::build_bundled(2, &[1, 1], &ids, &[]);
+        let before = unknown.metadata.clone();
+        assert!(
+            !unknown.update_sizes(&[100, 200]),
+            "zero table means unknown"
+        );
+        assert_eq!(unknown.metadata, before);
     }
 }
