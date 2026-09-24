@@ -1222,7 +1222,7 @@ where
 /// window of 1 costs nothing extra).
 #[cfg(feature = "parallel")]
 fn default_streaming_window() -> usize {
-    rayon::current_num_threads().min(4).max(1)
+    rayon::current_num_threads().clamp(1, 4)
 }
 
 #[cfg(not(feature = "parallel"))]
