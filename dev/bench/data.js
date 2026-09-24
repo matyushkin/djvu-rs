@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790291810270,
+  "lastUpdate": 1790293241812,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20002,6 +20002,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 48543000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6387a790de995837b8506e8cbad91d96a76dd26e",
+          "message": "fix(mut): update the DIRM size table when a bundled edit resizes a component (#840)\n\nDjVuLibre reads a bundled component by its DIRM offset and by the 24-bit\nsize in the DIRM metadata. The document mutator recomputed only the\noffsets and kept the metadata verbatim, so any edit that grew or shrank a\npage left a stale size. djvused and ddjvu then failed with \"Unexpected End\nOf File\" (carte, czech, colorbook, DjVu3Spec_bundled after set_metadata).\n\n- djvu-iff: add framed_size(), the FORM header plus declared length without\n  the pad byte. All 13 bundled fixtures record exactly this value.\n- DirmPayload::update_sizes() rewrites the table and re-encodes the BZZ\n  metadata only when a known size changed. An all-zero table (sizes\n  unknown) and a matching table stay byte-identical.\n- recompute_dirm_offsets() updates sizes first, then offsets: a re-encoded\n  table can change the DIRM length and so every later offset.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T01:00:30+02:00",
+          "tree_id": "e5d2adff740780239dc38e6deb1472c533158a71",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/6387a790de995837b8506e8cbad91d96a76dd26e"
+        },
+        "date": 1790293240663,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 124000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6780000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 42000000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40355000,
             "range": "± 0",
             "unit": "ns/iter"
           }
