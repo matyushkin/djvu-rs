@@ -41,10 +41,20 @@ pub(crate) fn form_byte_range(offset: u32, size_be: [u8; 4]) -> Range<u64> {
 pub(crate) enum DirmComponentKind {
     /// A renderable page (`FORM:DJVU`).
     Page,
-    /// A shared dictionary (`FORM:DJVI`).
+    /// A shared include component (`FORM:DJVI`), e.g. a symbol dictionary.
     Shared,
+    /// The document's shared annotation (`FORM:DJVI`, DIRM flag 3). DjVuLibre
+    /// keeps document metadata in its `(metadata …)` block.
+    SharedAnno,
     /// A thumbnail (`FORM:THUM`).
     Thumbnail,
+}
+
+impl DirmComponentKind {
+    /// Whether the component is a `FORM:DJVI` include (plain or annotation).
+    pub(crate) fn is_include(self) -> bool {
+        matches!(self, Self::Shared | Self::SharedAnno)
+    }
 }
 
 /// One DIRM component descriptor: its kind and resolver id.
@@ -191,6 +201,7 @@ impl DirmPayload {
             let kind = match flag & 0x3f {
                 1 => DirmComponentKind::Page,
                 2 => DirmComponentKind::Thumbnail,
+                3 => DirmComponentKind::SharedAnno,
                 _ => DirmComponentKind::Shared,
             };
             let id = read_nt_string(&meta, &mut pos).unwrap_or_default();
@@ -408,6 +419,23 @@ mod tests {
         let bytes = p.encode();
         let p2 = DirmPayload::decode(&bytes).expect("decode built");
         assert_eq!(p2.encode(), bytes);
+    }
+
+    #[test]
+    fn flag_three_decodes_as_shared_annotation() {
+        let ids = vec!["dict".to_string(), "anno".to_string(), "t".to_string()];
+        let p = DirmPayload::build_bundled(3, &[0, 3, 2], &ids, &[]);
+        let kinds: Vec<_> = p.components().iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                DirmComponentKind::Shared,
+                DirmComponentKind::SharedAnno,
+                DirmComponentKind::Thumbnail
+            ]
+        );
+        assert!(kinds[0].is_include() && kinds[1].is_include());
+        assert!(!kinds[2].is_include());
     }
 
     #[test]

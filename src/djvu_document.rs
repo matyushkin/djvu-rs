@@ -1234,6 +1234,9 @@ pub struct DjVuDocument {
     page_byte_ranges: Vec<core::ops::Range<u64>>,
     /// Configurable resource limits supplied at parse/open time.
     resource_limits: Option<crate::resource_limits::ResourceLimits>,
+    /// `ANTa`/`ANTz` chunks of the shared-annotation component (DIRM flag 3),
+    /// or empty. DjVuLibre reads document metadata from here (#833).
+    shared_anno: Vec<RawChunk>,
 }
 
 #[cfg(feature = "std")]
@@ -1387,7 +1390,7 @@ impl DjVuDocument {
         let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
+            .filter(|(_, e)| e.kind.is_include())
             .filter_map(|(comp_idx, entry)| {
                 let sf = sub_forms.get(comp_idx)?;
                 let chunks = parse_sub_form(sf.data).ok()?;
@@ -1398,6 +1401,7 @@ impl DjVuDocument {
                 ))
             })
             .collect();
+        let shared_anno = bundled_shared_anno(&entries, &sub_forms);
 
         let base = data.as_ptr() as usize;
         let mut pages = Vec::new();
@@ -1446,6 +1450,7 @@ impl DjVuDocument {
                 global_chunks,
                 page_byte_ranges,
                 resource_limits: None,
+                shared_anno,
             },
             opts.limits,
         ))
@@ -1507,6 +1512,7 @@ impl DjVuDocument {
         #[cfg(not(feature = "std"))]
         let mut shared_djbz: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut page_components: Vec<(ComponentId, Vec<u8>)> = Vec::new();
+        let mut shared_anno = Vec::new();
 
         for entry in &entries {
             let component = component_id_from_dirm(entry);
@@ -1524,6 +1530,9 @@ impl DjVuDocument {
                 });
             }
 
+            if entry.kind == DirmComponentKind::SharedAnno {
+                shared_anno = annotation_chunks(&resolved_form.chunks);
+            }
             match component_kind {
                 ComponentKind::Page => page_components.push((component, resolved)),
                 ComponentKind::Shared => {
@@ -1568,6 +1577,7 @@ impl DjVuDocument {
             // Indirect component bytes live outside the index buffer.
             page_byte_ranges: Vec::new(),
             resource_limits: None,
+            shared_anno,
         })
     }
 
@@ -1602,6 +1612,7 @@ impl DjVuDocument {
                     global_chunks,
                     page_byte_ranges,
                     resource_limits: None,
+                    shared_anno: Vec::new(),
                 })
             }
             b"BM44" | b"PM44" => {
@@ -1614,6 +1625,7 @@ impl DjVuDocument {
                     global_chunks: Vec::new(),
                     page_byte_ranges,
                     resource_limits: None,
+                    shared_anno: Vec::new(),
                 })
             }
             b"DJVM" => {
@@ -1662,7 +1674,7 @@ impl DjVuDocument {
                     let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
+                        .filter(|(_, e)| e.kind.is_include())
                         .filter_map(|(comp_idx, entry)| {
                             let sf = sub_forms.get(comp_idx)?;
                             let chunks = parse_sub_form(sf.data).ok()?;
@@ -1677,7 +1689,7 @@ impl DjVuDocument {
                     let djvi_djbz: BTreeMap<String, Vec<u8>> = entries
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.kind == DirmComponentKind::Shared)
+                        .filter(|(_, e)| e.kind.is_include())
                         .filter_map(|(comp_idx, entry)| {
                             let sf = sub_forms.get(comp_idx)?;
                             let chunks = parse_sub_form(sf.data).ok()?;
@@ -1685,6 +1697,7 @@ impl DjVuDocument {
                             Some((entry.id.clone(), djbz.data.to_vec()))
                         })
                         .collect();
+                    let shared_anno = bundled_shared_anno(&entries, &sub_forms);
 
                     let mut pages = Vec::new();
                     let mut page_byte_ranges = Vec::new();
@@ -1749,10 +1762,24 @@ impl DjVuDocument {
                         global_chunks,
                         page_byte_ranges,
                         resource_limits: None,
+                        shared_anno,
                     })
                 } else {
                     // Indirect: pages must be resolved by name
                     let resolver = resolver.ok_or(DocError::NoResolver)?;
+
+                    // Metadata is optional: an unresolvable shared annotation
+                    // must not fail the document open.
+                    let shared_anno = entries
+                        .iter()
+                        .find(|e| e.kind == DirmComponentKind::SharedAnno)
+                        .and_then(|entry| resolver(&entry.id).ok())
+                        .and_then(|bytes| {
+                            parse_form(&bytes)
+                                .ok()
+                                .map(|form| annotation_chunks(&form.chunks))
+                        })
+                        .unwrap_or_default();
 
                     let mut pages = Vec::new();
                     let mut page_idx = 0usize;
@@ -1776,6 +1803,7 @@ impl DjVuDocument {
                         // index buffer — no meaningful range to expose here.
                         page_byte_ranges: Vec::new(),
                         resource_limits: None,
+                        shared_anno,
                     })
                 }
             }
@@ -2030,19 +2058,34 @@ impl DjVuDocument {
     /// Parse document-level metadata from a METz (BZZ-compressed) or METa
     /// (plain text) chunk.
     ///
-    /// Returns `Ok(None)` if no METa/METz chunk is present.
+    /// Without METa/METz, falls back to the `(metadata …)` block of the
+    /// shared-annotation component, where DjVuLibre (`djvused set-meta`)
+    /// stores it (#833).
+    ///
+    /// Returns `Ok(None)` if neither source carries metadata.
     pub fn metadata(&self) -> Result<Option<DjVuMetadata>, DocError> {
-        match self.chunk_payload(b"METz", b"METa")? {
-            Some(bytes) => Ok(Some(crate::metadata::parse_metadata(&bytes)?)),
-            None => Ok(None),
+        if let Some(bytes) = self.chunk_payload(b"METz", b"METa")? {
+            return Ok(Some(crate::metadata::parse_metadata(&bytes)?));
         }
+        let find = |id: &[u8; 4]| {
+            self.shared_anno
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| c.data.as_slice())
+        };
+        let Some(bytes) = decode_paired_payload(find(b"ANTz"), find(b"ANTa"))? else {
+            return Ok(None);
+        };
+        let meta = crate::metadata::parse_metadata(&bytes)?;
+        Ok((meta != DjVuMetadata::default()).then_some(meta))
     }
 
     /// Component directory from the document `DIRM` chunk.
     ///
     /// Returns an empty vector when no `DIRM` is present (typical single-page
     /// `FORM:DJVU`). Kind letters match DjVuLibre `djvused ls`: `P` page,
-    /// `I` shared/include, `T` thumbnail.
+    /// `I` shared/include, `A` shared annotation, `T` thumbnail. Unlike
+    /// `djvused ls`, every thumbnail entry is listed in DIRM order.
     pub fn component_directory(&self) -> Result<Vec<ComponentDirectoryEntry>, DocError> {
         let Some(data) = self.raw_chunk(b"DIRM") else {
             return Ok(Vec::new());
@@ -2056,6 +2099,7 @@ impl DjVuDocument {
                     DirmComponentKind::Page => 'P',
                     DirmComponentKind::Thumbnail => 'T',
                     DirmComponentKind::Shared => 'I',
+                    DirmComponentKind::SharedAnno => 'A',
                 },
                 id: component.id,
             })
@@ -2362,7 +2406,7 @@ impl core::ops::Deref for MmapDocument {
 fn component_id_from_dirm(component: &DirmComponent) -> ComponentId {
     let kind = match component.kind {
         DirmComponentKind::Page => ComponentKind::Page,
-        DirmComponentKind::Shared => ComponentKind::Shared,
+        DirmComponentKind::Shared | DirmComponentKind::SharedAnno => ComponentKind::Shared,
         DirmComponentKind::Thumbnail => ComponentKind::Thumbnail,
     };
     ComponentId::new(component.id.clone(), kind)
@@ -2591,6 +2635,29 @@ fn parse_page_from_chunks(
 ///
 /// The `data` bytes start with a 4-byte form type (e.g. `DJVU`), followed by
 /// sequential IFF chunks.
+/// Copy the `ANTa`/`ANTz` chunks of a shared-annotation component.
+fn annotation_chunks(chunks: &[IffChunk<'_>]) -> Vec<RawChunk> {
+    chunks
+        .iter()
+        .filter(|c| &c.id == b"ANTa" || &c.id == b"ANTz")
+        .map(|c| RawChunk {
+            id: c.id,
+            data: c.data.to_vec(),
+        })
+        .collect()
+}
+
+/// Annotation chunks of the bundled shared-annotation component, if any.
+fn bundled_shared_anno(entries: &[DirmComponent], sub_forms: &[&IffChunk<'_>]) -> Vec<RawChunk> {
+    entries
+        .iter()
+        .position(|e| e.kind == DirmComponentKind::SharedAnno)
+        .and_then(|idx| sub_forms.get(idx))
+        .and_then(|sf| parse_sub_form(sf.data).ok())
+        .map(|chunks| annotation_chunks(&chunks))
+        .unwrap_or_default()
+}
+
 fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
     if data.len() < 4 {
         return Err(DocError::Malformed("sub-form data too short"));
@@ -2750,6 +2817,92 @@ mod tests {
             black, 308_624,
             "mask content must match the ddjvu reference"
         );
+    }
+
+    fn czech_expected_metadata() -> Vec<(String, String)> {
+        [
+            ("HostComputer", "schroeder"),
+            ("ModDate", "2017-12-14T22:19:04+00:00"),
+            ("Producer", "Aleš Kapica, djvutool 0.8"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    fn sorted_extra(doc: &DjVuDocument) -> Vec<(String, String)> {
+        let mut extra = doc
+            .metadata()
+            .unwrap()
+            .expect("shared annotation carries (metadata …)")
+            .extra;
+        extra.sort();
+        extra
+    }
+
+    /// #833: DIRM flag 3 marks the shared annotation. `djvused ls` lists it as
+    /// `A`, and `djvused print-meta` reads document metadata from its
+    /// `(metadata …)` block; czech.djvu has no METa/METz chunk.
+    #[test]
+    fn shared_annotation_is_listed_and_supplies_metadata() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/czech.djvu");
+        let data = std::fs::read(path).unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let annotations: Vec<String> = doc
+            .component_directory()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.kind == 'A')
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(annotations, ["shared_anno.iff"]);
+        assert_eq!(sorted_extra(&doc), czech_expected_metadata());
+
+        // The indirect form resolves the shared annotation by name too.
+        let indirect = crate::djvm::to_indirect(&data).unwrap();
+        let components = indirect.components;
+        let doc = DjVuDocument::parse_with_resolver(
+            &indirect.index,
+            Some(|name: &str| {
+                components
+                    .iter()
+                    .find(|(id, _)| id == name)
+                    .map(|(_, bytes)| bytes.clone())
+                    .ok_or(DocError::IndirectResolve(name.to_string()))
+            }),
+        )
+        .unwrap();
+        assert_eq!(sorted_extra(&doc), czech_expected_metadata());
+    }
+
+    /// #833: rewriting a bundled document keeps DIRM flag 3; it used to be
+    /// saved as a plain include (flag 0).
+    #[test]
+    fn page_removal_keeps_shared_annotation_flag() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/czech.djvu");
+        let data = std::fs::read(path).unwrap();
+        let removal =
+            crate::djvm::remove_pages(&data, &[0], crate::djvm::UnreachablePolicy::Preserve)
+                .unwrap();
+        let doc = DjVuDocument::parse(&removal.document).unwrap();
+        assert!(
+            doc.component_directory()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.kind == 'A' && entry.id == "shared_anno.iff")
+        );
+        assert_eq!(sorted_extra(&doc), czech_expected_metadata());
+    }
+
+    /// A document without METa/METz or a shared annotation has no metadata.
+    #[test]
+    fn metadata_is_none_without_shared_annotation() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/carte.djvu");
+        let doc = DjVuDocument::parse(&std::fs::read(path).unwrap()).unwrap();
+        assert!(doc.metadata().unwrap().is_none());
     }
 
     /// A NAVM bookmark chain nested far deeper than `MAX_NAVM_DEPTH` must error,

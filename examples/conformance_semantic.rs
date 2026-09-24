@@ -67,8 +67,13 @@ fn djvused_metadata_signature(raw: &str) -> String {
         let Some((key, rest)) = line.split_once('\t') else {
             continue;
         };
-        let value = rest.trim().trim_matches('"');
-        pairs.push((key.to_ascii_lowercase(), text_signature(value)));
+        // djvused prints values as S-expression strings with octal byte
+        // escapes (`"Ale\305\241"`); decode them like the outline plane.
+        let value = match outline_tokens(rest.trim()).ok().as_deref() {
+            Some([OutlineToken::String(value)]) => value.clone(),
+            _ => rest.trim().trim_matches('"').to_string(),
+        };
+        pairs.push((key.to_ascii_lowercase(), text_signature(&value)));
     }
     pairs.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
     pairs
@@ -84,6 +89,17 @@ fn directory_signature(entries: &[(char, String)]) -> String {
         .map(|(kind, id)| format!("{kind}\t{id}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Collapse thumbnail entries the way `djvused ls` prints them: one trailing
+/// `T <thumbnails>` row whatever the number of `FORM:THUM` components.
+fn collapse_thumbnails(entries: Vec<(char, String)>) -> Vec<(char, String)> {
+    let (thumbnails, mut rest): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|(kind, _)| *kind == 'T');
+    if !thumbnails.is_empty() {
+        rest.push(('T', "<thumbnails>".to_string()));
+    }
+    rest
 }
 
 fn djvused_directory_signature(raw: &str) -> String {
@@ -404,8 +420,8 @@ fn process(path: &Path, max_pages: usize) -> Result<bool, String> {
         .as_ref()
         .map(metadata_signature)
         .unwrap_or_default();
-    // DjVuLibre print-meta exposes annotation-carried file metadata. The corpus
-    // fixtures have neither METa nor print-meta payloads today; both empty → match.
+    // DjVuLibre print-meta reads the `(metadata …)` block of the shared
+    // annotation; `metadata()` falls back to the same source (#833).
     let theirs_meta = djvused_metadata_signature(&djvused(path, "print-meta")?);
     all_match &= emit(path, 0, "metadata", ours_meta, theirs_meta);
 
@@ -422,6 +438,7 @@ fn process(path: &Path, max_pages: usize) -> Result<bool, String> {
             .unwrap_or_default();
         ours_dir.push(('P', fallback));
     }
+    let ours_dir = collapse_thumbnails(ours_dir);
     let theirs_dir = djvused_directory_signature(&djvused(path, "ls")?);
     all_match &= emit(path, 0, "dirm", directory_signature(&ours_dir), theirs_dir);
 
@@ -538,6 +555,34 @@ mod tests {
         let value = djvused_bookmarks_value(nested).unwrap();
         assert_ne!(value, djvused_bookmarks_value(siblings).unwrap());
         assert_ne!(value, djvused_bookmarks_value(swapped).unwrap());
+    }
+
+    #[test]
+    fn metadata_parser_decodes_octal_escapes() {
+        let raw = "Producer\t\"Ale\\305\\241 Kapica\"\nModDate\t\"2017\"\n";
+        assert_eq!(
+            djvused_metadata_signature(raw),
+            "moddate=2017\nproducer=Aleš Kapica"
+        );
+    }
+
+    #[test]
+    fn thumbnails_collapse_to_one_trailing_row() {
+        let entries = vec![
+            ('T', "a.thumb".to_string()),
+            ('P', "p1.djvu".to_string()),
+            ('A', "shared_anno.iff".to_string()),
+            ('T', "b.thumb".to_string()),
+        ];
+        assert_eq!(
+            directory_signature(&collapse_thumbnails(entries)),
+            "P\tp1.djvu\nA\tshared_anno.iff\nT\t<thumbnails>"
+        );
+        let raw = "   1 P   151892  carte.djvu\n     T           <thumbnails>\n";
+        assert_eq!(
+            djvused_directory_signature(raw),
+            "P\tcarte.djvu\nT\t<thumbnails>"
+        );
     }
 
     #[test]

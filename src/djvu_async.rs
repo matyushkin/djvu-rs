@@ -348,7 +348,7 @@ where
         };
         match entry.comp_type {
             DirmComponentKind::Page => pages.push(LazyPageIndex { range }),
-            DirmComponentKind::Shared => {
+            DirmComponentKind::Shared | DirmComponentKind::SharedAnno => {
                 shared.insert(entry.id, LazyComponentIndex { range });
             }
             DirmComponentKind::Thumbnail => {}

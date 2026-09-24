@@ -26,7 +26,7 @@
     {
       "id": "metadata-meta-vs-print-meta",
       "category": "semantic-source",
-      "rationale": "djvu-rs metadata() reads METa/METz; DjVuLibre print-meta exposes annotation-carried file metadata. The conformance corpus currently has neither payload, so both signatures are empty and match. Divergences outside that contract must be filed separately."
+      "rationale": "djvu-rs metadata() reads METa/METz first, then falls back to the (metadata ...) block of the DIRM shared-annotation component, the only source DjVuLibre print-meta reads (#833). czech.djvu covers the shared-annotation path; no corpus document carries METa/METz, which DjVuLibre ignores."
     }
   ]
 }
