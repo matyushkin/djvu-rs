@@ -15986,3 +15986,89 @@ right premise (half-resolution chroma exists) but the wrong filter:
 DjVuLibre repeats, it does not interpolate. The encoder's `chroma_half`
 option still emits full chroma; emitting a real `crcb_half` stream is now
 possible and could be a future size experiment.
+
+### Native-size BG/FG44 upscale — DjVuLibre's exact rules, not a centre-aligned approximation (#831, 2026-09-24)
+
+**Issue.** #831. At page size, a reduced BG44 (`red` = 2..12) or FG44 was
+enlarged with #279's centre-aligned bilinear mapping, counted from the top.
+DjVuLibre counts rows from the **bottom** (DjVu coordinates grow upwards) and
+uses its own coordinate table. Every page whose height is not a multiple of
+`red` was shifted by one or more page rows. Tolerance 4, width 99999:
+colorbook 53/62 pages over the 0.8 % gate, czech 52/85, history 2/3 (page 0 at
+36.7 %), carte 1/1 (1.17 %). The CI baseline for colorbook page 0 (0.7488 %)
+was this bug.
+
+**Approach.** Port DjVuLibre's rules for a render at page size
+(`native_bg_red` / `native_fg_red`, both `0` for any other size):
+
+- `compute_red`: the `red` in 1..=12 with `ceil(page / red) == plane` on both
+  axes.
+- BG, `GPixmapScaler` with `prepare_coord(1, red)`: `scaler_coord(k) = beg +
+  (red/2 + 16k) / red`, `beg = (16 + red) / (2 red) - 8`, clamped to
+  `(len - 1) * 16` (red 3: −5, 0, 6, 11, 16, 22). Rows from the bottom
+  (`scaler_rows`). Vertical pass rounded to 8 bits, then horizontal, both
+  `lo + ((up - lo) f + 8) >> 4` (`scaler_lerp`, written in its exact
+  unsigned form).
+- FG44, `GPixmap::stencil`: the whole cell `(x / red, y_from_bottom / red)`,
+  no interpolation (`fg_native_frac`).
+- The column table (`precompute_bilinear_x`) and `bg_rows_needed` (banded
+  path, #811) follow the same coordinates. Down-scaled and zoomed renders
+  keep the #279 mapping.
+
+**Numbers.**
+
+- 360 native pages over 21 fixtures: **all bit-exact vs `ddjvu` at tolerance
+  0** (the two rotated `boy_jb2` fixtures are skipped by the harness on `main`
+  too — a size check before rotation). Before: the counts above.
+- Conformance corpus: colorbook grows from page 0 to all 62 pages, history (3)
+  is added; the local gate passes. czech and carte also render bit-exact but
+  fail the *semantic* gate (DIRM thumbnails / shared-annotation type, and
+  annotation-carried metadata) — filed separately.
+- Speed, `cargo bench --bench render`, criterion vs a saved `main` baseline:
+  - First version: **+32…39 %** on every native render (watchmaker,
+    cable, navm). Isolation runs showed the cost was not the new arithmetic
+    — forcing the old mapping through the new code was *slower* (+37…46 %).
+    The per-pixel `bg_at` closure was compiled out of line
+    (`composite_rows_bilinear_one::{closure#17}` in `nm`).
+  - Second version: the per-pixel step became a free `#[inline(always)]`
+    function (`bg_row_pixel`) that matched on a three-way `BgRow` enum.
+    Native renders came back to −0.2…−2.9 %, but `palette_native_cached`
+    stayed at +4.2…+7.7 %, and CI's same-runner re-check flagged the *zoom*
+    path: `render_page/dpi/144…600` (boy.djvu, 100 dpi, so 1.44–6× zoom)
+    **+8.9…+18.8 %**, locally +11…+13 %. On a page without a mask every pixel
+    is background, so the per-pixel `match` on the enum sat in the hottest
+    loop and LLVM did not unswitch it.
+  - Fix: the pixel loop is a local `macro_rules!` expanded once per `BgRow`
+    variant; each copy calls its own sampler (`bg_scaled_pixel` /
+    `bg_blend_pixel`) directly. Criterion vs the same `main` baselines:
+    `render_page/dpi/*` within ±0.7 % (p > 0.05),
+    `render_corpus_color` **−15.8 %**,
+    `render_native_stages/render_pixmap/watchmaker_color` **−16.5 %**,
+    `…/cable_bilevel` **−20.6 %**, `color_native_cached` **−15.2 %**,
+    `bilevel_native_cached` **−18.9 %**, `palette_native_cached` **−13.0 %**,
+    `render_colorbook` and the downscale cases within ±1.0 % (no change).
+    The loop on `main` also tested `Option<vb>` per pixel; specialising it
+    away is where the native gain comes from. Output unchanged: 360/360
+    pages still bit-exact vs `ddjvu`.
+  - Rejected: a whole-row eager horizontal pass (one load per pixel) —
+    **+3.6…+10 %**; most of the row is background, but the extra pass and
+    store cost more than the lazy blend.
+  - Rejected (no effect): the unsigned `scaler_lerp` form alone did not move
+    the palette case (kept anyway: exact and simpler).
+
+**Guard.** `native_reduced_bg_fg_matches_ddjvu_digest` in
+`tests/document_and_render.rs` — colorbook page 9 (2208×3646, BG 736×1216 red
+3, `3646 % 3 == 1`; FG44 184×304 red 12): four regions, `render_region` and
+`render_region_tiled`, FNV-1a of RGB = `ddjvu -page=10` (3.5.28). Fails on
+`main` at the first region. Unit tests: `scaler_coord` (red 2 and 3, clamp),
+`scaler_rows` (bottom origin), `scaler_lerp` (floor, not truncation),
+`fg_native_frac`, `compute_red`.
+
+**Decision.** Kept. Correctness fix, and native renders are 13–21 % faster
+than `main`; zoom and downscale unchanged.
+
+**Corrections to older entries.** #279's centre-aligned BG sampling and
+nearest-cell FG44 (see `tests/diff_tolerance.md`) were close approximations
+for page-size renders; the exact rules are the bottom-origin
+`GPixmapScaler` table and the bottom-origin FG cell. The "tolerance-4 native
+ceiling" of 0.8 % no longer needs its colorbook headroom.
