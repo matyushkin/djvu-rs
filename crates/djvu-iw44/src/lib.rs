@@ -4501,7 +4501,10 @@ mod tests {
             let empty = img.rgb_rows(5..5).expect("an empty range is fine");
             assert_eq!((empty.width, empty.height), (w, 0));
             assert!(matches!(img.rgb_rows(0..h + 1), Err(Iw44Error::Invalid)));
-            assert!(matches!(img.rgb_rows(7..6), Err(Iw44Error::Invalid)));
+            // A reversed range is the input under test.
+            #[allow(clippy::reversed_empty_ranges)]
+            let reversed = 7..6;
+            assert!(matches!(img.rgb_rows(reversed), Err(Iw44Error::Invalid)));
         }
     }
 

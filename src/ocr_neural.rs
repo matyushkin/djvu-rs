@@ -54,7 +54,10 @@ mod tests {
 
     #[test]
     fn load_always_returns_init_failed() {
-        let err = CandleBackend::load("/some/model/dir").unwrap_err();
+        // `unwrap_err` needs `Debug` on the backend, which it does not implement.
+        let Err(err) = CandleBackend::load("/some/model/dir") else {
+            panic!("load must fail");
+        };
         assert!(matches!(err, OcrError::InitFailed(_)));
     }
 
