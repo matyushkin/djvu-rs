@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790290288359,
+  "lastUpdate": 1790291810270,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19954,6 +19954,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47351000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a8237174c26afb29cbacf76176194af8c37c0ccf",
+          "message": "fix(text): decode sibling zones against the previous sibling, write version 1 (#839)\n\nTXTa/TXTz zone boxes and text offsets of a sibling are delta-encoded against\nthe previous sibling's own decoded box and span (DjVuLibre\nDjVuTXT::Zone::decode). The decoder used a different reference, so words\nafter the first in a line got wrong boxes and text on files written by\nDjVuLibre (for example carte.djvu). The encoder mirrored the same rule, so\nour own files round-tripped but other readers decoded them wrongly.\n\n- Decoder: keep each child's decoded context and use it for the next sibling.\n- Encoder: use the same rule; search a zone's text from the end of the\n  previous sibling, so repeated words keep their own offsets.\n- Encoder: write text layer version 1. DjVuLibre rejects version 0\n  (\"Text version unexpected\").\n\nFiles that older djvu-rs versions wrote carry version 0 and the old sibling\noffsets; re-save the text layer to fix them.\n\nConformance: text_hierarchy is now fail-closed. It compares the zone tree\nand leaf-zone text without trailing DjVu separators, as djvused print-txt\nprints it. The text-hierarchy-observational accepted difference is removed.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T00:45:04+02:00",
+          "tree_id": "43d1a956fdea0d22a4627d8e757a1197543ad150",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/a8237174c26afb29cbacf76176194af8c37c0ccf"
+        },
+        "date": 1790291808991,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 165000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8253000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 50028000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 48543000,
             "range": "± 0",
             "unit": "ns/iter"
           }
