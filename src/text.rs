@@ -369,7 +369,7 @@ fn parse_text_layer_inner(data: &[u8], page_height: u32) -> Result<TextLayer, Te
     // Parse zone tree
     let mut zones = Vec::new();
     if pos < data.len() {
-        let zone = parse_zone(data, &mut pos, None, None, &full_text, page_height, 0)?;
+        let (zone, _) = parse_zone(data, &mut pos, None, None, &full_text, page_height, 0)?;
         zones.push(zone);
     }
 
@@ -408,7 +408,7 @@ fn parse_zone(
     full_text: &FullText<'_>,
     page_height: u32,
     depth: usize,
-) -> Result<TextZone, TextError> {
+) -> Result<(TextZone, ZoneCtx), TextError> {
     if depth > MAX_ZONE_DEPTH {
         return Err(TextError::ZoneTooDeep);
     }
@@ -505,7 +505,9 @@ fn parse_zone(
     let mut prev_child: Option<ZoneCtx> = None;
 
     for _ in 0..children_count {
-        let child = parse_zone(
+        // The next sibling is delta-encoded against this child's own decoded
+        // (unclamped) box and text span, as in DjVuLibre `DjVuTXT::Zone::decode`.
+        let (child, child_ctx) = parse_zone(
             data,
             pos,
             Some(&ctx),
@@ -514,27 +516,19 @@ fn parse_zone(
             page_height,
             depth + 1,
         )?;
-        prev_child = Some(ZoneCtx {
-            x: child.rect.x as i32,
-            y: {
-                // We need to store the original bottom-left y for delta calc.
-                // Inverse remap: bl_y = page_height - (tl_y + height)
-                (page_height as i32).saturating_sub(child.rect.y as i32 + child.rect.height as i32)
-            },
-            width: child.rect.width as i32,
-            height: child.rect.height as i32,
-            text_start: ts as i32,
-            text_len: tl as i32,
-        });
+        prev_child = Some(child_ctx);
         children.push(child);
     }
 
-    Ok(TextZone {
-        kind,
-        rect,
-        text: zone_text,
-        children,
-    })
+    Ok((
+        TextZone {
+            kind,
+            rect,
+            text: zone_text,
+            children,
+        },
+        ctx,
+    ))
 }
 
 /// Extract a substring from `full_text` starting at byte offset `start` with byte length `len`.
@@ -1000,6 +994,41 @@ mod tests {
         assert_eq!(result.zones[0].text, "Hi");
         assert_eq!(result.zones[0].rect.width, 100);
         assert_eq!(result.zones[0].rect.height, 50);
+    }
+
+    /// A sibling zone is delta-encoded against the previous sibling's own
+    /// text span (DjVuLibre `DjVuTXT::Zone::decode`). Using the parent's span
+    /// gave every word after the first one the wrong text. Expected words are
+    /// `djvused carte.djvu -e 'select 1; print-txt'`, which drops the
+    /// trailing separator each span carries.
+    #[test]
+    fn sibling_words_decode_against_previous_sibling() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/carte.djvu");
+        let doc = crate::DjVuDocument::parse(&std::fs::read(path).unwrap()).unwrap();
+        let layer = doc.page(0).unwrap().text_layer().unwrap().unwrap();
+        let first_line = &layer.zones[0].children[0];
+        assert_eq!(first_line.kind, TextZoneKind::Line);
+        let words: Vec<&str> = first_line
+            .children
+            .iter()
+            .map(|w| w.text.trim_end())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "0",
+                "PERATI",
+                "0",
+                "bl$",
+                "o/'",
+                "G\u{7f}ArE\u{7f}L",
+                "\u{7f}t\u{7f}rA",
+                "SItINGTON"
+            ]
+        );
+        let second_line = &layer.zones[0].children[1];
+        assert_eq!(second_line.children[0].text.trim_end(), "a\u{7f}ain\u{7f}t");
     }
 
     // ── Paragraph reflow tests (#228) ───────────────────────────────────────

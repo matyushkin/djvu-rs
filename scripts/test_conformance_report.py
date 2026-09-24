@@ -97,14 +97,15 @@ class ValidateTests(unittest.TestCase):
         failures = report.validate_semantic(self.manifest, rows)
         self.assertTrue(any("semantic divergence" in item for item in failures))
 
-    def test_text_hierarchy_divergence_is_observational(self):
+    def test_text_hierarchy_divergence_fails(self):
         rows = self._semantic_rows()
         for row in rows:
             if row["plane"] == "text_hierarchy":
                 row["status"] = "diverge"
                 row["ours"] = "a"
                 row["djvulibre"] = "b"
-        self.assertEqual(report.validate_semantic(self.manifest, rows), [])
+        failures = report.validate_semantic(self.manifest, rows)
+        self.assertTrue(any("text_hierarchy" in item for item in failures))
 
     def test_semantic_status_must_match_payload(self):
         row = {

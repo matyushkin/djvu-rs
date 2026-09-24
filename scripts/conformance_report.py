@@ -200,11 +200,7 @@ def validate_semantic(
         if key in seen:
             failures.append(f"duplicate semantic result for {key}")
         seen.add(key)
-        # text_hierarchy is covered and published, but zone trees still diverge
-        # across implementations (parent text fill + OCR segmentation). Treat
-        # those divergences as observational until the trees align; other planes
-        # remain fail-closed.
-        if row["status"] != "match" and row["plane"] != "text_hierarchy":
+        if row["status"] != "match":
             failures.append(f"semantic divergence for {key[0]} page {key[1]} {key[2]}")
         if (row["status"] == "match") != (row["ours"] == row["djvulibre"]):
             failures.append(f"semantic status/payload contradiction for {key}")
