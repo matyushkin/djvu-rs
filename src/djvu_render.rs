@@ -730,6 +730,9 @@ fn plane_q24(plane: Option<&Pixmap>, page_w: u32, page_h: u32) -> (u64, u64) {
 /// pixel centres instead of top-left corners.  This matches the usual image
 /// resampling convention and reduces native-resolution drift against ddjvu for
 /// non-integer page→plane ratios such as colorbook's 2260→754 BG scale.
+///
+/// A render at page size does not use it: there the BG follows
+/// [`scaler_coord`] and the FG44 follows [`fg_native_frac`] (#831).
 #[inline]
 fn map_plane_center_frac(page_frac: u32, q24: u64) -> u32 {
     let centered = (((page_frac as u64 + (FRAC / 2) as u64) * q24) >> 24) as u32;
@@ -772,6 +775,99 @@ fn bg_q24(bg: Option<(u32, u32)>, page_w: u32, page_h: u32) -> (u64, u64) {
         }
         _ => (0, 0),
     }
+}
+
+/// DjVuLibre's `compute_red`: the reduction `red` with
+/// `ceil(page / red) == plane` on both axes, if one exists in `1..=12`
+/// (DjVuLibre draws no background past 12).
+fn compute_red(page: (u32, u32), plane: (u32, u32)) -> Option<u32> {
+    (1..=12u32).find(|&red| page.0.div_ceil(red) == plane.0 && page.1.div_ceil(red) == plane.1)
+}
+
+/// The background reduction when a page is rendered at its own size and the
+/// background plane is smaller: DjVuLibre then enlarges the plane with
+/// `GPixmapScaler` (#831). `0` for every other case, which keeps the
+/// centre-aligned bilinear mapping of [`bg_q24`].
+fn native_bg_red(page: (u32, u32), full: (u32, u32), plane: (u32, u32)) -> u32 {
+    if page != full {
+        return 0;
+    }
+    match compute_red(page, plane) {
+        Some(red) if red >= 2 => red,
+        _ => 0,
+    }
+}
+
+/// [`CompositeContext::fg_red`]: the FG44 reduction when the render is at
+/// page size, else `0`.
+fn native_fg_red(page: (u32, u32), full: (u32, u32), fg: &Pixmap) -> u32 {
+    if page != full {
+        return 0;
+    }
+    compute_red(page, (fg.width, fg.height)).unwrap_or(0)
+}
+
+/// FG44 plane coordinates, in 1/16 pixels, of page pixel `(x, y)` on a
+/// render at page size: the whole cell `(x / red, y / red)` with `y`
+/// counted from the bottom, as DjVuLibre's `GPixmap::stencil` reads it.
+/// Whole-pixel coordinates make the bilinear samplers return that cell.
+#[inline]
+fn fg_native_frac(x: u32, y: u32, page_h: u32, red: u32, fg: &Pixmap) -> (u32, u32) {
+    let from_bottom = page_h.saturating_sub(1).saturating_sub(y) / red;
+    let row = fg.height.saturating_sub(1).saturating_sub(from_bottom);
+    ((x / red) << FRACBITS, row << FRACBITS)
+}
+
+/// DjVuLibre's `GScaler::prepare_coord` for an enlargement by `red`: the
+/// source position of output pixel `k` in 1/16 pixels. Both axes count from
+/// the plane's origin — the left column, and the **bottom** row, since DjVu
+/// coordinates grow upwards. The result can be slightly negative at the
+/// first pixel and is clamped to the plane's last pixel at the far edge.
+#[inline]
+fn scaler_coord(k: u32, red: u32, plane_len: u32) -> i32 {
+    let beg = ((FRAC + red) / (2 * red)) as i32 - (FRAC / 2) as i32;
+    let c = beg + ((red / 2 + k * FRAC) / red) as i32;
+    c.min((plane_len.saturating_sub(1) * FRAC) as i32)
+}
+
+/// The column entry of [`scaler_coord`] for page column `x`.
+#[inline]
+fn scaler_x(x: u32, red: u32, plane_w: u32) -> BilinearX {
+    let c = scaler_coord(x, red, plane_w);
+    let clamp = |v: i32| v.clamp(0, plane_w.saturating_sub(1) as i32) as u32;
+    BilinearX {
+        x0: clamp(c >> FRACBITS),
+        x1: clamp((c >> FRACBITS) + 1),
+        tx: (c & FRAC_MASK as i32) as u32,
+    }
+}
+
+/// The two plane rows, as top-origin indices, that page row `y` blends,
+/// and the weight of the second: `(lower, upper, f)`. `lower` is the row
+/// nearer the bottom, so `upper <= lower`.
+#[inline]
+fn scaler_rows(y: u32, page_h: u32, red: u32, plane_h: u32) -> (u32, u32, u32) {
+    let from_bottom = page_h.saturating_sub(1).saturating_sub(y);
+    let c = scaler_coord(from_bottom, red, plane_h);
+    let last = plane_h.saturating_sub(1) as i32;
+    let lower = (c >> FRACBITS).clamp(0, last) as u32;
+    let upper = ((c >> FRACBITS) + 1).clamp(0, last) as u32;
+    (
+        last as u32 - lower,
+        last as u32 - upper,
+        (c & FRAC_MASK as i32) as u32,
+    )
+}
+
+/// DjVuLibre's interpolation step, `lo + ((up - lo) * f + 8) >> 4`, with
+/// an arithmetic shift. `GPixmapScaler` applies it vertically, rounds to
+/// 8 bits, then applies it horizontally.
+#[inline]
+fn scaler_lerp(lo: u32, up: u32, f: u32) -> u32 {
+    // `lo + floor(x / 16)` equals `floor((16 * lo + x) / 16)`, and
+    // `16 * lo + (up - lo) * f + 8` is never negative: the unsigned form
+    // below is exact and has the shape of the bilinear blend.
+    (lo * (FRAC - f) + up * f + FRAC / 2) >> FRACBITS
 }
 
 /// Sample a pixmap at fractional coordinates using bilinear interpolation.
@@ -3011,6 +3107,10 @@ struct CompositeContext<'a> {
     /// `bg` is `None`.
     bg_x_q24: u64,
     bg_y_q24: u64,
+    /// [`native_bg_red`]: when non-zero the render is at page size and the
+    /// background is enlarged exactly like DjVuLibre's `GPixmapScaler`
+    /// instead of through `bg_x_q24`/`bg_y_q24`.
+    bg_red: u32,
     mask: Option<&'a crate::bitmap::Bitmap>,
     /// `mask_sub.trailing_zeros()` where mask_sub is 1 (full-res) or 4 (1/4-res).
     /// Using a shift instead of division avoids a UDIV instruction in the hot path.
@@ -3025,6 +3125,10 @@ struct CompositeContext<'a> {
     /// height so the bottom row remains reachable.  `0` when `fg44` is `None`.
     fg_x_q24: u64,
     fg_y_q24: u64,
+    /// The FG44 reduction on a render at page size (`0` otherwise). DjVuLibre
+    /// then paints each foreground pixel from its nearest cell, counting rows
+    /// from the bottom (`GPixmap::stencil`, #831); see [`fg_native_frac`].
+    fg_red: u32,
     gamma_lut: &'a [u8; 256],
     /// True when gamma_lut is the identity mapping (lut[i] == i for all i).
     gamma_is_identity: bool,
@@ -3082,11 +3186,30 @@ struct BilinearX {
     tx: u32,
 }
 
+/// A row's background source in [`composite_rows_bilinear_one`].
+#[derive(Clone, Copy)]
+enum BgRow<'s> {
+    /// DjVuLibre's vertical pass, rounded to 8 bits, and its first plane
+    /// column (#831). `bg_at` applies the horizontal pass per pixel.
+    Scaled(&'s [[u16; 4]], u32),
+    /// The vertical pre-blend, the plane width, and its first column.
+    Blend(&'s [[u16; 4]], u32, u32),
+}
+
 /// Build the per-column table for [`composite_rows_bilinear_one`]. Walks the
 /// exact Q48 fixed-point accumulator of the in-loop fallback (`bg_fx_q`), so
 /// table lookups and the fallback produce byte-identical coordinates.
+/// When [`CompositeContext::bg_red`] is set, the table holds the
+/// [`scaler_x`] entries instead, and the fallback is not used.
 fn precompute_bilinear_x(ctx: &CompositeContext<'_>, fx_step: u32) -> Option<Vec<BilinearX>> {
     let bg = ctx.bg?;
+    if ctx.bg_red != 0 {
+        return Some(
+            (0..ctx.out_w)
+                .map(|ox| scaler_x(ox + ctx.offset_x, ctx.bg_red, bg.width()))
+                .collect(),
+        );
+    }
     let clamp_w = bg.width().saturating_sub(1);
     let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
     let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
@@ -3135,7 +3258,17 @@ impl<'a> CompositeContext<'a> {
         let page_w = page.width() as u32;
         let page_h = page.height() as u32;
         let (fg_x_q24, fg_y_q24) = fg_q24(fg44, page_w, page_h);
+        let fg_red = fg44.map_or(0, |f| {
+            native_fg_red((page_w, page_h), (opts.width, opts.height), f)
+        });
         let (bg_x_q24, bg_y_q24) = bg_q24(bg.map(|b| (b.width(), b.height())), page_w, page_h);
+        let bg_red = bg.map_or(0, |b| {
+            native_bg_red(
+                (page_w, page_h),
+                (opts.width, opts.height),
+                (b.width(), b.height()),
+            )
+        });
         CompositeContext {
             opts,
             page_w,
@@ -3143,6 +3276,7 @@ impl<'a> CompositeContext<'a> {
             bg,
             bg_x_q24,
             bg_y_q24,
+            bg_red,
             mask,
             mask_shift,
             fg_palette,
@@ -3150,6 +3284,7 @@ impl<'a> CompositeContext<'a> {
             fg44,
             fg_x_q24,
             fg_y_q24,
+            fg_red,
             gamma_lut,
             gamma_is_identity: gamma_lut.iter().enumerate().all(|(i, &v)| v == i as u8),
             offset_x: offset.0,
@@ -3171,10 +3306,18 @@ impl<'a> CompositeContext<'a> {
             self.page_w,
             self.page_h,
         );
+        let bg_red = bg.map_or(0, |b| {
+            native_bg_red(
+                (self.page_w, self.page_h),
+                (self.opts.width, self.opts.height),
+                (b.width(), b.height()),
+            )
+        });
         CompositeContext {
             bg,
             bg_x_q24,
             bg_y_q24,
+            bg_red,
             ..*self
         }
     }
@@ -3310,6 +3453,12 @@ fn bg_rows_needed(
         let (lo, _) = area_range(plane_h, row_of(first), bg_fy_step);
         let (y0, y1) = area_range(plane_h, row_of(last), bg_fy_step);
         (lo, y1.max(y0 + 1))
+    } else if let red @ 1.. = native_bg_red((page_w, page_h), (full_w, full_h), plane) {
+        // Rows grow downwards while the scaler counts from the bottom:
+        // the first output row reads the band's top, the last its bottom.
+        let (_, lo, _) = scaler_rows(first, page_h, red, plane_h);
+        let (hi, _, _) = scaler_rows(last, page_h, red, plane_h);
+        (lo, hi + 1)
     } else {
         let clamp_h = plane_h - 1;
         let row_of =
@@ -3801,6 +3950,60 @@ fn composite_rows_bilevel_one(
     }
 }
 
+/// The background pixel of one output column in
+/// [`composite_rows_bilinear_one`]: the horizontal half of the separable
+/// blend. `e` is the column's table entry; without one the column comes from
+/// the Q48 accumulator `bg_fx_q`, the same walk `precompute_bilinear_x`
+/// replicates. A free `#[inline(always)]` function, not a closure: the
+/// closure was compiled out of line and cost up to 37 % on native renders
+/// (#831).
+#[inline(always)]
+fn bg_row_pixel(src: Option<BgRow<'_>>, e: Option<BilinearX>, bg_fx_q: u64) -> (u8, u8, u8) {
+    match src {
+        None => (255, 255, 255),
+        Some(BgRow::Scaled(vert, col_start)) => {
+            // The #831 arm always has a table (`precompute_bilinear_x`).
+            let Some(e) = e else {
+                return (255, 255, 255);
+            };
+            let v0 = vert
+                .get(e.x0.wrapping_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let v1 = vert
+                .get(e.x1.wrapping_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let f = |i: usize| scaler_lerp(v0[i] as u32, v1[i] as u32, e.tx) as u8;
+            (f(0), f(1), f(2))
+        }
+        Some(BgRow::Blend(vb_row, bg_w, col_start)) => {
+            let e = e.unwrap_or_else(|| {
+                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
+                let clamp_w = bg_w.saturating_sub(1);
+                let x0 = (bg_fx >> FRACBITS).min(clamp_w);
+                BilinearX {
+                    x0,
+                    x1: (x0 + 1).min(clamp_w),
+                    tx: bg_fx & FRAC_MASK,
+                }
+            });
+            // `col_start` shifts full-bg column indices into the windowed row.
+            let v0 = vb_row
+                .get(e.x0.saturating_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let v1 = vb_row
+                .get(e.x1.saturating_sub(col_start) as usize)
+                .copied()
+                .unwrap_or([0; 4]);
+            let itx = FRAC - e.tx;
+            let f = |i: usize| ((v0[i] as u32 * itx + v1[i] as u32 * e.tx + 128) >> 8) as u8;
+            (f(0), f(1), f(2))
+        }
+    }
+}
+
 /// Write one bilinear row into `row_buf` (upscale / 1:1).
 ///
 /// `bx` is the optional per-column table from [`precompute_bilinear_x`]
@@ -3939,7 +4142,11 @@ fn composite_rows_bilinear_one(
         // C2: Pre-hoist FG44 y-rows (row-invariant, analogous to bg_rows in B-series path).
         // Eliminates per-fg-pixel: map_plane_center_frac(fy), y0/y1/ty computation, row lookups.
         let fg_rows_1x1 = ctx.fg44.filter(|_| ctx.fg_palette.is_none()).map(|fg| {
-            let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+            let fg_fy = if ctx.fg_red != 0 {
+                fg_native_frac(0, py, page_h, ctx.fg_red, fg).1
+            } else {
+                map_plane_center_frac(fy, ctx.fg_y_q24)
+            };
             let y0 = (fg_fy >> FRACBITS).min(fg.height.saturating_sub(1)) as usize;
             let y1 = (y0 + 1).min(fg.height.saturating_sub(1) as usize);
             let ty = fg_fy & FRAC_MASK;
@@ -4071,7 +4278,10 @@ fn composite_rows_bilinear_one(
                     let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                     (color.r, color.g, color.b)
                 } else if let Some((fg_row0, fg_row1, fg_w, fg_ty)) = fg_rows_1x1 {
-                    let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
+                    let fg_fx = match px.checked_div(ctx.fg_red) {
+                        Some(cell) => cell << FRACBITS,
+                        None => map_plane_center_frac(fx, ctx.fg_x_q24),
+                    };
                     bilinear_from_rows(fg_row0, fg_row1, fg_w, fg_fx, fg_ty)
                 } else {
                     (0, 0, 0)
@@ -4142,8 +4352,48 @@ fn composite_rows_bilinear_one(
     // The pre-blend only covers the bg columns this row actually samples
     // ([col_start, col_end], from the monotonic accumulator's endpoints) —
     // a region render must not pay for the full bg width (#region bench).
-    let vb: Option<(&[[u16; 4]], u32, u32)> = match ctx.bg {
+    //
+    // #831: a native render of a reduced background takes the other arm,
+    // DjVuLibre's `GPixmapScaler`: the vertical pass, rounded to 8 bits,
+    // over the columns the row reads; `bg_at` then applies the horizontal
+    // pass to each pixel that shows the background.
+    let bg_src: Option<BgRow<'_>> = match ctx.bg {
         None => None,
+        Some(bg) if ctx.bg_red != 0 => {
+            let red = ctx.bg_red;
+            let out_w = row_buf.len() / 4;
+            let (lower, upper, f) = scaler_rows(oy + ctx.offset_y, page_h, red, bg.height());
+            let entry = |ox: usize| {
+                bx.and_then(|t| t.get(ox).copied())
+                    .unwrap_or_else(|| scaler_x(ox as u32 + ctx.offset_x, red, bg.width()))
+            };
+            let col_start = entry(0).x0;
+            let col_end = entry(out_w.saturating_sub(1)).x1.max(col_start);
+            let ncols = (col_end - col_start + 1) as usize;
+            vblend.clear();
+            vblend.resize(ncols * 4, 0);
+            let (r0, r1) = (bg.row(lower), bg.row(upper));
+            let span = col_start as usize * 4..(col_end as usize + 1) * 4;
+            if let (Some(a), Some(b)) = (r0.get(span.clone()), r1.get(span)) {
+                for ((v, &a), &b) in vblend.iter_mut().zip(a).zip(b) {
+                    *v = scaler_lerp(a as u32, b as u32, f) as u16;
+                }
+            } else {
+                for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    // Truncated rows (partial/streaming decode) read as zeros,
+                    // as in the bilinear arm below.
+                    let off = (col_start as usize + i) * 4;
+                    let p0 = r0.get(off..off + 4);
+                    let p1 = r1.get(off..off + 4);
+                    for ch in 0..3 {
+                        let a = p0.map_or(0, |q| q[ch] as u32);
+                        let b = p1.map_or(0, |q| q[ch] as u32);
+                        v[ch] = scaler_lerp(a, b, f) as u16;
+                    }
+                }
+            }
+            Some(BgRow::Scaled(vblend.as_chunks::<4>().0, col_start))
+        }
         Some(bg) => {
             let bg_fy = bg_fy_hoist.unwrap_or(0);
             let clamp_h = bg.height().saturating_sub(1);
@@ -4174,38 +4424,17 @@ fn composite_rows_bilinear_one(
                     v[ch] = (a * ity + b * ty) as u16;
                 }
             }
-            Some((vblend.as_chunks::<4>().0, bg.width(), col_start))
+            Some(BgRow::Blend(
+                vblend.as_chunks::<4>().0,
+                bg.width(),
+                col_start,
+            ))
         }
     };
 
-    // Horizontal half of the separable blend. The column entry comes from the
-    // precomputed table when available, else from the Q48 accumulator — the
-    // same walk `precompute_bilinear_x` replicates. `col_start` shifts full-bg
-    // column indices into the windowed `vb_row`.
-    let hblend =
-        |vb_row: &[[u16; 4]], bg_w: u32, col_start: u32, e: Option<BilinearX>, bg_fx_q: u64| {
-            let e = e.unwrap_or_else(|| {
-                let bg_fx = ((bg_fx_q >> 24) as u32).saturating_sub(FRAC / 2);
-                let clamp_w = bg_w.saturating_sub(1);
-                let x0 = (bg_fx >> FRACBITS).min(clamp_w);
-                BilinearX {
-                    x0,
-                    x1: (x0 + 1).min(clamp_w),
-                    tx: bg_fx & FRAC_MASK,
-                }
-            });
-            let v0 = vb_row
-                .get(e.x0.saturating_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let v1 = vb_row
-                .get(e.x1.saturating_sub(col_start) as usize)
-                .copied()
-                .unwrap_or([0; 4]);
-            let itx = FRAC - e.tx;
-            let f = |i: usize| ((v0[i] as u32 * itx + v1[i] as u32 * e.tx + 128) >> 8) as u8;
-            (f(0), f(1), f(2))
-        };
+    let bg_at = |ox: usize, bg_fx_q: u64| {
+        bg_row_pixel(bg_src, bx.and_then(|t| t.get(ox).copied()), bg_fx_q)
+    };
 
     // D_AA_ZOOM (opt-in): this function is only invoked when `!downscale`
     // (composite_into/composite_rows dispatch downscale to the area-average
@@ -4248,24 +4477,20 @@ fn composite_rows_bilinear_one(
         };
 
         let (r, g, b) = if coverage == 0 {
-            if let Some((vb_row, bg_w, col_start)) = vb {
-                hblend(
-                    vb_row,
-                    bg_w,
-                    col_start,
-                    bx.and_then(|t| t.get(ox).copied()),
-                    bg_fx_q,
-                )
-            } else {
-                (255, 255, 255)
-            }
+            bg_at(ox, bg_fx_q)
         } else {
             let (fr, fg_g, fb) = if let Some(pal) = ctx.fg_palette {
                 let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                 (color.r, color.g, color.b)
             } else if let Some(fg) = ctx.fg44 {
-                let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
-                let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
+                let (fg_fx, fg_fy) = if ctx.fg_red != 0 {
+                    fg_native_frac(px, py, page_h, ctx.fg_red, fg)
+                } else {
+                    (
+                        map_plane_center_frac(fx, ctx.fg_x_q24),
+                        map_plane_center_frac(fy, ctx.fg_y_q24),
+                    )
+                };
                 sample_bilinear(fg, fg_fx, fg_fy)
             } else {
                 (0, 0, 0)
@@ -4275,17 +4500,7 @@ fn composite_rows_bilinear_one(
             } else {
                 // Partial coverage (mask_aa only): blend fg/bg proportionally
                 // to the interpolated mask coverage for a smoothed glyph edge.
-                let (br, bg_g, bb) = if let Some((vb_row, bg_w, col_start)) = vb {
-                    hblend(
-                        vb_row,
-                        bg_w,
-                        col_start,
-                        bx.and_then(|t| t.get(ox).copied()),
-                        bg_fx_q,
-                    )
-                } else {
-                    (255, 255, 255)
-                };
+                let (br, bg_g, bb) = bg_at(ox, bg_fx_q);
                 let cov = coverage as u32;
                 let inv = 255 - cov;
                 let blend =
@@ -5852,8 +6067,16 @@ mod tests {
         out_h: u32,
     ) -> CompositeContext<'a> {
         let (fg_x_q24, fg_y_q24) = fg_q24(None, page_w, page_h);
+        let fg_red = 0;
         let bg = bg.map(PlaneView::whole);
         let (bg_x_q24, bg_y_q24) = bg_q24(bg.map(|b| (b.width(), b.height())), page_w, page_h);
+        let bg_red = bg.map_or(0, |b| {
+            native_bg_red(
+                (page_w, page_h),
+                (opts.width, opts.height),
+                (b.width(), b.height()),
+            )
+        });
         CompositeContext {
             opts,
             page_w,
@@ -5861,6 +6084,7 @@ mod tests {
             bg,
             bg_x_q24,
             bg_y_q24,
+            bg_red,
             mask,
             mask_shift: 0,
             fg_palette: None,
@@ -5868,6 +6092,7 @@ mod tests {
             fg44: None,
             fg_x_q24,
             fg_y_q24,
+            fg_red,
             gamma_lut,
             // Compute from the lut (mirroring CompositeContext::from_layers)
             // rather than hard-coding, so a future test passing a non-identity
@@ -6065,6 +6290,67 @@ mod tests {
         let (qx, qy) = bg_q24(Some((754, 1223)), 2260, 3669);
         assert_eq!(qx, (1u64 << 24) / 3);
         assert_eq!(qy, (1u64 << 24) / 3);
+    }
+
+    #[test]
+    fn scaler_coord_matches_djvulibre_prepare_coord() {
+        // GScaler::prepare_coord(in=1, out=3): beg = 19/6 - 8 = -5, then
+        // beg + (1 + 16k) / 3.
+        let got: Vec<i32> = (0..6).map(|k| scaler_coord(k, 3, 100)).collect();
+        assert_eq!(got, [-5, 0, 6, 11, 16, 22]);
+        // Clamped to the last plane pixel, (len - 1) * 16.
+        assert_eq!(scaler_coord(5, 3, 2), 16);
+        // red 2: beg = 9/2 - 8 = -4, then (1 + 16k) / 2.
+        let got: Vec<i32> = (0..4).map(|k| scaler_coord(k, 2, 100)).collect();
+        assert_eq!(got, [-4, 4, 12, 20]);
+    }
+
+    #[test]
+    fn scaler_rows_count_from_the_bottom() {
+        // 3646-row page, 1216-row plane, red 3: 3646 % 3 == 1, so a
+        // top-origin mapping is off by one page row.
+        // Bottom page row -> coordinate -5 -> both rows are the last one.
+        assert_eq!(scaler_rows(3645, 3646, 3, 1216), (1215, 1215, 11));
+        // From-bottom 1 -> coordinate 0 -> last row, no blend.
+        assert_eq!(scaler_rows(3644, 3646, 3, 1216), (1215, 1214, 0));
+        // Top page row: from-bottom 3645 -> -5 + 58321 / 3 = 19435, just
+        // below the clamp 1215 * 16 = 19440: plane rows 1214 and 1215 from
+        // the bottom, i.e. top-origin rows 1 and 0, weight 11.
+        assert_eq!(scaler_rows(0, 3646, 3, 1216), (1, 0, 11));
+    }
+
+    #[test]
+    fn scaler_lerp_rounds_with_arithmetic_shift() {
+        assert_eq!(scaler_lerp(0, 255, 8), 128);
+        assert_eq!(scaler_lerp(255, 0, 8), 128);
+        // (-255 + 8) >> 4 is -16 (floor), not -15 (truncation).
+        assert_eq!(scaler_lerp(255, 0, 1), 239);
+        assert_eq!(scaler_lerp(10, 20, 0), 10);
+        assert_eq!(scaler_lerp(10, 20, 15), 19);
+    }
+
+    #[test]
+    fn fg_native_frac_uses_bottom_origin_cells() {
+        // 3646-row page, 304-row FG44 plane, red 12: 3646 % 12 == 10.
+        let fg = Pixmap::try_new(184, 304, 0, 0, 0, 255).expect("fits the pixmap limit");
+        // The bottom 12 page rows read the last FG row.
+        assert_eq!(fg_native_frac(0, 3645, 3646, 12, &fg), (0, 303 << FRACBITS));
+        assert_eq!(fg_native_frac(0, 3634, 3646, 12, &fg), (0, 303 << FRACBITS));
+        assert_eq!(fg_native_frac(0, 3633, 3646, 12, &fg), (0, 302 << FRACBITS));
+        // The top 10 page rows form the partial first cell.
+        assert_eq!(fg_native_frac(25, 9, 3646, 12, &fg), (2 << FRACBITS, 0));
+        assert_eq!(
+            fg_native_frac(25, 10, 3646, 12, &fg),
+            (2 << FRACBITS, 1 << FRACBITS)
+        );
+    }
+
+    #[test]
+    fn compute_red_matches_djvulibre() {
+        assert_eq!(compute_red((2208, 3646), (736, 1216)), Some(3));
+        assert_eq!(compute_red((2208, 3646), (184, 304)), Some(12));
+        assert_eq!(compute_red((2208, 3646), (2208, 3646)), Some(1));
+        assert_eq!(compute_red((2208, 3646), (700, 1216)), None);
     }
 
     #[test]
