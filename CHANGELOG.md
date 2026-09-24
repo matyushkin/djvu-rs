@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.2](https://github.com/matyushkin/djvu-rs/compare/v0.35.1...v0.35.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* **dirm:** read the shared annotation like DjVuLibre ([#833](https://github.com/matyushkin/djvu-rs/issues/833)) ([#837](https://github.com/matyushkin/djvu-rs/issues/837)) ([25f74c0](https://github.com/matyushkin/djvu-rs/commit/25f74c059ab22f5a7edf8dec622cb071b998077a))
+* **djvm:** keep component ids, INCL targets and DIRM types in merge and split ([#841](https://github.com/matyushkin/djvu-rs/issues/841)) ([7b0a2d5](https://github.com/matyushkin/djvu-rs/commit/7b0a2d55204bfc71a417269d9c95a28677e5c405))
+* **mut:** update the DIRM size table when a bundled edit resizes a component ([#840](https://github.com/matyushkin/djvu-rs/issues/840)) ([6387a79](https://github.com/matyushkin/djvu-rs/commit/6387a790de995837b8506e8cbad91d96a76dd26e))
+* **text:** decode sibling zones against the previous sibling, write version 1 ([#839](https://github.com/matyushkin/djvu-rs/issues/839)) ([a823717](https://github.com/matyushkin/djvu-rs/commit/a8237174c26afb29cbacf76176194af8c37c0ccf))
+
 ## [0.35.1](https://github.com/matyushkin/djvu-rs/compare/v0.35.0...v0.35.1) (2026-09-24)
 
 
