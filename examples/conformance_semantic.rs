@@ -140,10 +140,21 @@ fn zone_kind_name(kind: &djvu_rs::text::TextZoneKind) -> &'static str {
     }
 }
 
+/// DjVu text separators that end a zone's span: column (VT), region (GS),
+/// paragraph (US) and line (LF). `djvused print-txt` does not print them.
+const TEXT_SEPARATORS: &[char] = &['\u{0b}', '\u{1d}', '\u{1f}', '\n'];
+
 fn zone_signature(zone: &TextZone) -> serde_json::Value {
+    // `djvused print-txt` prints text on leaf zones only; the text of a parent
+    // zone is the concatenation of its children, so comparing it adds nothing.
+    let text = if zone.children.is_empty() {
+        text_signature(zone.text.trim_end_matches(TEXT_SEPARATORS))
+    } else {
+        String::new()
+    };
     json!({
         "kind": zone_kind_name(&zone.kind),
-        "text": text_signature(&zone.text),
+        "text": text,
         "children": zone.children.iter().map(zone_signature).collect::<Vec<_>>(),
     })
 }

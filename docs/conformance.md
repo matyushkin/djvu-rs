@@ -53,6 +53,11 @@ Semantic planes covered per document/page:
 - page: `text`, `text_hierarchy`, `annotations`
 - document: `bookmarks`, `metadata`, `dirm`
 
+Every plane is fail-closed: a divergence from `djvused` fails the run.
+`text_hierarchy` compares the zone tree (kinds and nesting) and the text of
+leaf zones only, without trailing DjVu separators, as `djvused print-txt`
+prints it.
+
 `history.json` retains the latest 100 published run summaries. CI restores the
 previous published history before appending the current run. Missing or
 malformed current results always fail; inability to download old history does
