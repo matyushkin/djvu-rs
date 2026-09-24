@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790263825674,
+  "lastUpdate": 1790265657295,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19810,6 +19810,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47588000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "709d46891d1741c9c342470e99e4edf5463a3e87",
+          "message": "chore: clear clippy across the workspace with all features (#835)\n\n`cargo clippy --workspace --all-targets --all-features -D warnings` failed,\nalthough the CI Lint job (root crate, default features) passed:\n\n- djvu-iw44 test: a deliberate reversed range 7..6 (reversed_empty_ranges);\n  allowed locally, with a comment.\n- default_streaming_window: min(4).max(1) -> clamp(1, 4).\n- ocr_neural test: unwrap_err() needs Debug on CandleBackend, which it does\n  not implement (a compile error under the ocr-neural feature); use let-else.\n- examples jb2_same_size_a2 / jb2_crosssize_b1probe: collapsible if-let\n  (let chains) and field assignment after Default::default().\n\nNo behaviour change.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-24T17:35:36+02:00",
+          "tree_id": "2870ed0171fe8b9ca7a178692a7a6f1c87816a31",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/709d46891d1741c9c342470e99e4edf5463a3e87"
+        },
+        "date": 1790265654819,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8167000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49434000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47397000,
             "range": "± 0",
             "unit": "ns/iter"
           }
