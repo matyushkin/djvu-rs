@@ -34,16 +34,16 @@
     "mismatch_pct_delta": 0.0,
     "new_failure_count": 0,
     "new_failures": [],
-    "pages_delta": 2,
-    "previous_commit": "2f04a0df109702ab3c321d6515076c129bc4783c",
+    "pages_delta": 1,
+    "previous_commit": "75a1fb92aced2d59417ddfe737eb0f18208323db",
     "previous_status": "pass",
     "regression": false,
     "resolved_failure_count": 0,
     "resolved_failures": [],
     "status_changed": false
   },
-  "commit": "75a1fb92aced2d59417ddfe737eb0f18208323db",
-  "corpus_digest": "29106308867411013ff55076e87fd5919974f90334ae0bbf4b882ae146c9fefc",
+  "commit": "279dad09ad0498a3c6849dddd7693f43daf6525d",
+  "corpus_digest": "d42b0207ef6f0872bc8f6f83d0f73bdad3156d8245de2503c30596fa89628409",
   "diff_fuzz_registry": {
     "categories": {
       "dim-mismatch": 1,
@@ -112,10 +112,15 @@
       "pages": 1,
       "path": "tests/fixtures/legacy_pm44.djvu",
       "sha256": "8fa8bb1ac9dc020b5a1ed8b2bcf3269e166165662bcbeab0c12ebbb79764bbc9"
+    },
+    {
+      "pages": 1,
+      "path": "tests/fixtures/chicken_crcbhalf.djvu",
+      "sha256": "e2512907407fabc255e11021d5efad712335290ca9eddf1679250091bc00c471"
     }
   ],
   "max_mismatch_pct": 0.7488,
-  "pages_compared": 16,
+  "pages_compared": 17,
   "render_policy": {
     "channel_tolerance": 4,
     "max_mean_abs_diff": 0.2,
@@ -297,6 +302,17 @@
       "mismatched_px": 0,
       "page": 0,
       "total_px": 43440,
+      "width": 181
+    },
+    {
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "height": 239,
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0,
+      "mismatch_pct": 0.0,
+      "mismatched_px": 0,
+      "page": 0,
+      "total_px": 43259,
       "width": 181
     }
   ],
@@ -949,12 +965,60 @@
       "page": 0,
       "plane": "annotations",
       "status": "match"
+    },
+    {
+      "djvulibre": "[]",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "[]",
+      "page": 0,
+      "plane": "bookmarks",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "metadata",
+      "status": "match"
+    },
+    {
+      "djvulibre": "P\tchicken_crcbhalf.djvu",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "P\tchicken_crcbhalf.djvu",
+      "page": 0,
+      "plane": "dirm",
+      "status": "match"
+    },
+    {
+      "djvulibre": "",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "",
+      "page": 0,
+      "plane": "text",
+      "status": "match"
+    },
+    {
+      "djvulibre": "empty",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "empty",
+      "page": 0,
+      "plane": "text_hierarchy",
+      "status": "match"
+    },
+    {
+      "djvulibre": "0",
+      "file": "tests/fixtures/chicken_crcbhalf.djvu",
+      "ours": "0",
+      "page": 0,
+      "plane": "annotations",
+      "status": "match"
     }
   ],
   "status": "pass",
-  "timestamp": "2026-09-23T12:21:36+00:00",
+  "timestamp": "2026-09-24T10:51:33+00:00",
   "tools": {
-    "djvu_rs": "75a1fb92aced2d59417ddfe737eb0f18208323db",
+    "djvu_rs": "279dad09ad0498a3c6849dddd7693f43daf6525d",
     "djvulibre": "DDJVU --- DjVuLibre-3.5.28 (Ubuntu 3.5.28-2ubuntu0.24.04.2)"
   },
   "writer_validation": {
