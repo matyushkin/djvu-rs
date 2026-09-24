@@ -1008,14 +1008,16 @@ fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChil
     Some(ranges)
 }
 
-/// Recompute the absolute byte offsets stored in the `DIRM` chunk so they
-/// point at each `FORM:DJVU`/`FORM:DJVI` component in the about-to-be-emitted
-/// document.
+/// Recompute the absolute byte offsets and the component sizes stored in the
+/// `DIRM` chunk so they describe each `FORM:DJVU`/`FORM:DJVI`/`FORM:THUM`
+/// component in the about-to-be-emitted document.
 ///
 /// Offsets in DIRM are absolute file-byte positions (from the leading
 /// `b"AT&T"` magic) of each component's outer `b"FORM"` chunk header. After a
 /// page-chunk mutation those positions shift, and viewers that use DIRM for
 /// page navigation see the wrong bytes if the table is not refreshed.
+/// DjVuLibre also reads each component by its metadata size, so a stale size
+/// truncates an edited page ("Unexpected End Of File").
 ///
 /// No-op for non-DJVM roots and for indirect DIRM (no offset table).
 fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
@@ -1031,60 +1033,75 @@ fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
         return Ok(());
     }
 
-    // Absolute byte position of the next chunk inside the FORM:DJVM body:
-    // AT&T(4) + FORM(4) + length(4) + secondary_id "DJVM"(4) = 16.
-    let mut pos: usize = 16;
-    let mut new_offsets: Vec<u32> = Vec::new();
-    let mut dirm_idx: Option<usize> = None;
+    fn is_component(child: &Chunk) -> bool {
+        matches!(child, Chunk::Form { secondary_id: sid, .. }
+            if sid == b"DJVU" || sid == b"DJVI" || sid == b"THUM")
+    }
 
     // The `id == b"DIRM"` guard form is needed: `id` is `[u8; 4]` reached
     // through a `&` reference, so a by-value pattern would require `*b"DIRM"`
     // which clippy's redundant-guards autofix doesn't propose.
     #[allow(clippy::redundant_guards)]
-    for (i, child) in children.iter().enumerate() {
-        match child {
-            Chunk::Leaf { id, .. } if id == b"DIRM" => {
-                dirm_idx = Some(i);
-            }
-            Chunk::Form {
-                secondary_id: sid, ..
-            } if sid == b"DJVU" || sid == b"DJVI" || sid == b"THUM" => {
-                new_offsets.push(u32::try_from(pos).map_err(|_| {
-                    MutError::DirmMalformed("component offset exceeds u32 (file > 4 GiB)")
-                })?);
-            }
-            _ => {}
-        }
-        pos += iff::emitted_size(child);
-    }
-
+    let dirm_idx = children
+        .iter()
+        .position(|child| matches!(child, Chunk::Leaf { id, .. } if id == b"DIRM"));
     let Some(dirm_idx) = dirm_idx else {
         // Bundled DJVM with no DIRM is malformed by spec, but tolerate it
         // (parse_dirm would have failed during from_bytes if it mattered).
         return Ok(());
     };
 
-    let dirm = &mut children[dirm_idx];
-    let Chunk::Leaf { data, .. } = dirm else {
+    // Sizes first: they do not depend on offsets, but a re-encoded size table
+    // can change the DIRM length and so every offset after it.
+    // The 24-bit table clamps anyway; saturate instead of wrapping.
+    let new_sizes: Vec<u32> = children
+        .iter()
+        .filter(|child| is_component(child))
+        .map(|child| u32::try_from(iff::framed_size(child)).unwrap_or(u32::MAX))
+        .collect();
+
+    let Chunk::Leaf { data, .. } = &children[dirm_idx] else {
         return Err(MutError::DirmMalformed("DIRM is not a leaf chunk"));
     };
-
-    // Decode through the shared DIRM model, swap in the recomputed offsets, and
-    // re-encode. The metadata tail is preserved verbatim, so only the 4-byte
-    // offset slots change — the rewrite stays byte-preserving everywhere else.
+    // Decode through the shared DIRM model, swap in the recomputed sizes and
+    // offsets, and re-encode. The BZZ metadata is re-encoded only when a size
+    // changed; otherwise only the 4-byte offset slots change.
     let mut payload = DirmPayload::decode(data).map_err(MutError::DirmMalformed)?;
     if !payload.is_bundled() {
         // Indirect DIRM has no offset table to update.
         return Ok(());
     }
-    if payload.nfiles as usize != new_offsets.len() {
+    if payload.nfiles as usize != new_sizes.len() {
         return Err(MutError::DirmComponentCountMismatch {
             dirm: payload.nfiles as usize,
-            children: new_offsets.len(),
+            children: new_sizes.len(),
         });
     }
+    if payload.update_sizes(&new_sizes) {
+        // The offset table is fixed-width, so this length is final.
+        children[dirm_idx] = Chunk::Leaf {
+            id: *b"DIRM",
+            data: payload.encode(),
+        };
+    }
+
+    // Absolute byte position of the next chunk inside the FORM:DJVM body:
+    // AT&T(4) + FORM(4) + length(4) + secondary_id "DJVM"(4) = 16.
+    let mut pos: usize = 16;
+    let mut new_offsets: Vec<u32> = Vec::with_capacity(new_sizes.len());
+    for child in children.iter() {
+        if is_component(child) {
+            new_offsets.push(u32::try_from(pos).map_err(|_| {
+                MutError::DirmMalformed("component offset exceeds u32 (file > 4 GiB)")
+            })?);
+        }
+        pos += iff::emitted_size(child);
+    }
     payload.offsets = new_offsets;
-    *data = payload.encode();
+    children[dirm_idx] = Chunk::Leaf {
+        id: *b"DIRM",
+        data: payload.encode(),
+    };
     Ok(())
 }
 
@@ -2161,6 +2178,51 @@ mod tests {
         assert_eq!(reparsed.page_count(), original_doc.page_count());
     }
 
+    /// Helper: the DIRM metadata size of each component and its actual
+    /// `FORM` header plus declared length.
+    fn dirm_sizes_and_actual(data: &[u8]) -> (Vec<u32>, Vec<u32>) {
+        let form = crate::iff::parse_form(data).expect("parse_form");
+        let dirm = form
+            .chunks
+            .iter()
+            .find(|c| &c.id == b"DIRM")
+            .expect("DIRM present");
+        let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
+        let declared = payload.components().iter().map(|c| c.size).collect();
+        let actual = payload
+            .offsets
+            .iter()
+            .map(|&off| {
+                let o = off as usize;
+                u32::from_be_bytes([data[o + 4], data[o + 5], data[o + 6], data[o + 7]]) + 8
+            })
+            .collect();
+        (declared, actual)
+    }
+
+    #[test]
+    fn dirm_sizes_recomputed_after_page_edit() {
+        // DjVuLibre reads a bundled component by offset and metadata size; a
+        // stale size makes it read a truncated page ("Unexpected End Of File").
+        let original = read_corpus("DjVu3Spec_bundled.djvu");
+        let (declared, actual) = dirm_sizes_and_actual(&original);
+        assert_eq!(declared, actual, "fixture sizes are exact");
+
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let mut meta = DjVuMetadata::default();
+        meta.title = Some("grow page 1".into());
+        doc.page_mut(1).unwrap().set_metadata(&meta);
+        let edited = doc.into_bytes();
+
+        let (declared, actual) = dirm_sizes_and_actual(&edited);
+        assert_eq!(declared, actual, "DIRM sizes must follow the edited FORMs");
+        let (orig_declared, _) = dirm_sizes_and_actual(&original);
+        let changed: Vec<usize> = (0..declared.len())
+            .filter(|&i| declared[i] != orig_declared[i])
+            .collect();
+        assert_eq!(changed.len(), 1, "only the edited page's size changes");
+    }
+
     #[test]
     fn dirm_offsets_recomputed_after_middle_page_edit() {
         // Editing a non-first page must shift only the trailing offsets.
@@ -2178,12 +2240,15 @@ mod tests {
         let (declared, actual) = dirm_offsets_and_actual(&edited);
         assert_eq!(declared, actual);
 
-        // Pages before `mid` should have unchanged offsets vs. the original.
+        // Pages before `mid` move only by the DIRM length change (the size
+        // table is re-encoded), so they all shift by the same amount.
         let (orig_declared, _) = dirm_offsets_and_actual(&original);
+        let shift = i64::from(declared[0]) - i64::from(orig_declared[0]);
         for i in 0..mid {
             assert_eq!(
-                declared[i], orig_declared[i],
-                "offset for page {i} (before edit) must be unchanged"
+                i64::from(declared[i]) - i64::from(orig_declared[i]),
+                shift,
+                "offset for page {i} (before edit) must shift only with DIRM"
             );
         }
     }
