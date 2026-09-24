@@ -873,10 +873,17 @@ pub fn to_indirect(bundled: &[u8]) -> Result<IndirectDocument, DjvmError> {
 
 /// Merge multiple DjVu documents (raw bytes) into a single bundled DJVM.
 ///
-/// Each input document contributes all its pages to the output.
-/// Shared dictionaries (DJVI components) are included and INCL
-/// references are preserved within each source document's pages.
+/// Each input document contributes all its pages, in order. Shared
+/// components (DJVI) keep their DIRM identities so `INCL` references still
+/// resolve; an identity that an earlier document already uses is renamed
+/// (`d{doc}_{id}`) and the `INCL` chunks of that document are rewritten.
+/// The first shared annotation (DIRM flag 3, which carries the document
+/// metadata) keeps its type; later ones become ordinary includes, so their
+/// pages keep their annotations. Thumbnails are dropped: they are matched to
+/// pages by position, which a merge does not preserve.
 pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
     if documents.is_empty() {
         return Err(DjvmError::EmptyMerge);
     }
@@ -884,27 +891,91 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
     let mut components: Vec<Vec<u8>> = Vec::new();
     let mut component_ids: Vec<String> = Vec::new();
     let mut component_flags: Vec<u8> = Vec::new();
+    let mut used_ids = BTreeSet::<String>::new();
+    let mut have_shared_anno = false;
+
+    // Reserve `preferred`, or a `d{doc}_`-prefixed variant when it is taken.
+    fn claim_id(used_ids: &mut BTreeSet<String>, doc_idx: usize, preferred: String) -> String {
+        let mut id = preferred.clone();
+        let mut attempt = 0;
+        while used_ids.contains(&id) {
+            id = if attempt == 0 {
+                format!("d{doc_idx}_{preferred}")
+            } else {
+                format!("d{doc_idx}_{attempt}_{preferred}")
+            };
+            attempt += 1;
+        }
+        used_ids.insert(id.clone());
+        id
+    }
 
     for (doc_idx, &doc_data) in documents.iter().enumerate() {
         let form = iff::parse_form(doc_data)?;
 
         if &form.form_type == b"DJVU" {
             // Single-page document — the whole file is one page
+            let id = claim_id(
+                &mut used_ids,
+                doc_idx,
+                format!("p{:04}.djvu", components.len() + 1),
+            );
             components.push(doc_data.to_vec());
-            component_ids.push(format!("p{:04}.djvu", components.len()));
+            component_ids.push(id);
             component_flags.push(1); // page
         } else if &form.form_type == b"DJVM" {
-            // Multi-page bundled document — extract each FORM child
-            for chunk in &form.chunks {
-                if &chunk.id == b"FORM" && chunk.data.len() >= 4 {
-                    let child_form_type = &chunk.data[..4];
+            // Multi-page bundled document — extract each FORM child. DIRM entry
+            // i describes FORM child i; without a matching bundled directory,
+            // fall back to generated ids.
+            let forms = form
+                .chunks
+                .iter()
+                .filter(|chunk| &chunk.id == b"FORM" && chunk.data.len() >= 4)
+                .collect::<Vec<_>>();
+            let directory = form
+                .chunks
+                .iter()
+                .find(|chunk| &chunk.id == b"DIRM")
+                .and_then(|chunk| DirmPayload::decode(chunk.data).ok())
+                .filter(DirmPayload::is_bundled)
+                .map(|dirm| dirm.components())
+                .filter(|entries| entries.len() == forms.len());
 
-                    let flag = if child_form_type == b"DJVI" { 0 } else { 1 }; // 0 = shared, 1 = page
-
-                    components.push(wrap_sub_form(chunk.data));
-                    component_ids.push(format!("d{}p{:04}.djvu", doc_idx, components.len()));
-                    component_flags.push(flag);
+            let mut renamed = BTreeMap::<String, String>::new();
+            let mut kept = Vec::new();
+            for (index, chunk) in forms.iter().enumerate() {
+                let entry = directory.as_ref().map(|entries| &entries[index]);
+                let flag = match &chunk.data[..4] {
+                    b"DJVU" => 1,
+                    b"THUM" => continue,
+                    _ if entry.is_some_and(|e| e.kind == DirmComponentKind::SharedAnno)
+                        && !have_shared_anno =>
+                    {
+                        have_shared_anno = true;
+                        3
+                    }
+                    _ => 0,
+                };
+                let original = entry
+                    .map(|e| e.id.clone())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| format!("d{doc_idx}p{:04}.djvu", components.len() + 1));
+                let id = claim_id(&mut used_ids, doc_idx, original.clone());
+                if id != original {
+                    renamed.insert(original, id.clone());
                 }
+                kept.push((chunk.data, id, flag));
+            }
+
+            for (data, id, flag) in kept {
+                let body = if renamed.is_empty() {
+                    data.to_vec()
+                } else {
+                    rewrite_component_incls(data, &renamed)?
+                };
+                components.push(wrap_sub_form(&body));
+                component_ids.push(id);
+                component_flags.push(flag);
             }
         }
     }
@@ -1011,6 +1082,15 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
                 .iter()
                 .filter(|chunk| chunk.id == *b"FORM")
                 .collect::<Vec<_>>();
+            // The DIRM type keeps a shared annotation (flag 3) distinct from an
+            // ordinary include; the graph classifies both as non-page nodes.
+            let directory = form
+                .chunks
+                .iter()
+                .find(|chunk| chunk.id == *b"DIRM")
+                .and_then(|chunk| DirmPayload::decode(chunk.data).ok())
+                .map(|dirm| dirm.components())
+                .unwrap_or_default();
             let mut components = Vec::new();
             let mut component_ids = Vec::new();
             let mut component_flags = Vec::new();
@@ -1022,7 +1102,14 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
                     let component = component_forms[node.dirm_index];
                     components.push(wrap_sub_form(component.data));
                     component_ids.push(node.id.clone());
-                    component_flags.push(u8::from(node.kind == ComponentNodeKind::Page));
+                    let shared_anno = directory
+                        .get(node.dirm_index)
+                        .is_some_and(|entry| entry.kind == DirmComponentKind::SharedAnno);
+                    component_flags.push(match node.kind {
+                        ComponentNodeKind::Page => 1,
+                        _ if shared_anno => 3,
+                        _ => 0,
+                    });
                 }
             }
 
@@ -2109,6 +2196,56 @@ mod tests {
         let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").expect("DIRM");
         let payload = crate::dirm::DirmPayload::decode(dirm.data).expect("decode DIRM");
         assert_eq!(payload.nfiles, 3);
+    }
+
+    /// DIRM flags of a bundled document, in directory order.
+    fn dirm_flags(bundled: &[u8]) -> Vec<DirmComponentKind> {
+        let form = iff::parse_form(bundled).unwrap();
+        let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").unwrap();
+        let payload = DirmPayload::decode(dirm.data).unwrap();
+        payload.components().iter().map(|c| c.kind).collect()
+    }
+
+    /// czech.djvu has thumbnails, shared dictionaries that pages INCL, and a
+    /// shared annotation with the document metadata. Merging it with itself
+    /// renames the second copy's components and must keep every INCL valid.
+    #[test]
+    fn merge_keeps_includes_and_shared_annotation() {
+        let czech = std::fs::read(fixture_path("czech.djvu")).unwrap();
+        let merged = merge(&[&czech, &czech]).expect("merge");
+
+        let graph = ComponentGraph::parse(&merged).expect("graph");
+        assert_eq!(graph.validate(), vec![], "every INCL must resolve");
+
+        let kinds = dirm_flags(&merged);
+        let count = |kind| kinds.iter().filter(|&&k| k == kind).count();
+        assert_eq!(count(DirmComponentKind::Page), 170);
+        assert_eq!(count(DirmComponentKind::Thumbnail), 0, "thumbnails dropped");
+        assert_eq!(
+            count(DirmComponentKind::SharedAnno),
+            1,
+            "one shared annotation"
+        );
+
+        let doc = DjVuDocument::parse(&merged).expect("parse merged");
+        assert_eq!(doc.page_count(), 170);
+        let meta = doc.metadata().unwrap().expect("metadata survives");
+        assert!(
+            meta.extra
+                .iter()
+                .any(|(key, value)| key == "HostComputer" && value == "schroeder")
+        );
+    }
+
+    #[test]
+    fn split_keeps_shared_annotation_type() {
+        let czech = std::fs::read(fixture_path("czech.djvu")).unwrap();
+        let part = split(&czech, 1, 4).expect("split");
+        let kinds = dirm_flags(&part);
+        assert!(kinds.contains(&DirmComponentKind::SharedAnno));
+        let doc = DjVuDocument::parse(&part).unwrap();
+        assert_eq!(doc.page_count(), 3);
+        assert!(doc.metadata().unwrap().is_some(), "metadata survives split");
     }
 
     #[test]
