@@ -20,3 +20,6 @@ Copyright (c) 2004-2005 LizardTech, Inc.  All Rights Reserved.
 ```
 
 These files are used solely for testing and verification purposes.
+
+`chicken_crcbhalf.djvu` is derived from `chicken.djvu`: its `ddjvu` render,
+cropped to 181x239, re-encoded with DjVuLibre `c44 -crcbhalf` (#830).
