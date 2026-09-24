@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.1](https://github.com/matyushkin/djvu-rs/compare/v0.35.0...v0.35.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **iw44:** honour crcb_half like DjVuLibre ([#830](https://github.com/matyushkin/djvu-rs/issues/830)) ([#832](https://github.com/matyushkin/djvu-rs/issues/832)) ([279dad0](https://github.com/matyushkin/djvu-rs/commit/279dad09ad0498a3c6849dddd7693f43daf6525d))
+* **iw44:** match DjVuLibre inverse transform on small planes ([#827](https://github.com/matyushkin/djvu-rs/issues/827)) ([#828](https://github.com/matyushkin/djvu-rs/issues/828)) ([75a1fb9](https://github.com/matyushkin/djvu-rs/commit/75a1fb92aced2d59417ddfe737eb0f18208323db))
+* **render:** match DjVuLibre's native BG/FG44 upscale ([#831](https://github.com/matyushkin/djvu-rs/issues/831)) ([#834](https://github.com/matyushkin/djvu-rs/issues/834)) ([d2d0496](https://github.com/matyushkin/djvu-rs/commit/d2d049618d02d6ed46ace017dd9c948f9ccf80da))
+
 ## [0.35.0](https://github.com/matyushkin/djvu-rs/compare/v0.34.0...v0.35.0) (2026-09-22)
 
 
