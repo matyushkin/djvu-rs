@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790125222129,
+  "lastUpdate": 1790263825674,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -19762,6 +19762,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 43933000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d2d049618d02d6ed46ace017dd9c948f9ccf80da",
+          "message": "fix(render): match DjVuLibre's native BG/FG44 upscale (#831) (#834)\n\n* fix(render): match DjVuLibre's native BG/FG44 upscale (#831)\n\nAt page size a reduced BG44 or FG44 was enlarged with #279's\ncentre-aligned bilinear mapping, counted from the top. DjVuLibre counts\nrows from the bottom and uses GPixmapScaler's coordinate table, so every\npage whose height is not a multiple of the reduction was shifted.\n\nPort the exact rules for renders at page size only:\n- compute_red: the red in 1..=12 with ceil(page/red) == plane.\n- BG: prepare_coord(1, red) coordinates, rows from the bottom, vertical\n  pass rounded to 8 bits, then horizontal, both lo + ((up-lo)f + 8) >> 4.\n- FG44: the whole cell (x/red, y_from_bottom/red), as GPixmap::stencil.\n- The column table and bg_rows_needed (banded path) follow them.\nDown-scaled and zoomed renders keep the #279 mapping.\n\nAll 360 native fixture pages are now bit-exact against ddjvu at\ntolerance 0 (before, at tolerance 4: colorbook 53/62 pages over the\ngate, czech 52/85, history 2/3, carte 1/1). The conformance corpus\ngrows to all 62 colorbook pages plus history.\n\nThe per-pixel background step is a free #[inline(always)] function: as\na closure it was left out of line and cost 32-39 % on native renders.\nBenches vs main: native -0.2..-2.9 %, downscale within 1.3 %,\npalette_native_cached +4.5 % (12x background).\n\nCloses #831\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH\n\n* perf(render): expand the bilinear pixel loop once per BgRow variant (#831)\n\nCI's same-runner benchmark re-check flagged the zoom path:\nrender_page/dpi/144..600 was 9-19 % slower. The per-pixel match on the\nthree-way BgRow enum sat in the hottest loop, and LLVM did not unswitch it.\n\nThe pixel loop is now a local macro_rules! expanded once per variant. Each\ncopy calls its own sampler (bg_scaled_pixel / bg_blend_pixel) directly.\n\nCriterion vs main: zoom within +-0.7 %; native renders 13-21 % faster\n(color_native_cached -15.2 %, bilevel_native_cached -18.9 %,\npalette_native_cached -13.0 %); downscale within +-1 %. All 360 fixture\npages are still bit-exact vs ddjvu at tolerance 0.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-24T17:04:23+02:00",
+          "tree_id": "68b0e8352dec460698e7aeb36d24ba100b110f28",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/d2d049618d02d6ed46ace017dd9c948f9ccf80da"
+        },
+        "date": 1790263824352,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8185000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49210000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47588000,
             "range": "± 0",
             "unit": "ns/iter"
           }
