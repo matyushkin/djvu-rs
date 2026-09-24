@@ -410,7 +410,7 @@ impl ComponentGraph {
 fn expected_form(kind: DirmComponentKind) -> [u8; 4] {
     match kind {
         DirmComponentKind::Page => *b"DJVU",
-        DirmComponentKind::Shared => *b"DJVI",
+        DirmComponentKind::Shared | DirmComponentKind::SharedAnno => *b"DJVI",
         DirmComponentKind::Thumbnail => *b"THUM",
     }
 }
@@ -442,7 +442,9 @@ fn classify_component(
     } else {
         match directory_kind {
             DirmComponentKind::Page => ComponentNodeKind::Page,
-            DirmComponentKind::Shared => ComponentNodeKind::SharedOther,
+            DirmComponentKind::Shared | DirmComponentKind::SharedAnno => {
+                ComponentNodeKind::SharedOther
+            }
             DirmComponentKind::Thumbnail => ComponentNodeKind::Thumbnail,
         }
     }

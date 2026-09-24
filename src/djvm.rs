@@ -752,6 +752,7 @@ fn dirm_kind_flag(kind: DirmComponentKind) -> u8 {
         DirmComponentKind::Shared => 0,
         DirmComponentKind::Page => 1,
         DirmComponentKind::Thumbnail => 2,
+        DirmComponentKind::SharedAnno => 3,
     }
 }
 

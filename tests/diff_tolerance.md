@@ -103,10 +103,11 @@ Resolved under **#831**: a render at page size now reproduces DjVuLibre's
 The #279 centre alignment was close, but every page whose height is not a
 multiple of `red` was shifted by one or more rows. With the fix, every page of
 all 21 fixtures (360 pages) is bit-exact against local `ddjvu` at tolerance 0,
-and the conformance corpus now covers every page of `colorbook` (62) and
-`history` (3). `czech` (85) and `carte` (1) render bit-exact too, but stay
-out of the corpus: their semantic gate still fails on DIRM thumbnail and
-shared-annotation types and on ANTz metadata. Measured before the fix at
+and the conformance corpus now covers every page of `colorbook` (62),
+`history` (3), `czech` (85) and `carte` (1). The last two joined under #833,
+after the reader learnt the DIRM shared-annotation type (flag 3, `A` in
+`djvused ls`) and the `(metadata …)` block in it, and the gate learnt that
+`djvused ls` shows all thumbnails as one `T <thumbnails>` row. Measured before the fix at
 tolerance 4: colorbook 53/62 pages over the gate, czech 52/85, history 2/3
 (page 0 at 36.7%), carte 1/1 (1.17%). Regions of a page-size render use the
 same rules; down-scaled and zoomed renders keep the centre-aligned mapping. The digest test
