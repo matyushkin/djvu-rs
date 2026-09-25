@@ -25,6 +25,7 @@ run python3 -m unittest scripts/test_conformance_report.py
 run cargo build --release --features cli --example diff_djvulibre
 run cargo build --release --features cli --example conformance_semantic
 run cargo build --release --features cli --example interop_encode
+run cargo build --release --features cli --example writer_conformance
 
 python3 - <<PY > conformance_commands.sh
 import json, shlex
@@ -62,6 +63,17 @@ set -o pipefail
   tests/fixtures/boy.djvu \
   tests/fixtures/chicken.djvu | tee writer_results.txt
 run cargo test --lib djvu_mut
+
+# Structural writers (save, re-encode, merge, split, remove, dedup, indirect)
+# over the whole corpus; DjVuLibre must read every output like its source.
+python3 - <<PY > writer_conformance_commands.sh
+import json, shlex
+manifest = json.load(open("${MANIFEST}"))
+command = ["./target/release/examples/writer_conformance"]
+command += [doc["path"] for doc in manifest["documents"]]
+print(" ".join(shlex.quote(part) for part in command))
+PY
+run bash -c 'set -o pipefail; bash writer_conformance_commands.sh | tee writer_conformance_results.txt'
 # Writer status is derived from interop_encode exit (pipefail) + mutation tests.
 printf 'pass\n' > writer_status.txt
 
@@ -80,6 +92,7 @@ run python3 scripts/conformance_report.py \
   --semantic-results semantic_results.jsonl \
   --writer-status writer_status.txt \
   --writer-results writer_results.txt \
+  --writer-conformance-results writer_conformance_results.txt \
   --accepted-differences conformance/accepted_differences.json \
   --diff-fuzz-registry fuzz/corpus-regressions/diff_fuzz \
   --output-dir "${OUT_DIR}" \

@@ -245,6 +245,37 @@ def parse_writer_results(path: Path) -> dict[str, Any]:
     }
 
 
+def parse_writer_conformance_results(path: Path) -> dict[str, Any]:
+    """Parse writer_conformance stdout: one `document<TAB>operation<TAB>ok|FAIL[<TAB>reason]`
+    line per case (DjVuLibre re-reads each djvu-rs writer output)."""
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read writer conformance results {path}: {exc}") from exc
+    cases: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 3:
+            continue
+        document, operation, status = parts[:3]
+        cases.append(
+            {
+                "document": document,
+                "operation": operation,
+                "status": "ok" if status == "ok" else "fail",
+                "reason": parts[3] if len(parts) > 3 else "",
+            }
+        )
+    failed = sum(case["status"] != "ok" for case in cases)
+    return {
+        # No cases means the harness did not run: never report that as a pass.
+        "status": "pass" if cases and failed == 0 else "fail",
+        "checked": len(cases),
+        "failed": failed,
+        "cases": cases,
+    }
+
+
 def load_accepted_differences(path: Path | None) -> list[dict[str, Any]]:
     if path is None:
         return []
@@ -388,6 +419,27 @@ def render_html(summary: dict[str, Any], history: list[dict[str, Any]]) -> str:
         )
     else:
         writer_html = f"<p><code>{html.escape(str(writer))}</code></p>"
+    conformance = summary.get("writer_conformance")
+    if isinstance(conformance, dict):
+        failed_cases = "".join(
+            "<tr>"
+            f"<td>{html.escape(case['document'])}</td>"
+            f"<td>{html.escape(case['operation'])}</td>"
+            f"<td>{html.escape(case['reason'])}</td>"
+            "</tr>"
+            for case in conformance.get("cases", [])
+            if case.get("status") != "ok"
+        )
+        writer_html += (
+            f"<p>DjVuLibre re-read of edited, merged, and split output: status "
+            f"<code>{html.escape(str(conformance.get('status')))}</code> · "
+            f"checked {conformance.get('checked', 0)} · failed {conformance.get('failed', 0)}</p>"
+        )
+        if failed_cases:
+            writer_html += (
+                "<table><thead><tr><th>Document</th><th>Operation</th><th>Divergence</th>"
+                f"</tr></thead><tbody>{failed_cases}</tbody></table>"
+            )
     fuzz = summary.get("diff_fuzz_registry", {})
     fuzz_rows = "".join(
         f"<tr><td>{html.escape(category)}</td><td>{count}</td></tr>"
@@ -430,6 +482,7 @@ def main() -> int:
     parser.add_argument("--semantic-results", type=Path, required=True)
     parser.add_argument("--writer-status", type=Path, required=True)
     parser.add_argument("--writer-results", type=Path)
+    parser.add_argument("--writer-conformance-results", type=Path)
     parser.add_argument("--accepted-differences", type=Path)
     parser.add_argument("--diff-fuzz-registry", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -457,6 +510,17 @@ def main() -> int:
                 )
         else:
             writer_validation = writer_status
+        writer_conformance = None
+        if args.writer_conformance_results is not None:
+            writer_conformance = parse_writer_conformance_results(
+                args.writer_conformance_results
+            )
+            if writer_conformance["status"] != "pass":
+                failures.append(
+                    "writer conformance reported "
+                    f"{writer_conformance['failed']} failure(s) "
+                    f"in {writer_conformance['checked']} case(s)"
+                )
         accepted = load_accepted_differences(args.accepted_differences)
         diff_fuzz = load_diff_fuzz_registry(args.diff_fuzz_registry)
         commit = args.commit or command_version(["git", "rev-parse", "HEAD"])
@@ -492,6 +556,7 @@ def main() -> int:
             "render_results": rows,
             "semantic_results": semantic_rows,
             "writer_validation": writer_validation,
+            "writer_conformance": writer_conformance,
             "accepted_differences": accepted,
             "diff_fuzz_registry": {
                 key: diff_fuzz[key]
