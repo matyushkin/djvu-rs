@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790335700298,
+  "lastUpdate": 1790337294009,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20194,6 +20194,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 43026000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "523454fa49f71839cee8240c22b86a9f110c0869",
+          "message": "fix(djvm): treat legacy FORM:BM44/PM44 image files as pages (#845)\n\nDjVuLibre reads a legacy FORM:BM44/PM44 IW44 image file as a one-page\ndocument, and `djvm -c` bundles it as a page component. djvu-rs only\nread it as a standalone file; every writer counted FORM:DJVU alone:\n\n- `djvm::merge` skipped it and failed with \"no pages to merge\".\n- `djvm::split` reported \"document has 0 pages\".\n- `DjVuDocumentMut::page_mut` returned the misleading\n  `IndirectDjvmUnsupported`, and inside a bundle its page index skipped\n  legacy pages, so it disagreed with the reader's page index.\n- The DIRM offset rewrite in `DjVuDocumentMut` skipped a legacy component,\n  so an edit to an earlier page left its offset stale.\n- The reader rejected a bundle with a legacy page component.\n\nOne helper, `djvm::is_page_form`, now defines a page (DJVU, BM44, PM44)\nfor merge, split, the component graph, the mutable document, and the\neager, lazy, indirect and async readers. `page_mut` on a legacy page\nreturns the new `MutError::LegacyIw44Page`: it has no INFO, text layer or\nannotations to edit.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T11:28:35Z",
+          "tree_id": "81dfa33217b13d3f8057c8e892c6da2eebee0610",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/523454fa49f71839cee8240c22b86a9f110c0869"
+        },
+        "date": 1790337292518,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8234999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49359000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47320000,
             "range": "± 0",
             "unit": "ns/iter"
           }
