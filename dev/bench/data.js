@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790293241812,
+  "lastUpdate": 1790294743754,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20050,6 +20050,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40355000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7b0a2d55204bfc71a417269d9c95a28677e5c405",
+          "message": "fix(djvm): keep component ids, INCL targets and DIRM types in merge and split (#841)\n\nmerge() flagged every non-DJVI FORM as a page and renamed every component\nto d{doc}p{n}.djvu without touching INCL chunks. On czech.djvu (thumbnails,\nshared dictionaries, shared annotation) the result had 97 pages instead of\n86, and DjVuLibre could not decode any page: \"id_to_file(shared_anno.iff)\ndid not create any file\".\n\n- merge: keep each component's DIRM id. Rename only an id that an earlier\n  document already uses (d{doc}_{id}) and rewrite that document's INCL\n  chunks to match.\n- merge: drop thumbnails; they map to pages by position, which a merge does\n  not keep.\n- merge: keep the first shared annotation (DIRM flag 3, document metadata);\n  later ones become includes, so their pages keep their annotations.\n- split: keep the shared annotation type instead of turning it into a\n  plain include, so the document metadata survives.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T01:37:27+02:00",
+          "tree_id": "87388d9cb6844f3588cd6b4b9fc9951a203cc981",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/7b0a2d55204bfc71a417269d9c95a28677e5c405"
+        },
+        "date": 1790294742456,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8193000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49314000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47392000,
             "range": "± 0",
             "unit": "ns/iter"
           }
