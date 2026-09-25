@@ -54,6 +54,7 @@ use core::ops::Range;
 use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
 use crate::chunk_encode::{ChunkEncoder, NavmChunk};
 use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
+use crate::djvm::is_page_form;
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
@@ -121,6 +122,16 @@ pub enum MutError {
     /// [`docs/indirect-djvm-mutation.md`](../docs/indirect-djvm-mutation.md).
     #[error("mutation of indirect DJVM documents is not supported")]
     IndirectDjvmUnsupported,
+
+    /// The page is a legacy `FORM:BM44`/`FORM:PM44` image. Such a page holds
+    /// only IW44 image chunks — no `INFO`, text layer, or annotations — so the
+    /// page setters do not apply to it. Whole-document operations (save,
+    /// merge, split) still carry it through unchanged.
+    #[error("page {index} is a legacy FORM:BM44/PM44 image and cannot be edited")]
+    LegacyIw44Page {
+        /// Zero-based page index.
+        index: usize,
+    },
 
     /// The DIRM chunk was malformed in a way that prevents offset
     /// recomputation. Should not occur after a successful
@@ -316,14 +327,11 @@ impl DjVuDocumentMut {
                 reason: "not a parseable IFF document",
             })?;
             match &parsed.root {
-                Chunk::Form { secondary_id, .. }
-                    if secondary_id == b"DJVU"
-                        || secondary_id == b"DJVI"
-                        || secondary_id == b"THUM" => {}
+                Chunk::Form { secondary_id, .. } if is_component_form(secondary_id) => {}
                 _ => {
                     return Err(MutError::ComponentMalformed {
                         name: comp.id.clone(),
-                        reason: "root is not a FORM:DJVU/DJVI/THUM",
+                        reason: "root is not a page, FORM:DJVI or FORM:THUM",
                     });
                 }
             }
@@ -672,8 +680,9 @@ impl DjVuDocumentMut {
 
     /// Number of editable pages in the document.
     ///
-    /// `1` for `FORM:DJVU`, the count of `FORM:DJVU` children for `FORM:DJVM`
+    /// `1` for a single-page file, the count of page children for `FORM:DJVM`
     /// (shared-dictionary `FORM:DJVI` components are not counted as pages).
+    /// A page is `FORM:DJVU` or a legacy `FORM:BM44`/`FORM:PM44` image.
     pub fn page_count(&self) -> usize {
         match self.root_form_type() {
             Some(b"DJVM") => self
@@ -682,7 +691,7 @@ impl DjVuDocumentMut {
                 .children()
                 .iter()
                 .filter(
-                    |c| matches!(c, Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU"),
+                    |c| matches!(c, Chunk::Form { secondary_id, .. } if is_page_form(secondary_id)),
                 )
                 .count(),
             _ => 1,
@@ -692,8 +701,9 @@ impl DjVuDocumentMut {
     /// Borrow the i-th page's `FORM:DJVU` for high-level mutation.
     ///
     /// For single-page `FORM:DJVU` only `index == 0` is valid. For bundled
-    /// `FORM:DJVM` the index walks `FORM:DJVU` direct children in order
-    /// (shared-dictionary `FORM:DJVI` components are skipped).
+    /// `FORM:DJVM` the index walks the page children in order
+    /// (shared-dictionary `FORM:DJVI` components are skipped), so it matches
+    /// the page index of [`crate::DjVuDocument`].
     ///
     /// On serialisation, [`Self::into_bytes`] rewrites DIRM offsets to
     /// reflect any size changes from page mutations.
@@ -704,14 +714,19 @@ impl DjVuDocumentMut {
     /// - [`MutError::IndirectDjvmUnsupported`] if the document is an
     ///   indirect (non-bundled) `FORM:DJVM` — page bytes live in external
     ///   files, so editing in place is not supported by this primitive.
+    /// - [`MutError::LegacyIw44Page`] if the page is a legacy
+    ///   `FORM:BM44`/`FORM:PM44` image, which has no editable layers.
     pub fn page_mut(&mut self, index: usize) -> Result<PageMut<'_>, MutError> {
         let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
-        if &root_form_type == b"DJVU" {
+        if is_page_form(&root_form_type) {
             let count = self.page_count();
             if index >= count {
                 return Err(MutError::PageOutOfRange { index, count });
             }
             debug_assert_eq!(index, 0);
+            if &root_form_type != b"DJVU" {
+                return Err(MutError::LegacyIw44Page { index });
+            }
             return Ok(PageMut {
                 form: &mut self.file.root,
                 dirty: &mut self.dirty,
@@ -725,7 +740,7 @@ impl DjVuDocumentMut {
         if index >= count {
             return Err(MutError::PageOutOfRange { index, count });
         }
-        // Walk the root's children, returning the index-th FORM:DJVU.
+        // Walk the root's children, returning the index-th page FORM.
         let children = match &mut self.file.root {
             Chunk::Form { children, .. } => children,
             Chunk::Leaf { .. } => unreachable!("validated FORM root"),
@@ -733,9 +748,12 @@ impl DjVuDocumentMut {
         let mut seen = 0usize;
         for child in children.iter_mut() {
             if let Chunk::Form { secondary_id, .. } = child
-                && secondary_id == b"DJVU"
+                && is_page_form(secondary_id)
             {
                 if seen == index {
+                    if secondary_id != b"DJVU" {
+                        return Err(MutError::LegacyIw44Page { index });
+                    }
                     return Ok(PageMut {
                         form: child,
                         dirty: &mut self.dirty,
@@ -959,6 +977,12 @@ fn emit_patched_single_page(root: &Chunk, original: &[u8]) -> Option<Vec<u8>> {
     iff::partial_emit(*secondary_id, &parts)
 }
 
+/// Whether a FORM type can be a `FORM:DJVM` component: a page (`DJVU`, or a
+/// legacy `BM44`/`PM44` image), a shared `DJVI`, or a `THUM` thumbnail set.
+fn is_component_form(form_type: &[u8; 4]) -> bool {
+    is_page_form(form_type) || form_type == b"DJVI" || form_type == b"THUM"
+}
+
 fn original_single_page_child_ranges(original: &[u8]) -> Option<Vec<OriginalChildRange>> {
     if original.len() < 16 || &original[..4] != b"AT&T" || &original[4..8] != b"FORM" {
         return None;
@@ -1034,8 +1058,7 @@ fn recompute_dirm_offsets(root: &mut Chunk) -> Result<(), MutError> {
     }
 
     fn is_component(child: &Chunk) -> bool {
-        matches!(child, Chunk::Form { secondary_id: sid, .. }
-            if sid == b"DJVU" || sid == b"DJVI" || sid == b"THUM")
+        matches!(child, Chunk::Form { secondary_id: sid, .. } if is_component_form(sid))
     }
 
     // The `id == b"DIRM"` guard form is needed: `id` is `[u8; 4]` reached
@@ -1374,14 +1397,11 @@ impl IndirectRewritePlan {
                 reason: "not a parseable IFF document",
             })?;
             match &parsed.root {
-                Chunk::Form { secondary_id, .. }
-                    if secondary_id == b"DJVU"
-                        || secondary_id == b"DJVI"
-                        || secondary_id == b"THUM" => {}
+                Chunk::Form { secondary_id, .. } if is_component_form(secondary_id) => {}
                 _ => {
                     return Err(MutError::ComponentMalformed {
                         name: info.id.clone(),
-                        reason: "root is not a FORM:DJVU/DJVI/THUM",
+                        reason: "root is not a page, FORM:DJVI or FORM:THUM",
                     });
                 }
             }

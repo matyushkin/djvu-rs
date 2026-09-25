@@ -154,7 +154,7 @@ impl ComponentGraph {
             let chunks =
                 parse_form_body(body).map_err(|error| GraphError::Malformed(error.to_string()))?;
 
-            if form != expected_form(entry.kind) || !is_component_form(form) {
+            if !form_matches_kind(form, entry.kind) {
                 validation_errors.push(GraphError::InvalidComponentType {
                     id: entry.id.clone(),
                     form,
@@ -407,16 +407,15 @@ impl ComponentGraph {
     }
 }
 
-fn expected_form(kind: DirmComponentKind) -> [u8; 4] {
+/// Whether a component FORM type agrees with its DIRM kind. A page is
+/// `FORM:DJVU`, or a legacy `FORM:BM44`/`FORM:PM44` image that DjVuLibre
+/// (`djvm -c`) bundles as a page.
+fn form_matches_kind(form: [u8; 4], kind: DirmComponentKind) -> bool {
     match kind {
-        DirmComponentKind::Page => *b"DJVU",
-        DirmComponentKind::Shared | DirmComponentKind::SharedAnno => *b"DJVI",
-        DirmComponentKind::Thumbnail => *b"THUM",
+        DirmComponentKind::Page => crate::djvm::is_page_form(&form),
+        DirmComponentKind::Shared | DirmComponentKind::SharedAnno => form == *b"DJVI",
+        DirmComponentKind::Thumbnail => form == *b"THUM",
     }
-}
-
-fn is_component_form(form: [u8; 4]) -> bool {
-    form == *b"DJVU" || form == *b"DJVI" || form == *b"THUM"
 }
 
 fn classify_component(
@@ -424,7 +423,7 @@ fn classify_component(
     chunks: &[crate::iff::IffChunk<'_>],
     directory_kind: DirmComponentKind,
 ) -> ComponentNodeKind {
-    if form == *b"DJVU" {
+    if crate::djvm::is_page_form(&form) {
         ComponentNodeKind::Page
     } else if form == *b"THUM" {
         ComponentNodeKind::Thumbnail

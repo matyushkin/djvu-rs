@@ -173,7 +173,8 @@ where
         }
 
         let form_type = &head[12..16];
-        let (pages, shared) = if form_type == b"DJVU" {
+        // A legacy FORM:BM44/PM44 image file is a one-page document too.
+        let (pages, shared) = if matches!(form_type, b"DJVU" | b"BM44" | b"PM44") {
             (vec![LazyPageIndex { range: 0..file_len }], BTreeMap::new())
         } else if form_type == b"DJVM" {
             index_bundled_djvm(&mut reader).await?

@@ -1427,7 +1427,14 @@ impl DjVuDocument {
             // and parse it on demand.
             let off = sub_form.data.as_ptr() as usize - base;
             let range = off..off + sub_form.data.len();
-            let page = parse_page_lazy(&sub_chunks, page_idx, shared_djbz, backing.clone(), range)?;
+            let form_type = &sub_form.data[..4];
+            let page = if matches!(form_type, b"BM44" | b"PM44") {
+                // A legacy IW44 image page is small and has no INFO to parse
+                // lazily; decode it eagerly like the non-backed path does.
+                parse_component_page(form_type, &sub_chunks, page_idx, None)?
+            } else {
+                parse_page_lazy(&sub_chunks, page_idx, shared_djbz, backing.clone(), range)?
+            };
             pages.push(page);
 
             if let Some(off2) = comp_offsets.get(comp_idx) {
@@ -1563,7 +1570,8 @@ impl DjVuDocument {
                 .filter_map(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
                 .find_map(|name| shared_djbz.get(name))
                 .cloned();
-            pages.push(parse_page_from_chunks(
+            pages.push(parse_component_page(
+                &page_form.form_type,
                 &page_form.chunks,
                 page_idx,
                 shared_for_page,
@@ -1726,7 +1734,12 @@ impl DjVuDocument {
                             .find_map(|name| djvi_djbz.get(name))
                             .cloned();
 
-                        let page = parse_page_from_chunks(&sub_chunks, page_idx, shared_djbz)?;
+                        let page = parse_component_page(
+                            &sub_form.data[..4],
+                            &sub_chunks,
+                            page_idx,
+                            shared_djbz,
+                        )?;
                         pages.push(page);
 
                         // Record the byte range of this page's outer FORM. The
@@ -1790,7 +1803,12 @@ impl DjVuDocument {
                         let resolved_data = resolver(&entry.id)
                             .map_err(|_| DocError::IndirectResolve(entry.id.clone()))?;
                         let sub_form = parse_form(&resolved_data)?;
-                        let page = parse_page_from_chunks(&sub_form.chunks, page_idx, None)?;
+                        let page = parse_component_page(
+                            &sub_form.form_type,
+                            &sub_form.chunks,
+                            page_idx,
+                            None,
+                        )?;
                         pages.push(page);
                         page_idx += 1;
                     }
@@ -1818,10 +1836,10 @@ impl DjVuDocument {
         shared_djbz: Option<Arc<SharedDict>>,
     ) -> Result<DjVuPage, DocError> {
         let form = parse_form(data)?;
-        if form.form_type != *b"DJVU" {
+        if !matches!(&form.form_type, b"DJVU" | b"BM44" | b"PM44") {
             return Err(DocError::NotDjVu(form.form_type));
         }
-        parse_page_from_chunks(&form.chunks, index, shared_djbz)
+        parse_component_page(&form.form_type, &form.chunks, index, shared_djbz)
     }
 
     /// Number of pages.
@@ -2543,6 +2561,29 @@ fn page_info_from_iw44_first_chunk(
 }
 
 /// Parse a legacy standalone `FORM:BM44` or `FORM:PM44` page.
+#[cfg(feature = "std")]
+type PageSharedDict = Arc<SharedDict>;
+#[cfg(not(feature = "std"))]
+type PageSharedDict = Vec<u8>;
+
+/// Parse one page component of a multi-page document.
+///
+/// A page component is usually `FORM:DJVU`, but DjVuLibre also bundles a
+/// legacy `FORM:BM44`/`FORM:PM44` image file as a page (`djvm -c`), and
+/// djvu-rs merge does the same.
+fn parse_component_page(
+    form_type: &[u8],
+    chunks: &[IffChunk<'_>],
+    index: usize,
+    shared_djbz: Option<PageSharedDict>,
+) -> Result<DjVuPage, DocError> {
+    match form_type {
+        b"BM44" => parse_legacy_iw44_page(b"BM44", chunks, index),
+        b"PM44" => parse_legacy_iw44_page(b"PM44", chunks, index),
+        _ => parse_page_from_chunks(chunks, index, shared_djbz),
+    }
+}
+
 fn parse_legacy_iw44_page(
     form_type: &[u8; 4],
     chunks: &[IffChunk<'_>],
