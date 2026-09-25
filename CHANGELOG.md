@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0](https://github.com/matyushkin/djvu-rs/compare/v0.35.2...v0.36.0) (2026-09-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **annotation:** `MapArea` has new public fields `target` and `extra`, and `Annotation` has a new public field `extra`; struct literals must set them. `Border::style` now holds the DjVuLibre option without parentheses (for example `xor`, `border #FF0000`, `shadow_in 4`) and is encoded as `(<style>)`.
+
+### Features
+
+* **annotation:** keep every annotation form DjVuLibre writes ([#843](https://github.com/matyushkin/djvu-rs/issues/843)) ([c0e3efb](https://github.com/matyushkin/djvu-rs/commit/c0e3efbdc42456cd2dfd80cb8d662246957b4521))
+
+
+### Bug Fixes
+
+* **djvm:** treat legacy FORM:BM44/PM44 image files as pages ([#845](https://github.com/matyushkin/djvu-rs/issues/845)) ([523454f](https://github.com/matyushkin/djvu-rs/commit/523454fa49f71839cee8240c22b86a9f110c0869))
+
 ## [0.35.2](https://github.com/matyushkin/djvu-rs/compare/v0.35.1...v0.35.2) (2026-09-24)
 
 
