@@ -174,15 +174,17 @@ fn parse_metadata_text(text: &str) -> DjVuMetadata {
     // Look for a top-level (metadata ...) list
     for expr in &sexprs {
         if let SExpr::List(items) = expr
-            && let Some(SExpr::Atom(head)) = items.first()
+            && let Some(head) = items.first().and_then(SExpr::text)
         {
             if !head.eq_ignore_ascii_case("metadata") {
                 continue;
             }
             for item in &items[1..] {
                 if let SExpr::List(pair) = item
-                    && let (Some(SExpr::Atom(key)), Some(SExpr::Atom(val))) =
-                        (pair.first(), pair.get(1))
+                    && let (Some(key), Some(val)) = (
+                        pair.first().and_then(SExpr::text),
+                        pair.get(1).and_then(SExpr::text),
+                    )
                 {
                     store_kv(&mut meta, key, val);
                 }

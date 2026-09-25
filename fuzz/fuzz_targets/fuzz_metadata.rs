@@ -223,6 +223,7 @@ fn annotation_case(cur: &mut Cursor<'_>) {
         zoom: (cur.next(2) == 0).then(|| 10 + cur.next(400)),
         mode: (cur.next(2) == 0)
             .then(|| ["color", "bw", "fore", "back"][cur.next(4) as usize].to_string()),
+            extra: Vec::new(),
     };
     let areas: Vec<MapArea> = (0..cur.next(5))
         .map(|_| MapArea {
@@ -232,10 +233,12 @@ fn annotation_case(cur: &mut Cursor<'_>) {
             description: cur.text(20),
             shape: shape(cur),
             border: (cur.next(2) == 0).then(|| Border {
-                style: ["(xor)", "(border #0000FF)", "(shadow_in 4)"][cur.next(3) as usize]
+                style: ["xor", "border #0000FF", "shadow_in 4"][cur.next(3) as usize]
                     .to_string(),
             }),
             highlight: (cur.next(2) == 0).then(|| Highlight { color: color(cur) }),
+            target: None,
+            extra: Vec::new(),
         })
         .collect();
 
