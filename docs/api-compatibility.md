@@ -114,8 +114,10 @@ they can outlive the minimum window without cost.
 - Experimental surfaces are exempt: they may break in any release.
 
 Unintended breakage of the **stable** surface is caught by
-[`cargo-semver-checks`](#enforcement) in CI, which compares the PR against the
-latest published version and understands the `0.x` breaking axis. An
+[`cargo-semver-checks`](#enforcement) in CI, which compares each change against
+its parent (a PR against its base commit, a push to `main` against the previous
+tip) and understands the `0.x` breaking axis. A break declared by an earlier
+PR is therefore not reported again before the next release. An
 intended break is declared with a `!` in the PR title (`feat(scope)!: …`) or
 a `BREAKING CHANGE:` footer, the same marker release-please reads; the gate
 then checks the PR as the breaking bump it will produce (`0.Y` on 0.x) and
