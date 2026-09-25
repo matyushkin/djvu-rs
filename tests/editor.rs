@@ -39,6 +39,7 @@ fn request() -> EditRequest {
                 background: Some(Color { r: 1, g: 2, b: 3 }),
                 zoom: Some(120),
                 mode: Some("color".into()),
+                extra: Vec::new(),
             },
             areas: Vec::new(),
         },

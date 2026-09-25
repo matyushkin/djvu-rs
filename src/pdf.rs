@@ -2217,6 +2217,8 @@ mod tests {
             description: String::new(),
             border: None,
             highlight: None,
+            target: None,
+            extra: Vec::new(),
         };
 
         let rect = shape_to_pdf_rect(&link.shape, 100.0, 360.0);
@@ -2566,6 +2568,8 @@ mod tests {
             }),
             border: None,
             highlight: None,
+            target: None,
+            extra: Vec::new(),
         };
         let ant_data = ann::encode_annotations_bzz(&Annotation::default(), &[maparea]);
         // Minimal INFO: width=100, height=100, dpi=0 (default), rest zero.
