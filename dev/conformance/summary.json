@@ -30,14 +30,14 @@
     "new_failure_count": 0,
     "new_failures": [],
     "pages_delta": 0,
-    "previous_commit": "c0e3efbdc42456cd2dfd80cb8d662246957b4521",
+    "previous_commit": "523454fa49f71839cee8240c22b86a9f110c0869",
     "previous_status": "pass",
     "regression": false,
     "resolved_failure_count": 0,
     "resolved_failures": [],
     "status_changed": false
   },
-  "commit": "523454fa49f71839cee8240c22b86a9f110c0869",
+  "commit": "a78bfe332786a23fb31f635a57e5068175b008b3",
   "corpus_digest": "baed323711cbb4cee23036b0249feb5c6508ce644485e0b5c9bfba27b9d8030a",
   "diff_fuzz_registry": {
     "categories": {
@@ -6348,10 +6348,509 @@
     }
   ],
   "status": "pass",
-  "timestamp": "2026-09-25T11:32:14+00:00",
+  "timestamp": "2026-09-25T11:52:48+00:00",
   "tools": {
-    "djvu_rs": "523454fa49f71839cee8240c22b86a9f110c0869",
+    "djvu_rs": "a78bfe332786a23fb31f635a57e5068175b008b3",
     "djvulibre": "DDJVU --- DjVuLibre-3.5.28 (Ubuntu 3.5.28-2ubuntu0.24.04.2)"
+  },
+  "writer_conformance": {
+    "cases": [
+      {
+        "document": "tests/fixtures/boy.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy_jb2.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy_jb2.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy_jb2.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/boy_jb2.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/ccitt_2.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/ccitt_2.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/ccitt_2.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/ccitt_2.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/links.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/problem_page.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/big-scanned-page.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/big-scanned-page.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/big-scanned-page.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/big-scanned-page.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "split-tail",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "remove-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/navm_fgbz.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "split-tail",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "remove-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/colorbook.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "split-tail",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "remove-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/history.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "split-tail",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "remove-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/czech.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "dedup",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/carte.djvu",
+        "operation": "indirect",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_bm44.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_bm44.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_bm44.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_bm44.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_pm44.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_pm44.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_pm44.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/legacy_pm44.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken_crcbhalf.djvu",
+        "operation": "save",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken_crcbhalf.djvu",
+        "operation": "reencode",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken_crcbhalf.djvu",
+        "operation": "merge",
+        "reason": "",
+        "status": "ok"
+      },
+      {
+        "document": "tests/fixtures/chicken_crcbhalf.djvu",
+        "operation": "split-first",
+        "reason": "",
+        "status": "ok"
+      }
+    ],
+    "checked": 82,
+    "failed": 0,
+    "status": "pass"
   },
   "writer_validation": {
     "cases": [
