@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790296100477,
+  "lastUpdate": 1790335700298,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20146,6 +20146,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 34115000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c0e3efbdc42456cd2dfd80cb8d662246957b4521",
+          "message": "feat(annotation)!: keep every annotation form DjVuLibre writes (#843)\n\nA parse + encode round trip of an ANTa/ANTz chunk lost or corrupted data\nthat DjVuLibre reads:\n\n- `(zoom d150)` failed to parse and dropped the whole annotation; the\n  encoder wrote the non-standard `(zoom 150)`.\n- `(url \"href\" \"target\")` became an empty url.\n- Border options were written as `(border xor)` instead of `(xor)`.\n- Colors were written in lower case; unknown top-level forms\n  (`metadata`, `align`, `xmp`, ...) and unknown maparea options\n  (`opacity`, `width`, `arrow`, ...) were dropped.\n\nThe model now round-trips them: `MapArea` gains `target` and `extra`\n(unmodeled options as raw S-expression text), `Annotation` gains `extra`\n(unmodeled top-level forms), zoom accepts the `d` prefix, and the encoder\nwrites DjVuLibre syntax. Legacy `(border <keyword>)` input still parses.\n\nBREAKING CHANGE: `MapArea` has new public fields `target` and `extra`, and\n`Annotation` has a new public field `extra`; struct literals must set them.\n`Border::style` now holds the DjVuLibre option without parentheses (for\nexample `xor`, `border #FF0000`, `shadow_in 4`) and is encoded as\n`(<style>)`.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-25T11:02:23Z",
+          "tree_id": "2c8cbf65068c8a9ac5531a060c9c38bc02e4d4b1",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/c0e3efbdc42456cd2dfd80cb8d662246957b4521"
+        },
+        "date": 1790335698764,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7209000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45071000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43026000,
             "range": "± 0",
             "unit": "ns/iter"
           }
