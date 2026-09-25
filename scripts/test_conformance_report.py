@@ -147,6 +147,24 @@ class ValidateTests(unittest.TestCase):
             self.assertEqual(parsed["rejected"], 1)
             self.assertEqual(parsed["checked"], 2)
 
+    def test_writer_conformance_results_parse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "writer_conformance.txt"
+            path.write_text(
+                "a.djvu\tsave\tok\n"
+                "a.djvu\tmerge\tFAIL\tpage 1 djvused differs\n"
+            )
+            parsed = report.parse_writer_conformance_results(path)
+            self.assertEqual(parsed["status"], "fail")
+            self.assertEqual((parsed["checked"], parsed["failed"]), (2, 1))
+            self.assertEqual(parsed["cases"][1]["reason"], "page 1 djvused differs")
+
+            path.write_text("a.djvu\tsave\tok\n")
+            self.assertEqual(report.parse_writer_conformance_results(path)["status"], "pass")
+
+            path.write_text("")
+            self.assertEqual(report.parse_writer_conformance_results(path)["status"], "fail")
+
     def test_baseline_delta_detects_regression(self):
         previous = {
             "commit": "aaa",
