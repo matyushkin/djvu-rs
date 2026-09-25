@@ -913,7 +913,7 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
     for (doc_idx, &doc_data) in documents.iter().enumerate() {
         let form = iff::parse_form(doc_data)?;
 
-        if &form.form_type == b"DJVU" {
+        if is_page_form(&form.form_type) {
             // Single-page document — the whole file is one page
             let id = claim_id(
                 &mut used_ids,
@@ -946,7 +946,7 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
             for (index, chunk) in forms.iter().enumerate() {
                 let entry = directory.as_ref().map(|entries| &entries[index]);
                 let flag = match &chunk.data[..4] {
-                    b"DJVU" => 1,
+                    form_type if is_page_form(form_type) => 1,
                     b"THUM" => continue,
                     _ if entry.is_some_and(|e| e.kind == DirmComponentKind::SharedAnno)
                         && !have_shared_anno =>
@@ -997,12 +997,8 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     // the bounds check can never disagree with what is actually present (a
     // DIRM-based page count and the FORM:DJVU children can diverge).
     let count = match &form.form_type {
-        b"DJVU" => 1,
-        b"DJVM" => form
-            .chunks
-            .iter()
-            .filter(|c| &c.id == b"FORM" && c.data.len() >= 4 && &c.data[..4] == b"DJVU")
-            .count(),
+        b"DJVM" => form.chunks.iter().filter(|c| is_page_component(c)).count(),
+        form_type if is_page_form(form_type) => 1,
         _ => 0,
     };
 
@@ -1011,7 +1007,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     }
 
     // Single-page document: just return the whole thing
-    if &form.form_type == b"DJVU" && start == 0 && end == 1 {
+    if is_page_form(&form.form_type) && start == 0 && end == 1 {
         return Ok(doc_data.to_vec());
     }
 
@@ -1039,7 +1035,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
         if standalone {
             let mut page_idx = 0;
             for chunk in &form.chunks {
-                if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
+                if is_page_component(chunk) {
                     if page_idx == start {
                         return Ok(wrap_sub_form(chunk.data));
                     }
@@ -1135,7 +1131,7 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     // Second pass: collect pages in the requested range
     let mut page_idx = 0;
     for chunk in &form.chunks {
-        if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVU" {
+        if is_page_component(chunk) {
             if page_idx >= start && page_idx < end {
                 components.push(wrap_sub_form(chunk.data));
                 component_ids.push(format!("p{:04}.djvu", page_idx + 1));
@@ -1146,6 +1142,19 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     }
 
     build_djvm(&components, &component_ids, &component_flags)
+}
+
+/// Whether a FORM of this type is a page.
+///
+/// Besides `FORM:DJVU`, DjVuLibre treats a legacy `FORM:BM44`/`FORM:PM44`
+/// image file as a one-page document, and `djvm -c` bundles it as a page.
+pub(crate) fn is_page_form(form_type: &[u8]) -> bool {
+    matches!(form_type, b"DJVU" | b"BM44" | b"PM44")
+}
+
+/// Whether a direct child of `FORM:DJVM` is a page component.
+fn is_page_component(chunk: &iff::IffChunk<'_>) -> bool {
+    &chunk.id == b"FORM" && chunk.data.len() >= 4 && is_page_form(&chunk.data[..4])
 }
 
 /// Build a bundled DJVM file from components.
