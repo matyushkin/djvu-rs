@@ -779,10 +779,17 @@ impl DjVuDocumentMut {
                 ..
             } => {
                 if secondary_id == b"DJVM" {
+                    // After DIRM, and after the NAVM that must follow it.
                     children
                         .iter()
                         .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"DIRM"))
-                        .map(|i| i + 1)
+                        .map(|i| {
+                            let navm_next = matches!(
+                                children.get(i + 1),
+                                Some(Chunk::Leaf { id, .. }) if id == b"NAVM"
+                            );
+                            i + 1 + usize::from(navm_next)
+                        })
                 } else {
                     None
                 }
@@ -790,6 +797,7 @@ impl DjVuDocumentMut {
             _ => None,
         };
         replace_or_insert_form_chunk(&mut self.file.root, b"METa", b"METz", bytes, insert_at);
+        keep_navm_after_dirm(&mut self.file.root);
         self.dirty = true;
     }
 
@@ -842,8 +850,33 @@ impl DjVuDocumentMut {
                 children.insert(insert_at, NavmChunk(bookmarks).encode_chunk()?.into_leaf());
             }
         }
+        keep_navm_after_dirm(&mut self.file.root);
         self.dirty = true;
         Ok(())
+    }
+}
+
+/// Move a bundle's `NAVM` to directly after `DIRM`.
+///
+/// DjVuLibre (`DjVmDoc::read`, `DjVuDocument`) reads bookmarks only from the
+/// chunk that immediately follows `DIRM`; a `NAVM` anywhere else is silently
+/// ignored. Document-level `METz` goes after it, and a file an earlier
+/// version wrote with `METz` in between is repaired on the next edit.
+fn keep_navm_after_dirm(root: &mut Chunk) {
+    let Chunk::Form { children, .. } = root else {
+        return;
+    };
+    let is_leaf = |c: &Chunk, want: &[u8; 4]| matches!(c, Chunk::Leaf { id, .. } if id == want);
+    let (Some(dirm), Some(navm)) = (
+        children.iter().position(|c| is_leaf(c, b"DIRM")),
+        children.iter().position(|c| is_leaf(c, b"NAVM")),
+    ) else {
+        return;
+    };
+    if navm != dirm + 1 {
+        let chunk = children.remove(navm);
+        let dirm = if navm < dirm { dirm - 1 } else { dirm };
+        children.insert(dirm + 1, chunk);
     }
 }
 
@@ -2367,6 +2400,80 @@ mod tests {
         );
 
         let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+    }
+
+    /// DjVuLibre reads `NAVM` only when it directly follows `DIRM`, so
+    /// document-level metadata must never land between them, in either order.
+    #[test]
+    fn metadata_and_bookmarks_keep_navm_after_dirm() {
+        use crate::djvu_document::DjVuBookmark;
+        use crate::metadata::DjVuMetadata;
+
+        let bookmarks = vec![DjVuBookmark {
+            title: "Start".into(),
+            url: "#1".into(),
+            children: vec![],
+        }];
+        let metadata = DjVuMetadata {
+            title: Some("Atlas".into()),
+            ..DjVuMetadata::default()
+        };
+        let original = read_corpus("navm_fgbz.djvu");
+
+        let chunk_ids = |bytes: &[u8]| -> Vec<[u8; 4]> {
+            crate::iff::parse_form(bytes)
+                .unwrap()
+                .chunks
+                .iter()
+                .map(|c| c.id)
+                .collect()
+        };
+
+        for metadata_first in [true, false] {
+            let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+            if metadata_first {
+                doc.set_metadata(&metadata);
+                doc.set_bookmarks(&bookmarks).unwrap();
+            } else {
+                doc.set_bookmarks(&bookmarks).unwrap();
+                doc.set_metadata(&metadata);
+            }
+            let edited = doc.into_bytes();
+
+            let ids = chunk_ids(&edited);
+            assert_eq!(
+                &ids[..3],
+                &[*b"DIRM", *b"NAVM", *b"METz"],
+                "metadata_first={metadata_first}"
+            );
+
+            let (declared, actual) = dirm_offsets_and_actual(&edited);
+            assert_eq!(declared, actual);
+            let reparsed = crate::djvu_document::DjVuDocument::parse(&edited).unwrap();
+            assert_eq!(reparsed.bookmarks()[0].title, "Start");
+            let meta = reparsed.metadata().unwrap().unwrap();
+            assert_eq!(meta.title.as_deref(), Some("Atlas"));
+        }
+
+        // Earlier versions wrote DIRM, METz, NAVM; the next edit repairs it.
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_metadata(&metadata);
+        let Chunk::Form { children, .. } = &mut doc.file.root else {
+            unreachable!()
+        };
+        children.swap(1, 2);
+        let misplaced = doc.into_bytes();
+        assert_eq!(&chunk_ids(&misplaced)[..3], &[*b"DIRM", *b"METz", *b"NAVM"]);
+
+        let mut doc = DjVuDocumentMut::from_bytes(&misplaced).unwrap();
+        doc.set_metadata(&DjVuMetadata {
+            title: Some("Repaired".into()),
+            ..DjVuMetadata::default()
+        });
+        let repaired = doc.into_bytes();
+        assert_eq!(&chunk_ids(&repaired)[..3], &[*b"DIRM", *b"NAVM", *b"METz"]);
+        let (declared, actual) = dirm_offsets_and_actual(&repaired);
         assert_eq!(declared, actual);
     }
 
