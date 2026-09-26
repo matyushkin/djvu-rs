@@ -1,17 +1,25 @@
 use std::ffi::{CString, c_int, c_void};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pythonize::{depythonize, pythonize};
 
+use djvu_rs::annotation::{Annotation, MapArea};
 use djvu_rs::cbz::CbzOptions;
+use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
+use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
 use djvu_rs::djvu_render::UserRotation;
+use djvu_rs::editor::DocumentEditor;
 use djvu_rs::epub::EpubOptions;
+use djvu_rs::metadata::DjVuMetadata;
 use djvu_rs::pdf::PdfOptions;
+use djvu_rs::text::TextLayer;
 use djvu_rs::tiff_export::{TiffBilevelCompression, TiffMode, TiffOptions};
 
 create_exception!(
@@ -44,6 +52,84 @@ create_exception!(
     pyo3::exceptions::PyIndexError,
     "Page index is out of range for this document."
 );
+create_exception!(
+    djvu_rs,
+    EditError,
+    Error,
+    "An edit was rejected, or the edited document could not be saved."
+);
+
+// ---- Document model as Python data ----------------------------------------
+//
+// Annotations, text layers, metadata and bookmarks cross the boundary as plain
+// dicts and lists in the serde shape of the Rust models (via `pythonize`), so
+// a value read from a page can be changed and written straight back. Missing
+// optional keys take their defaults: `{"title": "..."}` is valid metadata.
+
+fn to_python<'py, T: serde::Serialize + ?Sized>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<Bound<'py, PyAny>> {
+    pythonize(py, value).map_err(PyErr::from)
+}
+
+/// Read `value` as the Rust model `T`; `what` names it in the error.
+fn from_python<T: serde::de::DeserializeOwned>(
+    value: &Bound<'_, PyAny>,
+    what: &str,
+) -> PyResult<T> {
+    depythonize(value)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}")))
+}
+
+fn document_metadata<'py>(
+    py: Python<'py>,
+    doc: &DjVuDocument,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let meta = doc
+        .metadata()
+        .map_err(|e| DecodeError::new_err(format!("{e}")))?;
+    meta.map(|m| to_python(py, &m)).transpose()
+}
+
+fn page_annotations<'py>(
+    py: Python<'py>,
+    doc: &DjVuDocument,
+    index: usize,
+) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+    let page = doc
+        .page(index)
+        .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+    let parsed = py.detach(|| {
+        page.annotations()
+            .map_err(|e| DecodeError::new_err(format!("{e}")))
+    })?;
+    parsed
+        .map(|(annotation, areas)| Ok((to_python(py, &annotation)?, to_python(py, &areas)?)))
+        .transpose()
+}
+
+fn page_text_layer<'py>(
+    py: Python<'py>,
+    doc: &DjVuDocument,
+    index: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let page = doc
+        .page(index)
+        .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+    let layer = py.detach(|| {
+        page.text_layer()
+            .map_err(|e| DecodeError::new_err(format!("{e}")))
+    })?;
+    layer.map(|l| to_python(py, &l)).transpose()
+}
+
+fn edit_error(e: MutError) -> PyErr {
+    match e {
+        MutError::PageOutOfRange { .. } => PageIndexError::new_err(format!("{e}")),
+        other => EditError::new_err(format!("{other}")),
+    }
+}
 
 // ---- Export ------------------------------------------------------------------
 //
@@ -202,6 +288,21 @@ impl Document {
             doc: Arc::clone(&self.inner),
             index,
         })
+    }
+
+    /// Document-level metadata as a dict, or None when the document has none.
+    ///
+    /// Keys: `title`, `author`, `subject`, `publisher`, `year`, `keywords`
+    /// (each a string or None), and `extra`, a list of other `(key, value)`
+    /// pairs in document order.
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        document_metadata(py, self.inner.inner())
+    }
+
+    /// The table of contents as a list of dicts with `title`, `url` and
+    /// `children` (the same shape, nested). Empty when there is none.
+    fn bookmarks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        to_python(py, self.inner.inner().bookmarks())
     }
 
     /// Convert the document to PDF and return the bytes.
@@ -643,6 +744,267 @@ impl Page {
                 .map_err(|e| DecodeError::new_err(format!("{e}")))
         })
     }
+
+    /// The page's annotations as `(annotation, areas)`, or None when the page
+    /// has none.
+    ///
+    /// `annotation` is a dict with `background`, `zoom`, `mode` and `extra`
+    /// (every other top-level form as S-expression text). `areas` is a list
+    /// of map-area dicts with `url`, `target`, `description`, `shape`,
+    /// `border`, `highlight` and `extra`. A shape is a one-key dict such as
+    /// `{"Rect": {"x": 10, "y": 10, "width": 100, "height": 20}}`, in DjVu
+    /// coordinates (origin at the bottom-left corner).
+    fn annotations<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        page_annotations(py, self.doc.inner(), self.index)
+    }
+
+    /// The page's text layer as a dict, or None when the page has none.
+    ///
+    /// The dict has `text`, the full page text, and `zones`, a tree of zone
+    /// dicts with `kind` (`"Page"`, `"Column"`, `"Region"`, `"Para"`,
+    /// `"Line"`, `"Word"` or `"Character"`), `rect` (`x`, `y`, `width`,
+    /// `height` in pixels, origin at the top-left corner), `text` and
+    /// `children`.
+    fn text_layer<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        page_text_layer(py, self.doc.inner(), self.index)
+    }
+}
+
+/// A DjVu document opened for editing.
+///
+/// Changes stay in memory until `save` or `to_bytes`. The readers
+/// (`metadata`, `bookmarks`, `page_annotations`, `page_text_layer`,
+/// `document`) show the document with the changes made so far, so a value
+/// can be read, changed and written back. Single-page and bundled documents
+/// are supported; indirect documents and legacy BM44/PM44 pages raise
+/// `EditError`.
+#[pyclass]
+struct Editor {
+    doc: DjVuDocumentMut,
+    /// The edited state, parsed for reading; dropped by every change.
+    view: Option<Arc<djvu_rs::Document>>,
+}
+
+impl Editor {
+    fn new(doc: DjVuDocumentMut) -> Self {
+        Editor { doc, view: None }
+    }
+
+    /// The current state, parsed once per change.
+    fn view(&mut self, py: Python<'_>) -> PyResult<Arc<djvu_rs::Document>> {
+        if let Some(view) = &self.view {
+            return Ok(Arc::clone(view));
+        }
+        let doc = self.doc.clone();
+        let view = py.detach(move || {
+            let bytes = doc.try_into_bytes().map_err(edit_error)?;
+            djvu_rs::Document::from_bytes(bytes).map_err(|e| DecodeError::new_err(format!("{e}")))
+        })?;
+        let view = Arc::new(view);
+        self.view = Some(Arc::clone(&view));
+        Ok(view)
+    }
+
+    fn changed(&mut self) {
+        self.view = None;
+    }
+
+    fn serialize(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let doc = self.doc.clone();
+        py.detach(move || doc.try_into_bytes().map_err(edit_error))
+    }
+}
+
+#[pymethods]
+impl Editor {
+    /// Open a DjVu file for editing.
+    #[staticmethod]
+    fn open(py: Python<'_>, path: &str) -> PyResult<Self> {
+        let doc = py.detach(|| {
+            let data = std::fs::read(path).map_err(|e| IoError::new_err(format!("{e}")))?;
+            DjVuDocumentMut::from_bytes(&data).map_err(|e| DecodeError::new_err(format!("{e}")))
+        })?;
+        Ok(Editor::new(doc))
+    }
+
+    /// Open DjVu bytes for editing.
+    #[staticmethod]
+    fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
+        let data = data.to_vec();
+        let doc = py.detach(move || {
+            DjVuDocumentMut::from_bytes(&data).map_err(|e| DecodeError::new_err(format!("{e}")))
+        })?;
+        Ok(Editor::new(doc))
+    }
+
+    /// Number of pages in the document.
+    fn page_count(&self) -> usize {
+        self.doc.page_count()
+    }
+
+    /// True once any change has been made.
+    #[getter]
+    fn modified(&self) -> bool {
+        self.doc.is_dirty()
+    }
+
+    /// The document with the changes made so far, as a read-only `Document`
+    /// (for rendering, text or export).
+    fn document(&mut self, py: Python<'_>) -> PyResult<Document> {
+        Ok(Document {
+            inner: self.view(py)?,
+        })
+    }
+
+    /// Document-level metadata as a dict, or None. See `Document.metadata`.
+    fn metadata<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let view = self.view(py)?;
+        document_metadata(py, view.inner())
+    }
+
+    /// Replace the document-level metadata with the dict `metadata`.
+    ///
+    /// Keys left out are empty: `{"title": "Atlas"}` keeps no author.
+    fn set_metadata(&mut self, metadata: &Bound<'_, PyAny>) -> PyResult<()> {
+        let metadata: DjVuMetadata = from_python(metadata, "metadata")?;
+        self.doc.set_metadata(&metadata);
+        self.changed();
+        Ok(())
+    }
+
+    /// Remove the document-level metadata.
+    fn remove_metadata(&mut self) {
+        self.doc.remove_metadata();
+        self.changed();
+    }
+
+    /// The table of contents. See `Document.bookmarks`.
+    fn bookmarks<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let view = self.view(py)?;
+        to_python(py, view.inner().bookmarks())
+    }
+
+    /// Replace the table of contents with `bookmarks`, a list of dicts with
+    /// `title`, `url` and optional `children`. An empty list removes it.
+    ///
+    /// Raises `EditError` for a single-page document: DjVu keeps bookmarks
+    /// only in a bundled multi-page file.
+    fn set_bookmarks(&mut self, bookmarks: &Bound<'_, PyAny>) -> PyResult<()> {
+        let bookmarks: Vec<DjVuBookmark> = from_python(bookmarks, "bookmarks")?;
+        self.doc.set_bookmarks(&bookmarks).map_err(edit_error)?;
+        self.changed();
+        Ok(())
+    }
+
+    /// The annotations of page `index`. See `Page.annotations`.
+    fn page_annotations<'py>(
+        &mut self,
+        py: Python<'py>,
+        index: usize,
+    ) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        let view = self.view(py)?;
+        page_annotations(py, view.inner(), index)
+    }
+
+    /// Replace the annotations of page `index`.
+    ///
+    /// `annotation` is a dict in the shape `Page.annotations` returns; keys
+    /// left out take their defaults, so `{}` is valid. `areas` is a list of
+    /// map-area dicts; each needs a `shape`.
+    #[pyo3(signature = (index, annotation, areas=None))]
+    fn set_page_annotations(
+        &mut self,
+        index: usize,
+        annotation: &Bound<'_, PyAny>,
+        areas: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let annotation: Annotation = from_python(annotation, "annotation")?;
+        let areas: Vec<MapArea> = match areas {
+            Some(areas) => from_python(areas, "map areas")?,
+            None => Vec::new(),
+        };
+        self.doc
+            .page_mut(index)
+            .map_err(edit_error)?
+            .set_annotations(&annotation, &areas);
+        self.changed();
+        Ok(())
+    }
+
+    /// Remove the annotations of page `index`.
+    fn remove_page_annotations(&mut self, index: usize) -> PyResult<()> {
+        self.doc
+            .page_mut(index)
+            .map_err(edit_error)?
+            .remove_annotations();
+        self.changed();
+        Ok(())
+    }
+
+    /// The text layer of page `index`. See `Page.text_layer`.
+    fn page_text_layer<'py>(
+        &mut self,
+        py: Python<'py>,
+        index: usize,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let view = self.view(py)?;
+        page_text_layer(py, view.inner(), index)
+    }
+
+    /// Replace the text layer of page `index` with the dict `layer`, in the
+    /// shape `Page.text_layer` returns.
+    ///
+    /// Each zone's `text` must occur in the layer's `text`: the file stores
+    /// zones as spans of the page text.
+    fn set_page_text_layer(
+        &mut self,
+        py: Python<'_>,
+        index: usize,
+        layer: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let layer: TextLayer = from_python(layer, "text layer")?;
+        let doc = &mut self.doc;
+        py.detach(|| {
+            doc.page_mut(index)
+                .map_err(edit_error)?
+                .set_text_layer(&layer)
+                .map_err(edit_error)
+        })?;
+        self.changed();
+        Ok(())
+    }
+
+    /// Remove the text layer of page `index`.
+    fn remove_page_text_layer(&mut self, index: usize) -> PyResult<()> {
+        self.doc
+            .page_mut(index)
+            .map_err(edit_error)?
+            .remove_text_layer();
+        self.changed();
+        Ok(())
+    }
+
+    /// The edited document as bytes.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self.serialize(py)?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// Write the edited document to `path`.
+    ///
+    /// The output is validated first and then replaces `path` in one step,
+    /// through a temporary file beside it, so a failure leaves an existing
+    /// file untouched. `path` may be the file this editor was opened from.
+    fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let bytes = self.serialize(py)?;
+        py.detach(|| {
+            DocumentEditor::commit_bytes(Path::new(path), &bytes)
+                .map_err(|e| EditError::new_err(format!("cannot save {path}: {e}")))
+        })
+    }
 }
 
 /// An RGBA pixel buffer.
@@ -809,8 +1171,10 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("IoError", m.py().get_type::<IoError>())?;
     m.add("ExportError", m.py().get_type::<ExportError>())?;
     m.add("PageIndexError", m.py().get_type::<PageIndexError>())?;
+    m.add("EditError", m.py().get_type::<EditError>())?;
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;
+    m.add_class::<Editor>()?;
     m.add_class::<Pixmap>()?;
     Ok(())
 }

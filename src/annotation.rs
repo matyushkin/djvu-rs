@@ -115,12 +115,14 @@ pub struct Highlight {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MapArea {
     /// Target URL (empty string if no link).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub url: String,
     /// Browser frame for the link, from the `(url "href" "target")` form;
     /// `None` for the plain `"href"` form.
     #[cfg_attr(feature = "serde", serde(default))]
     pub target: Option<String>,
     /// Human-readable description.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub description: String,
     /// Shape of the area.
     pub shape: Shape,
@@ -138,6 +140,7 @@ pub struct MapArea {
 /// Page-level annotation data.
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Annotation {
     /// Background color for the page view.
     pub background: Option<Color>,

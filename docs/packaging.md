@@ -50,12 +50,15 @@ Exposed today: open / `from_bytes`, page metadata, render (including region /
 progressive / coarse), text extraction, typed exceptions, zero-copy buffer
 views, and document export — `to_pdf` / `write_pdf`, `to_epub` / `write_epub`,
 `to_cbz` / `write_cbz`, `to_tiff` / `write_tiff`. Each `to_*` returns bytes;
-each `write_*` streams to a file and holds one page at a time.
+each `write_*` streams to a file and holds one page at a time. `Editor` edits
+annotations, text layers, metadata and bookmarks, exchanged as dicts in the
+serde shape of the Rust models; `save` validates and replaces the file
+atomically.
 
 **Not exposed in the Python bindings** (use the Rust crate / CLI instead):
 
 - encode / `PageEncoder`
-- document mutation (`DjVuDocumentMut`)
+- structural edits: merge, split, page insert / remove, indirect documents
 
 ### Typed exceptions
 
@@ -65,6 +68,7 @@ each `write_*` streams to a file and holds one page at a time.
 | `djvu_rs.DecodeError` | Parse / decode / render failures |
 | `djvu_rs.IoError` | Filesystem failures from `Document.open` and the `write_*` exporters |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failures |
+| `djvu_rs.EditError` | An `Editor` change or save the file cannot take |
 | `djvu_rs.PageIndexError` | Out-of-range `Document.page` (also an `IndexError`) |
 
 ### Smoke tests

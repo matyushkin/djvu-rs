@@ -32,6 +32,11 @@ then renames it over the destination. A rejected request therefore leaves an
 existing destination unchanged. Input and output paths that resolve to the
 same file are rejected.
 
+`DocumentEditor::commit_bytes` is that commit step on its own: it validates
+edited bytes (for example from `DjVuDocumentMut`) and atomically replaces the
+destination. It may replace the file the bytes were read from; the Python
+`Editor.save` uses it.
+
 Operations are applied in order. On a single-page document, page-level and
 document-level metadata refer to the same root `FORM:DJVU`; use a bundled
 document when those scopes must remain distinct.

@@ -1,11 +1,12 @@
 # djvu-rs Python bindings
 
 Python bindings for [djvu-rs](https://github.com/matyushkin/djvu-rs), a
-pure-Rust DjVu decoder and encoder. The bindings cover reading and export:
-open documents, render pages (to PIL or numpy), extract the text layer, and
-convert a whole document to PDF, EPUB, CBZ or TIFF.
+pure-Rust DjVu decoder and encoder. The bindings cover reading, export and
+editing: open documents, render pages (to PIL or numpy), extract the text
+layer, convert a whole document to PDF, EPUB, CBZ or TIFF, and change the
+annotations, text layer, metadata and bookmarks of an existing file.
 
-Encode and document mutation are **not** exposed here — use the
+Encoding new DjVu files is **not** exposed here — use the
 [Rust crate](https://crates.io/crates/djvu-rs) or the `djvu` CLI. See
 [docs/packaging.md](../docs/packaging.md) for the release contract.
 
@@ -43,6 +44,7 @@ separate Python release train.
 | `djvu_rs.DecodeError` | Parse / decode / render failure |
 | `djvu_rs.IoError` | Filesystem failure from `Document.open` |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failure |
+| `djvu_rs.EditError` | An edit or `Editor.save` the file cannot take |
 | `djvu_rs.PageIndexError` | Out-of-range page index (also an `IndexError`) |
 
 ## Usage
@@ -103,3 +105,55 @@ doc.write_tiff('scan.tiff', mode='bilevel', bilevel_compression='g4')
 `dpi=0` in `to_pdf` means the page's own resolution — the largest and slowest
 output. `jpeg_quality=None` gives lossless page images and larger files.
 `adaptive=True` encodes each page both ways and keeps the smaller one.
+
+## Editing
+
+`Editor` changes the annotations, text layer, metadata and bookmarks of an
+existing file. Every value is a plain dict or list in the same shape as the
+Rust models' serde form, so you read a value, change it, and write it back.
+
+```python
+editor = djvu.Editor.open('book.djvu')
+
+# Metadata: missing keys become None.
+editor.set_metadata({'title': 'Atlas', 'extra': [('isbn', '978-0')]})
+
+# Annotations of page 0: a dict of page settings plus a list of map areas.
+# Annotation rectangles use DjVu coordinates (origin at the bottom left).
+annotation, areas = editor.page_annotations(0) or ({}, [])
+areas.append({
+    'url': 'https://example.org',
+    'description': 'Example',
+    'shape': {'Rect': {'x': 10, 'y': 20, 'width': 100, 'height': 30}},
+})
+editor.set_page_annotations(0, annotation, areas)
+
+# Bookmarks (bundled multi-page files only). [] removes them.
+editor.set_bookmarks([{'title': 'Chapter 1', 'url': '#1'}])
+
+# Text layer: text plus a zone tree; zone rectangles have a top-left origin.
+layer = editor.page_text_layer(0)
+
+editor.save('book.djvu')          # validates, then replaces the file atomically
+data = editor.to_bytes()          # or keep the result in memory
+```
+
+| Method | Effect |
+|---|---|
+| `Editor.open(path)` / `Editor.from_bytes(data)` | Start an edit session |
+| `metadata()` / `set_metadata(dict)` / `remove_metadata()` | Document metadata |
+| `bookmarks()` / `set_bookmarks(list)` | Document outline |
+| `page_annotations(i)` / `set_page_annotations(i, annotation, areas=None)` / `remove_page_annotations(i)` | Page annotations and links |
+| `page_text_layer(i)` / `set_page_text_layer(i, layer)` / `remove_page_text_layer(i)` | Page text layer |
+| `modified` | `True` after any change |
+| `document()` | A read-only `Document` of the current, unsaved state |
+| `to_bytes()` / `save(path)` | Write the result |
+
+The getters show unsaved changes. `Document.metadata()`, `Document.bookmarks()`,
+`Page.annotations()` and `Page.text_layer()` return the same shapes for a
+read-only document. A getter returns `None` (or `[]` for bookmarks) when the
+file has no such data.
+
+A dict of the wrong shape raises `ValueError` and leaves the document
+unchanged. An out-of-range page raises `PageIndexError`. Legacy `BM44` /
+`PM44` pages and bookmarks on a single-page file raise `EditError`.

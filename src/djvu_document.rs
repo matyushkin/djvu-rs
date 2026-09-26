@@ -230,6 +230,7 @@ pub struct DjVuBookmark {
     /// Target URL (DjVu internal URL format).
     pub url: String,
     /// Nested child entries.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub children: Vec<DjVuBookmark>,
 }
 

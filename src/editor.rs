@@ -289,9 +289,23 @@ impl DocumentEditor {
 
         let input_bytes = fs::read(input)?;
         let output_bytes = Self::apply(&input_bytes, request)?;
+        Self::commit_bytes(output, &output_bytes)
+    }
+
+    /// Validate edited document bytes and atomically replace `output` with
+    /// them.
+    ///
+    /// This is the commit step of [`Self::apply_to_path`], for callers that
+    /// edit through [`DjVuDocumentMut`] directly. Error-severity findings from
+    /// [`crate::validate::validate_planned_output`] abort the commit before a
+    /// temporary file is created. The temporary file is a sibling of
+    /// `output`, flushed and synced before the rename, so a failure leaves an
+    /// existing `output` untouched. `output` may be the file the bytes were
+    /// read from.
+    pub fn commit_bytes(output: &Path, output_bytes: &[u8]) -> Result<(), EditError> {
         // #696: validate the planned output before touching the destination.
         // Error-severity findings abort the commit; warnings do not block.
-        if let Err(findings) = crate::validate::validate_planned_output(&output_bytes) {
+        if let Err(findings) = crate::validate::validate_planned_output(output_bytes) {
             let summary = findings
                 .iter()
                 .map(|finding| finding.code)
@@ -304,7 +318,7 @@ impl DocumentEditor {
         let temp = create_sibling_temp(output)?;
         let write_result = (|| -> Result<(), EditError> {
             let mut file = OpenOptions::new().write(true).open(&temp)?;
-            file.write_all(&output_bytes)?;
+            file.write_all(output_bytes)?;
             file.sync_all()?;
             fs::rename(&temp, output)?;
             Ok(())
