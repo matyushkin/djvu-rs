@@ -743,9 +743,13 @@ Honest boundaries, so you can decide fast:
   `DjVuDocumentMut::from_bytes` + `page_mut` on an indirect index errors;
   use `from_indirect_resolved` (rebundles) or `IndirectRewritePlan` (rewrites
   component files; per-file atomic, whole-commit not transactional).
+- **Legacy `FORM:BM44`/`FORM:PM44` pages are read-only.** They render and pass
+  through save, merge, and split unchanged, but `page_mut` returns
+  `MutError::LegacyIw44Page`: these files have no text or annotation layers
+  to edit.
 - **Lazy async loading does not cover indirect DJVM** — bundled `FORM:DJVM`
-  and single-page `FORM:DJVU` only; indirect returns a clean `Unsupported`
-  error.
+  and single-page `FORM:DJVU` (or legacy `BM44`/`PM44`) only; indirect returns
+  a clean `Unsupported` error.
 - **`create_indirect` does not emit shared `DJVI` dictionary components** —
   build a bundled document with `djvu merge` when pages share a dictionary, or
   convert an existing bundled document with `djvm::to_indirect`, which
@@ -763,11 +767,15 @@ Honest boundaries, so you can decide fast:
   not match the decoder's Pigeon `YCbCr` basis (`IW44_PIGEON_COLOR`); see
   `PERF_EXPERIMENTS.md`. Same-size record-6 and lossy rec-7 remain experimental
   and are tracked in [`docs/jb2-size-gap-plan.md`](docs/jb2-size-gap-plan.md).
-- **Document optimization is conservative in the first slice.** `djvu optimize`
-  currently removes only semantically inert `FREE` padding and reports unmet
-  size targets; archival codec search, progress callbacks, and cancellation
-  remain planned. See [`docs/optimizer.md`](docs/optimizer.md); it always writes
-  a separate output file.
+- **Document optimization is conservative.** `lossless-cleanup` removes only
+  semantically inert `FREE` padding. `archival` re-encodes IW44 backgrounds
+  (and, with `--lossy-text`, JB2 masks) only under an SSIM floor
+  (`--max-ssim-loss`), searches for the least loss that meets `--target-size`,
+  and reports a target it cannot meet. `FG44` foregrounds, thumbnails, legacy
+  `BM44`/`PM44` files, and masks that use an `INCL` or `Djbz` dictionary are not
+  re-encoded. Progress and cancellation hooks are available. See
+  [`docs/optimizer.md`](docs/optimizer.md); it always writes a separate output
+  file.
 - **OCR: Tesseract is the supported recognition backend.** `OcrOptions`
   (languages, dpi) are honored by Tesseract only; the `ocr-onnx` neural
   pipeline is CLI-live but experimental (fixed pinned models, options
