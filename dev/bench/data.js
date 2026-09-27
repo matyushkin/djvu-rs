@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790472114153,
+  "lastUpdate": 1790515268779,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20434,6 +20434,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47262000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7e751a912d6220ebefb47d488c23c64ecc9d50da",
+          "message": "feat(mut)!: write metadata where DjVuLibre reads it (#853)\n\nDjVuLibre ignores METa/METz chunks: `djvused print-meta` and ddjvuapi\nsaw nothing that djvu-rs wrote. Metadata now goes into the\n`(metadata ...)` block of an ANTz annotation chunk:\n\n- a bundled document writes the shared annotation component, adding it\n  (DIRM entry, FORM:DJVI, an INCL in every page) on first use, as\n  `djvused set-meta` does;\n- a single-page document and `PageMut::set_metadata` write the page ANTz;\n- `PageEncoder::with_metadata` emits ANTz instead of METz.\n\nOther annotations in the chunk are kept, root METa/METz are dropped, and\nreplacing or removing page annotations keeps the metadata block. Legacy\nMETa/METz are still read.\n\nBREAKING CHANGE: `DjVuDocumentMut::set_metadata`/`remove_metadata` and\n`PageMut::set_metadata`/`remove_metadata` now return\n`Result<(), MutError>`. They fail when the existing annotation chunk does\nnot parse (new `MutError::Annotation`), for an indirect DJVM, or for a\nlegacy BM44/PM44 root.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T12:55:45Z",
+          "tree_id": "233c07bd3f76b83f4f90ff76d8cfabffd2b3eded",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/7e751a912d6220ebefb47d488c23c64ecc9d50da"
+        },
+        "date": 1790515267484,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8294000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49869000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47779000,
             "range": "± 0",
             "unit": "ns/iter"
           }
