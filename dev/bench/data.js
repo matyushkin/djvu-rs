@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790342734635,
+  "lastUpdate": 1790469107404,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20290,6 +20290,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40667000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2af3b341d83f98a74178c13284c8b21fb526df59",
+          "message": "feat(py): edit annotations, text layers, metadata and bookmarks (#851)\n\nA new `Editor` class opens a document for editing and exposes the\nDjVuDocumentMut setters to Python. Values are plain dicts and lists in\nthe serde shape of the Rust models (via pythonize), so a caller reads\na value, changes it and writes it back:\n\n- metadata / set_metadata / remove_metadata\n- bookmarks / set_bookmarks\n- page_annotations / set_page_annotations / remove_page_annotations\n- page_text_layer / set_page_text_layer / remove_page_text_layer\n- modified, document(), to_bytes(), save(path)\n\nThe getters show unsaved changes. Read-only `Document.metadata()`,\n`Document.bookmarks()`, `Page.annotations()` and `Page.text_layer()`\nreturn the same shapes. A wrong dict raises ValueError and leaves the\ndocument unchanged; a new `EditError` covers edits the file cannot take.\n\n`save` goes through the new `DocumentEditor::commit_bytes`, the commit\nstep of `apply_to_path` on its own: validate, then atomically replace\nthe destination, which may be the file that was opened.\n\nThe serde models now accept partial input: `DjVuMetadata` and\n`Annotation` default missing fields, as do `MapArea.url`,\n`MapArea.description`, `TextZone.children` and `DjVuBookmark.children`.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T00:06:24Z",
+          "tree_id": "14a9da9a875479ddd5b2a91188e15273141e1716",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2af3b341d83f98a74178c13284c8b21fb526df59"
+        },
+        "date": 1790469105207,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 134000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6920000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41888000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40183000,
             "range": "± 0",
             "unit": "ns/iter"
           }
