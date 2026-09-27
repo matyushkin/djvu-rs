@@ -16072,3 +16072,72 @@ nearest-cell FG44 (see `tests/diff_tolerance.md`) were close approximations
 for page-size renders; the exact rules are the bottom-origin
 `GPixmapScaler` table and the bottom-origin FG cell. The "tolerance-4 native
 ceiling" of 0.8 % no longer needs its colorbook headroom.
+
+### JB2 center-aligned record-4 refinement — `Lossless` switches to the dictionary — **Kept** (2026-09-27)
+
+**Issue.** The encoder parity scorecard put the public JB2 `Lossless` profile
+at up to 2.1× `cjb2` (cable 4,720 vs 2,248 B; Chinese cookbook 140 vs 67 B).
+
+**Cause.** Profile choice, not the dictionary. `PageEncoder` `Lossless`
+called `encode_jb2`, which writes direct record-3 tiles with no symbol
+dictionary. The exact-match dictionary (`encode_jb2_dict`) already brings
+cable to about 1.13×. The rest is glyph matching: `cjb2` refines near-twins.
+
+**Approach.** Center-aligned refinement (`AlignedRefine`):
+
+- Candidates: dict entries within ±`max_dim_delta` px per axis, same size
+  included, newest first.
+- Distance: Hamming count under the decoder's own refinement alignment
+  (`row_shift`/`col_shift` of the centers), computed byte-wise with a 16-bit
+  shift window and early exit. A unit test checks it against a per-pixel
+  count for every size pair within ±3 px. Earlier attempts (#322) resampled
+  the reference, so the refinement context mispredicted.
+- Prefilter: ink-count difference is a lower bound on the distance, so most
+  candidates never get a pixel scan. The budget shrinks to the best match.
+- Emission: record 4 (refine, add to dict, blit), so a refined glyph can be
+  the reference for later ones. Record 6 (blit only) was measured too.
+
+New public `encode_jb2_lossless(bitmap)`: dictionary + `AlignedRefine::LOSSLESS`
+(±2 px, 20 %, record 4). It also runs `encode_jb2` and keeps the smaller
+stream. Pages whose components exceed the decoder's record or symbol-pixel
+limits (conservative check: every component counted as decoded) get
+`encode_jb2` only. `PageEncoder` `Lossless` + `BilevelCodec::Jb2` now calls it.
+
+**Numbers.** Sjbz bytes, first 8 masks per corpus
+(`examples/jb2_aligned_refine.rs`), round-trip exact everywhere:
+
+| Corpus | direct tiles | dict (exact match) | rec-4 d=2 20 % | vs dict |
+|---|---:|---:|---:|---:|
+| cable (2) | 31,166 | 9,107 | 8,548 | −6.1 % |
+| Chinese cookbook (5) | 191,523 | 155,103 | 142,664 | −8.0 % |
+| watchmaker (8) | 374,155 | 92,650 | 73,858 | −20.3 % |
+| conquete_paix (8) | 61,609 | 17,294 | 16,970 | −1.9 % |
+| pathogenic_bacteria (7) | 196,138 | 148,969 | 134,237 | −9.9 % |
+| war_1812 (8) | 543,604 | 384,639 | 358,283 | −6.9 % |
+
+Sweep: d ∈ {1,2,3} × budget ∈ {10,20,30 %}. d=2/20 % is at or within 0.8 %
+of the best on every corpus; d=3 costs up to 30 % more time on war_1812 for
+≤0.8 % gain. Record 6 at the same settings *loses* (+0.1…+120 %): without
+the dict entry, later glyphs refine against the older, worse reference.
+
+Scorecard vs `cjb2` 3.5.29 (`ddjvu` pixel-exact on all three):
+cable **1.011×** (was 2.100×), Chinese cookbook **0.985×** (was 2.090×), map
+atlas **0.952×** (unchanged — direct tiles win there, so they are kept).
+Earlier DjVuLibre check: `ddjvu` pixel-identical on 8 pages × record 4 and 6.
+
+**Speed.** Aligned search vs exact-match dict: 0–8 % on five corpora,
+war_1812 +170 % (318 → 857 ms for 8 pages; dense page of many similar glyphs).
+A scan cap (8…64 comparisons per component) lost most of war_1812's gain, so
+there is no cap. `Lossless` page encode vs the old direct tiles: cable
+16.6 → 21.9 ms, map atlas 29.6 → 149.4 ms (both encodings run), still faster
+than `cjb2` on all three pages.
+
+**Decision.** Kept. `encode_jb2_dict*` defaults are byte-identical (the
+aligned path runs only through `encode_jb2_lossless` or the experimental
+`Jb2EncodeOptions::aligned_refine`).
+
+**Open.** `chunk_encode` and the multi-page bundle path do not use aligned
+refinement yet. Direct `encode_jb2` output above 16 MP does not decode in our
+decoder (per-page symbol budget, `ImageTooLarge`) — pre-existing, and
+`encode_jb2_lossless` still returns it when the dictionary path is over the
+limits.

@@ -512,12 +512,13 @@ worker pool. The full contract lives in
 ### JB2 bilevel image encoder
 
 ```rust
-use djvu_rs::{Bitmap, jb2_encode::encode_jb2};
+use djvu_rs::{Bitmap, jb2_encode::encode_jb2_lossless};
 
 fn main() {
     let mut bm = Bitmap::new(800, 1000);
     // ... fill bitmap pixels ...
-    let sjbz_payload = encode_jb2(&bm);
+    // Symbol dictionary + refinement of similar glyphs; pixel-exact.
+    let sjbz_payload = encode_jb2_lossless(&bm);
     // Wrap in a Sjbz IFF chunk and embed in a DjVu FORM:DJVU.
     assert!(!sjbz_payload.is_empty());
 }
@@ -804,8 +805,8 @@ Honest boundaries, so you can decide fast:
   the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
   `PageEncoder` profiles. The 2026-07-16 snapshot ranges from 1.025–1.040×
   `c44` for IW44 photo pages — at matched-or-better fidelity (decoded PSNR/SSIM
-  meet or exceed `c44` on the measured pages) — and 0.952–2.100× `cjb2` for the
-  public direct JB2 lossless profile; every measured output passed its
+  meet or exceed `c44` on the measured pages) — and 0.952–1.011× `cjb2` for the
+  JB2 lossless profile (2026-09-27 snapshot); every measured output passed its
   interop/fidelity gate. The earlier IW44 gap (up to 1.345×, and lower fidelity)
   came from two encoder bugs since fixed: an activation threshold that stranded
   dense-page coefficients (`IW44_LUMA_PLATEAU`) and a colour transform that did

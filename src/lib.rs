@@ -149,8 +149,11 @@ pub mod iw44_encode;
 
 /// JB2 bilevel image encoder — produces Sjbz chunk payloads.
 ///
-/// Provides [`jb2_encode::encode_jb2`] (single record-type-3 direct encoding) and
-/// [`jb2_encode::encode_jb2_dict`] (connected-component symbol-dictionary encoding).
+/// Provides [`jb2_encode::encode_jb2_lossless`] (symbol dictionary with
+/// refinement of similar glyphs — the smallest lossless output),
+/// [`jb2_encode::encode_jb2_dict`] (connected-component symbol-dictionary
+/// encoding) and [`jb2_encode::encode_jb2`] (single record-type-3 direct
+/// encoding).
 #[cfg(feature = "std")]
 pub mod jb2_encode;
 
