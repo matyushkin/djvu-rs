@@ -595,6 +595,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+When pages share components — a JB2 symbol dictionary or shared annotations
+in a `FORM:DJVI` file — list every component file with
+`create_indirect_with_components`. The FORM type of each file sets its kind,
+and each page's `INCL` must name a listed shared component:
+
+```rust,no_run
+use djvu_rs::djvm::create_indirect_with_components;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dict = std::fs::read("dict0001.iff")?;  // FORM:DJVI with a Djbz
+    let p1 = std::fs::read("p0001.djvu")?;      // FORM:DJVU, INCL dict0001.iff
+    let p2 = std::fs::read("p0002.djvu")?;
+    let index = create_indirect_with_components(&[
+        ("dict0001.iff", &dict),
+        ("p0001.djvu", &p1),
+        ("p0002.djvu", &p2),
+    ])?;
+    std::fs::write("book.djvu", index)?;
+    Ok(())
+}
+```
+
 Load an indirect document by resolving component files from a directory:
 
 ```rust,no_run
@@ -777,10 +799,6 @@ Honest boundaries, so you can decide fast:
 - **Lazy indirect DJVM loading is Rust-only.** `LazyIndirectDocument` fetches
   indirect pages through an async resolver; the browser `wasm-lazy` API still
   opens only bundled and single-page files.
-- **`create_indirect` does not emit shared `DJVI` dictionary components** —
-  build a bundled document with `djvu merge` when pages share a dictionary, or
-  convert an existing bundled document with `djvm::to_indirect`, which
-  preserves shared components.
 - **Encoder size parity is corpus- and profile-dependent.** Run the
   reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
   the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe

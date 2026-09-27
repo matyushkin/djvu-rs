@@ -345,12 +345,24 @@ impl DirmPayload {
     /// Build an indirect `DIRM` (no offset table) from component descriptors.
     #[cfg(feature = "std")]
     pub fn build_indirect(count: usize, flags: &[u8], ids: &[String]) -> Self {
+        Self::build_indirect_with_sizes(count, flags, ids, &[])
+    }
+
+    /// Like [`Self::build_indirect`], with each component's byte size (its
+    /// `FORM` header plus declared length) in the size table.
+    #[cfg(feature = "std")]
+    pub fn build_indirect_with_sizes(
+        count: usize,
+        flags: &[u8],
+        ids: &[String],
+        sizes: &[u32],
+    ) -> Self {
         Self {
             // Directory version 1 (see build_bundled), bundled bit clear.
             flags: 0x01,
             nfiles: count as u16,
             offsets: Vec::new(),
-            metadata: build_metadata(count, flags, ids, &[]),
+            metadata: build_metadata(count, flags, ids, sizes),
         }
     }
 }
