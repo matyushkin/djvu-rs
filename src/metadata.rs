@@ -1,7 +1,9 @@
 //! DjVu document metadata parser — phase 4 extension.
 //!
-//! Parses METa (plain text) and METz (BZZ-compressed) metadata chunks into a
-//! structured [`DjVuMetadata`] value.
+//! Parses the `(metadata …)` block into a structured [`DjVuMetadata`] value.
+//! DjVuLibre reads that block from `ANTa`/`ANTz` annotation chunks; older
+//! files may carry it in METa (plain text) or METz (BZZ-compressed) chunks,
+//! which DjVuLibre ignores. djvu-rs writers emit only the annotation form.
 //!
 //! ## Key public types
 //!

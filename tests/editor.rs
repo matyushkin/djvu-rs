@@ -77,7 +77,7 @@ fn editor_plans_and_applies_typed_operations() {
         parse_metadata(
             &doc.page(0)
                 .unwrap()
-                .chunk_payload(b"METz", b"METa")
+                .chunk_payload(b"ANTz", b"ANTa")
                 .unwrap()
                 .unwrap(),
         )
@@ -201,7 +201,7 @@ fn editor_removes_page_and_document_state() {
     assert!(
         doc.page(0)
             .unwrap()
-            .chunk_payload(b"METz", b"METa")
+            .chunk_payload(b"ANTz", b"ANTa")
             .unwrap()
             .is_none()
     );

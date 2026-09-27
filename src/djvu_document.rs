@@ -2074,14 +2074,18 @@ impl DjVuDocument {
         &self.bookmarks
     }
 
-    /// Parse document-level metadata from a METz (BZZ-compressed) or METa
-    /// (plain text) chunk.
+    /// Parse document-level metadata.
     ///
-    /// Without METa/METz, falls back to the `(metadata …)` block of the
-    /// shared-annotation component, where DjVuLibre (`djvused set-meta`)
-    /// stores it (#833).
+    /// Sources, in order:
+    /// 1. a root `METz` (BZZ-compressed) or `METa` (plain) chunk, which
+    ///    earlier djvu-rs versions wrote and DjVuLibre ignores;
+    /// 2. the `(metadata …)` block of the shared-annotation component, where
+    ///    DjVuLibre (`djvused set-meta`) and djvu-rs store it for a bundle
+    ///    (#833);
+    /// 3. for a single-page `FORM:DJVU`, the `(metadata …)` block of its own
+    ///    annotation chunk, the only scope such a file has.
     ///
-    /// Returns `Ok(None)` if neither source carries metadata.
+    /// Returns `Ok(None)` if no source carries metadata.
     pub fn metadata(&self) -> Result<Option<DjVuMetadata>, DocError> {
         if let Some(bytes) = self.chunk_payload(b"METz", b"METa")? {
             return Ok(Some(crate::metadata::parse_metadata(&bytes)?));
@@ -2092,7 +2096,12 @@ impl DjVuDocument {
                 .find(|c| &c.id == id)
                 .map(|c| c.data.as_slice())
         };
-        let Some(bytes) = decode_paired_payload(find(b"ANTz"), find(b"ANTa"))? else {
+        let bytes = match decode_paired_payload(find(b"ANTz"), find(b"ANTa"))? {
+            Some(bytes) => Some(bytes),
+            // Root-level ANTz/ANTa exist only in a single-page FORM:DJVU.
+            None => self.chunk_payload(b"ANTz", b"ANTa")?,
+        };
+        let Some(bytes) = bytes else {
             return Ok(None);
         };
         let meta = crate::metadata::parse_metadata(&bytes)?;

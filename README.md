@@ -209,9 +209,10 @@ where unmasked detail warrants it, so routed photos keep their detail. These
 knobs are opt-in, only affect layered profiles, and do not change lossless
 JB2 defaults.
 Library callers can use the same controls with `PageEncoder::with_segment_options`.
-For newly encoded pages, `PageEncoder::with_metadata` emits a `METz` chunk;
-for existing documents, `DjVuDocumentMut::page_mut(...).set_metadata(...)`
-performs a mutation while preserving untouched chunks. These are deliberately
+For newly encoded pages, `PageEncoder::with_metadata` emits the metadata in an
+`ANTz` annotation chunk, where DjVuLibre reads it; for existing documents,
+`DjVuDocumentMut::set_metadata(...)` and `page_mut(...).set_metadata(...)`
+perform a mutation while preserving untouched chunks. These are deliberately
 separate fresh-encode and mutation APIs.
 
 ## Python
@@ -616,8 +617,8 @@ bounded to the spooled component being appended.
 
 `DocumentEditor` provides a versioned, typed operation list with a semantic
 dry-run plan and validation of every operation before bytes are emitted. The
-current schema covers page text, page annotations, page/document METa/METz
-metadata, and bundled-document NAVM bookmarks:
+current schema covers page text, page annotations, page/document metadata
+(written where DjVuLibre reads it), and bundled-document NAVM bookmarks:
 
 ```rust,no_run
 use djvu_rs::{DocumentEditor, EditOperation, EditRequest};
@@ -719,7 +720,7 @@ The fresh-encode versus existing-document mutation contract is expanded in
 | Bookmarks (`NAVM`) | ✓ | ✓ |
 | Multi-page directory (`DIRM`), bundled and indirect | ✓ | ✓ (DjVuLibre-clean directory v1) |
 | Thumbnails (`TH44`) | ✓ | ✓ (`--thumbnails`) |
-| Metadata (`METa` / `METz`) | ✓ | ✓ (`PageEncoder::with_metadata`; `PageMut::set_metadata`) |
+| Metadata (`ANTz` `(metadata …)`; legacy `METa` / `METz` read only) | ✓ | ✓ (`PageEncoder::with_metadata`; `set_metadata` on documents and pages) |
 | Legacy standalone `FORM:BM44` / `FORM:PM44` files | ✓ | — |
 | Unknown chunk IDs | preserved byte-exact for round-trip | n/a |
 

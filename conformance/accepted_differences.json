@@ -21,7 +21,7 @@
     {
       "id": "metadata-meta-vs-print-meta",
       "category": "semantic-source",
-      "rationale": "djvu-rs metadata() reads METa/METz first, then falls back to the (metadata ...) block of the DIRM shared-annotation component, the only source DjVuLibre print-meta reads (#833). czech.djvu covers the shared-annotation path; no corpus document carries METa/METz, which DjVuLibre ignores."
+      "rationale": "djvu-rs metadata() reads METa/METz first, then falls back to the (metadata ...) block of the DIRM shared-annotation component, the only source DjVuLibre print-meta reads (#833). czech.djvu covers the shared-annotation path; no corpus document carries METa/METz, which DjVuLibre ignores. djvu-rs writers now emit only the ANTz (metadata ...) form and drop METa/METz on edit."
     }
   ]
 }
