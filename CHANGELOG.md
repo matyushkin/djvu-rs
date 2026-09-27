@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0](https://github.com/matyushkin/djvu-rs/compare/v0.36.0...v0.37.0) (2026-09-27)
+
+
+### Features
+
+* **py:** edit annotations, text layers, metadata and bookmarks ([#851](https://github.com/matyushkin/djvu-rs/issues/851)) ([2af3b34](https://github.com/matyushkin/djvu-rs/commit/2af3b341d83f98a74178c13284c8b21fb526df59))
+
+
+### Bug Fixes
+
+* **mut:** keep NAVM directly after DIRM when writing metadata ([#850](https://github.com/matyushkin/djvu-rs/issues/850)) ([e0b1a92](https://github.com/matyushkin/djvu-rs/commit/e0b1a92b32d03fc240062048177bd2b831b0ecbc))
+
 ## [0.36.0](https://github.com/matyushkin/djvu-rs/compare/v0.35.2...v0.36.0) (2026-09-25)
 
 
