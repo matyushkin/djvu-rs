@@ -1,0 +1,8 @@
+# Names that exist only for type checkers: the TypedDicts and aliases that
+# describe the dict shapes. Import them under `if TYPE_CHECKING:`.
+djvu_rs\.(Annotation|AnnotationInput|Bookmark|BookmarkInput|Border|Color|Highlight|MapArea|MapAreaInput|Metadata|MetadataInput|Rect|Shape|RectShape|OvalShape|PolyShape|LineShape|TextShape|TextLayer|TextLayerInput|TextZone|TextZoneInput|ZoneKind)
+# The compiled extension that djvu_rs/__init__.py re-exports.
+djvu_rs\.djvu_rs
+# The stub's __all__ also lists the type-only names, so type checkers treat
+# them as public.
+djvu_rs\.__all__

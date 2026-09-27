@@ -2,7 +2,7 @@
 #
 # Builds the extension module via maturin into a uv-managed venv and runs the
 # pytest suite (tests/). Mirrors what the `djvu-py` CI job does.
-.PHONY: py-venv py-build py-test py-clean
+.PHONY: py-venv py-build py-test py-stubtest py-clean
 
 VENV := .venv
 PYTHON_VERSION ?= 3.12
@@ -20,6 +20,11 @@ py-build: py-venv
 ## Build (if needed) and run the pytest suite.
 py-test: py-build
 	$(VENV)/bin/pytest tests -v
+
+## Check the type stub djvu_rs.pyi against the built module with mypy's stubtest.
+py-stubtest: py-build
+	uv pip install --python $(VENV)/bin/python mypy
+	cd $(VENV) && bin/python -m mypy.stubtest djvu_rs --allowlist ../stubtest-allowlist.txt
 
 ## Remove the venv and pytest caches.
 py-clean:
