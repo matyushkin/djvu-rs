@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790469107404,
+  "lastUpdate": 1790470612098,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20338,6 +20338,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40183000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e0b1a92b32d03fc240062048177bd2b831b0ecbc",
+          "message": "fix(mut): keep NAVM directly after DIRM when writing metadata (#850)\n\nDjVuLibre reads a bundle's bookmarks only from the chunk that\nimmediately follows DIRM. `set_metadata` inserted the document-level\nMETz right after DIRM, so after any metadata edit `djvused\nprint-outline` showed no bookmarks, including the original ones.\n\n`set_metadata` now inserts METz after a NAVM that follows DIRM, and\nboth `set_metadata` and `set_bookmarks` move a misplaced NAVM back\nnext to DIRM, which repairs files written by earlier versions.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T00:07:15Z",
+          "tree_id": "080f0c125e2501f81c5799ffc168508e5e65f8ce",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/e0b1a92b32d03fc240062048177bd2b831b0ecbc"
+        },
+        "date": 1790470611157,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8276999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49548000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47707000,
             "range": "± 0",
             "unit": "ns/iter"
           }
