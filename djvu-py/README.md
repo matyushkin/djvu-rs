@@ -158,3 +158,30 @@ file has no such data.
 A dict of the wrong shape raises `ValueError` and leaves the document
 unchanged. An out-of-range page raises `PageIndexError`. Legacy `BM44` /
 `PM44` pages and bookmarks on a single-page file raise `EditError`.
+
+## Type hints
+
+The package ships a type stub (`djvu_rs.pyi`) and a `py.typed` marker, so
+mypy, pyright and IDEs check calls and complete names. The dict shapes above
+have `TypedDict` types: `Metadata`, `Bookmark`, `Annotation`, `MapArea`,
+`Shape`, `TextLayer`, `TextZone` and others. The editor also accepts the
+`...Input` variants, where keys left out take their defaults.
+
+These types exist only for type checkers. Import them under `TYPE_CHECKING`:
+
+```python
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+import djvu_rs as djvu
+
+if TYPE_CHECKING:
+    from djvu_rs import Metadata
+
+def title(path: str) -> str | None:
+    meta: Metadata | None = djvu.Document.open(path).metadata()
+    return meta["title"] if meta else None
+```
+
+A shape is a dict with one key; `if "Rect" in shape:` narrows it to
+`RectShape`. `make py-stubtest` checks the stub against the built module.

@@ -173,19 +173,19 @@ fn pdf_options(
 #[allow(clippy::too_many_arguments)]
 fn epub_options(
     dpi: u32,
-    title: String,
-    author: String,
-    language: String,
+    title: &str,
+    author: &str,
+    language: &str,
     modified: Option<String>,
     reflowable_text: bool,
     jpeg_quality: Option<u8>,
     adaptive: bool,
 ) -> EpubOptions {
     EpubOptions {
-        title,
-        author,
+        title: title.to_owned(),
+        author: author.to_owned(),
         dpi,
-        language,
+        language: language.to_owned(),
         modified,
         reflowable_text,
         jpeg_quality,
@@ -376,17 +376,17 @@ impl Document {
     ///         image, for readers that prefer flowing text.
     ///     jpeg_quality: 1-100 for JPEG page images, or None for PNG.
     ///     adaptive: Encode each page both ways and keep the smaller one.
-    #[pyo3(signature = (dpi=150, title="DjVu Document".to_owned(), author=String::new(),
-                        language="en".to_owned(), modified=None, reflowable_text=false,
+    #[pyo3(signature = (dpi=150, title="DjVu Document", author="",
+                        language="en", modified=None, reflowable_text=false,
                         jpeg_quality=None, adaptive=false))]
     #[allow(clippy::too_many_arguments)]
     fn to_epub<'py>(
         &self,
         py: Python<'py>,
         dpi: u32,
-        title: String,
-        author: String,
-        language: String,
+        title: &str,
+        author: &str,
+        language: &str,
         modified: Option<String>,
         reflowable_text: bool,
         jpeg_quality: Option<u8>,
@@ -412,8 +412,8 @@ impl Document {
     /// Convert the document to EPUB 3, straight into the file at `path`.
     ///
     /// Takes the same arguments as `to_epub`.
-    #[pyo3(signature = (path, dpi=150, title="DjVu Document".to_owned(), author=String::new(),
-                        language="en".to_owned(), modified=None, reflowable_text=false,
+    #[pyo3(signature = (path, dpi=150, title="DjVu Document", author="",
+                        language="en", modified=None, reflowable_text=false,
                         jpeg_quality=None, adaptive=false))]
     #[allow(clippy::too_many_arguments)]
     fn write_epub(
@@ -421,9 +421,9 @@ impl Document {
         py: Python<'_>,
         path: &str,
         dpi: u32,
-        title: String,
-        author: String,
-        language: String,
+        title: &str,
+        author: &str,
+        language: &str,
         modified: Option<String>,
         reflowable_text: bool,
         jpeg_quality: Option<u8>,
