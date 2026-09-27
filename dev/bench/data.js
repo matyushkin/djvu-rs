@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790519137200,
+  "lastUpdate": 1790520854778,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20578,6 +20578,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47350000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "75e6d4bf411df63028a3e53f7fdfee6036b9a4a4",
+          "message": "feat(jb2): lossless dictionary encoding with center-aligned refinement (#858)\n\nPageEncoder Lossless wrote direct record-3 tiles with no symbol\ndictionary, which put it at up to 2.1x cjb2. New encode_jb2_lossless\ncodes the page with the dictionary plus record-4 refinements scored\nunder the decoder's center alignment, keeps direct tiles when they are\nsmaller, and falls back to them over the decoder's limits.\n\nScorecard vs cjb2 3.5.29: cable 2.100x -> 1.011x, Chinese cookbook\n2.090x -> 0.985x, map atlas 0.952x (tiles kept); ddjvu pixel-exact.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T14:29:08Z",
+          "tree_id": "01c700b246bd519c7afcc67ec81fba591c8bcf55",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/75e6d4bf411df63028a3e53f7fdfee6036b9a4a4"
+        },
+        "date": 1790520852772,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 165000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8230000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49998000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47693000,
             "range": "± 0",
             "unit": "ns/iter"
           }
