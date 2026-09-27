@@ -385,6 +385,7 @@ pub mod tiff_export;
 /// one-line pattern).
 ///
 /// Key abstractions: [`djvu_async::LazyDocument`],
+/// [`djvu_async::LazyIndirectDocument`],
 /// [`djvu_async::render_progressive_stream`],
 /// [`djvu_async::render_tile_async`],
 /// [`djvu_async::render_tile_progressive_stream`],
