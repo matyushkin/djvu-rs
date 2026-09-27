@@ -119,6 +119,36 @@ pub enum DjvmError {
         /// Number of requested components.
         count: usize,
     },
+
+    /// Two components passed to [`create_indirect_with_components`] share a name.
+    #[error("component name {name:?} is used more than once")]
+    DuplicateComponentName {
+        /// The repeated name.
+        name: String,
+    },
+
+    /// A component passed to [`create_indirect_with_components`] is not a
+    /// page, shared (`DJVI`) or thumbnail (`THUM`) form.
+    #[error(
+        "component {name:?} is FORM:{}, not a DjVu component",
+        String::from_utf8_lossy(form_type)
+    )]
+    UnsupportedComponentForm {
+        /// The component name.
+        name: String,
+        /// The FORM type found.
+        form_type: [u8; 4],
+    },
+
+    /// A page includes (`INCL`) a name that is not a shared component of the
+    /// same document.
+    #[error("page {page:?} includes {include:?}, which is not a shared component")]
+    UnresolvedInclude {
+        /// The page component name.
+        page: String,
+        /// The `INCL` target.
+        include: String,
+    },
 }
 
 /// Storage policy for [`DjvmStreamWriter`] component bytes.
@@ -1205,8 +1235,9 @@ fn build_djvm_with_document_chunks(
 /// `Page` component; there are no embedded `FORM:DJVU` sub-forms — the component
 /// data lives in separate files that must be passed to a resolver when parsing.
 ///
-/// Shared-dictionary (DJVI) components are not supported by this helper; use
-/// [`merge`] to build a bundled document that includes them.
+/// This helper lists pages only. To list shared `DJVI` components (symbol
+/// dictionaries, shared annotations) and thumbnails too, use
+/// [`create_indirect_with_components`].
 ///
 /// # Errors
 ///
@@ -1226,6 +1257,121 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
     let dirm = iff::Chunk::Leaf {
         id: *b"DIRM",
         data: DirmPayload::build_indirect(count, &flags, &ids).encode(),
+    };
+    iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).ok_or(DjvmError::OutputTooLarge)
+}
+
+/// Create an indirect `FORM:DJVM` index for a set of standalone component
+/// files: pages, shared `DJVI` components and `THUM` thumbnails.
+///
+/// Each entry is `(name, file bytes)`, in directory order. The name is the
+/// DIRM id: the file name a resolver loads and the name a page's `INCL` uses.
+/// The FORM type of each file sets its kind: `DJVU` (or legacy `BM44`/`PM44`)
+/// is a page, `DJVI` is a shared component, `THUM` is a thumbnail. A `DJVI`
+/// that every page includes, that holds annotations and no `Djbz` symbol
+/// dictionary, becomes the document's shared annotation (DIRM flag 3), where
+/// DjVuLibre reads document metadata; only the first such component does.
+///
+/// The index records each component's size. Write each component file with the
+/// exact bytes given here, next to the index. The index holds only the
+/// directory: to keep bookmarks (`NAVM`), split a bundled document with
+/// [`to_indirect`] instead.
+///
+/// # Errors
+///
+/// - [`DjvmError::EmptyMerge`] when no component is a page;
+/// - [`DjvmError::DuplicateComponentName`] when two components share a name;
+/// - [`DjvmError::UnsupportedComponentForm`] for any other FORM type;
+/// - [`DjvmError::UnresolvedInclude`] when a page includes a name that is not
+///   a shared component in the list;
+/// - [`DjvmError::TooManyComponents`] above 65 535 components;
+/// - [`DjvmError::Iff`] when a component is not a valid IFF file.
+pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<Vec<u8>, DjvmError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if components.len() > usize::from(u16::MAX) {
+        return Err(DjvmError::TooManyComponents {
+            count: components.len(),
+        });
+    }
+
+    let mut index_of: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut flags = Vec::with_capacity(components.len());
+    let mut sizes = Vec::with_capacity(components.len());
+    let mut page_includes: Vec<(&str, BTreeSet<String>)> = Vec::new();
+    // Shared components that could hold the shared annotation, in order.
+    let mut anno_candidates: Vec<(&str, usize)> = Vec::new();
+    for (index, &(name, bytes)) in components.iter().enumerate() {
+        if index_of.insert(name, index).is_some() {
+            return Err(DjvmError::DuplicateComponentName {
+                name: name.to_string(),
+            });
+        }
+        let form = iff::parse_form(bytes)?;
+        // `parse_form` succeeded, so the FORM header is present.
+        let form_bytes = strip_att(bytes);
+        let declared =
+            u32::from_be_bytes([form_bytes[4], form_bytes[5], form_bytes[6], form_bytes[7]]);
+        sizes.push(declared.saturating_add(8));
+        let flag = match &form.form_type {
+            form_type if is_page_form(form_type) => {
+                let includes = form
+                    .chunks
+                    .iter()
+                    .filter(|chunk| chunk.id == *b"INCL")
+                    .map(|chunk| String::from_utf8_lossy(chunk.data.trim_ascii_end()).into_owned())
+                    .collect();
+                page_includes.push((name, includes));
+                1
+            }
+            b"DJVI" => {
+                let has = |id: &[u8; 4]| form.chunks.iter().any(|chunk| chunk.id == *id);
+                if !has(b"Djbz") && (has(b"ANTa") || has(b"ANTz")) {
+                    anno_candidates.push((name, index));
+                }
+                0
+            }
+            b"THUM" => 2,
+            other => {
+                return Err(DjvmError::UnsupportedComponentForm {
+                    name: name.to_string(),
+                    form_type: *other,
+                });
+            }
+        };
+        flags.push(flag);
+    }
+    if page_includes.is_empty() {
+        return Err(DjvmError::EmptyMerge);
+    }
+
+    for (page, includes) in &page_includes {
+        if let Some(include) = includes
+            .iter()
+            .find(|include| index_of.get(include.as_str()).map(|&index| flags[index]) != Some(0))
+        {
+            return Err(DjvmError::UnresolvedInclude {
+                page: page.to_string(),
+                include: include.clone(),
+            });
+        }
+    }
+    if let Some(&(_, index)) = anno_candidates.iter().find(|(name, _)| {
+        page_includes
+            .iter()
+            .all(|(_, includes)| includes.contains(*name))
+    }) {
+        flags[index] = 3;
+    }
+
+    let ids: Vec<String> = components
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    let dirm = iff::Chunk::Leaf {
+        id: *b"DIRM",
+        data: DirmPayload::build_indirect_with_sizes(components.len(), &flags, &ids, &sizes)
+            .encode(),
     };
     iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).ok_or(DjvmError::OutputTooLarge)
 }
@@ -2047,6 +2193,184 @@ mod tests {
                 "page {index}'s INCL still resolves its shared dictionary"
             );
         }
+    }
+
+    // ── create_indirect_with_components ─────────────────────────────────────
+
+    fn dirm_kinds(index: &[u8]) -> Vec<(String, crate::dirm::DirmComponentKind)> {
+        let form = iff::parse_form(index).expect("parse index");
+        let dirm = form
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == *b"DIRM")
+            .expect("index has DIRM");
+        let payload = DirmPayload::decode(dirm.data).expect("decode DIRM");
+        assert!(!payload.is_bundled());
+        payload
+            .components()
+            .into_iter()
+            .map(|component| (component.id, component.kind))
+            .collect()
+    }
+
+    fn resolve_indirect(index: &[u8], files: &[(String, Vec<u8>)]) -> DjVuDocument {
+        use crate::djvu_document::{ComponentId, ComponentResolveError};
+        let resolver = |component: &ComponentId| {
+            files
+                .iter()
+                .find(|(name, _)| *name == component.name)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| ComponentResolveError::Missing {
+                    component: component.clone(),
+                })
+        };
+        DjVuDocument::parse_with_component_resolver(index, &resolver).expect("resolve")
+    }
+
+    fn borrowed(files: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+        files
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect()
+    }
+
+    /// Rebuilding the index of a split corpus book keeps every kind and size,
+    /// and pages still decode their shared dictionaries.
+    #[test]
+    fn indirect_with_components_rebuilds_the_directory_of_a_split_book() {
+        for name in ["czech.djvu", "DjVu3Spec_bundled.djvu"] {
+            let bundled = std::fs::read(fixture_path(name)).expect("fixture");
+            let split = to_indirect(&bundled).expect("to_indirect");
+            let index =
+                create_indirect_with_components(&borrowed(&split.components)).expect("index");
+            assert_eq!(dirm_kinds(&index), dirm_kinds(&split.index), "{name}");
+
+            let form = iff::parse_form(&index).unwrap();
+            let payload = DirmPayload::decode(form.chunks[0].data).unwrap();
+            for (component, (_, bytes)) in payload.components().iter().zip(&split.components) {
+                assert_eq!(component.size as usize, strip_att(bytes).len(), "{name}");
+            }
+
+            let original = DjVuDocument::parse(&bundled).unwrap();
+            let rebuilt = resolve_indirect(&index, &split.components);
+            assert_eq!(rebuilt.page_count(), original.page_count(), "{name}");
+            for i in 0..original.page_count() {
+                assert_eq!(
+                    rebuilt.page(i).unwrap().decoded_shared_dict().is_some(),
+                    original.page(i).unwrap().decoded_shared_dict().is_some(),
+                    "{name} page {i}"
+                );
+            }
+        }
+    }
+
+    /// A DJVI of annotations that every page includes becomes the shared
+    /// annotation, so the document metadata stays readable.
+    #[test]
+    fn indirect_with_components_marks_the_shared_annotation() {
+        use crate::dirm::DirmComponentKind;
+        let bundled = std::fs::read(fixture_path("navm_fgbz.djvu")).expect("fixture");
+        let meta = crate::metadata::DjVuMetadata {
+            title: Some("Atlas".into()),
+            ..Default::default()
+        };
+        let mut doc = crate::djvu_mut::DjVuDocumentMut::from_bytes(&bundled).unwrap();
+        doc.set_metadata(&meta).unwrap();
+        let split = to_indirect(&doc.into_bytes()).expect("to_indirect");
+
+        let index = create_indirect_with_components(&borrowed(&split.components)).unwrap();
+        let kinds = dirm_kinds(&index);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|(_, kind)| *kind == DirmComponentKind::SharedAnno)
+                .count(),
+            1
+        );
+        assert_eq!(kinds, dirm_kinds(&split.index));
+        let rebuilt = resolve_indirect(&index, &split.components);
+        assert_eq!(rebuilt.metadata().unwrap(), Some(meta));
+    }
+
+    /// An annotation DJVI that only some pages include stays an ordinary
+    /// shared component.
+    #[test]
+    fn indirect_with_components_keeps_partial_annotation_includes_shared() {
+        use crate::dirm::DirmComponentKind;
+        let form = |form_type: &[u8; 4], chunks: &[([u8; 4], &[u8])]| {
+            let leaves = chunks
+                .iter()
+                .map(|(id, data)| iff::Chunk::Leaf {
+                    id: *id,
+                    data: data.to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let parts = leaves.iter().map(iff::EmitPart::Chunk).collect::<Vec<_>>();
+            iff::partial_emit(*form_type, &parts).unwrap()
+        };
+        let info = crate::chunk_encode::encode_info(10, 10, 300);
+        let anno = form(b"DJVI", &[(*b"ANTa", b"(background #ffffff)")]);
+        let with = form(b"DJVU", &[(*b"INFO", &info), (*b"INCL", b"anno.djvi")]);
+        let without = form(b"DJVU", &[(*b"INFO", &info)]);
+        let components: Vec<(&str, &[u8])> = vec![
+            ("anno.djvi", &anno),
+            ("p1.djvu", &with),
+            ("p2.djvu", &without),
+        ];
+        let index = create_indirect_with_components(&components).unwrap();
+        assert_eq!(dirm_kinds(&index)[0].1, DirmComponentKind::Shared);
+
+        let components: Vec<(&str, &[u8])> =
+            vec![("anno.djvi", &anno), ("p1.djvu", &with), ("p2.djvu", &with)];
+        let index = create_indirect_with_components(&components).unwrap();
+        assert_eq!(dirm_kinds(&index)[0].1, DirmComponentKind::SharedAnno);
+    }
+
+    #[test]
+    fn indirect_with_components_rejects_bad_input() {
+        let bundled = std::fs::read(fixture_path("czech.djvu")).expect("fixture");
+        let split = to_indirect(&bundled).expect("to_indirect");
+        let all = borrowed(&split.components);
+        let page = all
+            .iter()
+            .copied()
+            .find(|(_, bytes)| &bytes[12..16] == b"DJVU")
+            .unwrap();
+        let shared = all
+            .iter()
+            .copied()
+            .find(|(_, bytes)| &bytes[12..16] == b"DJVI")
+            .unwrap();
+
+        let duplicate = [page, page];
+        assert!(matches!(
+            create_indirect_with_components(&duplicate),
+            Err(DjvmError::DuplicateComponentName { .. })
+        ));
+        let bundle = [("book.djvu", bundled.as_slice())];
+        assert!(matches!(
+            create_indirect_with_components(&bundle),
+            Err(DjvmError::UnsupportedComponentForm { form_type, .. }) if &form_type == b"DJVM"
+        ));
+        let shared_only = [shared];
+        assert!(matches!(
+            create_indirect_with_components(&shared_only),
+            Err(DjvmError::EmptyMerge)
+        ));
+        // czech pages include shared components: without them the INCL dangles.
+        let pages_only = all
+            .iter()
+            .copied()
+            .filter(|(_, bytes)| &bytes[12..16] == b"DJVU")
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            create_indirect_with_components(&pages_only),
+            Err(DjvmError::UnresolvedInclude { .. })
+        ));
+        assert!(matches!(
+            create_indirect_with_components(&[("junk", b"not an iff file")]),
+            Err(DjvmError::Iff(_))
+        ));
     }
 
     #[test]
