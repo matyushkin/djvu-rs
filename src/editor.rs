@@ -56,13 +56,13 @@ pub enum EditOperation {
     },
     /// Remove a page's annotation layer.
     RemovePageAnnotations { page: usize },
-    /// Replace page-level METa/METz metadata.
+    /// Replace page-level metadata (the page `ANTz` `(metadata …)` block).
     SetPageMetadata { page: usize, metadata: DjVuMetadata },
-    /// Remove page-level METa/METz metadata.
+    /// Remove page-level metadata.
     RemovePageMetadata { page: usize },
-    /// Replace document-level METa/METz metadata.
+    /// Replace document-level metadata where DjVuLibre reads it.
     SetDocumentMetadata { metadata: DjVuMetadata },
-    /// Remove document-level METa/METz metadata.
+    /// Remove document-level metadata.
     RemoveDocumentMetadata,
     /// Replace the document's NAVM bookmarks.
     SetBookmarks { bookmarks: Vec<DjVuBookmark> },
@@ -395,21 +395,13 @@ fn apply_one(
             Ok(())
         }
         EditOperation::SetPageMetadata { page, metadata } => {
-            page_mut_for_operation(doc, operation, *page, edit.kind())?.set_metadata(metadata);
-            Ok(())
+            page_mut_for_operation(doc, operation, *page, edit.kind())?.set_metadata(metadata)
         }
         EditOperation::RemovePageMetadata { page } => {
-            page_mut_for_operation(doc, operation, *page, edit.kind())?.remove_metadata();
-            Ok(())
+            page_mut_for_operation(doc, operation, *page, edit.kind())?.remove_metadata()
         }
-        EditOperation::SetDocumentMetadata { metadata } => {
-            doc.set_metadata(metadata);
-            Ok(())
-        }
-        EditOperation::RemoveDocumentMetadata => {
-            doc.remove_metadata();
-            Ok(())
-        }
+        EditOperation::SetDocumentMetadata { metadata } => doc.set_metadata(metadata),
+        EditOperation::RemoveDocumentMetadata => doc.remove_metadata(),
         EditOperation::SetBookmarks { bookmarks } => doc.set_bookmarks(bookmarks),
         EditOperation::RemoveBookmarks => doc.set_bookmarks(&[]),
     };

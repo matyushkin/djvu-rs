@@ -115,7 +115,8 @@ Rust models' serde form, so you read a value, change it, and write it back.
 ```python
 editor = djvu.Editor.open('book.djvu')
 
-# Metadata: missing keys become None.
+# Metadata: missing keys become None. DjVuLibre tools such as
+# `djvused -e print-meta` see the result.
 editor.set_metadata({'title': 'Atlas', 'extra': [('isbn', '978-0')]})
 
 # Annotations of page 0: a dict of page settings plus a list of map areas.

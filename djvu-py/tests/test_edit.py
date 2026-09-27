@@ -78,6 +78,15 @@ def test_metadata_accepts_a_partial_dict(boy_path):
     assert reopen(editor).metadata() is None
 
 
+def test_annotation_edits_keep_metadata(boy_path):
+    # A single-page file keeps both in one chunk; only set_metadata changes it.
+    editor = djvu.Editor.open(str(boy_path))
+    editor.set_metadata({"title": "Atlas"})
+    editor.set_page_annotations(0, {"zoom": 150}, [LINK])
+    editor.remove_page_annotations(0)
+    assert reopen(editor).metadata()["title"] == "Atlas"
+
+
 def test_readers_show_unsaved_changes(boy_path):
     editor = djvu.Editor.open(str(boy_path))
     assert editor.metadata() is None

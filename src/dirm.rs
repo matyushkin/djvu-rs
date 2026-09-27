@@ -274,6 +274,74 @@ impl DirmPayload {
         true
     }
 
+    /// Insert a component descriptor at `index` (0 ..= `nfiles`).
+    ///
+    /// `flags` is the DIRM flags byte (low bits: the component kind, e.g. 3
+    /// for a shared annotation); the new entry carries only an id, so readers
+    /// use the id as its name and title. Every existing entry, including its
+    /// name and title strings, is kept byte for byte. The new size and offset
+    /// are zero until [`Self::update_sizes`] and the caller's offset pass
+    /// fill them in.
+    #[cfg(feature = "std")]
+    pub fn insert_component(
+        &mut self,
+        index: usize,
+        flags: u8,
+        id: &str,
+    ) -> Result<(), &'static str> {
+        let n = self.nfiles as usize;
+        if index > n {
+            return Err("DIRM insert index out of range");
+        }
+        let nfiles = u16::try_from(n + 1).map_err(|_| "DIRM component count overflow")?;
+        let meta =
+            crate::bzz::bzz_decode(&self.metadata).map_err(|_| "DIRM metadata is not valid BZZ")?;
+        let sizes = meta.get(..n * 3).ok_or("DIRM size table truncated")?;
+        let old_flags = meta.get(n * 3..n * 4).ok_or("DIRM flags table truncated")?;
+
+        // Per component: id, then name and title when its flags say so.
+        let mut pos = n * 4;
+        let mut entries = Vec::with_capacity(n);
+        for &flag in old_flags {
+            let start = pos;
+            let strings = 1 + usize::from(flag & 0x80 != 0) + usize::from(flag & 0x40 != 0);
+            for _ in 0..strings {
+                let nul = meta
+                    .get(pos..)
+                    .and_then(|rest| rest.iter().position(|&b| b == 0))
+                    .ok_or("DIRM component string truncated")?;
+                pos += nul + 1;
+            }
+            entries.push(&meta[start..pos]);
+        }
+        let tail = &meta[pos..];
+
+        let mut new_id = id.as_bytes().to_vec();
+        new_id.push(0);
+        let mut out = Vec::with_capacity(meta.len() + 4 + new_id.len());
+        out.extend_from_slice(&sizes[..index * 3]);
+        out.extend_from_slice(&[0, 0, 0]);
+        out.extend_from_slice(&sizes[index * 3..]);
+        out.extend_from_slice(&old_flags[..index]);
+        out.push(flags);
+        out.extend_from_slice(&old_flags[index..]);
+        for entry in &entries[..index] {
+            out.extend_from_slice(entry);
+        }
+        out.extend_from_slice(&new_id);
+        for entry in &entries[index..] {
+            out.extend_from_slice(entry);
+        }
+        out.extend_from_slice(tail);
+
+        self.nfiles = nfiles;
+        if self.is_bundled() {
+            self.offsets.insert(index, 0);
+        }
+        self.metadata = crate::bzz_encode::bzz_encode(&out);
+        Ok(())
+    }
+
     /// Build an indirect `DIRM` (no offset table) from component descriptors.
     #[cfg(feature = "std")]
     pub fn build_indirect(count: usize, flags: &[u8], ids: &[String]) -> Self {
@@ -457,6 +525,34 @@ mod tests {
         let bytes = p.encode();
         let p2 = DirmPayload::decode(&bytes).expect("decode built");
         assert_eq!(p2.encode(), bytes);
+    }
+
+    #[test]
+    fn insert_component_keeps_existing_entries() {
+        let ids = ["dict.iff".to_string(), "p1.djvu".to_string()];
+        let mut dirm = DirmPayload::build_bundled(2, &[0, 1], &ids, &[100, 200]);
+        dirm.insert_component(1, 3, "shared_anno.iff").unwrap();
+
+        assert_eq!(dirm.nfiles, 3);
+        assert_eq!(dirm.offsets.len(), 3);
+        let parts: Vec<_> = dirm
+            .components()
+            .into_iter()
+            .map(|c| (c.kind, c.id, c.size))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (DirmComponentKind::Shared, "dict.iff".to_string(), 100),
+                (
+                    DirmComponentKind::SharedAnno,
+                    "shared_anno.iff".to_string(),
+                    0
+                ),
+                (DirmComponentKind::Page, "p1.djvu".to_string(), 200),
+            ]
+        );
+        assert!(dirm.insert_component(4, 3, "x").is_err());
     }
 
     #[test]

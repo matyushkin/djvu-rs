@@ -870,15 +870,16 @@ impl Editor {
     /// Keys left out are empty: `{"title": "Atlas"}` keeps no author.
     fn set_metadata(&mut self, metadata: &Bound<'_, PyAny>) -> PyResult<()> {
         let metadata: DjVuMetadata = from_python(metadata, "metadata")?;
-        self.doc.set_metadata(&metadata);
+        self.doc.set_metadata(&metadata).map_err(edit_error)?;
         self.changed();
         Ok(())
     }
 
     /// Remove the document-level metadata.
-    fn remove_metadata(&mut self) {
-        self.doc.remove_metadata();
+    fn remove_metadata(&mut self) -> PyResult<()> {
+        self.doc.remove_metadata().map_err(edit_error)?;
         self.changed();
+        Ok(())
     }
 
     /// The table of contents. See `Document.bookmarks`.
@@ -913,7 +914,8 @@ impl Editor {
     ///
     /// `annotation` is a dict in the shape `Page.annotations` returns; keys
     /// left out take their defaults, so `{}` is valid. `areas` is a list of
-    /// map-area dicts; each needs a `shape`.
+    /// map-area dicts; each needs a `shape`. The page's `(metadata ...)`
+    /// block is kept unless `annotation["extra"]` holds one.
     #[pyo3(signature = (index, annotation, areas=None))]
     fn set_page_annotations(
         &mut self,

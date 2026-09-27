@@ -51,7 +51,9 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::annotation::{Annotation, MapArea, encode_annotations_bzz};
+use crate::annotation::{
+    Annotation, AnnotationError, MapArea, encode_annotations_bzz, parse_annotations,
+};
 use crate::chunk_encode::{ChunkEncoder, NavmChunk};
 use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
 use crate::djvm::is_page_form;
@@ -59,7 +61,7 @@ use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
 use crate::info::PageInfo;
-use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
+use crate::metadata::{DjVuMetadata, encode_metadata};
 use crate::text::TextLayer;
 use crate::text_encode::encode_text_layer;
 
@@ -138,6 +140,11 @@ pub enum MutError {
     /// [`DjVuDocumentMut::from_bytes`] on a well-formed DJVM document.
     #[error("DIRM chunk is malformed: {0}")]
     DirmMalformed(&'static str),
+
+    /// An existing annotation chunk did not parse, so a metadata edit cannot
+    /// keep the annotations around its `(metadata …)` block.
+    #[error("annotation chunk does not parse: {0}")]
+    Annotation(#[from] AnnotationError),
 
     /// The number of `FORM:DJVU`/`FORM:DJVI` components in the bundle does
     /// not match the count recorded in DIRM. Indicates a structurally
@@ -765,45 +772,77 @@ impl DjVuDocumentMut {
         unreachable!("page_count agreed with bundle but iteration disagreed")
     }
 
-    /// Replace (or insert) document-level metadata in the root FORM.
+    /// Replace document-level metadata where DjVuLibre reads it.
     ///
-    /// An empty value removes both METa and METz. For a bundled DJVM the
-    /// metadata is inserted immediately after DIRM when it is not already
-    /// present, keeping document-level chunks ahead of component FORMs.
-    pub fn set_metadata(&mut self, meta: &DjVuMetadata) {
-        let bytes = encode_metadata_bzz(meta);
-        let insert_at = match &self.file.root {
-            Chunk::Form {
-                secondary_id,
-                children,
-                ..
-            } => {
-                if secondary_id == b"DJVM" {
-                    // After DIRM, and after the NAVM that must follow it.
-                    children
-                        .iter()
-                        .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"DIRM"))
-                        .map(|i| {
-                            let navm_next = matches!(
-                                children.get(i + 1),
-                                Some(Chunk::Leaf { id, .. }) if id == b"NAVM"
-                            );
-                            i + 1 + usize::from(navm_next)
-                        })
-                } else {
-                    None
-                }
+    /// A bundled `FORM:DJVM` keeps document metadata in the `(metadata …)`
+    /// block of its shared-annotation component (`djvused set-meta`). If the
+    /// bundle has none and `meta` is not empty, this adds one the way
+    /// DjVuLibre does: a `FORM:DJVI` component before the first page, a DIRM
+    /// entry of type "shared annotation", and an `INCL` to it on every page.
+    /// A single-page `FORM:DJVU` has one scope, so the block goes into the
+    /// page's own `ANTz`, the same place as [`PageMut::set_metadata`].
+    ///
+    /// Every other annotation is kept. Root `METa`/`METz` chunks, which only
+    /// djvu-rs reads, are removed so they cannot shadow the new value. An
+    /// empty `meta` removes the metadata block.
+    ///
+    /// # Errors
+    ///
+    /// - [`MutError::Annotation`] if the existing annotation chunk does not
+    ///   parse.
+    /// - [`MutError::IndirectDjvmUnsupported`] for an indirect `FORM:DJVM`.
+    /// - [`MutError::LegacyIw44Page`] for a legacy single-page
+    ///   `FORM:BM44`/`FORM:PM44`, which has no annotation chunk.
+    /// - [`MutError::DirmMalformed`] if a shared annotation must be added and
+    ///   the DIRM cannot take the new entry.
+    pub fn set_metadata(&mut self, meta: &DjVuMetadata) -> Result<(), MutError> {
+        let root_form_type = *self.root_form_type().expect("from_bytes validated FORM");
+        if is_page_form(&root_form_type) {
+            if &root_form_type != b"DJVU" {
+                return Err(MutError::LegacyIw44Page { index: 0 });
             }
-            _ => None,
+            set_form_metadata(&mut self.file.root, meta)?;
+            self.dirty = true;
+            return Ok(());
+        }
+        if !is_bundled_djvm(&self.file.root) {
+            return Err(MutError::IndirectDjvmUnsupported);
+        }
+        let Chunk::Form { children, .. } = &mut self.file.root else {
+            unreachable!("validated FORM root");
         };
-        replace_or_insert_form_chunk(&mut self.file.root, b"METa", b"METz", bytes, insert_at);
+        children.retain(|c| !matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"));
+        match shared_anno_child(&self.file.root)? {
+            Some(child) => {
+                let Chunk::Form { children, .. } = &mut self.file.root else {
+                    unreachable!("validated FORM root");
+                };
+                set_form_metadata(&mut children[child], meta)?;
+            }
+            None if encode_metadata(meta).is_empty() => {}
+            None => {
+                let mut form = Chunk::Form {
+                    secondary_id: *b"DJVI",
+                    length: 0,
+                    children: Vec::new(),
+                };
+                set_form_metadata(&mut form, meta)?;
+                add_shared_anno(&mut self.file.root, form)?;
+            }
+        }
         keep_navm_after_dirm(&mut self.file.root);
         self.dirty = true;
+        Ok(())
     }
 
-    /// Remove document-level METa/METz metadata from the root FORM.
-    pub fn remove_metadata(&mut self) {
-        self.set_metadata(&DjVuMetadata::default());
+    /// Remove document-level metadata: the `(metadata …)` block that
+    /// [`Self::set_metadata`] writes, and any root `METa`/`METz`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::set_metadata`].
+    pub fn remove_metadata(&mut self) -> Result<(), MutError> {
+        self.set_metadata(&DjVuMetadata::default())
     }
 
     /// Replace, insert, or remove the document's `NAVM` bookmark chunk.
@@ -860,8 +899,8 @@ impl DjVuDocumentMut {
 ///
 /// DjVuLibre (`DjVmDoc::read`, `DjVuDocument`) reads bookmarks only from the
 /// chunk that immediately follows `DIRM`; a `NAVM` anywhere else is silently
-/// ignored. Document-level `METz` goes after it, and a file an earlier
-/// version wrote with `METz` in between is repaired on the next edit.
+/// ignored. A file an earlier version wrote with a root `METz` in between is
+/// repaired on the next edit.
 fn keep_navm_after_dirm(root: &mut Chunk) {
     let Chunk::Form { children, .. } = root else {
         return;
@@ -878,6 +917,163 @@ fn keep_navm_after_dirm(root: &mut Chunk) {
         let dirm = if navm < dirm { dirm - 1 } else { dirm };
         children.insert(dirm + 1, chunk);
     }
+}
+
+/// Replace the `(metadata …)` block in the annotation chunk of `form`.
+///
+/// DjVuLibre reads page metadata, and a shared annotation's document
+/// metadata, from this block. Every other annotation is kept. `METa`/`METz`
+/// in `form` are removed, since DjVuLibre ignores them and djvu-rs would
+/// read them first. An empty `meta` drops the block; an annotation chunk
+/// left with nothing in it is removed.
+fn set_form_metadata(form: &mut Chunk, meta: &DjVuMetadata) -> Result<(), MutError> {
+    let (mut annotation, areas) = form_annotations(form)?;
+    annotation.extra.retain(|form| !is_metadata_form(form));
+    let block = encode_metadata(meta);
+    if !block.is_empty() {
+        annotation
+            .extra
+            .push(String::from_utf8(block).expect("encode_metadata emits UTF-8"));
+    }
+    let bytes = encode_annotations_bzz(&annotation, &areas);
+    replace_or_insert_form_chunk(form, b"ANTa", b"ANTz", bytes, None);
+    replace_or_insert_form_chunk(form, b"METa", b"METz", Vec::new(), None);
+    Ok(())
+}
+
+/// The parsed `ANTz` (preferred) or `ANTa` chunk of `form`; empty when it has
+/// neither.
+fn form_annotations(form: &Chunk) -> Result<(Annotation, Vec<MapArea>), MutError> {
+    let find = |want: &[u8; 4]| {
+        form.children().iter().find_map(|c| match c {
+            Chunk::Leaf { id, data } if id == want => Some(data.as_slice()),
+            _ => None,
+        })
+    };
+    Ok(match (find(b"ANTz"), find(b"ANTa")) {
+        (Some(z), _) => parse_annotations(&crate::bzz::bzz_decode(z).map_err(|_| {
+            MutError::Annotation(AnnotationError::Parse("ANTz is not valid BZZ".into()))
+        })?)?,
+        (None, Some(a)) => parse_annotations(a)?,
+        (None, None) => (Annotation::default(), Vec::new()),
+    })
+}
+
+/// The `(metadata …)` blocks of `form`'s annotation chunk. A chunk that does
+/// not parse has none that could be kept.
+fn form_metadata_blocks(form: &Chunk) -> Vec<String> {
+    form_annotations(form)
+        .map(|(annotation, _)| {
+            annotation
+                .extra
+                .into_iter()
+                .filter(|f| is_metadata_form(f))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether an annotation form is a `(metadata …)` block (case-insensitive,
+/// as DjVuLibre and [`crate::metadata::parse_metadata`] treat it).
+fn is_metadata_form(form: &str) -> bool {
+    let Some(rest) = form.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    let head: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+        .collect();
+    head.eq_ignore_ascii_case("metadata")
+}
+
+/// Root child index of a bundle's shared-annotation component, if any.
+fn shared_anno_child(root: &Chunk) -> Result<Option<usize>, MutError> {
+    let children = root.children();
+    let Some(dirm) = children.iter().find_map(|c| match c {
+        Chunk::Leaf {
+            id: [b'D', b'I', b'R', b'M'],
+            data,
+        } => Some(data),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let payload = DirmPayload::decode(dirm).map_err(MutError::DirmMalformed)?;
+    let Some(k) = payload
+        .components()
+        .iter()
+        .position(|c| c.kind == DirmComponentKind::SharedAnno)
+    else {
+        return Ok(None);
+    };
+    Ok(children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, Chunk::Form { secondary_id, .. } if is_component_form(secondary_id)))
+        .nth(k)
+        .map(|(i, _)| i))
+}
+
+/// Add `form` to a bundle as its shared-annotation component, as DjVuLibre's
+/// `DjVuDocEditor::create_shared_anno_file` does: before the first page, with
+/// a DIRM entry of type 3, and an `INCL` after `INFO` on every `FORM:DJVU`
+/// page. Sizes and offsets are recomputed on serialization.
+fn add_shared_anno(root: &mut Chunk, form: Chunk) -> Result<(), MutError> {
+    let Chunk::Form { children, .. } = root else {
+        unreachable!("validated FORM root");
+    };
+    let dirm_idx = children
+        .iter()
+        .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"DIRM"))
+        .ok_or(MutError::DirmMalformed("bundle has no DIRM"))?;
+    let mut payload =
+        DirmPayload::decode(children[dirm_idx].data()).map_err(MutError::DirmMalformed)?;
+    let taken: Vec<String> = payload.components().into_iter().map(|c| c.id).collect();
+    let id = core::iter::once("shared_anno.iff".to_string())
+        .chain((1..).map(|n| format!("shared_anno{n}.iff")))
+        .find(|id| !taken.contains(id))
+        .expect("an unused id exists");
+
+    let is_component = |c: &Chunk| matches!(c, Chunk::Form { secondary_id, .. } if is_component_form(secondary_id));
+    let is_page =
+        |c: &Chunk| matches!(c, Chunk::Form { secondary_id, .. } if is_page_form(secondary_id));
+    let at = children.iter().position(is_page).unwrap_or(children.len());
+    let component_index = children[..at].iter().filter(|c| is_component(c)).count();
+    payload
+        .insert_component(component_index, 3, &id)
+        .map_err(MutError::DirmMalformed)?;
+    children[dirm_idx] = Chunk::Leaf {
+        id: *b"DIRM",
+        data: payload.encode(),
+    };
+    children.insert(at, form);
+
+    for page in children.iter_mut() {
+        let Chunk::Form {
+            secondary_id,
+            children: chunks,
+            ..
+        } = page
+        else {
+            continue;
+        };
+        if secondary_id != b"DJVU" {
+            continue;
+        }
+        let pos = chunks
+            .iter()
+            .position(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"INFO"))
+            .map_or(0, |i| i + 1);
+        chunks.insert(
+            pos,
+            Chunk::Leaf {
+                id: *b"INCL",
+                data: id.as_bytes().to_vec(),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Shared prologue for the two indirect-DJVM resolvers
@@ -1230,31 +1426,61 @@ impl PageMut<'_> {
 
     /// Replace (or insert) the page's annotation chunk with the
     /// BZZ-compressed `ANTz` form of `(annotation, areas)`.
+    ///
+    /// The chunk also holds the page's `(metadata …)` block. When
+    /// `annotation.extra` has no such block, the existing one is kept, so
+    /// only [`Self::set_metadata`] changes metadata.
     pub fn set_annotations(&mut self, annotation: &Annotation, areas: &[MapArea]) {
-        let bytes = encode_annotations_bzz(annotation, areas);
+        let bytes = if annotation.extra.iter().any(|f| is_metadata_form(f)) {
+            encode_annotations_bzz(annotation, areas)
+        } else {
+            let mut annotation = annotation.clone();
+            annotation.extra.extend(form_metadata_blocks(self.form));
+            encode_annotations_bzz(&annotation, areas)
+        };
         self.replace_or_insert(b"ANTa", b"ANTz", bytes);
         *self.dirty = true;
     }
 
-    /// Remove both ANTa and ANTz annotation chunks from the page.
+    /// Remove the page's annotations: both ANTa and ANTz chunks, except for
+    /// a `(metadata …)` block, which stays in a new `ANTz`.
     pub fn remove_annotations(&mut self) {
-        self.replace_or_insert(b"ANTa", b"ANTz", Vec::new());
+        let metadata = form_metadata_blocks(self.form);
+        let bytes = if metadata.is_empty() {
+            Vec::new()
+        } else {
+            let annotation = Annotation {
+                extra: metadata,
+                ..Annotation::default()
+            };
+            encode_annotations_bzz(&annotation, &[])
+        };
+        self.replace_or_insert(b"ANTa", b"ANTz", bytes);
         *self.dirty = true;
     }
 
-    /// Replace (or insert) the page's metadata chunk with the
-    /// BZZ-compressed `METz` form of `meta`. An empty `meta` value removes
-    /// any existing METa/METz chunk.
-    pub fn set_metadata(&mut self, meta: &DjVuMetadata) {
-        let bytes = encode_metadata_bzz(meta);
-        self.replace_or_insert(b"METa", b"METz", bytes);
+    /// Replace the page's metadata: the `(metadata …)` block of its `ANTz`,
+    /// where DjVuLibre (`djvused select 1; set-meta`) keeps page metadata.
+    ///
+    /// Every other annotation is kept, and any `METa`/`METz` chunk on the
+    /// page is removed. An empty `meta` removes the block.
+    ///
+    /// # Errors
+    ///
+    /// [`MutError::Annotation`] if the page's annotation chunk does not parse.
+    pub fn set_metadata(&mut self, meta: &DjVuMetadata) -> Result<(), MutError> {
+        set_form_metadata(self.form, meta)?;
         *self.dirty = true;
+        Ok(())
     }
 
-    /// Remove both METa and METz page-metadata chunks.
-    pub fn remove_metadata(&mut self) {
-        self.replace_or_insert(b"METa", b"METz", Vec::new());
-        *self.dirty = true;
+    /// Remove the page's metadata block and any `METa`/`METz` chunk.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::set_metadata`].
+    pub fn remove_metadata(&mut self) -> Result<(), MutError> {
+        self.set_metadata(&DjVuMetadata::default())
     }
 
     fn find_leaf_data(&self, id: &[u8; 4]) -> Option<&[u8]> {
@@ -2083,20 +2309,28 @@ mod tests {
         let mut meta = DjVuMetadata::default();
         meta.title = Some("Test Title".into());
         meta.author = Some("Tester".into());
-        doc.page_mut(0).unwrap().set_metadata(&meta);
+        doc.page_mut(0).unwrap().set_metadata(&meta).unwrap();
         let edited = doc.into_bytes();
 
         let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
-        let metz = reparsed
+        let antz = reparsed
             .file
             .root
             .children()
             .iter()
-            .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
-            .expect("METz should be inserted");
-        let decoded = crate::bzz::bzz_decode(metz.data()).unwrap();
+            .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"))
+            .expect("ANTz should hold the metadata");
+        let decoded = crate::bzz::bzz_decode(antz.data()).unwrap();
         let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed, meta);
+        assert!(
+            !reparsed
+                .file
+                .root
+                .children()
+                .iter()
+                .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
+        );
     }
 
     #[test]
@@ -2107,10 +2341,11 @@ mod tests {
         // Insert one, then clear.
         let mut meta = DjVuMetadata::default();
         meta.title = Some("X".into());
-        doc.page_mut(0).unwrap().set_metadata(&meta);
+        doc.page_mut(0).unwrap().set_metadata(&meta).unwrap();
         doc.page_mut(0)
             .unwrap()
-            .set_metadata(&DjVuMetadata::default());
+            .set_metadata(&DjVuMetadata::default())
+            .unwrap();
 
         let edited = doc.into_bytes();
         let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
@@ -2130,22 +2365,33 @@ mod tests {
 
         let mut m1 = DjVuMetadata::default();
         m1.title = Some("First".into());
-        doc.page_mut(0).unwrap().set_metadata(&m1);
+        doc.page_mut(0).unwrap().set_metadata(&m1).unwrap();
 
         let mut m2 = DjVuMetadata::default();
         m2.title = Some("Second".into());
-        doc.page_mut(0).unwrap().set_metadata(&m2);
+        doc.page_mut(0).unwrap().set_metadata(&m2).unwrap();
 
         let edited = doc.into_bytes();
         let reparsed = DjVuDocumentMut::from_bytes(&edited).unwrap();
-        let metz_count = reparsed
+        let ids: Vec<[u8; 4]> = reparsed
             .file
             .root
             .children()
             .iter()
-            .filter(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METa" || id == b"METz"))
-            .count();
-        assert_eq!(metz_count, 1, "should not duplicate METz on repeat set");
+            .filter_map(|c| match c {
+                Chunk::Leaf { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let count = |want: &[u8; 4]| ids.iter().filter(|id| *id == want).count();
+        assert_eq!(count(b"ANTa") + count(b"ANTz"), 1, "one annotation chunk");
+        assert_eq!(count(b"METa") + count(b"METz"), 0);
+        let meta = crate::djvu_document::DjVuDocument::parse(&edited)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Second"));
     }
 
     // ---- PR3: bundled DJVM mutation + set_bookmarks -----------------------
@@ -2207,7 +2453,7 @@ mod tests {
         let mut meta = DjVuMetadata::default();
         meta.title = Some("PR3 DJVM bundled mutation".into());
         meta.author = Some("djvu-rs PR3 tests".into());
-        doc.page_mut(0).unwrap().set_metadata(&meta);
+        doc.page_mut(0).unwrap().set_metadata(&meta).unwrap();
         assert!(doc.is_dirty());
 
         let edited = doc.into_bytes();
@@ -2264,7 +2510,7 @@ mod tests {
         let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
         let mut meta = DjVuMetadata::default();
         meta.title = Some("grow page 1".into());
-        doc.page_mut(1).unwrap().set_metadata(&meta);
+        doc.page_mut(1).unwrap().set_metadata(&meta).unwrap();
         let edited = doc.into_bytes();
 
         let (declared, actual) = dirm_sizes_and_actual(&edited);
@@ -2287,7 +2533,7 @@ mod tests {
         let mid = count / 2;
         let mut meta = DjVuMetadata::default();
         meta.title = Some("PR3 mid-page edit".into());
-        doc.page_mut(mid).unwrap().set_metadata(&meta);
+        doc.page_mut(mid).unwrap().set_metadata(&meta).unwrap();
 
         let edited = doc.into_bytes();
         let (declared, actual) = dirm_offsets_and_actual(&edited);
@@ -2433,19 +2679,23 @@ mod tests {
         for metadata_first in [true, false] {
             let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
             if metadata_first {
-                doc.set_metadata(&metadata);
+                doc.set_metadata(&metadata).unwrap();
                 doc.set_bookmarks(&bookmarks).unwrap();
             } else {
                 doc.set_bookmarks(&bookmarks).unwrap();
-                doc.set_metadata(&metadata);
+                doc.set_metadata(&metadata).unwrap();
             }
             let edited = doc.into_bytes();
 
             let ids = chunk_ids(&edited);
             assert_eq!(
-                &ids[..3],
-                &[*b"DIRM", *b"NAVM", *b"METz"],
+                &ids[..2],
+                &[*b"DIRM", *b"NAVM"],
                 "metadata_first={metadata_first}"
+            );
+            assert!(
+                !ids.contains(b"METz"),
+                "metadata goes to the shared annotation"
             );
 
             let (declared, actual) = dirm_offsets_and_actual(&edited);
@@ -2458,23 +2708,293 @@ mod tests {
 
         // Earlier versions wrote DIRM, METz, NAVM; the next edit repairs it.
         let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
-        doc.set_metadata(&metadata);
         let Chunk::Form { children, .. } = &mut doc.file.root else {
             unreachable!()
         };
-        children.swap(1, 2);
+        children.insert(
+            1,
+            Chunk::Leaf {
+                id: *b"METz",
+                data: crate::metadata::encode_metadata_bzz(&metadata),
+            },
+        );
+        doc.dirty = true;
         let misplaced = doc.into_bytes();
         assert_eq!(&chunk_ids(&misplaced)[..3], &[*b"DIRM", *b"METz", *b"NAVM"]);
 
         let mut doc = DjVuDocumentMut::from_bytes(&misplaced).unwrap();
-        doc.set_metadata(&DjVuMetadata {
-            title: Some("Repaired".into()),
-            ..DjVuMetadata::default()
-        });
+        doc.set_bookmarks(&bookmarks).unwrap();
         let repaired = doc.into_bytes();
         assert_eq!(&chunk_ids(&repaired)[..3], &[*b"DIRM", *b"NAVM", *b"METz"]);
         let (declared, actual) = dirm_offsets_and_actual(&repaired);
         assert_eq!(declared, actual);
+    }
+
+    fn component_kinds(bytes: &[u8]) -> Vec<DirmComponentKind> {
+        let form = crate::iff::parse_form(bytes).unwrap();
+        let dirm = form.chunks.iter().find(|c| &c.id == b"DIRM").unwrap();
+        DirmPayload::decode(dirm.data)
+            .unwrap()
+            .components()
+            .into_iter()
+            .map(|c| c.kind)
+            .collect()
+    }
+
+    fn atlas() -> DjVuMetadata {
+        DjVuMetadata {
+            title: Some("Atlas".into()),
+            author: Some("Me".into()),
+            ..DjVuMetadata::default()
+        }
+    }
+
+    /// Without a shared annotation, document metadata adds one the way
+    /// `djvused set-meta` does, and leaves the pages' own annotations alone.
+    #[test]
+    fn document_metadata_adds_a_shared_annotation() {
+        let original = read_corpus("navm_fgbz.djvu");
+        assert!(!component_kinds(&original).contains(&DirmComponentKind::SharedAnno));
+        let before = crate::djvu_document::DjVuDocument::parse(&original).unwrap();
+
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_metadata(&atlas()).unwrap();
+        let edited = doc.into_bytes();
+
+        let kinds = component_kinds(&edited);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == DirmComponentKind::SharedAnno)
+                .count(),
+            1
+        );
+        let (declared, actual) = dirm_offsets_and_actual(&edited);
+        assert_eq!(declared, actual);
+
+        let after = crate::djvu_document::DjVuDocument::parse(&edited).unwrap();
+        assert_eq!(after.metadata().unwrap(), Some(atlas()));
+        assert_eq!(after.page_count(), before.page_count());
+        for i in 0..after.page_count() {
+            let page = after.page(i).unwrap();
+            assert_eq!(
+                format!("{:?}", page.annotations().unwrap()),
+                format!("{:?}", before.page(i).unwrap().annotations().unwrap())
+            );
+            assert!(page.raw_chunk(b"INCL").is_some(), "page {i} includes it");
+        }
+
+        // A second edit reuses the component instead of adding another.
+        let mut doc = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        doc.set_metadata(&DjVuMetadata {
+            title: Some("Second".into()),
+            ..DjVuMetadata::default()
+        })
+        .unwrap();
+        let again = doc.into_bytes();
+        assert_eq!(component_kinds(&again).len(), kinds.len());
+        let meta = crate::djvu_document::DjVuDocument::parse(&again)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .unwrap();
+        assert_eq!((meta.title.as_deref(), meta.author), (Some("Second"), None));
+
+        let mut doc = DjVuDocumentMut::from_bytes(&again).unwrap();
+        doc.remove_metadata().unwrap();
+        let removed = doc.into_bytes();
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&removed).unwrap();
+        assert_eq!(reparsed.metadata().unwrap(), None);
+    }
+
+    /// An existing shared annotation keeps its other forms; only the
+    /// `(metadata …)` block changes.
+    #[test]
+    fn document_metadata_keeps_shared_annotation_forms() {
+        let original = read_corpus("czech.djvu");
+        let kinds = component_kinds(&original);
+        assert!(kinds.contains(&DirmComponentKind::SharedAnno));
+
+        let shared_forms = |bytes: &[u8]| {
+            let doc = DjVuDocumentMut::from_bytes(bytes).unwrap();
+            let child = shared_anno_child(&doc.file.root).unwrap().unwrap();
+            let data = doc.file.root.children()[child]
+                .children()
+                .iter()
+                .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"))
+                .map(|c| crate::bzz::bzz_decode(c.data()).unwrap())
+                .unwrap();
+            let (annotation, areas) = parse_annotations(&data).unwrap();
+            let kept: Vec<String> = annotation
+                .extra
+                .iter()
+                .filter(|f| !is_metadata_form(f))
+                .cloned()
+                .collect();
+            format!(
+                "{:?}",
+                (
+                    annotation.background,
+                    annotation.zoom,
+                    annotation.mode,
+                    kept,
+                    areas
+                )
+            )
+        };
+
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_metadata(&atlas()).unwrap();
+        let edited = doc.into_bytes();
+
+        assert_eq!(component_kinds(&edited), kinds);
+        assert_eq!(shared_forms(&edited), shared_forms(&original));
+        let meta = crate::djvu_document::DjVuDocument::parse(&edited)
+            .unwrap()
+            .metadata()
+            .unwrap();
+        assert_eq!(meta, Some(atlas()));
+    }
+
+    /// Root METa/METz from earlier versions would shadow the new value.
+    #[test]
+    fn document_metadata_drops_root_metz() {
+        let original = read_corpus("navm_fgbz.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        let Chunk::Form { children, .. } = &mut doc.file.root else {
+            unreachable!()
+        };
+        children.insert(
+            2,
+            Chunk::Leaf {
+                id: *b"METz",
+                data: crate::metadata::encode_metadata_bzz(&atlas()),
+            },
+        );
+        doc.dirty = true;
+        doc.set_metadata(&DjVuMetadata {
+            title: Some("New".into()),
+            ..DjVuMetadata::default()
+        })
+        .unwrap();
+        let edited = doc.into_bytes();
+        let form = crate::iff::parse_form(&edited).unwrap();
+        assert!(!form.chunks.iter().any(|c| &c.id == b"METz"));
+        let meta = crate::djvu_document::DjVuDocument::parse(&edited)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.title.as_deref(), Some("New"));
+    }
+
+    /// A single-page file keeps metadata in its own ANTz, next to its links.
+    #[test]
+    fn single_page_metadata_joins_page_annotations() {
+        let original = read_corpus("boy.djvu");
+        let area = MapArea {
+            url: "https://example.org".into(),
+            target: None,
+            description: String::new(),
+            shape: crate::annotation::Shape::Rect(crate::annotation::Rect {
+                x: 1,
+                y: 2,
+                width: 30,
+                height: 40,
+            }),
+            border: None,
+            highlight: None,
+            extra: Vec::new(),
+        };
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.page_mut(0)
+            .unwrap()
+            .set_annotations(&Annotation::default(), core::slice::from_ref(&area));
+        doc.set_metadata(&atlas()).unwrap();
+        let edited = doc.into_bytes();
+
+        let form = crate::iff::parse_form(&edited).unwrap();
+        assert!(!form.chunks.iter().any(|c| &c.id == b"METz"));
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&edited).unwrap();
+        assert_eq!(reparsed.metadata().unwrap(), Some(atlas()));
+        let (_, areas) = reparsed.page(0).unwrap().annotations().unwrap().unwrap();
+        assert_eq!(format!("{areas:?}"), format!("{:?}", [area]));
+
+        let mut doc = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        doc.page_mut(0).unwrap().remove_metadata().unwrap();
+        let removed = doc.into_bytes();
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&removed).unwrap();
+        assert_eq!(reparsed.metadata().unwrap(), None);
+        assert_eq!(
+            reparsed
+                .page(0)
+                .unwrap()
+                .annotations()
+                .unwrap()
+                .unwrap()
+                .1
+                .len(),
+            1
+        );
+    }
+
+    /// Page annotations and metadata share one chunk; replacing or removing
+    /// the annotations keeps the metadata.
+    #[test]
+    fn annotation_edits_keep_page_metadata() {
+        let original = read_corpus("boy.djvu");
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.set_metadata(&atlas()).unwrap();
+        let zoomed = Annotation {
+            zoom: Some(150),
+            ..Annotation::default()
+        };
+        doc.page_mut(0).unwrap().set_annotations(&zoomed, &[]);
+        let edited = doc.into_bytes();
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&edited).unwrap();
+        assert_eq!(reparsed.metadata().unwrap(), Some(atlas()));
+        let (annotation, _) = reparsed.page(0).unwrap().annotations().unwrap().unwrap();
+        assert_eq!(annotation.zoom, Some(150));
+
+        let mut doc = DjVuDocumentMut::from_bytes(&edited).unwrap();
+        doc.page_mut(0).unwrap().remove_annotations();
+        let removed = doc.into_bytes();
+        let reparsed = crate::djvu_document::DjVuDocument::parse(&removed).unwrap();
+        assert_eq!(reparsed.metadata().unwrap(), Some(atlas()));
+        let (annotation, areas) = reparsed.page(0).unwrap().annotations().unwrap().unwrap();
+        assert_eq!((annotation.zoom, areas.len()), (None, 0));
+
+        // An explicit block in `extra` replaces the stored one.
+        let mut doc = DjVuDocumentMut::from_bytes(&removed).unwrap();
+        let explicit = Annotation {
+            extra: vec!["(metadata (title \"Given\"))".into()],
+            ..Annotation::default()
+        };
+        doc.page_mut(0).unwrap().set_annotations(&explicit, &[]);
+        let replaced = doc.into_bytes();
+        let meta = crate::djvu_document::DjVuDocument::parse(&replaced)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .unwrap();
+        assert_eq!((meta.title.as_deref(), meta.author), (Some("Given"), None));
+
+        // Without metadata, removing annotations still removes the chunk.
+        let mut doc = DjVuDocumentMut::from_bytes(&original).unwrap();
+        doc.page_mut(0).unwrap().set_annotations(&zoomed, &[]);
+        doc.page_mut(0).unwrap().remove_annotations();
+        let plain = doc.into_bytes();
+        let form = crate::iff::parse_form(&plain).unwrap();
+        assert!(!form.chunks.iter().any(|c| &c.id == b"ANTz"));
+    }
+
+    #[test]
+    fn metadata_form_detection() {
+        assert!(is_metadata_form("(metadata (title \"x\"))"));
+        assert!(is_metadata_form("  ( METADATA\n)"));
+        assert!(!is_metadata_form("(metadatax)"));
+        assert!(!is_metadata_form("(zoom page)"));
+        assert!(!is_metadata_form("metadata"));
     }
 
     #[test]
@@ -2556,7 +3076,7 @@ mod tests {
             title: Some("PR4 byte-identical probe".into()),
             ..Default::default()
         };
-        doc.page_mut(0).unwrap().set_metadata(&meta);
+        doc.page_mut(0).unwrap().set_metadata(&meta).unwrap();
         let edited = doc.into_bytes();
 
         let edited_ranges = top_form_ranges(&edited);
@@ -2665,7 +3185,7 @@ mod tests {
             author: Some("djvu-rs #325".into()),
             ..Default::default()
         };
-        doc.page_mut(1).unwrap().set_metadata(&meta);
+        doc.page_mut(1).unwrap().set_metadata(&meta).unwrap();
         assert!(doc.is_dirty());
         let edited = doc.into_bytes();
 
@@ -2688,15 +3208,15 @@ mod tests {
                 if djvu_seen == 1 {
                     found = children
                         .iter()
-                        .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"))
+                        .find(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"))
                         .map(|c| c.data().to_vec());
                     break;
                 }
                 djvu_seen += 1;
             }
         }
-        let metz = found.expect("page 1 should have METz after edit");
-        let decoded = crate::bzz::bzz_decode(&metz).unwrap();
+        let antz = found.expect("page 1 should have ANTz after edit");
+        let decoded = crate::bzz::bzz_decode(&antz).unwrap();
         let parsed = crate::metadata::parse_metadata(&decoded).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("rebundled indirect"));
     }
@@ -2854,7 +3374,7 @@ mod tests {
                 title: Some("rewrite path".into()),
                 ..Default::default()
             };
-            doc.page_mut(0)?.set_metadata(&meta);
+            doc.page_mut(0)?.set_metadata(&meta).unwrap();
             Ok(())
         })
         .unwrap();
@@ -2893,13 +3413,13 @@ mod tests {
         // round-trips through the single-page parser.
         let edited_comp = std::fs::read(dir.join("chicken.djvu")).unwrap();
         let reparsed = DjVuDocumentMut::from_bytes(&edited_comp).unwrap();
-        let has_metz = reparsed
+        let has_antz = reparsed
             .file
             .root
             .children()
             .iter()
-            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"METz"));
-        assert!(has_metz, "edited component file must contain METz");
+            .any(|c| matches!(c, Chunk::Leaf { id, .. } if id == b"ANTz"));
+        assert!(has_antz, "edited component file must contain ANTz");
         // The unedited component is byte-identical to the source fixture.
         let irish_src = read_corpus("irish.djvu");
         let irish_out = std::fs::read(dir.join("irish.djvu")).unwrap();
@@ -3069,7 +3589,8 @@ mod tests {
         // Default metadata → encode_metadata returns empty → (None, true) no-op path.
         doc.page_mut(0)
             .unwrap()
-            .set_metadata(&DjVuMetadata::default());
+            .set_metadata(&DjVuMetadata::default())
+            .unwrap();
         // Dirty is still set (set_metadata always marks dirty), but no METa was inserted.
         let bytes = doc.into_bytes();
         let reparsed = DjVuDocumentMut::from_bytes(&bytes).unwrap();

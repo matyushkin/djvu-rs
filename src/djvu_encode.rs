@@ -53,7 +53,8 @@
 //! - `Lossless` from a [`Pixmap`] / `Quality` from a [`Bitmap`] are
 //!   rejected: the combinations are mathematically meaningless
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
-//! - [`PageEncoder::with_metadata`] adds fresh-document `METz` metadata;
+//! - [`PageEncoder::with_metadata`] adds fresh-document metadata as an
+//!   `ANTz` `(metadata …)` block, where DjVuLibre reads it;
 //!   mutation of existing chunks remains the responsibility of
 //!   [`crate::djvu_mut::PageMut::set_metadata`].
 
@@ -64,7 +65,7 @@ use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use crate::jb2_encode::{self, Jb2EncodeOptions};
-use crate::metadata::{DjVuMetadata, encode_metadata_bzz};
+use crate::metadata::{DjVuMetadata, encode_metadata};
 use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
 use crate::segment::{SegmentOptions, segment_page, segment_page_with_mask};
@@ -620,8 +621,9 @@ impl<'a> PageEncoder<'a> {
         self
     }
 
-    /// Attach metadata to a newly encoded page as a BZZ-compressed `METz`
-    /// chunk. An empty [`DjVuMetadata`] is omitted. This is independent from
+    /// Attach metadata to a newly encoded page as the `(metadata …)` block of
+    /// a BZZ-compressed `ANTz` chunk, where DjVuLibre reads page metadata.
+    /// An empty [`DjVuMetadata`] is omitted. This is independent from
     /// [`crate::djvu_mut::PageMut::set_metadata`], which replaces metadata in
     /// an existing document while preserving untouched chunks.
     pub fn with_metadata(mut self, metadata: DjVuMetadata) -> Self {
@@ -836,15 +838,16 @@ impl<'a> PageEncoder<'a> {
         }
     }
 
-    /// Append the BZZ-compressed `METz` chunk for new-document metadata, if
-    /// metadata was attached and contains at least one populated field.
+    /// Append an `ANTz` chunk holding the `(metadata …)` block for
+    /// new-document metadata, if metadata was attached and contains at least
+    /// one populated field.
     fn push_metadata_chunk(&self, chunks: &mut Vec<Chunk>) {
         if let Some(metadata) = &self.metadata {
-            let compressed = encode_metadata_bzz(metadata);
-            if !compressed.is_empty() {
+            let plain = encode_metadata(metadata);
+            if !plain.is_empty() {
                 chunks.push(Chunk::Leaf {
-                    id: *b"METz",
-                    data: compressed,
+                    id: *b"ANTz",
+                    data: bzz_encode(&plain),
                 });
             }
         }
@@ -2209,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_page_metadata_round_trips_as_metz() {
+    fn fresh_page_metadata_round_trips_as_antz() {
         let bm = Bitmap::new(32, 24);
         let meta = crate::metadata::DjVuMetadata {
             title: Some("Fresh document".into()),
@@ -2224,7 +2227,9 @@ mod tests {
 
         let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
         let page = doc.page(0).expect("page");
-        assert!(page.raw_chunk(b"METz").is_some());
+        assert!(page.raw_chunk(b"METz").is_none());
+        let (annotation, _) = page.annotations().expect("annotations").expect("ANTz");
+        assert!(annotation.extra[0].starts_with("(metadata"));
         assert_eq!(doc.metadata().expect("metadata"), Some(meta));
     }
 
