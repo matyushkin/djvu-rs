@@ -400,6 +400,29 @@ Supported shapes: single-page `FORM:DJVU` and bundled `FORM:DJVM`, including
 shared `DJVI` dictionaries referenced via `INCL`. For browser-local `!Send`
 readers on `wasm32`, use `from_async_reader_lazy_local`.
 
+An indirect `FORM:DJVM` keeps each page in its own file. Open its index with
+`LazyIndirectDocument::from_index` and an async resolver: a closure that
+returns the bytes of one component by name. The resolver runs only for the
+pages you open and for the shared dictionaries they include, each at most once.
+
+```rust,no_run
+use djvu_rs::djvu_async::LazyIndirectDocument;
+use djvu_rs::{ComponentId, ComponentResolveError};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let index = tokio::fs::read("book/index.djvu").await?;
+    let doc = LazyIndirectDocument::from_index(&index, |component: ComponentId| async move {
+        tokio::fs::read(format!("book/{}", component.name))
+            .await
+            .map_err(|_| ComponentResolveError::Missing { component })
+    })?;
+    let page = doc.page_async(0).await?;
+    println!("first page: {}×{}", page.width(), page.height());
+    Ok(())
+}
+```
+
 See [`examples/async_lazy_first_page.rs`](examples/async_lazy_first_page.rs)
 for a native first-page latency probe and
 [`examples/wasm/range_lazy.md`](examples/wasm/range_lazy.md) for the HTTP
@@ -751,9 +774,9 @@ Honest boundaries, so you can decide fast:
   through save, merge, and split unchanged, but `page_mut` returns
   `MutError::LegacyIw44Page`: these files have no text or annotation layers
   to edit.
-- **Lazy async loading does not cover indirect DJVM** — bundled `FORM:DJVM`
-  and single-page `FORM:DJVU` (or legacy `BM44`/`PM44`) only; indirect returns
-  a clean `Unsupported` error.
+- **Lazy indirect DJVM loading is Rust-only.** `LazyIndirectDocument` fetches
+  indirect pages through an async resolver; the browser `wasm-lazy` API still
+  opens only bundled and single-page files.
 - **`create_indirect` does not emit shared `DJVI` dictionary components** —
   build a bundled document with `djvu merge` when pages share a dictionary, or
   convert an existing bundled document with `djvm::to_indirect`, which
