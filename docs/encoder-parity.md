@@ -72,13 +72,34 @@ PSNR and SSIM meet or exceed `c44` on both measured pages (previously up to
 1.345× *and* far lower fidelity). The JB2 lossless path is unchanged by these
 fixes.
 
+## 2026-09-27 snapshot (dictionary JB2 for `Lossless`)
+
+The bilevel `Lossless` profile used to write the page as direct tiles, with
+no symbol dictionary. It now calls `encode_jb2_lossless`: a symbol dictionary
+where a glyph that is close to an earlier one is coded as a refinement of it
+(center-aligned records 4, ±2 px, 20 % Hamming budget). The page is also coded
+as direct tiles, and the smaller stream wins — map atlas keeps its tiles.
+Rust 1.98.0, djvu-rs `af7a850` plus this change, DjVuLibre 3.5.29, three
+repetitions; `ddjvu` decodes every output pixel-exact.
+
+| Case | Mode | DjVuLibre B | djvu-rs B | Size ratio | DjVuLibre ms | djvu-rs ms | DjVuLibre RSS | djvu-rs RSS | Quality |
+|------|------|------------:|----------:|-----------:|--------------:|------------:|--------------:|------------:|---------|
+| cable | JB2 lossless / `cjb2` | 2,248 | 2,272 | 1.011× | 24.1 | 21.9 | 17,104 | 15,136 | pixel-exact |
+| map atlas | JB2 lossless / `cjb2` | 145,592 | 138,672 | 0.952× | 326.1 | 149.4 | 32,704 | 20,640 | pixel-exact |
+| Chinese cookbook | JB2 lossless / `cjb2` | 67 | 66 | 0.985× | 20.8 | 18.0 | 15,152 | 13,344 | pixel-exact |
+
+JB2 lossless is now **0.952–1.011×** `cjb2` (was 0.952–2.100×) and still
+faster than `cjb2`. The cost is encode time on pages where tiles win: map
+atlas 29.6 → 149.4 ms, because both encodings run.
+
 ## Decision boundary
 
 The scorecard is the measurement harness; the two IW44 fixes above were promoted
 to the default bitstream only after this scorecard, byte-exact `ddjvu` interop,
 and the full test suite confirmed them (recorded Kept in `PERF_EXPERIMENTS.md`).
 IW44 photo now sits at 1.025–1.040× `c44` at matched-or-better fidelity; the
-public direct JB2 lossless profile still ranges from 0.952× to 2.100×.
+JB2 lossless profile, after the 2026-09-27 dictionary switch, sits at
+0.952–1.011× `cjb2`.
 
 Same-size JB2 record-6 and lossy rec-7 remain explicit experimental options;
 their real-byte, round-trip, and OCR evidence stays in `PERF_EXPERIMENTS.md`.

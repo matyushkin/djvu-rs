@@ -41,7 +41,9 @@
 //!
 //! # Status
 //!
-//! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz` by default. Call
+//! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz` by default, coded
+//!   with a symbol dictionary and refinement of similar glyphs
+//!   ([`jb2_encode::encode_jb2_lossless`]). Call
 //!   [`PageEncoder::with_bilevel_codec`] with [`BilevelCodec::Smmr`] for an
 //!   explicit DjVuLibre-compatible `Smmr` G4/MMR mask. Both are pixel-exact.
 //! - `Quality` from a [`Pixmap`]: ships `INFO + Sjbz + BG44… + FGbz`
@@ -585,8 +587,8 @@ impl<'a> PageEncoder<'a> {
     /// used by the `Quality` / `Archival` color encodes' `Sjbz` dictionary.
     ///
     /// Defaults to [`Jb2EncodeOptions::default`] (lossless, byte-exact CC
-    /// matching). The bilevel `Lossless` path emits a single direct-bitmap
-    /// record and is unaffected.
+    /// matching). The bilevel `Lossless` path always uses
+    /// [`jb2_encode::encode_jb2_lossless`] and is unaffected.
     pub fn with_jb2_options(mut self, opts: Jb2EncodeOptions) -> Self {
         self.jb2_options = Some(opts);
         self
@@ -701,7 +703,7 @@ impl<'a> PageEncoder<'a> {
                 let mask = match self.bilevel_codec {
                     BilevelCodec::Jb2 => Chunk::Leaf {
                         id: *b"Sjbz",
-                        data: jb2_encode::encode_jb2(bm),
+                        data: jb2_encode::encode_jb2_lossless(bm),
                     },
                     BilevelCodec::Smmr => Chunk::Leaf {
                         id: *b"Smmr",
@@ -2138,6 +2140,8 @@ mod tests {
             cross_size_rec6_probe: None,
             #[cfg(feature = "experimental")]
             same_size_rec6: None,
+            #[cfg(feature = "experimental")]
+            aligned_refine: None,
         };
         let bytes = PageEncoder::from_pixmap(&pm)
             .with_quality(EncodeQuality::Quality)

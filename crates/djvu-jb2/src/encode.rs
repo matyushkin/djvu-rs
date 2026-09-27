@@ -216,9 +216,6 @@ fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitmap) {
 /// Both `cbm` and `mbm` are [`Bitmap`]s in top-down storage; the closures
 /// below translate Jbm row indices back into top-down `get` calls.
 ///
-/// Only the experiment-only cross-size rec-6 refinement path emits these, so
-/// the encoder is gated behind `experimental`.
-#[cfg(feature = "experimental")]
 fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bitmap) {
     debug_assert_eq!(ctx.len(), 2048);
     let cw = cbm.width as i32;
@@ -1112,6 +1109,107 @@ fn find_cross_size_refine_ref(
     best.map(|(i, _)| i)
 }
 
+/// Hamming distance between `cand` and `reference` under the refinement
+/// decoder's alignment (centers matched as in `encode_bitmap_ref`), counted over
+/// `cand`'s box. Stops early once the count exceeds `limit`.
+fn aligned_hamming(cand: &Bitmap, reference: &Bitmap, limit: u32) -> u32 {
+    let ch = cand.height as i32;
+    let mh = reference.height as i32;
+    let row_shift = ((mh - 1) >> 1) - ((ch - 1) >> 1);
+    let col_shift = ((reference.width as i32 - 1) >> 1) - ((cand.width as i32 - 1) >> 1);
+    let cs = cand.row_stride();
+    let ms = reference.row_stride();
+    let last_mask = |w: u32| {
+        if w.is_multiple_of(8) {
+            0xFF
+        } else {
+            0xFFu8 << (8 - w % 8)
+        }
+    };
+    let (c_last, m_last) = (last_mask(cand.width), last_mask(reference.width));
+    let mut diff = 0u32;
+    for y in 0..ch {
+        let crow = &cand.data[y as usize * cs..(y as usize + 1) * cs];
+        // Top-down row `y` is Jbm row `ch - 1 - y`; the reference row follows.
+        let my = mh - 1 - (ch - 1 - y + row_shift);
+        let mrow = (0..mh)
+            .contains(&my)
+            .then(|| &reference.data[my as usize * ms..(my as usize + 1) * ms]);
+        // Reference byte `i` with its padding bits cleared; 0 outside the row.
+        let mbyte = |i: i32| -> u16 {
+            match mrow {
+                Some(row) if i >= 0 && (i as usize) < ms => {
+                    let b = row[i as usize];
+                    u16::from(if i as usize == ms - 1 { b & m_last } else { b })
+                }
+                _ => 0,
+            }
+        };
+        for (j, &c) in crow.iter().enumerate() {
+            // Reference bits `8j + col_shift ..` line up with cand byte `j`.
+            let s = 8 * j as i32 + col_shift;
+            let (i, r) = (s.div_euclid(8), s.rem_euclid(8));
+            let m = (((mbyte(i) << 8) | mbyte(i + 1)) << r >> 8) as u8;
+            let mask = if j == cs - 1 { c_last } else { 0xFF };
+            diff += ((c ^ m) & mask).count_ones();
+        }
+        if diff > limit {
+            return diff;
+        }
+    }
+    diff
+}
+
+/// Nearest dict entry within `max_dim_delta` per axis (same size included) by
+/// [`aligned_hamming`], accepted within `area × max_hamming_fraction`.
+///
+/// `dict_ink[i]` is the black-pixel count of `dict_entries[i]`. The ink
+/// difference is a lower bound on the aligned distance (both ways when the
+/// reference box fits inside `cand`'s), so most candidates are rejected
+/// without a pixel scan. Buckets are scanned newest entry first, and the
+/// budget shrinks to the best distance found so far.
+fn find_aligned_refine_ref(
+    cand: &Bitmap,
+    cand_ink: u32,
+    dict_entries: &[&Bitmap],
+    dict_ink: &[u32],
+    by_size: &BTreeMap<(u32, u32), Vec<usize>>,
+    max_dim_delta: u32,
+    max_hamming_fraction: f32,
+) -> Option<usize> {
+    let area = (cand.width as u64) * (cand.height as u64);
+    if area < REFINEMENT_MIN_PIXELS {
+        return None;
+    }
+    let mut limit = ((area as f64) * (max_hamming_fraction as f64)).round() as u32;
+    let mut best: Option<usize> = None;
+    for w in cand.width.saturating_sub(max_dim_delta)..=cand.width + max_dim_delta {
+        for h in cand.height.saturating_sub(max_dim_delta)..=cand.height + max_dim_delta {
+            let Some(indices) = by_size.get(&(w, h)) else {
+                continue;
+            };
+            let inside = w <= cand.width && h <= cand.height;
+            for &idx in indices.iter().rev() {
+                let ink = dict_ink[idx];
+                let bound = if inside {
+                    cand_ink.abs_diff(ink)
+                } else {
+                    cand_ink.saturating_sub(ink)
+                };
+                if bound > limit {
+                    continue;
+                }
+                let d = aligned_hamming(cand, dict_entries[idx], limit);
+                if d < limit || (d == limit && best.is_none()) {
+                    limit = d;
+                    best = Some(idx);
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Find the closest **same-size** dict entry for a lossless record-6 matched
 /// refinement (Phase A1 of `docs/jb2-size-gap-plan.md`).
 ///
@@ -1175,6 +1273,38 @@ pub struct CrossSizeRec6Probe {
     /// pixel count, scored after nearest-neighbor resampling of the candidate
     /// into the component's dimensions.
     pub max_hamming_fraction: f32,
+}
+
+/// Knobs for **center-aligned** record-4/6 refinement.
+///
+/// A fresh component with no exact dictionary twin is coded as a refinement of
+/// the nearest dictionary entry whose box differs by at most `max_dim_delta`
+/// pixels per axis (same size included). Distance is the Hamming count under
+/// the decoder's own alignment: the reference is centered on the component
+/// exactly as the refinement context sees it, with no resampling. The
+/// refinement bitmap reproduces the component exactly, so output is lossless.
+///
+/// [`encode_jb2_lossless`] uses [`AlignedRefine::LOSSLESS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AlignedRefine {
+    /// Maximum per-axis bounding-box difference (in pixels).
+    pub max_dim_delta: u32,
+    /// Accepted aligned Hamming budget as a fraction of the component's
+    /// bounding-box area.
+    pub max_hamming_fraction: f32,
+    /// `true` emits record 4 (refine, add to the dictionary, blit), so the
+    /// refined glyph can serve as a later reference; `false` emits record 6.
+    pub add_to_dict: bool,
+}
+
+impl AlignedRefine {
+    /// Settings of [`encode_jb2_lossless`]: ±2 px, 20 % of the box area,
+    /// record 4. Measured in `PERF_EXPERIMENTS.md` ("JB2 aligned refinement").
+    pub const LOSSLESS: Self = Self {
+        max_dim_delta: 2,
+        max_hamming_fraction: 0.2,
+        add_to_dict: true,
+    };
 }
 
 /// Tunable knobs for the JB2 dictionary encoder.
@@ -1263,6 +1393,9 @@ pub struct Jb2EncodeOptions {
     /// the refinement context stays pixel-aligned. Lossless (round-trip exact).
     #[cfg(feature = "experimental")]
     pub same_size_rec6: Option<f32>,
+    /// Experiment-only center-aligned refinement; see [`AlignedRefine`].
+    #[cfg(feature = "experimental")]
+    pub aligned_refine: Option<AlignedRefine>,
 }
 
 impl Default for Jb2EncodeOptions {
@@ -1274,6 +1407,8 @@ impl Default for Jb2EncodeOptions {
             cross_size_rec6_probe: None,
             #[cfg(feature = "experimental")]
             same_size_rec6: None,
+            #[cfg(feature = "experimental")]
+            aligned_refine: None,
         }
     }
 }
@@ -1452,6 +1587,60 @@ pub fn encode_jb2_dict_with_options(
     encode_jb2_dict_with_blits(bitmap, shared_symbols, opts).0
 }
 
+/// Encode a bilevel page losslessly at the smallest size this crate reaches.
+///
+/// Uses the symbol dictionary with center-aligned refinement
+/// ([`AlignedRefine::LOSSLESS`]): each connected component is a new symbol, an
+/// exact copy, or a refinement of a similar earlier symbol. The page is also
+/// coded with [`encode_jb2`], and the smaller stream is returned: direct
+/// coding wins on pages of few, large, unique shapes such as maps. Either way
+/// the decoded page is pixel-identical to `bitmap`.
+///
+/// A page whose components would exceed the decoder's record or symbol-pixel
+/// limits always gets [`encode_jb2`], so the output decodes wherever the
+/// direct encoder's does. The check is conservative: it counts every
+/// component as decoded.
+pub fn encode_jb2_lossless(bitmap: &Bitmap) -> Vec<u8> {
+    let w = bitmap.width as i32;
+    let h = bitmap.height as i32;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let opts = Jb2EncodeOptions::default();
+    let (ccs, order) = extract_and_order_ccs(bitmap, &opts);
+    let direct = encode_jb2(bitmap);
+    if !fits_decoder_budget(&ccs) {
+        return direct;
+    }
+    let dict =
+        encode_jb2_dict_with_ccs(w, h, ccs, order, &[], &opts, Some(AlignedRefine::LOSSLESS)).0;
+    // A direct page over the per-page symbol budget does not decode here.
+    let direct_decodes = (bitmap.width as usize).saturating_mul(bitmap.height as usize)
+        <= crate::MAX_PAGE_SYMBOL_PIXELS;
+    if direct_decodes && direct.len() < dict.len() {
+        direct
+    } else {
+        dict
+    }
+}
+
+/// Whether one symbol record per component (plus start and end records) stays
+/// within the decoder's page limits, counting every component as decoded.
+fn fits_decoder_budget(ccs: &[Cc]) -> bool {
+    if ccs.len() + 2 > crate::MAX_RECORDS {
+        return false;
+    }
+    let mut total = 0usize;
+    for cc in ccs {
+        let px = (cc.bitmap.width as usize).saturating_mul(cc.bitmap.height as usize);
+        if px > crate::MAX_SYMBOL_PIXELS {
+            return false;
+        }
+        total = total.saturating_add(px);
+    }
+    total <= crate::MAX_PAGE_SYMBOL_PIXELS
+}
+
 /// One emitted blit: its cropped shape and top-left position (top-down page
 /// coordinates), in emission order — blit *i* here is blit index *i* on the
 /// decoder side.
@@ -1573,7 +1762,7 @@ pub fn encode_jb2_dict_with_symbols(
             pixel_count: 0,
         })
         .collect();
-    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts)
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned_of(opts))
 }
 
 /// Extract `bitmap`'s connected components in the same emission order (after
@@ -1635,7 +1824,19 @@ pub fn encode_jb2_dict_with_blits(
     }
 
     let (ccs, order) = extract_and_order_ccs(bitmap, opts);
-    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts)
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned_of(opts))
+}
+
+/// The aligned-refinement setting carried by `opts` (experiment builds only).
+fn aligned_of(_opts: &Jb2EncodeOptions) -> Option<AlignedRefine> {
+    #[cfg(feature = "experimental")]
+    {
+        _opts.aligned_refine
+    }
+    #[cfg(not(feature = "experimental"))]
+    {
+        None
+    }
 }
 
 /// Encode a JB2 symbol dictionary from an *already-extracted* geometric
@@ -1658,6 +1859,7 @@ fn encode_jb2_dict_with_ccs(
     order: Vec<usize>,
     shared_symbols: &[Bitmap],
     opts: &Jb2EncodeOptions,
+    aligned: Option<AlignedRefine>,
 ) -> (Vec<u8>, Vec<EncodedBlit>) {
     let mut zp = ZpEncoder::new();
     let mut record_type_ctx = NumContext::new();
@@ -1666,15 +1868,11 @@ fn encode_jb2_dict_with_ccs(
     let mut symbol_height_ctx = NumContext::new();
     let mut symbol_index_ctx = NumContext::new();
     let mut inherit_dict_size_ctx = NumContext::new();
-    // Cross-size record-6 refinement contexts (#322 experiment). Only the
-    // refinement path (behind `experimental`) ever touches these. Constructing
-    // a `NumContext` never touches the ZP coder, so omitting them when the
-    // feature is off leaves the default (probe-off) byte stream identical.
-    #[cfg(feature = "experimental")]
+    // Refinement contexts (records 4 and 6). Only refinement records touch
+    // these, and constructing a `NumContext` never touches the ZP coder, so
+    // output without refinement stays byte-identical.
     let mut symbol_width_diff_ctx = NumContext::new();
-    #[cfg(feature = "experimental")]
     let mut symbol_height_diff_ctx = NumContext::new();
-    #[cfg(feature = "experimental")]
     let mut refinement_bitmap_ctx = vec![0u8; 2048];
     let mut hoff_ctx = NumContext::new();
     let mut voff_ctx = NumContext::new();
@@ -1720,7 +1918,13 @@ fn encode_jb2_dict_with_ccs(
     let mut dict_entries: Vec<&Bitmap> = Vec::new();
     // Index of dict entries by (w, h) for O(1) lookup of refinement candidates.
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    // Black-pixel count per dict entry, for the aligned-refinement prefilter.
+    let mut dict_ink: Vec<u32> = Vec::new();
+    let ink = |bm: &Bitmap| -> u32 { bm.data.iter().map(|b| b.count_ones()).sum() };
     for sym in shared_symbols {
+        if aligned.is_some() {
+            dict_ink.push(ink(sym));
+        }
         let idx = dict_entries.len();
         dedup
             .entry(symbol_hash(sym.width, sym.height, &sym.data))
@@ -1742,6 +1946,12 @@ fn encode_jb2_dict_with_ccs(
         let y_jb2 = h - cc.y as i32 - cc_h;
 
         let dkey = symbol_hash(cc.bitmap.width, cc.bitmap.height, &cc.bitmap.data);
+        // `pixel_count` is 0 on the `encode_jb2_dict_with_symbols` path.
+        let cc_ink = if aligned.is_some() {
+            ink(&cc.bitmap)
+        } else {
+            0
+        };
         let exact_match = dedup.get(&dkey).and_then(|cands| {
             cands.iter().copied().find(|&i| {
                 let d = dict_entries[i];
@@ -1762,6 +1972,8 @@ fn encode_jb2_dict_with_ccs(
             /// (#322) experiment.
             #[cfg(feature = "experimental")]
             Refine(usize),
+            /// Center-aligned refinement; `true` = record 4 (adds to dict).
+            RefineAligned(usize, bool),
         }
         let action = if let Some(idx) = exact_match {
             Action::Copy(idx)
@@ -1778,8 +1990,22 @@ fn encode_jb2_dict_with_ccs(
             } else {
                 None
             };
+            let aligned_ref = aligned.and_then(|a| {
+                find_aligned_refine_ref(
+                    &cc.bitmap,
+                    cc_ink,
+                    &dict_entries,
+                    &dict_ink,
+                    &by_size,
+                    a.max_dim_delta,
+                    a.max_hamming_fraction,
+                )
+                .map(|idx| (idx, a.add_to_dict))
+            });
             if let Some(idx) = lossy_copy {
                 Action::Copy(idx)
+            } else if let Some((idx, add)) = aligned_ref {
+                Action::RefineAligned(idx, add)
             } else {
                 // Experiment: divert fresh components with a dictionary twin to a
                 // lossless rec-6 refinement. Same-size (Phase A1) is tried first —
@@ -1832,6 +2058,28 @@ fn encode_jb2_dict_with_ccs(
                     (dict_size - 1) as i32,
                     *dict_idx as i32,
                 );
+            }
+            Action::RefineAligned(dict_idx, add) => {
+                let reference = dict_entries[*dict_idx];
+                let wdiff = cc_w - reference.width as i32;
+                let hdiff = cc_h - reference.height as i32;
+                encode_num(
+                    &mut zp,
+                    &mut record_type_ctx,
+                    0,
+                    11,
+                    if *add { 4 } else { 6 },
+                );
+                encode_num(
+                    &mut zp,
+                    &mut symbol_index_ctx,
+                    0,
+                    (dict_size - 1) as i32,
+                    *dict_idx as i32,
+                );
+                encode_num(&mut zp, &mut symbol_width_diff_ctx, -262143, 262142, wdiff);
+                encode_num(&mut zp, &mut symbol_height_diff_ctx, -262143, 262142, hdiff);
+                encode_bitmap_ref(&mut zp, &mut refinement_bitmap_ctx, &cc.bitmap, reference);
             }
             #[cfg(feature = "experimental")]
             Action::Refine(dict_idx) => {
@@ -1899,9 +2147,13 @@ fn encode_jb2_dict_with_ccs(
             layout.same_line_seen = true;
         }
 
-        // Only record-type-1 (new symbol) extends the dict — types 6 and 7
-        // are blit-only and the decoder leaves the dict untouched.
-        if matches!(action, Action::New) {
+        // Records 1 (new) and 4 (refine + add) extend the dict — types 6 and
+        // 7 are blit-only and the decoder leaves the dict untouched.
+        let extends_dict = matches!(action, Action::New | Action::RefineAligned(_, true));
+        if extends_dict {
+            if aligned.is_some() {
+                dict_ink.push(cc_ink);
+            }
             let next_idx = dict_entries.len();
             dedup.entry(dkey).or_default().push(next_idx);
             by_size
@@ -2523,6 +2775,55 @@ pub fn analyze_jb2_cc_stats(page: &Bitmap, shared_symbols: &[Bitmap]) -> CcStats
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte-wise `aligned_hamming` equals a per-pixel count under the
+    /// same center alignment, for every size pair within ±3 px.
+    #[test]
+    fn aligned_hamming_matches_per_pixel_count() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random_bitmap = |w: u32, h: u32| {
+            let mut bm = Bitmap::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    bm.set(x, y, seed.is_multiple_of(3));
+                }
+            }
+            bm
+        };
+        for (cw, ch) in [(1u32, 1u32), (7, 5), (8, 8), (9, 13), (17, 4), (33, 21)] {
+            let cand = random_bitmap(cw, ch);
+            for dw in -3i32..=3 {
+                for dh in -3i32..=3 {
+                    let (mw, mh) = (
+                        (cw as i32 + dw).max(1) as u32,
+                        (ch as i32 + dh).max(1) as u32,
+                    );
+                    let reference = random_bitmap(mw, mh);
+                    let row_shift = ((mh as i32 - 1) >> 1) - ((ch as i32 - 1) >> 1);
+                    let col_shift = ((mw as i32 - 1) >> 1) - ((cw as i32 - 1) >> 1);
+                    let mut want = 0;
+                    for y in 0..ch as i32 {
+                        let my = mh as i32 - 1 - (ch as i32 - 1 - y + row_shift);
+                        for x in 0..cw as i32 {
+                            let mx = x + col_shift;
+                            let r = (0..mh as i32).contains(&my)
+                                && (0..mw as i32).contains(&mx)
+                                && reference.get(mx as u32, my as u32);
+                            want += u32::from(cand.get(x as u32, y as u32) != r);
+                        }
+                    }
+                    assert_eq!(
+                        aligned_hamming(&cand, &reference, u32::MAX),
+                        want,
+                        "{cw}x{ch} vs {mw}x{mh}"
+                    );
+                }
+            }
+        }
+    }
     use crate as jb2;
     use djvu_bitmap::Bitmap;
 
@@ -2534,6 +2835,85 @@ mod tests {
             }
         }
         bm
+    }
+
+    /// A page of ring glyphs whose size and edge pixels vary a little, as
+    /// scanned copies of one letter do.
+    fn noisy_ring_page() -> Bitmap {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut page = Bitmap::new(640, 400);
+        for row in 0..10u32 {
+            for col in 0..20u32 {
+                let (gw, gh) = (20 + (next() % 3) as u32, 24 + (next() % 3) as u32);
+                let (cx, cy) = (gw as f32 / 2.0, gh as f32 / 2.0);
+                for y in 0..gh {
+                    for x in 0..gw {
+                        let dx = (x as f32 + 0.5 - cx) / cx;
+                        let dy = (y as f32 + 0.5 - cy) / cy;
+                        let r = dx * dx + dy * dy;
+                        let noise = next().is_multiple_of(16);
+                        if (0.45..=1.0).contains(&r) != noise {
+                            page.set(col * 32 + 4 + x, row * 40 + 4 + y, true);
+                        }
+                    }
+                }
+            }
+        }
+        page
+    }
+
+    #[test]
+    fn lossless_roundtrips_and_beats_plain_dict() {
+        let page = noisy_ring_page();
+        let lossless = encode_jb2_lossless(&page);
+        let decoded = jb2::decode(&lossless, None).expect("decode failed");
+        assert_eq!(decoded.data, page.data, "lossless output must be exact");
+        let plain = encode_jb2_dict(&page);
+        assert!(
+            lossless.len() < plain.len(),
+            "aligned refinement {} B vs plain dict {} B",
+            lossless.len(),
+            plain.len()
+        );
+    }
+
+    #[test]
+    fn lossless_keeps_direct_when_smaller() {
+        // One page-sized component with no repeats: direct coding keeps the
+        // context across the whole page and wins.
+        let page = make_bitmap(300, 200, |x, y| (x / 3 + y / 5) % 7 < 3 || x == y);
+        let lossless = encode_jb2_lossless(&page);
+        let direct = encode_jb2(&page);
+        assert!(lossless.len() <= direct.len());
+        let decoded = jb2::decode(&lossless, None).expect("decode failed");
+        assert_eq!(decoded.data, page.data);
+    }
+
+    #[test]
+    fn lossless_falls_back_to_direct_over_record_limit() {
+        // One isolated dot per component: more components than the decoder
+        // accepts records on one page.
+        let (w, h) = (600u32, 480u32);
+        let page = make_bitmap(w, h, |x, y| x % 2 == 0 && y % 2 == 0);
+        assert!((w / 2 * h / 2) as usize + 2 > crate::MAX_RECORDS);
+        let lossless = encode_jb2_lossless(&page);
+        assert_eq!(lossless, encode_jb2(&page));
+        let decoded = jb2::decode(&lossless, None).expect("decode failed");
+        assert_eq!(decoded.data, page.data);
+    }
+
+    #[test]
+    fn lossless_empty_page() {
+        assert!(encode_jb2_lossless(&Bitmap::new(0, 5)).is_empty());
+        let blank = Bitmap::new(33, 17);
+        let decoded = jb2::decode(&encode_jb2_lossless(&blank), None).expect("decode failed");
+        assert_eq!(decoded.data, blank.data);
     }
 
     fn roundtrip(bm: &Bitmap) -> Bitmap {
