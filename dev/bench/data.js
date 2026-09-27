@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790517585475,
+  "lastUpdate": 1790519137200,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20530,6 +20530,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47384000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "74a72da5b506b71912f131c88bd4eccbcf13d7c2",
+          "message": "feat(djvm): write indirect indexes with shared components (#857)\n\n`create_indirect_with_components` builds an indirect DJVM index from\nnamed component files. The FORM type decides each DIRM kind (page,\nshared DJVI, thumbnail), and the size table holds each component's\nreal size. A DJVI with annotations and no Djbz that every page\nincludes is marked as the shared annotation component, so DjVuLibre\nreads document metadata from it. Duplicate names, unknown FORM types\nand page INCLs without a shared target are rejected.\n\nDjVuLibre (djvudump, djvused ls, print-meta, ddjvu) accepts the\noutput; split books render byte-identically to the bundled originals.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T13:55:28Z",
+          "tree_id": "86d8dab0a66f88af3bed64f803b97fc3815c8c81",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/74a72da5b506b71912f131c88bd4eccbcf13d7c2"
+        },
+        "date": 1790519135373,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49534000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47350000,
             "range": "± 0",
             "unit": "ns/iter"
           }
