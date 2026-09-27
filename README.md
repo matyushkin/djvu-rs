@@ -22,7 +22,7 @@ specification.
 | Render pages to RGBA pixels | [`render_pixmap`](#quick-start) — sync, [async](#async-render), or [parallel](#feature-flags) |
 | Build a zoomable viewer (tiles) | [`djvu_tile`](#tile-rendering) — cached, prefetchable, cancellable tile rendering |
 | Show DjVu in the browser | [WebAssembly bindings](#webassembly), incl. lazy HTTP-Range loading |
-| Read DjVu from Python | `pip install djvu-rs` — [PyO3 bindings](#python) |
+| Read and edit DjVu from Python | `pip install djvu-rs` — [PyO3 bindings](#python) |
 | Create DjVu from images (PNG/JPEG/TIFF) | [`djvu encode`](#cli) or [`PageEncoder`](#encoding--low-level-api) |
 | Add an OCR text layer to a scan | [`djvu ocr`](#ocr-recognition-backends) (Tesseract) |
 | Merge, split, edit documents | [`djvu merge` / `djvu split`](#cli), `DocumentEditor`, `DjVuDocumentMut` |
@@ -238,7 +238,8 @@ PyO3 bindings live in [`djvu-py/`](djvu-py/). Wheels track the crate version
 cover reading and export: open documents, render pages (including region and
 progressive rendering, with zero-copy numpy/PIL paths), extract the text
 layer, and convert a document to PDF, EPUB, CBZ or TIFF (`to_pdf` / `write_pdf`
-and friends). Encode and mutation stay on the Rust crate / CLI for now. See
+and friends). `Editor` changes annotations, the text layer, metadata and
+bookmarks through plain dicts. Encoding stays on the Rust crate / CLI. See
 [`djvu-py/README.md`](djvu-py/README.md) and
 [`docs/packaging.md`](docs/packaging.md).
 
@@ -736,9 +737,11 @@ Honest boundaries, so you can decide fast:
 
 - **Library + CLI, not a viewer.** There is no GUI; the WASM demo is the
   closest thing to one.
-- **Python bindings cover reading and export.** Open, render, text
-  extraction, and PDF/EPUB/CBZ/TIFF conversion ship in the PyPI wheels;
-  encode and mutation stay on the Rust crate / CLI for now.
+- **Python bindings cover reading, export and metadata-level editing.** Open,
+  render, text extraction, PDF/EPUB/CBZ/TIFF conversion, and editing of
+  annotations, text layers, metadata and bookmarks ship in the PyPI wheels;
+  encoding and structural edits (merge, split, page insert) stay on the Rust
+  crate / CLI.
 - **Indirect DJVM mutation is indirect-only via two paths.**
   `DjVuDocumentMut::from_bytes` + `page_mut` on an indirect index errors;
   use `from_indirect_resolved` (rebundles) or `IndirectRewritePlan` (rewrites

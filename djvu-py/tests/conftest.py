@@ -30,6 +30,18 @@ def boy_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def navm_path() -> Path:
+    """6 pages, bookmarks (NAVM), map areas on the first page."""
+    return _require(FIXTURES_DIR / "navm_fgbz.djvu")
+
+
+@pytest.fixture(scope="session")
+def legacy_path() -> Path:
+    """A legacy FORM:BM44 image file: one page with no editable layers."""
+    return _require(FIXTURES_DIR / "legacy_bm44.djvu")
+
+
+@pytest.fixture(scope="session")
 def boy_jb2_path() -> Path:
     """1 page, JB2 (bilevel) encoded, no text layer."""
     return _require(FIXTURES_DIR / "boy_jb2.djvu")

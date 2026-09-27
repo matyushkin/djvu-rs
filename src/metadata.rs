@@ -60,6 +60,7 @@ pub enum MetadataError {
 /// does not define structured types beyond that.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct DjVuMetadata {
     /// Document title.
     pub title: Option<String>,

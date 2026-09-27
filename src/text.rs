@@ -112,6 +112,7 @@ pub struct TextZone {
     /// Text covered by this zone (substring of [`TextLayer::text`]).
     pub text: String,
     /// Child zones (columns inside page, words inside line, etc.).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub children: Vec<TextZone>,
 }
 
