@@ -740,12 +740,24 @@ impl<'a> PageEncoder<'a> {
                 let iw44_options = self.iw44_options.unwrap_or_default();
                 #[cfg(feature = "parallel")]
                 let ((sjbz, blits), bg44_chunks) = rayon::join(
-                    || jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &jb2_options),
+                    || {
+                        jb2_encode::encode_jb2_dict_with_blits_refined(
+                            &seg.mask,
+                            &[],
+                            &jb2_options,
+                            Some(jb2_encode::AlignedRefine::LOSSLESS),
+                        )
+                    },
                     || encode_iw44_color(&seg.bg, &iw44_options),
                 );
                 #[cfg(not(feature = "parallel"))]
                 let ((sjbz, blits), bg44_chunks) = (
-                    jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &jb2_options),
+                    jb2_encode::encode_jb2_dict_with_blits_refined(
+                        &seg.mask,
+                        &[],
+                        &jb2_options,
+                        Some(jb2_encode::AlignedRefine::LOSSLESS),
+                    ),
                     encode_iw44_color(&seg.bg, &iw44_options),
                 );
                 // Lossy rec-7 substitution blits near-twins whose pixels can
@@ -1614,12 +1626,13 @@ fn build_page(
     let (sjbz, fgbz) = if jb2_options.lossy_threshold <= 0.0
         && let (Some(symbols), Some(cc_colors)) = (prep.cc_symbols, prep.cc_colors)
     {
-        let (sjbz, _blits) = jb2_encode::encode_jb2_dict_with_symbols(
+        let (sjbz, _blits) = jb2_encode::encode_jb2_dict_with_symbols_refined(
             prep.mask.width,
             prep.mask.height,
             symbols,
             shared_for_encode,
             jb2_options,
+            Some(jb2_encode::AlignedRefine::LOSSLESS),
         );
         let fgbz = fgbz_from_accums(cc_colors, FgbzPaletteOptions::Exact);
         (sjbz, fgbz)
@@ -1631,8 +1644,12 @@ fn build_page(
              lossy_threshold up front and the lossless precomputed table is \
              otherwise always present",
         ))?;
-        let (sjbz, blits) =
-            jb2_encode::encode_jb2_dict_with_blits(&prep.mask, shared_for_encode, jb2_options);
+        let (sjbz, blits) = jb2_encode::encode_jb2_dict_with_blits_refined(
+            &prep.mask,
+            shared_for_encode,
+            jb2_options,
+            Some(jb2_encode::AlignedRefine::LOSSLESS),
+        );
         let fgbz = if jb2_options.lossy_threshold > 0.0 {
             let shared_dict = if has_shared {
                 crate::jb2::decode_dict(&jb2_encode::encode_jb2_djbz(shared_for_encode), None).ok()
@@ -2432,6 +2449,89 @@ mod tests {
             right.2 > right.0,
             "right foreground should render blue-dominant, got {right:?}"
         );
+    }
+
+    /// 20 thick rings, each missing a different ink pixel; the first ten are
+    /// dark red, the rest dark blue. Returns the pixmap and each ring's
+    /// top-left corner.
+    fn noisy_colored_rings(first_defect: usize) -> (Pixmap, Vec<(u32, u32)>) {
+        let mut ink = Vec::new();
+        for y in 0..16i32 {
+            for x in 0..16i32 {
+                let d2 = (2 * x - 15).pow(2) + (2 * y - 15).pow(2);
+                if (8 * 8..=226).contains(&d2) {
+                    ink.push((x as u32, y as u32));
+                }
+            }
+        }
+        let mut pm = Pixmap::white(200, 60);
+        let mut origins = Vec::new();
+        for i in 0..20usize {
+            let (ox, oy) = (4 + (i as u32 % 10) * 19, 6 + (i as u32 / 10) * 26);
+            let hole = ink[(first_defect + i) * 7 % ink.len()];
+            let (r, g, b) = if i < 10 { (150, 10, 10) } else { (10, 20, 150) };
+            for &(x, y) in &ink {
+                if (x, y) != hole {
+                    pm.set_rgb(ox + x, oy + y, r, g, b);
+                }
+            }
+            origins.push((ox, oy));
+        }
+        (pm, origins)
+    }
+
+    #[test]
+    fn quality_color_refines_near_copies_and_keeps_colors() {
+        // Near-copy glyphs become refinements of earlier symbols; the blit
+        // order and so the FGbz colour per blit must not change.
+        let (pm, origins) = noisy_colored_rings(0);
+        let seg = segment_page(&pm, &EncodeQuality::Quality.default_segment_options());
+        let (plain, _) =
+            jb2_encode::encode_jb2_dict_with_blits(&seg.mask, &[], &Jb2EncodeOptions::default());
+
+        let bytes = PageEncoder::from_pixmap(&pm)
+            .with_quality(EncodeQuality::Quality)
+            .encode()
+            .expect("encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse");
+        let page = doc.page(0).expect("page");
+        let sjbz = page.raw_chunk(b"Sjbz").expect("Sjbz");
+        assert!(
+            sjbz.len() < plain.len(),
+            "refined Sjbz {} B vs plain dict {} B",
+            sjbz.len(),
+            plain.len()
+        );
+        let mask = page.extract_mask().expect("mask decode").expect("mask");
+        assert_eq!(mask, seg.mask, "mask must decode pixel-exact");
+
+        let rendered = render_native(&doc);
+        for (i, &(ox, oy)) in origins.iter().enumerate() {
+            // First ink pixel of this ring in the decoded mask.
+            let (px, py) = (0..16)
+                .flat_map(|y| (0..16).map(move |x| (ox + x, oy + y)))
+                .find(|&(x, y)| mask.get(x, y))
+                .expect("ring ink");
+            let (r, _, b) = rendered.get_rgb(px, py);
+            if i < 10 {
+                assert!(r > b, "ring {i} should render red, got ({r}, _, {b})");
+            } else {
+                assert!(b > r, "ring {i} should render blue, got ({r}, _, {b})");
+            }
+        }
+    }
+
+    #[test]
+    fn layered_shared_refines_near_copies_and_round_trips() {
+        let pages = [noisy_colored_rings(0).0, noisy_colored_rings(40).0];
+        let bytes = encode_djvm_layered_shared(&pages, EncodeQuality::Quality, 300, None, 2)
+            .expect("layered shared encode");
+        let doc = crate::djvu_document::DjVuDocument::parse(&bytes).expect("parse bundle");
+        let opts = EncodeQuality::Quality.default_segment_options();
+        for (i, pm) in pages.iter().enumerate() {
+            let mask = doc.page(i).unwrap().extract_mask().unwrap().unwrap();
+            assert_eq!(mask, segment_page(pm, &opts).mask, "page {i} mask");
+        }
     }
 
     #[test]

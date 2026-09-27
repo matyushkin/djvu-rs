@@ -16141,3 +16141,76 @@ refinement yet. Direct `encode_jb2` output above 16 MP does not decode in our
 decoder (per-page symbol budget, `ImageTooLarge`) — pre-existing, and
 `encode_jb2_lossless` still returns it when the dictionary path is over the
 limits.
+
+### JB2 aligned refinement in bundles, colour masks and `chunk_encode` — **Kept** (2026-09-28)
+
+**Issue.** JB2_ALIGNED_REC4 (2026-09-27) put center-aligned record-4
+refinement into the single-page `Lossless` path only. The bilevel multi-page
+bundle (`encode_djvm_bundle_jb2*`), the colour mask of `PageEncoder`
+`Quality`/`Archival`, the layered multi-page path and `chunk_encode::Jb2Chunk`
+still used the exact-match dictionary or direct tiles.
+
+**Approach.** `Jb2EncodeOptions` is not `#[non_exhaustive]`, so a new public
+field would be a semver break. Instead, new entry points take the setting as
+an argument: `encode_jb2_lossless_with_shared`,
+`encode_jb2_dict_with_blits_refined`, `encode_jb2_dict_with_symbols_refined`.
+The old functions delegate and stay byte-identical.
+
+- Bundle pages: `encode_jb2_lossless_with_shared` (dictionary with
+  refinement against the shared `Djbz` symbols too; keeps direct tiles when
+  smaller; direct tiles over the decoder limits).
+- Colour masks (single page and layered bundle):
+  `AlignedRefine::LOSSLESS`. No direct-tile fallback — FGbz needs the blit
+  list. The blit order does not change, so FGbz indices stay valid.
+- `Jb2Chunk`: `encode_jb2_lossless`.
+
+**Bug found on the way.** Both decoders align a refinement on the
+reference's content box (ours crops dict entries; DjVuLibre uses the
+`LibRect` bounding box). A caller-supplied shared symbol with blank border
+rows decoded 2,441 pixels wrong. Such symbols are now not refinement
+references (`NOT_REFINABLE`); `cluster_shared_symbols` output is always
+tight, so real bundles lose nothing.
+
+**Numbers.** `examples/_refine_everywhere.rs` (scratch), first 8 masks,
+round-trip exact everywhere.
+
+Bilevel bundle, Djbz + Σ Sjbz, shared = `cluster_shared_symbols(·, 2)`:
+
+| Corpus | before | after | Δ | time before → after |
+|---|---:|---:|---:|---|
+| cable (2) | 8,971 | 8,391 | −6.5 % | 23 → 66 ms |
+| Chinese cookbook (5) | 155,144 | 142,602 | −8.1 % | 148 → 297 ms |
+| watchmaker (8) | 88,343 | 70,739 | −19.9 % | 206 → 422 ms |
+| conquete_paix (8) | 17,328 | 17,009 | −1.8 % | 248 → 729 ms |
+| pathogenic_bacteria (7) | 136,582 | 124,065 | −9.2 % | 155 → 372 ms |
+| war_1812 (8) | 384,536 | 358,179 | −6.9 % | 378 → 1,000 ms |
+
+Time includes the direct-tile encode that `encode_jb2_lossless_with_shared`
+runs for the size comparison (sequential here; bundle pages run in parallel
+under `parallel`).
+
+Colour `Quality` pages rendered at native size, whole `PageEncoder` output
+(`examples/_colour_pages.rs`, first 4 pages, best of 3):
+
+| Corpus | before | after | Δ | time before → after |
+|---|---:|---:|---:|---|
+| watchmaker | 48,204 | 38,870 | −19.4 % | 267 → 263 ms |
+| goody_twoshoes | 111,542 | 109,550 | −1.8 % | 534 → 595 ms |
+| map atlas (2) | 360,226 | 361,804 | +0.4 % | 324 → 454 ms |
+| cyrillic_simonovich | 40,876 | 37,394 | −8.5 % | 41 → 90 ms |
+
+The layered bundle (`encode_djvm_layered_shared`) moves the same way:
+watchmaker 47,412 → 38,540 B, map atlas 360,226 → 361,830 B.
+
+`big_scanned_page` (62 MP) Quality mask: 73,903 → 73,900 B, but neither
+stream decodes in our decoder (`ImageTooLarge`, 16 MP per-page symbol
+budget) — pre-existing, handled separately.
+
+**Decision.** Kept. Text-heavy colour and bilevel output shrinks 2–20 %.
+Map atlas loses 0.4 % and 130 ms: few repeats, so refinement rarely beats a
+new symbol. A plain-dict fallback there would need a second full encode.
+
+**Reason.** Same lossless lever as JB2_ALIGNED_REC4, now on every JB2 write
+path. Guards: `bundle_pages_refine_against_shared_symbols` (incl. an untight
+shared symbol), `quality_color_refines_near_copies_and_keeps_colors`,
+`layered_shared_refines_near_copies_and_round_trips`.

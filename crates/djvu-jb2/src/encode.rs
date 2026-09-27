@@ -1160,6 +1160,26 @@ fn aligned_hamming(cand: &Bitmap, reference: &Bitmap, limit: u32) -> u32 {
     diff
 }
 
+/// `dict_ink` marker for a dict entry that must not be a refinement reference.
+///
+/// Both decoders align a refinement on the reference's content box: ours
+/// crops dict entries to it, DjVuLibre aligns on the entry's bounding box. A
+/// caller-supplied shared symbol with blank border rows or columns would
+/// therefore decode against a different box than the encoder coded against.
+const NOT_REFINABLE: u32 = u32::MAX;
+
+/// Whether every border row and column of `bm` holds ink, so the decoder's
+/// content box equals the full bitmap.
+fn is_tight(bm: &Bitmap) -> bool {
+    let (w, h) = (bm.width, bm.height);
+    w > 0
+        && h > 0
+        && (0..w).any(|x| bm.get(x, 0))
+        && (0..w).any(|x| bm.get(x, h - 1))
+        && (0..h).any(|y| bm.get(0, y))
+        && (0..h).any(|y| bm.get(w - 1, y))
+}
+
 /// Nearest dict entry within `max_dim_delta` per axis (same size included) by
 /// [`aligned_hamming`], accepted within `area × max_hamming_fraction`.
 ///
@@ -1191,6 +1211,9 @@ fn find_aligned_refine_ref(
             let inside = w <= cand.width && h <= cand.height;
             for &idx in indices.iter().rev() {
                 let ink = dict_ink[idx];
+                if ink == NOT_REFINABLE {
+                    continue;
+                }
                 let bound = if inside {
                     cand_ink.abs_diff(ink)
                 } else {
@@ -1601,6 +1624,17 @@ pub fn encode_jb2_dict_with_options(
 /// direct encoder's does. The check is conservative: it counts every
 /// component as decoded.
 pub fn encode_jb2_lossless(bitmap: &Bitmap) -> Vec<u8> {
+    encode_jb2_lossless_with_shared(bitmap, &[])
+}
+
+/// [`encode_jb2_lossless`] for a page that inherits `shared_symbols` from a
+/// shared `Djbz`, as [`encode_jb2_dict_with_shared`] does. A component can
+/// copy or refine a shared symbol.
+///
+/// When direct coding wins, or the page exceeds the decoder's limits, the
+/// stream does not reference the shared dictionary; it still decodes with or
+/// without it.
+pub fn encode_jb2_lossless_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap]) -> Vec<u8> {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
     if w == 0 || h == 0 {
@@ -1609,11 +1643,19 @@ pub fn encode_jb2_lossless(bitmap: &Bitmap) -> Vec<u8> {
     let opts = Jb2EncodeOptions::default();
     let (ccs, order) = extract_and_order_ccs(bitmap, &opts);
     let direct = encode_jb2(bitmap);
-    if !fits_decoder_budget(&ccs) {
+    if !fits_decoder_budget(&ccs, !shared_symbols.is_empty()) {
         return direct;
     }
-    let dict =
-        encode_jb2_dict_with_ccs(w, h, ccs, order, &[], &opts, Some(AlignedRefine::LOSSLESS)).0;
+    let dict = encode_jb2_dict_with_ccs(
+        w,
+        h,
+        ccs,
+        order,
+        shared_symbols,
+        &opts,
+        Some(AlignedRefine::LOSSLESS),
+    )
+    .0;
     // A direct page over the per-page symbol budget does not decode here.
     let direct_decodes = (bitmap.width as usize).saturating_mul(bitmap.height as usize)
         <= crate::MAX_PAGE_SYMBOL_PIXELS;
@@ -1624,10 +1666,11 @@ pub fn encode_jb2_lossless(bitmap: &Bitmap) -> Vec<u8> {
     }
 }
 
-/// Whether one symbol record per component (plus start and end records) stays
-/// within the decoder's page limits, counting every component as decoded.
-fn fits_decoder_budget(ccs: &[Cc]) -> bool {
-    if ccs.len() + 2 > crate::MAX_RECORDS {
+/// Whether one symbol record per component (plus start and end records, and
+/// the inherited-dictionary record when `shared`) stays within the decoder's
+/// page limits, counting every component as decoded.
+fn fits_decoder_budget(ccs: &[Cc], shared: bool) -> bool {
+    if ccs.len() + 2 + usize::from(shared) > crate::MAX_RECORDS {
         return false;
     }
     let mut total = 0usize;
@@ -1744,6 +1787,27 @@ pub fn encode_jb2_dict_with_symbols(
     shared_symbols: &[Bitmap],
     opts: &Jb2EncodeOptions,
 ) -> (Vec<u8>, Vec<EncodedBlit>) {
+    encode_jb2_dict_with_symbols_refined(
+        mask_width,
+        mask_height,
+        symbols,
+        shared_symbols,
+        opts,
+        aligned_of(opts),
+    )
+}
+
+/// [`encode_jb2_dict_with_symbols`] with center-aligned refinement set by
+/// `aligned` (it replaces the experimental `opts.aligned_refine`). The blit
+/// list is unchanged: a refinement reproduces its component exactly.
+pub fn encode_jb2_dict_with_symbols_refined(
+    mask_width: u32,
+    mask_height: u32,
+    symbols: Vec<SymbolBox>,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+    aligned: Option<AlignedRefine>,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
     let w = mask_width as i32;
     let h = mask_height as i32;
     if w == 0 || h == 0 {
@@ -1762,7 +1826,7 @@ pub fn encode_jb2_dict_with_symbols(
             pixel_count: 0,
         })
         .collect();
-    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned_of(opts))
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned)
 }
 
 /// Extract `bitmap`'s connected components in the same emission order (after
@@ -1817,6 +1881,20 @@ pub fn encode_jb2_dict_with_blits(
     shared_symbols: &[Bitmap],
     opts: &Jb2EncodeOptions,
 ) -> (Vec<u8>, Vec<EncodedBlit>) {
+    encode_jb2_dict_with_blits_refined(bitmap, shared_symbols, opts, aligned_of(opts))
+}
+
+/// [`encode_jb2_dict_with_blits`] with center-aligned refinement set by
+/// `aligned` (it replaces the experimental `opts.aligned_refine`). With
+/// `Some(AlignedRefine::LOSSLESS)` a component close to an earlier symbol is
+/// coded as its refinement; the blit list is unchanged, since a refinement
+/// reproduces its component exactly.
+pub fn encode_jb2_dict_with_blits_refined(
+    bitmap: &Bitmap,
+    shared_symbols: &[Bitmap],
+    opts: &Jb2EncodeOptions,
+    aligned: Option<AlignedRefine>,
+) -> (Vec<u8>, Vec<EncodedBlit>) {
     let w = bitmap.width as i32;
     let h = bitmap.height as i32;
     if w == 0 || h == 0 {
@@ -1824,7 +1902,7 @@ pub fn encode_jb2_dict_with_blits(
     }
 
     let (ccs, order) = extract_and_order_ccs(bitmap, opts);
-    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned_of(opts))
+    encode_jb2_dict_with_ccs(w, h, ccs, order, shared_symbols, opts, aligned)
 }
 
 /// The aligned-refinement setting carried by `opts` (experiment builds only).
@@ -1923,7 +2001,11 @@ fn encode_jb2_dict_with_ccs(
     let ink = |bm: &Bitmap| -> u32 { bm.data.iter().map(|b| b.count_ones()).sum() };
     for sym in shared_symbols {
         if aligned.is_some() {
-            dict_ink.push(ink(sym));
+            dict_ink.push(if is_tight(sym) {
+                ink(sym)
+            } else {
+                NOT_REFINABLE
+            });
         }
         let idx = dict_entries.len();
         dedup

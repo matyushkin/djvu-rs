@@ -25,7 +25,8 @@ pub const BUNDLE_DEFAULT_DPI: u16 = 300;
 /// pages are promoted into a single shared [`Jb2Dict`] (Djbz) emitted as a
 /// `FORM:DJVI` component. Each page's `FORM:DJVU` then carries a small
 /// `INCL` chunk pointing at that DJVI plus a Sjbz that references the shared
-/// dictionary by index.
+/// dictionary by index. Each Sjbz comes from [`encode_jb2_lossless_with_shared`]:
+/// a glyph close to a shared or earlier symbol is coded as its refinement.
 ///
 /// Returns the full DjVu container bytes (with `AT&T` magic, ready to write
 /// to a file). With `pages.len() < 2` or `shared_dict_page_threshold > pages.len()`,
@@ -126,7 +127,7 @@ fn encode_djvm_bundle_jb2_impl(
     // the pages are encoded concurrently on rayon, since JB2 encoding dominates the
     // multi-page cost. Order is preserved by the indexed collect.
     let build_page = |page_idx: usize, page: &Bitmap| -> (Vec<u8>, bool, String) {
-        let sjbz = encode_jb2_dict_with_shared(page, shared_ref);
+        let sjbz = encode_jb2_lossless_with_shared(page, shared_ref);
         // Canonical INFO (see crate::chunk_encode::encode_info). Fixes the prior
         // hand-rolled bytes that hard-coded dpi 100 and gamma byte 1 (≈ 0.1),
         // diverging from the single-page/layered encoder's real dpi + gamma 2.2.
@@ -401,6 +402,98 @@ mod tests {
             shared_jb2_total,
             independent_total
         );
+    }
+
+    /// A 16×16 thick ring; `defect` clears one ink pixel (none when `None`),
+    /// so each copy differs from the clean ring without an exact match.
+    fn ring(defect: Option<usize>) -> Bitmap {
+        let mut bm = Bitmap::new(16, 16);
+        let mut ink = Vec::new();
+        for y in 0..16i32 {
+            for x in 0..16i32 {
+                let d2 = (2 * x - 15).pow(2) + (2 * y - 15).pow(2);
+                // 226 = 15² + 1² puts ink on every border row and column.
+                if (8 * 8..=226).contains(&d2) {
+                    ink.push((x as u32, y as u32));
+                }
+            }
+        }
+        for &(x, y) in &ink {
+            bm.set(x, y, true);
+        }
+        if let Some(i) = defect {
+            let (x, y) = ink[i * 7 % ink.len()];
+            bm.set(x, y, false);
+        }
+        bm
+    }
+
+    fn noisy_ring_page(first_defect: usize) -> Bitmap {
+        let mut page = Bitmap::new(200, 60);
+        for i in 0..20u32 {
+            let glyph = ring(Some(first_defect + i as usize));
+            let (ox, oy) = (4 + (i % 10) * 19, 6 + (i / 10) * 26);
+            for y in 0..16 {
+                for x in 0..16 {
+                    if glyph.get(x, y) {
+                        page.set(ox + x, oy + y, true);
+                    }
+                }
+            }
+        }
+        page
+    }
+
+    #[test]
+    fn bundle_pages_refine_against_shared_symbols() {
+        // Every page glyph is a near-copy of the one shared ring: the plain
+        // dictionary codes each as a new symbol, the bundle path refines it
+        // against the shared entry. Pages must still decode pixel-exact.
+        let shared = vec![ring(None)];
+        let pages = [noisy_ring_page(0), noisy_ring_page(40)];
+
+        let djbz = encode_jb2_djbz(&shared);
+        let dict = crate::jb2::decode_dict(&djbz, None).expect("decode Djbz");
+        for page in &pages {
+            let refined = encode_jb2_lossless_with_shared(page, &shared);
+            let plain = encode_jb2_dict_with_shared(page, &shared);
+            assert!(
+                refined.len() < plain.len(),
+                "refined {} B vs plain dict {} B",
+                refined.len(),
+                plain.len()
+            );
+            let decoded = crate::jb2::decode(&refined, Some(&dict)).expect("decode Sjbz");
+            assert_decoded_eq(page, &decoded);
+        }
+
+        // A shared symbol with a blank border decodes cropped, so it must not
+        // serve as a refinement reference; the page still round-trips.
+        let mut padded = Bitmap::new(18, 18);
+        for y in 0..16 {
+            for x in 0..16 {
+                padded.set(x + 1, y + 1, shared[0].get(x, y));
+            }
+        }
+        let padded = vec![padded];
+        let padded_dict =
+            crate::jb2::decode_dict(&encode_jb2_djbz(&padded), None).expect("decode Djbz");
+        let sjbz = encode_jb2_lossless_with_shared(&pages[0], &padded);
+        let decoded = crate::jb2::decode(&sjbz, Some(&padded_dict)).expect("decode Sjbz");
+        assert_decoded_eq(&pages[0], &decoded);
+
+        let bundle = encode_djvm_bundle_jb2_with_shared(&pages, &shared, BUNDLE_DEFAULT_DPI);
+        let doc = crate::djvu_document::DjVuDocument::parse(&bundle).expect("parse DJVM");
+        assert_eq!(doc.page_count(), 2);
+        for (i, page) in pages.iter().enumerate() {
+            let mask = doc
+                .page(i)
+                .expect("page")
+                .extract_mask()
+                .expect("extract_mask")
+                .expect("mask present");
+            assert_decoded_eq(page, &mask);
+        }
     }
 
     #[test]
