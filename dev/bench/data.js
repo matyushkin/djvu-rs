@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790515268779,
+  "lastUpdate": 1790517585475,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20482,6 +20482,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47779000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "af7a850331da1b07c2cf34f4f2259f277644e69a",
+          "message": "feat(async): lazy loading for indirect DJVM documents (#856)\n\nLazyIndirectDocument::from_index reads an indirect index; page_async\nfetches a page through an AsyncComponentResolver only when requested.\nShared DJVI dictionaries resolve once, on first use, and serve every\npage that includes them. Thumbnails are never resolved.\n\nA resolver failure returns AsyncLazyError::Resolve and is not cached,\nso a later call retries. A component of the wrong FORM type returns\nDocError::ComponentKindMismatch. A closure returning a future\nimplements the resolver; the document is Send + Sync when it is.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T13:34:37Z",
+          "tree_id": "c861dd26e5fd1209f6fbf0a2182ca63e4a1b2095",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/af7a850331da1b07c2cf34f4f2259f277644e69a"
+        },
+        "date": 1790517583352,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8177000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49555000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47384000,
             "range": "± 0",
             "unit": "ns/iter"
           }
