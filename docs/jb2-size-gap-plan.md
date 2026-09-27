@@ -13,6 +13,13 @@ the exact-match dictionary. `encode_jb2_lossless` combines both and is now the
 `Lossless` default: 0.952–1.011× `cjb2`. See PERF_EXPERIMENTS.md,
 "JB2 center-aligned record-4 refinement".
 
+**Update 2026-09-28.** The same refinement now runs on every JB2 write path:
+the bilevel multi-page bundle (also against shared `Djbz` symbols), the
+colour `Quality`/`Archival` mask and the layered bundle, and
+`chunk_encode::Jb2Chunk`. Colour text pages shrink 2–19 % as whole files.
+See PERF_EXPERIMENTS.md, "JB2 aligned refinement in bundles, colour masks and
+`chunk_encode`".
+
 ## 1. Where the gap actually is
 
 The naive framing ("our JB2 files are bigger") is too coarse. The measured
