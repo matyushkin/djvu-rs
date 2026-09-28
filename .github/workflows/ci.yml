@@ -75,16 +75,18 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
-      # main: all 452 tests in one pass — slow PDF/IW44 run in parallel with fast ones
+      # `async` adds the djvu_async / export_async unit tests (lazy indirect
+      # loading, async export sinks); no other required job runs them.
+      # main: every test in one pass — slow PDF/IW44 run in parallel with fast ones
       - name: Test (all)
         if: github.ref == 'refs/heads/main'
-        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff
+        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async
 
       # PR / other branch: fast tests only (~440 tests, skip 200s PDF + large IW44)
       - name: Test (fast — skip slow PDF + IW44)
         if: github.ref != 'refs/heads/main'
         run: >
-          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff
+          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
       # nextest does not run doctests; this compiles every ```rust block in
@@ -367,6 +369,11 @@ jobs:
 
       - name: Build + test djvu-py (maturin develop + pytest)
         run: make -C djvu-py py-test
+
+      # mypy stubtest: the shipped djvu_rs.pyi must match the built module
+      # (names, signatures, TypedDict shapes). Reuses the venv and build above.
+      - name: Type stubs match the module (stubtest)
+        run: make -C djvu-py py-stubtest
 
   # ── Licenses & security audit (combined — both are fast, one runner) ─────────
   deps-check:
