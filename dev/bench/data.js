@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790616398742,
+  "lastUpdate": 1790617989037,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20722,6 +20722,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 46991000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "658d56fa0b504135867d6ee620c27d24b2de05a7",
+          "message": "feat(wasm): lazy indirect DJVM documents in the browser (#862)\n\nAdd `WasmLazyIndirectDocument` to the `wasm-lazy` API. `open(index, resolve)`\nreads the DIRM of an indirect index file and fetches nothing else. Each page\nrequest calls the JS `resolve(name, kind)` callback for that page file and,\nonce, for every shared dictionary its pages include (via\n`LazyIndirectDocument`). The callback resolves to the file bytes, or to\n`null` for a missing file; failures are not cached.\n\nThe page render helper is now a module-level function shared by both lazy\ndocument types. README, the wasm README, and the feature matrix drop the\n\"lazy indirect is Rust-only\" limitation.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-28T17:24:01Z",
+          "tree_id": "cbb7e8311fe7f29b3762b767dfebdcee56c3bfb6",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/658d56fa0b504135867d6ee620c27d24b2de05a7"
+        },
+        "date": 1790617987359,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 122000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6092000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 36223000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34059000,
             "range": "± 0",
             "unit": "ns/iter"
           }
