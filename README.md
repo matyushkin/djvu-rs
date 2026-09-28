@@ -279,7 +279,8 @@ make wasm   # → examples/wasm/pkg (dual scalar + simd128 loader)
 See [`examples/wasm/`](examples/wasm/) for a complete drag-and-drop demo, and
 [`examples/wasm/range_lazy.md`](examples/wasm/range_lazy.md) for lazy loading
 over HTTP `Range` requests (`wasm-lazy` feature) — the browser fetches only
-the index plus the pages actually opened.
+the index plus the pages actually opened. `WasmLazyIndirectDocument` does the
+same for an indirect document, one page file per request.
 
 ## Advanced usage
 
@@ -422,6 +423,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+In the browser, `WasmLazyIndirectDocument` (`wasm-lazy` feature) wraps this
+loader; its resolver is a JS callback — see
+[`examples/wasm/README.md`](examples/wasm/README.md).
 
 See [`examples/async_lazy_first_page.rs`](examples/async_lazy_first_page.rs)
 for a native first-page latency probe and
@@ -797,9 +802,6 @@ Honest boundaries, so you can decide fast:
   through save, merge, and split unchanged, but `page_mut` returns
   `MutError::LegacyIw44Page`: these files have no text or annotation layers
   to edit.
-- **Lazy indirect DJVM loading is Rust-only.** `LazyIndirectDocument` fetches
-  indirect pages through an async resolver; the browser `wasm-lazy` API still
-  opens only bundled and single-page files.
 - **Encoder size parity is corpus- and profile-dependent.** Run the
   reproducible [`encoder parity scorecard`](docs/encoder-parity.md) to compare
   the same raster through DjVuLibre 3.5.29's `c44`/`cjb2` and the archival-safe
