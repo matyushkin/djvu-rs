@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790520854778,
+  "lastUpdate": 1790554977159,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20626,6 +20626,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47693000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b166f05e8c3a00874cca336519fdd6eb4c412da0",
+          "message": "feat(jb2): aligned refinement in bundles, colour masks and chunk_encode (#859)\n\nCenter-aligned record-4 refinement (#858) ran only on the single-page\nLossless path. Every JB2 write path now uses it:\n\n- bilevel DJVM bundle pages: new encode_jb2_lossless_with_shared, which\n  also refines against shared Djbz symbols and keeps direct tiles when\n  smaller;\n- colour Quality/Archival masks and the layered bundle: new\n  encode_jb2_dict_with_blits_refined / encode_jb2_dict_with_symbols_refined\n  with AlignedRefine::LOSSLESS (blit order unchanged, so FGbz stays valid);\n- chunk_encode::Jb2Chunk: encode_jb2_lossless.\n\nThe existing encode_jb2_dict* functions stay byte-identical.\n\nFix: both decoders align a refinement on the reference's content box, so a\ncaller-supplied shared symbol with blank borders is no longer used as a\nrefinement reference.\n\nBundle Djbz+Sjbz -1.8..-19.9 % on six corpora; colour Quality whole files\n-1.8..-19.4 %, map atlas +0.4 %.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-27T23:57:16Z",
+          "tree_id": "6e4f0f40a02d9ff0908e2c91e68202a5610274a2",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/b166f05e8c3a00874cca336519fdd6eb4c412da0"
+        },
+        "date": 1790554975344,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8226000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49631000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47484000,
             "range": "± 0",
             "unit": "ns/iter"
           }
