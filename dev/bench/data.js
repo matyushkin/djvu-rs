@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790554977159,
+  "lastUpdate": 1790616398742,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20674,6 +20674,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47484000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab3164ae8ddc72d4deb174a03c6caf810bada59b",
+          "message": "ci: run async unit tests and Python stubtest (#861)\n\n- Test (stable) and `make check` now test with `cli,tiff,async`. This\n  adds the 34 djvu_async / export_async unit tests (lazy indirect\n  loading, async export sinks) to a required gate; no required job ran\n  them before.\n- The djvu-py job runs mypy stubtest against the built module, so\n  `djvu_rs.pyi` cannot drift from the bindings.\n- Fix the export_async tests under `async` without `pdf`: import\n  `DjVuDocument` directly and gate the PDF-only imports. Add\n  `async_djvm_failing_sink_returns_sink_error`, which also keeps the\n  failing-writer fixture used without `pdf`.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-28T19:01:26+02:00",
+          "tree_id": "1745e6fb5d47018db2287b19f8b0d54e4de51b15",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/ab3164ae8ddc72d4deb174a03c6caf810bada59b"
+        },
+        "date": 1790616396537,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8209000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49296000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 46991000,
             "range": "± 0",
             "unit": "ns/iter"
           }
