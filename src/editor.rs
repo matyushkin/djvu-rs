@@ -450,10 +450,8 @@ fn create_sibling_temp(output: &Path) -> Result<PathBuf, EditError> {
             .create_new(true)
             .open(&candidate)
         {
-            Ok(file) => {
-                drop(file);
-                return Ok(candidate);
-            }
+            // The handle is not bound, so it closes before the path is returned.
+            Ok(_) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }

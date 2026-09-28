@@ -276,9 +276,9 @@ impl TempFileSpool {
 
 impl Drop for TempFileSpool {
     fn drop(&mut self) {
-        // Windows cannot remove an open file. Taking it here closes the handle
+        // Windows cannot remove an open file. Clearing it here closes the handle
         // before the best-effort deletion; Unix follows the same cleanup path.
-        drop(self.file.take());
+        self.file = None;
         let _ = std::fs::remove_file(&self.path);
     }
 }
