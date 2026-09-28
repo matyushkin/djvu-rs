@@ -625,7 +625,10 @@ mod lazy {
     use wasm_bindgen_futures::JsFuture;
 
     use super::WasmPixmap;
-    use crate::djvu_async::{LazyDocument, from_async_reader_lazy_local};
+    use crate::djvu_async::{
+        AsyncComponentResolver, LazyDocument, LazyIndirectDocument, from_async_reader_lazy_local,
+    };
+    use crate::djvu_document::{ComponentId, ComponentKind, ComponentResolveError, DjVuPage};
 
     /// Fetch granularity. 64 KiB matches the native HTTP-Range probe (#584):
     /// the whole head + DIRM index of a 500-component book fits in one block,
@@ -816,7 +819,7 @@ mod lazy {
                 .page_async(index as usize)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
-            Self::render(&page, target_dpi, u32::MAX)
+            render(&page, target_dpi, u32::MAX)
         }
 
         /// Progressive variant of [`render_page`](Self::render_page): decode at
@@ -834,32 +837,171 @@ mod lazy {
                 .page_async(index as usize)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
-            Self::render(&page, target_dpi, chunk_n)
+            render(&page, target_dpi, chunk_n)
+        }
+    }
+
+    /// Render `page` at `target_dpi`; `chunk_n == u32::MAX` decodes every
+    /// BG44 chunk, any other value renders progressively.
+    fn render(page: &Arc<DjVuPage>, target_dpi: u32, chunk_n: u32) -> Result<WasmPixmap, JsError> {
+        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
+        let pm = if chunk_n == u32::MAX {
+            crate::djvu_render::render_pixmap(page, &opts)
+        } else {
+            crate::djvu_render::render_progressive(page, &opts, chunk_n as usize)
+        }
+        .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(WasmPixmap {
+            width: pm.width,
+            height: pm.height,
+            data: pm.data,
+        })
+    }
+
+    /// [`AsyncComponentResolver`] over a JS
+    /// `(name: string, kind: string) -> Promise<Uint8Array | null>` callback.
+    ///
+    /// `kind` is `"page"`, `"shared"`, or `"thumbnail"`. A `null` or
+    /// `undefined` result means the component is missing; a thrown error or a
+    /// rejected promise means it could not be read.
+    struct JsComponentResolver {
+        resolve: js_sys::Function,
+    }
+
+    impl AsyncComponentResolver for JsComponentResolver {
+        fn resolve(
+            &self,
+            component: &ComponentId,
+        ) -> impl Future<Output = Result<Vec<u8>, ComponentResolveError>> {
+            let kind = match component.kind {
+                ComponentKind::Page => "page",
+                ComponentKind::Shared => "shared",
+                ComponentKind::Thumbnail => "thumbnail",
+            };
+            let call = self.resolve.call2(
+                &JsValue::NULL,
+                &JsValue::from_str(&component.name),
+                &JsValue::from_str(kind),
+            );
+            let component = component.clone();
+            async move {
+                let failed = |e: JsValue| ComponentResolveError::Failed {
+                    component: component.clone(),
+                    reason: e
+                        .as_string()
+                        .or_else(|| {
+                            e.dyn_ref::<js_sys::Error>()
+                                .map(|err| String::from(err.message()))
+                        })
+                        .unwrap_or_else(|| "JS component resolver failed".to_string()),
+                };
+                let value = call.map_err(failed)?;
+                // `Promise.resolve` also accepts a plain (non-promise) value.
+                let value = JsFuture::from(js_sys::Promise::resolve(&value))
+                    .await
+                    .map_err(failed)?;
+                if value.is_null() || value.is_undefined() {
+                    return Err(ComponentResolveError::Missing { component });
+                }
+                Ok(js_sys::Uint8Array::new(&value).to_vec())
+            }
+        }
+    }
+
+    /// Lazily opened indirect DjVu document: the index file lists the pages,
+    /// and each page lives in its own file.
+    ///
+    /// `open(indexBytes, resolve)` reads only the directory. Each
+    /// `render_page(i, dpi)` then asks `resolve` for that page file, and for a
+    /// shared symbol dictionary the page includes (fetched once, cached).
+    /// `resolve` receives `(name, kind)` — the file name from the index and
+    /// `"page"` or `"shared"` — and resolves to the file's bytes as a
+    /// `Uint8Array`, or to `null` when the file does not exist:
+    ///
+    /// ```js
+    /// const base = new URL("book/", location.href);
+    /// const index = new Uint8Array(await (await fetch(new URL("index.djvu", base))).arrayBuffer());
+    /// const doc = WasmLazyIndirectDocument.open(index, async (name, kind) => {
+    ///   const r = await fetch(new URL(name, base));
+    ///   return r.ok ? new Uint8Array(await r.arrayBuffer()) : null;
+    /// });
+    /// ```
+    ///
+    /// A bundled or single-page file is not an index: open it with
+    /// [`WasmLazyDocument`].
+    #[wasm_bindgen]
+    pub struct WasmLazyIndirectDocument {
+        inner: LazyIndirectDocument<JsComponentResolver>,
+    }
+
+    #[wasm_bindgen]
+    impl WasmLazyIndirectDocument {
+        /// Read the directory of an indirect index file. No component is
+        /// fetched here.
+        pub fn open(
+            index: &[u8],
+            resolve: js_sys::Function,
+        ) -> Result<WasmLazyIndirectDocument, JsError> {
+            let inner = LazyIndirectDocument::from_index(index, JsComponentResolver { resolve })
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmLazyIndirectDocument { inner })
         }
 
-        fn render(
-            page: &Arc<crate::djvu_document::DjVuPage>,
+        /// Number of pages in the index.
+        pub fn page_count(&self) -> u32 {
+            self.inner.page_count() as u32
+        }
+
+        /// The file name of page `index`, as passed to `resolve`, or
+        /// `undefined` when `index` is out of range.
+        pub fn page_name(&self, index: u32) -> Option<String> {
+            self.inner
+                .page_component(index as usize)
+                .map(|c| c.name.clone())
+        }
+
+        /// Fetch (or reuse) page `index` and return `[width_px, height_px, dpi]`
+        /// at the page's native resolution.
+        pub async fn page_info(&self, index: u32) -> Result<js_sys::Uint32Array, JsError> {
+            let page = self.page(index).await?;
+            let out = [page.width() as u32, page.height() as u32, page.dpi() as u32];
+            Ok(js_sys::Uint32Array::from(&out[..]))
+        }
+
+        /// Fetch (or reuse) page `index` and render it at `target_dpi` into a
+        /// [`WasmPixmap`].
+        pub async fn render_page(
+            &self,
+            index: u32,
+            target_dpi: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let page = self.page(index).await?;
+            render(&page, target_dpi, u32::MAX)
+        }
+
+        /// Progressive variant of [`render_page`](Self::render_page): decode at
+        /// most `chunk_n` BG44 refinement chunks (0 ⇒ mask/foreground only).
+        pub async fn render_page_progressive(
+            &self,
+            index: u32,
             target_dpi: u32,
             chunk_n: u32,
         ) -> Result<WasmPixmap, JsError> {
-            let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-            let pm = if chunk_n == u32::MAX {
-                crate::djvu_render::render_pixmap(page, &opts)
-            } else {
-                crate::djvu_render::render_progressive(page, &opts, chunk_n as usize)
-            }
-            .map_err(|e| JsError::new(&e.to_string()))?;
-            Ok(WasmPixmap {
-                width: pm.width,
-                height: pm.height,
-                data: pm.data,
-            })
+            let page = self.page(index).await?;
+            render(&page, target_dpi, chunk_n)
+        }
+
+        async fn page(&self, index: u32) -> Result<Arc<DjVuPage>, JsError> {
+            self.inner
+                .page_async(index as usize)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))
         }
     }
 }
 
 #[cfg(all(feature = "async", target_arch = "wasm32"))]
-pub use lazy::WasmLazyDocument;
+pub use lazy::{WasmLazyDocument, WasmLazyIndirectDocument};
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 //
