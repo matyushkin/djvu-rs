@@ -20,7 +20,9 @@ run cargo build --no-default-features                       # no_std (host)
 # wasm32 — the gate that catches no_std `vec!` / leaked `std::*` (#448 class).
 if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown'; then
   run cargo check --target wasm32-unknown-unknown --features wasm
-  run cargo check --target wasm32-unknown-unknown --features wasm-lazy  # lazy Range open (#588)
+  # Lazy Range open (#588). Clippy, not just check: wasm32 std stubs (e.g. a
+  # `File` without `Drop`) trigger lints the host build never sees (#863).
+  run cargo clippy --target wasm32-unknown-unknown --features wasm-lazy -- -D warnings
   run cargo build --no-default-features --target wasm32-unknown-unknown
   run env RUSTFLAGS='-C target-feature=+simd128' \
     cargo check --target wasm32-unknown-unknown --features wasm
