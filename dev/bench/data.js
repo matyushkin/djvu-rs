@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790617989037,
+  "lastUpdate": 1790619431052,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20770,6 +20770,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 34059000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "25d3e8a47f89b9d8946e67e647f9a5bca69c4968",
+          "message": "fix: clear wasm32 clippy drop_non_drop lints (#863)\n\nOn wasm32-unknown-unknown `std::fs::File` has no `Drop` impl, so\n`drop(file)` trips clippy's `drop_non_drop`. Close the handles without an\nexplicit `drop` call: assign `None` to the spool's file, and leave the\nfreshly created temp file unbound. Behaviour on native targets is\nunchanged: each handle still closes before the file is removed or its\npath is returned.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-28T17:45:46Z",
+          "tree_id": "66f55980508f82434c2fc36d94655a9571c2f702",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/25d3e8a47f89b9d8946e67e647f9a5bca69c4968"
+        },
+        "date": 1790619429517,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6738000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41742000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40020000,
             "range": "± 0",
             "unit": "ns/iter"
           }
