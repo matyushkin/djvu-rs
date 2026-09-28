@@ -16214,3 +16214,65 @@ new symbol. A plain-dict fallback there would need a second full encode.
 path. Guards: `bundle_pages_refine_against_shared_symbols` (incl. an untight
 shared symbol), `quality_color_refines_near_copies_and_keeps_colors`,
 `layered_shared_refines_near_copies_and_round_trips`.
+
+### JB2 per-page work budget and oversized-component splitting — **Kept** (2026-09-28)
+
+**Issue.** Our own JB2 output above 16 MP did not decode in our decoder
+(`ImageTooLarge`). Three causes:
+
+1. The decoder's per-page cap counted 16 MP of symbol pixels. Direct
+   `encode_jb2` tiles cover every page pixel, so any page over 16 MP failed.
+2. The dictionary encoders emitted a component with a bounding box over the
+   16 MP per-symbol limit as one symbol (a scan's dark border, for example).
+3. The encoder refined large components with no view of the page budget.
+
+**Approach.**
+
+- Decoder (`crates/djvu-jb2/src/lib.rs`): the page cap is now a work budget,
+  `MAX_PAGE_SYMBOL_WORK = 64 M` units. A direct pixel costs 1 unit, a
+  refinement pixel (records 4–6) costs `REFINE_PIXEL_WORK = 4`. Refinement
+  decodes at ≈ 15 ns/px and direct at ≈ 4 ns/px on low-entropy input, so
+  16 MP of refinement (the old fuzz worst case) and 64 MP of direct cost about
+  the same. The Djbz dictionary loop is unchanged. Every stream that passed
+  the old 16 MP cap still passes.
+- Encoder (`crates/djvu-jb2/src/encode.rs`):
+  - `extract_ccs` splits a component over 16 MP into 4096² pieces, each
+    cropped to its own ink.
+  - If the page's component boxes still add up past the budget (nested
+    components), it cuts every component wider than 1024 px into 1024²
+    pieces. Only such pages change.
+  - The dictionary encoder tracks decode work and codes a would-be
+    refinement as a new symbol when it would pass the budget.
+  - `encode_jb2_lossless` now checks the page at direct cost, so pages of
+    16–64 MP get the dictionary instead of tiles.
+
+**Numbers** (`examples/_budget_probe.rs`, native, best of 5):
+
+| Stream | Size | Decode before | Decode after |
+|---|---:|---|---|
+| fuzz seed `page_cap_timeout.bin` | 409 B | `ImageTooLarge` | `ImageTooLarge`, 170 ms |
+| blank 8192² direct tiles | 327 B | `ImageTooLarge` | ok, 179 ms |
+| noise 8192² direct tiles | 8.7 MB | `ImageTooLarge` | ok, 657 ms |
+| text 8192² direct tiles | 777,674 B | `ImageTooLarge` | ok, 233 ms |
+| text 8192² `encode_jb2_lossless` | 777,674 → **201,590 B** | `ImageTooLarge` | ok, 38 ms |
+| `big_scanned_page` (62 MP) colour `Quality`, whole file | 101,236 → 103,170 B | mask `ImageTooLarge` | ok |
+
+The seed stays at the same cost: it still stops at 16 MP of refinement.
+The worst small input is now a blank direct page at 179 ms, about the seed's
+time. The noise row is not an amplification: its input is 8.7 MB.
+Lossless encode of the 64 MP text page takes 543 ms (379 ms tiles-only).
+
+**Decision.** Kept.
+
+**Reason.** Every page up to the 64 MP page limit now round-trips through
+our own decoder, with no new fuzz exposure. The split, the finer split and
+the refinement guard only fire on pages that did not decode before. The one
+other change: `encode_jb2_lossless` may now try the dictionary on a page
+whose component boxes total 16–64 MP, and it still keeps the smaller stream.
+Guards: `tiled_above_16mp_roundtrip`,
+`lossless_large_page_falls_back_to_decodable_tiles`,
+`dict_splits_component_over_symbol_limit`,
+`dict_splits_finer_when_boxes_exceed_page_budget`,
+`aligned_refinement_stays_within_page_budget`, and
+`page_cap_bounds_refinement_amplification` (seed still `ImageTooLarge`).
+Each new test fails with its mechanism disabled.
