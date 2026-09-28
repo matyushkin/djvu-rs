@@ -233,6 +233,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -243,8 +244,10 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown --features wasm
 
       # Lazy Range-based browser open (#588): wasm + async + wasm-bindgen-futures.
-      - name: cargo check --target wasm32-unknown-unknown (wasm-lazy)
-        run: cargo check --target wasm32-unknown-unknown --features wasm-lazy
+      # Clippy, not just check: wasm32 std stubs (e.g. a `File` without `Drop`)
+      # trigger lints the host build never sees (#863).
+      - name: cargo clippy --target wasm32-unknown-unknown (wasm-lazy)
+        run: cargo clippy --target wasm32-unknown-unknown --features wasm-lazy -- -D warnings
 
       # Pure no_std build for wasm32 (no std feature, no wasm-bindgen).
       # This is the strictest test of the README "no_std compatible — IFF/BZZ/JB2/IW44/ZP
