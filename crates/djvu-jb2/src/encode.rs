@@ -288,9 +288,10 @@ fn encode_bitmap_ref(zp: &mut ZpEncoder, ctx: &mut [u8], cbm: &Bitmap, mbm: &Bit
 ///
 /// Images with `width * height ≤ 1 MP` are emitted as a single direct-bitmap
 /// record (type 3). Larger images are split into ≤ 1024×1024 tiles, each
-/// emitted as its own record-3 — this keeps every symbol within the decoder's
-/// `MAX_SYMBOL_PIXELS = 1 MP` DoS guard so the output round-trips through
-/// [`crate::decode`] for any size up to `MAX_PIXELS = 64 MP`.
+/// emitted as its own record-3. Every tile stays within the decoder's
+/// 16 MP per-symbol guard, and the tiles together cost one unit per page
+/// pixel in its 64 M per-page work budget, so the output round-trips through
+/// [`crate::decode`] for any size up to the 64 MP page limit.
 ///
 /// No connected-component analysis or symbol dictionary is used.
 /// For substantially better compression on text-heavy bitmaps see
@@ -328,9 +329,8 @@ pub fn encode_jb2(bitmap: &Bitmap) -> Vec<u8> {
 
     // ── Direct-bitmap records, tiled to stay under MAX_SYMBOL_PIXELS ───────
     //
-    // Tile size: 1024 — equal to the decoder's MAX_SYMBOL_PIXELS = 1024*1024,
-    // and the per-symbol check is `pixels > MAX`, so tile_w*tile_h ≤ 1 MP is
-    // accepted. Layout state mirrors the decoder (jb2.rs:LayoutState):
+    // Tile size: 1024, so tile_w*tile_h ≤ 1 MP — well under the decoder's
+    // 16 MP MAX_SYMBOL_PIXELS (the tile size predates that limit). Layout state mirrors the decoder (jb2.rs:LayoutState):
     //   first_left = -1, first_bottom = image_height - 1.
     //
     // JB2 stream coords are y-flipped relative to image coords: blit_to_bitmap
@@ -579,6 +579,17 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
 
             let cc_w = (max_x - min_x + 1) as u32;
             let cc_h = (max_y - min_y + 1) as u32;
+            if (cc_w as usize) * (cc_h as usize) > crate::MAX_SYMBOL_PIXELS {
+                split_cc(
+                    &cc_pixels,
+                    min_x as u32,
+                    min_y as u32,
+                    cc_w,
+                    SPLIT_TILE,
+                    &mut out,
+                );
+                continue;
+            }
             let mut cc_bm = Bitmap::new(cc_w, cc_h);
             for &(px, py) in &cc_pixels {
                 cc_bm.set(px - min_x as u32, py - min_y as u32, true);
@@ -592,7 +603,95 @@ fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
         }
     }
 
+    // Bounding boxes of nested components overlap, so on a page that is
+    // mostly ink their areas can add up past the decoder's per-page budget
+    // even after the split above. Cutting the large components finer crops
+    // away the holes that hold other components. Only such pages change.
+    let bbox_total = out.iter().fold(0usize, |t, cc| {
+        t.saturating_add((cc.bitmap.width as usize) * (cc.bitmap.height as usize))
+    });
+    if bbox_total > crate::MAX_PAGE_SYMBOL_WORK {
+        let mut fine = Vec::with_capacity(out.len());
+        for cc in out {
+            let (bw, bh) = (cc.bitmap.width, cc.bitmap.height);
+            if bw.max(bh) <= FINE_SPLIT_TILE {
+                fine.push(cc);
+                continue;
+            }
+            cc_pixels.clear();
+            for y in 0..bh {
+                for x in 0..bw {
+                    if cc.bitmap.get(x, y) {
+                        cc_pixels.push((cc.x + x, cc.y + y));
+                    }
+                }
+            }
+            split_cc(&cc_pixels, cc.x, cc.y, bw, FINE_SPLIT_TILE, &mut fine);
+        }
+        out = fine;
+    }
+
     out
+}
+
+/// Side of the square pieces cut from a component over the decoder's
+/// per-symbol limit: 4096² = 16 MP, the limit itself (the decoder rejects
+/// only symbols *above* it).
+const SPLIT_TILE: u32 = 4096;
+
+/// Side of the pieces cut from large components when the page's bounding
+/// boxes add up past the decoder's per-page budget.
+const FINE_SPLIT_TILE: u32 = 1024;
+
+/// Append the pixels of one component as several pieces, one per `tile`-sized
+/// grid cell it touches. Each piece is cropped to its own ink, so it stays
+/// tight like a real component; the pieces do not overlap and together hold
+/// exactly the component's pixels. Without this a page-wide component (a
+/// scan's dark border, say) made the whole stream undecodable.
+fn split_cc(
+    pixels: &[(u32, u32)],
+    min_x: u32,
+    min_y: u32,
+    cc_w: u32,
+    tile: u32,
+    out: &mut Vec<Cc>,
+) {
+    let tiles_x = cc_w.div_ceil(tile) as usize;
+    let tile_of = |(px, py): (u32, u32)| {
+        ((py - min_y) / tile) as usize * tiles_x + ((px - min_x) / tile) as usize
+    };
+    /// One grid cell's ink bbox (x0, y0, x1, y1) and pixel count.
+    type Cell = (u32, u32, u32, u32, u32);
+    let mut cells: Vec<Option<Cell>> = Vec::new();
+    for &p in pixels {
+        let t = tile_of(p);
+        if t >= cells.len() {
+            cells.resize(t + 1, None);
+        }
+        let (px, py) = p;
+        cells[t] = Some(match cells[t] {
+            None => (px, py, px, py, 1),
+            Some((x0, y0, x1, y1, n)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py), n + 1),
+        });
+    }
+    let first = out.len();
+    let mut slot = vec![usize::MAX; cells.len()];
+    for (t, cell) in cells.iter().enumerate() {
+        if let Some((x0, y0, x1, y1, n)) = *cell {
+            slot[t] = out.len();
+            out.push(Cc {
+                x: x0,
+                y: y0,
+                bitmap: Bitmap::new(x1 - x0 + 1, y1 - y0 + 1),
+                pixel_count: n,
+            });
+        }
+    }
+    debug_assert!(out.len() > first);
+    for &p in pixels {
+        let cc = &mut out[slot[tile_of(p)]];
+        cc.bitmap.set(p.0 - cc.x, p.1 - cc.y, true);
+    }
 }
 
 // ── Dict-based encoding: record types 1 (new) + 6 (refinement) + 7 (copy) ────
@@ -1566,7 +1665,7 @@ impl Jb2EncodeOptions {
 ///   Cross-size matching (which the format permits via wdiff/hdiff) needs
 ///   per-pixel resampling to compute the Hamming distance and is left to
 ///   a future phase.
-/// - Components >= 1 MP are encoded as-is; the decoder will reject them via
+/// - Components > 16 MP are encoded as-is; the decoder will reject them via
 ///   `MAX_SYMBOL_PIXELS`. For scanned text pages this is not a practical issue.
 pub fn encode_jb2_dict(bitmap: &Bitmap) -> Vec<u8> {
     encode_jb2_dict_with_shared(bitmap, &[])
@@ -1656,9 +1755,10 @@ pub fn encode_jb2_lossless_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap
         Some(AlignedRefine::LOSSLESS),
     )
     .0;
-    // A direct page over the per-page symbol budget does not decode here.
+    // Direct tiles cost one work unit per page pixel in the decoder's
+    // per-page budget; a page over it does not decode here.
     let direct_decodes = (bitmap.width as usize).saturating_mul(bitmap.height as usize)
-        <= crate::MAX_PAGE_SYMBOL_PIXELS;
+        <= crate::MAX_PAGE_SYMBOL_WORK;
     if direct_decodes && direct.len() < dict.len() {
         direct
     } else {
@@ -1668,20 +1768,18 @@ pub fn encode_jb2_lossless_with_shared(bitmap: &Bitmap, shared_symbols: &[Bitmap
 
 /// Whether one symbol record per component (plus start and end records, and
 /// the inherited-dictionary record when `shared`) stays within the decoder's
-/// page limits, counting every component as decoded.
+/// page limits, counting every component as a direct symbol. Refinement costs
+/// more, but the dictionary encoder only refines while the page stays within
+/// budget, and [`extract_ccs`] already split components over the per-symbol
+/// limit.
 fn fits_decoder_budget(ccs: &[Cc], shared: bool) -> bool {
     if ccs.len() + 2 + usize::from(shared) > crate::MAX_RECORDS {
         return false;
     }
-    let mut total = 0usize;
-    for cc in ccs {
-        let px = (cc.bitmap.width as usize).saturating_mul(cc.bitmap.height as usize);
-        if px > crate::MAX_SYMBOL_PIXELS {
-            return false;
-        }
-        total = total.saturating_add(px);
-    }
-    total <= crate::MAX_PAGE_SYMBOL_PIXELS
+    let total = ccs.iter().fold(0usize, |t, cc| {
+        t.saturating_add((cc.bitmap.width as usize).saturating_mul(cc.bitmap.height as usize))
+    });
+    total <= crate::MAX_PAGE_SYMBOL_WORK
 }
 
 /// One emitted blit: its cropped shape and top-left position (top-down page
@@ -2019,10 +2117,20 @@ fn encode_jb2_dict_with_ccs(
         dict_entries.push(sym);
     }
 
+    // The decoder's per-page work budget: one unit per direct pixel,
+    // `REFINE_PIXEL_WORK` per refinement pixel. A refinement that would push
+    // the page over it is coded as a new symbol instead, so large refined
+    // components cannot make an otherwise decodable page fail.
+    let mut decode_work = 0usize;
+
     for &cc_idx in &order {
         let cc = &ccs[cc_idx];
         let cc_w = cc.bitmap.width as i32;
         let cc_h = cc.bitmap.height as i32;
+        let cc_px = (cc.bitmap.width as usize).saturating_mul(cc.bitmap.height as usize);
+        let refine_fits = decode_work
+            .saturating_add(cc_px.saturating_mul(crate::REFINE_PIXEL_WORK))
+            <= crate::MAX_PAGE_SYMBOL_WORK;
         // JB2 uses bottom-up y: y_jb2 is the bottom y of the symbol.
         let x_jb2 = cc.x as i32;
         let y_jb2 = h - cc.y as i32 - cc_h;
@@ -2072,7 +2180,7 @@ fn encode_jb2_dict_with_ccs(
             } else {
                 None
             };
-            let aligned_ref = aligned.and_then(|a| {
+            let aligned_ref = aligned.filter(|_| refine_fits).and_then(|a| {
                 find_aligned_refine_ref(
                     &cc.bitmap,
                     cc_ink,
@@ -2095,7 +2203,9 @@ fn encode_jb2_dict_with_ccs(
                 // then the cross-size #322 path. Behind `experimental`; the default
                 // build always emits `New`.
                 #[cfg(feature = "experimental")]
-                {
+                if !refine_fits {
+                    Action::New
+                } else {
                     let same_size = opts.same_size_rec6.and_then(|frac| {
                         find_same_size_refine_ref(&cc.bitmap, &dict_entries, candidates, frac)
                     });
@@ -2122,6 +2232,14 @@ fn encode_jb2_dict_with_ccs(
                 }
             }
         };
+
+        decode_work = decode_work.saturating_add(match action {
+            Action::New => cc_px,
+            Action::Copy(_) => 0,
+            #[cfg(feature = "experimental")]
+            Action::Refine(_) => cc_px.saturating_mul(crate::REFINE_PIXEL_WORK),
+            Action::RefineAligned(..) => cc_px.saturating_mul(crate::REFINE_PIXEL_WORK),
+        });
 
         let dict_size = dict_entries.len();
         match &action {
@@ -2990,6 +3108,85 @@ mod tests {
         assert_eq!(decoded.data, page.data);
     }
 
+    /// A page above 16 MP with more components than the record limit falls
+    /// back to direct tiles, and those tiles must decode: the decoder's page
+    /// budget used to stop at 16 MP of symbol pixels.
+    #[test]
+    fn lossless_large_page_falls_back_to_decodable_tiles() {
+        let (w, h) = (5120u32, 4096u32);
+        assert!((w * h) as usize > 16 * 1024 * 1024);
+        let page = make_bitmap(w, h, |x, y| x % 8 == 0 && y % 8 == 0);
+        let lossless = encode_jb2_lossless(&page);
+        assert_eq!(lossless, encode_jb2(&page));
+        let decoded = jb2::decode(&lossless, None).expect("decode failed");
+        assert_eq!(decoded.data, page.data);
+    }
+
+    /// Square outline `size` px wide with a `t` px stroke, placed at `x0`;
+    /// `defect` clears one pixel of the top edge so outlines differ slightly.
+    fn outline(x: u32, y: u32, x0: u32, size: u32, t: u32, defect: Option<u32>) -> bool {
+        if x < x0 || x >= x0 + size || y >= size {
+            return false;
+        }
+        let (lx, ly) = (x - x0, y);
+        if ly == 0 && defect == Some(lx) {
+            return false;
+        }
+        lx < t || ly < t || lx >= size - t || ly >= size - t
+    }
+
+    /// A component whose bounding box is over the decoder's 16 MP per-symbol
+    /// limit is split into pieces, so the dictionary stream decodes.
+    #[test]
+    fn dict_splits_component_over_symbol_limit() {
+        let size = 4200u32;
+        assert!((size * size) as usize > crate::MAX_SYMBOL_PIXELS);
+        let page = make_bitmap(size, size, |x, y| outline(x, y, 0, size, 2, None));
+        for stream in [encode_jb2_dict(&page), encode_jb2_lossless(&page)] {
+            let decoded = jb2::decode(&stream, None).expect("decode failed");
+            assert_eq!(decoded.data, page.data);
+        }
+    }
+
+    /// Nested outlines: their bounding boxes add up past the per-page budget,
+    /// so the large ones are cut finer and the stream still decodes.
+    #[test]
+    fn dict_splits_finer_when_boxes_exceed_page_budget() {
+        let size = 7000u32;
+        let page = make_bitmap(size, size, |x, y| {
+            (0..4u32).any(|k| {
+                let m = k * 600;
+                x >= m && y >= m && outline(x - m, y - m, 0, size - 2 * m, 2, None)
+            })
+        });
+        let boxes: usize = (0..4usize).map(|k| (7000 - 1200 * k).pow(2)).sum();
+        assert!(boxes > crate::MAX_PAGE_SYMBOL_WORK);
+        let decoded = jb2::decode(&encode_jb2_dict(&page), None).expect("decode failed");
+        assert_eq!(decoded.data, page.data);
+    }
+
+    /// Three near-identical 9 MP outlines: refining both copies would cost
+    /// 9 + 2 × 36 M work units, over the decoder's 64 M page budget. The
+    /// encoder refines only while the page stays within it.
+    #[test]
+    fn aligned_refinement_stays_within_page_budget() {
+        let (size, pitch) = (3000u32, 3010u32);
+        let page = make_bitmap(3 * pitch, size, |x, y| {
+            let i = x / pitch;
+            outline(x, y, i * pitch, size, 3, Some(100 + i))
+        });
+        let px = (size * size) as usize;
+        assert!(px + 2 * px * crate::REFINE_PIXEL_WORK > crate::MAX_PAGE_SYMBOL_WORK);
+        let (stream, _) = encode_jb2_dict_with_blits_refined(
+            &page,
+            &[],
+            &Jb2EncodeOptions::default(),
+            Some(AlignedRefine::LOSSLESS),
+        );
+        let decoded = jb2::decode(&stream, None).expect("decode failed");
+        assert_eq!(decoded.data, page.data);
+    }
+
     #[test]
     fn lossless_empty_page() {
         assert!(encode_jb2_lossless(&Bitmap::new(0, 5)).is_empty());
@@ -3199,6 +3396,18 @@ mod tests {
                 assert_eq!(decoded.get(x, y), src.get(x, y), "mismatch at ({x},{y})");
             }
         }
+    }
+
+    /// Direct tiles above 16 MP decode: every page pixel costs one unit of the
+    /// decoder's 64 M per-page work budget, so pages up to the 64 MP limit fit.
+    #[test]
+    fn tiled_above_16mp_roundtrip() {
+        let (w, h) = (5000u32, 4000u32);
+        assert!((w * h) as usize > 16 * 1024 * 1024);
+        let src = make_bitmap(w, h, |x, y| (x * 7 + y * 3) % 29 == 0);
+        let decoded = roundtrip(&src);
+        assert_eq!((decoded.width, decoded.height), (w, h));
+        assert_eq!(decoded.data, src.data);
     }
 
     /// 4096×4096 = 16 MP forces a 4×4 tile grid (#198 DoD).
