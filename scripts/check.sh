@@ -33,9 +33,9 @@ fi
 
 # tests (nextest if present, else cargo test) — same scope as CI
 if command -v cargo-nextest >/dev/null 2>&1; then
-  run cargo nextest run --workspace --exclude djvu-py --features cli,tiff
+  run cargo nextest run --workspace --exclude djvu-py --features cli,tiff,async
 else
-  run cargo test --workspace --exclude djvu-py --features cli,tiff
+  run cargo test --workspace --exclude djvu-py --features cli,tiff,async
 fi
 
 # README doctests — nextest skips doctests; this compiles every rust block in
