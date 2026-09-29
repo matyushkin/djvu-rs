@@ -912,7 +912,9 @@ impl<'a> Page<'a> {
 
     /// Progressive render: decode BG44 chunks `0..=chunk_n` plus all
     /// foreground layers. `chunk_n = bg44_chunk_count() - 1` equals the full
-    /// render; each lower value is a coarser refinement stage.
+    /// render except at about a quarter of the native size and below (see
+    /// [`djvu_render::render_progressive`]); each lower value is a coarser
+    /// refinement stage.
     pub fn render_progressive(
         &self,
         width: u32,
