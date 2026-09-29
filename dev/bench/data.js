@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790679163248,
+  "lastUpdate": 1790683503235,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21154,6 +21154,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 35242000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bda7813b0eafdb2bd85ac0c9119efc6476a06b0c",
+          "message": "fix!: one render pipeline behind every render entry point (#872)\n\nEvery render entry point repeated the same steps: check the size, build\nthe gamma table, pick the IW44 subsample, decode the layers, choose the\nmask plane, composite the bands, then (for whole pages) anti-alias,\nrescale with Lanczos-3, and rotate. The copies had drifted apart:\n\n- Lanczos-3 on an INFO-rotated page rotated the native canvas twice\n  (render_pixmap, render_progressive): mean pixel difference to the\n  bilinear render was 48-58 instead of 0.6.\n- Lanczos-3 in render_region re-rendered the region rectangle at native\n  scale, so a region was not a crop of the page.\n- Below a quarter of the native size a strict render reads only the\n  first BG44 chunk; a permissive one read all of them. The tile cache\n  shares tiles across both modes, so a cached region depended on which\n  mode filled the cache first.\n- render_into silently skipped anti-aliasing, Lanczos-3 and rotation.\n- Anti-aliasing never reached progressive frames, the ProgressiveDecoder\n  or render_coarse.\n\nNow one module does it. `Composite::decode(page, opts, detail)` turns the\noptions into the decoded layers for a canvas at one `Detail` (full,\nthe first n BG44 chunks, or coarse). It composites any window into a\nbuffer, a pixmap or a row sink, and `page_pixmap` finishes a whole page\nin one order: anti-aliasing, Lanczos-3 (a native-size canvas at the same\ndetail, rescaled), rotation. render_pixmap, render_into, render_streaming,\nrender_region, the tile cache, render_coarse, render_progressive and the\nProgressiveDecoder are adapters over it. render_rows, MaskPlane,\nresolve_sub4_mask, apply_lanczos_postpass and the recursive Lanczos\nre-render are gone.\n\nA hash dump of every entry point over 16 fixtures x 4 scales x 7 option\nsets (5280 cases) against main differs only in the cases listed above.\n\nThe docs no longer claim that the last progressive frame always equals\nrender_pixmap: below a quarter of the native size render_pixmap reads\nonly the first BG44 chunk and a quarter-resolution mask.\n\nBREAKING CHANGE: render_into / render_into_with_limits / DjVuPage::render_into\nreturn RenderError::UnsupportedOption for options that need a whole\npixmap (anti-aliasing, Lanczos-3 at a scaled size, or a combined\nINFO + user rotation), as render_streaming does, instead of writing an\nunrotated, unfiltered buffer. Check RenderOptions::can_stream or use\nrender_pixmap. The image-crate DjVuDecoder now decodes in display\norientation: its default size and with_size are after the INFO rotation.\nAnti-aliasing now halves progressive frames, ProgressiveDecoder frames\nand render_coarse output, and render_coarse applies Lanczos-3.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T11:39:54Z",
+          "tree_id": "deeb408caa0347a5ff7e4af3db08a5750717bc1d",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/bda7813b0eafdb2bd85ac0c9119efc6476a06b0c"
+        },
+        "date": 1790683501542,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8170000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 48941000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45472000,
             "range": "± 0",
             "unit": "ns/iter"
           }
