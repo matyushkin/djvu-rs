@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790675038641,
+  "lastUpdate": 1790679163248,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21106,6 +21106,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 43922000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f4dd12c09afc0bb07b9cde0ecf23e7ed5fbca55f",
+          "message": "refactor!: one DIRM component table for every bundle writer (#871)\n\nEvery DJVM writer now builds its directory from `DirmComponent` values\nand `DirmComponentKind`, not from raw flag bytes and parallel vectors.\n\n- `DirmComponentKind::from_flag` / `flag` are the only flag<->kind map.\n- `DirmPayload::build_bundled` and `build_indirect` take `&[DirmComponent]`;\n  `insert_component` takes a kind.\n- `merge`, `split`, `remove_pages`, `dedup_shared_components`,\n  `to_indirect`, `create_indirect*`, `djvu_mut` and both encoders share\n  one `Bundle` parser and one `build_djvm(Vec<BundlePart>)` writer.\n- `DjvmStreamWriter::add_component` keeps only the low 6 bits of the flag.\n  Before, a caller's 0x80/0x40 bit made readers take the next id as a\n  name or title and shifted every later component.\n\nMemory: bundle writers peak at 2.01x the output instead of 4.51x.\n`iff::partial_emit_with_offsets` reserved 8 bytes for a 12-byte prologue,\nso every emit reallocated; parts are now dropped once spooled and the\nspool is reserved exactly. Guard: tests/djvm_peak_memory.rs.\nSee PERF_EXPERIMENTS.md DJVM_BUNDLE_PEAK.\n\nBREAKING CHANGE: `DjvmError::ComponentDescriptorCountMismatch` is removed;\nno writer can produce it any more. `DjvmStreamWriter::add_component` now\nignores the name (0x80) and title (0x40) bits and writes unknown component\ntypes as shared (0).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T10:28:15Z",
+          "tree_id": "eab76baf4126c7ee9d2dc0a7aa8dbe4f8b630aa1",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/f4dd12c09afc0bb07b9cde0ecf23e7ed5fbca55f"
+        },
+        "date": 1790679161303,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 123000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6197000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 37328000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35242000,
             "range": "± 0",
             "unit": "ns/iter"
           }
