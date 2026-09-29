@@ -56,7 +56,7 @@ use crate::annotation::{
 };
 use crate::chunk_encode::{ChunkEncoder, NavmChunk};
 use crate::dirm::is_page_form;
-use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
+use crate::dirm::{BUNDLED_FLAG, DirmComponent, DirmComponentKind, DirmPayload};
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
@@ -1041,7 +1041,7 @@ fn add_shared_anno(root: &mut Chunk, form: Chunk) -> Result<(), MutError> {
     let at = children.iter().position(is_page).unwrap_or(children.len());
     let component_index = children[..at].iter().filter(|c| is_component(c)).count();
     payload
-        .insert_component(component_index, 3, &id)
+        .insert_component(component_index, DirmComponentKind::SharedAnno, &id)
         .map_err(MutError::DirmMalformed)?;
     children[dirm_idx] = Chunk::Leaf {
         id: *b"DIRM",
@@ -1131,7 +1131,7 @@ fn bundled_dirm_from_indirect(indirect: &[u8], nfiles: usize) -> Result<Vec<u8>,
     // component); the real positions are filled by `recompute_dirm_offsets`
     // for the about-to-be-emitted layout. The BZZ metadata tail is carried
     // through verbatim by `DirmPayload`, preserving ids / names / titles / flags.
-    payload.flags |= 0x80;
+    payload.flags |= BUNDLED_FLAG;
     payload.offsets = core::iter::repeat_n(0u32, nfiles).collect();
     Ok(payload.encode())
 }
@@ -3325,7 +3325,10 @@ mod tests {
     fn from_indirect_resolved_no_page_component_returns_dirm_malformed() {
         use crate::dirm::DirmPayload;
         // Build indirect DJVM with 1 Shared entry (flag=0x00)
-        let dirm_payload = DirmPayload::build_indirect(1, &[0x00], &["shared.djvi".to_string()]);
+        let dirm_payload = DirmPayload::build_indirect(&[DirmComponent::new(
+            DirmComponentKind::Shared,
+            "shared.djvi",
+        )]);
         let dirm_chunk = iff::Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -3740,7 +3743,7 @@ mod tests {
     // Line 637: indirect DJVM with nfiles=0 → DirmMalformed("indirect DIRM lists no components").
     #[test]
     fn from_indirect_resolved_empty_dirm_returns_dirm_malformed() {
-        let dirm_payload = DirmPayload::build_indirect(0, &[], &[]);
+        let dirm_payload = DirmPayload::build_indirect(&[]);
         let dirm = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -3923,12 +3926,10 @@ mod tests {
     #[test]
     fn recompute_dirm_offsets_count_mismatch_errors() {
         // DIRM payload with nfiles=2 but bundled, then supply only 1 FORM:DJVU.
-        let dirm_payload = DirmPayload::build_bundled(
-            2,
-            &[0x01, 0x01],
-            &["p1.djvu".to_string(), "p2.djvu".to_string()],
-            &[],
-        );
+        let dirm_payload = DirmPayload::build_bundled(&[
+            DirmComponent::new(DirmComponentKind::Page, "p1.djvu"),
+            DirmComponent::new(DirmComponentKind::Page, "p2.djvu"),
+        ]);
         let dirm_data = dirm_payload.encode();
         let mut root = Chunk::Form {
             secondary_id: *b"DJVM",

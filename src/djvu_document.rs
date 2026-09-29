@@ -3408,7 +3408,10 @@ mod tests {
     fn parse_bundled_djvm_with_short_sub_form_returns_malformed() {
         use crate::dirm::DirmPayload;
         // Bundled DIRM with 1 Page entry (flags=0x80 = bundled, flag=0x01=Page)
-        let dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p0001.djvu".to_string()], &[]);
+        let dirm_payload = DirmPayload::build_bundled(&[crate::dirm::DirmComponent::new(
+            crate::dirm::DirmComponentKind::Page,
+            "p0001.djvu",
+        )]);
         let dirm = crate::iff::Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -4190,11 +4193,10 @@ mod tests {
             std::fs::read(assets_path().join("chicken.djvu")).expect("chicken.djvu must exist");
 
         // Build DIRM: entry 0 = Shared (flag=0x00), entry 1 = Page (flag=0x01)
-        let dirm_payload = DirmPayload::build_indirect(
-            2,
-            &[0x00, 0x01],
-            &["shared.djvi".to_string(), "page.djvu".to_string()],
-        );
+        let dirm_payload = DirmPayload::build_indirect(&[
+            crate::dirm::DirmComponent::new(crate::dirm::DirmComponentKind::Shared, "shared.djvi"),
+            crate::dirm::DirmComponent::new(crate::dirm::DirmComponentKind::Page, "page.djvu"),
+        ]);
         let dirm_data = dirm_payload.encode();
         let djvm_data = build_djvm_with_dirm(&dirm_data);
 
@@ -4253,15 +4255,14 @@ mod tests {
             .expect("shared component fits");
         let thumbnail_bytes = crate::iff::partial_emit(*b"THUM", &[]).expect("thumbnail fits");
 
-        let dirm = DirmPayload::build_indirect(
-            3,
-            &[0x00, 0x01, 0x02],
-            &[
-                "shared.djvi".to_string(),
-                "page.djvu".to_string(),
-                "thumb.thum".to_string(),
-            ],
-        );
+        let dirm = DirmPayload::build_indirect(&[
+            crate::dirm::DirmComponent::new(crate::dirm::DirmComponentKind::Shared, "shared.djvi"),
+            crate::dirm::DirmComponent::new(crate::dirm::DirmComponentKind::Page, "page.djvu"),
+            crate::dirm::DirmComponent::new(
+                crate::dirm::DirmComponentKind::Thumbnail,
+                "thumb.thum",
+            ),
+        ]);
         let dirm_chunk = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm.encode(),
@@ -4310,8 +4311,10 @@ mod tests {
         std::fs::write(&abs_name, &chicken).expect("write tmp component");
         let abs_name_str = abs_name.to_str().unwrap().to_string();
 
-        let dirm_payload =
-            DirmPayload::build_indirect(1, &[0x01], std::slice::from_ref(&abs_name_str));
+        let dirm_payload = DirmPayload::build_indirect(&[crate::dirm::DirmComponent::new(
+            crate::dirm::DirmComponentKind::Page,
+            &abs_name_str,
+        )]);
         let dirm = Chunk::Leaf {
             id: *b"DIRM",
             data: dirm_payload.encode(),
@@ -4360,7 +4363,10 @@ mod tests {
 
         // Build a bundled DIRM with one Page entry but set its offset to a value
         // far beyond the end of the file so the byte-range lookup fails.
-        let mut dirm_payload = DirmPayload::build_bundled(1, &[0x01], &["p.djvu".to_string()], &[]);
+        let mut dirm_payload = DirmPayload::build_bundled(&[crate::dirm::DirmComponent::new(
+            crate::dirm::DirmComponentKind::Page,
+            "p.djvu",
+        )]);
         dirm_payload.offsets[0] = 0xFFFF_FFFF; // points well outside the file
         let dirm_data = dirm_payload.encode();
 

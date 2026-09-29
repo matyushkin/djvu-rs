@@ -1350,10 +1350,11 @@ mod tests {
         let page = iff::partial_emit(*b"DJVU", &page_parts).expect("small page");
         let page_len = u32::from_be_bytes(page[8..12].try_into().expect("FORM length")) as usize;
         let page_body = page[12..12 + page_len].to_vec();
-        let ids = ["page.djvu".to_string()];
-        let flags = [1u8];
-        let sizes = [u32::try_from(8 + page_body.len()).expect("small page")];
-        let mut dirm = DirmPayload::build_bundled(1, &flags, &ids, &sizes);
+        let mut dirm = DirmPayload::build_bundled(&[crate::dirm::DirmComponent {
+            kind: crate::dirm::DirmComponentKind::Page,
+            id: "page.djvu".to_string(),
+            size: u32::try_from(8 + page_body.len()).expect("small page"),
+        }]);
         let emit = |dirm: &DirmPayload| {
             let dirm = Chunk::Leaf {
                 id: *b"DIRM",

@@ -520,19 +520,16 @@ mod tests {
 
     fn bundled(components: Vec<FixtureComponent>) -> Vec<u8> {
         let bodies = components.iter().map(component_body).collect::<Vec<_>>();
-        let ids = components
+        let entries = components
             .iter()
-            .map(|component| component.id.to_string())
+            .zip(&bodies)
+            .map(|(component, body)| crate::dirm::DirmComponent {
+                kind: DirmComponentKind::from_flag(component.dirm_flag),
+                id: component.id.to_string(),
+                size: u32::try_from(8 + body.len()).unwrap(),
+            })
             .collect::<Vec<_>>();
-        let flags = components
-            .iter()
-            .map(|component| component.dirm_flag)
-            .collect::<Vec<_>>();
-        let sizes = bodies
-            .iter()
-            .map(|body| u32::try_from(8 + body.len()).unwrap())
-            .collect::<Vec<_>>();
-        let mut dirm = DirmPayload::build_bundled(components.len(), &flags, &ids, &sizes);
+        let mut dirm = DirmPayload::build_bundled(&entries);
 
         let emit = |dirm: &DirmPayload| {
             let dirm_chunk = Chunk::Leaf {

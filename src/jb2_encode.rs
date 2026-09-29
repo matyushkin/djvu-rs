@@ -12,7 +12,8 @@ pub use djvu_jb2::encode::*;
 
 use crate::Bitmap;
 use crate::chunk_encode::encode_info;
-use crate::iff;
+use crate::dirm::DirmComponentKind;
+use crate::djvm::BundlePart;
 
 /// Encoder-wide default page resolution, matching
 /// [`crate::djvu_encode::PageEncoder`]'s 300 dpi. Callers that have no dpi to
@@ -105,7 +106,7 @@ fn encode_djvm_bundle_jb2_impl(
     // INFO chunk (none required by spec) + the Djbz.
     //
     // DJVU page components: INFO + INCL("dict0001.djvi") + Sjbz [+ TH44].
-    let mut comp_form_bodies: Vec<(Vec<u8>, /*is_page*/ bool, String)> = Vec::new();
+    let mut parts: Vec<BundlePart> = Vec::new();
 
     let dict_id = "dict0001.djvi".to_string();
     let has_shared = !shared.is_empty();
@@ -118,7 +119,11 @@ fn encode_djvm_bundle_jb2_impl(
         if !djbz_bytes.len().is_multiple_of(2) {
             djvi_body.push(0);
         }
-        comp_form_bodies.push((djvi_body, false, dict_id.clone()));
+        parts.push(BundlePart::new(
+            DirmComponentKind::Shared,
+            dict_id.clone(),
+            &djvi_body,
+        ));
     }
 
     let shared_ref: &[Bitmap] = shared;
@@ -126,7 +131,7 @@ fn encode_djvm_bundle_jb2_impl(
     // thumbnail codec). Build one component per page; with the `parallel` feature
     // the pages are encoded concurrently on rayon, since JB2 encoding dominates the
     // multi-page cost. Order is preserved by the indexed collect.
-    let build_page = |page_idx: usize, page: &Bitmap| -> (Vec<u8>, bool, String) {
+    let build_page = |page_idx: usize, page: &Bitmap| -> BundlePart {
         let sjbz = encode_jb2_lossless_with_shared(page, shared_ref);
         // Canonical INFO (see crate::chunk_encode::encode_info). Fixes the prior
         // hand-rolled bytes that hard-coded dpi 100 and gamma byte 1 (≈ 0.1),
@@ -168,11 +173,11 @@ fn encode_djvm_bundle_jb2_impl(
         }
 
         let pid = format!("p{:04}.djvu", page_idx + 1);
-        (djvu_body, true, pid)
+        BundlePart::new(DirmComponentKind::Page, pid, &djvu_body)
     };
 
     #[cfg(feature = "parallel")]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = {
+    let page_comps: Vec<BundlePart> = {
         use rayon::prelude::*;
         pages
             .par_iter()
@@ -181,14 +186,14 @@ fn encode_djvm_bundle_jb2_impl(
             .collect()
     };
     #[cfg(not(feature = "parallel"))]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = pages
+    let page_comps: Vec<BundlePart> = pages
         .iter()
         .enumerate()
         .map(|(i, p)| build_page(i, p))
         .collect();
-    comp_form_bodies.extend(page_comps);
+    parts.extend(page_comps);
 
-    assemble_djvm_bundle(comp_form_bodies)
+    crate::djvm::build_djvm(parts).expect("DJVM bundle exceeds the DIRM or 4 GiB IFF FORM limit")
 }
 
 /// Append one IFF chunk (`id` + 32-bit big-endian length + data + pad-to-even)
@@ -213,84 +218,12 @@ pub(crate) fn build_form_body(form_type: &[u8; 4], chunks: &[([u8; 4], Vec<u8>)]
     body
 }
 
-/// Assemble a bundled DJVM from component FORM bodies (`(body, is_page, id)`):
-/// a leading DIRM directory chunk + one component FORM each. Shared by the
-/// masks-only ([`encode_djvm_bundle_jb2_with_shared`]) and layered bundlers.
-pub(crate) fn assemble_djvm_bundle(comp_form_bodies: Vec<(Vec<u8>, bool, String)>) -> Vec<u8> {
-    // ── DIRM metadata table (BZZ-compressed sizes/flags/ids/names/titles) ──
-    //
-    // Matches the bundled-format layout read by `djvu_document.rs::parse`:
-    // flags=0x81 (bundled + v1.0), u16-be count, u32-be per-component offsets,
-    // then this BZZ-compressed metadata blob.
-    let n = comp_form_bodies.len();
-    let mut meta = Vec::new();
-    for (body, _, _) in &comp_form_bodies {
-        let total = body.len() + 8; // FORM + size + body
-        meta.extend_from_slice(&(total as u32).to_be_bytes()[1..4]); // 24-bit size
-    }
-    for (_, is_page, _) in &comp_form_bodies {
-        let flag = if *is_page { 1u8 } else { 0u8 };
-        meta.push(flag);
-    }
-    for (_, _, id) in &comp_form_bodies {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    for (_, _, id) in &comp_form_bodies {
-        meta.extend_from_slice(id.as_bytes());
-        meta.push(0);
-    }
-    meta.extend(core::iter::repeat_n(0u8, n)); // empty titles
-    let bzz_meta = crate::bzz_encode::bzz_encode(&meta);
-
-    // ── Assemble through the IFF emission seam ──
-    //
-    // The bundle is a leading DIRM chunk followed by one component FORM per
-    // page/dict. The DIRM carries a file-offset table pointing at each
-    // component FORM, so this is the seam's documented two-pass shape: emit
-    // once with a zeroed table to learn the offsets, refill the table, then
-    // re-emit. `partial_emit_with_offsets` owns all framing/padding; only the
-    // DIRM payload layout (bundled flag, count, offset table) lives here.
-    let build_dirm = |offsets: &[u32]| -> Vec<u8> {
-        let mut d = Vec::with_capacity(3 + 4 * n + bzz_meta.len());
-        d.push(0x81); // bundled (high bit) + version 1
-        d.extend_from_slice(&(n as u16).to_be_bytes());
-        for &off in offsets {
-            d.extend_from_slice(&off.to_be_bytes());
-        }
-        d.extend_from_slice(&bzz_meta);
-        d
-    };
-    let emit = |dirm_data: Vec<u8>| -> (Vec<u8>, Vec<usize>) {
-        let dirm = iff::Chunk::Leaf {
-            id: *b"DIRM",
-            data: dirm_data,
-        };
-        let mut parts: Vec<iff::EmitPart> = Vec::with_capacity(1 + n);
-        parts.push(iff::EmitPart::Chunk(&dirm));
-        parts.extend(
-            comp_form_bodies
-                .iter()
-                .map(|(b, _, _)| iff::EmitPart::Form(b.as_slice())),
-        );
-        iff::partial_emit_with_offsets(*b"DJVM", &parts)
-            .expect("DJVM bundle exceeds the 4 GiB IFF FORM limit")
-    };
-
-    // Pass 1: placeholder offsets → learn each component FORM's file offset
-    // (`part_offsets[0]` is the DIRM itself; the rest are the components).
-    let (_, part_offsets) = emit(build_dirm(&vec![0u32; n]));
-    let comp_offsets: Vec<u32> = part_offsets[1..].iter().map(|&o| o as u32).collect();
-
-    // Pass 2: real offsets written into the DIRM table.
-    emit(build_dirm(&comp_offsets)).0
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iff;
 
     fn render_glyph(bm: &mut Bitmap, x: u32, y: u32, glyph: &[&[u8]]) {
         for (gy, row) in glyph.iter().enumerate() {

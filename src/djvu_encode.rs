@@ -63,6 +63,8 @@
 use crate::bitmap::Bitmap;
 use crate::bzz_encode::bzz_encode;
 use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk, encode_info};
+use crate::dirm::DirmComponentKind;
+use crate::djvm::BundlePart;
 use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
@@ -1180,17 +1182,21 @@ where
     let has_shared = !shared.is_empty();
 
     let dict_id = "dict0001.djvi";
-    let mut comps: Vec<(Vec<u8>, bool, String)> = Vec::new();
+    let mut comps: Vec<BundlePart> = Vec::new();
     if has_shared {
         let djbz = jb2_encode::encode_jb2_djbz(&shared);
         let djvi_body = jb2_encode::build_form_body(b"DJVI", &[(*b"Djbz", djbz)]);
-        comps.push((djvi_body, false, dict_id.to_string()));
+        comps.push(BundlePart::new(
+            DirmComponentKind::Shared,
+            dict_id.to_string(),
+            &djvi_body,
+        ));
     }
 
     // ── Phase 3: per-page finalize — no pixmap in scope at all ──────────────
     let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
     #[cfg(feature = "parallel")]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = {
+    let page_comps: Vec<BundlePart> = {
         use rayon::prelude::*;
         prepared
             .into_par_iter()
@@ -1210,7 +1216,7 @@ where
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = prepared
+    let page_comps: Vec<BundlePart> = prepared
         .into_iter()
         .enumerate()
         .map(|(idx, prep)| {
@@ -1228,7 +1234,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     comps.extend(page_comps);
 
-    Ok(jb2_encode::assemble_djvm_bundle(comps))
+    bundle(comps)
 }
 
 /// Default bounded window for [`encode_djvm_layered_shared_streaming`]:
@@ -1333,14 +1339,18 @@ fn encode_djvm_layered_shared_impl(
     let has_shared = !shared.is_empty();
 
     let dict_id = "dict0001.djvi";
-    let mut comps: Vec<(Vec<u8>, bool, String)> = Vec::new();
+    let mut comps: Vec<BundlePart> = Vec::new();
     // FGbz is rebuilt from the encoder's own emitted blits (#612), so the
     // shared dictionary no longer needs to be decoded back for the per-page
     // blit maps — only the DJVI component itself is emitted.
     if has_shared {
         let djbz = jb2_encode::encode_jb2_djbz(&shared);
         let djvi_body = jb2_encode::build_form_body(b"DJVI", &[(*b"Djbz", djbz)]);
-        comps.push((djvi_body, false, dict_id.to_string()));
+        comps.push(BundlePart::new(
+            DirmComponentKind::Shared,
+            dict_id.to_string(),
+            &djvi_body,
+        ));
     }
 
     // ── Phase 3: per-page finalize ───────────────────────────────────────────
@@ -1361,7 +1371,7 @@ fn encode_djvm_layered_shared_impl(
     // Order is preserved by the indexed collect.
     let shared_for_encode: &[Bitmap] = if has_shared { &shared } else { &[] };
     #[cfg(feature = "parallel")]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = {
+    let page_comps: Vec<BundlePart> = {
         use rayon::prelude::*;
         pixmaps
             .par_iter()
@@ -1382,7 +1392,7 @@ fn encode_djvm_layered_shared_impl(
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let page_comps: Vec<(Vec<u8>, bool, String)> = pixmaps
+    let page_comps: Vec<BundlePart> = pixmaps
         .iter()
         .zip(prepared)
         .enumerate()
@@ -1401,7 +1411,7 @@ fn encode_djvm_layered_shared_impl(
         .collect::<Result<Vec<_>, _>>()?;
     comps.extend(page_comps);
 
-    Ok(jb2_encode::assemble_djvm_bundle(comps))
+    bundle(comps)
 }
 
 /// Phase-1 → phase-2/3 boundary artifact for
@@ -1601,7 +1611,7 @@ fn build_page(
     dict_id: &str,
     dpi: u16,
     jb2_options: &Jb2EncodeOptions,
-) -> Result<(Vec<u8>, bool, String), EncodeError> {
+) -> Result<BundlePart, EncodeError> {
     let w = u16::try_from(prep.width)
         .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
     let h = u16::try_from(prep.height)
@@ -1692,7 +1702,17 @@ fn build_page(
         chunks.push((*b"TH44", payload.clone()));
     }
     let body = jb2_encode::build_form_body(b"DJVU", &chunks);
-    Ok((body, true, format!("p{:04}.djvu", idx + 1)))
+    Ok(BundlePart::new(
+        DirmComponentKind::Page,
+        format!("p{:04}.djvu", idx + 1),
+        &body,
+    ))
+}
+
+/// Assemble the bundled DJVM from its shared dictionary and page parts.
+fn bundle(parts: Vec<BundlePart>) -> Result<Vec<u8>, EncodeError> {
+    crate::djvm::build_djvm(parts)
+        .map_err(|_| EncodeError::Unsupported("bundle exceeds the DIRM or 4 GiB IFF limit"))
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -3696,7 +3716,7 @@ mod tests {
         );
 
         // Phase 3: FGbz must still be emitted, via the decode-based path.
-        let (body, is_page, name) = build_page(
+        let part = build_page(
             0,
             Some(&pm),
             prepared,
@@ -3707,10 +3727,10 @@ mod tests {
             &lossy_jb2_options,
         )
         .expect("build_page");
-        assert!(is_page);
-        assert_eq!(name, "p0001.djvu");
+        assert_eq!(part.kind, DirmComponentKind::Page);
+        assert_eq!(part.id, "p0001.djvu");
         assert!(
-            body.windows(4).any(|w| w == b"FGbz"),
+            part.bytes.windows(4).any(|w| w == b"FGbz"),
             "FGbz chunk present despite lossy_threshold fallback"
         );
     }

@@ -16276,3 +16276,47 @@ Guards: `tiled_above_16mp_roundtrip`,
 `aligned_refinement_stays_within_page_budget`, and
 `page_cap_bounds_refinement_amplification` (seed still `ImageTooLarge`).
 Each new test fails with its mechanism disabled.
+
+### DJVM_BUNDLE_PEAK — bundle writers hold two copies, not four and a half — **Kept** (2026-09-29)
+
+**Issue.** Every DJVM bundle writer (`merge`, `split`, `remove_pages`,
+`dedup_shared_components`, the bilevel and colour encoders) peaked at about
+4.5× the size of its output. Three causes:
+
+1. `iff::partial_emit_with_offsets` reserved `8 + payload` bytes, but the
+   prologue is 12 bytes. Every emitted buffer grew once, and a `Vec` grows by
+   doubling, so each component briefly held two copies of itself.
+2. The writers kept every component alive until `finish`, next to its copy in
+   the spool.
+3. The in-memory spool also grew by doubling.
+
+**Approach.**
+
+- `partial_emit_with_offsets` reserves `PROLOGUE + payload + 1` (the pad
+  byte), so it never reallocates.
+- The new internal `build_djvm(Vec<BundlePart>)` takes the parts by value and
+  drops each one as soon as the spool holds it.
+- The spool reserves the exact total (`bytes + 1` per part) before the first
+  write.
+- Came with the DIRM component-table refactor: all writers now share
+  `DirmPayload::build_bundled` / `build_indirect`.
+
+**Numbers** (`examples/_bundle_peak.rs`, counting allocator; colorbook + czech
+merged three times, 12,535,924 B output; peak ÷ output):
+
+| Operation | Old main | Emit fix only | Now |
+|---|---:|---:|---:|
+| merge | 4.51× (56,558,652 B) | 3.51× | **2.01× (25,140,135 B)** |
+| split | 4.39× | — | **2.05×** |
+| dedup | 4.51× | — | **2.01×** |
+
+Output is byte-identical: a temporary assert compared old and new writers on
+50 bundles across the full test suite.
+
+**Decision.** Kept.
+
+**Reason.** Peak memory falls by more than half with no change in output.
+The floor is two copies: the spool plus the final buffer. A streamed
+`finish` to a file would go lower, but the public functions return
+`Vec<u8>`. Guard: `tests/djvm_peak_memory.rs` (peak under 2.5× the output;
+measured 2.01×, 4.51× on old main).
