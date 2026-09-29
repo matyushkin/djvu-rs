@@ -1183,6 +1183,33 @@ fn aa_downscale(pm: &Pixmap) -> Pixmap {
     out
 }
 
+/// `window` of a page whose pixels from `origin` on are `src`, white where
+/// the window leaves `src`.
+fn white_crop(src: &Pixmap, origin: (u32, u32), window: RenderRect) -> Pixmap {
+    let mut pm = Pixmap::white(window.width, window.height);
+    let x0 = window.x.max(origin.0);
+    let y0 = window.y.max(origin.1);
+    let x1 = window
+        .x
+        .saturating_add(window.width)
+        .min(origin.0.saturating_add(src.width));
+    let y1 = window
+        .y
+        .saturating_add(window.height)
+        .min(origin.1.saturating_add(src.height));
+    if x1 <= x0 || y1 <= y0 {
+        return pm;
+    }
+    let row = (x1 - x0) as usize * 4;
+    for y in y0..y1 {
+        let src_at = ((y - origin.1) as usize * src.width as usize + (x0 - origin.0) as usize) * 4;
+        let dst_at =
+            ((y - window.y) as usize * window.width as usize + (x0 - window.x) as usize) * 4;
+        pm.data[dst_at..dst_at + row].copy_from_slice(&src.data[src_at..src_at + row]);
+    }
+    pm
+}
+
 // ── Page rotation ───────────────────────────────────────────────────────────
 
 /// Convert a rotation to a number of 90° CW steps (0..3).
@@ -4878,25 +4905,38 @@ impl<'p> Composite<'p> {
         Ok(rotate_pixmap(pm, self.canvas.output_rotation(self.page)))
     }
 
-    /// `window` of the canvas, before rotation: composited directly, or cut
-    /// from the Lanczos-3 canvas, white where it leaves the canvas.
+    /// `window` of the page before rotation, white where it leaves the page:
+    /// the exact crop of [`page_pixmap`](Self::page_pixmap) before its
+    /// rotation. Cut from the Lanczos-3 canvas, or averaged from the doubled
+    /// window of the canvas under anti-aliasing, or composited directly.
     fn region(&self, window: RenderRect) -> Result<Pixmap, RenderError> {
-        let Some(full) = self.lanczos_canvas(None)? else {
-            return self.pixmap(window);
-        };
-        let mut pm = Pixmap::white(window.width, window.height);
-        let x1 = window.x.saturating_add(window.width).min(full.width);
-        let y1 = window.y.saturating_add(window.height).min(full.height);
-        if x1 > window.x && y1 > window.y {
-            let (src_stride, dst_stride) = (full.width as usize * 4, window.width as usize * 4);
-            let row = (x1 - window.x) as usize * 4;
-            for y in window.y..y1 {
-                let src = y as usize * src_stride + window.x as usize * 4;
-                let dst = (y - window.y) as usize * dst_stride;
-                pm.data[dst..dst + row].copy_from_slice(&full.data[src..src + row]);
-            }
+        if let Some(full) = self.lanczos_canvas(None)? {
+            return Ok(white_crop(&full, (0, 0), window));
         }
-        Ok(pm)
+        if !self.canvas.aa {
+            return self.pixmap(window);
+        }
+        // Pixel (x, y) of the halved page averages canvas pixels 2x..=2x+1,
+        // 2y..=2y+1, so the part of `window` on the page needs only the
+        // doubled window of the canvas.
+        let (w, h) = (
+            (self.canvas.width / 2).max(1),
+            (self.canvas.height / 2).max(1),
+        );
+        let x1 = window.x.saturating_add(window.width).min(w);
+        let y1 = window.y.saturating_add(window.height).min(h);
+        if x1 <= window.x || y1 <= window.y {
+            return Ok(Pixmap::white(window.width, window.height));
+        }
+        let (x, y) = (window.x * 2, window.y * 2);
+        let doubled = RenderRect {
+            x,
+            y,
+            width: ((x1 - window.x) * 2).min(self.canvas.width - x),
+            height: ((y1 - window.y) * 2).min(self.canvas.height - y),
+        };
+        let halved = aa_downscale(&self.pixmap(doubled)?);
+        Ok(white_crop(&halved, (window.x, window.y), window))
     }
 
     /// The Lanczos-3 canvas: when the options ask for Lanczos-3 at a size
@@ -5029,6 +5069,19 @@ fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
 fn lanczos_rescales(page: &DjVuPage, resampling: Resampling, full: (u32, u32)) -> bool {
     resampling == Resampling::Lanczos3
         && (page.width() as u32 != full.0 || page.height() as u32 != full.1)
+}
+
+/// The size of the page [`render_pixmap`] returns for `opts`, before
+/// rotation: the requested size, halved by anti-aliasing unless Lanczos-3
+/// rescales the page to the requested size.
+#[cfg(feature = "std")]
+fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32) {
+    let full = (opts.width.max(1), opts.height.max(1));
+    if opts.aa && !lanczos_rescales(page, opts.resampling, full) {
+        ((full.0 / 2).max(1), (full.1 / 2).max(1))
+    } else {
+        full
+    }
 }
 
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
@@ -5166,6 +5219,12 @@ where
 /// full render to output. The returned `Pixmap` has dimensions
 /// `region.width × region.height`.
 ///
+/// The region is the exact crop of [`render_pixmap`] before its rotation,
+/// then turned by the same rotation; pixels outside the page are white.
+/// Every option applies: with `opts.aa` the region addresses the halved page
+/// (`opts.width / 2 × opts.height / 2`), and Lanczos-3 at a scaled size
+/// crops the rescaled page.
+///
 /// # Errors
 ///
 /// - [`RenderError::InvalidDimensions`] if `region.width == 0 || region.height == 0`
@@ -5208,10 +5267,12 @@ pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> b
 /// call (the `PageLayers` caches only memoize the full-chunk decode), and
 /// their pixels are never inserted into the composited-tile cache.
 ///
+/// Every option applies as in [`render_region`]: the region is cut from the
+/// same page [`render_progressive`] returns.
+///
 /// # Errors
 ///
-/// Same as [`render_progressive`], plus [`RenderError::UnsupportedOption`]
-/// for Lanczos-3 resampling (the tile API rejects it earlier anyway).
+/// Same as [`render_progressive`].
 pub(crate) fn render_region_progressive(
     page: &DjVuPage,
     region: RenderRect,
@@ -5226,11 +5287,6 @@ pub(crate) fn render_region_progressive(
         region.width,
         region.height,
     )?;
-    if opts.resampling == Resampling::Lanczos3 {
-        return Err(RenderError::UnsupportedOption(
-            "Lanczos-3 resampling is not supported for progressive region renders",
-        ));
-    }
     let n_bg44 = page.bg44_chunks().len();
     let max_chunk = n_bg44.saturating_sub(1);
     if n_bg44 > 0 && chunk_n > max_chunk {
@@ -5247,7 +5303,7 @@ pub(crate) fn render_region_progressive(
     if is_cancelled(cancel) {
         return Ok(None);
     }
-    let pm = composite.pixmap(region)?;
+    let pm = composite.region(region)?;
     Ok(Some(rotate_pixmap(pm, opts.output_rotation(page))))
 }
 
@@ -5281,9 +5337,10 @@ pub(crate) fn render_region_progressive(
 ///
 /// # Eligibility
 ///
-/// Every request uses the cache except Lanczos-3 resampling at a scaled size:
-/// it rescales the whole native-size canvas, which per-tile assembly cannot
-/// share, so it falls back to a plain [`render_region`] call with no tile
+/// Every request uses the cache except anti-aliasing and Lanczos-3
+/// resampling at a scaled size: both derive the page from a canvas of
+/// another size (twice as large, or native), whose pixels the cached tiles
+/// do not hold. They fall back to a plain [`render_region`] call with no tile
 /// bookkeeping.
 ///
 /// - Rotation: tiles are cached in native orientation and the assembled
@@ -5380,7 +5437,7 @@ pub(crate) fn render_display_region_tiled(
         region.width,
         region.height,
     )?;
-    let native = (opts.width.max(1), opts.height.max(1));
+    let native = unrotated_size(page, opts);
     let (dw, dh) = match rotation {
         Rotation::Cw90 | Rotation::Ccw90 => (native.1, native.0),
         Rotation::None | Rotation::Rot180 => native,
@@ -5401,12 +5458,7 @@ pub(crate) fn render_display_region_tiled(
     if (inside.width, inside.height) == (region.width, region.height) {
         return Ok(pm);
     }
-    let mut out = Pixmap::white(region.width, region.height);
-    let (out_stride, in_stride) = (region.width as usize * 4, inside.width as usize * 4);
-    for (row, src) in pm.data.chunks_exact(in_stride).enumerate() {
-        out.data[row * out_stride..row * out_stride + in_stride].copy_from_slice(src);
-    }
-    Ok(out)
+    Ok(white_crop(&pm, (region.x, region.y), region))
 }
 
 /// [`render_region_tiled`] with a cooperative cancel flag (#691 slice 3).
@@ -5437,7 +5489,7 @@ pub(crate) fn render_region_tiled_cancellable(
     if is_cancelled(cancel) {
         return Ok(None);
     }
-    if lanczos_rescales(page, opts.resampling, (full_w, full_h)) {
+    if opts.aa || lanczos_rescales(page, opts.resampling, (full_w, full_h)) {
         return render_region(page, region, opts).map(Some);
     }
     // Tiles are cached in native orientation; the assembled region turns
@@ -8606,6 +8658,138 @@ mod tests {
                     10 + ry
                 );
             }
+        }
+    }
+
+    /// `region` of `full`, white where it leaves `full`: the reference crop,
+    /// pixel by pixel.
+    fn reference_crop(full: &Pixmap, region: RenderRect) -> Vec<u8> {
+        let mut out = Pixmap::white(region.width, region.height);
+        for y in 0..region.height {
+            for x in 0..region.width {
+                let (fx, fy) = (region.x + x, region.y + y);
+                if fx < full.width && fy < full.height {
+                    let (r, g, b) = full.get_rgb(fx, fy);
+                    out.set_rgb(x, y, r, g, b);
+                }
+            }
+        }
+        out.data
+    }
+
+    /// Regions inside the page, across its right and bottom edges, and
+    /// wholly outside it.
+    fn regions_around(w: u32, h: u32) -> [RenderRect; 4] {
+        let rect = |x, y, width, height| RenderRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        [
+            rect(3, 5, 17, 11),
+            rect(w.saturating_sub(7), h.saturating_sub(4), 12, 9),
+            rect(0, 0, w + 1, h + 1),
+            rect(w + 2, 0, 5, 5),
+        ]
+    }
+
+    /// Every option applies to `render_region` and to the progressive region
+    /// render: each returns the exact crop of the matching whole-page render.
+    /// Anti-aliasing crops the halved page (odd sizes too), Lanczos-3 the
+    /// rescaled page (which ignores `aa`, as `render_pixmap` does).
+    #[test]
+    fn render_region_matches_full_render_in_every_mode() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let aa = |width, height| RenderOptions {
+            width,
+            height,
+            aa: true,
+            ..Default::default()
+        };
+        let modes = [
+            aa(101, 81),
+            aa(1, 1),
+            RenderOptions {
+                rotation: UserRotation::Cw90,
+                ..aa(90, 120)
+            },
+            RenderOptions {
+                resampling: Resampling::Lanczos3,
+                ..aa(70, 90)
+            },
+            RenderOptions {
+                resampling: Resampling::Lanczos3,
+                aa: false,
+                ..aa(70, 90)
+            },
+        ];
+        let last = progressive_steps(page) - 1;
+        assert!(last > 0, "chicken.djvu must have several BG44 chunks");
+        for opts in &modes {
+            let upright = RenderOptions {
+                rotation: UserRotation::None,
+                ..opts.clone()
+            };
+            let full = render_pixmap(page, &upright).unwrap();
+            let first = render_progressive(page, &upright, 0).unwrap();
+            for region in regions_around(full.width, full.height) {
+                let rotation = opts.output_rotation(page);
+                let expect = |pm: &Pixmap| {
+                    let crop = Pixmap {
+                        width: region.width,
+                        height: region.height,
+                        data: reference_crop(pm, region),
+                    };
+                    rotate_pixmap(crop, rotation).data
+                };
+                let what = format!("{opts:?} at {region:?}");
+                assert!(
+                    render_region(page, region, opts).unwrap().data == expect(&full),
+                    "render_region, {what}"
+                );
+                for (step, whole) in [(0, &first), (last, &full)] {
+                    let part = render_region_progressive(page, region, opts, step, None)
+                        .unwrap()
+                        .unwrap();
+                    assert!(part.data == expect(whole), "step {step}, {what}");
+                }
+            }
+        }
+    }
+
+    /// The tiled region renders fall back to `render_region` under
+    /// anti-aliasing: display-space regions of a rotated, anti-aliased page
+    /// are the matching crops of the whole render.
+    #[test]
+    fn display_region_tiled_crops_the_anti_aliased_page() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 91,
+            height: 121,
+            aa: true,
+            rotation: UserRotation::Cw90,
+            ..Default::default()
+        };
+        let upright = RenderOptions {
+            rotation: UserRotation::None,
+            ..opts.clone()
+        };
+        let full = render_pixmap(page, &opts).unwrap();
+        assert_eq!((full.width, full.height), (60, 45));
+        for region in regions_around(full.width, full.height) {
+            let tiled = render_display_region_tiled(page, region, &opts).unwrap();
+            assert!(
+                tiled.data == reference_crop(&full, region),
+                "display region {region:?}"
+            );
+            assert!(
+                render_region_tiled(page, region, &upright).unwrap().data
+                    == render_region(page, region, &upright).unwrap().data,
+                "tiled region {region:?}"
+            );
         }
     }
 
