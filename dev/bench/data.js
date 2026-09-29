@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790619431052,
+  "lastUpdate": 1790645815086,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20818,6 +20818,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40020000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1c0488fb67eccb3fd7bd35a3d5a48b632ffee515",
+          "message": "refactor: one page assembler for the DJVM catalog (#865)\n\nEvery sync loader now builds pages through one catalog assembler\n(src/djvu_document/assembly.rs). Only the component source differs:\nbundled bytes, a name resolver, or a typed resolver. The async loaders\nshare the same INCL policy.\n\nFixes found on the way:\n- Document::from_bytes read only the first INCL, so czech.djvu lost its\n  shared dictionary on all 85 pages.\n- parse_with_resolver / parse_from_dir gave indirect pages no shared\n  dictionary.\n- The typed component resolver rejected BM44/PM44 page components.\n- validate and optimizer counted only FORM:DJVU pages.\n- INCL names are now stripped of trailing NUL and whitespace everywhere.\n- LazyDocument no longer swallows a read error on an INCL target and\n  caches the page without its dictionary; components without a Djbz\n  are cached as \"no dictionary\" instead of re-read for every page.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T01:11:38Z",
+          "tree_id": "0b301f79ce79ab96dd0e13bc85133c8ca77ce521",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/1c0488fb67eccb3fd7bd35a3d5a48b632ffee515"
+        },
+        "date": 1790645813448,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 146000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7936000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51328000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49321000,
             "range": "± 0",
             "unit": "ns/iter"
           }
