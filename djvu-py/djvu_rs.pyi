@@ -273,7 +273,10 @@ class Page:
         full_width: Optional[int] = None,
         full_height: Optional[int] = None,
     ) -> Pixmap:
-        """Render a rectangle cut from a render of size full_width x full_height."""
+        """Render a rectangle cut from a render of size full_width x full_height.
+
+        Coordinates follow the displayed (INFO-rotated) orientation.
+        """
     def render_coarse(self, dpi: Optional[float] = None) -> Optional[Pixmap]:
         """A fast, blurry preview; None for bilevel-only pages."""
     def render_progressive(self, chunk_n: int, dpi: Optional[float] = None) -> Pixmap:
