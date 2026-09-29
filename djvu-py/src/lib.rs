@@ -563,19 +563,12 @@ struct Page {
     index: usize,
 }
 
-impl Page {
-    /// Output dims for an optional target DPI (native when `None`).
-    fn dims_at(&self, dpi: Option<f32>) -> (u32, u32) {
-        match dpi {
-            Some(target) => {
-                let scale = target / self.dpi as f32;
-                (
-                    ((self.width as f32 * scale).round() as u32).max(1),
-                    ((self.height as f32 * scale).round() as u32).max(1),
-                )
-            }
-            None => (self.width, self.height),
-        }
+/// Output dims for an optional target DPI (native DPI when `None`). The size
+/// is after the page's INFO rotation, the size the render comes out at.
+fn dims_at(page: &djvu_rs::Page<'_>, dpi: Option<f32>) -> (u32, u32) {
+    match dpi {
+        Some(target) => page.size_at_dpi(target),
+        None => (page.display_width(), page.display_height()),
     }
 }
 
@@ -617,10 +610,8 @@ impl Page {
                 .page(self.index)
                 .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
 
-            if let Some(target_dpi) = dpi {
-                let scale = target_dpi / self.dpi as f32;
-                let w = ((self.width as f32 * scale).round() as u32).max(1);
-                let h = ((self.height as f32 * scale).round() as u32).max(1);
+            if dpi.is_some() {
+                let (w, h) = dims_at(&page, dpi);
                 page.render_to_size(w, h)
             } else {
                 page.render()
@@ -640,7 +631,8 @@ impl Page {
     /// Args:
     ///     x, y, w, h: viewport rectangle in output pixels.
     ///     full_width, full_height: the full-render size the region is cut
-    ///         from (the zoom level). Defaults to the native page size.
+    ///         from (the zoom level). Defaults to the page size after its
+    ///         INFO rotation.
     ///
     /// Routed through the composited-tile cache, so viewer-style pans and
     /// revisits reuse tiles — O(viewport) work instead of O(page). Releases
@@ -657,13 +649,14 @@ impl Page {
         full_width: Option<u32>,
         full_height: Option<u32>,
     ) -> PyResult<Pixmap> {
-        let fw = full_width.unwrap_or(self.width).max(1);
-        let fh = full_height.unwrap_or(self.height).max(1);
         let pixmap = py.detach(|| {
             let page = self
                 .doc
                 .page(self.index)
                 .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+            let (dw, dh) = dims_at(&page, None);
+            let fw = full_width.unwrap_or(dw).max(1);
+            let fh = full_height.unwrap_or(dh).max(1);
             page.render_region(fw, fh, x, y, w, h)
                 .map_err(|e| DecodeError::new_err(format!("render_region failed: {e}")))
         })?;
@@ -678,12 +671,12 @@ impl Page {
     /// near-instant preview; returns None for bilevel-only pages.
     #[pyo3(signature = (dpi=None))]
     fn render_coarse(&self, py: Python<'_>, dpi: Option<f32>) -> PyResult<Option<Pixmap>> {
-        let (w, h) = self.dims_at(dpi);
         let pm = py.detach(|| {
             let page = self
                 .doc
                 .page(self.index)
                 .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+            let (w, h) = dims_at(&page, dpi);
             page.render_coarse(w, h)
                 .map_err(|e| DecodeError::new_err(format!("render_coarse failed: {e}")))
         })?;
@@ -704,12 +697,12 @@ impl Page {
         chunk_n: usize,
         dpi: Option<f32>,
     ) -> PyResult<Pixmap> {
-        let (w, h) = self.dims_at(dpi);
         let pm = py.detach(|| {
             let page = self
                 .doc
                 .page(self.index)
                 .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+            let (w, h) = dims_at(&page, dpi);
             page.render_progressive(w, h, chunk_n)
                 .map_err(|e| DecodeError::new_err(format!("render_progressive failed: {e}")))
         })?;

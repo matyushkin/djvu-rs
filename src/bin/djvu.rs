@@ -1261,7 +1261,7 @@ fn cmd_render(
     // use rayon-based parallel rendering via the DjVuDocument API.
     #[cfg(feature = "parallel")]
     if all && matches!(format, Format::Png) {
-        return render_png_parallel(path, dpi, output);
+        return render_png_parallel(path, dpi, to_user_rotation(&rotate), output);
     }
 
     let doc = open(path)?;
@@ -1488,6 +1488,7 @@ fn render_cbz(
 fn render_png_parallel(
     path: &Path,
     dpi: u32,
+    rotate: djvu_rs::djvu_render::UserRotation,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
@@ -1497,7 +1498,7 @@ fn render_png_parallel(
     let pixmaps = djvu_rs::djvu_render::render_pages_parallel(&doc, dpi);
 
     for (i, result) in pixmaps.into_iter().enumerate() {
-        let pixmap = result?;
+        let pixmap = apply_user_rotation(result?, rotate);
         let out = output.join(format!("page_{:04}.png", i + 1));
         let file = std::fs::File::create(&out)?;
         let mut writer = std::io::BufWriter::new(file);

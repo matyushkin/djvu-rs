@@ -9,15 +9,16 @@
 //!  * [`page_indices`] — the per-page loop, with optional single-page
 //!    selection (the hOCR/ALTO/EPUB/TIFF loops; the PDF loop keeps its own
 //!    rayon parallel form because it needs an indexed range).
-//!  * [`scaled_size`] — scale → pixel size with the shared `.max(1)` clamp.
+//!  * Page sizing (DPI or scale → pixels, rotation-aware) is not here: it
+//!    lives in the crate-internal `render_size` module.
 //!  * [`word_spans`] — the leaf Word/Character descent the PDF and EPUB text
 //!    layers both walk; callers map over it in their own coordinate units.
 //!  * [`shape_bbox`] — the annotation [`Shape`] → bounding-rect projection the
 //!    PDF and EPUB link writers both need, with one fold seed and one
 //!    zero-area skip; callers add only their unit conversion.
-//!  * [`flip_y_bottom`] — the vertical flip between top- and bottom-anchored
-//!    coordinates that the EPUB text overlay and link projection both apply
-//!    (OCR/hOCR/ALTO emit top-left as-is; PDF does the equivalent in points).
+//!  * [`flip_y_bottom`] — the vertical flip from bottom- to top-anchored
+//!    coordinates that the EPUB link projection applies to annotation rects
+//!    (text rects are top-left already; PDF does the equivalent in points).
 //!
 //! Streaming-eligibility is *not* here: it lives on
 //! [`RenderOptions::can_stream`](crate::djvu_render::RenderOptions::can_stream)
@@ -40,43 +41,6 @@ pub(crate) fn page_indices(
         Some(i) => Box::new(core::iter::once(i)),
         None => Box::new(0..doc.page_count()),
     }
-}
-
-/// Scale `(w, h)` by `scale`, rounding to the nearest pixel and clamping each
-/// dimension to at least 1.
-///
-/// This is the size kernel every raster exporter shares: PDF derives `scale`
-/// from a capped DPI ratio, EPUB from an uncapped DPI ratio, and TIFF passes a
-/// direct multiplier — but all three then round-and-clamp identically.
-pub(crate) fn scaled_size(w: u32, h: u32, scale: f32) -> (u32, u32) {
-    let sw = ((w as f32 * scale).round() as u32).max(1);
-    let sh = ((h as f32 * scale).round() as u32).max(1);
-    (sw, sh)
-}
-
-/// Pixel scale factor to render `page` at `target_dpi`, relative to the page's
-/// native DPI.
-///
-/// This is the first half of the export sizing idiom that every raster exporter
-/// and binding re-derived: `target_dpi / page.dpi()`. The page DPI is clamped to
-/// at least 1 so a degenerate `0`-DPI INFO chunk can never produce a non-finite
-/// scale.
-pub(crate) fn scale_at_dpi(page: &DjVuPage, target_dpi: f32) -> f32 {
-    target_dpi / page.dpi().max(1) as f32
-}
-
-/// Pixel `(width, height)` of `page` rendered at `target_dpi`.
-///
-/// The whole sizing idiom in one place: derive the scale from the two DPIs, then
-/// round-and-clamp via [`scaled_size`]. Exporters that also need the render-time
-/// `scale` (to populate [`RenderOptions`](crate::djvu_render::RenderOptions))
-/// pair this with [`scale_at_dpi`].
-pub(crate) fn size_at_dpi(page: &DjVuPage, target_dpi: f32) -> (u32, u32) {
-    scaled_size(
-        page.width() as u32,
-        page.height() as u32,
-        scale_at_dpi(page, target_dpi),
-    )
 }
 
 /// Append the RGB bytes of one RGBA scanline to `dst`, dropping the alpha.
@@ -208,12 +172,10 @@ pub(crate) fn word_spans(layer: &TextLayer) -> Vec<WordSpan<'_>> {
 /// bottom to the span's far edge, `total_h - (y + height)` (saturating at 0),
 /// in **pixels**.
 ///
-/// This is the one flip expression the bottom-anchored EPUB output shares
-/// across both coordinate systems it ingests: top-left-origin text rects
-/// (where `y` is the distance from the top) and bottom-left-origin annotation
-/// rects (the [`shape_bbox`] result), which need the identical
-/// `total_h - (y + height)` arithmetic to land on a CSS top offset. Callers
-/// pass the rect's `y`/`height` and then scale into their own units. PDF
+/// EPUB applies it to bottom-left-origin annotation rects (the [`shape_bbox`]
+/// result) to land on a CSS top offset. Text rects are top-left origin
+/// already and must not be flipped. Callers pass the rect's `y`/`height` and
+/// then scale into their own units. PDF
 /// performs the *equivalent* flip in point space (`pt_h − px_to_pt(top_edge)`)
 /// rather than calling this, because reordering the `f32` operations would
 /// perturb its `{:.4}`-formatted output.
@@ -359,17 +321,6 @@ mod tests {
             )],
         };
         assert!(word_spans(&layer).is_empty());
-    }
-
-    #[test]
-    fn scaled_size_rounds_and_clamps_to_one() {
-        assert_eq!(scaled_size(100, 200, 0.5), (50, 100));
-        // Round to nearest.
-        assert_eq!(scaled_size(3, 3, 0.5), (2, 2)); // 1.5 → 2
-        // Clamp to at least 1 even when scale collapses the dimension.
-        assert_eq!(scaled_size(10, 10, 0.001), (1, 1));
-        // scale == 0 still yields the 1×1 floor.
-        assert_eq!(scaled_size(10, 10, 0.0), (1, 1));
     }
 
     #[test]

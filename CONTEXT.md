@@ -58,3 +58,17 @@ The `Djbz` symbol dictionary of a shared `FORM:DJVI` component. A page names
 the components it includes with `INCL` chunks; the first included component
 that holds a `Djbz` is the page's shared dictionary.
 _Avoid_: shared dict (in prose), DJVI (that is the form, not the dictionary)
+
+### Rendering
+
+**Native size**:
+The page size stored in its INFO chunk, before the INFO rotation. The
+compositor works in this orientation; `RenderOptions.width/height` are in it.
+_Avoid_: page size (ambiguous for a rotated page)
+
+**Display size**:
+The page size after the INFO rotation (sides swapped for a quarter turn): the
+size of the returned pixmap and the size a caller asks for (DPI, fit, exact).
+The `render_size` module is the one place that turns a display-size request
+into a native buffer size.
+_Avoid_: output size, effective size

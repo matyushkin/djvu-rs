@@ -177,6 +177,25 @@ fn test_rotated_page() {
     assert!(pdf_contains(&pdf, b"/Type /Page"));
 }
 
+/// The INFO rotation becomes the page's `/Rotate`: the raster, masks, text,
+/// and links all stay in native orientation and the viewer turns the page.
+#[test]
+fn test_rotated_pages_carry_pdf_rotate() {
+    for (name, rotate) in [
+        ("boy_jb2_rotate90.djvu", Some(&b"/Rotate 90"[..])),
+        ("boy_jb2_rotate180.djvu", Some(&b"/Rotate 180"[..])),
+        ("boy_jb2_rotate270.djvu", Some(&b"/Rotate 270"[..])),
+        ("boy_jb2.djvu", None),
+    ] {
+        let pdf = djvu_to_pdf(&load_doc(name)).unwrap();
+        assert_valid_pdf_structure(&pdf);
+        match rotate {
+            Some(entry) => assert!(pdf_contains(&pdf, entry), "{name}: missing /Rotate"),
+            None => assert!(!pdf_contains(&pdf, b"/Rotate"), "{name}: upright page"),
+        }
+    }
+}
+
 #[test]
 fn test_pdf_output_nonzero_size() {
     // Ensure all fixture files produce non-trivial PDFs

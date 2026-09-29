@@ -45,6 +45,7 @@ use crate::{
     djvu_document::DjVuDocument,
     djvu_render::{render_coarse, render_progressive},
     djvu_tile,
+    render_size::RenderSize,
 };
 
 // ── WasmPixmap — Rust-owned pixel buffer (#611) ──────────────────────────────
@@ -272,19 +273,21 @@ impl WasmPage {
         crate::foreign::page_dpi(&self.doc, self.index).unwrap_or(300)
     }
 
-    /// Output width in pixels when rendered at `target_dpi`.
+    /// Output width in pixels when rendered at `target_dpi` (after the
+    /// page's INFO rotation).
     pub fn width_at(&self, target_dpi: u32) -> u32 {
         self.doc
             .page(self.index)
-            .map(|p| crate::export_common::size_at_dpi(p, target_dpi as f32).0)
+            .map(|p| RenderSize::at_dpi(p, target_dpi as f32).display.0)
             .unwrap_or(1)
     }
 
-    /// Output height in pixels when rendered at `target_dpi`.
+    /// Output height in pixels when rendered at `target_dpi` (after the
+    /// page's INFO rotation).
     pub fn height_at(&self, target_dpi: u32) -> u32 {
         self.doc
             .page(self.index)
-            .map(|p| crate::export_common::size_at_dpi(p, target_dpi as f32).1)
+            .map(|p| RenderSize::at_dpi(p, target_dpi as f32).display.1)
             .unwrap_or(1)
     }
 
@@ -309,7 +312,7 @@ impl WasmPage {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        let (render_w, render_h) = crate::export_common::size_at_dpi(page, target_dpi as f32);
+        let (render_w, render_h) = RenderSize::at_dpi(page, target_dpi as f32).display;
 
         let Some(layer) = page
             .text_layer_at_size(render_w, render_h)
@@ -415,6 +418,17 @@ impl WasmPage {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
         let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
+        if page.rotation() != crate::info::Rotation::None {
+            // `render_into` writes the native (unrotated) buffer; a rotated
+            // page goes through the rotating pixmap path instead.
+            let pm = crate::djvu_render::render_pixmap(page, &opts)
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            out.data.clear();
+            out.data.extend_from_slice(&pm.data);
+            out.width = pm.width;
+            out.height = pm.height;
+            return Ok(());
+        }
         let need = opts.width as usize * opts.height as usize * 4;
         out.data.resize(need, 0);
         crate::djvu_render::render_into(page, &opts, &mut out.data)

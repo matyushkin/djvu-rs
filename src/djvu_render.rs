@@ -43,6 +43,7 @@ use std::sync::Arc;
 use crate::djvu_document::DjVuPage;
 use crate::iw44::Iw44Image;
 use crate::pixmap::{GrayPixmap, Pixmap};
+use crate::render_size::RenderSize;
 
 // Test-only counter of BG44 `decode_chunk` calls made through this module's
 // two progressive call sites (the naive per-frame `decode_background_chunks`
@@ -220,9 +221,13 @@ pub enum Resampling {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderOptions {
-    /// Output width in pixels.
+    /// Compositor width in pixels, in the page's native (pre-rotation)
+    /// orientation. The returned pixmap is this size after the page's INFO
+    /// rotation and [`rotation`](Self::rotation): a quarter turn swaps the
+    /// sides. The `fit_to_*` constructors take display sizes and set this.
     pub width: u32,
-    /// Output height in pixels.
+    /// Compositor height in pixels, in the page's native orientation (see
+    /// [`width`](Self::width)).
     pub height: u32,
     /// Deprecated and **ignored by the render pipeline**.
     ///
@@ -423,69 +428,47 @@ fn permissive_layer<T>(result: Result<Option<T>, RenderError>, layer: RecoveredL
 #[allow(deprecated)] // the `fit_to_*` constructors still populate `scale` for back-compat
 impl RenderOptions {
     /// Create render options that scale the page to fit the given width,
-    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk:
+    /// `width` is the width of the rendered (rotated) pixmap.
     pub fn fit_to_width(page: &crate::djvu_document::DjVuPage, width: u32) -> Self {
-        let (dw, dh) = display_dimensions(page);
-        let height = if dw == 0 {
-            width
-        } else {
-            ((dh as f64 * width as f64) / dw as f64).round() as u32
-        }
-        .max(1);
-        let scale = width as f32 / dw.max(1) as f32;
+        let size = RenderSize::fit_width(page, width);
+        let scale = size.display.0 as f32 / display_dimensions(page).0.max(1) as f32;
         RenderOptions {
-            width,
-            height,
             scale,
-            ..Default::default()
+            ..size.options()
         }
     }
 
     /// Create render options that scale the page to fit the given height,
-    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk:
+    /// `height` is the height of the rendered (rotated) pixmap.
     pub fn fit_to_height(page: &crate::djvu_document::DjVuPage, height: u32) -> Self {
-        let (dw, dh) = display_dimensions(page);
-        let width = if dh == 0 {
-            height
-        } else {
-            ((dw as f64 * height as f64) / dh as f64).round() as u32
-        }
-        .max(1);
-        let scale = height as f32 / dh.max(1) as f32;
+        let size = RenderSize::fit_height(page, height);
+        let scale = size.display.1 as f32 / display_dimensions(page).1.max(1) as f32;
         RenderOptions {
-            width,
-            height,
             scale,
-            ..Default::default()
+            ..size.options()
         }
     }
 
     /// Create render options that scale the page to fit within a bounding box,
-    /// preserving aspect ratio. Respects page rotation from the INFO chunk.
+    /// preserving aspect ratio. Respects page rotation from the INFO chunk:
+    /// the rendered (rotated) pixmap fits in `max_width × max_height`.
     pub fn fit_to_box(
         page: &crate::djvu_document::DjVuPage,
         max_width: u32,
         max_height: u32,
     ) -> Self {
+        let size = RenderSize::fit_box(page, max_width, max_height);
         let (dw, dh) = display_dimensions(page);
-        if dw == 0 || dh == 0 {
-            return RenderOptions {
-                width: max_width.max(1),
-                height: max_height.max(1),
-                scale: 1.0,
-                ..Default::default()
-            };
-        }
-        let scale_w = max_width as f64 / dw as f64;
-        let scale_h = max_height as f64 / dh as f64;
-        let scale = if scale_w < scale_h { scale_w } else { scale_h };
-        let width = (dw as f64 * scale).round() as u32;
-        let height = (dh as f64 * scale).round() as u32;
+        let scale = if dw == 0 || dh == 0 {
+            1.0
+        } else {
+            (max_width as f64 / dw as f64).min(max_height as f64 / dh as f64) as f32
+        };
         RenderOptions {
-            width: width.max(1),
-            height: height.max(1),
-            scale: scale as f32,
-            ..Default::default()
+            scale,
+            ..size.options()
         }
     }
 
@@ -5516,16 +5499,7 @@ pub fn render_pages_parallel(
         .into_par_iter()
         .map(|i| {
             let page = doc.page(i)?;
-            let native_dpi = page.dpi() as f32;
-            let scale = dpi as f32 / native_dpi;
-            let w = ((page.width() as f32 * scale).round() as u32).max(1);
-            let h = ((page.height() as f32 * scale).round() as u32).max(1);
-            let opts = RenderOptions {
-                width: w,
-                height: h,
-                ..Default::default()
-            };
-            render_pixmap(page, &opts)
+            render_pixmap(page, &RenderSize::at_dpi(page, dpi as f32).options())
         })
         .collect()
 }
@@ -7689,10 +7663,13 @@ mod tests {
         // Display dimensions are swapped for 90° rotation
         let (dw, dh) = (ph, pw);
 
+        // `width`/`height` are native (pre-rotation); the rendered pixmap
+        // has the requested display width.
         let opts = RenderOptions::fit_to_width(page, 400);
-        assert_eq!(opts.width, 400);
         let expected_h = ((dh as f64 * 400.0) / dw as f64).round() as u32;
-        assert_eq!(opts.height, expected_h);
+        assert_eq!((opts.width, opts.height), (expected_h, 400));
+        let pm = render_pixmap(page, &opts).unwrap();
+        assert_eq!((pm.width, pm.height), (400, expected_h));
     }
 
     /// `render_into` with a zero-width dimension returns InvalidDimensions.

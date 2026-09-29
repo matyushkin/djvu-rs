@@ -25,8 +25,9 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 use crate::{
     annotation::MapArea,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
-    djvu_render::{RenderError, RenderOptions},
+    djvu_render::RenderError,
     export_control::{ExportObserver, NoOpObserver},
+    text::Rect,
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -291,19 +292,11 @@ fn build_page_artifacts(
     index: usize,
     opts: &EpubOptions,
 ) -> Result<PageArtifacts, EpubError> {
-    // Native page dimensions in DjVu pixels
-    let pw = page.width() as u32;
-    let ph = page.height() as u32;
-
-    // Scale to the requested output DPI. The pipeline derives the decode scale
-    // from `width`, so we set only the size.
-    let (w, h) = crate::export_common::size_at_dpi(page, opts.dpi as f32);
-
-    let render_opts = RenderOptions {
-        width: w,
-        height: h,
-        ..RenderOptions::default()
-    };
+    // Scale to the requested output DPI. The image comes out in display
+    // orientation (after the INFO rotation), so `w × h` is the display size.
+    let size = crate::render_size::RenderSize::at_dpi(page, opts.dpi as f32);
+    let (w, h) = size.display;
+    let render_opts = size.options();
     // Stream the RGBA scanlines when the page allows it, else fall back to a
     // full pixmap — the shared raster seam every exporter routes through.
     let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
@@ -350,7 +343,7 @@ fn build_page_artifacts(
     let img_path = format!("OEBPS/images/{img_name}");
 
     // Text overlay (invisible selectable text)
-    let text_overlay = build_text_overlay(page, pw, ph);
+    let text_overlay = build_text_overlay(page);
 
     // Hyperlink overlays from ANTz/ANTa annotations
     let hyperlinks = page.hyperlinks().unwrap_or_default();
@@ -377,8 +370,7 @@ fn build_page_artifacts(
         &img_name,
         w,
         h,
-        pw,
-        ph,
+        page_frame(page),
         &text_overlay,
         &hyperlinks,
         &reflowable,
@@ -457,29 +449,61 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 ///
 /// Coordinates are CSS percentages of the rendered image dimensions.
 /// DjVu text zones use bottom-left origin; the y-axis is inverted for CSS.
-fn build_text_overlay(page: &DjVuPage, pw: u32, ph: u32) -> Vec<(f32, f32, f32, f32, String)> {
+fn build_text_overlay(page: &DjVuPage) -> Vec<(f32, f32, f32, f32, String)> {
     let text_layer = match page.text_layer() {
         Ok(Some(tl)) => tl,
         _ => return Vec::new(),
     };
-
-    let mut spans = Vec::new();
+    let frame = page_frame(page);
 
     // Map each leaf word/character zone (shared zone-walk) to a CSS-percentage
-    // overlay rect. DjVu rects are top-left origin; the overlay is anchored
-    // from the bottom, so the vertical position is flipped.
-    for span in crate::export_common::word_spans(&text_layer) {
-        let r = span.rect;
-        let x = r.x as f32 / pw as f32 * 100.0;
-        let y = crate::export_common::flip_y_bottom(ph, r.y, r.height) as f32 / ph as f32 * 100.0;
-        let w = r.width as f32 / pw as f32 * 100.0;
-        let h = r.height as f32 / ph as f32 * 100.0;
-        if w > 0.0 && h > 0.0 {
-            spans.push((x, y, w, h, xml_escape(span.text)));
-        }
-    }
+    // overlay rect. Text rects are already top-left origin, so they need no
+    // vertical flip — only the page rotation.
+    crate::export_common::word_spans(&text_layer)
+        .into_iter()
+        .filter_map(|span| {
+            let (x, y, w, h) = frame.to_css(span.rect)?;
+            Some((x, y, w, h, xml_escape(span.text)))
+        })
+        .collect()
+}
 
-    spans
+/// The native page size and INFO rotation: maps native top-left-origin rects
+/// onto the displayed (rotated) page image as CSS percentages.
+#[derive(Clone, Copy)]
+struct PageFrame {
+    width: u32,
+    height: u32,
+    rotation: crate::info::Rotation,
+}
+
+fn page_frame(page: &DjVuPage) -> PageFrame {
+    PageFrame {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        rotation: page.rotation(),
+    }
+}
+
+impl PageFrame {
+    /// `rect` (native, top-left origin) as `(left, top, width, height)`
+    /// percentages of the displayed page; `None` when it has no area.
+    fn to_css(self, rect: &Rect) -> Option<(f32, f32, f32, f32)> {
+        let r = rect.rotate(self.width, self.height, self.rotation);
+        let (dw, dh) = match self.rotation {
+            crate::info::Rotation::Cw90 | crate::info::Rotation::Ccw90 => (self.height, self.width),
+            _ => (self.width, self.height),
+        };
+        if dw == 0 || dh == 0 || r.width == 0 || r.height == 0 {
+            return None;
+        }
+        Some((
+            r.x as f32 / dw as f32 * 100.0,
+            r.y as f32 / dh as f32 * 100.0,
+            r.width as f32 / dw as f32 * 100.0,
+            r.height as f32 / dh as f32 * 100.0,
+        ))
+    }
 }
 
 // ── XHTML page ────────────────────────────────────────────────────────────────
@@ -489,8 +513,7 @@ fn build_page_xhtml(
     img_name: &str,
     w: u32,
     h: u32,
-    pw: u32,
-    ph: u32,
+    frame: PageFrame,
     text_overlay: &[(f32, f32, f32, f32, String)],
     hyperlinks: &[MapArea],
     reflowable: &[String],
@@ -539,7 +562,7 @@ body { margin: 0; padding: 0; }
     }
 
     for ma in hyperlinks {
-        if let Some((x, y, ww, hh)) = map_area_to_css(ma, pw, ph) {
+        if let Some((x, y, ww, hh)) = map_area_to_css(ma, frame) {
             let href = resolve_link_href(&ma.url);
             let title = xml_escape(&ma.description);
             html.push_str(&format!(
@@ -569,20 +592,18 @@ body { margin: 0; padding: 0; }
 ///
 /// Returns `None` for empty or degenerate (zero-area) shapes. The bounding box
 /// and that skip are the shared [`crate::export_common::shape_bbox`]; here we
-/// only scale into page percentages and flip the bottom-left-origin box to a
-/// CSS top offset via [`crate::export_common::flip_y_bottom`] — the same flip
-/// the text overlay uses.
-fn map_area_to_css(ma: &MapArea, pw: u32, ph: u32) -> Option<(f32, f32, f32, f32)> {
-    if pw == 0 || ph == 0 {
-        return None;
-    }
+/// flip the bottom-left-origin box to top-left via
+/// [`crate::export_common::flip_y_bottom`], then let the page frame rotate and
+/// scale it.
+fn map_area_to_css(ma: &MapArea, frame: PageFrame) -> Option<(f32, f32, f32, f32)> {
     let rect = crate::export_common::shape_bbox(&ma.shape)?;
-    let x = (rect.x as f32 / pw as f32) * 100.0;
-    let y =
-        (crate::export_common::flip_y_bottom(ph, rect.y, rect.height) as f32 / ph as f32) * 100.0;
-    let ww = (rect.width as f32 / pw as f32) * 100.0;
-    let hh = (rect.height as f32 / ph as f32) * 100.0;
-    Some((x, y, ww, hh))
+    let top_left = Rect {
+        x: rect.x,
+        y: crate::export_common::flip_y_bottom(frame.height, rect.y, rect.height),
+        width: rect.width,
+        height: rect.height,
+    };
+    frame.to_css(&top_left)
 }
 
 /// Resolve a DjVu annotation URL to an EPUB-relative href.
@@ -1005,16 +1026,80 @@ mod tests {
         assert!(!EpubOptions::default().reflowable_text);
     }
 
+    const UPRIGHT_800X1000: PageFrame = PageFrame {
+        width: 800,
+        height: 1000,
+        rotation: crate::info::Rotation::None,
+    };
+
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Text rects are top-left origin already: a word at the top of the
+    /// page stays at the top of the overlay.
+    #[test]
+    fn page_frame_keeps_top_left_rects_on_top() {
+        let frame = PageFrame {
+            width: 100,
+            height: 200,
+            rotation: crate::info::Rotation::None,
+        };
+        assert_eq!(
+            frame.to_css(&rect(0, 0, 10, 20)),
+            Some((0.0, 0.0, 10.0, 10.0))
+        );
+    }
+
+    /// On a quarter-turned page the overlay follows the rotated image: the
+    /// native top-left corner lands at the displayed top-right.
+    #[test]
+    fn page_frame_rotates_rects_with_the_page() {
+        let frame = PageFrame {
+            width: 100,
+            height: 200,
+            rotation: crate::info::Rotation::Cw90,
+        };
+        // Display space is 200 × 100; (0,0,10,20) → (180,0,20,10).
+        assert_eq!(
+            frame.to_css(&rect(0, 0, 10, 20)),
+            Some((90.0, 0.0, 10.0, 10.0))
+        );
+        assert_eq!(frame.to_css(&rect(5, 5, 0, 10)), None);
+    }
+
+    /// A rotated page's image is encoded at its display (rotated) size.
+    #[test]
+    fn rotated_page_image_has_display_size() {
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = EpubOptions::default();
+        let art = build_page_artifacts(page, 0, &opts).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(&art.png_bytes));
+        let info = decoder.read_info().unwrap().info().clone();
+        let want = crate::render_size::RenderSize::at_dpi(page, opts.dpi as f32).display;
+        assert_eq!((info.width, info.height), want);
+        assert!(
+            want.0 > want.1,
+            "the fixture page is portrait before rotation"
+        );
+    }
+
     #[test]
     fn build_page_xhtml_omits_reflowable_when_empty() {
-        let html = build_page_xhtml("p_0001.png", 800, 1000, 800, 1000, &[], &[], &[]);
+        let html = build_page_xhtml("p_0001.png", 800, 1000, UPRIGHT_800X1000, &[], &[], &[]);
         assert!(!html.contains("djvu-reflowable"));
     }
 
     #[test]
     fn build_page_xhtml_emits_reflowable_paragraphs() {
         let paras = vec!["First paragraph.".to_string(), "Second & last.".to_string()];
-        let html = build_page_xhtml("p_0001.png", 800, 1000, 800, 1000, &[], &[], &paras);
+        let html = build_page_xhtml("p_0001.png", 800, 1000, UPRIGHT_800X1000, &[], &[], &paras);
         assert!(html.contains(r#"<section class="djvu-reflowable">"#));
         assert!(html.contains("<p>First paragraph.</p>"));
         // XML-escapes ampersand

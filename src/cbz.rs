@@ -15,7 +15,7 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
-use crate::djvu_render::{RenderError, RenderOptions, UserRotation, render_pixmap};
+use crate::djvu_render::{RenderError, UserRotation, render_pixmap};
 use crate::export_control::{ExportObserver, NoOpObserver};
 
 /// Errors during CBZ conversion.
@@ -223,15 +223,8 @@ fn write_page_png<W: Write + Seek>(
 
 /// Render one page at the target DPI, apply user rotation, encode to PNG.
 fn build_page_png(page: &DjVuPage, opts: &CbzOptions) -> Result<Vec<u8>, CbzError> {
-    let (w, h) = crate::export_common::size_at_dpi(page, opts.dpi as f32);
-    let pixmap = render_pixmap(
-        page,
-        &RenderOptions {
-            width: w,
-            height: h,
-            ..RenderOptions::default()
-        },
-    )?;
+    let size = crate::render_size::RenderSize::at_dpi(page, opts.dpi as f32);
+    let pixmap = render_pixmap(page, &size.options())?;
     let pixmap = match opts.rotation {
         UserRotation::None => pixmap,
         UserRotation::Cw90 => pixmap.rotate_cw90(),

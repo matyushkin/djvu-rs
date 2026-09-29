@@ -256,6 +256,10 @@ pub mod semantic_diff;
 /// `djvu_render::render_progressive`.
 pub mod djvu_render;
 
+/// Page render size in native and display orientation — the one translation
+/// between a size the reader sees and the compositor buffer.
+pub(crate) mod render_size;
+
 /// Process-wide ceiling for the page render caches (READ_CACHE_BOUNDED).
 ///
 /// Provides `render_cache::budget`, `render_cache::set_budget`,
@@ -781,30 +785,16 @@ impl<'a> Page<'a> {
         djvu_render::display_dimensions(self.page)
     }
 
-    /// Build options that render the (rotation-aware) display size scaled by
-    /// `scale`. The single home for the `display × scale` size idiom the
-    /// scale-based render methods share.
+    /// Build options that render the native page scaled by `scale`; the
+    /// pixmap comes out at the rotated (display) size.
     fn opts_for_scale(&self, scale: f32) -> djvu_render::RenderOptions {
-        let (dw, dh) = self.display_dims();
-        let w = ((dw as f32 * scale).round() as u32).max(1);
-        let h = ((dh as f32 * scale).round() as u32).max(1);
-        // The pipeline re-derives the decode scale from `w` and the page's
-        // display width, so we set only the size; `scale` is no longer an input.
-        djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
-        }
+        render_size::RenderSize::at_scale(self.page, scale).options()
     }
 
-    /// Build options for an explicit target `width × height`, deriving the
-    /// rotation-aware `scale` from [`RenderOptions::fit_to_width`] and then
-    /// honoring the caller's exact `height` (which need not preserve aspect).
-    /// The single home for the size-based scale idiom.
+    /// Build options whose rendered pixmap is exactly `width × height` (the
+    /// display size, after rotation); the aspect ratio is the caller's choice.
     fn opts_for_size(&self, width: u32, height: u32) -> djvu_render::RenderOptions {
-        let mut opts = djvu_render::RenderOptions::fit_to_width(self.page, width);
-        opts.height = height;
-        opts
+        render_size::RenderSize::exact(self.page, width, height).options()
     }
 
     /// Render with caller-supplied [`RenderOptions`] — the single entry point
@@ -834,13 +824,14 @@ impl<'a> Page<'a> {
         self.page.dpi()
     }
 
-    /// Pixel `(width, height)` this page renders to at `target_dpi`.
+    /// Pixel `(width, height)` this page renders to at `target_dpi`: the size
+    /// after the INFO rotation, so a quarter-turned page has its sides swapped.
     ///
-    /// The rounding/clamping policy lives in one place (the crate-internal
-    /// `export_common` sizing helper); a `0`-DPI page is treated as 1 DPI so the
-    /// scale stays finite.
+    /// Pass the result to [`render_to_size`](Self::render_to_size) to render
+    /// at that DPI. A `0`-DPI page is treated as 1 DPI so the scale stays
+    /// finite.
     pub fn size_at_dpi(&self, target_dpi: f32) -> (u32, u32) {
-        export_common::size_at_dpi(self.page, target_dpi)
+        render_size::RenderSize::at_dpi(self.page, target_dpi).display
     }
 
     /// The 0-based index of this page within the document.
@@ -884,6 +875,10 @@ impl<'a> Page<'a> {
     /// ([`djvu_render::render_region_tiled`]) so viewer-style pans and
     /// revisits reuse tiles (C4_TILE_CACHE / TILE_LRU) — O(viewport) work
     /// instead of O(page).
+    ///
+    /// `full_w × full_h` is the display size, after the INFO rotation. On a
+    /// rotated page `(x, y, w, h)` still address the native (unrotated)
+    /// render, and the returned tile is then rotated.
     pub fn render_region(
         &self,
         full_w: u32,
@@ -1076,6 +1071,32 @@ mod tests {
         assert!(page.dpi() > 0);
         assert_eq!(page.index(), 0);
         let _ = page.rotation();
+    }
+
+    /// On a quarter-turned page every size is the display size: `render`,
+    /// `size_at_dpi`, and `render_to_size` agree, and the pixels are the
+    /// upright page turned clockwise.
+    #[test]
+    fn rotated_page_renders_at_display_size() {
+        let fixtures = std::path::Path::new("tests/fixtures");
+        let doc = Document::open(fixtures.join("boy_jb2_rotate90.djvu")).unwrap();
+        let page = doc.page(0).unwrap();
+        let display = (page.display_width(), page.display_height());
+        assert_eq!(display, (page.height(), page.width()));
+
+        let pm = page.render().unwrap();
+        assert_eq!((pm.width, pm.height), display);
+        let upright = Document::open(fixtures.join("boy_jb2.djvu")).unwrap();
+        let want = upright.page(0).unwrap().render().unwrap().rotate_cw90();
+        assert!(
+            pm.data == want.data,
+            "render must be the upright page turned cw"
+        );
+
+        let (w, h) = page.size_at_dpi(page.dpi() as f32 / 2.0);
+        assert_eq!((w, h), (display.0.div_ceil(2), display.1.div_ceil(2)));
+        let pm = page.render_to_size(w, h).unwrap();
+        assert_eq!((pm.width, pm.height), (w, h));
     }
 
     #[test]
