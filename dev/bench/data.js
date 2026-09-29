@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790671850423,
+  "lastUpdate": 1790673401147,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21010,6 +21010,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 39489000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2160b1ef59f794ebe4a96925d88db3769a3515c5",
+          "message": "fix!: page regions in display coordinates on rotated pages (#869)\n\nPage::render_region took its full size in display space (after the INFO\nrotation) but its region rectangle in native space. On a rotated page a\nviewer had to rotate its viewport by hand.\n\nThe region is now in display space too: it is the matching crop of\nrender_to_size(full_w, full_h). Pixels outside the page are white.\n\nThe display-to-native rectangle mapping now lives in one place,\ndjvu_render::native_rect. TileLayout uses the same function.\n\nBREAKING CHANGE: on pages with a non-zero INFO rotation, the (x, y, w, h)\narguments of Page::render_region (and Python Page.render_region) address\nthe rotated page, not the unrotated one. Upright pages are unchanged.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T08:33:27Z",
+          "tree_id": "2dc9bdea2ad14fb115d324ad7455371971ec0bfe",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2160b1ef59f794ebe4a96925d88db3769a3515c5"
+        },
+        "date": 1790673399234,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 160000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8764000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53307000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 50973000,
             "range": "± 0",
             "unit": "ns/iter"
           }
