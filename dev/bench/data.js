@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790683503235,
+  "lastUpdate": 1790710008845,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21202,6 +21202,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45472000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c79c5eee9807e1a7cdf007cb2a20bb662ea62fc8",
+          "message": "perf: keep the bilinear row loop out of composite_into (#873)\n\n#872 moved every render through one pipeline. The compositor now has\nfewer call sites, and the compiler inlined composite_rows_bilinear_one\ninto composite_into. The inlined loop compiled to slower code:\nnative-size renders ran 11-14% slower and 144-600 dpi renders 8% slower\nthan before #872, although the work is the same.\n\nMark composite_rows_bilinear_one #[inline(never)]. Native-size renders\nreturn to the pre-#872 speed (-1.5..+1.7%). The #872 gains at small\nscales stay (72 dpi -41%, colorbook -29%): they come from the inlined\narea-average row, which keeps its #[inline].\n\nNumbers and the rejected variants: COMPOSITE_BILINEAR_NOINLINE in\nPERF_EXPERIMENTS.md.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T19:01:18Z",
+          "tree_id": "6cdeffb50e1a0f3415d099bba5196fef6357c743",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/c79c5eee9807e1a7cdf007cb2a20bb662ea62fc8"
+        },
+        "date": 1790710007167,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 162000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8378000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49423000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47352000,
             "range": "± 0",
             "unit": "ns/iter"
           }
