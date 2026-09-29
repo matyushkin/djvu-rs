@@ -103,16 +103,15 @@ where
             if observer.cancelled() {
                 return Ok(PageRun::Cancelled);
             }
-            let built: Vec<T> = indices
-                .par_iter()
-                .map(|&i| build(i))
-                .collect::<Result<_, E>>()?;
+            // Not `collect::<Result<_, _>>()`: rayon returns whichever error
+            // it meets first in time, not the first in page order.
+            let built: Vec<Result<T, E>> = indices.par_iter().map(|&i| build(i)).collect();
             for (offset, value) in built.into_iter().enumerate() {
                 if observer.cancelled() {
                     return Ok(PageRun::Cancelled);
                 }
                 let position = batch * chunk + offset;
-                emit(position, value)?;
+                emit(position, value?)?;
                 observer.on_progress(position + 1, total);
             }
         }
@@ -418,11 +417,10 @@ mod tests {
                 Ok(())
             },
         );
+        // Pages 5, 12, 19, … fail; the export reports page 5 and emits
+        // exactly the pages before it, with or without `parallel`.
         assert_eq!(err, Err(5));
-        assert!(
-            emitted.iter().all(|&v| v < 5),
-            "no page after the failed one"
-        );
+        assert_eq!(emitted, [0, 1, 2, 3, 4]);
     }
 
     #[test]
