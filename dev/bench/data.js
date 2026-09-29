@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790710008845,
+  "lastUpdate": 1790711840805,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21250,6 +21250,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47352000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c496fea8af60785ecdf2f53fcd28287e66b43d68",
+          "message": "fix: parallel exports report the first failing page (#874)\n\nexport_pages promises the first error in page order. With the parallel\nfeature it collected each batch with rayon's Result collect, which\nreturns whichever error it meets first in time. When pages 5 and 12\nboth failed, the export could report page 12, and it emitted none of\nthe batch's pages before the failed one. The serial build reported\npage 5 after emitting pages 0-4.\n\nCollect the batch results first, then emit in page order up to the\nfirst error. Both builds now report the same page and write the same\npages before it. The test that caught this failed 7 runs out of 8.\n\nThe same pattern gave a nondeterministic error in the wasm batch\nrender and in the CLI OCR command; both now take the first error in\npage order.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T19:34:24Z",
+          "tree_id": "d6e8e0a1c1680f24ef80699a89afe6f3cdd8c69d",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/c496fea8af60785ecdf2f53fcd28287e66b43d68"
+        },
+        "date": 1790711838525,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 108000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5236000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35476000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 32991000,
             "range": "± 0",
             "unit": "ns/iter"
           }
