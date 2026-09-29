@@ -1337,11 +1337,11 @@ fn adjust_path(path: &[usize], removed: &[&[usize]]) -> Vec<usize> {
 
 fn page_count(document: &DjVuDocumentMut) -> usize {
     match document.root_form_type() {
-        Some(form_type) if *form_type == *b"DJVU" => 1,
+        Some(form_type) if crate::dirm::is_page_form(form_type) => 1,
         Some(form_type) if *form_type == *b"DJVM" => (0..document.root_child_count())
             .filter_map(|index| document.chunk_at_path(&[index]).ok())
             .filter(|chunk| {
-                matches!(chunk, Chunk::Form { secondary_id, .. } if secondary_id == b"DJVU")
+                matches!(chunk, Chunk::Form { secondary_id, .. } if crate::dirm::is_page_form(secondary_id))
             })
             .count(),
         _ => 0,

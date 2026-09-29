@@ -55,8 +55,8 @@ use crate::annotation::{
     Annotation, AnnotationError, MapArea, encode_annotations_bzz, parse_annotations,
 };
 use crate::chunk_encode::{ChunkEncoder, NavmChunk};
+use crate::dirm::is_page_form;
 use crate::dirm::{DirmComponent, DirmComponentKind, DirmPayload};
-use crate::djvm::is_page_form;
 use crate::djvu_document::DjVuBookmark;
 use crate::error::{IffError, LegacyError};
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};

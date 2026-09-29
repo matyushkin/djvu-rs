@@ -412,7 +412,7 @@ impl ComponentGraph {
 /// (`djvm -c`) bundles as a page.
 fn form_matches_kind(form: [u8; 4], kind: DirmComponentKind) -> bool {
     match kind {
-        DirmComponentKind::Page => crate::djvm::is_page_form(&form),
+        DirmComponentKind::Page => crate::dirm::is_page_form(&form),
         DirmComponentKind::Shared | DirmComponentKind::SharedAnno => form == *b"DJVI",
         DirmComponentKind::Thumbnail => form == *b"THUM",
     }
@@ -423,7 +423,7 @@ fn classify_component(
     chunks: &[crate::iff::IffChunk<'_>],
     directory_kind: DirmComponentKind,
 ) -> ComponentNodeKind {
-    if crate::djvm::is_page_form(&form) {
+    if crate::dirm::is_page_form(&form) {
         ComponentNodeKind::Page
     } else if form == *b"THUM" {
         ComponentNodeKind::Thumbnail
@@ -450,13 +450,9 @@ fn classify_component(
 }
 
 fn component_id_from_incl(data: &[u8]) -> Result<String, GraphError> {
-    let end = data
-        .iter()
-        .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
-        .map_or(0, |index| index + 1);
-    core::str::from_utf8(&data[..end])
+    crate::dirm::incl_target(data)
         .map(str::to_owned)
-        .map_err(|_| GraphError::Malformed("INCL component id is not valid UTF-8".to_string()))
+        .ok_or_else(|| GraphError::Malformed("INCL component id is not valid UTF-8".to_string()))
 }
 
 fn consume_visit(visits: &mut usize) -> bool {

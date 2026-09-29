@@ -1173,7 +1173,11 @@ fn page_component_id(
     records
         .iter()
         .filter(|record| {
-            record.id == *b"FORM" && record.depth == 1 && record.form_type == Some(*b"DJVU")
+            record.id == *b"FORM"
+                && record.depth == 1
+                && record
+                    .form_type
+                    .is_some_and(|form_type| crate::dirm::is_page_form(&form_type))
         })
         .nth(page_index)
         .and_then(|record| component_offsets.get(&record.offset))

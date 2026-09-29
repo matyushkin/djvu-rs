@@ -52,6 +52,8 @@ use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
+pub(crate) mod assembly;
+
 /// The kind of an external component listed by an indirect `FORM:DJVM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1336,8 +1338,8 @@ impl DjVuDocument {
     ///
     /// Single-page, non-DJVM, and indirect documents fall back to the eager
     /// [`parse`](Self::parse) path (they are small or need a resolver), so this
-    /// is safe to call for any input. Keep the bundled loop below in sync with
-    /// the eager one in [`parse_with_resolver`](Self::parse_with_resolver).
+    /// is safe to call for any input. Pages come from the same catalog
+    /// assembler as the eager path; only their chunk copy is deferred.
     #[cfg(feature = "std")]
     pub(crate) fn parse_backed_with_options(
         backing: Backing,
@@ -1384,72 +1386,12 @@ impl DjVuDocument {
             })
             .collect();
 
-        let sub_forms: Vec<&IffChunk<'_>> =
-            form.chunks.iter().filter(|c| &c.id == b"FORM").collect();
-
-        use std::collections::BTreeMap;
-        let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.kind.is_include())
-            .filter_map(|(comp_idx, entry)| {
-                let sf = sub_forms.get(comp_idx)?;
-                let chunks = parse_sub_form(sf.data).ok()?;
-                let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
-                Some((
-                    entry.id.clone(),
-                    Arc::new(SharedDict::new(djbz.data.to_vec())),
-                ))
-            })
-            .collect();
-        let shared_anno = bundled_shared_anno(&entries, &sub_forms);
-
-        let base = data.as_ptr() as usize;
-        let mut pages = Vec::new();
-        let mut page_byte_ranges = Vec::new();
-        let mut page_idx = 0usize;
-        for (comp_idx, entry) in entries.iter().enumerate() {
-            if entry.kind != DirmComponentKind::Page {
-                continue;
-            }
-            let sub_form = sub_forms.get(comp_idx).ok_or(DocError::Malformed(
-                "DIRM entry count exceeds FORM children",
-            ))?;
-            let sub_chunks = parse_sub_form(sub_form.data)?;
-            let shared_djbz = sub_chunks
-                .iter()
-                .find(|c| &c.id == b"INCL")
-                .and_then(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
-                .and_then(|name| djvi_djbz.get(name))
-                .cloned();
-
-            // The page's FORM sub-form is a slice of `data`, which is `backing`'s
-            // bytes — so its offset within `backing` lets the lazy store re-slice
-            // and parse it on demand.
-            let off = sub_form.data.as_ptr() as usize - base;
-            let range = off..off + sub_form.data.len();
-            let form_type = &sub_form.data[..4];
-            let page = if matches!(form_type, b"BM44" | b"PM44") {
-                // A legacy IW44 image page is small and has no INFO to parse
-                // lazily; decode it eagerly like the non-backed path does.
-                parse_component_page(form_type, &sub_chunks, page_idx, None)?
-            } else {
-                parse_page_lazy(&sub_chunks, page_idx, shared_djbz, backing.clone(), range)?
-            };
-            pages.push(page);
-
-            if let Some(off2) = comp_offsets.get(comp_idx) {
-                let start = *off2 as usize;
-                if let Some(size_bytes) = data.get(start + 4..start + 8) {
-                    let size_be = [size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
-                    page_byte_ranges.push(crate::dirm::form_byte_range(*off2, size_be));
-                }
-            }
-            page_idx += 1;
-        }
-        if page_byte_ranges.len() != pages.len() {
-            page_byte_ranges.clear();
-        }
+        let mut source = BundledSource {
+            sub_forms: form.chunks.iter().filter(|c| &c.id == b"FORM").collect(),
+            backing: Some(backing.clone()),
+        };
+        let assembly::Assembly { pages, shared_anno } = assembly::assemble(&entries, &mut source)?;
+        let page_byte_ranges = bundled_page_byte_ranges(&entries, comp_offsets, data, pages.len());
 
         Ok(attach_resource_limits(
             DjVuDocument {
@@ -1510,74 +1452,8 @@ impl DjVuDocument {
             })
             .collect();
 
-        #[cfg(not(feature = "std"))]
-        use alloc::collections::BTreeMap;
-        #[cfg(feature = "std")]
-        use std::collections::BTreeMap;
-
-        #[cfg(feature = "std")]
-        let mut shared_djbz: BTreeMap<String, Arc<SharedDict>> = BTreeMap::new();
-        #[cfg(not(feature = "std"))]
-        let mut shared_djbz: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        let mut page_components: Vec<(ComponentId, Vec<u8>)> = Vec::new();
-        let mut shared_anno = Vec::new();
-
-        for entry in &entries {
-            let component = component_id_from_dirm(entry);
-            let component_kind = component.kind;
-            let resolved = resolver
-                .resolve(&component)
-                .map_err(DocError::ComponentResolve)?;
-            let resolved_form = parse_form(&resolved)?;
-            let expected = expected_component_form(component_kind);
-            if resolved_form.form_type != expected {
-                return Err(DocError::ComponentKindMismatch {
-                    component,
-                    found: resolved_form.form_type,
-                    expected: component_kind,
-                });
-            }
-
-            if entry.kind == DirmComponentKind::SharedAnno {
-                shared_anno = annotation_chunks(&resolved_form.chunks);
-            }
-            match component_kind {
-                ComponentKind::Page => page_components.push((component, resolved)),
-                ComponentKind::Shared => {
-                    // A DJVI may contain annotations or other shared data that
-                    // this page model does not consume yet. Keep the resolver
-                    // contract broad, but index the Djbz form when present.
-                    if let Some(djbz) = resolved_form.chunks.iter().find(|c| &c.id == b"Djbz") {
-                        #[cfg(feature = "std")]
-                        shared_djbz.insert(
-                            component.name,
-                            Arc::new(SharedDict::new(djbz.data.to_vec())),
-                        );
-                        #[cfg(not(feature = "std"))]
-                        shared_djbz.insert(component.name, djbz.data.to_vec());
-                    }
-                }
-                ComponentKind::Thumbnail => {}
-            }
-        }
-
-        let mut pages = Vec::with_capacity(page_components.len());
-        for (page_idx, (_component, resolved)) in page_components.iter().enumerate() {
-            let page_form = parse_form(resolved)?;
-            let shared_for_page = page_form
-                .chunks
-                .iter()
-                .filter(|c| &c.id == b"INCL")
-                .filter_map(|incl| core::str::from_utf8(incl.data.trim_ascii_end()).ok())
-                .find_map(|name| shared_djbz.get(name))
-                .cloned();
-            pages.push(parse_component_page(
-                &page_form.form_type,
-                &page_form.chunks,
-                page_idx,
-                shared_for_page,
-            )?);
-        }
+        let assembly::Assembly { pages, shared_anno } =
+            assembly::assemble(&entries, &mut TypedSource(resolver))?;
 
         Ok(DjVuDocument {
             pages,
@@ -1666,109 +1542,15 @@ impl DjVuDocument {
 
                 if is_bundled {
                     // Bundled: FORM:DJVU / FORM:DJVI sub-forms follow DIRM in sequence.
-                    let sub_forms: Vec<&IffChunk<'_>> =
-                        form.chunks.iter().filter(|c| &c.id == b"FORM").collect();
-
-                    // Build a map of DJVI component ID → raw Djbz bytes for
-                    // shared symbol dictionaries (referenced via INCL chunks).
-                    // Use BTreeMap so this compiles in no_std (alloc::collections::BTreeMap
-                    // is available; std::collections::HashMap is not).
-                    #[cfg(not(feature = "std"))]
-                    use alloc::collections::BTreeMap;
-                    #[cfg(feature = "std")]
-                    use std::collections::BTreeMap;
-                    // Wrap shared dict bytes in Arc (std) so all pages that
-                    // reference the same DJVI component share one allocation.
-                    #[cfg(feature = "std")]
-                    let djvi_djbz: BTreeMap<String, Arc<SharedDict>> = entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| e.kind.is_include())
-                        .filter_map(|(comp_idx, entry)| {
-                            let sf = sub_forms.get(comp_idx)?;
-                            let chunks = parse_sub_form(sf.data).ok()?;
-                            let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
-                            Some((
-                                entry.id.clone(),
-                                Arc::new(SharedDict::new(djbz.data.to_vec())),
-                            ))
-                        })
-                        .collect();
-                    #[cfg(not(feature = "std"))]
-                    let djvi_djbz: BTreeMap<String, Vec<u8>> = entries
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| e.kind.is_include())
-                        .filter_map(|(comp_idx, entry)| {
-                            let sf = sub_forms.get(comp_idx)?;
-                            let chunks = parse_sub_form(sf.data).ok()?;
-                            let djbz = chunks.iter().find(|c| &c.id == b"Djbz")?;
-                            Some((entry.id.clone(), djbz.data.to_vec()))
-                        })
-                        .collect();
-                    let shared_anno = bundled_shared_anno(&entries, &sub_forms);
-
-                    let mut pages = Vec::new();
-                    let mut page_byte_ranges = Vec::new();
-                    let mut page_idx = 0usize;
-                    for (comp_idx, entry) in entries.iter().enumerate() {
-                        if entry.kind != DirmComponentKind::Page {
-                            continue;
-                        }
-                        let sub_form = sub_forms.get(comp_idx).ok_or(DocError::Malformed(
-                            "DIRM entry count exceeds FORM children",
-                        ))?;
-                        let sub_chunks = parse_sub_form(sub_form.data)?;
-
-                        // Resolve the page's INCL references to a shared DJVI
-                        // dictionary. A page may include several components
-                        // (e.g. a shared-annotation DJVI *and* the symbol
-                        // dictionary — czech.djvu carries three INCLs, #624),
-                        // so scan them all and take the first whose target
-                        // actually holds a Djbz.
-                        let shared_djbz = sub_chunks
-                            .iter()
-                            .filter(|c| &c.id == b"INCL")
-                            .filter_map(|incl| {
-                                core::str::from_utf8(incl.data.trim_ascii_end()).ok()
-                            })
-                            .find_map(|name| djvi_djbz.get(name))
-                            .cloned();
-
-                        let page = parse_component_page(
-                            &sub_form.data[..4],
-                            &sub_chunks,
-                            page_idx,
-                            shared_djbz,
-                        )?;
-                        pages.push(page);
-
-                        // Record the byte range of this page's outer FORM. The
-                        // offset→range arithmetic lives in `dirm::form_byte_range`;
-                        // here we just supply the four size bytes from the in-memory
-                        // FORM header.
-                        if let Some(off) = comp_offsets.get(comp_idx) {
-                            let start = *off as usize;
-                            // `start` is an untrusted DIRM offset; `start + 8`
-                            // overflows `usize` on 32-bit targets for a crafted
-                            // out-of-bounds offset. Guard the header slice.
-                            if let Some(size_bytes) = start
-                                .checked_add(8)
-                                .and_then(|end| data.get(start + 4..end))
-                            {
-                                let size_be =
-                                    [size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
-                                page_byte_ranges.push(crate::dirm::form_byte_range(*off, size_be));
-                            }
-                        }
-                        page_idx += 1;
-                    }
-
-                    // Only expose offsets if we got one for every page; partial
-                    // tables would surprise callers iterating by page index.
-                    if page_byte_ranges.len() != pages.len() {
-                        page_byte_ranges.clear();
-                    }
+                    let mut source = BundledSource {
+                        sub_forms: form.chunks.iter().filter(|c| &c.id == b"FORM").collect(),
+                        #[cfg(feature = "std")]
+                        backing: None,
+                    };
+                    let assembly::Assembly { pages, shared_anno } =
+                        assembly::assemble(&entries, &mut source)?;
+                    let page_byte_ranges =
+                        bundled_page_byte_ranges(&entries, &comp_offsets, data, pages.len());
 
                     Ok(DjVuDocument {
                         pages,
@@ -1779,40 +1561,10 @@ impl DjVuDocument {
                         shared_anno,
                     })
                 } else {
-                    // Indirect: pages must be resolved by name
+                    // Indirect: components must be resolved by name.
                     let resolver = resolver.ok_or(DocError::NoResolver)?;
-
-                    // Metadata is optional: an unresolvable shared annotation
-                    // must not fail the document open.
-                    let shared_anno = entries
-                        .iter()
-                        .find(|e| e.kind == DirmComponentKind::SharedAnno)
-                        .and_then(|entry| resolver(&entry.id).ok())
-                        .and_then(|bytes| {
-                            parse_form(&bytes)
-                                .ok()
-                                .map(|form| annotation_chunks(&form.chunks))
-                        })
-                        .unwrap_or_default();
-
-                    let mut pages = Vec::new();
-                    let mut page_idx = 0usize;
-                    for entry in &entries {
-                        if entry.kind != DirmComponentKind::Page {
-                            continue;
-                        }
-                        let resolved_data = resolver(&entry.id)
-                            .map_err(|_| DocError::IndirectResolve(entry.id.clone()))?;
-                        let sub_form = parse_form(&resolved_data)?;
-                        let page = parse_component_page(
-                            &sub_form.form_type,
-                            &sub_form.chunks,
-                            page_idx,
-                            None,
-                        )?;
-                        pages.push(page);
-                        page_idx += 1;
-                    }
+                    let assembly::Assembly { pages, shared_anno } =
+                        assembly::assemble(&entries, &mut NamedSource(resolver))?;
 
                     Ok(DjVuDocument {
                         pages,
@@ -1837,7 +1589,7 @@ impl DjVuDocument {
         shared_djbz: Option<Arc<SharedDict>>,
     ) -> Result<DjVuPage, DocError> {
         let form = parse_form(data)?;
-        if !matches!(&form.form_type, b"DJVU" | b"BM44" | b"PM44") {
+        if !crate::dirm::is_page_form(&form.form_type) {
             return Err(DocError::NotDjVu(form.form_type));
         }
         parse_component_page(&form.form_type, &form.chunks, index, shared_djbz)
@@ -2440,11 +2192,149 @@ fn component_id_from_dirm(component: &DirmComponent) -> ComponentId {
     ComponentId::new(component.id.clone(), kind)
 }
 
-fn expected_component_form(kind: ComponentKind) -> [u8; 4] {
+/// Whether a resolved component's form type fits its DIRM kind. A page may be
+/// a legacy `FORM:BM44`/`FORM:PM44` image as well as `FORM:DJVU`.
+pub(crate) fn form_fits_kind(form_type: &[u8; 4], kind: ComponentKind) -> bool {
     match kind {
-        ComponentKind::Page => *b"DJVU",
-        ComponentKind::Shared => *b"DJVI",
-        ComponentKind::Thumbnail => *b"THUM",
+        ComponentKind::Page => crate::dirm::is_page_form(form_type),
+        ComponentKind::Shared => form_type == b"DJVI",
+        ComponentKind::Thumbnail => form_type == b"THUM",
+    }
+}
+
+/// Bundled components: `FORM` children of the index buffer, in DIRM order.
+struct BundledSource<'a> {
+    sub_forms: Vec<&'a IffChunk<'a>>,
+    /// The buffer behind `sub_forms`, when pages should re-slice it lazily
+    /// instead of copying their chunks now.
+    #[cfg(feature = "std")]
+    backing: Option<Backing>,
+}
+
+impl<'a> assembly::ComponentSource<'a> for BundledSource<'a> {
+    fn fetch(
+        &mut self,
+        index: usize,
+        _entry: &DirmComponent,
+    ) -> Result<Option<assembly::ComponentBytes<'a>>, DocError> {
+        Ok(self
+            .sub_forms
+            .get(index)
+            .map(|sf| assembly::ComponentBytes::Body(sf.data)))
+    }
+
+    #[cfg(feature = "std")]
+    fn build_page(
+        &mut self,
+        page_index: usize,
+        bytes: &assembly::ComponentBytes<'a>,
+        form_type: &[u8; 4],
+        chunks: &[IffChunk<'_>],
+        shared: Option<PageSharedDict>,
+    ) -> Result<DjVuPage, DocError> {
+        // A legacy IW44 image page is small and has no INFO to parse lazily;
+        // decode it eagerly like the non-backed path does.
+        let lazy = !matches!(form_type, b"BM44" | b"PM44");
+        match (&self.backing, bytes) {
+            (Some(backing), assembly::ComponentBytes::Body(body)) if lazy => {
+                // The page's FORM body is a slice of the backing bytes, so its
+                // offset lets the lazy store re-slice and parse it on demand.
+                let off = body.as_ptr() as usize - backing_bytes(backing).as_ptr() as usize;
+                let range = off..off + body.len();
+                parse_page_lazy(chunks, page_index, shared, backing.clone(), range)
+            }
+            _ => parse_component_page(form_type, chunks, page_index, shared),
+        }
+    }
+}
+
+/// Indirect components fetched by DIRM name through a
+/// [`DjVuDocument::parse_with_resolver`] callback.
+///
+/// A page that cannot be resolved fails the open. A shared component that
+/// cannot be resolved is skipped: metadata is optional, and a page that needs
+/// a missing dictionary reports it when rendered.
+struct NamedSource<R>(R);
+
+impl<R> assembly::ComponentSource<'static> for NamedSource<R>
+where
+    R: Fn(&str) -> Result<Vec<u8>, DocError>,
+{
+    fn fetch(
+        &mut self,
+        _index: usize,
+        entry: &DirmComponent,
+    ) -> Result<Option<assembly::ComponentBytes<'static>>, DocError> {
+        Ok(match entry.kind {
+            DirmComponentKind::Page => {
+                Some((self.0)(&entry.id).map_err(|_| DocError::IndirectResolve(entry.id.clone()))?)
+            }
+            DirmComponentKind::Shared | DirmComponentKind::SharedAnno => (self.0)(&entry.id).ok(),
+            DirmComponentKind::Thumbnail => None,
+        }
+        .map(assembly::ComponentBytes::File))
+    }
+}
+
+/// Indirect components fetched through a typed [`ComponentResolver`]: every
+/// DIRM entry is resolved once, in order, and must have the form its kind
+/// declares.
+struct TypedSource<'r, R: ?Sized>(&'r R);
+
+impl<R> assembly::ComponentSource<'static> for TypedSource<'_, R>
+where
+    R: ComponentResolver + ?Sized,
+{
+    fn fetch(
+        &mut self,
+        _index: usize,
+        entry: &DirmComponent,
+    ) -> Result<Option<assembly::ComponentBytes<'static>>, DocError> {
+        let component = component_id_from_dirm(entry);
+        let resolved = self
+            .0
+            .resolve(&component)
+            .map_err(DocError::ComponentResolve)?;
+        let found = parse_form(&resolved)?.form_type;
+        if !form_fits_kind(&found, component.kind) {
+            return Err(DocError::ComponentKindMismatch {
+                expected: component.kind,
+                component,
+                found,
+            });
+        }
+        Ok(Some(assembly::ComponentBytes::File(resolved)))
+    }
+}
+
+/// Byte ranges of the bundled page `FORM`s, or none unless every page has one:
+/// a partial table would surprise callers iterating by page index.
+fn bundled_page_byte_ranges(
+    entries: &[DirmComponent],
+    offsets: &[u32],
+    data: &[u8],
+    page_count: usize,
+) -> Vec<core::ops::Range<u64>> {
+    let ranges: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == DirmComponentKind::Page)
+        .filter_map(|(comp_idx, _)| {
+            let off = *offsets.get(comp_idx)?;
+            let start = off as usize;
+            // `start` is an untrusted DIRM offset; `start + 8` overflows
+            // `usize` on 32-bit targets for a crafted offset. Guard the slice.
+            let size = data.get(start.checked_add(4)?..start.checked_add(8)?)?;
+            Some(crate::dirm::form_byte_range(
+                off,
+                [size[0], size[1], size[2], size[3]],
+            ))
+        })
+        .collect();
+    if ranges.len() == page_count {
+        ranges
+    } else {
+        Vec::new()
     }
 }
 
@@ -2698,17 +2588,6 @@ fn annotation_chunks(chunks: &[IffChunk<'_>]) -> Vec<RawChunk> {
         .collect()
 }
 
-/// Annotation chunks of the bundled shared-annotation component, if any.
-fn bundled_shared_anno(entries: &[DirmComponent], sub_forms: &[&IffChunk<'_>]) -> Vec<RawChunk> {
-    entries
-        .iter()
-        .position(|e| e.kind == DirmComponentKind::SharedAnno)
-        .and_then(|idx| sub_forms.get(idx))
-        .and_then(|sf| parse_sub_form(sf.data).ok())
-        .map(|chunks| annotation_chunks(&chunks))
-        .unwrap_or_default()
-}
-
 fn parse_sub_form(data: &[u8]) -> Result<Vec<IffChunk<'_>>, DocError> {
     if data.len() < 4 {
         return Err(DocError::Malformed("sub-form data too short"));
@@ -2854,6 +2733,20 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/czech.djvu");
         let data = std::fs::read(path).unwrap();
         let doc = DjVuDocument::parse(&data).unwrap();
+        assert_czech_catalog(&doc);
+    }
+
+    /// Every czech page has its symbol dictionary, and page 1's mask matches
+    /// DjVuLibre's `ddjvu -mode=mask` output.
+    fn assert_czech_catalog(doc: &DjVuDocument) {
+        assert_eq!(doc.page_count(), 85);
+        let missing: Vec<usize> = (0..doc.page_count())
+            .filter(|&i| doc.page(i).unwrap().shared_djbz.is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "pages without a dictionary: {missing:?}"
+        );
         let mask = doc
             .page(1)
             .unwrap()
@@ -2868,6 +2761,124 @@ mod tests {
             black, 308_624,
             "mask content must match the ddjvu reference"
         );
+    }
+
+    /// The lazy backed loader behind `Document::from_bytes` used to read only
+    /// the first INCL, so every czech page lost its dictionary.
+    #[test]
+    fn backed_multi_incl_page_resolves_shared_dict() {
+        let data = fixture_bytes("czech.djvu");
+        let doc = crate::Document::from_bytes(data).unwrap();
+        assert_czech_catalog(doc.inner());
+    }
+
+    /// czech.djvu split into an indirect index and its component files.
+    fn czech_indirect() -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
+        let split = crate::djvm::to_indirect(&fixture_bytes("czech.djvu")).unwrap();
+        (split.index, split.components.into_iter().collect())
+    }
+
+    /// The name-resolver path used to give indirect pages no dictionary.
+    #[test]
+    fn indirect_named_resolver_attaches_shared_dict() {
+        let (index, files) = czech_indirect();
+        let doc = DjVuDocument::parse_with_resolver(
+            &index,
+            Some(|name: &str| {
+                files
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| DocError::IndirectResolve(name.to_string()))
+            }),
+        )
+        .unwrap();
+        assert_czech_catalog(&doc);
+    }
+
+    #[test]
+    fn parse_from_dir_attaches_shared_dict() {
+        let (index, files) = czech_indirect();
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in &files {
+            std::fs::write(dir.path().join(name), bytes).unwrap();
+        }
+        let doc = DjVuDocument::parse_from_dir(&index, dir.path()).unwrap();
+        assert_czech_catalog(&doc);
+    }
+
+    #[test]
+    fn indirect_typed_resolver_attaches_shared_dict() {
+        let (index, files) = czech_indirect();
+        let doc = DjVuDocument::parse_with_component_resolver(&index, &|c: &ComponentId| {
+            files
+                .get(&c.name)
+                .cloned()
+                .ok_or_else(|| ComponentResolveError::Missing {
+                    component: c.clone(),
+                })
+        })
+        .unwrap();
+        assert_czech_catalog(&doc);
+        assert_eq!(sorted_extra(&doc), czech_expected_metadata());
+    }
+
+    /// A page may INCL a shared component that DIRM lists after it; the
+    /// assembler waits for the whole catalog before building that page.
+    #[test]
+    fn page_before_its_shared_dict_in_dirm_gets_it() {
+        let (_, files) = czech_indirect();
+        let split = crate::djvm::to_indirect(&fixture_bytes("czech.djvu")).unwrap();
+        let (pages, shared): (Vec<_>, Vec<_>) = split
+            .components
+            .iter()
+            .filter(|(_, bytes)| &bytes[12..16] != b"THUM")
+            .partition(|(_, bytes)| &bytes[12..16] == b"DJVU");
+        let components: Vec<(&str, &[u8])> = pages
+            .iter()
+            .chain(&shared)
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect();
+        let index = crate::djvm::create_indirect_with_components(&components).unwrap();
+        let doc = DjVuDocument::parse_with_resolver(
+            &index,
+            Some(|name: &str| {
+                files
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| DocError::IndirectResolve(name.to_string()))
+            }),
+        )
+        .unwrap();
+        assert_czech_catalog(&doc);
+    }
+
+    /// A legacy BM44/PM44 image is a page component too, so the typed
+    /// resolver must not reject it as a kind mismatch.
+    #[test]
+    fn indirect_typed_resolver_accepts_legacy_iw44_page() {
+        let files = [
+            ("a.djvu", fixture_bytes("legacy_bm44.djvu")),
+            ("b.djvu", fixture_bytes("legacy_pm44.djvu")),
+        ];
+        let components: Vec<(&str, &[u8])> =
+            files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        let index = crate::djvm::create_indirect_with_components(&components).unwrap();
+        let doc = DjVuDocument::parse_with_component_resolver(&index, &|c: &ComponentId| {
+            files
+                .iter()
+                .find(|(n, _)| *n == c.name)
+                .map(|(_, b)| b.clone())
+                .ok_or_else(|| ComponentResolveError::Missing {
+                    component: c.clone(),
+                })
+        })
+        .unwrap();
+        assert_eq!(doc.page_count(), 2);
+        for (i, (_, bytes)) in files.iter().enumerate() {
+            let single = DjVuDocument::parse(bytes).unwrap();
+            let (want, got) = (single.page(0).unwrap(), doc.page(i).unwrap());
+            assert_eq!((got.width(), got.height()), (want.width(), want.height()));
+        }
     }
 
     fn czech_expected_metadata() -> Vec<(String, String)> {
