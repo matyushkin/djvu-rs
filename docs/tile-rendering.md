@@ -71,7 +71,11 @@ later slice of #691.
   `opts.width`/`height` instead.
 
 `permissive: true` is allowed and inherits the region renderer's recovery
-semantics (the cached path falls back to uncached rendering in that mode).
+semantics. Strict and permissive requests share the cache: layers decode
+before any tile lookup, so a strict request on a damaged page still fails,
+and on an intact page both modes composite identical tiles. Rotated requests
+use the cache too: tiles are stored in native orientation and the assembled
+region is rotated once.
 
 ### Resource limits
 

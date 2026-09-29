@@ -1107,6 +1107,22 @@ mod native_tests {
         assert_eq!(pm.data.len(), (w * h * 4) as usize);
     }
 
+    /// The viewer render options are permissive; `render_tile` must still
+    /// fill the page's tile cache (before, permissive requests bypassed it).
+    #[test]
+    fn wasm_render_tile_fills_tile_cache() {
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = crate::foreign::render_opts_for_dpi(page, 150.0);
+        assert!(opts.permissive);
+        assert_eq!(page.render_layers().tile_cache_len(), 0);
+        let tile = djvu_tile::render_tile_cached(page, &opts, 64, 1, 1).unwrap();
+        assert!(page.render_layers().tile_cache_len() > 0);
+        let again = djvu_tile::render_tile_cached(page, &opts, 64, 1, 1).unwrap();
+        assert_eq!(tile.data, again.data);
+    }
+
     /// bg44_chunk_count is > 0 for a color page.
     #[test]
     fn wasm_bg44_chunk_count_color_page() {

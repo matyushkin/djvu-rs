@@ -482,14 +482,43 @@ impl RenderOptions {
     /// anti-aliasing, no rotation, and either bilinear resampling or a 1:1
     /// (unscaled) render.
     ///
+    /// The rotation is the combined INFO + user rotation: a user rotation that
+    /// cancels the page's INFO rotation streams too.
+    ///
     /// This is the single source of truth for streaming eligibility; export
-    /// paths call it instead of re-deriving the rule.
+    /// paths call it instead of re-deriving the rule, and [`render_streaming`]
+    /// refuses exactly the options it rejects.
     pub fn can_stream(&self, page: &crate::djvu_document::DjVuPage) -> bool {
-        !self.aa
-            && (self.resampling == Resampling::Bilinear
-                || (page.width() as u32 == self.width && page.height() as u32 == self.height))
-            && page.rotation() == crate::info::Rotation::None
-            && self.rotation == UserRotation::None
+        self.whole_pixmap_reason(page).is_none()
+    }
+
+    /// Why a render of `page` needs a whole [`Pixmap`] before its output is
+    /// final, or `None` when rows come out of the compositor final.
+    ///
+    /// The three whole-image post-passes are the anti-aliasing halving,
+    /// Lanczos-3 rescaling, and the combined rotation. The reason doubles as
+    /// the [`render_streaming`] error message.
+    pub(crate) fn whole_pixmap_reason(
+        &self,
+        page: &crate::djvu_document::DjVuPage,
+    ) -> Option<&'static str> {
+        if self.aa {
+            Some("anti-aliasing requires a full pixmap; use render_pixmap")
+        } else if lanczos_rescales(page, self.resampling, (self.width, self.height)) {
+            Some("Lanczos-3 resampling at scaled output requires a full pixmap; use render_pixmap")
+        } else if self.output_rotation(page) != crate::info::Rotation::None {
+            Some("rotation requires a full pixmap; use render_pixmap")
+        } else {
+            None
+        }
+    }
+
+    /// The combined INFO + user rotation applied after compositing.
+    pub(crate) fn output_rotation(
+        &self,
+        page: &crate::djvu_document::DjVuPage,
+    ) -> crate::info::Rotation {
+        combine_rotations(page.rotation(), self.rotation)
     }
 
     /// The scale the decode pipeline uses to choose the IW44 wavelet subsample
@@ -1337,9 +1366,10 @@ pub(crate) const TILE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Composited-output tile cache key: `(full_w, full_h, tile_x, tile_y, bold,
 /// mask_aa)` — the tuple of [`RenderOptions`] fields (plus the tile's
 /// top-left corner in full-render space) that `composite_into`'s per-pixel
-/// output actually depends on for a [`render_region_tiled`]-eligible request
-/// (bilinear resampling, identity rotation, strict decode). Any option that
-/// can change a composited pixel's bytes must be part of this key.
+/// output actually depends on. Rotation and the Lanczos-3 post-pass run after
+/// compositing, and permissive decode matches strict decode on every page a
+/// strict request can reach the cache for, so none of them is in the key. Any
+/// option that can change a composited pixel's bytes must be part of this key.
 #[cfg(feature = "std")]
 type TileKey = (u32, u32, u32, u32, u8, bool);
 
@@ -4838,6 +4868,16 @@ fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
 /// `out` is the target the result is scaled to. They differ only for
 /// [`render_region`], where the comparison is against the full page render but
 /// the output is the (smaller) region.
+/// Whether `resampling` runs the Lanczos-3 post-pass for a `full`-sized render
+/// of `page`: Lanczos-3 at any size other than the native one.
+///
+/// At the native size the post-pass is the identity, so such a render streams,
+/// tiles, and caches like a bilinear one.
+fn lanczos_rescales(page: &DjVuPage, resampling: Resampling, full: (u32, u32)) -> bool {
+    resampling == Resampling::Lanczos3
+        && (page.width() as u32 != full.0 || page.height() as u32 != full.1)
+}
+
 fn apply_lanczos_postpass<F>(
     pm: Pixmap,
     page: &DjVuPage,
@@ -4849,12 +4889,7 @@ fn apply_lanczos_postpass<F>(
 where
     F: FnOnce(&RenderOptions) -> Result<Pixmap, RenderError>,
 {
-    if opts.resampling != Resampling::Lanczos3 {
-        return Ok(pm);
-    }
-    let (full_w, full_h) = full;
-    let need_scale = page.width() as u32 != full_w || page.height() as u32 != full_h;
-    if !need_scale {
+    if !lanczos_rescales(page, opts.resampling, full) {
         return Ok(pm);
     }
     let native_opts = native_render_opts(page, opts);
@@ -4985,9 +5020,11 @@ pub fn render_pixmap_with_limits(
 /// - `opts.resampling == Resampling::Bilinear`, *or* the output dimensions
 ///   match the page's native dimensions (in which case Lanczos becomes a
 ///   no-op and `Bilinear` produces the same bytes anyway)
-/// - `opts.rotation == UserRotation::None` *and* the page's INFO rotation is
-///   `Rotation::None` (i.e. the combined rotation is identity)
+/// - the page's INFO rotation combined with `opts.rotation` is the identity
+///   (an upright page with no user rotation, or a user rotation that cancels
+///   the INFO rotation)
 ///
+/// [`RenderOptions::can_stream`] answers the same question without rendering.
 /// For any of those modes, use [`render_pixmap`] instead.
 ///
 /// # Errors
@@ -5016,22 +5053,8 @@ pub fn render_streaming<F>(
 where
     F: FnMut(usize, &[u8]),
 {
-    if opts.aa {
-        return Err(RenderError::UnsupportedOption(
-            "anti-aliasing requires a full pixmap; use render_pixmap",
-        ));
-    }
-    let lanczos_with_scaling = opts.resampling == Resampling::Lanczos3
-        && (page.width() as u32 != opts.width || page.height() as u32 != opts.height);
-    if lanczos_with_scaling {
-        return Err(RenderError::UnsupportedOption(
-            "Lanczos-3 resampling at scaled output requires a full pixmap; use render_pixmap",
-        ));
-    }
-    if combine_rotations(page.rotation(), opts.rotation) != crate::info::Rotation::None {
-        return Err(RenderError::UnsupportedOption(
-            "rotation requires a full pixmap; use render_pixmap",
-        ));
+    if let Some(reason) = opts.whole_pixmap_reason(page) {
+        return Err(RenderError::UnsupportedOption(reason));
     }
     render_rows(page, opts, None, sink)
 }
@@ -5262,15 +5285,17 @@ pub(crate) fn render_region_progressive(
 ///
 /// # Eligibility
 ///
-/// The cache only activates for the mode it was built for; anything else
-/// falls back to a plain [`render_region`] call with no tile bookkeeping:
+/// Every request uses the cache except Lanczos-3 resampling at a scaled size:
+/// its native-scale re-render recursion isn't compatible with per-tile
+/// assembly, so it falls back to a plain [`render_region`] call with no tile
+/// bookkeeping.
 ///
-/// - `opts.resampling == Resampling::Lanczos3` — its native-scale re-render
-///   recursion isn't compatible with per-tile assembly.
-/// - the combined page + user rotation isn't the identity — tiles are cached
-///   pre-rotation, so a rotated request would need a different assembly.
-/// - `opts.permissive` — kept off the fast path defensively; this targets the
-///   interactive strict-decode hot path, not error recovery.
+/// - Rotation: tiles are cached in native orientation and the assembled
+///   region is rotated once, exactly as [`render_region`] does.
+/// - `opts.permissive`: strict and permissive requests share tiles. Layers
+///   decode before any tile lookup, so a strict request on a damaged page
+///   still fails there. On an intact page both modes decode identical
+///   layers, hence identical tiles.
 ///
 /// This is an **opt-in** entry point: call it where you want tile caching
 /// (e.g. a pan/zoom viewer). [`render_region`] itself is untouched and pays no
@@ -5316,16 +5341,15 @@ pub(crate) fn render_region_tiled_cancellable(
     let full_w = opts.width.max(1);
     let full_h = opts.height.max(1);
 
-    let eligible = opts.resampling == Resampling::Bilinear
-        && !opts.permissive
-        && combine_rotations(page.rotation(), opts.rotation) == crate::info::Rotation::None;
-
     if is_cancelled(cancel) {
         return Ok(None);
     }
-    if !eligible {
+    if lanczos_rescales(page, opts.resampling, (full_w, full_h)) {
         return render_region(page, region, opts).map(Some);
     }
+    // Tiles are cached in native orientation; the assembled region turns
+    // once at the end, as in `render_region`.
+    let rotation = opts.output_rotation(page);
 
     let gamma_lut = build_gamma_lut(page.gamma());
     let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
@@ -5386,7 +5410,7 @@ pub(crate) fn render_region_tiled_cancellable(
         // Region lies entirely outside the full render — nothing to copy;
         // return the white-filled pixmap (matches render_region's behaviour,
         // whose compositor loop would likewise touch no valid pixels).
-        return Ok(Some(pm));
+        return Ok(Some(rotate_pixmap(pm, rotation)));
     }
     let tx0 = region.x / TILE_SIZE;
     let ty0 = region.y / TILE_SIZE;
@@ -5466,7 +5490,7 @@ pub(crate) fn render_region_tiled_cancellable(
         }
     }
 
-    Ok(Some(pm))
+    Ok(Some(rotate_pixmap(pm, rotation)))
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -8725,10 +8749,11 @@ mod tests {
         assert_eq!(direct.data, tiled.data);
     }
 
-    /// Ineligible modes (rotation, Lanczos-3, permissive) fall back to
-    /// `render_region` and still produce its exact output.
+    /// Rotated and permissive requests go through the tile cache; scaled
+    /// Lanczos-3 falls back to `render_region`. Every mode produces the exact
+    /// `render_region` output.
     #[test]
-    fn render_region_tiled_falls_back_for_ineligible_modes() {
+    fn render_region_tiled_matches_render_region_in_every_mode() {
         let doc = load_doc("chicken.djvu");
         let page = doc.page(0).unwrap();
         let region = RenderRect {
@@ -8737,6 +8762,7 @@ mod tests {
             width: 40,
             height: 30,
         };
+        let tiles = || page.render_layers().tile_cache_len();
 
         let rotated_opts = RenderOptions {
             width: 200,
@@ -8744,12 +8770,28 @@ mod tests {
             rotation: UserRotation::Cw90,
             ..Default::default()
         };
+        assert_eq!(tiles(), 0);
+        let tiled = render_region_tiled(page, region, &rotated_opts).unwrap();
+        assert!(tiles() > 0, "a rotated request must fill the tile cache");
+        assert_eq!((tiled.width, tiled.height), (30, 40));
         assert_eq!(
             render_region(page, region, &rotated_opts).unwrap().data,
-            render_region_tiled(page, region, &rotated_opts)
+            tiled.data
+        );
+        // Rotated tiles are the upright ones, turned: a second, upright
+        // request reuses them.
+        let upright_opts = RenderOptions {
+            rotation: UserRotation::None,
+            ..rotated_opts
+        };
+        let cached = tiles();
+        assert_eq!(
+            render_region(page, region, &upright_opts).unwrap().data,
+            render_region_tiled(page, region, &upright_opts)
                 .unwrap()
                 .data
         );
+        assert_eq!(tiles(), cached, "rotation must not be part of the tile key");
 
         let lanczos_opts = RenderOptions {
             width: 100,
@@ -8765,16 +8807,21 @@ mod tests {
         );
 
         let permissive_opts = RenderOptions {
-            width: 200,
-            height: 150,
+            width: 300,
+            height: 225,
             permissive: true,
             ..Default::default()
         };
+        let cached = tiles();
         assert_eq!(
             render_region(page, region, &permissive_opts).unwrap().data,
             render_region_tiled(page, region, &permissive_opts)
                 .unwrap()
                 .data
+        );
+        assert!(
+            tiles() > cached,
+            "a permissive request must fill the tile cache"
         );
     }
 
@@ -9318,6 +9365,38 @@ mod tests {
         };
         let err = render_streaming(page, &opts, |_, _| {}).unwrap_err();
         assert!(matches!(err, RenderError::UnsupportedOption(_)));
+    }
+
+    /// A user rotation that cancels the page's INFO rotation streams: both
+    /// `can_stream` and `render_streaming` accept it, and the rows equal the
+    /// buffered render.
+    #[test]
+    fn render_streaming_accepts_rotation_that_cancels_info_rotation() {
+        let data = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/boy_jb2_rotate90.djvu"),
+        )
+        .unwrap();
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.rotation(), crate::info::Rotation::Cw90);
+        let opts = RenderOptions {
+            width: page.width() as u32,
+            height: page.height() as u32,
+            rotation: UserRotation::Ccw90,
+            ..Default::default()
+        };
+        assert!(opts.can_stream(page));
+        let mut rows = Vec::new();
+        render_streaming(page, &opts, |_, row| rows.extend_from_slice(row)).unwrap();
+        assert_eq!(rows, render_pixmap(page, &opts).unwrap().data);
+
+        let upright = RenderOptions {
+            rotation: UserRotation::None,
+            ..opts
+        };
+        assert!(!upright.can_stream(page));
+        assert!(render_streaming(page, &upright, |_, _| {}).is_err());
     }
 
     /// `render_streaming` rejects zero dimensions with `InvalidDimensions`.
