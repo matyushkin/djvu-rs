@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790711840805,
+  "lastUpdate": 1790714044787,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21298,6 +21298,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 32991000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b58d9ad26f60be4efb4fde6dd3df0c5fff3e6341",
+          "message": "fix!: region renders honor anti-aliasing and Lanczos-3 (#875)\n\nrender_region promised a crop of the full render, but with opts.aa it\nignored the anti-aliasing: it composited the region of the full-size\ncanvas, not of the halved page render_pixmap returns. The progressive\nregion render (the tile API's quality steps) also ignored aa and\nrefused Lanczos-3.\n\nComposite::region now crops the page exactly as page_pixmap builds it:\nfrom the Lanczos-3 canvas, or from the doubled canvas window averaged\n2x2 under anti-aliasing, or composited directly. The progressive region\nrender uses it and no longer refuses Lanczos-3. The tile cache falls\nback to render_region under aa, as it does for Lanczos-3, and the\ndisplay-space region path uses the halved page size.\n\nTests check every mode (odd sizes, a 1x1 page, rotation, Lanczos-3 with\nand without aa, first and last progressive step) against a crop of the\nwhole-page render, including regions across and outside the page edge.\n\nBREAKING CHANGE: render_region with opts.aa now returns a crop of the\nanti-aliased page, which is opts.width/2 x opts.height/2; the region\naddresses that halved page. Before, it returned an unsmoothed crop of\nthe full-size canvas.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T20:08:59Z",
+          "tree_id": "7f686bab9bab64bbd216586b0eab32ccf742c5ad",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/b58d9ad26f60be4efb4fde6dd3df0c5fff3e6341"
+        },
+        "date": 1790714043013,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8340000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49515000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47611000,
             "range": "± 0",
             "unit": "ns/iter"
           }
