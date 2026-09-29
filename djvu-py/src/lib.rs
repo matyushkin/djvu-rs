@@ -629,10 +629,14 @@ impl Page {
     /// Render a rectangular region of the page (#583).
     ///
     /// Args:
-    ///     x, y, w, h: viewport rectangle in output pixels.
+    ///     x, y, w, h: viewport rectangle in output pixels, in the page's
+    ///         displayed orientation (after its INFO rotation).
     ///     full_width, full_height: the full-render size the region is cut
     ///         from (the zoom level). Defaults to the page size after its
     ///         INFO rotation.
+    ///
+    /// The result is the matching crop of a full render at that size; pixels
+    /// outside the page are white.
     ///
     /// Routed through the composited-tile cache, so viewer-style pans and
     /// revisits reuse tiles — O(viewport) work instead of O(page). Releases

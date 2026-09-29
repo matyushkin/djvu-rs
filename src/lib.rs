@@ -876,9 +876,10 @@ impl<'a> Page<'a> {
     /// revisits reuse tiles (C4_TILE_CACHE / TILE_LRU) — O(viewport) work
     /// instead of O(page).
     ///
-    /// `full_w × full_h` is the display size, after the INFO rotation. On a
-    /// rotated page `(x, y, w, h)` still address the native (unrotated)
-    /// render, and the returned tile is then rotated.
+    /// Both `full_w × full_h` and `(x, y, w, h)` are in display space, after
+    /// the INFO rotation: the region is the matching crop of
+    /// [`render_to_size`](Self::render_to_size)`(full_w, full_h)`. Pixels
+    /// outside the page are white.
     pub fn render_region(
         &self,
         full_w: u32,
@@ -889,7 +890,7 @@ impl<'a> Page<'a> {
         h: u32,
     ) -> Result<Pixmap, Error> {
         let opts = self.opts_for_size(full_w, full_h);
-        djvu_render::render_region_tiled(
+        djvu_render::render_display_region_tiled(
             self.page,
             djvu_render::RenderRect {
                 x,
@@ -1097,6 +1098,46 @@ mod tests {
         assert_eq!((w, h), (display.0.div_ceil(2), display.1.div_ceil(2)));
         let pm = page.render_to_size(w, h).unwrap();
         assert_eq!((pm.width, pm.height), (w, h));
+    }
+
+    /// On a rotated page the region is a crop of the display render, in the
+    /// same coordinates as the returned pixels; outside the page it is white.
+    #[test]
+    fn rotated_page_region_is_crop_of_display_render() {
+        let doc = Document::open("tests/fixtures/boy_jb2_rotate90.djvu").unwrap();
+        let page = doc.page(0).unwrap();
+        let (fw, fh) = (page.display_width() / 2, page.display_height() / 2);
+        let full = page.render_to_size(fw, fh).unwrap();
+        let pixel = |pm: &Pixmap, x: u32, y: u32| {
+            let i = (y as usize * pm.width as usize + x as usize) * 4;
+            pm.data[i..i + 4].to_vec()
+        };
+        let rects = [
+            (0, 0, fw, fh),
+            (fw / 5, fh / 3, fw / 3, fh / 4),
+            (fw - 20, fh - 30, 50, 70),
+            (fw + 5, 0, 10, 10),
+        ];
+        for (x, y, w, h) in rects {
+            let region = page.render_region(fw, fh, x, y, w, h).unwrap();
+            assert_eq!((region.width, region.height), (w, h));
+            for ry in 0..h {
+                for rx in 0..w {
+                    let (px, py) = (x + rx, y + ry);
+                    let want = if px < fw && py < fh {
+                        pixel(&full, px, py)
+                    } else {
+                        vec![255, 255, 255, 255]
+                    };
+                    assert_eq!(
+                        pixel(&region, rx, ry),
+                        want,
+                        "region {:?} pixel ({rx}, {ry})",
+                        (x, y, w, h)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

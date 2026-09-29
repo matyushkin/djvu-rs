@@ -228,49 +228,20 @@ impl TileLayout {
         })
     }
 
-    /// Map a display-space rectangle to the pre-rotation [`RenderRect`] whose
-    /// rotated render equals that display rectangle.
-    ///
-    /// The region renderer selects its sub-rectangle before applying the
-    /// combined rotation, then rotates the small result
-    /// (`rotate_pixmap` runs last in `render_region`), so the display
-    /// rectangle must be pulled back through the inverse rotation. With
-    /// `(W, H)` the pre-rotation canvas and `(x, y, w, h)` the display rect:
-    ///
-    /// | combined rotation | pre-rotation rect |
-    /// |---|---|
-    /// | `None`  | `(x, y, w, h)` |
-    /// | `Cw90`  | `(y, H − x − w, h, w)` |
-    /// | `Rot180`| `(W − x − w, H − y − h, w, h)` |
-    /// | `Ccw90` | `(W − y − h, x, h, w)` |
+    /// Map a display-space tile to the pre-rotation [`RenderRect`] whose
+    /// rotated render equals it (see
+    /// [`native_rect`](crate::djvu_render::native_rect) for the table).
     fn to_render_rect(self, r: TileRect) -> RenderRect {
-        let (fw, fh) = (self.full_width, self.full_height);
-        match self.rotation {
-            Rotation::None => RenderRect {
+        crate::djvu_render::native_rect(
+            self.rotation,
+            (self.full_width, self.full_height),
+            RenderRect {
                 x: r.x,
                 y: r.y,
                 width: r.width,
                 height: r.height,
             },
-            Rotation::Cw90 => RenderRect {
-                x: r.y,
-                y: fh - r.x - r.width,
-                width: r.height,
-                height: r.width,
-            },
-            Rotation::Rot180 => RenderRect {
-                x: fw - r.x - r.width,
-                y: fh - r.y - r.height,
-                width: r.width,
-                height: r.height,
-            },
-            Rotation::Ccw90 => RenderRect {
-                x: fw - r.y - r.height,
-                y: r.x,
-                width: r.height,
-                height: r.width,
-            },
-        }
+        )
     }
 }
 

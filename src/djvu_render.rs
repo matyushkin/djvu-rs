@@ -5316,6 +5316,102 @@ pub fn render_region_tiled(
     Ok(pm.expect("uncancellable render completed"))
 }
 
+/// Map a display-space rectangle back to the native rectangle whose rotated
+/// render equals it.
+///
+/// `native` is the pre-rotation canvas `(W, H)`; `r = (x, y, w, h)` lies
+/// inside that canvas turned by `rotation`. The region renderers select their
+/// sub-rectangle before rotating (`rotate_pixmap` runs last), so a display
+/// rectangle is pulled back through the inverse rotation:
+///
+/// | combined rotation | native rect |
+/// |---|---|
+/// | `None`  | `(x, y, w, h)` |
+/// | `Cw90`  | `(y, H − x − w, h, w)` |
+/// | `Rot180`| `(W − x − w, H − y − h, w, h)` |
+/// | `Ccw90` | `(W − y − h, x, h, w)` |
+pub(crate) fn native_rect(
+    rotation: crate::info::Rotation,
+    native: (u32, u32),
+    r: RenderRect,
+) -> RenderRect {
+    use crate::info::Rotation;
+    let (fw, fh) = native;
+    match rotation {
+        Rotation::None => r,
+        Rotation::Cw90 => RenderRect {
+            x: r.y,
+            y: fh - r.x - r.width,
+            width: r.height,
+            height: r.width,
+        },
+        Rotation::Rot180 => RenderRect {
+            x: fw - r.x - r.width,
+            y: fh - r.y - r.height,
+            width: r.width,
+            height: r.height,
+        },
+        Rotation::Ccw90 => RenderRect {
+            x: fw - r.y - r.height,
+            y: r.x,
+            width: r.height,
+            height: r.width,
+        },
+    }
+}
+
+/// [`render_region_tiled`] with `region` in display space: the coordinates
+/// address the rendered page after its combined INFO + user rotation, like
+/// the returned pixels. `opts.width`/`opts.height` stay native, as everywhere.
+///
+/// Pixels outside the display canvas are white, as in [`render_region`].
+#[cfg(feature = "std")]
+pub(crate) fn render_display_region_tiled(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    use crate::info::Rotation;
+    let rotation = opts.output_rotation(page);
+    if rotation == Rotation::None {
+        return render_region_tiled(page, region, opts);
+    }
+    check_output_pixels(
+        "render_region_tiled",
+        page,
+        None,
+        region.width,
+        region.height,
+    )?;
+    let native = (opts.width.max(1), opts.height.max(1));
+    let (dw, dh) = match rotation {
+        Rotation::Cw90 | Rotation::Ccw90 => (native.1, native.0),
+        Rotation::None | Rotation::Rot180 => native,
+    };
+    // Only the part inside the display canvas maps to native pixels.
+    let x1 = region.x.saturating_add(region.width).min(dw);
+    let y1 = region.y.saturating_add(region.height).min(dh);
+    if x1 <= region.x || y1 <= region.y {
+        return Ok(Pixmap::white(region.width, region.height));
+    }
+    let inside = RenderRect {
+        x: region.x,
+        y: region.y,
+        width: x1 - region.x,
+        height: y1 - region.y,
+    };
+    let pm = render_region_tiled(page, native_rect(rotation, native, inside), opts)?;
+    if (inside.width, inside.height) == (region.width, region.height) {
+        return Ok(pm);
+    }
+    let mut out = Pixmap::white(region.width, region.height);
+    let (out_stride, in_stride) = (region.width as usize * 4, inside.width as usize * 4);
+    for (row, src) in pm.data.chunks_exact(in_stride).enumerate() {
+        out.data[row * out_stride..row * out_stride + in_stride].copy_from_slice(src);
+    }
+    Ok(out)
+}
+
 /// [`render_region_tiled`] with a cooperative cancel flag (#691 slice 3).
 ///
 /// The flag is checked on entry and again before each internal
