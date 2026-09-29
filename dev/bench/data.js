@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790645815086,
+  "lastUpdate": 1790648148902,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20866,6 +20866,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 49321000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "70d393e6446a80004e5f2b0cc77be75bea8b4840",
+          "message": "fix!: one render size for rotated pages (#866)\n\nAdd a crate-internal `render_size` module. `RenderSize` turns a request\nin display space (DPI, scale, fit width/height/box, exact size) into the\nnative buffer size of `RenderOptions` and the display size of the\nreturned pixmap, with one rounding and clamping policy.\n\nEvery render entry point, exporter, and binding now asks it instead of\nre-deriving `page.width() * scale`:\n\n- `Page::render`, `render_to_size`, `size_at_dpi`: a quarter-turned page\n  rendered squashed and in the wrong orientation; it now comes out at\n  its display size with the right pixels.\n- `RenderOptions::fit_to_*`: `width`/`height` are native, so the pixmap\n  has the requested display size.\n- PDF: the raster stays in native orientation next to the masks, text,\n  and links, and the page gets `/Rotate`. Before, a rotated colour page\n  embedded a rotated raster at the native size.\n- TIFF (colour) and EPUB: the encoder gets the display size of the\n  rotated pixmap instead of the native size.\n- EPUB overlays: text and link rects follow the page rotation. Text\n  rects are top-left origin already; they are no longer flipped\n  vertically.\n- hOCR/ALTO at a DPI: the page box matches the rotated text zones.\n- wasm: `width_at`/`height_at`/`text_zones_json` use the display size;\n  `render_into_pixmap` rotates a rotated page.\n- CLI: the parallel `--all` PNG path honours `--rotate`.\n- Python: `render`, `render_coarse`, `render_progressive`, and the\n  `render_region` default size use the display size and the 0-DPI clamp.\n- `render_pages_parallel` and the foreign render options clamp a 0-DPI\n  page.\n\nKnown limitation (README): bilevel and CCITT G4 TIFF still write the\nmask in native orientation.\n\nBREAKING CHANGE: on a page with a 90° or 270° INFO rotation,\n`RenderOptions::fit_to_width/height/box` set `width`/`height` in the\nnative orientation (sides swapped against the requested display size),\n`Page::size_at_dpi` and the wasm `width_at`/`height_at` return the\ndisplay size, and PDF pages carry `/Rotate`. Upright pages are\nunchanged.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T01:53:41Z",
+          "tree_id": "12771b52a763087af64e06bea461a4c15ead28dc",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/70d393e6446a80004e5f2b0cc77be75bea8b4840"
+        },
+        "date": 1790648146945,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 98000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 4949000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30315000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 28463000,
             "range": "± 0",
             "unit": "ns/iter"
           }
