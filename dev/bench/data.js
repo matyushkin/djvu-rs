@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790648148902,
+  "lastUpdate": 1790669728828,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20914,6 +20914,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 28463000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0e3201d5b30c7e1eec5ad34423d3969a08d17b4a",
+          "message": "fix: one whole-pixmap rule for streaming and the tile cache (#867)\n\n`RenderOptions::whole_pixmap_reason` is now the single answer to \"does\nthis render need a whole pixmap before its output is final\": the\nanti-aliasing halving, Lanczos-3 at a scaled size, or a non-identity\ncombined INFO + user rotation. `can_stream` and `render_streaming` both\nask it, and `lanczos_rescales` is the one Lanczos-3 test shared with the\npost-pass and the tile cache.\n\nFixes:\n\n- The tile cache never served the wasm viewer. `foreign::render_opts_for_dpi`\n  is permissive, and `render_region_tiled` sent every permissive request\n  to an uncached region render. Strict and permissive requests now share\n  tiles: layers decode before any tile lookup, so a strict request on a\n  damaged page still fails, and on an intact page both modes composite\n  the same tiles.\n- Rotated requests bypassed the tile cache too. Tiles stay in native\n  orientation; the assembled region turns once, as in `render_region`.\n- `can_stream` rejected any INFO rotation, while `render_streaming`\n  accepted a user rotation that cancels it. `can_stream` now uses the\n  combined rotation, so the PDF exporter (which cancels the INFO\n  rotation since #866) streams rotated pages instead of buffering them.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T07:47:51Z",
+          "tree_id": "ab9a5248bc486d9add1133abec756bf13a915762",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0e3201d5b30c7e1eec5ad34423d3969a08d17b4a"
+        },
+        "date": 1790669726417,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 143000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7245000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 46547000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 44040000,
             "range": "± 0",
             "unit": "ns/iter"
           }
