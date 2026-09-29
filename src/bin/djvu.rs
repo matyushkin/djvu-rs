@@ -1610,6 +1610,10 @@ fn cmd_ocr(
                     .map_err(|e| e.to_string())?;
                 ocr_one(i, be.as_ref())
             })
+            // Collect first, then take the first error in page order: rayon's
+            // own `Result` collect returns whichever error comes first in time.
+            .collect::<Vec<_>>()
+            .into_iter()
             .collect::<Result<Vec<_>, String>>()?
     };
     #[cfg(not(feature = "parallel"))]

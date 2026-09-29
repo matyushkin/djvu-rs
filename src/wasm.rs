@@ -232,7 +232,9 @@ impl WasmDocument {
         #[cfg(feature = "parallel")]
         let out: Result<Vec<WasmPixmap>, String> = {
             use rayon::prelude::*;
-            idxs.par_iter().map(render_one).collect()
+            // First error in page order, not the first one in time.
+            let built: Vec<Result<WasmPixmap, String>> = idxs.par_iter().map(render_one).collect();
+            built.into_iter().collect()
         };
         #[cfg(not(feature = "parallel"))]
         let out: Result<Vec<WasmPixmap>, String> = idxs.iter().map(render_one).collect();
