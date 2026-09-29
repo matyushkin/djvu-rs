@@ -335,19 +335,14 @@ fn write_color_page<W: Write + Seek>(
     }
 }
 
+/// The encoder size and render options for `page` at `scale`. The size is
+/// the display size: the pixmap comes out after the page's INFO rotation.
+/// Only the size is set in the options; the pipeline derives the decode scale
+/// from it.
 fn color_render_options(page: &DjVuPage, scale: f32) -> (u32, u32, RenderOptions) {
-    let (w, h) =
-        crate::export_common::scaled_size(page.width() as u32, page.height() as u32, scale);
-
-    // Only the size is set; the pipeline derives the decode scale from `width`.
-    // The remaining fields (bold/aa/rotation/permissive/resampling) are the
-    // `RenderOptions` defaults.
-    let opts = RenderOptions {
-        width: w,
-        height: h,
-        ..RenderOptions::default()
-    };
-    (w, h, opts)
+    let size = crate::render_size::RenderSize::at_scale(page, scale);
+    let (w, h) = size.display;
+    (w, h, size.options())
 }
 
 #[cfg(not(feature = "parallel"))]
@@ -1148,6 +1143,27 @@ mod tests {
         assert!(!tiff.is_empty());
         let magic = &tiff[..4];
         assert!(magic == b"II\x2A\x00" || magic == b"MM\x00\x2A");
+
+        // The IFD declares the display (rotated) size and holds the rotated
+        // pixels — not the rotated pixels laid out at the native size.
+        let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(&tiff)).unwrap();
+        let want = djvu_render::render_pixmap(
+            page,
+            &crate::render_size::RenderSize::at_scale(page, 1.0).options(),
+        )
+        .unwrap();
+        assert_eq!(decoder.dimensions().unwrap(), (want.width, want.height));
+        assert_eq!(
+            (want.width, want.height),
+            (page.height() as u32, page.width() as u32)
+        );
+        let tiff::decoder::DecodingResult::U8(rgb) = decoder.read_image().unwrap() else {
+            panic!("expected 8-bit RGB");
+        };
+        assert!(
+            rgb == want.to_rgb(),
+            "TIFF pixels must match the rotated render"
+        );
     }
 
     /// `TiffOptions::default()` selects color mode at 1.0 scale.

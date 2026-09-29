@@ -29,6 +29,8 @@ use crate::{
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderOptions},
     export_control::{ExportObserver, NoOpObserver},
+    info::Rotation,
+    render_size::RenderSize,
     text::Rect,
 };
 
@@ -220,17 +222,37 @@ fn px_to_pt(px: f32, dpi: f32) -> f32 {
 
 // ---- Page rendering ---------------------------------------------------------
 
-/// Compute render dimensions for a page given `output_dpi` option.
+/// Raster size for a page given the `output_dpi` option.
 ///
-/// Returns `(render_w, render_h)` in pixels. When `output_dpi == 0` the native
-/// page resolution is returned unchanged.
-fn render_dims(page: &DjVuPage, output_dpi: u32) -> (u32, u32) {
+/// When `output_dpi == 0` the native page resolution is kept. The raster is
+/// embedded in the page's native orientation (render it with
+/// [`RenderSize::native_options`]); the page's `/Rotate` entry turns it.
+fn render_size(page: &DjVuPage, output_dpi: u32) -> RenderSize {
     let native_dpi = page.dpi().max(1) as f32;
     // PDF never upscales: a zero or above-native target DPI keeps native pixels.
     if output_dpi == 0 || output_dpi as f32 >= native_dpi {
-        return (page.width() as u32, page.height() as u32);
+        return RenderSize::at_scale(page, 1.0);
     }
-    crate::export_common::size_at_dpi(page, output_dpi as f32)
+    RenderSize::at_dpi(page, output_dpi as f32)
+}
+
+/// The PDF `/Rotate` angle (clockwise degrees) for a page's INFO rotation.
+fn pdf_rotate(rotation: Rotation) -> u16 {
+    match rotation {
+        Rotation::None => 0,
+        Rotation::Cw90 => 90,
+        Rotation::Rot180 => 180,
+        Rotation::Ccw90 => 270,
+    }
+}
+
+/// ` /Rotate N` for a page dictionary, or nothing for an upright page.
+fn rotate_entry(rotate: u16) -> String {
+    if rotate == 0 {
+        String::new()
+    } else {
+        format!(" /Rotate {rotate}")
+    }
 }
 
 /// Pre-rendered page data — all expensive compute done, ready for sequential PDF emit.
@@ -244,6 +266,9 @@ fn render_dims(page: &DjVuPage, output_dpi: u32) -> (u32, u32) {
 struct RenderedPage {
     pt_w: f32,
     pt_h: f32,
+    /// Clockwise page rotation for `/Rotate`: every layer (raster, masks,
+    /// text, links) is laid out in the page's native orientation.
+    rotate: u16,
     is_bilevel_only: bool,
     /// Fully encoded XObject body written as PDF resource `/Im0`.
     ///
@@ -296,16 +321,12 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
         }
         (Some(encode_img0_body(&rgb, rw, rh, opts)), layers)
     } else {
-        let (rw, rh) = render_dims(page, opts.output_dpi);
-        // Set only the output size: the render pipeline derives the IW44 decode
-        // scale from `width` (see `RenderOptions::decode_scale`). Previously this
-        // left `scale = 1.0` at every DPI, forcing a full-resolution wavelet
-        // decode followed by a downscale (#377).
-        let render_opts = RenderOptions {
-            width: rw,
-            height: rh,
-            ..RenderOptions::default()
-        };
+        let size = render_size(page, opts.output_dpi);
+        let (rw, rh) = size.native;
+        // The render pipeline derives the IW44 decode scale from `width` (see
+        // `RenderOptions::decode_scale`) (#377). The raster stays in native
+        // orientation to line up with the masks, text, and links.
+        let render_opts = size.native_options(page);
         let rgb = render_rgb_for_pdf(page, &render_opts, rw, rh)?;
 
         (
@@ -320,6 +341,7 @@ fn render_page_data(page: &DjVuPage, opts: &PdfOptions) -> Result<RenderedPage, 
     Ok(RenderedPage {
         pt_w,
         pt_h,
+        rotate: pdf_rotate(page.rotation()),
         is_bilevel_only,
         img0_body,
         mask_layers,
@@ -681,6 +703,7 @@ fn emit_page_objects<W: std::io::Write>(
 ) -> Result<usize, PdfError> {
     let pt_w = data.pt_w;
     let pt_h = data.pt_h;
+    let rotate = rotate_entry(data.rotate);
 
     let img_id = match data.img0_body {
         Some(body) => Some(w.add(body)?),
@@ -767,7 +790,7 @@ fn emit_page_objects<W: std::io::Write>(
     w.add(
         format!(
             "<< /Type /Page /Parent {pages_id} 0 R\n\
-               /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
+               /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]{rotate}\n\
                /Contents {content_id} 0 R\n\
                /Resources << {resources} >>{annots_str} >>"
         )
@@ -1271,10 +1294,11 @@ fn djvu_to_pdf_impl<W: std::io::Write>(
                 let dpi = page.dpi().max(1) as f32;
                 let pt_w = px_to_pt(page.width() as f32, dpi);
                 let pt_h = px_to_pt(page.height() as f32, dpi);
+                let rotate = rotate_entry(pdf_rotate(page.rotation()));
                 w.add(
                     format!(
                         "<< /Type /Page /Parent {pages_id} 0 R\n\
-                           /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]\n\
+                           /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]{rotate}\n\
                            /Resources << >> >>"
                     )
                     .into_bytes(),
@@ -2039,12 +2063,9 @@ mod tests {
     fn pdf_rgb_streaming_matches_pixmap_rgb() {
         let doc = load_doc("boy.djvu");
         let page = doc.page(0).unwrap();
-        let (rw, rh) = render_dims(page, PdfOptions::default().output_dpi);
-        let opts = RenderOptions {
-            width: rw,
-            height: rh,
-            ..RenderOptions::default()
-        };
+        let size = render_size(page, PdfOptions::default().output_dpi);
+        let (rw, rh) = size.native;
+        let opts = size.native_options(page);
 
         let streamed = render_rgb_for_pdf(page, &opts, rw, rh).unwrap();
         let pixmap = djvu_render::render_pixmap(page, &opts).unwrap();
