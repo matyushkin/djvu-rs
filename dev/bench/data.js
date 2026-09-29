@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790673401147,
+  "lastUpdate": 1790675038641,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21058,6 +21058,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 50973000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6da938daaf9c74f54902f88a7c1c6c8d0ee5afc9",
+          "message": "fix!: one page-export loop and error policy for every exporter (#870)\n\nPDF, EPUB, CBZ and TIFF each had a sequential and a parallel page loop,\nwith the batching, cancellation and progress rules copied into each. The\ncopies had drifted:\n\n- PDF replaced a page that failed to render with a blank page and\n  reported success. Its own docs promised an error.\n- Parallel TIFF built every page before writing any, with no memory bound.\n\nexport_common::export_pages now owns the loop: build pages (in bounded\nrayon batches with the `parallel` feature), emit them in page order,\nreport progress, poll cancellation. A page that fails to build fails the\nexport. Each exporter passes only its build and emit steps. The G4 TIFF\nwriter uses it for both passes.\n\nBREAKING CHANGE: PDF export of a document with a page that cannot be\nrendered now returns an error instead of writing a blank page.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T09:11:10Z",
+          "tree_id": "23834b8bb288bd22cf9c2d68d4d00c0e6e9fbf85",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/6da938daaf9c74f54902f88a7c1c6c8d0ee5afc9"
+        },
+        "date": 1790675036459,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 143000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7280000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45894000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43922000,
             "range": "± 0",
             "unit": "ns/iter"
           }
