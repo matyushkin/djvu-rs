@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.0](https://github.com/matyushkin/djvu-rs/compare/v0.37.0...v0.38.0) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* render_region with opts.aa now returns a crop of the anti-aliased page, which is opts.width/2 x opts.height/2; the region addresses that halved page. Before, it returned an unsmoothed crop of the full-size canvas.
+* render_into / render_into_with_limits / DjVuPage::render_into return RenderError::UnsupportedOption for options that need a whole pixmap (anti-aliasing, Lanczos-3 at a scaled size, or a combined INFO + user rotation), as render_streaming does, instead of writing an unrotated, unfiltered buffer. Check RenderOptions::can_stream or use render_pixmap. The image-crate DjVuDecoder now decodes in display orientation: its default size and with_size are after the INFO rotation. Anti-aliasing now halves progressive frames, ProgressiveDecoder frames and render_coarse output, and render_coarse applies Lanczos-3.
+* `DjvmError::ComponentDescriptorCountMismatch` is removed; no writer can produce it any more. `DjvmStreamWriter::add_component` now ignores the name (0x80) and title (0x40) bits and writes unknown component types as shared (0).
+* PDF export of a document with a page that cannot be rendered now returns an error instead of writing a blank page.
+* on pages with a non-zero INFO rotation, the (x, y, w, h) arguments of Page::render_region (and Python Page.render_region) address the rotated page, not the unrotated one. Upright pages are unchanged.
+* on a page with a 90° or 270° INFO rotation, `RenderOptions::fit_to_width/height/box` set `width`/`height` in the native orientation (sides swapped against the requested display size), `Page::size_at_dpi` and the wasm `width_at`/`height_at` return the display size, and PDF pages carry `/Rotate`. Upright pages are unchanged.
+* **mut:** `DjVuDocumentMut::set_metadata`/`remove_metadata` and `PageMut::set_metadata`/`remove_metadata` now return `Result<(), MutError>`. They fail when the existing annotation chunk does not parse (new `MutError::Annotation`), for an indirect DJVM, or for a legacy BM44/PM44 root.
+
+### Features
+
+* **async:** lazy loading for indirect DJVM documents ([#856](https://github.com/matyushkin/djvu-rs/issues/856)) ([af7a850](https://github.com/matyushkin/djvu-rs/commit/af7a850331da1b07c2cf34f4f2259f277644e69a))
+* **djvm:** write indirect indexes with shared components ([#857](https://github.com/matyushkin/djvu-rs/issues/857)) ([74a72da](https://github.com/matyushkin/djvu-rs/commit/74a72da5b506b71912f131c88bd4eccbcf13d7c2))
+* **jb2:** aligned refinement in bundles, colour masks and chunk_encode ([#859](https://github.com/matyushkin/djvu-rs/issues/859)) ([b166f05](https://github.com/matyushkin/djvu-rs/commit/b166f05e8c3a00874cca336519fdd6eb4c412da0))
+* **jb2:** lossless dictionary encoding with center-aligned refinement ([#858](https://github.com/matyushkin/djvu-rs/issues/858)) ([75e6d4b](https://github.com/matyushkin/djvu-rs/commit/75e6d4bf411df63028a3e53f7fdfee6036b9a4a4))
+* **mut:** write metadata where DjVuLibre reads it ([#853](https://github.com/matyushkin/djvu-rs/issues/853)) ([7e751a9](https://github.com/matyushkin/djvu-rs/commit/7e751a912d6220ebefb47d488c23c64ecc9d50da))
+* **py:** ship type stubs with TypedDict shapes ([#855](https://github.com/matyushkin/djvu-rs/issues/855)) ([1067b8a](https://github.com/matyushkin/djvu-rs/commit/1067b8aeae8d9956d2bb53fbb758d5f6ca91e926))
+* **wasm:** lazy indirect DJVM documents in the browser ([#862](https://github.com/matyushkin/djvu-rs/issues/862)) ([658d56f](https://github.com/matyushkin/djvu-rs/commit/658d56fa0b504135867d6ee620c27d24b2de05a7))
+
+
+### Bug Fixes
+
+* bilevel TIFF pages render as they display ([#868](https://github.com/matyushkin/djvu-rs/issues/868)) ([737bc7c](https://github.com/matyushkin/djvu-rs/commit/737bc7cc1e15b3530fd6a51e51d5946d27adee49))
+* clear wasm32 clippy drop_non_drop lints ([#863](https://github.com/matyushkin/djvu-rs/issues/863)) ([25d3e8a](https://github.com/matyushkin/djvu-rs/commit/25d3e8a47f89b9d8946e67e647f9a5bca69c4968))
+* **jb2:** decode our own output up to the 64 MP page limit ([#860](https://github.com/matyushkin/djvu-rs/issues/860)) ([c77d12f](https://github.com/matyushkin/djvu-rs/commit/c77d12f1e4ee3375ec92190685209f86f383aa0e))
+* one page-export loop and error policy for every exporter ([#870](https://github.com/matyushkin/djvu-rs/issues/870)) ([6da938d](https://github.com/matyushkin/djvu-rs/commit/6da938daaf9c74f54902f88a7c1c6c8d0ee5afc9))
+* one render pipeline behind every render entry point ([#872](https://github.com/matyushkin/djvu-rs/issues/872)) ([bda7813](https://github.com/matyushkin/djvu-rs/commit/bda7813b0eafdb2bd85ac0c9119efc6476a06b0c))
+* one render size for rotated pages ([#866](https://github.com/matyushkin/djvu-rs/issues/866)) ([70d393e](https://github.com/matyushkin/djvu-rs/commit/70d393e6446a80004e5f2b0cc77be75bea8b4840))
+* one whole-pixmap rule for streaming and the tile cache ([#867](https://github.com/matyushkin/djvu-rs/issues/867)) ([0e3201d](https://github.com/matyushkin/djvu-rs/commit/0e3201d5b30c7e1eec5ad34423d3969a08d17b4a))
+* page regions in display coordinates on rotated pages ([#869](https://github.com/matyushkin/djvu-rs/issues/869)) ([2160b1e](https://github.com/matyushkin/djvu-rs/commit/2160b1ef59f794ebe4a96925d88db3769a3515c5))
+* parallel exports report the first failing page ([#874](https://github.com/matyushkin/djvu-rs/issues/874)) ([c496fea](https://github.com/matyushkin/djvu-rs/commit/c496fea8af60785ecdf2f53fcd28287e66b43d68))
+* region renders honor anti-aliasing and Lanczos-3 ([#875](https://github.com/matyushkin/djvu-rs/issues/875)) ([b58d9ad](https://github.com/matyushkin/djvu-rs/commit/b58d9ad26f60be4efb4fde6dd3df0c5fff3e6341))
+
+
+### Performance Improvements
+
+* keep the bilinear row loop out of composite_into ([#873](https://github.com/matyushkin/djvu-rs/issues/873)) ([c79c5ee](https://github.com/matyushkin/djvu-rs/commit/c79c5eee9807e1a7cdf007cb2a20bb662ea62fc8))
+
+
+### Code Refactoring
+
+* one DIRM component table for every bundle writer ([#871](https://github.com/matyushkin/djvu-rs/issues/871)) ([f4dd12c](https://github.com/matyushkin/djvu-rs/commit/f4dd12c09afc0bb07b9cde0ecf23e7ed5fbca55f))
+
 ## [0.37.0](https://github.com/matyushkin/djvu-rs/compare/v0.36.0...v0.37.0) (2026-09-27)
 
 
