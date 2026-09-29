@@ -43,3 +43,18 @@ README examples (doctest gate), a roll call of CLI subcommands/flags, and a
 roll call of Cargo feature flags.
 _Avoid_: pre-commit check (it runs in the ordinary test suite, not a separate
 hook framework)
+
+### Document structure
+
+**Catalog**:
+The `DIRM` directory of a multi-page `FORM:DJVM`: the ordered list of its
+components (pages, shared components, thumbnails). One catalog assembler turns
+it into pages for every sync loader; only the component source differs
+(bundled bytes, a name resolver, a typed resolver).
+_Avoid_: directory (ambiguous with a file-system directory), manifest
+
+**Shared dictionary**:
+The `Djbz` symbol dictionary of a shared `FORM:DJVI` component. A page names
+the components it includes with `INCL` chunks; the first included component
+that holds a `Djbz` is the page's shared dictionary.
+_Avoid_: shared dict (in prose), DJVI (that is the form, not the dictionary)

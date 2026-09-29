@@ -53,7 +53,7 @@ use crate::{
     dirm::{DirmComponentKind, DirmPayload},
     djvu_document::{
         ComponentId, ComponentKind, ComponentResolveError, DjVuDocument, DjVuPage, DocError,
-        SharedDict,
+        SharedDict, assembly::incl_targets,
     },
     djvu_render::{self, RenderError, RenderOptions},
     djvu_tile::{TileCancelToken, TileError, TileRenderControls},
@@ -156,7 +156,9 @@ pub struct LazyDocument<R> {
     pages: Vec<LazyPageIndex>,
     shared: BTreeMap<String, LazyComponentIndex>,
     cache: Vec<OnceCell<Arc<DjVuPage>>>,
-    shared_cache: BTreeMap<String, OnceCell<Arc<SharedDict>>>,
+    /// Shared components by DIRM name; `None` once read when the component
+    /// holds no `Djbz` (for example shared annotations).
+    shared_cache: BTreeMap<String, OnceCell<Option<Arc<SharedDict>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +188,7 @@ where
 
         let form_type = &head[12..16];
         // A legacy FORM:BM44/PM44 image file is a one-page document too.
-        let (pages, shared) = if matches!(form_type, b"DJVU" | b"BM44" | b"PM44") {
+        let (pages, shared) = if crate::dirm::is_page_form(form_type) {
             (vec![LazyPageIndex { range: 0..file_len }], BTreeMap::new())
         } else if form_type == b"DJVM" {
             index_bundled_djvm(&mut reader).await?
@@ -236,13 +238,11 @@ where
             .get_or_try_init(|| async move {
                 let bytes = self.read_page_bytes(page.range).await?;
                 let form = parse_form(&bytes)?;
-                // A page may INCL several components (shared annotations AND
-                // the symbol dictionary, #624) — take the first include that
-                // resolves to a DJVI actually holding a Djbz, skipping the
-                // rest instead of failing on them.
+                // Same dictionary policy as the sync catalog assembler: the
+                // first INCL target that holds a Djbz is the dictionary (#624).
                 let mut shared_djbz = None;
-                for incl in form.chunks.iter().filter(|c| &c.id == b"INCL") {
-                    if let Ok(dict) = self.shared_djbz(incl.data).await {
+                for name in incl_targets(&form.chunks) {
+                    if let Some(dict) = self.shared_djbz(name).await? {
                         shared_djbz = Some(dict);
                         break;
                     }
@@ -254,28 +254,27 @@ where
             .cloned()
     }
 
-    async fn shared_djbz(&self, incl: &[u8]) -> Result<Arc<SharedDict>, AsyncLazyError> {
-        let name = core::str::from_utf8(incl.trim_ascii_end())
-            .map_err(|_| AsyncLazyError::Unsupported("INCL name is not valid UTF-8"))?;
-        let cell = self
-            .shared_cache
-            .get(name)
-            .ok_or(AsyncLazyError::Unsupported("INCL target is not in DIRM"))?;
+    /// The symbol dictionary of the shared component named `name`, or `None`
+    /// when the name is not in DIRM or the component has no `Djbz`.
+    ///
+    /// A read failure is returned, not cached: a transient I/O error must not
+    /// leave a page cached without its dictionary.
+    async fn shared_djbz(&self, name: &str) -> Result<Option<Arc<SharedDict>>, AsyncLazyError> {
+        let (Some(cell), Some(component)) = (self.shared_cache.get(name), self.shared.get(name))
+        else {
+            return Ok(None);
+        };
         cell.get_or_try_init(|| async move {
-            let component = self
-                .shared
-                .get(name)
-                .ok_or(AsyncLazyError::Unsupported("INCL target is not in DIRM"))?
-                .clone();
-            let bytes = self.read_page_bytes(component.range).await?;
+            let bytes = self.read_page_bytes(component.range.clone()).await?;
             let form = parse_form(&bytes)?;
             if form.form_type != *b"DJVI" {
                 return Err(AsyncLazyError::Unsupported("INCL target is not FORM:DJVI"));
             }
-            let djbz = form.chunks.iter().find(|c| &c.id == b"Djbz").ok_or(
-                AsyncLazyError::Unsupported("DJVI component is missing Djbz"),
-            )?;
-            Ok(Arc::new(SharedDict::new(djbz.data.to_vec())))
+            Ok(form
+                .chunks
+                .iter()
+                .find(|c| &c.id == b"Djbz")
+                .map(|djbz| Arc::new(SharedDict::new(djbz.data.to_vec()))))
         })
         .await
         .cloned()
@@ -471,7 +470,7 @@ where
             .get_or_try_init(|| async move {
                 let bytes = self.resolver.resolve(component).await?;
                 let form = parse_form(&bytes)?;
-                if !matches!(&form.form_type, b"DJVU" | b"BM44" | b"PM44") {
+                if !crate::dirm::is_page_form(&form.form_type) {
                     return Err(DocError::ComponentKindMismatch {
                         component: component.clone(),
                         found: form.form_type,
@@ -479,12 +478,11 @@ where
                     }
                     .into());
                 }
-                // Like the bundled loader (#624): a page may include shared
-                // annotations and a symbol dictionary; the first include that
-                // holds a Djbz is the dictionary.
+                // Same dictionary policy as the sync catalog assembler: the
+                // first INCL target that holds a Djbz is the dictionary (#624).
                 let mut shared_djbz = None;
-                for incl in form.chunks.iter().filter(|c| &c.id == b"INCL") {
-                    if let Some(dict) = self.shared_djbz(incl.data).await? {
+                for name in incl_targets(&form.chunks) {
+                    if let Some(dict) = self.shared_djbz(name).await? {
                         shared_djbz = Some(dict);
                         break;
                     }
@@ -498,10 +496,7 @@ where
 
     /// The symbol dictionary of the shared component an `INCL` names, or
     /// `None` when the name is not in DIRM or the component has no `Djbz`.
-    async fn shared_djbz(&self, incl: &[u8]) -> Result<Option<Arc<SharedDict>>, AsyncLazyError> {
-        let Ok(name) = core::str::from_utf8(incl.trim_ascii_end()) else {
-            return Ok(None);
-        };
+    async fn shared_djbz(&self, name: &str) -> Result<Option<Arc<SharedDict>>, AsyncLazyError> {
         let Some(cell) = self.shared.get(name) else {
             return Ok(None);
         };

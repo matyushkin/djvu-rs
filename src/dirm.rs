@@ -36,6 +36,27 @@ pub(crate) fn form_byte_range(offset: u32, size_be: [u8; 4]) -> Range<u64> {
     begin..begin.saturating_add(8).saturating_add(size)
 }
 
+/// Whether a FORM of this type is a page.
+///
+/// Besides `FORM:DJVU`, DjVuLibre treats a legacy `FORM:BM44`/`FORM:PM44`
+/// image file as a one-page document, and `djvm -c` bundles it as a page.
+/// Every reader, writer, and validator asks this one function.
+pub(crate) fn is_page_form(form_type: &[u8]) -> bool {
+    matches!(form_type, b"DJVU" | b"BM44" | b"PM44")
+}
+
+/// The DIRM component name an `INCL` chunk payload refers to.
+///
+/// Writers pad the name with a trailing NUL or whitespace; both are stripped.
+/// Returns `None` when the name is not UTF-8.
+pub(crate) fn incl_target(data: &[u8]) -> Option<&str> {
+    let end = data
+        .iter()
+        .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    core::str::from_utf8(&data[..end]).ok()
+}
+
 /// Component classification from a DIRM per-component flags byte (low 6 bits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirmComponentKind {

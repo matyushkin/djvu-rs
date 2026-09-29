@@ -9,7 +9,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::dirm::{BUNDLED_FLAG, DirmComponentKind, DirmPayload};
+use crate::dirm::{BUNDLED_FLAG, DirmComponentKind, DirmPayload, is_page_form};
 use crate::error::IffError;
 use crate::iff;
 use crate::{ComponentGraph, ComponentNodeKind};
@@ -1174,14 +1174,6 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     build_djvm(&components, &component_ids, &component_flags)
 }
 
-/// Whether a FORM of this type is a page.
-///
-/// Besides `FORM:DJVU`, DjVuLibre treats a legacy `FORM:BM44`/`FORM:PM44`
-/// image file as a one-page document, and `djvm -c` bundles it as a page.
-pub(crate) fn is_page_form(form_type: &[u8]) -> bool {
-    matches!(form_type, b"DJVU" | b"BM44" | b"PM44")
-}
-
 /// Whether a direct child of `FORM:DJVM` is a page component.
 fn is_page_component(chunk: &iff::IffChunk<'_>) -> bool {
     &chunk.id == b"FORM" && chunk.data.len() >= 4 && is_page_form(&chunk.data[..4])
@@ -1319,7 +1311,12 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
                     .chunks
                     .iter()
                     .filter(|chunk| chunk.id == *b"INCL")
-                    .map(|chunk| String::from_utf8_lossy(chunk.data.trim_ascii_end()).into_owned())
+                    .map(|chunk| {
+                        crate::dirm::incl_target(chunk.data).map_or_else(
+                            || String::from_utf8_lossy(chunk.data.trim_ascii_end()).into_owned(),
+                            str::to_owned,
+                        )
+                    })
                     .collect();
                 page_includes.push((name, includes));
                 1
