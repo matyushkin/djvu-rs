@@ -7,8 +7,11 @@
 //! common traversal:
 //!
 //!  * [`page_indices`] — the per-page loop, with optional single-page
-//!    selection (the hOCR/ALTO/EPUB/TIFF loops; the PDF loop keeps its own
-//!    rayon parallel form because it needs an indexed range).
+//!    selection (the hOCR and ALTO text writers).
+//!  * [`export_pages`] — the build-then-emit page loop the PDF, EPUB, CBZ and
+//!    TIFF writers share: bounded parallel batches with the `parallel`
+//!    feature, page-order emission, progress, cancellation, and one error
+//!    policy (a page that fails to build fails the export).
 //!  * Page sizing (DPI or scale → pixels, rotation-aware) is not here: it
 //!    lives in the crate-internal `render_size` module.
 //!  * [`word_spans`] — the leaf Word/Character descent the PDF and EPUB text
@@ -26,13 +29,14 @@
 
 use crate::annotation::{Rect as AnnotRect, Shape};
 use crate::djvu_document::{DjVuDocument, DjVuPage};
+use crate::export_control::ExportObserver;
 use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 
 /// Iterate the page indices to export: just page `only` when `Some`, otherwise
 /// every page `0..page_count`.
 ///
 /// Centralizes the `Box<dyn Iterator>` range the hOCR and ALTO writers
-/// duplicated verbatim; the EPUB and TIFF whole-document loops use it too.
+/// duplicated verbatim.
 pub(crate) fn page_indices(
     doc: &DjVuDocument,
     only: Option<usize>,
@@ -41,6 +45,89 @@ pub(crate) fn page_indices(
         Some(i) => Box::new(core::iter::once(i)),
         None => Box::new(0..doc.page_count()),
     }
+}
+
+/// How an [`export_pages`] run ended.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageRun {
+    /// Every page was built and emitted.
+    Finished,
+    /// The observer cancelled; pages emitted so far stay in the sink.
+    Cancelled,
+}
+
+/// Export `pages` in order: `build` each page (decode, render, encode), then
+/// `emit` it into the writer's serial sink.
+///
+/// `build` gets a page index and runs off the writer thread: with the
+/// `parallel` feature, pages build in bounded rayon batches of
+/// `8 × threads`, so at most one batch of built pages is held at a time. The
+/// batch size trades that memory bound against idle threads at each batch
+/// barrier; it measured within noise of an unbounded collect on a 504-page
+/// document (#606). Without the feature, each page is built and emitted
+/// before the next one starts.
+///
+/// `emit` gets the page's position in `pages` and the built value, always in
+/// page order, so output bytes do not depend on the feature. After each emit
+/// the observer gets `on_progress(position + 1, pages.len())`.
+///
+/// The observer's [`cancelled`](ExportObserver::cancelled) flag is polled
+/// before each batch and before each emit. A cancelled run returns
+/// [`PageRun::Cancelled`]; the caller picks its own cancellation result.
+///
+/// # Errors
+///
+/// The first error from `build` or `emit`, in page order. A page that cannot
+/// be built fails the whole export; no exporter substitutes a placeholder.
+#[allow(dead_code)]
+pub(crate) fn export_pages<T, E, B, M>(
+    pages: &[usize],
+    observer: &mut dyn ExportObserver,
+    build: B,
+    mut emit: M,
+) -> Result<PageRun, E>
+where
+    T: Send,
+    E: Send,
+    B: Fn(usize) -> Result<T, E> + Sync,
+    M: FnMut(usize, T) -> Result<(), E>,
+{
+    let total = pages.len();
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let chunk = rayon::current_num_threads().max(1) * 8;
+        for (batch, indices) in pages.chunks(chunk).enumerate() {
+            if observer.cancelled() {
+                return Ok(PageRun::Cancelled);
+            }
+            let built: Vec<T> = indices
+                .par_iter()
+                .map(|&i| build(i))
+                .collect::<Result<_, E>>()?;
+            for (offset, value) in built.into_iter().enumerate() {
+                if observer.cancelled() {
+                    return Ok(PageRun::Cancelled);
+                }
+                let position = batch * chunk + offset;
+                emit(position, value)?;
+                observer.on_progress(position + 1, total);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for (position, &i) in pages.iter().enumerate() {
+        if observer.cancelled() {
+            return Ok(PageRun::Cancelled);
+        }
+        emit(position, build(i)?)?;
+        observer.on_progress(position + 1, total);
+    }
+
+    Ok(PageRun::Finished)
 }
 
 /// Append the RGB bytes of one RGBA scanline to `dst`, dropping the alpha.
@@ -256,6 +343,86 @@ mod tests {
             text: text.to_string(),
             children,
         }
+    }
+
+    /// Records emits and progress; cancels once `cancel_after` pages are out.
+    struct Recorder {
+        progress: Vec<(usize, usize)>,
+        cancel_after: Option<usize>,
+    }
+
+    impl ExportObserver for Recorder {
+        fn on_progress(&mut self, done: usize, total: usize) {
+            self.progress.push((done, total));
+        }
+        fn cancelled(&self) -> bool {
+            self.cancel_after.is_some_and(|n| self.progress.len() >= n)
+        }
+    }
+
+    #[test]
+    fn export_pages_emits_in_order_with_progress() {
+        let pages: Vec<usize> = (0..50).rev().collect();
+        let mut obs = Recorder {
+            progress: Vec::new(),
+            cancel_after: None,
+        };
+        let mut emitted = Vec::new();
+        let run = export_pages(
+            &pages,
+            &mut obs,
+            |i| Ok::<_, ()>(i * 10),
+            |position, v| {
+                emitted.push((position, v));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(run, PageRun::Finished);
+        let want: Vec<(usize, usize)> = pages
+            .iter()
+            .enumerate()
+            .map(|(p, &i)| (p, i * 10))
+            .collect();
+        assert_eq!(emitted, want);
+        let progress: Vec<(usize, usize)> = (1..=50).map(|d| (d, 50)).collect();
+        assert_eq!(obs.progress, progress);
+    }
+
+    #[test]
+    fn export_pages_stops_on_cancel_and_on_first_error() {
+        let pages: Vec<usize> = (0..50).collect();
+        let mut obs = Recorder {
+            progress: Vec::new(),
+            cancel_after: Some(3),
+        };
+        let mut emitted = 0;
+        let run = export_pages(&pages, &mut obs, Ok::<_, ()>, |_, _| {
+            emitted += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((run, emitted), (PageRun::Cancelled, 3));
+
+        let mut obs = Recorder {
+            progress: Vec::new(),
+            cancel_after: None,
+        };
+        let mut emitted = Vec::new();
+        let err = export_pages(
+            &pages,
+            &mut obs,
+            |i| if i % 7 == 5 { Err(i) } else { Ok(i) },
+            |_, v| {
+                emitted.push(v);
+                Ok(())
+            },
+        );
+        assert_eq!(err, Err(5));
+        assert!(
+            emitted.iter().all(|&v| v < 5),
+            "no page after the failed one"
+        );
     }
 
     #[test]
