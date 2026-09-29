@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790669728828,
+  "lastUpdate": 1790671850423,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -20962,6 +20962,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 44040000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "737bc7cc1e15b3530fd6a51e51d5946d27adee49",
+          "message": "fix: bilevel TIFF pages render as they display (#868)\n\nBoth bilevel TIFF writers now read one `display_mask`: the page mask\nfrom `DjVuPage::extract_mask`, turned to the display orientation and\nsized to the page. The Deflate writer expands it with the inverted LUT\n`mask_to_gray8`.\n\nFixes in the Deflate (default) bilevel mode:\n\n- Colours were inverted. The strip is `Gray8`, which the `tiff` crate\n  tags BlackIsZero, but mask pixels were written as 255, so text came\n  out white on black. Black is now 0 and white 255.\n- Pages whose JB2 stream uses a shared dictionary (`Djbz` in an\n  included `DJVI`) failed with \"stream requires shared dict\": the\n  writer looked only for an inline dictionary.\n- Pages with an MMR (`Smmr`) mask were exported blank.\n\nIn both Deflate and G4 modes:\n\n- The page rotation is honoured (was a README limitation).\n- A mask smaller than the page keeps its pixels; before, G4 wrote a\n  blank page and Deflate read past the mask.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-29T08:24:54Z",
+          "tree_id": "8094b6ab13693a87b9c776ba0a8550b6c15f5b38",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/737bc7cc1e15b3530fd6a51e51d5946d27adee49"
+        },
+        "date": 1790671848008,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 137000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7137000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40987000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 39489000,
             "range": "± 0",
             "unit": "ns/iter"
           }
