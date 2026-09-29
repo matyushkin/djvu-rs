@@ -798,9 +798,6 @@ Honest boundaries, so you can decide fast:
   `DjVuDocumentMut::from_bytes` + `page_mut` on an indirect index errors;
   use `from_indirect_resolved` (rebundles) or `IndirectRewritePlan` (rewrites
   component files; per-file atomic, whole-commit not transactional).
-- **Bilevel TIFF ignores page rotation.** `TiffMode::Bilevel` and the CCITT
-  G4 path write the page mask in its native (unrotated) orientation. Colour
-  TIFF, PDF (via `/Rotate`), EPUB, CBZ, and PNG honour the INFO rotation.
 - **Legacy `FORM:BM44`/`FORM:PM44` pages are read-only.** They render and pass
   through save, merge, and split unchanged, but `page_mut` returns
   `MutError::LegacyIw44Page`: these files have no text or annotation layers
