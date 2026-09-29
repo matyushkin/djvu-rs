@@ -4018,7 +4018,11 @@ fn bg_blend_pixel(
 /// (`None` falls back to the in-loop fixed-point walk — byte-identical).
 /// `vblend` is caller-owned scratch for the vertically pre-blended bg row;
 /// reusing it across rows avoids a per-row allocation.
-#[inline]
+///
+/// `inline(never)`: inlined into `composite_into`, this loop compiles to
+/// code 11–14% slower on native-size renders (COMPOSITE_BILINEAR_NOINLINE in
+/// `PERF_EXPERIMENTS.md`).
+#[inline(never)]
 fn composite_rows_bilinear_one(
     ctx: &CompositeContext<'_>,
     oy: u32,

@@ -16320,3 +16320,41 @@ The floor is two copies: the spool plus the final buffer. A streamed
 `finish` to a file would go lower, but the public functions return
 `Vec<u8>`. Guard: `tests/djvm_peak_memory.rs` (peak under 2.5× the output;
 measured 2.01×, 4.51× on old main).
+
+### COMPOSITE_BILINEAR_NOINLINE — 2026-09-29
+
+**Issue.** After #872 (one render pipeline) native-size and moderate-downscale
+renders got slower, although the new code does the same work. The CI benchmark
+job hid it under a −44% runner drift. `sample` showed why: the old binary kept
+`composite_rows_bilinear_one` as a separate function; the new one inlined it
+into `composite_into`, and the inlined loop compiled to slower code.
+
+**Approach.** Tried `#[inline(never)]` on the two row functions of
+`composite_into`, in every combination: both (v1), only the bilinear row (v2),
+only the area-average row (v3). Each variant is a separate bench binary; the
+binaries ran in turn, three rounds, best of three (Apple Silicon,
+`benches/render.rs`, change vs f4dd12c, the commit before #872).
+
+**Numbers.**
+
+| Benchmark | #872 | v1 both | **v2 bilinear** | v3 area-avg |
+|---|---:|---:|---:|---:|
+| `render_page/dpi/72` | −40.3% | +0.3% | **−40.9%** | +0.5% |
+| `render_page/dpi/144` | +8.0% | +0.6% | **+2.3%** | +6.0% |
+| `render_page/dpi/300` | +8.4% | +1.0% | **+1.2%** | +5.1% |
+| `render_page/dpi/600` | +7.9% | +0.8% | **+2.3%** | +4.8% |
+| `render_colorbook` | −29.3% | +0.9% | **−29.2%** | +0.1% |
+| `render_native_stages/render_pixmap/watchmaker_color` | +12.7% | +1.2% | **+1.7%** | +10.8% |
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | +13.1% | +1.3% | **+0.1%** | +8.8% |
+| `render_native_stages/render_pixmap/cable_bilevel` | +13.9% | +1.2% | **−0.2%** | +10.3% |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | +13.9% | −1.4% | **−1.5%** | +11.0% |
+| `render_coarse` | +1.1% | +1.0% | **−0.0%** | −0.2% |
+
+Old code measured against itself stayed within ±4% (noise band of this run).
+
+**Decision.** Kept v2: `#[inline(never)]` on `composite_rows_bilinear_one`.
+
+**Reason.** v2 removes the #872 regression on native-size renders and keeps
+its gains on small scales (72 dpi, colorbook), which come from the inlined
+area-average row. Output is unchanged (codegen only). Measured on aarch64
+only; the Callgrind job in CI covers x86.
