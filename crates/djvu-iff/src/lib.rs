@@ -676,7 +676,8 @@ pub fn partial_emit_with_offsets(
         }
     }
     let len = u32::try_from(payload.len()).ok()?;
-    let mut out = Vec::with_capacity(8 + payload.len());
+    // AT&T + FORM + length prologue, the payload, and the defensive pad below.
+    let mut out = Vec::with_capacity(PROLOGUE + payload.len() + 1);
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(b"FORM");
     out.extend_from_slice(&len.to_be_bytes());

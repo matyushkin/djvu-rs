@@ -9,7 +9,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{format, string::String, vec, vec::Vec};
 
-use crate::dirm::{BUNDLED_FLAG, DirmComponentKind, DirmPayload, is_page_form};
+use crate::dirm::{BUNDLED_FLAG, DirmComponent, DirmComponentKind, DirmPayload, is_page_form};
 use crate::error::IffError;
 use crate::iff;
 use crate::{ComponentGraph, ComponentNodeKind};
@@ -100,19 +100,6 @@ pub enum DjvmError {
     #[error("stream I/O error: {0}")]
     Io(#[from] io::Error),
 
-    /// The component, id, and flag slices passed to a convenience builder disagree.
-    #[error(
-        "component descriptor count mismatch (components: {components}, ids: {ids}, flags: {flags})"
-    )]
-    ComponentDescriptorCountMismatch {
-        /// Number of component byte slices.
-        components: usize,
-        /// Number of component ids.
-        ids: usize,
-        /// Number of component flags.
-        flags: usize,
-    },
-
     /// More than `u16::MAX` components were supplied for one bundled DIRM.
     #[error("bundled DIRM supports at most 65535 components (got {count})")]
     TooManyComponents {
@@ -161,13 +148,6 @@ pub enum DjvmSpool {
     /// only the component currently passed to [`DjvmStreamWriter::add_component`]
     /// in RAM; the file is removed when the writer finishes or is dropped.
     TempFile,
-}
-
-struct SpoolComponent {
-    id: String,
-    flag: u8,
-    /// Length of the embedded component before its enclosing-DJVM alignment pad.
-    size: u32,
 }
 
 enum SpoolStorage {
@@ -288,12 +268,14 @@ impl Drop for TempFileSpool {
 /// [`Self::add_component`] accepts either a complete standalone `AT&T`-prefixed
 /// component file or the same component with only that four-byte `AT&T` prefix
 /// removed (a bare `FORM` sub-FORM). Components are embedded unchanged after
-/// stripping only the optional magic. `flag` is the DIRM kind: `0` shared,
-/// `1` page, or `2` thumbnail.
+/// stripping only the optional magic. `flag` is the DIRM component type:
+/// `0` shared, `1` page, `2` thumbnail, or `3` shared annotation.
 pub struct DjvmStreamWriter<W: Write> {
     sink: W,
     spool: SpoolStorage,
-    components: Vec<SpoolComponent>,
+    /// Directory entries; each `size` is the embedded component's length
+    /// before its enclosing-DJVM alignment pad.
+    components: Vec<DirmComponent>,
     document_chunks: Vec<iff::Chunk>,
 }
 
@@ -313,7 +295,21 @@ impl<W: Write> DjvmStreamWriter<W> {
     /// The supplied bytes are spooled immediately. In [`DjvmSpool::TempFile`]
     /// mode, the writer retains only this borrowed component while this call is
     /// running; the recorded directory data is just id, flag, and byte length.
+    ///
+    /// Only the low six bits of `flag` select the type, and a value other
+    /// than `1`, `2` or `3` is written as a shared component (`0`), as
+    /// readers classify it. The name and title bits (`0x80`, `0x40`) are
+    /// ignored: this writer records no separate names or titles.
     pub fn add_component(&mut self, id: &str, flag: u8, bytes: &[u8]) -> Result<(), DjvmError> {
+        self.add_entry(DirmComponentKind::from_flag(flag), id, bytes)
+    }
+
+    fn add_entry(
+        &mut self,
+        kind: DirmComponentKind,
+        id: &str,
+        bytes: &[u8],
+    ) -> Result<(), DjvmError> {
         if self.components.len() == usize::from(u16::MAX) {
             return Err(DjvmError::TooManyComponents {
                 count: self.components.len() + 1,
@@ -323,9 +319,9 @@ impl<W: Write> DjvmStreamWriter<W> {
         let component = strip_att(bytes);
         let size = u32::try_from(component.len()).map_err(|_| DjvmError::OutputTooLarge)?;
         self.spool.write_component(component)?;
-        self.components.push(SpoolComponent {
+        self.components.push(DirmComponent {
+            kind,
             id: id.to_string(),
-            flag,
             size,
         });
         Ok(())
@@ -364,20 +360,7 @@ impl<W: Write> DjvmStreamWriter<W> {
             components,
             document_chunks,
         } = self;
-        let component_count = components.len();
-        let ids = components
-            .iter()
-            .map(|component| component.id.clone())
-            .collect::<Vec<_>>();
-        let flags = components
-            .iter()
-            .map(|component| component.flag)
-            .collect::<Vec<_>>();
-        let sizes = components
-            .iter()
-            .map(|component| component.size)
-            .collect::<Vec<_>>();
-        let mut dirm = DirmPayload::build_bundled(component_count, &flags, &ids, &sizes);
+        let mut dirm = DirmPayload::build_bundled(&components);
 
         // The offset table is fixed-width and comes before the BZZ metadata.
         // Its final contents cannot affect the DIRM chunk's framed size, so all
@@ -491,6 +474,71 @@ pub struct PageRemoval {
     pub unreachable: Vec<String>,
 }
 
+/// A bundled `FORM:DJVM`, checked and split into its directory and the
+/// component `FORM` bodies: directory entry `i` describes `forms[i]`.
+struct Bundle<'a> {
+    dirm: DirmPayload,
+    directory: Vec<DirmComponent>,
+    /// Component `FORM` chunk data, starting with the 4-byte form type.
+    forms: Vec<&'a [u8]>,
+    /// Every direct child of the outer FORM, in file order.
+    chunks: Vec<iff::IffChunk<'a>>,
+}
+
+impl<'a> Bundle<'a> {
+    /// Parse a bundled document. Rejects an indirect or non-DJVM input, a
+    /// missing or malformed `DIRM`, and a directory whose entry count differs
+    /// from the number of embedded component FORMs.
+    fn parse(bundled: &'a [u8]) -> Result<Self, DjvmError> {
+        let form = iff::parse_form(bundled)?;
+        if form.form_type != *b"DJVM" {
+            return Err(DjvmError::NotBundledDjvm);
+        }
+        let dirm_data = form
+            .chunks
+            .iter()
+            .find(|chunk| chunk.id == *b"DIRM")
+            .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
+            .data;
+        let dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
+        if !dirm.is_bundled() {
+            return Err(DjvmError::NotBundledDjvm);
+        }
+        let directory = dirm.components();
+        let forms = form
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.id == *b"FORM")
+            .map(|chunk| chunk.data)
+            .collect::<Vec<_>>();
+        if forms.len() != directory.len() {
+            return Err(DjvmError::DirmComponentCountMismatch {
+                dirm: directory.len(),
+                children: forms.len(),
+            });
+        }
+        Ok(Self {
+            dirm,
+            directory,
+            forms,
+            chunks: form.chunks,
+        })
+    }
+
+    /// The document-level chunks (`NAVM` and any extensions), in order,
+    /// without the `DIRM` and the component FORMs.
+    fn document_chunks(&self) -> Vec<iff::Chunk> {
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
+            .map(|chunk| iff::Chunk::Leaf {
+                id: chunk.id,
+                data: chunk.data.to_vec(),
+            })
+            .collect()
+    }
+}
+
 /// Remove the pages at the given 0-based page indices (page order = DIRM order
 /// of `Page` components) from a bundled `FORM:DJVM`, applying `policy` to shared
 /// components that no longer have any including page.
@@ -499,36 +547,9 @@ pub fn remove_pages(
     pages_to_remove: &[usize],
     policy: UnreachablePolicy,
 ) -> Result<PageRemoval, DjvmError> {
-    let form = iff::parse_form(bundled)?;
-    if form.form_type != *b"DJVM" {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
-    let dirm_data = form
-        .chunks
-        .iter()
-        .find(|chunk| chunk.id == *b"DIRM")
-        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
-        .data;
-    let dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
-    if !dirm.is_bundled() {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
+    let bundle = Bundle::parse(bundled)?;
     let graph = ComponentGraph::parse(bundled)
         .map_err(|error| DjvmError::ComponentGraph(format!("{error:?}")))?;
-    let directory = dirm.components();
-    let component_forms = form
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.id == *b"FORM")
-        .collect::<Vec<_>>();
-    if component_forms.len() != directory.len() {
-        return Err(DjvmError::DirmComponentCountMismatch {
-            dirm: directory.len(),
-            children: component_forms.len(),
-        });
-    }
 
     let pages = graph
         .nodes()
@@ -586,9 +607,7 @@ pub fn remove_pages(
         removed_dirm_entries[page.dirm_index] = removed[index];
     }
 
-    let mut components = Vec::new();
-    let mut ids = Vec::new();
-    let mut flags = Vec::new();
+    let mut parts = Vec::new();
     for node in graph.nodes() {
         let keep = match node.kind {
             ComponentNodeKind::Page => !removed_dirm_entries[node.dirm_index],
@@ -602,23 +621,16 @@ pub fn remove_pages(
             ComponentNodeKind::Thumbnail => true,
         };
         if keep {
-            let component = component_forms[node.dirm_index];
-            components.push(wrap_sub_form(component.data));
-            ids.push(directory[node.dirm_index].id.clone());
-            flags.push(dirm_kind_flag(directory[node.dirm_index].kind));
+            let entry = &bundle.directory[node.dirm_index];
+            parts.push(BundlePart::new(
+                entry.kind,
+                entry.id.clone(),
+                bundle.forms[node.dirm_index],
+            ));
         }
     }
 
-    let document_chunks = form
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
-        .map(|chunk| iff::Chunk::Leaf {
-            id: chunk.id,
-            data: chunk.data.to_vec(),
-        })
-        .collect::<Vec<_>>();
-    let document = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)?;
+    let document = build_djvm_with_document_chunks(parts, &bundle.document_chunks())?;
 
     Ok(PageRemoval {
         document,
@@ -631,34 +643,8 @@ pub fn remove_pages(
 /// thumbnails are never merged; only exact byte-for-byte duplicate shared
 /// components are.
 pub fn dedup_shared_components(bundled: &[u8]) -> Result<ComponentDedup, DjvmError> {
-    let form = iff::parse_form(bundled)?;
-    if form.form_type != *b"DJVM" {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
-    let dirm_data = form
-        .chunks
-        .iter()
-        .find(|chunk| chunk.id == *b"DIRM")
-        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
-        .data;
-    let dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
-    if !dirm.is_bundled() {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
-    let directory = dirm.components();
-    let component_forms = form
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.id == *b"FORM")
-        .collect::<Vec<_>>();
-    if component_forms.len() != directory.len() {
-        return Err(DjvmError::DirmComponentCountMismatch {
-            dirm: directory.len(),
-            children: component_forms.len(),
-        });
-    }
+    let bundle = Bundle::parse(bundled)?;
+    let directory = &bundle.directory;
 
     // A BTreeMap makes this grouping deterministic, while the first entry seen
     // for each byte payload is necessarily its lowest DIRM index.
@@ -667,21 +653,21 @@ pub fn dedup_shared_components(bundled: &[u8]) -> Result<ComponentDedup, DjvmErr
     let mut merged = Vec::new();
     let mut dropped_to_survivor = std::collections::BTreeMap::new();
 
-    for (index, (entry, component)) in directory.iter().zip(&component_forms).enumerate() {
+    for (index, (entry, &component)) in directory.iter().zip(&bundle.forms).enumerate() {
         // Do not infer shareability from the FORM type alone: a malformed DIRM
         // could label a page or thumbnail as DJVI. Only a directory-declared
         // shared component with a DJVI body is eligible.
-        if entry.kind != DirmComponentKind::Shared || !component.data.starts_with(b"DJVI") {
+        if entry.kind != DirmComponentKind::Shared || !component.starts_with(b"DJVI") {
             continue;
         }
 
-        if let Some(&survivor) = survivor_by_payload.get(component.data) {
+        if let Some(&survivor) = survivor_by_payload.get(component) {
             keep[index] = false;
             let surviving_id = directory[survivor].id.clone();
             merged.push((entry.id.clone(), surviving_id.clone()));
             dropped_to_survivor.insert(entry.id.clone(), surviving_id);
         } else {
-            survivor_by_payload.insert(component.data.to_vec(), index);
+            survivor_by_payload.insert(component.to_vec(), index);
         }
     }
 
@@ -694,34 +680,21 @@ pub fn dedup_shared_components(bundled: &[u8]) -> Result<ComponentDedup, DjvmErr
         });
     }
 
-    let mut components = Vec::new();
-    let mut ids = Vec::new();
-    let mut flags = Vec::new();
-    for (index, (entry, component)) in directory.iter().zip(component_forms).enumerate() {
+    let mut parts = Vec::new();
+    for (index, (entry, &component)) in directory.iter().zip(&bundle.forms).enumerate() {
         if !keep[index] {
             continue;
         }
 
-        let body = if component.data.starts_with(b"DJVU") || component.data.starts_with(b"DJVI") {
-            rewrite_component_incls(component.data, &dropped_to_survivor)?
+        let body = if component.starts_with(b"DJVU") || component.starts_with(b"DJVI") {
+            rewrite_component_incls(component, &dropped_to_survivor)?
         } else {
-            component.data.to_vec()
+            component.to_vec()
         };
-        components.push(wrap_sub_form(&body));
-        ids.push(entry.id.clone());
-        flags.push(dirm_kind_flag(entry.kind));
+        parts.push(BundlePart::new(entry.kind, entry.id.clone(), &body));
     }
 
-    let document_chunks = form
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.id != *b"DIRM" && chunk.id != *b"FORM")
-        .map(|chunk| iff::Chunk::Leaf {
-            id: chunk.id,
-            data: chunk.data.to_vec(),
-        })
-        .collect::<Vec<_>>();
-    let document = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)?;
+    let document = build_djvm_with_document_chunks(parts, &bundle.document_chunks())?;
 
     Ok(ComponentDedup { document, merged })
 }
@@ -777,15 +750,6 @@ fn rewrite_component_incls(
     Ok(emitted[12..12 + length].to_vec())
 }
 
-fn dirm_kind_flag(kind: DirmComponentKind) -> u8 {
-    match kind {
-        DirmComponentKind::Shared => 0,
-        DirmComponentKind::Page => 1,
-        DirmComponentKind::Thumbnail => 2,
-        DirmComponentKind::SharedAnno => 3,
-    }
-}
-
 /// Re-serialize a sub-FORM child — the raw `data` of a `FORM` chunk, which
 /// begins with its 4-byte form type — back into a standalone `AT&T`-prefixed
 /// FORM document. Inverse of [`strip_att`].
@@ -824,42 +788,20 @@ fn strip_att(form: &[u8]) -> &[u8] {
 /// component is a complete `AT&T`-prefixed `FORM:DJVU`, `FORM:DJVI`, or
 /// `FORM:THUM` file suitable for [`crate::djvu_document::ComponentResolver`].
 pub fn to_indirect(bundled: &[u8]) -> Result<IndirectDocument, DjvmError> {
-    let form = iff::parse_form(bundled)?;
-    if form.form_type != *b"DJVM" {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
-    let dirm_data = form
-        .chunks
-        .iter()
-        .find(|chunk| chunk.id == *b"DIRM")
-        .ok_or(DjvmError::DirmMalformed("bundled DJVM has no DIRM chunk"))?
-        .data;
-    let mut dirm = DirmPayload::decode(dirm_data).map_err(DjvmError::DirmMalformed)?;
-    if !dirm.is_bundled() {
-        return Err(DjvmError::NotBundledDjvm);
-    }
-
-    let component_forms = form
-        .chunks
-        .iter()
-        .filter(|chunk| chunk.id == *b"FORM")
-        .collect::<Vec<_>>();
-    let expected_count = dirm.nfiles as usize;
-    if component_forms.len() != expected_count {
-        return Err(DjvmError::DirmComponentCountMismatch {
-            dirm: expected_count,
-            children: component_forms.len(),
-        });
-    }
+    let Bundle {
+        mut dirm,
+        directory,
+        forms,
+        chunks,
+    } = Bundle::parse(bundled)?;
+    let expected_count = forms.len();
 
     // The BZZ metadata tail is opaque here. Decoding it only supplies the
     // resolver keys; the re-emitted DIRM carries the original metadata bytes.
-    let components = dirm
-        .components()
+    let components = directory
         .into_iter()
-        .zip(component_forms)
-        .map(|(component, form)| (component.id, wrap_sub_form(form.data)))
+        .zip(forms)
+        .map(|(component, form)| (component.id, wrap_sub_form(form)))
         .collect();
 
     // Bundled DIRM layout is [flags][nfiles][offset table][BZZ metadata].
@@ -872,9 +814,9 @@ pub fn to_indirect(bundled: &[u8]) -> Result<IndirectDocument, DjvmError> {
     // Preserve document-level chunks (NAVM and any extensions) in their
     // original order while removing all embedded component FORMs. Re-frame
     // leaves through the IFF emission seam so length and padding are correct.
-    let mut index_chunks = Vec::with_capacity(form.chunks.len() - expected_count);
+    let mut index_chunks = Vec::with_capacity(chunks.len() - expected_count);
     let mut replaced_dirm = false;
-    for chunk in &form.chunks {
+    for chunk in &chunks {
         match chunk.id {
             id if id == *b"FORM" => {}
             id if id == *b"DIRM" && !replaced_dirm => {
@@ -918,9 +860,7 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
         return Err(DjvmError::EmptyMerge);
     }
 
-    let mut components: Vec<Vec<u8>> = Vec::new();
-    let mut component_ids: Vec<String> = Vec::new();
-    let mut component_flags: Vec<u8> = Vec::new();
+    let mut parts: Vec<BundlePart> = Vec::new();
     let mut used_ids = BTreeSet::<String>::new();
     let mut have_shared_anno = false;
 
@@ -948,11 +888,13 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
             let id = claim_id(
                 &mut used_ids,
                 doc_idx,
-                format!("p{:04}.djvu", components.len() + 1),
+                format!("p{:04}.djvu", parts.len() + 1),
             );
-            components.push(doc_data.to_vec());
-            component_ids.push(id);
-            component_flags.push(1); // page
+            parts.push(BundlePart {
+                kind: DirmComponentKind::Page,
+                id,
+                bytes: doc_data.to_vec(),
+            });
         } else if &form.form_type == b"DJVM" {
             // Multi-page bundled document — extract each FORM child. DIRM entry
             // i describes FORM child i; without a matching bundled directory,
@@ -975,46 +917,44 @@ pub fn merge(documents: &[&[u8]]) -> Result<Vec<u8>, DjvmError> {
             let mut kept = Vec::new();
             for (index, chunk) in forms.iter().enumerate() {
                 let entry = directory.as_ref().map(|entries| &entries[index]);
-                let flag = match &chunk.data[..4] {
-                    form_type if is_page_form(form_type) => 1,
+                let kind = match &chunk.data[..4] {
+                    form_type if is_page_form(form_type) => DirmComponentKind::Page,
                     b"THUM" => continue,
                     _ if entry.is_some_and(|e| e.kind == DirmComponentKind::SharedAnno)
                         && !have_shared_anno =>
                     {
                         have_shared_anno = true;
-                        3
+                        DirmComponentKind::SharedAnno
                     }
-                    _ => 0,
+                    _ => DirmComponentKind::Shared,
                 };
                 let original = entry
                     .map(|e| e.id.clone())
                     .filter(|id| !id.is_empty())
-                    .unwrap_or_else(|| format!("d{doc_idx}p{:04}.djvu", components.len() + 1));
+                    .unwrap_or_else(|| format!("d{doc_idx}p{:04}.djvu", parts.len() + 1));
                 let id = claim_id(&mut used_ids, doc_idx, original.clone());
                 if id != original {
                     renamed.insert(original, id.clone());
                 }
-                kept.push((chunk.data, id, flag));
+                kept.push((chunk.data, id, kind));
             }
 
-            for (data, id, flag) in kept {
-                let body = if renamed.is_empty() {
-                    data.to_vec()
+            for (data, id, kind) in kept {
+                let part = if renamed.is_empty() {
+                    BundlePart::new(kind, id, data)
                 } else {
-                    rewrite_component_incls(data, &renamed)?
+                    BundlePart::new(kind, id, &rewrite_component_incls(data, &renamed)?)
                 };
-                components.push(wrap_sub_form(&body));
-                component_ids.push(id);
-                component_flags.push(flag);
+                parts.push(part);
             }
         }
     }
 
-    if components.is_empty() {
+    if parts.is_empty() {
         return Err(DjvmError::EmptyMerge);
     }
 
-    build_djvm(&components, &component_ids, &component_flags)
+    build_djvm(parts)
 }
 
 /// Split a document, extracting pages in the given range (0-based, exclusive end).
@@ -1117,44 +1057,41 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
                 .and_then(|chunk| DirmPayload::decode(chunk.data).ok())
                 .map(|dirm| dirm.components())
                 .unwrap_or_default();
-            let mut components = Vec::new();
-            let mut component_ids = Vec::new();
-            let mut component_flags = Vec::new();
+            let mut parts = Vec::new();
 
             // The graph and reader both correlate DIRM entry i with embedded
             // FORM child i.  Iterating nodes keeps the output in DIRM order.
             for node in graph.nodes() {
                 if selected[node.dirm_index] {
-                    let component = component_forms[node.dirm_index];
-                    components.push(wrap_sub_form(component.data));
-                    component_ids.push(node.id.clone());
                     let shared_anno = directory
                         .get(node.dirm_index)
                         .is_some_and(|entry| entry.kind == DirmComponentKind::SharedAnno);
-                    component_flags.push(match node.kind {
-                        ComponentNodeKind::Page => 1,
-                        _ if shared_anno => 3,
-                        _ => 0,
-                    });
+                    let kind = match node.kind {
+                        ComponentNodeKind::Page => DirmComponentKind::Page,
+                        _ if shared_anno => DirmComponentKind::SharedAnno,
+                        _ => DirmComponentKind::Shared,
+                    };
+                    parts.push(BundlePart::new(
+                        kind,
+                        node.id.clone(),
+                        component_forms[node.dirm_index].data,
+                    ));
                 }
             }
 
-            return build_djvm(&components, &component_ids, &component_flags);
+            return build_djvm(parts);
         }
     }
 
     // Fallback for indirect, malformed, and otherwise non-graph DJVMs: keep
     // the historical FORM-based extraction behaviour.
-    let mut components: Vec<Vec<u8>> = Vec::new();
-    let mut component_ids: Vec<String> = Vec::new();
-    let mut component_flags: Vec<u8> = Vec::new();
+    let mut parts: Vec<BundlePart> = Vec::new();
 
     // First pass: collect shared components (DJVI) that might be needed
     for chunk in &form.chunks {
         if &chunk.id == b"FORM" && chunk.data.len() >= 4 && &chunk.data[..4] == b"DJVI" {
-            components.push(wrap_sub_form(chunk.data));
-            component_ids.push(format!("shared{}.djvi", components.len()));
-            component_flags.push(0); // shared
+            let id = format!("shared{}.djvi", parts.len() + 1);
+            parts.push(BundlePart::new(DirmComponentKind::Shared, id, chunk.data));
         }
     }
 
@@ -1163,20 +1100,38 @@ pub fn split(doc_data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, DjvmE
     for chunk in &form.chunks {
         if is_page_component(chunk) {
             if page_idx >= start && page_idx < end {
-                components.push(wrap_sub_form(chunk.data));
-                component_ids.push(format!("p{:04}.djvu", page_idx + 1));
-                component_flags.push(1); // page
+                let id = format!("p{:04}.djvu", page_idx + 1);
+                parts.push(BundlePart::new(DirmComponentKind::Page, id, chunk.data));
             }
             page_idx += 1;
         }
     }
 
-    build_djvm(&components, &component_ids, &component_flags)
+    build_djvm(parts)
 }
 
 /// Whether a direct child of `FORM:DJVM` is a page component.
 fn is_page_component(chunk: &iff::IffChunk<'_>) -> bool {
     &chunk.id == b"FORM" && chunk.data.len() >= 4 && is_page_form(&chunk.data[..4])
+}
+
+/// One component for [`build_djvm`]: its directory type and id, and its bytes
+/// in either form [`DjvmStreamWriter::add_component`] accepts.
+pub(crate) struct BundlePart {
+    pub(crate) kind: DirmComponentKind,
+    pub(crate) id: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl BundlePart {
+    /// A part from a component `FORM` body (a DJVM child's chunk data).
+    pub(crate) fn new(kind: DirmComponentKind, id: String, form_body: &[u8]) -> Self {
+        Self {
+            kind,
+            id,
+            bytes: wrap_sub_form(form_body),
+        }
+    }
 }
 
 /// Build a bundled DJVM file from components.
@@ -1186,32 +1141,29 @@ fn is_page_component(chunk: &iff::IffChunk<'_>) -> bool {
 /// so this writer shares the one emission seam (#367). The DIRM goes through as
 /// a re-framed [`iff::Chunk`]; each component is copied verbatim (its AT&T magic
 /// stripped, since it is embedded, not a standalone file).
-fn build_djvm(components: &[Vec<u8>], ids: &[String], flags: &[u8]) -> Result<Vec<u8>, DjvmError> {
-    build_djvm_with_document_chunks(components, ids, flags, &[])
+pub(crate) fn build_djvm(parts: Vec<BundlePart>) -> Result<Vec<u8>, DjvmError> {
+    build_djvm_with_document_chunks(parts, &[])
 }
 
 /// Build a bundled DJVM, retaining the supplied document-level chunks between
 /// the rebuilt DIRM and embedded component FORMs.
+///
+/// Peak memory stays near twice the output size: each part is dropped once
+/// spooled, and the spool is sized once up front.
 fn build_djvm_with_document_chunks(
-    components: &[Vec<u8>],
-    ids: &[String],
-    flags: &[u8],
+    parts: Vec<BundlePart>,
     document_chunks: &[iff::Chunk],
 ) -> Result<Vec<u8>, DjvmError> {
-    if components.len() != ids.len() || components.len() != flags.len() {
-        return Err(DjvmError::ComponentDescriptorCountMismatch {
-            components: components.len(),
-            ids: ids.len(),
-            flags: flags.len(),
-        });
-    }
-
     // Keep every convenience API on the streaming implementation. The memory
     // spool preserves the Vec-returning surface while the TempFile spool is
     // available to callers whose documents cannot fit in a component Vec.
     let mut writer = DjvmStreamWriter::new(Vec::new(), DjvmSpool::Memory)?;
-    for ((component, id), &flag) in components.iter().zip(ids).zip(flags) {
-        writer.add_component(id, flag, component)?;
+    if let SpoolStorage::Memory(spool) = &mut writer.spool {
+        // Each part adds at most its bytes plus one alignment pad.
+        spool.reserve_exact(parts.iter().map(|part| part.bytes.len() + 1).sum());
+    }
+    for part in parts {
+        writer.add_entry(part.kind, &part.id, &part.bytes)?;
     }
     for chunk in document_chunks {
         writer.add_document_iff_chunk(chunk);
@@ -1239,16 +1191,20 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
         return Err(DjvmError::EmptyMerge);
     }
 
-    let count = page_names.len();
-    let ids: Vec<String> = page_names.iter().map(|s| s.to_string()).collect();
-    // All entries are pages (flag = 1)
-    let flags: Vec<u8> = vec![1u8; count];
+    let pages = page_names
+        .iter()
+        .map(|name| DirmComponent {
+            kind: DirmComponentKind::Page,
+            id: name.to_string(),
+            size: 0,
+        })
+        .collect::<Vec<_>>();
 
     // Indirect: a single DIRM chunk, no embedded component FORMs. Route the
     // DJVM framing through the emission seam (same path as the bundled build).
     let dirm = iff::Chunk::Leaf {
         id: *b"DIRM",
-        data: DirmPayload::build_indirect(count, &flags, &ids).encode(),
+        data: DirmPayload::build_indirect(&pages).encode(),
     };
     iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).ok_or(DjvmError::OutputTooLarge)
 }
@@ -1288,8 +1244,7 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
     }
 
     let mut index_of: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut flags = Vec::with_capacity(components.len());
-    let mut sizes = Vec::with_capacity(components.len());
+    let mut entries = Vec::with_capacity(components.len());
     let mut page_includes: Vec<(&str, BTreeSet<String>)> = Vec::new();
     // Shared components that could hold the shared annotation, in order.
     let mut anno_candidates: Vec<(&str, usize)> = Vec::new();
@@ -1304,8 +1259,7 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
         let form_bytes = strip_att(bytes);
         let declared =
             u32::from_be_bytes([form_bytes[4], form_bytes[5], form_bytes[6], form_bytes[7]]);
-        sizes.push(declared.saturating_add(8));
-        let flag = match &form.form_type {
+        let kind = match &form.form_type {
             form_type if is_page_form(form_type) => {
                 let includes = form
                     .chunks
@@ -1319,16 +1273,16 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
                     })
                     .collect();
                 page_includes.push((name, includes));
-                1
+                DirmComponentKind::Page
             }
             b"DJVI" => {
                 let has = |id: &[u8; 4]| form.chunks.iter().any(|chunk| chunk.id == *id);
                 if !has(b"Djbz") && (has(b"ANTa") || has(b"ANTz")) {
                     anno_candidates.push((name, index));
                 }
-                0
+                DirmComponentKind::Shared
             }
-            b"THUM" => 2,
+            b"THUM" => DirmComponentKind::Thumbnail,
             other => {
                 return Err(DjvmError::UnsupportedComponentForm {
                     name: name.to_string(),
@@ -1336,17 +1290,23 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
                 });
             }
         };
-        flags.push(flag);
+        entries.push(DirmComponent {
+            kind,
+            id: name.to_string(),
+            size: declared.saturating_add(8),
+        });
     }
     if page_includes.is_empty() {
         return Err(DjvmError::EmptyMerge);
     }
 
     for (page, includes) in &page_includes {
-        if let Some(include) = includes
-            .iter()
-            .find(|include| index_of.get(include.as_str()).map(|&index| flags[index]) != Some(0))
-        {
+        if let Some(include) = includes.iter().find(|include| {
+            index_of
+                .get(include.as_str())
+                .map(|&index| entries[index].kind)
+                != Some(DirmComponentKind::Shared)
+        }) {
             return Err(DjvmError::UnresolvedInclude {
                 page: page.to_string(),
                 include: include.clone(),
@@ -1358,17 +1318,12 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
             .iter()
             .all(|(_, includes)| includes.contains(*name))
     }) {
-        flags[index] = 3;
+        entries[index].kind = DirmComponentKind::SharedAnno;
     }
 
-    let ids: Vec<String> = components
-        .iter()
-        .map(|(name, _)| name.to_string())
-        .collect();
     let dirm = iff::Chunk::Leaf {
         id: *b"DIRM",
-        data: DirmPayload::build_indirect_with_sizes(components.len(), &flags, &ids, &sizes)
-            .encode(),
+        data: DirmPayload::build_indirect(&entries).encode(),
     };
     iff::partial_emit(*b"DJVM", &[iff::EmitPart::Chunk(&dirm)]).ok_or(DjvmError::OutputTooLarge)
 }
@@ -1435,19 +1390,16 @@ mod tests {
             .iter()
             .map(split_component_body)
             .collect::<Vec<_>>();
-        let ids = components
+        let entries = components
             .iter()
-            .map(|component| component.id.to_string())
+            .zip(&bodies)
+            .map(|(component, body)| DirmComponent {
+                kind: DirmComponentKind::from_flag(component.dirm_flag),
+                id: component.id.to_string(),
+                size: u32::try_from(8 + body.len()).unwrap(),
+            })
             .collect::<Vec<_>>();
-        let flags = components
-            .iter()
-            .map(|component| component.dirm_flag)
-            .collect::<Vec<_>>();
-        let sizes = bodies
-            .iter()
-            .map(|body| u32::try_from(8 + body.len()).unwrap())
-            .collect::<Vec<_>>();
-        let mut dirm = DirmPayload::build_bundled(components.len(), &flags, &ids, &sizes);
+        let mut dirm = DirmPayload::build_bundled(&entries);
         let document_chunks = document_chunks
             .into_iter()
             .map(|(id, data)| iff::Chunk::Leaf { id, data })
@@ -1523,11 +1475,16 @@ mod tests {
             .iter()
             .map(|component| strip_att(component))
             .collect::<Vec<_>>();
-        let sizes = stripped
+        let entries = stripped
             .iter()
-            .map(|component| u32::try_from(component.len()).expect("small fixture component"))
+            .zip(ids.iter().zip(flags))
+            .map(|(component, (id, &flag))| DirmComponent {
+                kind: DirmComponentKind::from_flag(flag),
+                id: id.clone(),
+                size: u32::try_from(component.len()).expect("small fixture component"),
+            })
             .collect::<Vec<_>>();
-        let mut dirm = DirmPayload::build_bundled(components.len(), flags, ids, &sizes);
+        let mut dirm = DirmPayload::build_bundled(&entries);
         let emit = |dirm: &DirmPayload| {
             let dirm_chunk = iff::Chunk::Leaf {
                 id: *b"DIRM",
@@ -1563,7 +1520,16 @@ mod tests {
     fn stream_writer_matches_vec_builder_and_parses_for_both_spools() {
         let (components, ids, flags, document_chunks) = stream_writer_fixture();
         let reference = two_pass_djvm_reference(&components, &ids, &flags, &document_chunks);
-        let expected = build_djvm_with_document_chunks(&components, &ids, &flags, &document_chunks)
+        let parts = components
+            .iter()
+            .zip(ids.iter().zip(&flags))
+            .map(|(bytes, (id, &flag))| BundlePart {
+                kind: DirmComponentKind::from_flag(flag),
+                id: id.clone(),
+                bytes: bytes.clone(),
+            })
+            .collect::<Vec<_>>();
+        let expected = build_djvm_with_document_chunks(parts, &document_chunks)
             .expect("build through vector convenience API");
         assert_eq!(expected, reference, "Vec API must preserve old IFF framing");
 
@@ -1601,6 +1567,34 @@ mod tests {
             let graph = ComponentGraph::parse(&actual).expect("parse streamed component graph");
             assert!(graph.validate().is_empty(), "streamed graph must validate");
         }
+    }
+
+    #[test]
+    fn stream_writer_ignores_name_and_title_bits_in_a_flag() {
+        // The writer records no separate names or titles, so a caller's 0x80 or
+        // 0x40 bit must not reach the DIRM: readers would then consume the next
+        // id as a name and shift every later entry.
+        let page = std::fs::read(fixture_path("chicken.djvu")).expect("read page");
+        let mut writer =
+            DjvmStreamWriter::new(Vec::new(), DjvmSpool::Memory).expect("create writer");
+        writer.add_component("a.djvu", 0x81, &page).unwrap();
+        writer.add_component("b.djvu", 0x41, &page).unwrap();
+        writer.add_component("c.djvu", 0x07, &page).unwrap();
+        let bundled = writer.finish().unwrap();
+
+        let directory = Bundle::parse(&bundled).expect("parse bundle").directory;
+        let entries = directory
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            [
+                ("a.djvu", DirmComponentKind::Page),
+                ("b.djvu", DirmComponentKind::Page),
+                ("c.djvu", DirmComponentKind::Shared),
+            ]
+        );
     }
 
     #[test]
