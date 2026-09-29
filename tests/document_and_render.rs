@@ -501,6 +501,42 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
     );
 }
 
+/// Strict and permissive tiled renders share the tile cache. A permissive
+/// render caches tiles for a damaged page; a strict render of the same page
+/// must still fail instead of serving those tiles.
+#[test]
+fn strict_tiled_render_fails_after_permissive_one_on_truncated_bg44() {
+    let corrupted = make_truncated_bg44_djvu();
+    let doc = DjVuDocument::parse(&corrupted).unwrap();
+    let page = doc.page(0).unwrap();
+    let region = RenderRect {
+        x: 0,
+        y: 0,
+        width: 64,
+        height: 64,
+    };
+    let permissive = RenderOptions {
+        width: page.width() as u32,
+        height: page.height() as u32,
+        permissive: true,
+        ..RenderOptions::default()
+    };
+    let tiled = render_region_tiled(page, region, &permissive)
+        .expect("permissive tiled render must recover");
+    assert_eq!(
+        tiled.data,
+        render_region(page, region, &permissive).unwrap().data
+    );
+    let strict = RenderOptions {
+        permissive: false,
+        ..permissive
+    };
+    assert!(
+        render_region_tiled(page, region, &strict).is_err(),
+        "a strict request must not read tiles a permissive one cached"
+    );
+}
+
 /// #696: the permissive render report must name the recovered layer.
 #[test]
 fn permissive_report_records_truncated_bg44_recovery() {
