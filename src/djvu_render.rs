@@ -2578,6 +2578,21 @@ fn decode_background_chunks(
     Ok(Background::None)
 }
 
+/// How many BG44 chunks a full-detail render (`max_chunks == usize::MAX`)
+/// decodes at `subsample`: all of them, or only the first at subsample 4 and
+/// above, where the later chunks refine detail too fine to show.
+///
+/// The strict path follows it through the first-chunk `bg44_partial` cache in
+/// [`decode_background_chunks`]; the permissive path reads it here, so both
+/// modes decode the same background on an intact page and may share tiles.
+fn full_detail_chunks(max_chunks: usize, subsample: u32) -> usize {
+    if max_chunks == usize::MAX && subsample >= 4 {
+        1
+    } else {
+        max_chunks
+    }
+}
+
 /// Permissive variant: decode BG44 chunks until the first error, then stop.
 ///
 /// Returns whatever was decoded so far (may be blurry / incomplete).
@@ -2588,6 +2603,7 @@ fn decode_background_chunks_permissive(
     max_chunks: usize,
     subsample: u32,
 ) -> Background {
+    let max_chunks = full_detail_chunks(max_chunks, subsample);
     let bg44_chunks = page.bg44_chunks();
     if !bg44_chunks.is_empty() {
         let mut img = Iw44Image::new();
@@ -2858,11 +2874,9 @@ impl<'a> PlaneView<'a> {
 /// propagates. The returned `mask` already has `opts.bold` dilation applied,
 /// since both callers do that immediately after decoding.
 ///
-/// Both [`render_rows`] (the row path behind `render_pixmap` / `render_into` /
-/// `render_streaming`) and [`render_region`] build their `CompositeContext`
-/// from this, keeping their decode logic identical. The progressive path
-/// decodes differently (partial background up to `chunk_n`) and is not routed
-/// through here.
+/// Every [`Composite`] with foreground layers decodes through this, so the
+/// whole-page, row, buffer, region, tile, and progressive renders share one
+/// decode; `max_chunks` sets how much of the background a render reads.
 fn decode_layers(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -2871,7 +2885,7 @@ fn decode_layers(
 ) -> Result<DecodedLayers, RenderError> {
     // #607 (round 89 follow-up): an eligible sub>=4 render skips the full JB2
     // decode entirely, whether `mask_sub4` is already warm or still cold.
-    // Eligibility mirrors `resolve_sub4_mask` (no bold dilation, no FGbz
+    // Eligibility mirrors `sub4_mask` (no bold dilation, no FGbz
     // palette — those need full-resolution mask semantics); the compositor
     // then reads only the sub4 plane, so output is pixel-identical to the
     // full-decode path by construction.
@@ -2886,7 +2900,7 @@ fn decode_layers(
     //
     // Restricted to full-background decodes (`bg_chunk_limit == usize::MAX`):
     // the progressive path composites with the mask returned *here* (it never
-    // consults `resolve_sub4_mask`), so handing it a maskless layer set made
+    // consults `sub4_mask`), so handing it a maskless layer set made
     // `render_progressive` frames silently drop the text layer whenever this
     // cache happened to be warm — output depended on cache warmth (#691
     // slice 3 regression test `render_progressive_ignores_mask_sub4_warmth`).
@@ -3251,9 +3265,9 @@ impl<'a> CompositeContext<'a> {
     /// a q24 / offset / gamma bug can only ever be fixed in one place.
     ///
     /// The `(mask, mask_shift)` pair is passed in rather than derived because it
-    /// legitimately varies per entry point — the full-page paths swap in the
-    /// 1/4-resolution mask via [`resolve_sub4_mask`], while region / coarse /
-    /// progressive renders always composite against the full-resolution mask.
+    /// varies with the [`Detail`]: a full-detail composite may swap in the
+    /// 1/4-resolution mask via [`sub4_mask`], while coarse and progressive
+    /// composites always read the full-resolution mask.
     #[allow(clippy::too_many_arguments)]
     fn from_layers(
         page: &DjVuPage,
@@ -3336,62 +3350,41 @@ impl<'a> CompositeContext<'a> {
     }
 }
 
-/// Pick the mask plane and shift for a full-page composite.
+/// Pick the mask and its shift for a full-detail composite.
 ///
 /// At background subsample ≥ 4 (and only when no bold dilation or FGbz palette
 /// is in play, since those need full-resolution lookups) the compositor reads a
 /// pre-downsampled 1/4-resolution mask — one bit lookup per output pixel instead
 /// of 4–9. The returned shift is `mask_sub.trailing_zeros()` (2 for the 1/4-res
-/// mask, 0 for the full-res mask). This is the single home for that decision,
-/// previously copy-pasted into `render_rows` and `render_into`.
-/// The mask plane chosen by [`resolve_sub4_mask`].
+/// mask, 0 for the full-res mask).
 ///
-/// The full-resolution mask is borrowed from the caller's decoded layer set,
-/// but the 1/4-resolution mask is a shared handle out of the page cache: the
-/// cache can drop its own copy at any time (see `CacheSlot`), so the plane has
-/// to keep the buffer alive itself. Callers bind the plane to a local and read
-/// the mask with [`MaskPlane::get`].
-enum MaskPlane<'a> {
-    Borrowed(Option<&'a crate::bitmap::Bitmap>),
-    #[cfg(feature = "std")]
-    Shared(Option<std::sync::Arc<crate::bitmap::Bitmap>>),
-}
-
-impl MaskPlane<'_> {
-    #[inline]
-    fn get(&self) -> Option<&crate::bitmap::Bitmap> {
-        match self {
-            MaskPlane::Borrowed(m) => *m,
-            #[cfg(feature = "std")]
-            MaskPlane::Shared(m) => m.as_deref(),
-        }
-    }
-}
-
+/// The 1/4-resolution mask is a shared handle out of the page cache: the cache
+/// can drop its own copy at any time (see `CacheSlot`), so the composite keeps
+/// the buffer alive through the handle.
 #[cfg(feature = "std")]
-fn resolve_sub4_mask<'a>(
-    page: &'a DjVuPage,
+fn sub4_mask(
+    page: &DjVuPage,
     bg_subsample: u32,
     opts: &RenderOptions,
-    full_mask: Option<&'a crate::bitmap::Bitmap>,
+    full_mask: Option<Arc<crate::bitmap::Bitmap>>,
     fg_palette: Option<&FgbzPalette>,
-) -> (MaskPlane<'a>, u32) {
+) -> (Option<Arc<crate::bitmap::Bitmap>>, u32) {
     if bg_subsample >= 4 && opts.bold == 0 && fg_palette.is_none() {
-        (MaskPlane::Shared(page_mask_sub4(page)), 2)
+        (page_mask_sub4(page), 2)
     } else {
-        (MaskPlane::Borrowed(full_mask), 0)
+        (full_mask, 0)
     }
 }
 
 #[cfg(not(feature = "std"))]
-fn resolve_sub4_mask<'a>(
-    _page: &'a DjVuPage,
+fn sub4_mask(
+    _page: &DjVuPage,
     _bg_subsample: u32,
     _opts: &RenderOptions,
-    full_mask: Option<&'a crate::bitmap::Bitmap>,
+    full_mask: Option<Arc<crate::bitmap::Bitmap>>,
     _fg_palette: Option<&FgbzPalette>,
-) -> (MaskPlane<'a>, u32) {
-    (MaskPlane::Borrowed(full_mask), 0)
+) -> (Option<Arc<crate::bitmap::Bitmap>>, u32) {
+    (full_mask, 0)
 }
 
 /// Look up the palette color for a foreground pixel at (px, py).
@@ -3717,7 +3710,7 @@ fn composite_into(ctx: &CompositeContext<'_>, buf: &mut [u8]) -> Result<(), Rend
 /// `ctx.out_w`.  A single scratch row is allocated up-front (not per-row), so
 /// peak additional heap use is `out_w * 4` bytes regardless of page height.
 ///
-/// This is the internal streaming primitive used by [`render_rows`]; callers
+/// This is the streaming primitive behind [`render_streaming`]; callers
 /// that already hold a flat output buffer should prefer [`composite_into`],
 /// which writes directly without an intermediate copy.
 fn composite_rows<F>(ctx: &CompositeContext<'_>, mut sink: F) -> Result<(), RenderError>
@@ -4680,68 +4673,263 @@ fn composite_rows_area_avg_one(
     }
 }
 
-/// Render a `DjVuPage` row by row, calling `sink(row_index, &rgba_row)` for
-/// each output row in top-to-bottom order.
+// ── Render pipeline ──────────────────────────────────────────────────────────
+
+/// How much of a page a render decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Detail {
+    /// Every layer. The background follows [`full_detail_chunks`]: all BG44
+    /// chunks, or only the first at subsample 4 and above.
+    Full,
+    /// Every layer, with the background from BG44 chunks `0..n`: frame `n - 1`
+    /// of a progressive render.
+    Chunks(usize),
+    /// The background from its first BG44 chunk only, with no foreground.
+    Coarse,
+}
+
+/// A page's layers decoded for one render canvas.
 ///
-/// `rgba_row` contains `opts.width * 4` bytes (RGBA, alpha = 255).
+/// This is the one place a render turns [`RenderOptions`] into what the
+/// compositor reads: the gamma table, the IW44 subsample, the layers at the
+/// requested [`Detail`], and the mask plane. Every entry point builds one,
+/// composites a window of the canvas, and hands the pixels to its own output
+/// (a caller's buffer, a row sink, a pixmap, or cached tiles). Whole-page
+/// renders finish through [`Composite::page_pixmap`].
 ///
-/// This is the internal streaming primitive used by [`render_streaming`] and by
-/// permissive [`render_pixmap`] fallback. Public callers that need full-pixmap
-/// post-processing should use [`render_pixmap`].
-///
-/// # Errors
-///
-/// - [`RenderError::InvalidDimensions`] if `width == 0 || height == 0`
-/// - Propagates IW44 / JB2 decode errors.
-pub(crate) fn render_rows<F>(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    limits: Option<crate::resource_limits::ResourceLimits>,
-    sink: F,
-) -> Result<(), RenderError>
-where
-    F: FnMut(usize, &[u8]),
-{
-    let w = opts.width;
-    let h = opts.height;
+/// The canvas is the full render in native orientation, `opts.width ×
+/// opts.height` (at least 1 × 1); a window is any rectangle of it, and pixels
+/// of a window outside the canvas are left as they are.
+struct Composite<'p> {
+    page: &'p DjVuPage,
+    canvas: RenderOptions,
+    detail: Detail,
+    bg: Background,
+    fg_palette: Option<FgbzPalette>,
+    mask: Option<Arc<crate::bitmap::Bitmap>>,
+    mask_shift: u32,
+    blit_map: Option<Arc<Vec<i32>>>,
+    fg44: Option<Arc<Pixmap>>,
+    gamma_lut: [u8; 256],
+}
 
-    check_output_pixels("render_rows", page, limits, w, h)?;
+impl<'p> Composite<'p> {
+    /// Decode `page` at `detail` for a render at `opts`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates IW44 / JB2 decode errors (strict renders only).
+    fn decode(
+        page: &'p DjVuPage,
+        opts: &RenderOptions,
+        detail: Detail,
+    ) -> Result<Self, RenderError> {
+        let canvas = RenderOptions {
+            width: opts.width.max(1),
+            height: opts.height.max(1),
+            ..*opts
+        };
+        let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+        let DecodedLayers {
+            bg,
+            fg_palette,
+            mask,
+            blit_map,
+            fg44,
+        } = match detail {
+            Detail::Full => decode_layers(page, opts, bg_subsample, usize::MAX)?,
+            Detail::Chunks(n) => decode_layers(page, opts, bg_subsample, n)?,
+            Detail::Coarse => DecodedLayers {
+                bg: decode_background_chunks(page, 1, bg_subsample)?,
+                fg_palette: None,
+                mask: None,
+                blit_map: None,
+                fg44: None,
+            },
+        };
+        // Only a full-detail composite reads the 1/4-res mask: the
+        // progressive frames always used the full-resolution one, and a
+        // region is a crop of the full render, so it makes the same choice
+        // (#691).
+        let (mask, mask_shift) = if detail == Detail::Full {
+            sub4_mask(page, bg_subsample, opts, mask, fg_palette.as_ref())
+        } else {
+            (mask, 0)
+        };
+        Ok(Self {
+            page,
+            canvas,
+            detail,
+            bg,
+            fg_palette,
+            mask,
+            mask_shift,
+            blit_map,
+            fg44,
+            gamma_lut: build_gamma_lut(page.gamma()),
+        })
+    }
 
-    let gamma_lut = build_gamma_lut(page.gamma());
+    /// The whole canvas as a window.
+    fn whole(&self) -> RenderRect {
+        RenderRect {
+            x: 0,
+            y: 0,
+            width: self.canvas.width,
+            height: self.canvas.height,
+        }
+    }
 
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
+    /// `true` when the page has any background layer.
+    fn has_background(&self) -> bool {
+        self.bg.is_some()
+    }
 
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
+    /// Run `f` once per background band of `window` (see [`for_each_bg_band`]).
+    fn bands<F>(&self, window: RenderRect, f: F) -> Result<(), RenderError>
+    where
+        F: FnMut(&CompositeContext<'_>, u32) -> Result<(), RenderError>,
+    {
+        for_each_bg_band(
+            self.page,
+            &self.canvas,
+            &self.bg,
+            self.mask.as_deref(),
+            self.mask_shift,
+            self.fg_palette.as_ref(),
+            self.blit_map.as_deref().map(Vec::as_slice),
+            self.fg44.as_deref(),
+            &self.gamma_lut,
+            (window.x, window.y),
+            (window.width, window.height),
+            f,
+        )
+    }
 
-    let (mask_plane, mask_shift) = resolve_sub4_mask(
-        page,
-        bg_subsample,
-        opts,
-        mask.as_deref(),
-        fg_palette.as_ref(),
-    );
-    let ctx_mask = mask_plane.get();
-    let mut sink = sink;
-    for_each_bg_band(
-        page,
-        opts,
-        &bg,
-        ctx_mask,
-        mask_shift,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (0, 0),
-        (w, h),
-        |ctx, oy0| composite_rows(ctx, |y, row| sink(y + oy0 as usize, row)),
-    )
+    /// Composite `window` into `buf`: RGBA rows `window.width` pixels wide.
+    fn write(&self, window: RenderRect, buf: &mut [u8]) -> Result<(), RenderError> {
+        self.bands(window, |ctx, oy0| {
+            composite_into(ctx, band_rows_mut(buf, window.width, oy0, ctx.out_h))
+        })
+    }
+
+    /// Composite `window` into a new pixmap, white where it leaves the canvas.
+    fn pixmap(&self, window: RenderRect) -> Result<Pixmap, RenderError> {
+        let mut pm = Pixmap::white(window.width, window.height);
+        self.write(window, &mut pm.data)?;
+        Ok(pm)
+    }
+
+    /// Composite the whole canvas row by row, top to bottom.
+    fn rows<F>(&self, mut sink: F) -> Result<(), RenderError>
+    where
+        F: FnMut(usize, &[u8]),
+    {
+        self.bands(self.whole(), |ctx, oy0| {
+            composite_rows(ctx, |y, row| sink(y + oy0 as usize, row))
+        })
+    }
+
+    /// The context of the whole canvas over a whole (or missing) background;
+    /// the tile cache copies it per tile.
+    #[cfg(feature = "std")]
+    fn context(&self) -> CompositeContext<'_> {
+        CompositeContext::from_layers(
+            self.page,
+            &self.canvas,
+            self.bg.whole().map(PlaneView::whole),
+            self.mask.as_deref(),
+            self.mask_shift,
+            self.fg_palette.as_ref(),
+            self.blit_map.as_deref().map(Vec::as_slice),
+            self.fg44.as_deref(),
+            &self.gamma_lut,
+            (0, 0),
+            (self.canvas.width, self.canvas.height),
+        )
+    }
+
+    /// The wavelet image of a banded background (#811), which the tile cache
+    /// fetches one tile row at a time.
+    #[cfg(feature = "std")]
+    fn banded_background(&self) -> Option<&Arc<Iw44Image>> {
+        match &self.bg {
+            Background::Banded { image, .. } => Some(image),
+            _ => None,
+        }
+    }
+
+    /// The whole page: the canvas, then the whole-pixmap steps in their one
+    /// order — the anti-aliasing halving, the Lanczos-3 rescale (which
+    /// replaces the canvas), and the combined INFO + user rotation.
+    fn page_pixmap(
+        &self,
+        limits: Option<crate::resource_limits::ResourceLimits>,
+    ) -> Result<Pixmap, RenderError> {
+        let pm = match self.lanczos_canvas(limits)? {
+            Some(pm) => pm,
+            None if self.canvas.aa => aa_downscale(&self.pixmap(self.whole())?),
+            None => self.pixmap(self.whole())?,
+        };
+        Ok(rotate_pixmap(pm, self.canvas.output_rotation(self.page)))
+    }
+
+    /// `window` of the canvas, before rotation: composited directly, or cut
+    /// from the Lanczos-3 canvas, white where it leaves the canvas.
+    fn region(&self, window: RenderRect) -> Result<Pixmap, RenderError> {
+        let Some(full) = self.lanczos_canvas(None)? else {
+            return self.pixmap(window);
+        };
+        let mut pm = Pixmap::white(window.width, window.height);
+        let x1 = window.x.saturating_add(window.width).min(full.width);
+        let y1 = window.y.saturating_add(window.height).min(full.height);
+        if x1 > window.x && y1 > window.y {
+            let (src_stride, dst_stride) = (full.width as usize * 4, window.width as usize * 4);
+            let row = (x1 - window.x) as usize * 4;
+            for y in window.y..y1 {
+                let src = y as usize * src_stride + window.x as usize * 4;
+                let dst = (y - window.y) as usize * dst_stride;
+                pm.data[dst..dst + row].copy_from_slice(&full.data[src..src + row]);
+            }
+        }
+        Ok(pm)
+    }
+
+    /// The Lanczos-3 canvas: when the options ask for Lanczos-3 at a size
+    /// other than the native one, the page composited at its native size at
+    /// the same [`Detail`] and rescaled to the canvas; otherwise `None`.
+    ///
+    /// The native composite is unrotated and not anti-aliased, like every
+    /// canvas. It stays `None` when that composite fails (over the output
+    /// limit, or a decode error), so the caller keeps the bilinear canvas.
+    fn lanczos_canvas(
+        &self,
+        limits: Option<crate::resource_limits::ResourceLimits>,
+    ) -> Result<Option<Pixmap>, RenderError> {
+        let full = (self.canvas.width, self.canvas.height);
+        if !lanczos_rescales(self.page, self.canvas.resampling, full) {
+            return Ok(None);
+        }
+        let native_opts = native_render_opts(self.page, &self.canvas);
+        let native = check_output_pixels(
+            "render_native",
+            self.page,
+            limits,
+            native_opts.width,
+            native_opts.height,
+        )
+        .and_then(|()| Composite::decode(self.page, &native_opts, self.detail))
+        .and_then(|native| native.pixmap(native.whole()));
+        match native {
+            // The scaler refuses an output above `Pixmap::MAX_PIXELS`; that is
+            // a render-output limit, reported as one rather than as a blank
+            // page.
+            Ok(native) => Ok(Some(crate::pixmap::scale_lanczos3(
+                &native, full.0, full.1,
+            )?)),
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -4752,10 +4940,17 @@ where
 /// with the same dimensions. The buffer must be at least `width * height * 4`
 /// bytes.
 ///
+/// The buffer holds the composited page as it leaves the compositor, so the
+/// whole-pixmap steps of [`render_pixmap`] — anti-aliasing, Lanczos-3 at a
+/// scaled size, and rotation — are refused rather than skipped, exactly as in
+/// [`render_streaming`]. [`RenderOptions::can_stream`] answers the question
+/// without rendering.
+///
 /// # Errors
 ///
 /// - [`RenderError::BufTooSmall`] if `buf.len() < width * height * 4`
 /// - [`RenderError::InvalidDimensions`] if `width == 0 || height == 0`
+/// - [`RenderError::UnsupportedOption`] if a whole-pixmap option is set
 /// - Propagates IW44 / JB2 decode errors.
 pub fn render_into(
     page: &DjVuPage,
@@ -4776,6 +4971,9 @@ pub fn render_into_with_limits(
     let h = opts.height;
 
     check_output_pixels("render_into", page, limits, w, h)?;
+    if let Some(reason) = opts.whole_pixmap_reason(page) {
+        return Err(RenderError::UnsupportedOption(reason));
+    }
 
     let need = (w as usize)
         .checked_mul(h as usize)
@@ -4789,42 +4987,8 @@ pub fn render_into_with_limits(
         });
     }
 
-    let gamma_lut = build_gamma_lut(page.gamma());
-
-    // Decode all layers (shared permissive/strict seam, same as render_rows).
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
-
-    // Use pre-downsampled 1/4-res mask for sub=4 renders (single bit lookup vs
-    // 4-9 lookups per pixel in the full-res mask).
-    let (mask_plane, mask_shift) = resolve_sub4_mask(
-        page,
-        bg_subsample,
-        opts,
-        mask.as_deref(),
-        fg_palette.as_ref(),
-    );
-    let ctx_mask = mask_plane.get();
-    for_each_bg_band(
-        page,
-        opts,
-        &bg,
-        ctx_mask,
-        mask_shift,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (0, 0),
-        (w, h),
-        |ctx, oy0| composite_into(ctx, band_rows_mut(buf, w, oy0, ctx.out_h)),
-    )
+    let composite = Composite::decode(page, opts, Detail::Full)?;
+    composite.write(composite.whole(), buf)
 }
 
 /// Output rows `oy0..oy0 + rows` of an RGBA buffer `w` pixels wide.
@@ -4834,17 +4998,16 @@ fn band_rows_mut(buf: &mut [u8], w: u32, oy0: u32, rows: u32) -> &mut [u8] {
     &mut buf[oy0 as usize * stride..(oy0 as usize + rows as usize) * stride]
 }
 
-/// Build the options for the native-resolution pre-pass that feeds the
+/// Build the options for the native-resolution canvas that feeds the
 /// Lanczos-3 post-filter: full page size, no scaling, no AA, no rotation, and
-/// bilinear resampling (so the recursive render never re-enters this path).
+/// bilinear resampling.
 ///
 /// Bold and permissive flags are carried through so the high-resolution
 /// re-render matches the requested render in everything but the final
 /// resampling step.
 fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
-    // Full page size (decode scale derives to 1.0), bilinear resampling so the
-    // recursive render never re-enters this path, no AA / no rotation. Bold and
-    // permissive are carried through.
+    // Full page size (decode scale derives to 1.0), bilinear resampling, no AA /
+    // no rotation. Bold and permissive are carried through.
     RenderOptions {
         width: page.width() as u32,
         height: page.height() as u32,
@@ -4854,20 +5017,6 @@ fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
     }
 }
 
-/// Apply the shared Lanczos-3 post-pass to a freshly composited pixmap.
-///
-/// When `opts.resampling` is [`Resampling::Lanczos3`] *and* actual scaling
-/// happened (`page` native size differs from `full_w × full_h`), the page is
-/// re-rendered at native resolution via `render_native` and downscaled to
-/// `out_w × out_h` with [`crate::pixmap::scale_lanczos3`]. Otherwise `pm` is
-/// returned unchanged — covering both the non-Lanczos case and the 1:1 case
-/// where Lanczos would be a no-op. If the native re-render fails, the original
-/// (bilinear) `pm` is kept, matching the previous per-call behaviour.
-///
-/// `full` is the full output size used to decide whether scaling occurred;
-/// `out` is the target the result is scaled to. They differ only for
-/// [`render_region`], where the comparison is against the full page render but
-/// the output is the (smaller) region.
 /// Whether `resampling` runs the Lanczos-3 post-pass for a `full`-sized render
 /// of `page`: Lanczos-3 at any size other than the native one.
 ///
@@ -4876,30 +5025,6 @@ fn native_render_opts(page: &DjVuPage, opts: &RenderOptions) -> RenderOptions {
 fn lanczos_rescales(page: &DjVuPage, resampling: Resampling, full: (u32, u32)) -> bool {
     resampling == Resampling::Lanczos3
         && (page.width() as u32 != full.0 || page.height() as u32 != full.1)
-}
-
-fn apply_lanczos_postpass<F>(
-    pm: Pixmap,
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    full: (u32, u32),
-    out: (u32, u32),
-    render_native: F,
-) -> Result<Pixmap, RenderError>
-where
-    F: FnOnce(&RenderOptions) -> Result<Pixmap, RenderError>,
-{
-    if !lanczos_rescales(page, opts.resampling, full) {
-        return Ok(pm);
-    }
-    let native_opts = native_render_opts(page, opts);
-    match render_native(&native_opts) {
-        // The scaler refuses an output above `Pixmap::MAX_PIXELS`; that is a
-        // render-output limit, reported as one rather than as a blank page.
-        Ok(native_pm) => Ok(crate::pixmap::scale_lanczos3(&native_pm, out.0, out.1)?),
-        // Native render failed — keep the bilinear result already in `pm`.
-        Err(_) => Ok(pm),
-    }
 }
 
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
@@ -4950,45 +5075,11 @@ pub fn render_pixmap_with_limits(
     opts: &RenderOptions,
     limits: Option<crate::resource_limits::ResourceLimits>,
 ) -> Result<Pixmap, RenderError> {
-    let w = opts.width;
-    let h = opts.height;
-
     // Bound the output allocation. `w`/`h` flow from the (untrusted) INFO chunk on
     // a default render; w*h*4 of 65535² is ~17 GB, which either OOMs (64-bit) or
-    // wraps `Pixmap::new` to an empty buffer that the permissive copy below then
-    // indexes out of bounds. Reject up front.
-    check_output_pixels("render_pixmap", page, limits, w, h)?;
-
-    let mut pm = Pixmap::white(w, h);
-
-    if opts.permissive {
-        let row_stride = w as usize * 4;
-        // Permissive rendering has its own decode-error recovery path in
-        // render_rows; keep that behaviour and copy each recovered row.
-        render_rows(page, opts, limits, |y, row| {
-            let start = y * row_stride;
-            pm.data[start..start + row_stride].copy_from_slice(row);
-        })?;
-    } else {
-        // Strict renders can composite directly into the output Pixmap,
-        // avoiding the scratch row + row copy used by the streaming adapter.
-        render_into_with_limits(page, opts, limits, &mut pm.data)?;
-    }
-
-    if opts.aa {
-        pm = aa_downscale(&pm);
-    }
-
-    // Apply the shared Lanczos-3 post-pass (re-render at native size, then
-    // downscale) when requested and scaling actually happened.
-    let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
-        render_pixmap_with_limits(page, native_opts, limits)
-    })?;
-
-    Ok(rotate_pixmap(
-        pm,
-        combine_rotations(page.rotation(), opts.rotation),
-    ))
+    // wraps `Pixmap::new` to an empty buffer. Reject up front.
+    check_output_pixels("render_pixmap", page, limits, opts.width, opts.height)?;
+    Composite::decode(page, opts, Detail::Full)?.page_pixmap(limits)
 }
 
 /// Render a `DjVuPage` row by row, calling `sink(row_index, &rgba_row)` for
@@ -5056,7 +5147,8 @@ where
     if let Some(reason) = opts.whole_pixmap_reason(page) {
         return Err(RenderError::UnsupportedOption(reason));
     }
-    render_rows(page, opts, None, sink)
+    check_output_pixels("render_streaming", page, None, opts.width, opts.height)?;
+    Composite::decode(page, opts, Detail::Full)?.rows(sink)
 }
 
 /// Render a sub-rectangle of a page into a new [`Pixmap`].
@@ -5080,70 +5172,8 @@ pub fn render_region(
     opts: &RenderOptions,
 ) -> Result<Pixmap, RenderError> {
     check_output_pixels("render_region", page, None, region.width, region.height)?;
-
-    let full_w = opts.width.max(1);
-    let full_h = opts.height.max(1);
-    let gamma_lut = build_gamma_lut(page.gamma());
-
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
-
-    let out_w = region.width;
-    let out_h = region.height;
-    let mut pm = Pixmap::white(out_w, out_h);
-
-    let region_opts = RenderOptions {
-        width: full_w,
-        height: full_h,
-        ..*opts
-    };
-    // Same 1/4-res mask fast-path decision as `render_into`/`render_rows`, so
-    // a region render stays byte-identical to the matching crop of the full
-    // render at every subsample tier (#691).
-    let (mask_plane, mask_shift) = resolve_sub4_mask(
-        page,
-        bg_subsample,
-        opts,
-        mask.as_deref(),
-        fg_palette.as_ref(),
-    );
-    let ctx_mask = mask_plane.get();
-    for_each_bg_band(
-        page,
-        &region_opts,
-        &bg,
-        ctx_mask,
-        mask_shift,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (region.x, region.y),
-        (out_w, out_h),
-        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, out_w, oy0, ctx.out_h)),
-    )?;
-
-    // Shared Lanczos-3 post-pass: scaling is judged against the full render
-    // size (full_w/full_h) but the result is scaled to the region (out_w/out_h).
-    let pm = apply_lanczos_postpass(
-        pm,
-        page,
-        opts,
-        (full_w, full_h),
-        (out_w, out_h),
-        |native_opts| render_region(page, region, native_opts),
-    )?;
-
-    Ok(rotate_pixmap(
-        pm,
-        combine_rotations(page.rotation(), opts.rotation),
-    ))
+    let pm = Composite::decode(page, opts, Detail::Full)?.region(region)?;
+    Ok(rotate_pixmap(pm, opts.output_rotation(page)))
 }
 
 /// `true` when a cooperative cancel flag is present and set.
@@ -5177,8 +5207,7 @@ pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> b
 /// # Errors
 ///
 /// Same as [`render_progressive`], plus [`RenderError::UnsupportedOption`]
-/// for Lanczos-3 resampling (its whole-pixmap re-render recursion is
-/// incompatible with region output; the tile API rejects it earlier anyway).
+/// for Lanczos-3 resampling (the tile API rejects it earlier anyway).
 pub(crate) fn render_region_progressive(
     page: &DjVuPage,
     region: RenderRect,
@@ -5210,49 +5239,12 @@ pub(crate) fn render_region_progressive(
         return Ok(None);
     }
 
-    let full_w = opts.width.max(1);
-    let full_h = opts.height.max(1);
-    let gamma_lut = build_gamma_lut(page.gamma());
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
-
+    let composite = Composite::decode(page, opts, Detail::Chunks(chunk_n + 1))?;
     if is_cancelled(cancel) {
         return Ok(None);
     }
-
-    let out_w = region.width;
-    let out_h = region.height;
-    let mut pm = Pixmap::white(out_w, out_h);
-    let region_opts = RenderOptions {
-        width: full_w,
-        height: full_h,
-        ..*opts
-    };
-    for_each_bg_band(
-        page,
-        &region_opts,
-        &bg,
-        mask.as_deref(),
-        0,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (region.x, region.y),
-        (out_w, out_h),
-        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, out_w, oy0, ctx.out_h)),
-    )?;
-
-    Ok(Some(rotate_pixmap(
-        pm,
-        combine_rotations(page.rotation(), opts.rotation),
-    )))
+    let pm = composite.pixmap(region)?;
+    Ok(Some(rotate_pixmap(pm, opts.output_rotation(page))))
 }
 
 /// Render a sub-rectangle of a page, assembling the output from a per-page
@@ -5286,8 +5278,8 @@ pub(crate) fn render_region_progressive(
 /// # Eligibility
 ///
 /// Every request uses the cache except Lanczos-3 resampling at a scaled size:
-/// its native-scale re-render recursion isn't compatible with per-tile
-/// assembly, so it falls back to a plain [`render_region`] call with no tile
+/// it rescales the whole native-size canvas, which per-tile assembly cannot
+/// share, so it falls back to a plain [`render_region`] call with no tile
 /// bookkeeping.
 ///
 /// - Rotation: tiles are cached in native orientation and the assembled
@@ -5295,7 +5287,8 @@ pub(crate) fn render_region_progressive(
 /// - `opts.permissive`: strict and permissive requests share tiles. Layers
 ///   decode before any tile lookup, so a strict request on a damaged page
 ///   still fails there. On an intact page both modes decode identical
-///   layers, hence identical tiles.
+///   layers (the same background chunks too, see [`full_detail_chunks`]),
+///   hence identical tiles, whichever mode fills the cache first.
 ///
 /// This is an **opt-in** entry point: call it where you want tile caching
 /// (e.g. a pan/zoom viewer). [`render_region`] itself is untouched and pays no
@@ -5447,53 +5440,13 @@ pub(crate) fn render_region_tiled_cancellable(
     // once at the end, as in `render_region`.
     let rotation = opts.output_rotation(page);
 
-    let gamma_lut = build_gamma_lut(page.gamma());
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, usize::MAX)?;
-
-    let region_opts = RenderOptions {
-        width: full_w,
-        height: full_h,
-        ..*opts
-    };
-    // Same 1/4-res mask fast-path decision as `render_into`/`render_rows`
-    // (see render_region); the choice is a pure function of the tile-key
-    // fields plus per-page constants, so cached tiles stay coherent.
-    let (mask_plane, mask_shift) = resolve_sub4_mask(
-        page,
-        bg_subsample,
-        opts,
-        mask.as_deref(),
-        fg_palette.as_ref(),
-    );
-    let ctx_mask = mask_plane.get();
+    let composite = Composite::decode(page, opts, Detail::Full)?;
     // Template context for the whole full_w×full_h render; each tile below
     // copies it (cheap: `Copy`) and only overwrites offset/out fields.
-    let ctx_template = CompositeContext::from_layers(
-        page,
-        &region_opts,
-        bg.whole().map(PlaneView::whole),
-        ctx_mask,
-        mask_shift,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (0, 0),
-        (full_w, full_h),
-    );
+    let ctx_template = composite.context();
     // #811: a banded background is fetched one tile row at a time, on the
     // first cache miss in that row, and dropped with the row.
-    let banded = match &bg {
-        Background::Banded { image, .. } => Some(image),
-        _ => None,
-    };
+    let banded = composite.banded_background();
 
     let out_w = region.width;
     let out_h = region.height;
@@ -5626,48 +5579,29 @@ pub fn render_pages_parallel(
 
 /// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
 ///
+/// The background alone is composited, then finished like [`render_pixmap`]:
+/// anti-aliasing, Lanczos-3 at a scaled size, and rotation all apply.
+///
 /// Returns `Ok(None)` when the page has no BG44 chunks.
 pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pixmap>, RenderError> {
-    let w = opts.width;
-    let h = opts.height;
-
-    check_output_pixels("render_coarse", page, None, w, h)?;
-
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let bg = decode_background_chunks(page, 1, bg_subsample)?;
-    if !bg.is_some() {
+    check_output_pixels("render_coarse", page, None, opts.width, opts.height)?;
+    let composite = Composite::decode(page, opts, Detail::Coarse)?;
+    if !composite.has_background() {
         return Ok(None);
     }
-
-    let gamma_lut = build_gamma_lut(page.gamma());
-    let mut pm = Pixmap::white(w, h);
-
-    for_each_bg_band(
-        page,
-        opts,
-        &bg,
-        None,
-        0,
-        None,
-        None,
-        None,
-        &gamma_lut,
-        (0, 0),
-        (w, h),
-        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, w, oy0, ctx.out_h)),
-    )?;
-
-    Ok(Some(rotate_pixmap(
-        pm,
-        combine_rotations(page.rotation(), opts.rotation),
-    )))
+    composite.page_pixmap(None).map(Some)
 }
 
 /// Progressive render: decode BG44 chunks 1..=chunk_n and all other layers.
 ///
-/// `chunk_n = 0` behaves like [`render_coarse`] (first chunk only).
-/// Each additional chunk adds detail. The result after all chunks is
-/// equivalent to [`render_pixmap`].
+/// `chunk_n = 0` decodes the first chunk only, like [`render_coarse`], but with
+/// the foreground. Each additional chunk adds detail. The result after all
+/// chunks equals [`render_pixmap`], with one exception: at scales of about a quarter of the native size and below (IW44 subsample 4
+/// or more), [`render_pixmap`] decodes only the first background chunk and
+/// reads a quarter-resolution mask, so the two differ slightly there.
+///
+/// The whole-pixmap steps — anti-aliasing, Lanczos-3 at a scaled size, and
+/// rotation — apply to every frame as they do in [`render_pixmap`].
 ///
 /// # Errors
 ///
@@ -5678,10 +5612,7 @@ pub fn render_progressive(
     opts: &RenderOptions,
     chunk_n: usize,
 ) -> Result<Pixmap, RenderError> {
-    let w = opts.width;
-    let h = opts.height;
-
-    check_output_pixels("render_progressive", page, None, w, h)?;
+    check_output_pixels("render_progressive", page, None, opts.width, opts.height)?;
 
     let n_bg44 = page.bg44_chunks().len();
     let max_chunk = n_bg44.saturating_sub(1);
@@ -5693,46 +5624,7 @@ pub fn render_progressive(
         });
     }
 
-    let gamma_lut = build_gamma_lut(page.gamma());
-
-    // Decode background up to chunk_n + 1 chunks; full foreground + bold dilation
-    // via the shared decode_layers path so no logic can drift between this and the
-    // full render.
-    let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
-    let DecodedLayers {
-        bg,
-        fg_palette,
-        mask,
-        blit_map,
-        fg44,
-    } = decode_layers(page, opts, bg_subsample, chunk_n + 1)?;
-
-    let mut pm = Pixmap::white(w, h);
-    for_each_bg_band(
-        page,
-        opts,
-        &bg,
-        mask.as_deref(),
-        0,
-        fg_palette.as_ref(),
-        blit_map.as_deref().map(Vec::as_slice),
-        fg44.as_deref(),
-        &gamma_lut,
-        (0, 0),
-        (w, h),
-        |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, w, oy0, ctx.out_h)),
-    )?;
-
-    // Shared Lanczos-3 post-pass; the native re-render decodes the same
-    // `chunk_n` refinement level.
-    let pm = apply_lanczos_postpass(pm, page, opts, (w, h), (w, h), |native_opts| {
-        render_progressive(page, native_opts, chunk_n)
-    })?;
-
-    Ok(rotate_pixmap(
-        pm,
-        combine_rotations(page.rotation(), opts.rotation),
-    ))
+    Composite::decode(page, opts, Detail::Chunks(chunk_n + 1))?.page_pixmap(None)
 }
 
 /// Number of progressive refinement frames a page yields: one per BG44 chunk,
@@ -5780,17 +5672,10 @@ pub fn render_progressive_step(
 /// supported here (Lanczos re-renders at native resolution per frame, leaving no
 /// shared incremental state) — use [`render_progressive_all`] for those.
 pub struct ProgressiveDecoder<'a> {
-    page: &'a DjVuPage,
-    opts: RenderOptions,
-    w: u32,
-    h: u32,
-    gamma_lut: [u8; 256],
+    /// The foreground layers and the canvas; the background is replaced by
+    /// each frame's snapshot of `img`.
+    composite: Composite<'a>,
     bg_subsample: u32,
-    fg_palette: Option<FgbzPalette>,
-    mask: Option<Arc<crate::bitmap::Bitmap>>,
-    blit_map: Option<Arc<Vec<i32>>>,
-    fg44: Option<Arc<Pixmap>>,
-    rotation: crate::info::Rotation,
     /// Shared so a very large page can hand bands of it to the compositor
     /// (#811); nobody else holds it between frames.
     img: Arc<Iw44Image>,
@@ -5821,8 +5706,6 @@ impl<'a> ProgressiveDecoder<'a> {
             ));
         }
 
-        let gamma_lut = build_gamma_lut(page.gamma());
-        let bg_subsample = best_iw44_subsample(opts.decode_scale(page));
         let ForegroundLayers {
             fg_palette,
             mask,
@@ -5834,20 +5717,21 @@ impl<'a> ProgressiveDecoder<'a> {
         } else {
             mask
         };
-        let rotation = combine_rotations(page.rotation(), opts.rotation);
 
         Ok(Self {
-            page,
-            opts: opts.clone(),
-            w: opts.width,
-            h: opts.height,
-            gamma_lut,
-            bg_subsample,
-            fg_palette,
-            mask,
-            blit_map,
-            fg44,
-            rotation,
+            composite: Composite {
+                page,
+                canvas: opts.clone(),
+                detail: Detail::Chunks(0),
+                bg: Background::None,
+                fg_palette,
+                mask,
+                mask_shift: 0,
+                blit_map,
+                fg44,
+                gamma_lut: build_gamma_lut(page.gamma()),
+            },
+            bg_subsample: best_iw44_subsample(opts.decode_scale(page)),
             img: Arc::new(Iw44Image::new()),
             chunks_fed: 0,
         })
@@ -5865,24 +5749,12 @@ impl<'a> ProgressiveDecoder<'a> {
             .decode_chunk(chunk)
             .map_err(RenderError::Iw44)?;
         self.chunks_fed += 1;
-        let bg = Background::from_shared_iw44(&self.img, self.bg_subsample)?;
-
-        let mut pm = Pixmap::white(self.w, self.h);
-        for_each_bg_band(
-            self.page,
-            &self.opts,
-            &bg,
-            self.mask.as_deref(),
-            0,
-            self.fg_palette.as_ref(),
-            self.blit_map.as_deref().map(Vec::as_slice),
-            self.fg44.as_deref(),
-            &self.gamma_lut,
-            (0, 0),
-            (self.w, self.h),
-            |ctx, oy0| composite_into(ctx, band_rows_mut(&mut pm.data, self.w, oy0, ctx.out_h)),
-        )?;
-        Ok(rotate_pixmap(pm, self.rotation))
+        self.composite.detail = Detail::Chunks(self.chunks_fed);
+        self.composite.bg = Background::from_shared_iw44(&self.img, self.bg_subsample)?;
+        let frame = self.composite.page_pixmap(None);
+        // Release the frame's background so the next chunk decodes in place.
+        self.composite.bg = Background::None;
+        frame
     }
 
     /// Number of chunks fed so far (= number of frames produced).
@@ -5894,7 +5766,10 @@ impl<'a> ProgressiveDecoder<'a> {
 /// Eagerly render every progressive frame into a `Vec`, coarsest first.
 ///
 /// The convenience form of [`render_progressive_step`] over the full
-/// [`progressive_steps`] range; the last frame equals [`render_pixmap`].
+/// [`progressive_steps`] range. The last frame equals [`render_pixmap`], except
+/// at scales of about a quarter of the native size and below (IW44 subsample 4
+/// or more), [`render_pixmap`] decodes only the first background chunk and
+/// reads a quarter-resolution mask, so the two differ slightly there.
 /// Streaming consumers that want one frame at a time should drive a
 /// [`ProgressiveDecoder`] (strict Bilinear) or [`render_progressive_step`].
 pub fn render_progressive_all(
@@ -9305,7 +9180,7 @@ mod tests {
     /// #691: `render_region` matches the same crop of `render_pixmap` even
     /// when the downscale activates the 1/4-resolution mask fast path
     /// (`bg_subsample >= 4`, no bold, no FGbz) — the region path must take
-    /// the same `resolve_sub4_mask` decision as the full-page path.
+    /// the same `sub4_mask` decision as the full-page path.
     #[test]
     fn render_region_matches_full_render_crop_at_sub4() {
         let doc = load_doc("boy_jb2.djvu");
@@ -9822,5 +9697,225 @@ mod tests {
         let pm = render_pixmap(page, &opts).expect("bold render should succeed");
         assert_eq!(pm.width, 40);
         assert_eq!(pm.height, 40);
+    }
+
+    // ── One render pipeline ──────────────────────────────────────────────────
+
+    /// Native-orientation options at `1/div` of the page size.
+    fn opts_at(page: &DjVuPage, div: u32) -> RenderOptions {
+        RenderOptions {
+            width: (page.width() as u32 / div).max(1),
+            height: (page.height() as u32 / div).max(1),
+            ..Default::default()
+        }
+    }
+
+    /// The `r` rectangle of `pm` (which must contain it), as RGBA rows.
+    fn crop(pm: &Pixmap, r: RenderRect) -> Vec<u8> {
+        let mut out = Vec::with_capacity(r.width as usize * r.height as usize * 4);
+        for y in r.y..r.y + r.height {
+            let start = (y as usize * pm.width as usize + r.x as usize) * 4;
+            out.extend_from_slice(&pm.data[start..start + r.width as usize * 4]);
+        }
+        out
+    }
+
+    /// Mean absolute difference over the RGB channels of two same-sized pixmaps.
+    fn mean_abs_diff(a: &Pixmap, b: &Pixmap) -> f64 {
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        let (sum, n) = a
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.data.as_chunks::<4>().0)
+            .flat_map(|(p, q)| (0..3).map(move |c| p[c].abs_diff(q[c]) as u64))
+            .fold((0u64, 0u64), |(s, n), d| (s + d, n + 1));
+        sum as f64 / n as f64
+    }
+
+    /// Below a quarter of the native size a strict render reads only the
+    /// first BG44 chunk. A permissive render of an intact page reads the same
+    /// chunks, so both modes render alike and share cached tiles in either
+    /// order (the cache key has no permissive flag).
+    #[test]
+    fn permissive_matches_strict_below_quarter_scale() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        assert!(
+            page.bg44_chunks().len() >= 2,
+            "need a multi-chunk BG44 page"
+        );
+        let strict = opts_at(page, 5);
+        let permissive = RenderOptions {
+            permissive: true,
+            ..strict.clone()
+        };
+        let want = render_pixmap(page, &strict).unwrap();
+        assert!(render_pixmap(page, &permissive).unwrap().data == want.data);
+
+        let whole = RenderRect {
+            x: 0,
+            y: 0,
+            width: strict.width,
+            height: strict.height,
+        };
+        // The permissive request fills the tile cache first.
+        let first = render_region_tiled(page, whole, &permissive).unwrap();
+        let second = render_region_tiled(page, whole, &strict).unwrap();
+        assert!(first.data == want.data, "permissive tiles differ");
+        assert!(second.data == want.data, "strict tiles differ");
+    }
+
+    /// A Lanczos-3 region is the matching crop of the Lanczos-3 page, and
+    /// white where it leaves the canvas.
+    #[test]
+    fn lanczos_region_is_a_crop_of_the_page() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        assert_eq!(page.rotation(), crate::info::Rotation::None);
+        let opts = RenderOptions {
+            resampling: Resampling::Lanczos3,
+            ..opts_at(page, 3)
+        };
+        let full = render_pixmap(page, &opts).unwrap();
+        let r = RenderRect {
+            x: opts.width / 4,
+            y: opts.height / 3,
+            width: opts.width / 2,
+            height: opts.height / 2,
+        };
+        assert!(render_region(page, r, &opts).unwrap().data == crop(&full, r));
+        assert!(render_region_tiled(page, r, &opts).unwrap().data == crop(&full, r));
+
+        let edge = RenderRect {
+            x: opts.width - 4,
+            y: 0,
+            width: 8,
+            height: 2,
+        };
+        let pm = render_region(page, edge, &opts).unwrap();
+        let inside = RenderRect { width: 4, ..edge };
+        for y in 0..2usize {
+            let row = &pm.data[y * 32..(y + 1) * 32];
+            assert!(row[..16] == crop(&full, inside)[y * 16..(y + 1) * 16]);
+            assert!(
+                row[16..].iter().all(|&b| b == 255),
+                "outside the canvas is white"
+            );
+        }
+    }
+
+    /// Lanczos-3 turns an INFO-rotated page once, like bilinear, instead of
+    /// rotating its native-size canvas a second time.
+    #[test]
+    fn lanczos_turns_rotated_pages_once() {
+        for name in [
+            "boy_jb2_rotate90.djvu",
+            "boy_jb2_rotate180.djvu",
+            "boy_jb2_rotate270.djvu",
+        ] {
+            let doc = load_doc(name);
+            let page = doc.page(0).unwrap();
+            let bilinear = opts_at(page, 2);
+            let lanczos = RenderOptions {
+                resampling: Resampling::Lanczos3,
+                ..bilinear.clone()
+            };
+            let want = render_pixmap(page, &bilinear).unwrap();
+            let got = render_pixmap(page, &lanczos).unwrap();
+            let mad = mean_abs_diff(&want, &got);
+            assert!(mad < 4.0, "{name}: Lanczos differs from bilinear by {mad}");
+            let last = render_progressive(page, &lanczos, progressive_steps(page) - 1).unwrap();
+            assert!(last.data == got.data, "{name}: progressive Lanczos differs");
+        }
+    }
+
+    /// `render_into` fills the buffer straight from the compositor, so it
+    /// refuses the whole-pixmap steps instead of skipping them.
+    #[test]
+    fn render_into_refuses_whole_pixmap_options() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let base = opts_at(page, 2);
+        let mut buf = vec![0u8; base.width as usize * base.height as usize * 4];
+        for opts in [
+            RenderOptions {
+                aa: true,
+                ..base.clone()
+            },
+            RenderOptions {
+                resampling: Resampling::Lanczos3,
+                ..base.clone()
+            },
+            RenderOptions {
+                rotation: UserRotation::Cw90,
+                ..base.clone()
+            },
+        ] {
+            assert!(
+                matches!(
+                    render_into(page, &opts, &mut buf),
+                    Err(RenderError::UnsupportedOption(_))
+                ),
+                "{opts:?}"
+            );
+        }
+
+        // An INFO rotation needs a whole pixmap too; a user rotation that
+        // cancels it does not.
+        let doc = load_doc("boy_jb2_rotate90.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = opts_at(page, 1);
+        let mut buf = vec![0u8; opts.width as usize * opts.height as usize * 4];
+        assert!(matches!(
+            render_into(page, &opts, &mut buf),
+            Err(RenderError::UnsupportedOption(_))
+        ));
+        let upright = [
+            UserRotation::Cw90,
+            UserRotation::Rot180,
+            UserRotation::Ccw90,
+        ]
+        .into_iter()
+        .map(|rotation| RenderOptions {
+            rotation,
+            ..opts.clone()
+        })
+        .find(|o| o.can_stream(page))
+        .expect("one user rotation cancels the INFO rotation");
+        render_into(page, &upright, &mut buf).unwrap();
+        assert!(buf == render_pixmap(page, &upright).unwrap().data);
+    }
+
+    /// Anti-aliasing finishes every whole-page render: the progressive frames,
+    /// the streaming decoder's frames, and the coarse preview.
+    #[test]
+    fn anti_aliasing_finishes_every_whole_page_render() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let plain = opts_at(page, 2);
+        let aa = RenderOptions {
+            aa: true,
+            ..plain.clone()
+        };
+        let full = render_pixmap(page, &aa).unwrap();
+        assert_eq!(
+            (full.width, full.height),
+            (plain.width / 2, plain.height / 2)
+        );
+
+        let steps = progressive_steps(page);
+        assert!(render_progressive(page, &aa, steps - 1).unwrap().data == full.data);
+        let mut dec = ProgressiveDecoder::new(page, &aa).unwrap();
+        let mut last = None;
+        for chunk in page.bg44_chunks() {
+            last = Some(dec.push_bg44_chunk(chunk).unwrap());
+        }
+        assert!(last.unwrap().data == full.data);
+
+        let coarse = render_coarse(page, &aa).unwrap().unwrap();
+        let plain_coarse = render_coarse(page, &plain).unwrap().unwrap();
+        assert!(coarse.data == aa_downscale(&plain_coarse).data);
     }
 }

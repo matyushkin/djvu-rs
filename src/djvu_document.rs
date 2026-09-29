@@ -1181,6 +1181,8 @@ impl DjVuPage {
     ///
     /// - [`crate::djvu_render::RenderError::BufTooSmall`] if buffer is too small
     /// - [`crate::djvu_render::RenderError::InvalidDimensions`] if width/height is 0
+    /// - [`crate::djvu_render::RenderError::UnsupportedOption`] if the options
+    ///   need a whole pixmap (see [`crate::djvu_render::render_into`])
     /// - Propagates IW44 / JB2 decode errors
     pub fn render_into(
         &self,

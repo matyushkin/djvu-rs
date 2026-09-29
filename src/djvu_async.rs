@@ -672,7 +672,10 @@ where
 ///
 /// Yields one frame per BG44 wavelet refinement chunk: the first frame is the
 /// coarsest (fastest to produce), and each subsequent frame adds detail. The
-/// final frame is equivalent to [`render_pixmap`][djvu_render::render_pixmap].
+/// final frame equals [`render_pixmap`][djvu_render::render_pixmap], except at
+/// scales of about a quarter of the native size and below, where
+/// `render_pixmap` stops at the first background chunk (see
+/// [`render_progressive`][djvu_render::render_progressive]).
 ///
 /// If the page has no BG44 chunks (bilevel JB2-only pages), exactly one frame
 /// is yielded via [`render_pixmap`][djvu_render::render_pixmap].

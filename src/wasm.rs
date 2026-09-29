@@ -418,9 +418,10 @@ impl WasmPage {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
         let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-        if page.rotation() != crate::info::Rotation::None {
-            // `render_into` writes the native (unrotated) buffer; a rotated
-            // page goes through the rotating pixmap path instead.
+        if !opts.can_stream(page) {
+            // `render_into` refuses the whole-pixmap steps (rotation, and
+            // Lanczos-3 at a scaled size); those renders go through the pixmap
+            // path instead.
             let pm = crate::djvu_render::render_pixmap(page, &opts)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             out.data.clear();
