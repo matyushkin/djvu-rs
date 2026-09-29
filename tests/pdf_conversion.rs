@@ -284,3 +284,26 @@ fn decompress_all_streams(pdf: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+/// A page that cannot be rendered fails the export, as in the EPUB, CBZ and
+/// TIFF writers; the PDF writer used to replace it with a blank page.
+#[test]
+fn damaged_page_fails_pdf_export() {
+    let data = std::fs::read(fixture("boy.djvu")).unwrap();
+    let bg44 = data.windows(4).position(|w| w == b"BG44").unwrap();
+    let chunk_len = u32::from_be_bytes(data[bg44 + 4..bg44 + 8].try_into().unwrap());
+    // Keep 4 bytes of BG44 and patch both lengths, so the IW44 decode fails.
+    let reduction = chunk_len - 4;
+    let form_len = u32::from_be_bytes(data[8..12].try_into().unwrap());
+    let mut damaged = data[..8].to_vec();
+    damaged.extend_from_slice(&(form_len - reduction).to_be_bytes());
+    damaged.extend_from_slice(&data[12..bg44 + 4]);
+    damaged.extend_from_slice(&4u32.to_be_bytes());
+    damaged.extend_from_slice(&data[bg44 + 8..bg44 + 12]);
+    let doc = DjVuDocument::parse(&damaged).unwrap();
+
+    assert!(
+        djvu_to_pdf(&doc).is_err(),
+        "a damaged page must fail the export, not become a blank page"
+    );
+}

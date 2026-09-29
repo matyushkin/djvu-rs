@@ -26,6 +26,7 @@ use crate::{
     annotation::MapArea,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::RenderError,
+    export_common::{PageRun, export_pages},
     export_control::{ExportObserver, NoOpObserver},
     text::Rect,
 };
@@ -175,54 +176,23 @@ pub fn djvu_to_epub_writer_with_observer<W: Write + Seek>(
 
     // 3. Per-page content. Building a page's artifacts (render → PNG encode →
     //    text overlay → XHTML) is independent per page and CPU-heavy; only the
-    //    ZIP writing must be serial (a single `ZipWriter`, not `Send`). With the
-    //    `parallel` feature, build bounded batches concurrently via rayon, then
-    //    write each batch in index order — mirrors the PDF parallel exporter
-    //    (#298). Output bytes are identical to the sequential path.
+    //    ZIP writing must be serial (a single `ZipWriter`, not `Send`).
+    //    #629: each page builds on a cold clone — decode caches drop with it.
     let page_count = doc.page_count();
-
+    let pages: Vec<usize> = (0..page_count).collect();
     let mut image_names: Vec<String> = Vec::with_capacity(page_count);
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        let chunk = rayon::current_num_threads().max(1) * 8;
-        let mut start = 0;
-        while start < page_count {
-            if observer.cancelled() {
-                return finish_cancelled_epub(zip);
-            }
-            let end = (start + chunk).min(page_count);
-            let artifacts: Vec<PageArtifacts> = (start..end)
-                .into_par_iter()
-                .map(|i| {
-                    // #629: cold clone — decode caches drop with the page.
-                    let page = doc.page(i)?.clone();
-                    build_page_artifacts(&page, i, opts)
-                })
-                .collect::<Result<_, EpubError>>()?;
-            for (offset, art) in artifacts.iter().enumerate() {
-                if observer.cancelled() {
-                    return finish_cancelled_epub(zip);
-                }
-                write_page_artifacts(&mut zip, art)?;
-                image_names.push(art.img_name.clone());
-                observer.on_progress(start + offset + 1, page_count);
-            }
-            start = end;
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    for i in 0..page_count {
-        if observer.cancelled() {
-            return finish_cancelled_epub(zip);
-        }
-        // #629: cold clone — decode caches drop with the page.
-        let page = doc.page(i)?.clone();
-        let art = build_page_artifacts(&page, i, opts)?;
-        write_page_artifacts(&mut zip, &art)?;
-        image_names.push(art.img_name.clone());
-        observer.on_progress(i + 1, page_count);
+    let run = export_pages(
+        &pages,
+        observer,
+        |i| build_page_artifacts(&doc.page(i)?.clone(), i, opts),
+        |_, art| {
+            write_page_artifacts(&mut zip, &art)?;
+            image_names.push(art.img_name);
+            Ok(())
+        },
+    )?;
+    if run == PageRun::Cancelled {
+        return finish_cancelled_epub(zip);
     }
 
     // 4. Navigation document

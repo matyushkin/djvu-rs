@@ -16,6 +16,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
 use crate::djvu_render::{RenderError, UserRotation, render_pixmap};
+use crate::export_common::{PageRun, export_pages};
 use crate::export_control::{ExportObserver, NoOpObserver};
 
 /// Errors during CBZ conversion.
@@ -126,88 +127,24 @@ pub fn write_pages_with_observer<W: Write + Seek>(
     observer: &mut dyn ExportObserver,
 ) -> Result<(), CbzError> {
     let entry_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    let total = opts
-        .pages
-        .as_ref()
-        .map_or_else(|| doc.page_count(), Vec::len);
+    let pages: Vec<usize> = match &opts.pages {
+        Some(indices) => indices.clone(),
+        None => (0..doc.page_count()).collect(),
+    };
 
     // #629: pages render on cold clones so decode caches drop per page
-    // instead of accumulating O(pages) on the document.
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        // Keep the parallel speedup while retaining only one bounded batch of
-        // rendered PNGs. The ZIP writer remains serial, so each batch is
-        // written in page order before the next batch is rendered.
-        let chunk = rayon::current_num_threads().max(1) * 8;
-        match &opts.pages {
-            Some(indices) => {
-                for (chunk_index, indices) in indices.chunks(chunk).enumerate() {
-                    if observer.cancelled() {
-                        return Err(CbzError::Cancelled);
-                    }
-                    let pngs: Vec<Vec<u8>> = indices
-                        .par_iter()
-                        .map(|&i| build_page_png(&doc.page(i)?.clone(), opts))
-                        .collect::<Result<_, CbzError>>()?;
-                    for (offset, png) in pngs.iter().enumerate() {
-                        if observer.cancelled() {
-                            return Err(CbzError::Cancelled);
-                        }
-                        write_page_png(zip, chunk_index * chunk + offset + 1, png, entry_opts)?;
-                        observer.on_progress(chunk_index * chunk + offset + 1, total);
-                    }
-                }
-            }
-            None => {
-                let page_count = doc.page_count();
-                let mut start = 0;
-                while start < page_count {
-                    if observer.cancelled() {
-                        return Err(CbzError::Cancelled);
-                    }
-                    let end = (start + chunk).min(page_count);
-                    let pngs: Vec<Vec<u8>> = (start..end)
-                        .into_par_iter()
-                        .map(|i| build_page_png(&doc.page(i)?.clone(), opts))
-                        .collect::<Result<_, CbzError>>()?;
-                    for (offset, png) in pngs.iter().enumerate() {
-                        if observer.cancelled() {
-                            return Err(CbzError::Cancelled);
-                        }
-                        write_page_png(zip, start + offset + 1, png, entry_opts)?;
-                        observer.on_progress(start + offset + 1, total);
-                    }
-                    start = end;
-                }
-            }
-        }
+    // instead of accumulating O(pages) on the document. The ZIP writer is
+    // serial, so entries are written in page order.
+    let run = export_pages(
+        &pages,
+        observer,
+        |i| build_page_png(&doc.page(i)?.clone(), opts),
+        |position, png| write_page_png(zip, position + 1, &png, entry_opts),
+    )?;
+    match run {
+        PageRun::Finished => Ok(()),
+        PageRun::Cancelled => Err(CbzError::Cancelled),
     }
-
-    #[cfg(not(feature = "parallel"))]
-    match &opts.pages {
-        Some(indices) => {
-            for (index, &page_index) in indices.iter().enumerate() {
-                if observer.cancelled() {
-                    return Err(CbzError::Cancelled);
-                }
-                let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
-                write_page_png(zip, index + 1, &png, entry_opts)?;
-                observer.on_progress(index + 1, total);
-            }
-        }
-        None => {
-            for page_index in 0..doc.page_count() {
-                if observer.cancelled() {
-                    return Err(CbzError::Cancelled);
-                }
-                let png = build_page_png(&doc.page(page_index)?.clone(), opts)?;
-                write_page_png(zip, page_index + 1, &png, entry_opts)?;
-                observer.on_progress(page_index + 1, total);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn write_page_png<W: Write + Seek>(

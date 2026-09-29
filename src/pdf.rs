@@ -28,6 +28,7 @@ use crate::{
     annotation::Shape,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::{self, RenderOptions},
+    export_common::{PageRun, export_pages},
     export_control::{ExportObserver, NoOpObserver},
     info::Rotation,
     render_size::RenderSize,
@@ -1280,91 +1281,23 @@ fn djvu_to_pdf_impl<W: std::io::Write>(
 
     let page_count = doc.page_count();
 
-    // Emit one page's objects (rendered body or a blank-page fallback) and return
-    // its page-object id. Shared by both the parallel and sequential paths.
-    let emit_one = |w: &mut PdfWriter<W>,
-                    i: usize,
-                    rendered: Option<RenderedPage>|
-     -> Result<usize, PdfError> {
-        Ok(match rendered {
-            Some(data) => emit_page_objects(w, data, pages_id, font_id)?,
-            None => {
-                // Fallback: blank page at native dimensions
-                let page = doc.page(i)?;
-                let dpi = page.dpi().max(1) as f32;
-                let pt_w = px_to_pt(page.width() as f32, dpi);
-                let pt_h = px_to_pt(page.height() as f32, dpi);
-                let rotate = rotate_entry(pdf_rotate(page.rotation()));
-                w.add(
-                    format!(
-                        "<< /Type /Page /Parent {pages_id} 0 R\n\
-                           /MediaBox [0 0 {pt_w:.4} {pt_h:.4}]{rotate}\n\
-                           /Resources << >> >>"
-                    )
-                    .into_bytes(),
-                )?
-            }
-        })
-    };
-
+    // #629: each page renders on a cold clone so its decode caches die with
+    // it — the export never revisits a page, and caching on the document made
+    // peak RSS grow O(pages). PdfWriter is not Send, so only rendering runs in
+    // parallel; objects are emitted in page order.
+    let pages: Vec<usize> = (0..page_count).collect();
     let mut page_obj_ids = Vec::with_capacity(page_count);
-
-    // With the `parallel` feature, render all pages concurrently via rayon, then
-    // emit sequentially (PdfWriter is not Send).
-    // #606: render in bounded chunks so the parallel path holds O(chunk) page
-    // bodies instead of all `page_count` at once, then emit each chunk in
-    // order (identical output ordering → identical bytes).
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        // Chunk size trades bounded memory (O(chunk) retained bodies) against
-        // scheduling: too small starves the pool at each chunk barrier on
-        // uneven pages. 8x threads measured within noise of the old
-        // collect-everything path on a 504-page doc while bounding bodies.
-        let chunk = rayon::current_num_threads().max(1) * 8;
-        let mut start = 0;
-        while start < page_count {
-            if observer.cancelled() {
-                return Err(PdfError::Cancelled);
-            }
-            let end = (start + chunk).min(page_count);
-            let rendered_pages: Vec<Option<RenderedPage>> = (start..end)
-                .into_par_iter()
-                .map(|i| {
-                    // #629: render on a cold clone so the decode caches die
-                    // with it — the export never revisits a page, and caching
-                    // on the document made peak RSS grow O(pages).
-                    doc.page(i)
-                        .ok()
-                        .and_then(|p| render_page_data(&p.clone(), opts).ok())
-                })
-                .collect();
-            for (off, rendered) in rendered_pages.into_iter().enumerate() {
-                if observer.cancelled() {
-                    return Err(PdfError::Cancelled);
-                }
-                page_obj_ids.push(emit_one(&mut w, start + off, rendered)?);
-                observer.on_progress(start + off + 1, page_count);
-            }
-            start = end;
-        }
-    }
-
-    // #449: sequential path renders, emits, and drops one page at a time, holding
-    // O(1) page bodies in memory instead of collecting all `page_count` rendered
-    // bodies first (peak RSS O(pages × body) → O(1 page); mirrors TIFF_STREAM).
-    #[cfg(not(feature = "parallel"))]
-    for i in 0..page_count {
-        if observer.cancelled() {
-            return Err(PdfError::Cancelled);
-        }
-        // #629: render on a cold clone — see the parallel path above.
-        let rendered = doc
-            .page(i)
-            .ok()
-            .and_then(|p| render_page_data(&p.clone(), opts).ok());
-        page_obj_ids.push(emit_one(&mut w, i, rendered)?);
-        observer.on_progress(i + 1, page_count);
+    let run = export_pages(
+        &pages,
+        observer,
+        |i| render_page_data(&doc.page(i)?.clone(), opts),
+        |_, rendered| {
+            page_obj_ids.push(emit_page_objects(&mut w, rendered, pages_id, font_id)?);
+            Ok(())
+        },
+    )?;
+    if run == PageRun::Cancelled {
+        return Err(PdfError::Cancelled);
     }
 
     // Build outline from bookmarks
