@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790789362429,
+  "lastUpdate": 1790802201290,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21682,6 +21682,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 48105000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9bcead1420b6dc794ae9736bcb20f9d7312eea9c",
+          "message": "chore: benches and examples render through RenderRequest (#883)\n\nThe render and viewer benches and the mask_aa_crops example now call\nRenderRequest instead of the deprecated render_* functions. Benchmark\nnames stay the same, so the recorded history continues.\n\nmask_aa_crops takes its crop window from the unrotated mask, and a\nRenderRequest region is in display coordinates. It now refuses a rotated\npage instead of cropping the wrong place.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T20:35:07Z",
+          "tree_id": "dbd3106b538271c73b25e6ecffcebbc3826240d6",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/9bcead1420b6dc794ae9736bcb20f9d7312eea9c"
+        },
+        "date": 1790802199826,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 161000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 9134000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53740000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51592000,
             "range": "± 0",
             "unit": "ns/iter"
           }
