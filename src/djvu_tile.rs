@@ -46,9 +46,7 @@
 //! Layer selection and async/wasm surfaces are later slices of #691.
 
 use crate::djvu_document::DjVuPage;
-use crate::djvu_render::{
-    RenderError, RenderOptions, RenderRect, combine_rotations, render_region,
-};
+use crate::djvu_render::{RenderError, RenderOptions, RenderRect, combine_rotations};
 use crate::info::Rotation;
 use crate::pixmap::Pixmap;
 
@@ -214,6 +212,7 @@ impl TileLayout {
     /// Map a display-space tile to the pre-rotation [`RenderRect`] whose
     /// rotated render equals it (see
     /// [`native_rect`](crate::djvu_render::native_rect) for the table).
+    #[cfg(feature = "std")]
     fn to_render_rect(self, r: TileRect) -> RenderRect {
         crate::djvu_render::native_rect(
             self.rotation,
@@ -251,15 +250,20 @@ pub fn render_tile(
     col: u32,
     row: u32,
 ) -> Result<Pixmap, TileError> {
-    let layout = TileLayout::new(page, opts, tile_size)?;
-    let rect = layout.tile_rect(col, row)?;
-    Ok(render_region(page, layout.to_render_rect(rect), opts)?)
+    render_tile_with(
+        page,
+        opts,
+        tile_size,
+        col,
+        row,
+        &TileRenderControls::default(),
+    )
 }
 
 /// Render one tile, assembling it from the page's composited-tile cache.
 ///
 /// Byte-identical to [`render_tile`] for every input — this routes through
-/// [`render_region_tiled`](crate::djvu_render::render_region_tiled), a cache
+/// [`RenderRequest::cached`](crate::djvu_render::RenderRequest::cached), a cache
 /// in front of the same compositor (falling back to a plain region render
 /// whenever the cache is not eligible). Request order never affects output:
 /// cache entries are keyed by absolute position in the full render, so hits
@@ -276,13 +280,11 @@ pub fn render_tile_cached(
     col: u32,
     row: u32,
 ) -> Result<Pixmap, TileError> {
-    let layout = TileLayout::new(page, opts, tile_size)?;
-    let rect = layout.tile_rect(col, row)?;
-    Ok(crate::djvu_render::render_region_tiled(
-        page,
-        layout.to_render_rect(rect),
-        opts,
-    )?)
+    let controls = TileRenderControls {
+        use_cache: true,
+        ..TileRenderControls::default()
+    };
+    render_tile_with(page, opts, tile_size, col, row, &controls)
 }
 
 /// Cooperative cancellation token for tile work (#691 slice 3): the shared
@@ -600,6 +602,8 @@ fn prefetch_tiles_inner(
 }
 
 #[cfg(all(test, feature = "std"))]
+// The deprecated entry points keep their tests until they are removed.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;

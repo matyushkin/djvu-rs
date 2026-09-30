@@ -164,7 +164,9 @@ pub(crate) fn render_rows_or_pixmap(
     mut row_cb: impl FnMut(&[u8]),
 ) -> Result<(), crate::djvu_render::RenderError> {
     if opts.can_stream(page) {
-        crate::djvu_render::render_streaming(page, opts, |_, rgba_row| row_cb(rgba_row))
+        crate::djvu_render::RenderRequest::new(opts.clone())
+            .operation("render_streaming")
+            .rows(page, |_, rgba_row| row_cb(rgba_row))
     } else {
         let pixmap = crate::djvu_render::render_pixmap(page, opts)?;
         let stride = pixmap.width as usize * 4;

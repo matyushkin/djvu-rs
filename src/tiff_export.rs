@@ -250,9 +250,11 @@ fn build_page_image(page: &DjVuPage, opts: &TiffOptions) -> Result<PageImage, Ti
             // else fall back to the full-pixmap path for non-streamable options.
             let rgb = if ropts.can_stream(page) {
                 let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
-                djvu_render::render_streaming(page, &ropts, |_, rgba_row| {
-                    crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
-                })?;
+                djvu_render::RenderRequest::new(ropts)
+                    .operation("render_streaming")
+                    .rows(page, |_, rgba_row| {
+                        crate::export_common::rgba_row_to_rgb(&mut rgb, rgba_row);
+                    })?;
                 rgb
             } else {
                 djvu_render::render_pixmap(page, &ropts)?.to_rgb()
@@ -346,33 +348,35 @@ fn write_color_page_streaming<W: Write + Seek>(
     let mut strip = Vec::with_capacity(next_strip_samples);
     let mut encode_error: Option<tiff::TiffError> = None;
 
-    djvu_render::render_streaming(page, opts, |_, rgba_row| {
-        if encode_error.is_some() {
-            return;
-        }
-
-        crate::export_common::rgba_row_to_rgb(&mut strip, rgba_row);
-
-        if strip.len() > next_strip_samples {
-            encode_error = Some(
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "streamed RGB strip exceeded expected TIFF strip size",
-                )
-                .into(),
-            );
-            return;
-        }
-
-        if strip.len() == next_strip_samples {
-            if let Err(e) = img.write_strip(&strip) {
-                encode_error = Some(e);
+    djvu_render::RenderRequest::new(opts.clone())
+        .operation("render_streaming")
+        .rows(page, |_, rgba_row| {
+            if encode_error.is_some() {
                 return;
             }
-            strip.clear();
-            next_strip_samples = img.next_strip_sample_count() as usize;
-        }
-    })?;
+
+            crate::export_common::rgba_row_to_rgb(&mut strip, rgba_row);
+
+            if strip.len() > next_strip_samples {
+                encode_error = Some(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "streamed RGB strip exceeded expected TIFF strip size",
+                    )
+                    .into(),
+                );
+                return;
+            }
+
+            if strip.len() == next_strip_samples {
+                if let Err(e) = img.write_strip(&strip) {
+                    encode_error = Some(e);
+                    return;
+                }
+                strip.clear();
+                next_strip_samples = img.next_strip_sample_count() as usize;
+            }
+        })?;
 
     if let Some(e) = encode_error {
         return Err(e.into());

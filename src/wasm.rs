@@ -43,10 +43,39 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     djvu_document::DjVuDocument,
-    djvu_render::{render_coarse, render_progressive},
+    djvu_render::{Quality, RenderError, RenderOptions, RenderRequest},
     djvu_tile,
+    pixmap::Pixmap,
     render_size::RenderSize,
 };
+
+/// The coarse preview, or `None` when the page has no background.
+fn render_coarse(
+    page: &crate::djvu_document::DjVuPage,
+    opts: &RenderOptions,
+) -> Result<Option<Pixmap>, RenderError> {
+    match RenderRequest::new(opts.clone())
+        .quality(Quality::Coarse)
+        .operation("render_coarse")
+        .pixmap(page)
+    {
+        Err(RenderError::NoBackground) => Ok(None),
+        result => result.map(Some),
+    }
+}
+
+/// Progressive frame `chunk_n`: background chunks `0..=chunk_n` and every
+/// other layer.
+fn render_progressive(
+    page: &crate::djvu_document::DjVuPage,
+    opts: &RenderOptions,
+    chunk_n: usize,
+) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(opts.clone())
+        .quality(Quality::Step(chunk_n))
+        .operation("render_progressive")
+        .pixmap(page)
+}
 
 // ── WasmPixmap — Rust-owned pixel buffer (#611) ──────────────────────────────
 
@@ -434,7 +463,9 @@ impl WasmPage {
         }
         let need = opts.width as usize * opts.height as usize * 4;
         out.data.resize(need, 0);
-        crate::djvu_render::render_into(page, &opts, &mut out.data)
+        RenderRequest::new(opts.clone())
+            .operation("render_into")
+            .write_rgba(page, &mut out.data)
             .map_err(|e| JsError::new(&e.to_string()))?;
         out.width = opts.width;
         out.height = opts.height;
@@ -865,7 +896,7 @@ mod lazy {
         let pm = if chunk_n == u32::MAX {
             crate::djvu_render::render_pixmap(page, &opts)
         } else {
-            crate::djvu_render::render_progressive(page, &opts, chunk_n as usize)
+            crate::wasm::render_progressive(page, &opts, chunk_n as usize)
         }
         .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmPixmap {

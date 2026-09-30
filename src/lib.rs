@@ -812,8 +812,7 @@ impl<'a> Page<'a> {
     /// `bold` / `aa` / `resampling` as needed. This supersedes the bespoke
     /// `render_bold` / `render_aa` / `render_scaled*` methods.
     pub fn render_with(&self, opts: &djvu_render::RenderOptions) -> Result<Pixmap, Error> {
-        djvu_render::render_pixmap_with_limits(self.page, opts, self.page.resource_limits())
-            .map_err(Self::render_err)
+        self.render_with_limits(opts, self.page.resource_limits())
     }
 
     /// Render with caller-supplied [`RenderOptions`] and an optional limit override.
@@ -822,7 +821,11 @@ impl<'a> Page<'a> {
         opts: &djvu_render::RenderOptions,
         limits: Option<crate::resource_limits::ResourceLimits>,
     ) -> Result<Pixmap, Error> {
-        djvu_render::render_pixmap_with_limits(self.page, opts, limits).map_err(Self::render_err)
+        djvu_render::RenderRequest::new(opts.clone())
+            .limits(limits)
+            .operation("render_pixmap")
+            .pixmap(self.page)
+            .map_err(Self::render_err)
     }
 
     /// Page resolution in dots per inch.
@@ -912,13 +915,20 @@ impl<'a> Page<'a> {
     /// near-instant preview). Returns `Ok(None)` for bilevel-only pages.
     pub fn render_coarse(&self, width: u32, height: u32) -> Result<Option<Pixmap>, Error> {
         let opts = self.opts_for_size(width, height);
-        djvu_render::render_coarse(self.page, &opts).map_err(Self::render_err)
+        match djvu_render::RenderRequest::new(opts)
+            .quality(djvu_render::Quality::Coarse)
+            .operation("render_coarse")
+            .pixmap(self.page)
+        {
+            Err(djvu_render::RenderError::NoBackground) => Ok(None),
+            result => result.map(Some).map_err(Self::render_err),
+        }
     }
 
     /// Progressive render: decode BG44 chunks `0..=chunk_n` plus all
     /// foreground layers. `chunk_n = bg44_chunk_count() - 1` equals the full
     /// render except at about a quarter of the native size and below (see
-    /// [`djvu_render::render_progressive`]); each lower value is a coarser
+    /// [`djvu_render::Quality::Step`]); each lower value is a coarser
     /// refinement stage.
     pub fn render_progressive(
         &self,
@@ -927,7 +937,11 @@ impl<'a> Page<'a> {
         chunk_n: usize,
     ) -> Result<Pixmap, Error> {
         let opts = self.opts_for_size(width, height);
-        djvu_render::render_progressive(self.page, &opts, chunk_n).map_err(Self::render_err)
+        djvu_render::RenderRequest::new(opts)
+            .quality(djvu_render::Quality::Step(chunk_n))
+            .operation("render_progressive")
+            .pixmap(self.page)
+            .map_err(Self::render_err)
     }
 
     /// Number of BG44 refinement chunks on this page (0 for bilevel pages).

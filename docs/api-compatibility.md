@@ -40,7 +40,10 @@ bump). This includes:
 - The error hierarchy (`DjVuError`, `IffError`, `Jb2Error`, `Iw44Error`,
   `BzzError`, `DocError`, `RenderError`) — see the error-stability rule below.
 - The rendering entry points in [`djvu_render`] (`RenderOptions`,
-  `render_pixmap`, `render_region`, `render_coarse`, `render_progressive`, …).
+  `RenderRequest`, `render_pixmap`, …). The older `render_*` variants
+  (`render_into`, `render_streaming`, `render_region`, `render_coarse`,
+  `render_progressive`, …) are deprecated in favour of `RenderRequest`; they
+  keep working until a future breaking release removes them.
 - The codec entry points of the workspace crates that the README advertises as
   `no_std`-callable: `iff::parse_form`, `bzz::bzz_decode`, `jb2::decode_dict`,
   `iw44::Iw44Image::decode_chunk`.
@@ -287,12 +290,12 @@ of ceilings lives in [`../SECURITY.md`](../SECURITY.md#decode-time-resource-ceil
 budget via [`ParseOptions::limits`](../../src/validate.rs) on
 [`DjVuDocument::parse_with_options`](../../src/djvu_document.rs) /
 [`Document::from_bytes_with_options`](../../src/lib.rs), or via
-[`render_pixmap_with_limits`](../../src/djvu_render.rs) on render entry points.
+[`RenderRequest::limits`](../../src/djvu_render.rs) on a render.
 Unset fields mean “no limit on this axis”. When render calls omit an explicit
 override, the document inherits limits stored at parse time. When both are
 unset, render output inherits [`DEFAULT_MAX_RENDER_PIXELS`]. Use
 [`ResourceLimits::inherited`] for the documented default render ceiling only.
-Per-render tightening uses [`render_pixmap_with_limits`](../../src/djvu_render.rs).
+Per-render tightening uses [`RenderRequest::limits`](../../src/djvu_render.rs).
 The validator and `djvu validate --limits` use the same type.
 
 **Render caches are bounded by default (since 0.33).** The decode results a
