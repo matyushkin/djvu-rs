@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790804850226,
+  "lastUpdate": 1790808531405,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21778,6 +21778,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29209000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c9573c89e9f59a40aa1c5c894b9718378c1840d0",
+          "message": "docs: fix every broken intra-doc link and gate rustdoc in CI (#886)\n\n`cargo doc -D warnings` failed on 111 errors. Most came from modules\nthat have both an outer doc on `pub mod x;` in lib.rs and an inner `//!`\ndoc: rustdoc then resolves the inner links from the crate root, so\n`[`budget`]` inside render_cache found nothing. Those links now carry\ntheir full `crate::module::item` path. Links to private items became\nplain code text; a few wrong targets were corrected\n(`RenderError::UnsupportedOption`, `crate::ocr::OcrError`,\n`crate::iff::Chunk`).\n\nThe workspace crates (djvu-iff, djvu-iw44, djvu-zp, djvu-pixmap) get the\nsame treatment.\n\nThe Lint job and scripts/check.sh now run rustdoc with -D warnings over\nevery docs.rs feature except ocr-tesseract (needs the system library)\nand wasm-threads (nightly only). Lint timeout goes to 20 minutes.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T22:22:44Z",
+          "tree_id": "588b6cbb7f5304e6c937237c8207329484668bab",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/c9573c89e9f59a40aa1c5c894b9718378c1840d0"
+        },
+        "date": 1790808529660,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8722000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 52777000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 50876000,
             "range": "± 0",
             "unit": "ns/iter"
           }
