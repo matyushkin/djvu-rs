@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790739308050,
+  "lastUpdate": 1790743269226,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21538,6 +21538,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 39908000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f9dd1774ac4cdb2478768675e7ed85f1ab0b4620",
+          "message": "feat: one RenderRequest for every render (#881)\n\nAdd `djvu_render::RenderRequest`, one request type that gathers every\nrender choice the `render_*` functions spread over their names:\n\n- the page size and look (`RenderOptions`);\n- an optional region, in display space: the exact crop of the whole page;\n- the quality: full, a progressive step, or a coarse preview (`Quality`);\n- per-render resource limits;\n- a `CancelToken`;\n- the composited-tile cache for regions.\n\nThree methods pick the output: `pixmap` (plus `pixmap_with_report`),\n`write_rgba` into a caller's buffer, and `rows` into a row sink.\n\n`render_pixmap`, `render_pixmap_with_limits`, `render_pixmap_with_report`,\n`render_into`, `render_into_with_limits`, `render_streaming` and\n`render_coarse` now delegate to it, as do `Page::render_region` and\n`djvu_tile::render_tile_with`. Two crate-internal region functions are\ngone. `djvu_tile::TileCancelToken` is now an alias of the shared\n`CancelToken`. `RenderError` gains `Cancelled` and `NoBackground`.\n\nThe old functions stay; deprecating them is a later step, after the\ninternal callers move to the request.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T04:18:13Z",
+          "tree_id": "326f3cd727947bf6d5cd06ca8b24d1c3e594043c",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/f9dd1774ac4cdb2478768675e7ed85f1ab0b4620"
+        },
+        "date": 1790743267261,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 106000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5183000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30844000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 28795000,
             "range": "± 0",
             "unit": "ns/iter"
           }
