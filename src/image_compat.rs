@@ -1,15 +1,15 @@
 //! `image::ImageDecoder` integration for DjVu pages.
 //!
-//! This module provides [`DjVuDecoder`], which implements the
+//! This module provides [`DjVuDecoder`](crate::image_compat::DjVuDecoder), which implements the
 //! [`image::ImageDecoder`] and [`image::ImageDecoderRect`] traits from the
 //! `image` crate, making djvu-rs a first-class image format usable anywhere
 //! image-rs pipelines are used.
 //!
 //! ## Key public types
 //!
-//! - [`DjVuDecoder`] — implements `image::ImageDecoder` and `image::ImageDecoderRect`
+//! - [`DjVuDecoder`](crate::image_compat::DjVuDecoder) — implements `image::ImageDecoder` and `image::ImageDecoderRect`
 //!   for a single DjVu page (compatible with `image` 0.25+)
-//! - [`ImageCompatError`] — typed errors from this module
+//! - [`ImageCompatError`](crate::image_compat::ImageCompatError) — typed errors from this module
 //!
 //! ## Usage
 //!

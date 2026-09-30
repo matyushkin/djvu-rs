@@ -44,7 +44,7 @@
 //! - `Lossless` from a [`Bitmap`]: ships `INFO + Sjbz` by default, coded
 //!   with a symbol dictionary and refinement of similar glyphs
 //!   ([`jb2_encode::encode_jb2_lossless`]). Call
-//!   [`PageEncoder::with_bilevel_codec`] with [`BilevelCodec::Smmr`] for an
+//!   [`PageEncoder::with_bilevel_codec`](crate::djvu_encode::PageEncoder::with_bilevel_codec) with [`BilevelCodec::Smmr`](crate::djvu_encode::BilevelCodec::Smmr) for an
 //!   explicit DjVuLibre-compatible `Smmr` G4/MMR mask. Both are pixel-exact.
 //! - `Quality` from a [`Pixmap`]: ships `INFO + Sjbz + BG44… + FGbz`
 //!   when foreground ink is detected. Lossy by codec definition; output
@@ -55,7 +55,7 @@
 //! - `Lossless` from a [`Pixmap`] / `Quality` from a [`Bitmap`] are
 //!   rejected: the combinations are mathematically meaningless
 //!   (IW44 is lossy; bilevel input has nothing to put in BG44).
-//! - [`PageEncoder::with_metadata`] adds fresh-document metadata as an
+//! - [`PageEncoder::with_metadata`](crate::djvu_encode::PageEncoder::with_metadata) adds fresh-document metadata as an
 //!   `ANTz` `(metadata …)` block, where DjVuLibre reads it;
 //!   mutation of existing chunks remains the responsibility of
 //!   [`crate::djvu_mut::PageMut::set_metadata`].
@@ -112,7 +112,7 @@ pub enum EncodeError {
 
 // ── FGbz palette construction ─────────────────────────────────────────────────
 
-/// How [`foreground_fgbz`] turns per-blit average colours into a palette.
+/// How `foreground_fgbz` turns per-blit average colours into a palette.
 ///
 /// The historical (and default) behaviour is [`FgbzPaletteOptions::Exact`]:
 /// one palette entry per *distinct* per-blit average colour, so anti-aliased
@@ -1039,12 +1039,12 @@ pub fn encode_djvm_layered_shared_with_thumbnails_and_masks(
 ///
 /// At most `window` pages' pixmaps (default: `None`, meaning
 /// `rayon::current_num_threads().min(4)` under the `parallel` feature, or
-/// `1` without it — see [`default_streaming_window`]) are resident at once.
+/// `1` without it — see `default_streaming_window`) are resident at once.
 /// Each page's pixmap is fetched, run through phase 1 (segmentation, `BG44`/
 /// `TH44` encode, and — for the lossless default — the `FGbz` colour table
 /// precomputed by step 3), and dropped before the next window starts; phase
 /// 2 (shared-dictionary clustering) and phase 3 (per-page finalize) then run
-/// exactly as in the eager path, from the compact [`PreparedPage`]s alone.
+/// exactly as in the eager path, from the compact `PreparedPage`s alone.
 /// `window` is clamped to at least 1; passing `Some(page_count)` reproduces
 /// the eager entry points' behavior (everything in one window) if a caller
 /// wants that shape from a lazy source for some other reason (e.g. it
@@ -1052,10 +1052,10 @@ pub fn encode_djvm_layered_shared_with_thumbnails_and_masks(
 ///
 /// # The lossy fallback
 ///
-/// [`build_page`] needs the *original* pixmap a second time only when
+/// `build_page` needs the *original* pixmap a second time only when
 /// `Jb2EncodeOptions::lossy_threshold > 0.0` (not yet exposed as a
 /// caller-facing knob on this bundle path — it is always `0.0` today, see
-/// `page_jb2_options` in [`encode_djvm_layered_shared_impl`]) or in the
+/// `page_jb2_options` in `encode_djvm_layered_shared_impl`) or in the
 /// (currently unreachable) case where phase 1's precomputed colour table is
 /// unexpectedly absent for a lossless page. The bounded window has already
 /// dropped that pixmap by the time phase 3 runs, so this function refuses

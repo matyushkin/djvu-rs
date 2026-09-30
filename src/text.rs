@@ -1,7 +1,7 @@
 //! DjVu text layer — data model and parser.
 //!
 //! Defines the types shared by the text encoder, serialisers, and OCR
-//! backends, and provides the pure [`parse_text_layer`] parser for TXTa
+//! backends, and provides the pure [`parse_text_layer`](crate::text::parse_text_layer) parser for TXTa
 //! (plain) and TXTz (BZZ-compressed) chunks.
 //!
 //! ## Key types
@@ -9,9 +9,9 @@
 //! - [`TextLayer`] — full text content and zone hierarchy of a page
 //! - [`TextZone`] — single zone node (page/column/para/line/word/char)
 //! - [`TextZoneKind`] — enum discriminating zone types
-//! - [`Rect`] — bounding rectangle in top-left-origin coordinates
-//! - [`Paragraph`] — reflowable paragraph extracted from a [`TextLayer`]
-//! - [`TextError`] — typed errors from text layer parsing
+//! - [`Rect`](crate::text::Rect) — bounding rectangle in top-left-origin coordinates
+//! - [`Paragraph`](crate::text::Paragraph) — reflowable paragraph extracted from a [`TextLayer`]
+//! - [`TextError`](crate::text::TextError) — typed errors from text layer parsing
 //!
 //! ## Format notes
 //!

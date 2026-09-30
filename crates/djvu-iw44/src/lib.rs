@@ -3508,7 +3508,7 @@ impl Iw44Image {
     /// Heap bytes held by this image's decoded coefficient planes.
     ///
     /// A cache-budget accounting helper: an `Iw44Image` keeps one
-    /// [`PlaneDecoder`] per colour plane, and each holds `ceil(w/32) *
+    /// `PlaneDecoder` per colour plane, and each holds `ceil(w/32) *
     /// ceil(h/32)` blocks. A block stores its first 16 coefficients inline and
     /// grows a heap tail only up to its highest non-zero bucket, so the cost
     /// tracks how much detail the chunks actually carried, not `w x h`

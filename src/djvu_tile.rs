@@ -10,8 +10,8 @@
 //!
 //! - **Coordinate space.** Tile `(col, row)` covers display-space rectangle
 //!   `[col·ts, min((col+1)·ts, W)) × [row·ts, min((row+1)·ts, H))` where
-//!   `W × H` is the display canvas ([`TileLayout::output_width`] /
-//!   [`TileLayout::output_height`]) and `ts` the tile size. Edge tiles are
+//!   `W × H` is the display canvas ([`TileLayout::output_width`](crate::djvu_tile::TileLayout::output_width) /
+//!   [`TileLayout::output_height`](crate::djvu_tile::TileLayout::output_height)) and `ts` the tile size. Edge tiles are
 //!   clipped, never padded.
 //! - **Assembly parity.** Blitting every tile at its display rectangle
 //!   reproduces [`render_pixmap`](crate::djvu_render::render_pixmap) output
@@ -19,17 +19,17 @@
 //!   covers the halved page), and Lanczos-3 resampling.
 //! - **Order independence.** Tile pixels are a pure function of the tile
 //!   coordinate and the render options; request order (and cache state, for
-//!   [`render_tile_cached`]) never changes a single byte.
+//!   [`render_tile_cached`](crate::djvu_tile::render_tile_cached)) never changes a single byte.
 //!
-//! Slice 2 adds cache control at tile granularity: [`tile_cache_usage`],
-//! [`set_tile_cache_budget`], [`clear_tile_cache`],
-//! [`invalidate_tile_region`], and (with the `parallel` feature) bounded
-//! background [`prefetch_tiles`]. Cache state never changes rendered bytes —
+//! Slice 2 adds cache control at tile granularity: [`tile_cache_usage`](crate::djvu_tile::tile_cache_usage),
+//! [`set_tile_cache_budget`](crate::djvu_tile::set_tile_cache_budget), [`clear_tile_cache`](crate::djvu_tile::clear_tile_cache),
+//! [`invalidate_tile_region`](crate::djvu_tile::invalidate_tile_region), and (with the `parallel` feature) bounded
+//! background [`prefetch_tiles`](crate::djvu_tile::prefetch_tiles). Cache state never changes rendered bytes —
 //! only latency.
 //!
 //! Slice 3 adds explicit progressive quality steps and cooperative
-//! cancellation through [`render_tile_with`] / [`TileRenderControls`] /
-//! [`TileCancelToken`] (plus [`prefetch_tiles_cancellable`]):
+//! cancellation through [`render_tile_with`](crate::djvu_tile::render_tile_with) / [`TileRenderControls`](crate::djvu_tile::TileRenderControls) /
+//! [`TileCancelToken`](crate::djvu_tile::TileCancelToken) (plus [`prefetch_tiles_cancellable`](crate::djvu_tile::prefetch_tiles_cancellable)):
 //!
 //! - **Quality steps.** `quality_step = Some(k)` renders the tile from BG44
 //!   background chunks `0..=k` only — byte-identical to the matching crop of
@@ -40,7 +40,7 @@
 //!   already rides.
 //! - **Cancellation.** A cancelled token makes in-flight work stop at its
 //!   next checkpoint (per tile, and between decode and composite) with
-//!   [`TileError::Cancelled`]. Cancellation never corrupts caches and never
+//!   [`TileError::Cancelled`](crate::djvu_tile::TileError::Cancelled). Cancellation never corrupts caches and never
 //!   changes the bytes of any completed tile.
 //!
 //! Layer selection and async/wasm surfaces are later slices of #691.

@@ -4,9 +4,9 @@
 //!
 //! ## Key public types
 //!
-//! - [`TiffOptions`] — export parameters (color vs. bilevel mode)
-//! - [`djvu_to_tiff_writer`] — low-memory writer API backed by row-streaming
-//! - [`TiffError`] — errors from TIFF conversion
+//! - [`TiffOptions`](crate::tiff_export::TiffOptions) — export parameters (color vs. bilevel mode)
+//! - [`djvu_to_tiff_writer`](crate::tiff_export::djvu_to_tiff_writer) — low-memory writer API backed by row-streaming
+//! - [`TiffError`](crate::tiff_export::TiffError) — errors from TIFF conversion
 //!
 //! ## Modes
 //!

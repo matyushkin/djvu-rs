@@ -71,7 +71,7 @@ pub struct EpubOptions {
     /// When `None`, the current UTC time is used (computed from `std::time::SystemTime`).
     pub modified: Option<String>,
     /// Append a reflowable-text section after the page image on each page
-    /// XHTML, populated from [`TextLayer::reflowable_text`]. Defaults to
+    /// XHTML, populated from [`TextLayer::reflowable_text`](crate::text::TextLayer::reflowable_text). Defaults to
     /// `false` (existing fixed-layout behaviour, page image + invisible
     /// overlay text).
     ///

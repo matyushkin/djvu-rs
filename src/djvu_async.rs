@@ -33,14 +33,14 @@
 //!
 //! ## Key public abstractions
 //!
-//! - [`LazyDocument`] — seek-based lazy indexing with a concurrent per-page cache
-//! - [`LazyIndirectDocument`] — lazy indirect `FORM:DJVM`: pages come from an
-//!   [`AsyncComponentResolver`] only when requested
-//! - [`render_progressive_stream`] — streaming progressive render yielding one frame per BG44 chunk
-//! - [`render_tile_async`] / [`render_tile_progressive_stream`] — tile-first
+//! - [`LazyDocument`](crate::djvu_async::LazyDocument) — seek-based lazy indexing with a concurrent per-page cache
+//! - [`LazyIndirectDocument`](crate::djvu_async::LazyIndirectDocument) — lazy indirect `FORM:DJVM`: pages come from an
+//!   [`AsyncComponentResolver`](crate::djvu_async::AsyncComponentResolver) only when requested
+//! - [`render_progressive_stream`](crate::djvu_async::render_progressive_stream) — streaming progressive render yielding one frame per BG44 chunk
+//! - [`render_tile_async`](crate::djvu_async::render_tile_async) / [`render_tile_progressive_stream`](crate::djvu_async::render_tile_progressive_stream) — tile-first
 //!   rendering (#691) off the runtime thread, with quality steps and
 //!   cancellation
-//! - [`load_document_async_streaming`] — head-first async loader exposing per-page byte ranges
+//! - [`load_document_async_streaming`](crate::djvu_async::load_document_async_streaming) — head-first async loader exposing per-page byte ranges
 
 use std::{collections::BTreeMap, ops::Range, sync::Arc};
 

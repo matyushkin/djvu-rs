@@ -4,13 +4,13 @@
 //!
 //! - The concrete PP-OCR pipeline being built under #693 (see
 //!   `docs/neural-ocr-design.md`):
-//!   [`manifest`] — pinned model artifacts with mandatory SHA-256
-//!   verification; [`preprocess`] — deterministic detector preprocessing;
-//!   [`detect`] — DBNet text detection producing page-coordinate boxes;
-//!   [`recognize`] — Cyrillic CTC line recognition against the pinned
-//!   dictionary; [`pipeline`] — the [`pipeline::NeuralOcrBackend`] composition
+//!   [`manifest`](crate::ocr_onnx::manifest) — pinned model artifacts with mandatory SHA-256
+//!   verification; [`preprocess`](crate::ocr_onnx::preprocess) — deterministic detector preprocessing;
+//!   [`detect`](crate::ocr_onnx::detect) — DBNet text detection producing page-coordinate boxes;
+//!   [`recognize`](crate::ocr_onnx::recognize) — Cyrillic CTC line recognition against the pinned
+//!   dictionary; [`pipeline`](crate::ocr_onnx::pipeline) — the [`pipeline::NeuralOcrBackend`](crate::ocr_onnx::pipeline::NeuralOcrBackend) composition
 //!   wired to the CLI as `--backend onnx`.
-//! - [`OnnxBackend`] — an older generic scaffold for simple CTC-style
+//! - [`OnnxBackend`](crate::ocr_onnx::OnnxBackend) — an older generic scaffold for simple CTC-style
 //!   recognizers where the caller provides the model and vocabulary; not a
 //!   CLI backend.
 
@@ -42,7 +42,7 @@ type OnnxModel = tract_onnx::prelude::SimplePlan<
 ///
 /// Expects a pre-trained CTC-style ONNX model that accepts a single grayscale
 /// image tensor `[1, 1, H, W]` normalized to `[0, 1]` and emits character
-/// probabilities compatible with [`Self::ctc_decode`]. Other architectures
+/// probabilities compatible with `ctc_decode`. Other architectures
 /// require their own preprocessing and decoder and are not supported by this
 /// helper.
 pub struct OnnxBackend {

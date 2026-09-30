@@ -12,9 +12,9 @@
 //!   while the rest were infallible.
 //!
 //! This module is the one place that pairs each encoder with its id and routes
-//! every fallible case through a single [`EncodeError`]. A wrapper implements
-//! [`ChunkEncoder`] and yields an [`EncodedChunk`]; [`EncodedChunk::into_leaf`]
-//! bridges to the `iff` emission seam ([`Chunk::Leaf`]) so framing and
+//! every fallible case through a single [`EncodeError`](crate::chunk_encode::EncodeError). A wrapper implements
+//! [`ChunkEncoder`](crate::chunk_encode::ChunkEncoder) and yields an [`EncodedChunk`](crate::chunk_encode::EncodedChunk); [`EncodedChunk::into_leaf`](crate::chunk_encode::EncodedChunk::into_leaf)
+//! bridges to the `iff` emission seam ([`Chunk::Leaf`](crate::iff::Chunk::Leaf)) so framing and
 //! word-alignment padding stay centralised there (see issue #367).
 
 use crate::bitmap::Bitmap;

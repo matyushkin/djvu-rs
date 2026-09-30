@@ -823,7 +823,7 @@ impl<'a> Page<'a> {
         request.pixmap(self.page).map_err(Self::render_err)
     }
 
-    /// Render with caller-supplied [`RenderOptions`] — the single entry point
+    /// Render with caller-supplied [`RenderOptions`](djvu_render::RenderOptions) — the single entry point
     /// the convenience methods funnel through.
     ///
     /// Build `opts` with the rotation-aware
@@ -835,7 +835,7 @@ impl<'a> Page<'a> {
         self.render_with_limits(opts, self.page.resource_limits())
     }
 
-    /// Render with caller-supplied [`RenderOptions`] and an optional limit override.
+    /// Render with caller-supplied [`RenderOptions`](djvu_render::RenderOptions) and an optional limit override.
     pub fn render_with_limits(
         &self,
         opts: &djvu_render::RenderOptions,

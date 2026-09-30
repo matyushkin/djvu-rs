@@ -17,11 +17,11 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Fast lint gate (runs in ~15s) ────────────────────────────────────────────
+  # ── Fast lint gate ───────────────────────────────────────────────────────────
   lint:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -55,6 +55,16 @@ jobs:
       # dependency tree. Part of the required Lint gate on purpose.
       - name: Feature hygiene (decode-only default tree)
         run: scripts/check_feature_hygiene.sh
+
+      # Broken or private intra-doc links fail here instead of shipping to
+      # docs.rs. Every feature docs.rs documents, except ocr-tesseract (it
+      # needs the system Tesseract library) and wasm-threads (nightly only).
+      - name: Rustdoc (no broken links)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --workspace --exclude djvu-py --no-deps
+          --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,ocr-neural,experimental,iw44-probe
 
   # ── Tests ────────────────────────────────────────────────────────────────────
   # stable: every push + PRs, full suite on main

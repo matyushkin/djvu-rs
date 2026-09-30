@@ -306,7 +306,7 @@ impl Pixmap {
 /// An 8-bit grayscale image, 1 byte per pixel.
 ///
 /// Row-major, top-to-bottom. `data.len() == width * height`.
-/// Produced by [`Pixmap::to_gray8`] or [`crate::djvu_render::render_gray8`].
+/// Produced by [`Pixmap::to_gray8`] or `djvu_rs::djvu_render::render_gray8`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrayPixmap {
     pub width: u32,
