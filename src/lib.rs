@@ -797,10 +797,30 @@ impl<'a> Page<'a> {
         render_size::RenderSize::at_scale(self.page, scale).options()
     }
 
-    /// Build options whose rendered pixmap is exactly `width × height` (the
+    /// Options whose rendered pixmap is exactly `width × height` (the
     /// display size, after rotation); the aspect ratio is the caller's choice.
-    fn opts_for_size(&self, width: u32, height: u32) -> djvu_render::RenderOptions {
+    /// The starting point of a [`render_request`](Self::render_request).
+    pub fn options_for_size(&self, width: u32, height: u32) -> djvu_render::RenderOptions {
         render_size::RenderSize::exact(self.page, width, height).options()
+    }
+
+    /// Run a [`RenderRequest`](djvu_render::RenderRequest) on this page: the
+    /// one render call that covers a region, a progressive step, a coarse
+    /// preview, and the tile cache.
+    ///
+    /// ```no_run
+    /// use djvu_rs::djvu_render::{RenderRect, RenderRequest};
+    /// # let doc = djvu_rs::Document::from_bytes(vec![]).unwrap();
+    /// let page = doc.page(0).unwrap();
+    /// let opts = page.options_for_size(1024, 1400);
+    /// let viewport = RenderRect { x: 0, y: 200, width: 1024, height: 600 };
+    /// let part = page
+    ///     .render_request(&RenderRequest::new(opts).region(viewport).cached(true))
+    ///     .unwrap();
+    /// # let _ = part;
+    /// ```
+    pub fn render_request(&self, request: &djvu_render::RenderRequest) -> Result<Pixmap, Error> {
+        request.pixmap(self.page).map_err(Self::render_err)
     }
 
     /// Render with caller-supplied [`RenderOptions`] — the single entry point
@@ -873,7 +893,7 @@ impl<'a> Page<'a> {
 
     /// Render the page to an RGBA pixmap at a target size.
     pub fn render_to_size(&self, width: u32, height: u32) -> Result<Pixmap, Error> {
-        self.render_with(&self.opts_for_size(width, height))
+        self.render_with(&self.options_for_size(width, height))
     }
 
     /// Render a rectangular region of the page.
@@ -898,7 +918,7 @@ impl<'a> Page<'a> {
         w: u32,
         h: u32,
     ) -> Result<Pixmap, Error> {
-        djvu_render::RenderRequest::new(self.opts_for_size(full_w, full_h))
+        djvu_render::RenderRequest::new(self.options_for_size(full_w, full_h))
             .region(djvu_render::RenderRect {
                 x,
                 y,
@@ -914,7 +934,7 @@ impl<'a> Page<'a> {
     /// Fast coarse render — decodes only the first BG44 chunk (a blurry but
     /// near-instant preview). Returns `Ok(None)` for bilevel-only pages.
     pub fn render_coarse(&self, width: u32, height: u32) -> Result<Option<Pixmap>, Error> {
-        let opts = self.opts_for_size(width, height);
+        let opts = self.options_for_size(width, height);
         match djvu_render::RenderRequest::new(opts)
             .quality(djvu_render::Quality::Coarse)
             .operation("render_coarse")
@@ -936,7 +956,7 @@ impl<'a> Page<'a> {
         height: u32,
         chunk_n: usize,
     ) -> Result<Pixmap, Error> {
-        let opts = self.opts_for_size(width, height);
+        let opts = self.options_for_size(width, height);
         djvu_render::RenderRequest::new(opts)
             .quality(djvu_render::Quality::Step(chunk_n))
             .operation("render_progressive")

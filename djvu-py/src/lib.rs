@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyBufferError;
+use pyo3::exceptions::{PyBufferError, PyDeprecationWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pythonize::{depythonize, pythonize};
@@ -14,7 +14,7 @@ use djvu_rs::annotation::{Annotation, MapArea};
 use djvu_rs::cbz::CbzOptions;
 use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
 use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
-use djvu_rs::djvu_render::UserRotation;
+use djvu_rs::djvu_render::{Quality, RenderRect, RenderRequest, UserRotation};
 use djvu_rs::editor::DocumentEditor;
 use djvu_rs::epub::EpubOptions;
 use djvu_rs::metadata::DjVuMetadata;
@@ -572,6 +572,76 @@ fn dims_at(page: &djvu_rs::Page<'_>, dpi: Option<f32>) -> (u32, u32) {
     }
 }
 
+/// Parse the ``quality`` argument of ``Page.render``.
+fn parse_quality(quality: Option<&Bound<'_, PyAny>>) -> PyResult<Quality> {
+    let Some(q) = quality else {
+        return Ok(Quality::Full);
+    };
+    if let Ok(name) = q.extract::<String>() {
+        return match name.as_str() {
+            "full" => Ok(Quality::Full),
+            "coarse" => Ok(Quality::Coarse),
+            other => Err(PyValueError::new_err(format!(
+                "unknown quality {other:?}: expected \"full\", \"coarse\", or a chunk index"
+            ))),
+        };
+    }
+    q.extract::<usize>().map(Quality::Step).map_err(|_| {
+        PyValueError::new_err("quality must be None, \"full\", \"coarse\", or a chunk index")
+    })
+}
+
+/// Emit a `DeprecationWarning` pointing at the caller's line.
+fn deprecated(py: Python<'_>, message: &std::ffi::CStr) -> PyResult<()> {
+    PyErr::warn(py, &py.get_type::<PyDeprecationWarning>(), message, 1)
+}
+
+impl Page {
+    /// The one render path behind ``render`` and its deprecated variants.
+    ///
+    /// `size` sides left `None` default to the render size at `dpi` (native
+    /// DPI when `None`).
+    fn render_request(
+        &self,
+        py: Python<'_>,
+        operation: &str,
+        size: Option<(Option<u32>, Option<u32>)>,
+        dpi: Option<f32>,
+        region: Option<(u32, u32, u32, u32)>,
+        quality: Quality,
+    ) -> PyResult<Pixmap> {
+        let pixmap = py.detach(|| {
+            let page = self
+                .doc
+                .page(self.index)
+                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
+            let (dw, dh) = dims_at(&page, dpi);
+            let (w, h) = match size {
+                Some((w, h)) => (w.unwrap_or(dw), h.unwrap_or(dh)),
+                None => (dw, dh),
+            };
+            let mut request = RenderRequest::new(page.options_for_size(w, h)).quality(quality);
+            if let Some((x, y, width, height)) = region {
+                request = request
+                    .region(RenderRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    })
+                    .cached(true);
+            }
+            page.render_request(&request)
+                .map_err(|e| DecodeError::new_err(format!("{operation} failed: {e}")))
+        })?;
+        Ok(Pixmap {
+            width: pixmap.width,
+            height: pixmap.height,
+            data: pixmap.data,
+        })
+    }
+}
+
 #[pymethods]
 impl Page {
     /// Page width in pixels.
@@ -596,51 +666,49 @@ impl Page {
     ///
     /// Args:
     ///     dpi: Target DPI. If not specified, renders at native DPI.
+    ///     size: ``(width, height)`` of the full render, in place of ``dpi``
+    ///         (the zoom level as a pixel size).
+    ///     region: ``(x, y, w, h)`` — render only this rectangle of the full
+    ///         render, in the page's displayed orientation (after its INFO
+    ///         rotation). Pixels outside the page are white. Served from the
+    ///         composited-tile cache, so viewer-style pans and revisits cost
+    ///         only their new tiles.
+    ///     quality: ``None`` or ``"full"`` for the full render; ``"coarse"``
+    ///         for a fast, blurry preview from the first background chunk;
+    ///         an int ``n`` for background chunks ``0..=n`` (a progressive
+    ///         step; ``bg44_chunk_count - 1`` is the full render).
     ///
     /// Returns:
     ///     Pixmap with width, height, and RGBA data.
     ///
+    /// Raises:
+    ///     ValueError: both ``dpi`` and ``size``, or an unknown ``quality``.
+    ///     DecodeError: a decode error, a step past the last chunk, or a
+    ///         coarse render of a page without a background.
+    ///
     /// Releases the GIL for the (CPU-heavy) decode + compositing + resampling
     /// work, so other Python threads can render other pages concurrently.
-    #[pyo3(signature = (dpi=None))]
-    fn render(&self, py: Python<'_>, dpi: Option<f32>) -> PyResult<Pixmap> {
-        let pixmap = py.detach(|| {
-            let page = self
-                .doc
-                .page(self.index)
-                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
-
-            if dpi.is_some() {
-                let (w, h) = dims_at(&page, dpi);
-                page.render_to_size(w, h)
-            } else {
-                page.render()
-            }
-            .map_err(|e| DecodeError::new_err(format!("render failed: {e}")))
-        })?;
-
-        Ok(Pixmap {
-            width: pixmap.width,
-            height: pixmap.height,
-            data: pixmap.data,
-        })
+    #[pyo3(signature = (dpi=None, *, size=None, region=None, quality=None))]
+    fn render(
+        &self,
+        py: Python<'_>,
+        dpi: Option<f32>,
+        size: Option<(u32, u32)>,
+        region: Option<(u32, u32, u32, u32)>,
+        quality: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Pixmap> {
+        if dpi.is_some() && size.is_some() {
+            return Err(PyValueError::new_err("pass dpi or size, not both"));
+        }
+        let quality = parse_quality(quality)?;
+        let size = size.map(|(w, h)| (Some(w), Some(h)));
+        self.render_request(py, "render", size, dpi, region, quality)
     }
 
-    /// Render a rectangular region of the page (#583).
+    /// Deprecated: use ``render(size=(full_width, full_height), region=(x, y, w, h))``.
     ///
-    /// Args:
-    ///     x, y, w, h: viewport rectangle in output pixels, in the page's
-    ///         displayed orientation (after its INFO rotation).
-    ///     full_width, full_height: the full-render size the region is cut
-    ///         from (the zoom level). Defaults to the page size after its
-    ///         INFO rotation.
-    ///
-    /// The result is the matching crop of a full render at that size; pixels
-    /// outside the page are white.
-    ///
-    /// Routed through the composited-tile cache, so viewer-style pans and
-    /// revisits reuse tiles — O(viewport) work instead of O(page). Releases
-    /// the GIL like `render`.
+    /// Renders the rectangle ``(x, y, w, h)`` cut from a full render of
+    /// ``full_width x full_height`` (the page size by default).
     #[pyo3(signature = (x, y, w, h, full_width=None, full_height=None))]
     #[allow(clippy::too_many_arguments)]
     fn render_region(
@@ -653,47 +721,45 @@ impl Page {
         full_width: Option<u32>,
         full_height: Option<u32>,
     ) -> PyResult<Pixmap> {
-        let pixmap = py.detach(|| {
-            let page = self
-                .doc
-                .page(self.index)
-                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
-            let (dw, dh) = dims_at(&page, None);
-            let fw = full_width.unwrap_or(dw).max(1);
-            let fh = full_height.unwrap_or(dh).max(1);
-            page.render_region(fw, fh, x, y, w, h)
-                .map_err(|e| DecodeError::new_err(format!("render_region failed: {e}")))
-        })?;
-        Ok(Pixmap {
-            width: pixmap.width,
-            height: pixmap.height,
-            data: pixmap.data,
-        })
+        deprecated(
+            py,
+            c"Page.render_region is deprecated; use Page.render(size=..., region=(x, y, w, h))",
+        )?;
+        let size = match (full_width, full_height) {
+            (None, None) => None,
+            (fw, fh) => Some((fw, fh)),
+        };
+        self.render_request(
+            py,
+            "render_region",
+            size,
+            None,
+            Some((x, y, w, h)),
+            Quality::Full,
+        )
     }
 
-    /// Fast coarse render — first BG44 chunk only (#583). A blurry but
-    /// near-instant preview; returns None for bilevel-only pages.
+    /// Deprecated: use ``render(dpi, quality="coarse")``.
+    ///
+    /// A fast, blurry preview; None for bilevel-only pages.
     #[pyo3(signature = (dpi=None))]
     fn render_coarse(&self, py: Python<'_>, dpi: Option<f32>) -> PyResult<Option<Pixmap>> {
-        let pm = py.detach(|| {
-            let page = self
-                .doc
-                .page(self.index)
-                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
-            let (w, h) = dims_at(&page, dpi);
-            page.render_coarse(w, h)
-                .map_err(|e| DecodeError::new_err(format!("render_coarse failed: {e}")))
-        })?;
-        Ok(pm.map(|p| Pixmap {
-            width: p.width,
-            height: p.height,
-            data: p.data,
-        }))
+        deprecated(
+            py,
+            c"Page.render_coarse is deprecated; use Page.render(dpi, quality=\"coarse\")",
+        )?;
+        let has_background = self.bg44_chunk_count()? > 0;
+        if !has_background {
+            return Ok(None);
+        }
+        self.render_request(py, "render_coarse", None, dpi, None, Quality::Coarse)
+            .map(Some)
     }
 
-    /// Progressive render (#583): decode BG44 chunks 0..=chunk_n plus all
-    /// foreground layers. `chunk_n = bg44_chunk_count - 1` equals the full
-    /// render.
+    /// Deprecated: use ``render(dpi, quality=chunk_n)``.
+    ///
+    /// Progressive render: BG44 chunks ``0..=chunk_n`` plus all foreground
+    /// layers.
     #[pyo3(signature = (chunk_n, dpi=None))]
     fn render_progressive(
         &self,
@@ -701,20 +767,18 @@ impl Page {
         chunk_n: usize,
         dpi: Option<f32>,
     ) -> PyResult<Pixmap> {
-        let pm = py.detach(|| {
-            let page = self
-                .doc
-                .page(self.index)
-                .map_err(|e| PageIndexError::new_err(format!("{e}")))?;
-            let (w, h) = dims_at(&page, dpi);
-            page.render_progressive(w, h, chunk_n)
-                .map_err(|e| DecodeError::new_err(format!("render_progressive failed: {e}")))
-        })?;
-        Ok(Pixmap {
-            width: pm.width,
-            height: pm.height,
-            data: pm.data,
-        })
+        deprecated(
+            py,
+            c"Page.render_progressive is deprecated; use Page.render(dpi, quality=chunk_n)",
+        )?;
+        self.render_request(
+            py,
+            "render_progressive",
+            None,
+            dpi,
+            None,
+            Quality::Step(chunk_n),
+        )
     }
 
     /// Number of BG44 refinement chunks (0 for bilevel pages).

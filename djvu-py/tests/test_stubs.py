@@ -61,7 +61,9 @@ def test_stub_methods_match_the_classes():
 
 def test_stub_parameters_match():
     stub = {
-        (cls.name, fn.name): [a.arg for a in fn.args.args if a.arg != "self"]
+        (cls.name, fn.name): [
+            a.arg for a in fn.args.args + fn.args.kwonlyargs if a.arg != "self"
+        ]
         for cls in stub_tree().body
         if isinstance(cls, ast.ClassDef) and cls.name in CLASSES
         for fn in cls.body

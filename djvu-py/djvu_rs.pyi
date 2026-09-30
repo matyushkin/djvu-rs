@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union, final
 
+from typing_extensions import deprecated
+
 __all__ = [
     "__version__",
     "Error",
@@ -262,8 +264,23 @@ class Page:
     @property
     def bg44_chunk_count(self) -> int:
         """Number of BG44 refinement chunks (0 for bilevel pages)."""
-    def render(self, dpi: Optional[float] = None) -> Pixmap:
-        """Render the page; native DPI when `dpi` is None."""
+    def render(
+        self,
+        dpi: Optional[float] = None,
+        *,
+        size: Optional[Tuple[int, int]] = None,
+        region: Optional[Tuple[int, int, int, int]] = None,
+        quality: Union[Literal["full", "coarse"], int, None] = None,
+    ) -> Pixmap:
+        """Render the page; native DPI when both `dpi` and `size` are None.
+
+        `size` is the full render size, in place of `dpi`. `region` is an
+        `(x, y, w, h)` crop of that render, in the displayed (INFO-rotated)
+        orientation, served from the tile cache. `quality` is "full" (the
+        default), "coarse" (a fast preview; DecodeError on a page without a
+        background), or a chunk index n (background chunks 0..=n).
+        """
+    @deprecated("use Page.render(size=..., region=(x, y, w, h))")
     def render_region(
         self,
         x: int,
@@ -273,14 +290,13 @@ class Page:
         full_width: Optional[int] = None,
         full_height: Optional[int] = None,
     ) -> Pixmap:
-        """Render a rectangle cut from a render of size full_width x full_height.
-
-        Coordinates follow the displayed (INFO-rotated) orientation.
-        """
+        """Deprecated: use `render(size=(full_width, full_height), region=(x, y, w, h))`."""
+    @deprecated('use Page.render(dpi, quality="coarse")')
     def render_coarse(self, dpi: Optional[float] = None) -> Optional[Pixmap]:
-        """A fast, blurry preview; None for bilevel-only pages."""
+        """Deprecated: use `render(dpi, quality="coarse")`. None for bilevel-only pages."""
+    @deprecated("use Page.render(dpi, quality=chunk_n)")
     def render_progressive(self, chunk_n: int, dpi: Optional[float] = None) -> Pixmap:
-        """Render with BG44 chunks 0..=chunk_n."""
+        """Deprecated: use `render(dpi, quality=chunk_n)`."""
     def text(self) -> Optional[str]:
         """The page text, or None when there is no text layer."""
     def annotations(self) -> Optional[Tuple[Annotation, List[MapArea]]]:
