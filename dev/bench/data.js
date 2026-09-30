@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790743269226,
+  "lastUpdate": 1790765543011,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21586,6 +21586,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 28795000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "86ea96af1501d8bb448fdd9235603a21b8082f23",
+          "message": "feat: deprecate the render_* variants in favour of RenderRequest (#882)\n\n`render_pixmap` stays as the shorthand for a plain whole-page render.\nThe other variants are deprecated, and each note names the\n`RenderRequest` call that replaces it:\n\n- render_into, render_into_with_limits -> write_rgba\n- render_pixmap_with_limits, render_pixmap_with_report -> limits / pixmap_with_report\n- render_streaming -> rows\n- render_coarse -> quality(Quality::Coarse)\n- render_progressive, render_progressive_step -> quality(Quality::Step(n))\n- render_region, render_region_tiled -> region(r) / cached(true)\n\nThey keep working. A future breaking release removes them.\n\nAll library callers now use RenderRequest: the Page methods,\nDjVuPage::render_into, TIFF export, the async progressive stream, the\nwasm bindings, and the tile renderers (render_tile and render_tile_cached\nnow go through render_tile_with). Tests of the old functions stay,\nunder #[allow(deprecated)].\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T10:27:17Z",
+          "tree_id": "eaa2e577c531c528ff13f0274680088a1ce36051",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/86ea96af1501d8bb448fdd9235603a21b8082f23"
+        },
+        "date": 1790765541168,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8369999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49817000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47328000,
             "range": "± 0",
             "unit": "ns/iter"
           }
