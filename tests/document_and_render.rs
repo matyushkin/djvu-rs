@@ -2,6 +2,9 @@
 //!
 //! Uses both the low-level `DjVuDocument` and the high-level `Document` wrapper.
 
+// This file also tests the deprecated render entry points.
+#![allow(deprecated)]
+
 use djvu_rs::IffError;
 use djvu_rs::djvu_document::{DjVuDocument, DocError};
 use djvu_rs::djvu_render::{

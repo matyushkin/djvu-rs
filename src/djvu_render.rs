@@ -5486,15 +5486,19 @@ fn display_region(
 /// - [`RenderError::InvalidDimensions`] if `width == 0 || height == 0`
 /// - [`RenderError::UnsupportedOption`] if a whole-pixmap option is set
 /// - Propagates IW44 / JB2 decode errors.
+#[deprecated(note = "use `RenderRequest::new(opts).write_rgba(page, buf)`")]
 pub fn render_into(
     page: &DjVuPage,
     opts: &RenderOptions,
     buf: &mut [u8],
 ) -> Result<(), RenderError> {
-    render_into_with_limits(page, opts, None, buf)
+    RenderRequest::new(opts.clone())
+        .operation("render_into")
+        .write_rgba(page, buf)
 }
 
 /// Like [`render_into`], with an optional caller-supplied resource limit override.
+#[deprecated(note = "use `RenderRequest::new(opts).limits(limits).write_rgba(page, buf)`")]
 pub fn render_into_with_limits(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -5585,6 +5589,7 @@ pub(crate) fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32
 /// permissive mode it lists each background truncation, dropped mask, or
 /// skipped foreground/palette in the order the renderer took them.
 #[cfg(feature = "std")]
+#[deprecated(note = "use `RenderRequest::new(opts).pixmap_with_report(page)`")]
 pub fn render_pixmap_with_report(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -5598,7 +5603,9 @@ pub fn render_pixmap_with_report(
 /// whole page at full quality, the same as
 /// [`RenderRequest::new`]`(opts).`[`pixmap`](RenderRequest::pixmap)`(page)`.
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
-    render_pixmap_with_limits(page, opts, None)
+    RenderRequest::new(opts.clone())
+        .operation("render_pixmap")
+        .pixmap(page)
 }
 
 /// Render a page to an owned RGBA pixmap with an optional resource limit override.
@@ -5607,6 +5614,7 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
 /// time apply (see [`ParseOptions::limits`](crate::resource_limits::ParseOptions::limits)).
 /// Per-render overrides use [`render_pixmap_with_limits`] /
 /// [`render_into_with_limits`].
+#[deprecated(note = "use `RenderRequest::new(opts).limits(limits).pixmap(page)`")]
 pub fn render_pixmap_with_limits(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -5672,6 +5680,7 @@ pub fn render_pixmap_with_limits(
 ///     # let _ = (y, rgba_row);
 /// }).unwrap();
 /// ```
+#[deprecated(note = "use `RenderRequest::new(opts).rows(page, sink)`")]
 pub fn render_streaming<F>(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -5706,6 +5715,9 @@ where
 ///
 /// - [`RenderError::InvalidDimensions`] if `region.width == 0 || region.height == 0`
 /// - Propagates IW44 / JB2 decode errors.
+#[deprecated(
+    note = "use `RenderRequest::new(opts).region(r).pixmap(page)`; its region is in display (rotated) coordinates"
+)]
 pub fn render_region(
     page: &DjVuPage,
     region: RenderRect,
@@ -5783,6 +5795,9 @@ pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> b
 ///
 /// Same as [`render_region`].
 #[cfg(feature = "std")]
+#[deprecated(
+    note = "use `RenderRequest::new(opts).region(r).cached(true).pixmap(page)`; its region is in display (rotated) coordinates"
+)]
 pub fn render_region_tiled(
     page: &DjVuPage,
     region: RenderRect,
@@ -6089,6 +6104,9 @@ pub fn render_pages_parallel(
 /// anti-aliasing, Lanczos-3 at a scaled size, and rotation all apply.
 ///
 /// Returns `Ok(None)` when the page has no BG44 chunks.
+#[deprecated(
+    note = "use `RenderRequest::new(opts).quality(Quality::Coarse).pixmap(page)`; a page without a background gives `RenderError::NoBackground`"
+)]
 pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pixmap>, RenderError> {
     match RenderRequest::new(opts.clone())
         .quality(Quality::Coarse)
@@ -6115,6 +6133,7 @@ pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pix
 ///
 /// Returns [`RenderError::ChunkOutOfRange`] if `chunk_n` exceeds the number
 /// of available BG44 chunks.
+#[deprecated(note = "use `RenderRequest::new(opts).quality(Quality::Step(n)).pixmap(page)`")]
 pub fn render_progressive(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -6145,6 +6164,24 @@ pub fn progressive_steps(page: &DjVuPage) -> usize {
     page.bg44_chunks().len().max(1)
 }
 
+/// Progressive frame `step`; a page without BG44 chunks has one full frame,
+/// whatever `step` asks for.
+fn progressive_frame(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    step: usize,
+) -> Result<Pixmap, RenderError> {
+    let step = if page.bg44_chunks().is_empty() {
+        0
+    } else {
+        step
+    };
+    RenderRequest::new(opts.clone())
+        .quality(Quality::Step(step))
+        .operation("render_progressive")
+        .pixmap(page)
+}
+
 /// Render progressive frame `step` (`0..`[`progressive_steps`]).
 ///
 /// Encapsulates the "no BG44 chunks ⇒ a single full [`render_pixmap`], otherwise
@@ -6152,16 +6189,13 @@ pub fn progressive_steps(page: &DjVuPage) -> usize {
 /// `Page::render_scaled_progressive` collector and the async
 /// `render_progressive_stream`) previously open-coded. `step` is interpreted as
 /// the BG44 chunk index on multi-chunk pages.
+#[deprecated(note = "use `RenderRequest::new(opts).quality(Quality::Step(step)).pixmap(page)`")]
 pub fn render_progressive_step(
     page: &DjVuPage,
     opts: &RenderOptions,
     step: usize,
 ) -> Result<Pixmap, RenderError> {
-    if page.bg44_chunks().is_empty() {
-        render_pixmap(page, opts)
-    } else {
-        render_progressive(page, opts, step)
-    }
+    progressive_frame(page, opts, step)
 }
 
 /// Stateful **streaming** progressive decoder (B5).
@@ -6322,7 +6356,7 @@ pub fn render_progressive_all(
 
     let mut frames = Vec::with_capacity(steps);
     for step in 0..steps {
-        frames.push(render_progressive_step(page, opts, step)?);
+        frames.push(progressive_frame(page, opts, step)?);
     }
     Ok(frames)
 }
@@ -6330,6 +6364,8 @@ pub fn render_progressive_all(
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+// The deprecated entry points keep their tests until they are removed.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
@@ -9363,6 +9399,38 @@ mod tests {
 
     /// A cancelled token stops every output with `Cancelled`; quality errors
     /// name the problem.
+    #[test]
+    fn deprecated_progressive_step_matches_render_request() {
+        let opts = RenderOptions {
+            width: 60,
+            height: 80,
+            ..Default::default()
+        };
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        for step in 0..progressive_steps(page) {
+            let request = RenderRequest::new(opts.clone()).quality(Quality::Step(step));
+            assert_eq!(
+                render_progressive_step(page, &opts, step).unwrap().data,
+                request.pixmap(page).unwrap().data,
+                "step {step}"
+            );
+        }
+        // A page without background chunks has one full frame, whatever step
+        // the old entry point is asked for.
+        let doc = load_doc("boy_jb2.djvu");
+        let bilevel = doc.page(0).unwrap();
+        let full = render_pixmap(bilevel, &opts).unwrap();
+        assert_eq!(
+            render_progressive_step(bilevel, &opts, 3).unwrap().data,
+            full.data
+        );
+        assert_eq!(
+            render_progressive_all(bilevel, &opts).unwrap()[0].data,
+            full.data
+        );
+    }
+
     #[test]
     fn render_request_cancel_and_quality_errors() {
         let doc = load_doc("chicken.djvu");

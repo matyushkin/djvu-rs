@@ -507,9 +507,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The `render_*` functions (`render_pixmap`, `render_into`,
-`render_streaming`, `render_coarse`, …) remain as shorthands for common
-requests.
+`render_pixmap` stays as the shorthand for the plain whole-page render. The
+other `render_*` functions (`render_into`, `render_streaming`,
+`render_coarse`, `render_progressive`, `render_region`, …) are deprecated:
+each deprecation note names the `RenderRequest` call that replaces it. They
+still work and will be removed only in a future breaking release. Note that a
+`RenderRequest` region is in display (rotated) coordinates, while the old
+`render_region` took the rectangle before rotation.
 
 ### Tile rendering
 
@@ -926,7 +930,7 @@ combinations and targets), and is enforced in CI. In short:
   ceilings; exceeding one returns a typed error naming the codec and axis. The
   ceilings are caller-configurable: pass `ResourceLimits` via `ParseOptions` to
   `DjVuDocument::parse_with_options` (pages inherit them at render time), or
-  use `render_pixmap_with_limits` / `render_into_with_limits` directly. See
+  set them per render with `RenderRequest::limits`. See
   [`SECURITY.md`](SECURITY.md#decode-time-resource-ceilings).
 
 ## Performance

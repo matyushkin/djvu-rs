@@ -50,7 +50,7 @@ canvas exactly once.
   byte — for the cached entry point this holds across cold misses, warm
   hits, and any interleaving (`tile_pixels_independent_of_request_order`).
 - **Cache transparency.** `render_tile_cached` is byte-identical to
-  `render_tile`; it routes through `render_region_tiled`, a memoization of
+  `render_tile`; it routes through `RenderRequest::cached`, a memoization of
   the same compositor (see C4_TILE_CACHE notes there).
 
 ### Layer selection

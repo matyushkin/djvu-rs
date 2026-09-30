@@ -721,7 +721,10 @@ pub fn render_progressive_stream(
             let page = Arc::clone(&page);
             let opts = opts.clone();
             let result = tokio::task::spawn_blocking(move || {
-                djvu_render::render_progressive_step(&page, &opts, step)
+                djvu_render::RenderRequest::new(opts)
+                    .quality(djvu_render::Quality::Step(step))
+                    .operation("render_progressive")
+                    .pixmap(&page)
                     .map_err(AsyncRenderError::Render)
             })
             .await
