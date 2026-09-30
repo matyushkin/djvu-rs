@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790808531405,
+  "lastUpdate": 1790811384125,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21826,6 +21826,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 50876000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "335799138+djvu-rs-release-matyushkin[bot]@users.noreply.github.com",
+            "name": "djvu-rs-release-matyushkin[bot]",
+            "username": "djvu-rs-release-matyushkin[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9b6da38752653843901fdc8e52afe01708f6457f",
+          "message": "chore(main): release 0.40.0 (#885)\n\nCo-authored-by: djvu-rs-release-matyushkin[bot] <335799138+djvu-rs-release-matyushkin[bot]@users.noreply.github.com>",
+          "timestamp": "2026-10-01T01:10:34+02:00",
+          "tree_id": "4c1b3f2a34cc03413d6159e6f40df5b929d600b7",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/9b6da38752653843901fdc8e52afe01708f6457f"
+        },
+        "date": 1790811382044,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6780000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41826000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40166000,
             "range": "± 0",
             "unit": "ns/iter"
           }
