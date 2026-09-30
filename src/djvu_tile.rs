@@ -15,7 +15,8 @@
 //!   clipped, never padded.
 //! - **Assembly parity.** Blitting every tile at its display rectangle
 //!   reproduces [`render_pixmap`](crate::djvu_render::render_pixmap) output
-//!   byte-for-byte (bilinear resampling; all rotations).
+//!   byte-for-byte, for every option: all rotations, anti-aliasing (the grid
+//!   covers the halved page), and Lanczos-3 resampling.
 //! - **Order independence.** Tile pixels are a pure function of the tile
 //!   coordinate and the render options; request order (and cache state, for
 //!   [`render_tile_cached`]) never changes a single byte.
@@ -42,8 +43,7 @@
 //!   [`TileError::Cancelled`]. Cancellation never corrupts caches and never
 //!   changes the bytes of any completed tile.
 //!
-//! Layer selection, Lanczos tile aprons, and async/wasm surfaces are later
-//! slices of #691.
+//! Layer selection and async/wasm surfaces are later slices of #691.
 
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use crate::djvu_document::DjVuPage;
 use crate::djvu_render::{
-    RenderError, RenderOptions, RenderRect, Resampling, combine_rotations, render_region,
+    RenderError, RenderOptions, RenderRect, combine_rotations, render_region,
 };
 use crate::info::Rotation;
 use crate::pixmap::Pixmap;
@@ -115,7 +115,8 @@ pub struct TileRect {
 /// pixels depend only on the inputs, never on layout identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileLayout {
-    /// Pre-rotation full render canvas (`opts.width/height`, min 1).
+    /// Pre-rotation output page: `opts.width/height` (min 1), halved under
+    /// anti-aliasing, the size `render_pixmap` returns before rotation.
     full_width: u32,
     full_height: u32,
     /// Post-rotation display canvas.
@@ -131,31 +132,18 @@ impl TileLayout {
     ///
     /// # Errors
     ///
-    /// - [`TileError::InvalidTileSize`] if `tile_size == 0`.
-    /// - [`RenderError::UnsupportedOption`] if `opts.resampling` is
-    ///   [`Resampling::Lanczos3`] or `opts.aa` is set: both are
-    ///   whole-pixmap post-passes (windowed resampling; 2× downscale that
-    ///   halves the output) and do not commute with per-tile assembly, so
-    ///   tiles could not honor the assembly-parity guarantee (follow-up in
-    ///   #691). For a smaller output, set `opts.width`/`opts.height` to the
-    ///   target size instead of relying on the `aa` halving.
+    /// The grid covers the page [`render_pixmap`](crate::djvu_render::render_pixmap)
+    /// returns: with `opts.aa` that is half of `opts.width × opts.height`
+    /// (unless Lanczos-3 rescales the page, which ignores `aa`).
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::InvalidTileSize`] if `tile_size == 0`.
     pub fn new(page: &DjVuPage, opts: &RenderOptions, tile_size: u32) -> Result<Self, TileError> {
         if tile_size == 0 {
             return Err(TileError::InvalidTileSize);
         }
-        if opts.resampling == Resampling::Lanczos3 {
-            return Err(TileError::Render(RenderError::UnsupportedOption(
-                "Resampling::Lanczos3 does not commute with per-tile assembly (#691)",
-            )));
-        }
-        if opts.aa {
-            return Err(TileError::Render(RenderError::UnsupportedOption(
-                "the aa halving post-pass does not commute with per-tile assembly (#691); \
-                 request the target size directly instead",
-            )));
-        }
-        let full_width = opts.width.max(1);
-        let full_height = opts.height.max(1);
+        let (full_width, full_height) = crate::djvu_render::unrotated_size(page, opts);
         let rotation = combine_rotations(page.rotation(), opts.rotation);
         let (output_width, output_height) = match rotation {
             Rotation::None | Rotation::Rot180 => (full_width, full_height),
@@ -259,7 +247,7 @@ impl TileLayout {
 /// # Errors
 ///
 /// - [`TileError::InvalidTileSize`] / [`TileError::OutOfRange`] for grid
-///   violations, [`RenderError::UnsupportedOption`] for Lanczos-3 resampling.
+///   violations.
 /// - Propagates decode and resource-limit errors from the region renderer.
 pub fn render_tile(
     page: &DjVuPage,
@@ -503,12 +491,13 @@ pub fn clear_tile_cache(page: &DjVuPage) -> usize {
 /// sizes of the page, not just `opts.width × opts.height`: the region is
 /// mapped proportionally into each cached size, rounding outward, so a tile
 /// that touches the region at any scale is dropped rather than kept. Tiles
-/// wholly outside the region stay warm.
+/// wholly outside the region stay warm. A Lanczos-3 tile is dropped when
+/// the region lies within the filter's reach of it, since the filter carries
+/// a changed pixel into its neighbours.
 ///
 /// # Errors
 ///
-/// [`RenderError::UnsupportedOption`] for Lanczos-3 resampling or `aa`
-/// (same eligibility as [`TileLayout::new`]).
+/// None today; the `Result` keeps room for option checks.
 #[cfg(feature = "std")]
 pub fn invalidate_tile_region(
     page: &DjVuPage,
@@ -531,9 +520,12 @@ pub fn invalidate_tile_region(
         width,
         height,
     });
-    Ok(page
-        .render_layers()
-        .remove_tiles_intersecting(rect, layout.full_width, layout.full_height))
+    Ok(page.render_layers().remove_tiles_intersecting(
+        rect,
+        layout.full_width,
+        layout.full_height,
+        (page.width() as u32, page.height() as u32),
+    ))
 }
 
 /// Schedule a bounded background prefetch of the tiles around `(col, row)`
@@ -553,8 +545,8 @@ pub fn invalidate_tile_region(
 ///
 /// # Errors
 ///
-/// Same as [`render_tile`] for grid violations and rejected options; the
-/// center tile must lie inside the grid.
+/// Same as [`render_tile`] for grid violations; the center tile must lie
+/// inside the grid.
 #[cfg(all(feature = "std", feature = "parallel"))]
 pub fn prefetch_tiles(
     doc: &std::sync::Arc<crate::djvu_document::DjVuDocument>,
@@ -662,7 +654,7 @@ mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
     use crate::djvu_render::{
-        UserRotation, progressive_steps, render_pixmap, render_progressive_step,
+        Resampling, UserRotation, progressive_steps, render_pixmap, render_progressive_step,
     };
 
     fn assets_path() -> std::path::PathBuf {
@@ -867,20 +859,116 @@ mod tests {
             TileLayout::new(page, &opts, 0),
             Err(TileError::InvalidTileSize)
         ));
+    }
 
+    /// The anti-aliasing and Lanczos-3 variants of [`render_tile`]'s parity:
+    /// the grid covers the page `render_pixmap` returns (halved under `aa`,
+    /// Lanczos-3 ignoring `aa`), and uncached, cold-cache and warm-cache
+    /// tiles all reproduce it. Two tile sizes put tile edges both off and on
+    /// the internal 256-pixel cache grid.
+    #[test]
+    fn assembled_tiles_match_full_render_with_aa_and_lanczos() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let base = RenderOptions {
+            width: 123,
+            height: 91,
+            ..Default::default()
+        };
         let lanczos = RenderOptions {
             resampling: Resampling::Lanczos3,
-            ..opts
+            ..base
         };
-        assert!(matches!(
-            TileLayout::new(page, &lanczos, 32),
-            Err(TileError::Render(RenderError::UnsupportedOption(_)))
-        ));
-        let aa = RenderOptions { aa: true, ..opts };
-        assert!(matches!(
-            TileLayout::new(page, &aa, 32),
-            Err(TileError::Render(RenderError::UnsupportedOption(_)))
-        ));
+        let modes = [
+            RenderOptions { aa: true, ..base },
+            RenderOptions {
+                aa: true,
+                rotation: UserRotation::Cw90,
+                ..base
+            },
+            lanczos.clone(),
+            RenderOptions {
+                aa: true,
+                rotation: UserRotation::Rot180,
+                ..lanczos
+            },
+            // Upscaled Lanczos-3, wider than one internal cache tile.
+            RenderOptions {
+                width: 271,
+                height: 360,
+                ..lanczos
+            },
+        ];
+        for opts in modes {
+            let full = render_pixmap(page, &opts).unwrap();
+            for ts in [67, 256] {
+                let layout = TileLayout::new(page, &opts, ts).unwrap();
+                assert_eq!(
+                    (full.width, full.height),
+                    (layout.output_width(), layout.output_height()),
+                    "{opts:?}"
+                );
+                let plain = assemble(&layout, |c, r| render_tile(page, &opts, ts, c, r).unwrap());
+                assert!(plain.data == full.data, "render_tile {opts:?} ts={ts}");
+                clear_tile_cache(page);
+                for pass in ["cold", "warm"] {
+                    let cached = assemble(&layout, |c, r| {
+                        render_tile_cached(page, &opts, ts, c, r).unwrap()
+                    });
+                    assert!(cached.data == full.data, "{pass} {opts:?} ts={ts}");
+                }
+            }
+        }
+    }
+
+    /// One Lanczos-3 miss caches the whole rescaled page, so the rest of the
+    /// grid hits: the rescale runs once, not once per tile.
+    #[test]
+    fn lanczos_tiles_rescale_the_page_once() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 600,
+            height: 400,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        clear_tile_cache(page);
+        render_tile_cached(page, &opts, 64, 0, 0).unwrap();
+        // 600×400 is a 3×2 grid of internal 256-pixel tiles.
+        assert_eq!(tile_cache_usage(page).tiles, 6);
+        assert_eq!(tile_cache_usage(page).bytes, 600 * 400 * 4);
+    }
+
+    /// Invalidation reaches Lanczos-3 tiles within the filter's spread of
+    /// the region, and keeps tiles beyond it.
+    #[test]
+    fn invalidate_reaches_lanczos_neighbours() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 600,
+            height: 400,
+            resampling: Resampling::Lanczos3,
+            ..Default::default()
+        };
+        let one_pixel_left_of = |x: u32| TileRect {
+            x: x - 2,
+            y: 10,
+            width: 1,
+            height: 1,
+        };
+        clear_tile_cache(page);
+        render_tile_cached(page, &opts, 64, 0, 0).unwrap();
+        // A pixel 2 left of the x = 256 seam also drops the tiles right of it.
+        invalidate_tile_region(page, &opts, one_pixel_left_of(256)).unwrap();
+        assert_eq!(tile_cache_usage(page).tiles, 4);
+
+        // Far from any seam, only the tile holding the pixel goes.
+        clear_tile_cache(page);
+        render_tile_cached(page, &opts, 64, 0, 0).unwrap();
+        invalidate_tile_region(page, &opts, one_pixel_left_of(130)).unwrap();
+        assert_eq!(tile_cache_usage(page).tiles, 5);
     }
 
     /// 90° rotations swap the display canvas relative to `opts.width/height`.

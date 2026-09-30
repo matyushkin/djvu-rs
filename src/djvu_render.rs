@@ -1396,15 +1396,43 @@ const TILE_SIZE: u32 = 256;
 #[cfg(feature = "std")]
 pub(crate) const TILE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Composited-output tile cache key: `(full_w, full_h, tile_x, tile_y, bold,
-/// mask_aa)` — the tuple of [`RenderOptions`] fields (plus the tile's
-/// top-left corner in full-render space) that `composite_into`'s per-pixel
-/// output actually depends on. Rotation and the Lanczos-3 post-pass run after
-/// compositing, and permissive decode matches strict decode on every page a
-/// strict request can reach the cache for, so none of them is in the key. Any
-/// option that can change a composited pixel's bytes must be part of this key.
+/// Composited-output tile cache key: the [`RenderOptions`] fields a tile's
+/// pixels depend on, plus the tile's top-left corner in the unrotated output
+/// page ([`unrotated_size`]).
+///
+/// Rotation runs after the tiles are assembled, and permissive decode matches
+/// strict decode on every page a strict request can reach the cache for, so
+/// neither is in the key. Any option that can change a tile's bytes must be
+/// part of this key.
 #[cfg(feature = "std")]
-type TileKey = (u32, u32, u32, u32, u8, bool);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TileKey {
+    /// The composited canvas (`opts.width × opts.height`, min 1). Under
+    /// anti-aliasing the output page is half of it, so two canvas sizes can
+    /// share an output size; the canvas tells them apart.
+    canvas: (u32, u32),
+    /// The tile's top-left corner in the output page.
+    x: u32,
+    y: u32,
+    bold: u8,
+    mask_aa: bool,
+    /// [`aa_halves`]: the output page is the canvas averaged 2×2.
+    aa: bool,
+    /// [`lanczos_rescales`]: the output page is the native page rescaled.
+    lanczos: bool,
+}
+
+#[cfg(feature = "std")]
+impl TileKey {
+    /// The output page this tile belongs to.
+    fn page_size(&self) -> (u32, u32) {
+        if self.aa {
+            ((self.canvas.0 / 2).max(1), (self.canvas.1 / 2).max(1))
+        } else {
+            self.canvas
+        }
+    }
+}
 
 /// One cached composited tile: `w × h` (≤ [`TILE_SIZE`], smaller at the
 /// page's right/bottom edge) RGBA bytes, row-major, stride `w * 4`.
@@ -2087,15 +2115,20 @@ impl PageLayers {
 
     /// Drop every cached composited tile that intersects `rect`, where `rect`
     /// is given in the pre-rotation pixel space of a `canvas_w × canvas_h`
-    /// full render (#691 slice 2). Cached tiles belonging to *other* render
+    /// output page (#691 slice 2). Cached tiles belonging to *other* output
     /// sizes are matched by scaling the rect proportionally (outward, so a
     /// boundary-straddling tile is always dropped rather than kept). Returns
     /// the bytes freed.
+    ///
+    /// A Lanczos-3 pixel reads the native page up to 3 pixels of the smaller
+    /// of the two scales away, so for Lanczos-3 tiles the scaled rect grows by
+    /// that reach on every side. `native` is the page's native size.
     pub(crate) fn remove_tiles_intersecting(
         &self,
         rect: RenderRect,
         canvas_w: u32,
         canvas_h: u32,
+        native: (u32, u32),
     ) -> usize {
         if canvas_w == 0 || canvas_h == 0 || rect.width == 0 || rect.height == 0 {
             return 0;
@@ -2108,16 +2141,24 @@ impl PageLayers {
         let doomed: Vec<TileKey> = state
             .map
             .iter()
-            .filter(|((fw, fh, tx, ty, _, _), entry)| {
-                // Scale the rect into this entry's (fw × fh) render space,
+            .filter(|(key, entry)| {
+                // Scale the rect into this entry's (fw × fh) output space,
                 // rounding outward (floor start, ceil end).
-                let x0 = u64::from(rect.x) * u64::from(*fw) / u64::from(canvas_w);
-                let x1 = ((u64::from(rect.x) + u64::from(rect.width)) * u64::from(*fw))
+                let (fw, fh) = key.page_size();
+                let x0 = u64::from(rect.x) * u64::from(fw) / u64::from(canvas_w);
+                let x1 = ((u64::from(rect.x) + u64::from(rect.width)) * u64::from(fw))
                     .div_ceil(u64::from(canvas_w));
-                let y0 = u64::from(rect.y) * u64::from(*fh) / u64::from(canvas_h);
-                let y1 = ((u64::from(rect.y) + u64::from(rect.height)) * u64::from(*fh))
+                let y0 = u64::from(rect.y) * u64::from(fh) / u64::from(canvas_h);
+                let y1 = ((u64::from(rect.y) + u64::from(rect.height)) * u64::from(fh))
                     .div_ceil(u64::from(canvas_h));
-                let (tx0, ty0) = (u64::from(*tx), u64::from(*ty));
+                let (mx, my) = if key.lanczos {
+                    (lanczos_reach(fw, native.0), lanczos_reach(fh, native.1))
+                } else {
+                    (0, 0)
+                };
+                let (x0, x1) = (x0.saturating_sub(mx), x1 + mx);
+                let (y0, y1) = (y0.saturating_sub(my), y1 + my);
+                let (tx0, ty0) = (u64::from(key.x), u64::from(key.y));
                 let (tx1, ty1) = (tx0 + u64::from(entry.w), ty0 + u64::from(entry.h));
                 tx0 < x1 && tx1 > x0 && ty0 < y1 && ty1 > y0
             })
@@ -2133,6 +2174,15 @@ impl PageLayers {
         }
         state.bytes = state.bytes.saturating_sub(freed);
         freed
+    }
+
+    /// Whether a tile is cached, without touching its recency or telemetry.
+    fn has_tile(&self, key: &TileKey) -> bool {
+        self.tile_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .contains_key(key)
     }
 
     /// Tile-cache telemetry snapshot `(hits, misses, evictions)` (#576).
@@ -5078,6 +5128,17 @@ fn lanczos_rescales(page: &DjVuPage, resampling: Resampling, full: (u32, u32)) -
         && (page.width() as u32 != full.0 || page.height() as u32 != full.1)
 }
 
+/// How far, in output pixels, a Lanczos-3 rescale of `native` pixels to
+/// `out` pixels spreads a change of one native pixel: the kernel's 3-pixel
+/// half-width at the coarser of the two scales, plus one for rounding.
+#[cfg(feature = "std")]
+fn lanczos_reach(out: u32, native: u32) -> u64 {
+    (3 * u64::from(out))
+        .div_ceil(u64::from(native.max(1)))
+        .max(3)
+        + 1
+}
+
 /// Whether a render of `page` with `opts` halves the canvas for
 /// anti-aliasing: `opts.aa`, unless Lanczos-3 rescales the page, which
 /// ignores `aa`.
@@ -5092,8 +5153,7 @@ fn aa_halves(page: &DjVuPage, opts: &RenderOptions) -> bool {
 
 /// The size of the page [`render_pixmap`] returns for `opts`, before
 /// rotation: the requested size, halved when [`aa_halves`].
-#[cfg(feature = "std")]
-fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32) {
+pub(crate) fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32) {
     let full = (opts.width.max(1), opts.height.max(1));
     if aa_halves(page, opts) {
         ((full.0 / 2).max(1), (full.1 / 2).max(1))
@@ -5355,11 +5415,15 @@ pub(crate) fn render_region_progressive(
 ///
 /// # Eligibility
 ///
-/// Every request uses the cache except anti-aliasing and Lanczos-3
-/// resampling at a scaled size: both derive the page from a canvas of
-/// another size (twice as large, or native), whose pixels the cached tiles
-/// do not hold. They fall back to a plain [`render_region`] call with no tile
-/// bookkeeping.
+/// Every request uses the cache. Tiles hold the unrotated output page, the
+/// one [`render_region`] crops, so the options that derive it from a canvas
+/// of another size are cached too:
+///
+/// - Anti-aliasing: a missing tile is averaged from the doubled window of
+///   the canvas, exactly as [`render_region`] does.
+/// - Lanczos-3 at a scaled size: the first miss rescales the whole page and,
+///   when the page fits the tile-cache budget, caches all of its tiles, so
+///   the rest of a grid hits instead of rescaling the page again.
 ///
 /// - Rotation: tiles are cached in native orientation and the assembled
 ///   region is rotated once, exactly as [`render_region`] does.
@@ -5501,20 +5565,24 @@ pub(crate) fn render_region_tiled_cancellable(
         region.height,
     )?;
 
-    let full_w = opts.width.max(1);
-    let full_h = opts.height.max(1);
+    // Tiles cover the unrotated output page, the one `render_region` crops.
+    let canvas = (opts.width.max(1), opts.height.max(1));
+    let (full_w, full_h) = unrotated_size(page, opts);
+    let aa = aa_halves(page, opts);
+    let lanczos = lanczos_rescales(page, opts.resampling, canvas);
 
     if is_cancelled(cancel) {
         return Ok(None);
-    }
-    if opts.aa || lanczos_rescales(page, opts.resampling, (full_w, full_h)) {
-        return render_region(page, region, opts).map(Some);
     }
     // Tiles are cached in native orientation; the assembled region turns
     // once at the end, as in `render_region`.
     let rotation = opts.output_rotation(page);
 
     let composite = Composite::decode(page, opts, Detail::Full)?;
+    // The Lanczos-3 page, computed on the first miss and cropped for every
+    // other miss of this call. `Some(None)`: its native composite failed, and
+    // tiles come from the bilinear canvas, as in `Composite::region`.
+    let mut lanczos_page: Option<Option<Pixmap>> = None;
     // Template context for the whole full_w×full_h render; each tile below
     // copies it (cheap: `Copy`) and only overwrites offset/out fields.
     let ctx_template = composite.context();
@@ -5552,10 +5620,39 @@ pub(crate) fn render_region_tiled_cancellable(
             }
             let tile_x0 = tx * TILE_SIZE;
             let tile_w = TILE_SIZE.min(full_w - tile_x0);
-            let key: TileKey = (full_w, full_h, tile_x0, tile_y0, opts.bold, opts.mask_aa);
+            let key = TileKey {
+                canvas,
+                x: tile_x0,
+                y: tile_y0,
+                bold: opts.bold,
+                mask_aa: opts.mask_aa,
+                aa,
+                lanczos,
+            };
+            let tile_rect = RenderRect {
+                x: tile_x0,
+                y: tile_y0,
+                width: tile_w,
+                height: tile_h,
+            };
 
             let tile = match layers.get_tile(key) {
                 Some(t) => t,
+                None if lanczos => {
+                    if lanczos_page.is_none() {
+                        let full = composite.lanczos_canvas(None)?;
+                        if let Some(full) = &full {
+                            cache_whole_page(layers, full, key);
+                        }
+                        lanczos_page = Some(full);
+                    }
+                    let pm = match &lanczos_page {
+                        Some(Some(full)) => white_crop(full, (0, 0), tile_rect),
+                        _ => composite.pixmap(tile_rect)?,
+                    };
+                    insert_pixmap_tile(layers, key, pm)
+                }
+                None if aa => insert_pixmap_tile(layers, key, composite.region(tile_rect)?),
                 None => {
                     if let Some(image) = banded
                         && row_band.is_none()
@@ -5614,6 +5711,47 @@ pub(crate) fn render_region_tiled_cancellable(
     }
 
     Ok(Some(rotate_pixmap(pm, rotation)))
+}
+
+/// Cache `pm` as the tile `key` and return the entry.
+#[cfg(feature = "std")]
+fn insert_pixmap_tile(layers: &PageLayers, key: TileKey, pm: Pixmap) -> std::sync::Arc<TileEntry> {
+    let entry = std::sync::Arc::new(TileEntry {
+        w: pm.width,
+        h: pm.height,
+        data: pm.data,
+    });
+    layers.insert_tile(key, entry.clone());
+    entry
+}
+
+/// Cache every tile of `full`, a whole output page, under `key`'s options,
+/// when the whole page fits the page's tile-cache budget.
+///
+/// A Lanczos-3 page costs a native composite and a rescale of the whole
+/// page, however small the request. Cutting all of its tiles at once lets
+/// the rest of the grid hit the cache. A page over the budget would evict
+/// its own tiles as they go in, so it caches none beyond the requested ones.
+#[cfg(feature = "std")]
+fn cache_whole_page(layers: &PageLayers, full: &Pixmap, key: TileKey) {
+    if full.data.len() > layers.tile_cache_budget() {
+        return;
+    }
+    for y in (0..full.height).step_by(TILE_SIZE as usize) {
+        for x in (0..full.width).step_by(TILE_SIZE as usize) {
+            let key = TileKey { x, y, ..key };
+            if layers.has_tile(&key) {
+                continue;
+            }
+            let rect = RenderRect {
+                x,
+                y,
+                width: TILE_SIZE.min(full.width - x),
+                height: TILE_SIZE.min(full.height - y),
+            };
+            insert_pixmap_tile(layers, key, white_crop(full, (0, 0), rect));
+        }
+    }
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
