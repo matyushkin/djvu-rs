@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790735589570,
+  "lastUpdate": 1790739308050,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21490,6 +21490,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 49597000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0784912f0a37365336da6b9f411b737658ef1dac",
+          "message": "feat: tiles support anti-aliasing and Lanczos-3 (#879)\n\nTileLayout no longer rejects `aa` or Lanczos-3 options. The grid now covers\nthe page that render_pixmap returns, so an anti-aliased grid covers the\nhalved page, and assembled tiles match render_pixmap byte for byte for\nevery option.\n\n- The composited-tile cache keys tiles by canvas size, aa and Lanczos, so\n  tiles of different modes never mix.\n- An anti-aliased tile is the matching crop of the halved page.\n- A Lanczos-3 tile is a crop of the whole rescaled page. The first miss\n  rescales the page once and caches every tile of it when the page fits\n  the per-page tile budget; otherwise each tile falls back to its own\n  crop.\n- invalidate_tile_region widens the dropped area by the Lanczos kernel\n  reach, so neighbour tiles that read the changed pixels are dropped too.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T03:10:58Z",
+          "tree_id": "5443e2364baa730f375af0fc552f2b7db414fc64",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0784912f0a37365336da6b9f411b737658ef1dac"
+        },
+        "date": 1790739305861,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6734000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41502000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 39908000,
             "range": "± 0",
             "unit": "ns/iter"
           }
