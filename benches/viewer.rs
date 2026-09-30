@@ -14,8 +14,9 @@
 //! Two page kinds are covered: a colour page (BG44 + FG44/FGbz) and a bilevel
 //! page (JB2 mask only, the fast bilevel compositor path).
 //!
-//! For each pan sequence we bench two variants built from the *existing*
-//! `render_region` API (no new production code needed to answer Phase 1):
+//! For each pan sequence we bench two variants built from the uncached
+//! region render, `RenderRequest::region` (no new production code needed to
+//! answer Phase 1):
 //!
 //! - `full_recomposite`: what the viewer does today — every step re-renders
 //!   the entire viewport rectangle, independent of the previous frame.
@@ -37,8 +38,20 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use djvu_rs::Pixmap;
 use djvu_rs::djvu_document::DjVuPage;
-use djvu_rs::djvu_render::{RenderOptions, RenderRect, Resampling, UserRotation, render_region};
+use djvu_rs::djvu_render::{
+    RenderError, RenderOptions, RenderRect, RenderRequest, Resampling, UserRotation,
+};
+
+/// One uncached region render: every call recomposites the whole rectangle.
+fn render_region(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(opts.clone()).region(region).pixmap(page)
+}
 
 fn assets_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("references/djvujs/library/assets")
