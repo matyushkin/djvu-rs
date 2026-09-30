@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790726672321,
+  "lastUpdate": 1790733838935,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21394,6 +21394,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47511000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cbbaa79044d37a7bdfe0b15d539f6fc63f697614",
+          "message": "fix: Lanczos-3 fallback no longer halves an anti-aliased render (#877)\n\nLanczos-3 at a scaled size ignores `aa`: the output keeps the requested\nsize. When the native composite behind Lanczos-3 failed (over the\noutput limit, or a decode error), the render fell back to the bilinear\ncanvas and then applied `aa`, so the output was half the size. The\noutput size depended on an internal failure, not on the options.\n\nOne rule, `aa_halves`, now decides the halving from the options alone.\n`page_pixmap`, `region` and `unrotated_size` all use it. The `aa` field\ndocs state the rule.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T01:39:29Z",
+          "tree_id": "f798056b47840914cf4e725c931c531b99b89b78",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/cbbaa79044d37a7bdfe0b15d539f6fc63f697614"
+        },
+        "date": 1790733837104,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 121000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6050000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 35910000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38029000,
             "range": "± 0",
             "unit": "ns/iter"
           }
