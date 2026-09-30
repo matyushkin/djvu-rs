@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790802201290,
+  "lastUpdate": 1790804850226,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21730,6 +21730,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51592000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d122a360b7aae14eb939d1c145cbd8bcd43a8cfc",
+          "message": "feat: one render call in the Python and wasm bindings (#884)\n\nPython: Page.render(dpi, *, size, region, quality) covers the full page,\na region (tile-cached), a progressive step (quality=n) and a coarse\npreview (quality=\"coarse\"). render_region, render_coarse and\nrender_progressive still work and now raise a DeprecationWarning.\n\nBrowser (wasm): a new WasmRenderRequest (a DPI, plus set_region,\nset_step, set_coarse) goes to WasmPage.render_request, which writes into\na reused WasmPixmap. render_coarse, render_progressive,\nrender_into_pixmap and render_progressive_into_pixmap are marked\n@deprecated in their JSDoc and now route through the same path.\n\nRust: the high-level Page gets options_for_size and render_request, so\nit runs any RenderRequest.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-09-30T21:24:21Z",
+          "tree_id": "c12e87063d478109c2cdf07c018603e91ef3060c",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/d122a360b7aae14eb939d1c145cbd8bcd43a8cfc"
+        },
+        "date": 1790804848646,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 100000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5169000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30878000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29209000,
             "range": "± 0",
             "unit": "ns/iter"
           }
