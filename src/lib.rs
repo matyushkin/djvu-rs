@@ -250,7 +250,13 @@ pub mod semantic_diff;
 
 /// Rendering pipeline for [`DjVuPage`] — phase 5.
 ///
-/// Provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
+/// Provides `djvu_render::RenderRequest` — one request type for every
+/// render: whole page or region, full / progressive / coarse quality,
+/// resource limits, cancellation (`djvu_render::CancelToken`), and the
+/// composited-tile cache, written to a pixmap, a buffer, or a row sink.
+/// The `render_*` functions below are shorthands for common requests.
+///
+/// Also provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
 /// `djvu_render::render_into`, `djvu_render::render_pixmap`,
 /// `djvu_render::render_region`, `djvu_render::render_coarse`, and
 /// `djvu_render::render_progressive`.
@@ -872,7 +878,7 @@ impl<'a> Page<'a> {
     /// `full_w × full_h` set the full-render output size the region is cut
     /// from (the zoom level); `(x, y, w, h)` select the viewport within that
     /// space. Routed through the composited-tile cache
-    /// ([`djvu_render::render_region_tiled`]) so viewer-style pans and
+    /// ([`RenderRequest::cached`](djvu_render::RenderRequest::cached)) so viewer-style pans and
     /// revisits reuse tiles (C4_TILE_CACHE / TILE_LRU) — O(viewport) work
     /// instead of O(page).
     ///
@@ -889,18 +895,17 @@ impl<'a> Page<'a> {
         w: u32,
         h: u32,
     ) -> Result<Pixmap, Error> {
-        let opts = self.opts_for_size(full_w, full_h);
-        djvu_render::render_display_region_tiled(
-            self.page,
-            djvu_render::RenderRect {
+        djvu_render::RenderRequest::new(self.opts_for_size(full_w, full_h))
+            .region(djvu_render::RenderRect {
                 x,
                 y,
                 width: w,
                 height: h,
-            },
-            &opts,
-        )
-        .map_err(Self::render_err)
+            })
+            .cached(true)
+            .operation("render_region_tiled")
+            .pixmap(self.page)
+            .map_err(Self::render_err)
     }
 
     /// Fast coarse render — decodes only the first BG44 chunk (a blurry but

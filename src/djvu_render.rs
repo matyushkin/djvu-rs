@@ -131,6 +131,15 @@ pub enum RenderError {
     /// scaled output, or rotation).
     #[error("unsupported render option: {0}")]
     UnsupportedOption(&'static str),
+
+    /// A [`CancelToken`] stopped the render at a checkpoint.
+    #[error("render cancelled")]
+    Cancelled,
+
+    /// A coarse render ([`Quality::Coarse`]) of a page without a background
+    /// layer.
+    #[error("page has no background layer for a coarse render")]
+    NoBackground,
 }
 
 /// A refused output pixmap is a render-output limit.
@@ -4907,12 +4916,12 @@ impl<'p> Composite<'p> {
         Ok(pm)
     }
 
-    /// Composite the whole canvas row by row, top to bottom.
-    fn rows<F>(&self, mut sink: F) -> Result<(), RenderError>
+    /// Composite `window` row by row, top to bottom.
+    fn rows<F>(&self, window: RenderRect, mut sink: F) -> Result<(), RenderError>
     where
         F: FnMut(usize, &[u8]),
     {
-        self.bands(self.whole(), |ctx, oy0| {
+        self.bands(window, |ctx, oy0| {
             composite_rows(ctx, |y, row| sink(y + oy0 as usize, row))
         })
     }
@@ -5035,6 +5044,430 @@ impl<'p> Composite<'p> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// A cooperative stop signal shared between a render and its caller.
+///
+/// Clones share one flag: cancel any clone and every render holding a clone
+/// stops at its next checkpoint with [`RenderError::Cancelled`] (or
+/// `TileError::Cancelled` on the tile API). Checkpoints sit *between* units of
+/// work — on entry, between the layer decode and the composite, and before
+/// each internal cache tile — so an in-flight decode always runs to
+/// completion; cancellation bounds further work, not the current unit. A
+/// token is one-way: once cancelled it stays cancelled (create a fresh token
+/// per request generation instead of resetting).
+///
+/// Cancellation never changes rendered bytes and never corrupts caches: work
+/// either completes a unit fully or abandons it without publishing anything
+/// partial.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    flag: Arc<core::sync::atomic::AtomicBool>,
+}
+
+impl CancelToken {
+    /// A fresh, un-cancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal every holder of a clone of this token to stop.
+    pub fn cancel(&self) {
+        self.flag.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called on any clone.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The raw flag the render internals poll.
+    #[cfg(feature = "std")]
+    pub(crate) fn as_flag(&self) -> &core::sync::atomic::AtomicBool {
+        &self.flag
+    }
+}
+
+/// How much of the page a [`RenderRequest`] decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Quality {
+    /// Every layer at full detail, as [`render_pixmap`] renders it.
+    #[default]
+    Full,
+    /// Progressive frame `k`, `0..`[`progressive_steps`]`(page)`: the
+    /// background from BG44 chunks `0..=k` and every foreground layer, as
+    /// [`render_progressive`] renders it. On a page without BG44 chunks the
+    /// single frame `0` is the full render.
+    Step(usize),
+    /// The background from its first BG44 chunk only, with no foreground: a
+    /// fast blurry preview, as [`render_coarse`] renders it. A page without
+    /// a background has no coarse render: [`RenderError::NoBackground`].
+    Coarse,
+}
+
+/// One render of one page: what to render, and how.
+///
+/// This is the one front door to the renderer. It gathers every choice the
+/// `render_*` functions spread over their names and arguments:
+///
+/// - the page size and look — [`RenderOptions`];
+/// - an optional **region**, a rectangle of the output page;
+/// - the **quality** — full, a progressive step, or a coarse preview;
+/// - per-render **resource limits**;
+/// - a **cancel token**;
+/// - whether a region may use the page's composited-tile **cache**.
+///
+/// Then one method picks the output: a new [`Pixmap`]
+/// ([`pixmap`](Self::pixmap)), a caller's RGBA buffer
+/// ([`write_rgba`](Self::write_rgba)), or a row sink
+/// ([`rows`](Self::rows)). Every combination gives the same bytes as the
+/// matching crop of the full [`pixmap`](Self::pixmap).
+///
+/// # Example
+///
+/// ```no_run
+/// use djvu_rs::djvu_render::{Quality, RenderOptions, RenderRect, RenderRequest};
+/// # let doc = djvu_rs::djvu_document::DjVuDocument::parse(&[]).unwrap();
+/// # let page = doc.page(0).unwrap();
+/// let opts = RenderOptions::fit_to_width(page, 1024);
+/// // The whole page.
+/// let full = RenderRequest::new(opts.clone()).pixmap(page).unwrap();
+/// // A viewport of the same page, from the tile cache.
+/// let viewport = RenderRect { x: 0, y: 200, width: 1024, height: 600 };
+/// let part = RenderRequest::new(opts.clone())
+///     .region(viewport)
+///     .cached(true)
+///     .pixmap(page)
+///     .unwrap();
+/// // A quick preview first.
+/// let preview = RenderRequest::new(opts).quality(Quality::Step(0)).pixmap(page);
+/// # let _ = (full, part, preview);
+/// ```
+#[derive(Debug, Clone)]
+pub struct RenderRequest {
+    options: RenderOptions,
+    region: Option<RenderRect>,
+    quality: Quality,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+    cancel: Option<CancelToken>,
+    cached: bool,
+    /// The name resource-limit errors report.
+    operation: &'static str,
+}
+
+impl RenderRequest {
+    /// A full-quality render of the whole page at `options`.
+    pub fn new(options: RenderOptions) -> Self {
+        Self {
+            options,
+            region: None,
+            quality: Quality::Full,
+            limits: None,
+            cancel: None,
+            cached: false,
+            operation: "render",
+        }
+    }
+
+    /// Render only `region` of the output page.
+    ///
+    /// The region is in display space: it addresses the page as
+    /// [`pixmap`](Self::pixmap) returns it — after anti-aliasing halves it,
+    /// after Lanczos-3 rescales it, and after the INFO and user rotations
+    /// turn it. The output is `region.width × region.height`, the exact crop
+    /// of the whole page, with white pixels outside the page.
+    pub fn region(mut self, region: RenderRect) -> Self {
+        self.region = Some(region);
+        self
+    }
+
+    /// Decode the page at `quality` (default [`Quality::Full`]).
+    pub fn quality(mut self, quality: Quality) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Override the resource limits for this render. `None` (the default)
+    /// keeps the limits the page inherited from its document.
+    pub fn limits(mut self, limits: Option<crate::resource_limits::ResourceLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Stop the render at its next checkpoint once `token` is cancelled; see
+    /// [`CancelToken`].
+    pub fn cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// Let a full-quality region render assemble its pixels from the page's
+    /// composited-tile cache, and add the tiles it composites to it (see
+    /// [`render_region_tiled`]). Repeated and overlapping regions — a
+    /// viewer's pans — then cost only their new tiles. The bytes are the
+    /// same either way. Ignored without a region, and for progressive or
+    /// coarse quality, whose pixels are never cached. Needs the `std`
+    /// feature; without it the flag is ignored.
+    pub fn cached(mut self, cached: bool) -> Self {
+        self.cached = cached;
+        self
+    }
+
+    /// Name the operation that resource-limit errors report.
+    pub(crate) fn operation(mut self, operation: &'static str) -> Self {
+        self.operation = operation;
+        self
+    }
+
+    /// Render to a new pixmap: the whole page, or [`region`](Self::region)
+    /// of it.
+    ///
+    /// # Errors
+    ///
+    /// - [`RenderError::InvalidDimensions`] for a zero-sized output;
+    /// - [`RenderError::ResourceLimit`] when the output is over the limit;
+    /// - [`RenderError::ChunkOutOfRange`] for a [`Quality::Step`] past the
+    ///   last frame;
+    /// - [`RenderError::NoBackground`] for a coarse render of a page without
+    ///   a background;
+    /// - [`RenderError::Cancelled`] when the cancel token stopped the render;
+    /// - decode errors (strict renders only).
+    pub fn pixmap(&self, page: &DjVuPage) -> Result<Pixmap, RenderError> {
+        let (w, h) = self.output_size();
+        check_output_pixels(self.operation, page, self.limits, w, h)?;
+        let detail = self.detail(page)?;
+        self.checkpoint()?;
+        let opts = &self.options;
+        let Some(region) = self.region else {
+            let composite = self.decode(page, detail)?;
+            return composite.page_pixmap(self.limits);
+        };
+        #[cfg(feature = "std")]
+        if self.cached && detail == Detail::Full {
+            let flag = self.cancel.as_ref().map(CancelToken::as_flag);
+            return display_region(page, opts, region, |native| {
+                render_region_tiled_cancellable(page, native, opts, flag)
+            })?
+            .ok_or(RenderError::Cancelled);
+        }
+        let composite = self.decode(page, detail)?;
+        let rotation = opts.output_rotation(page);
+        display_region(page, opts, region, |native| {
+            Ok(Some(rotate_pixmap(composite.region(native)?, rotation)))
+        })?
+        .ok_or(RenderError::Cancelled)
+    }
+
+    /// Like [`pixmap`](Self::pixmap), with a [`RenderReport`] of the layers
+    /// a permissive render skipped or recovered (#696).
+    ///
+    /// The pixmap is byte-identical to [`pixmap`](Self::pixmap). In strict
+    /// mode the report is always clean (decode errors propagate instead of
+    /// being recovered); in permissive mode it lists each background
+    /// truncation, dropped mask, or skipped foreground/palette in the order
+    /// the renderer took them.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`pixmap`](Self::pixmap).
+    #[cfg(feature = "std")]
+    pub fn pixmap_with_report(
+        &self,
+        page: &DjVuPage,
+    ) -> Result<(Pixmap, RenderReport), RenderError> {
+        // Install a per-thread recovery sink; the guard clears it on every
+        // exit path (including panics) so a plain render never records.
+        struct SinkGuard;
+        impl Drop for SinkGuard {
+            fn drop(&mut self) {
+                RECOVERY_SINK.with(|sink| *sink.borrow_mut() = None);
+            }
+        }
+        RECOVERY_SINK.with(|sink| *sink.borrow_mut() = Some(Vec::new()));
+        let _guard = SinkGuard;
+        let pixmap = self.pixmap(page)?;
+        let recoveries = RECOVERY_SINK.with(|sink| sink.borrow_mut().take().unwrap_or_default());
+        Ok((pixmap, RenderReport { recoveries }))
+    }
+
+    /// Render into `buf`: RGBA rows of the output (the whole page, or
+    /// [`region`](Self::region) of it), with no allocation for the pixels.
+    ///
+    /// The buffer receives pixels as they leave the compositor, so the
+    /// whole-pixmap steps — anti-aliasing, Lanczos-3 at a scaled size, and
+    /// rotation — are refused rather than skipped
+    /// ([`RenderOptions::can_stream`] tells in advance). Without them the
+    /// output page is the canvas, and a region must lie inside it.
+    ///
+    /// # Errors
+    ///
+    /// As [`pixmap`](Self::pixmap), plus:
+    ///
+    /// - [`RenderError::UnsupportedOption`] for a whole-pixmap option, or a
+    ///   region that leaves the page;
+    /// - [`RenderError::BufTooSmall`] when `buf` holds fewer than
+    ///   `width × height × 4` bytes.
+    pub fn write_rgba(&self, page: &DjVuPage, buf: &mut [u8]) -> Result<(), RenderError> {
+        let (w, h) = self.output_size();
+        check_output_pixels(self.operation, page, self.limits, w, h)?;
+        let window = self.stream_window(page)?;
+        let need = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4))
+            .unwrap_or(usize::MAX);
+        if buf.len() < need {
+            return Err(RenderError::BufTooSmall {
+                need,
+                got: buf.len(),
+            });
+        }
+        let detail = self.detail(page)?;
+        self.checkpoint()?;
+        self.decode(page, detail)?.write(window, buf)
+    }
+
+    /// Render row by row: `sink(y, rgba_row)` receives each output row, top
+    /// to bottom, `width × 4` bytes long.
+    ///
+    /// This is the constant-memory path for low-memory targets and for
+    /// streaming encoders: one scratch row, plus the decoded layers. A page
+    /// whose full-resolution background would not fit the `djvu-iw44` band
+    /// budget (128 MiB) is composited from bands of the wavelet image, one
+    /// band in memory at a time (#811). The rows are those of
+    /// [`pixmap`](Self::pixmap).
+    ///
+    /// # Errors
+    ///
+    /// As [`write_rgba`](Self::write_rgba), without the buffer check.
+    pub fn rows<F>(&self, page: &DjVuPage, sink: F) -> Result<(), RenderError>
+    where
+        F: FnMut(usize, &[u8]),
+    {
+        let (w, h) = self.output_size();
+        check_output_pixels(self.operation, page, self.limits, w, h)?;
+        let window = self.stream_window(page)?;
+        let detail = self.detail(page)?;
+        self.checkpoint()?;
+        self.decode(page, detail)?.rows(window, sink)
+    }
+
+    /// The output size: the region, or the whole canvas.
+    fn output_size(&self) -> (u32, u32) {
+        match self.region {
+            Some(r) => (r.width, r.height),
+            None => (self.options.width, self.options.height),
+        }
+    }
+
+    /// The canvas window a streaming output composites, or why it cannot.
+    fn stream_window(&self, page: &DjVuPage) -> Result<RenderRect, RenderError> {
+        if let Some(reason) = self.options.whole_pixmap_reason(page) {
+            return Err(RenderError::UnsupportedOption(reason));
+        }
+        let (cw, ch) = (self.options.width, self.options.height);
+        let window = self.region.unwrap_or(RenderRect {
+            x: 0,
+            y: 0,
+            width: cw,
+            height: ch,
+        });
+        let inside = window
+            .x
+            .checked_add(window.width)
+            .is_some_and(|x1| x1 <= cw)
+            && window
+                .y
+                .checked_add(window.height)
+                .is_some_and(|y1| y1 <= ch);
+        if !inside {
+            return Err(RenderError::UnsupportedOption(
+                "a streamed region must lie inside the page; use pixmap",
+            ));
+        }
+        Ok(window)
+    }
+
+    /// The layer detail [`Self::quality`] asks for on `page`.
+    fn detail(&self, page: &DjVuPage) -> Result<Detail, RenderError> {
+        Ok(match self.quality {
+            Quality::Full => Detail::Full,
+            Quality::Coarse => Detail::Coarse,
+            Quality::Step(step) => {
+                let steps = progressive_steps(page);
+                if step >= steps {
+                    return Err(RenderError::ChunkOutOfRange {
+                        chunk_n: step,
+                        max: steps - 1,
+                    });
+                }
+                if page.bg44_chunks().is_empty() {
+                    // No refinement ladder: the single step is the full render.
+                    Detail::Full
+                } else {
+                    Detail::Chunks(step + 1)
+                }
+            }
+        })
+    }
+
+    /// Decode the layers at `detail`, then pass the post-decode checkpoint.
+    fn decode<'p>(&self, page: &'p DjVuPage, detail: Detail) -> Result<Composite<'p>, RenderError> {
+        let composite = Composite::decode(page, &self.options, detail)?;
+        if detail == Detail::Coarse && !composite.has_background() {
+            return Err(RenderError::NoBackground);
+        }
+        self.checkpoint()?;
+        Ok(composite)
+    }
+
+    /// [`RenderError::Cancelled`] once the cancel token is cancelled.
+    fn checkpoint(&self) -> Result<(), RenderError> {
+        if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            Err(RenderError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Render the display-space `region` of the page with `render_native`, which
+/// renders a native (pre-rotation) rectangle of the unrotated output page and
+/// returns it turned by the output rotation, or `None` when cancelled.
+///
+/// Only the part of `region` inside the display page reaches `render_native`;
+/// the rest is white, as in [`render_region`].
+fn display_region(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    region: RenderRect,
+    render_native: impl FnOnce(RenderRect) -> Result<Option<Pixmap>, RenderError>,
+) -> Result<Option<Pixmap>, RenderError> {
+    use crate::info::Rotation;
+    let rotation = opts.output_rotation(page);
+    let native = unrotated_size(page, opts);
+    let (dw, dh) = match rotation {
+        Rotation::Cw90 | Rotation::Ccw90 => (native.1, native.0),
+        Rotation::None | Rotation::Rot180 => native,
+    };
+    let x1 = region.x.saturating_add(region.width).min(dw);
+    let y1 = region.y.saturating_add(region.height).min(dh);
+    if x1 <= region.x || y1 <= region.y {
+        return Ok(Some(Pixmap::white(region.width, region.height)));
+    }
+    let inside = RenderRect {
+        x: region.x,
+        y: region.y,
+        width: x1 - region.x,
+        height: y1 - region.y,
+    };
+    let Some(pm) = render_native(native_rect(rotation, native, inside))? else {
+        return Ok(None);
+    };
+    if inside == region {
+        return Ok(Some(pm));
+    }
+    Ok(Some(white_crop(&pm, (region.x, region.y), region)))
+}
+
 /// Render a `DjVuPage` into a pre-allocated RGBA buffer.
 ///
 /// This is the zero-allocation render path when `buf` is reused across calls
@@ -5068,28 +5501,10 @@ pub fn render_into_with_limits(
     limits: Option<crate::resource_limits::ResourceLimits>,
     buf: &mut [u8],
 ) -> Result<(), RenderError> {
-    let w = opts.width;
-    let h = opts.height;
-
-    check_output_pixels("render_into", page, limits, w, h)?;
-    if let Some(reason) = opts.whole_pixmap_reason(page) {
-        return Err(RenderError::UnsupportedOption(reason));
-    }
-
-    let need = (w as usize)
-        .checked_mul(h as usize)
-        .and_then(|n| n.checked_mul(4))
-        .unwrap_or(usize::MAX);
-
-    if buf.len() < need {
-        return Err(RenderError::BufTooSmall {
-            need,
-            got: buf.len(),
-        });
-    }
-
-    let composite = Composite::decode(page, opts, Detail::Full)?;
-    composite.write(composite.whole(), buf)
+    RenderRequest::new(opts.clone())
+        .limits(limits)
+        .operation("render_into")
+        .write_rgba(page, buf)
 }
 
 /// Output rows `oy0..oy0 + rows` of an RGBA buffer `w` pixels wide.
@@ -5162,11 +5577,6 @@ pub(crate) fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32
     }
 }
 
-/// Render a `DjVuPage` to a new [`Pixmap`] using the given options.
-///
-/// Strict renders composite directly into the full pixmap. Permissive renders
-/// reuse the row path so decode-error recovery remains shared with
-/// [`render_streaming`].
 /// Render a page and return the pixmap together with a [`RenderReport`] of any
 /// layers a permissive render skipped or recovered (#696).
 ///
@@ -5179,22 +5589,14 @@ pub fn render_pixmap_with_report(
     page: &DjVuPage,
     opts: &RenderOptions,
 ) -> Result<(Pixmap, RenderReport), RenderError> {
-    // Install a per-thread recovery sink; the guard clears it on every exit
-    // path (including panics) so a normal `render_pixmap` never records.
-    struct SinkGuard;
-    impl Drop for SinkGuard {
-        fn drop(&mut self) {
-            RECOVERY_SINK.with(|sink| *sink.borrow_mut() = None);
-        }
-    }
-    RECOVERY_SINK.with(|sink| *sink.borrow_mut() = Some(Vec::new()));
-    let _guard = SinkGuard;
-
-    let pixmap = render_pixmap(page, opts)?;
-    let recoveries = RECOVERY_SINK.with(|sink| sink.borrow_mut().take().unwrap_or_default());
-    Ok((pixmap, RenderReport { recoveries }))
+    RenderRequest::new(opts.clone())
+        .operation("render_pixmap")
+        .pixmap_with_report(page)
 }
 
+/// Render a `DjVuPage` to a new [`Pixmap`] using the given options: the
+/// whole page at full quality, the same as
+/// [`RenderRequest::new`]`(opts).`[`pixmap`](RenderRequest::pixmap)`(page)`.
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     render_pixmap_with_limits(page, opts, None)
 }
@@ -5210,11 +5612,10 @@ pub fn render_pixmap_with_limits(
     opts: &RenderOptions,
     limits: Option<crate::resource_limits::ResourceLimits>,
 ) -> Result<Pixmap, RenderError> {
-    // Bound the output allocation. `w`/`h` flow from the (untrusted) INFO chunk on
-    // a default render; w*h*4 of 65535² is ~17 GB, which either OOMs (64-bit) or
-    // wraps `Pixmap::new` to an empty buffer. Reject up front.
-    check_output_pixels("render_pixmap", page, limits, opts.width, opts.height)?;
-    Composite::decode(page, opts, Detail::Full)?.page_pixmap(limits)
+    RenderRequest::new(opts.clone())
+        .limits(limits)
+        .operation("render_pixmap")
+        .pixmap(page)
 }
 
 /// Render a `DjVuPage` row by row, calling `sink(row_index, &rgba_row)` for
@@ -5279,11 +5680,9 @@ pub fn render_streaming<F>(
 where
     F: FnMut(usize, &[u8]),
 {
-    if let Some(reason) = opts.whole_pixmap_reason(page) {
-        return Err(RenderError::UnsupportedOption(reason));
-    }
-    check_output_pixels("render_streaming", page, None, opts.width, opts.height)?;
-    Composite::decode(page, opts, Detail::Full)?.rows(sink)
+    RenderRequest::new(opts.clone())
+        .operation("render_streaming")
+        .rows(page, sink)
 }
 
 /// Render a sub-rectangle of a page into a new [`Pixmap`].
@@ -5321,68 +5720,10 @@ pub fn render_region(
 ///
 /// `Relaxed` is enough: the flag carries no data, it only asks in-flight work
 /// to stop at its next checkpoint.
+#[cfg(feature = "std")]
 #[inline]
 pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> bool {
     cancel.is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Relaxed))
-}
-
-/// Region variant of [`render_progressive`] (#691 slice 3): composite the
-/// `region` sub-rectangle of progressive frame `chunk_n` (BG44 chunks
-/// `0..=chunk_n`, full foreground).
-///
-/// **Byte-identical** to the matching crop of
-/// `render_progressive(page, opts, chunk_n)` for every input: the layer
-/// decode is the same `decode_layers(.., chunk_n + 1)` call, the composite
-/// uses the same full-resolution mask (shift 0 — `render_progressive` never
-/// takes the 1/4-res mask fast path), and `composite_into` computes each
-/// pixel from its absolute position in the full render, so a sub-rectangle
-/// reproduces the frame's bytes exactly (see
-/// `progressive_tiles_match_progressive_frames` in `djvu_tile`).
-///
-/// `cancel` is a cooperative stop flag checked on entry and between the
-/// layer decode and the composite; `Ok(None)` means the render was abandoned
-/// at a checkpoint. Partial-quality frames are decoded from scratch on every
-/// call (the `PageLayers` caches only memoize the full-chunk decode), and
-/// their pixels are never inserted into the composited-tile cache.
-///
-/// Every option applies as in [`render_region`]: the region is cut from the
-/// same page [`render_progressive`] returns.
-///
-/// # Errors
-///
-/// Same as [`render_progressive`].
-pub(crate) fn render_region_progressive(
-    page: &DjVuPage,
-    region: RenderRect,
-    opts: &RenderOptions,
-    chunk_n: usize,
-    cancel: Option<&core::sync::atomic::AtomicBool>,
-) -> Result<Option<Pixmap>, RenderError> {
-    check_output_pixels(
-        "render_region_progressive",
-        page,
-        None,
-        region.width,
-        region.height,
-    )?;
-    let n_bg44 = page.bg44_chunks().len();
-    let max_chunk = n_bg44.saturating_sub(1);
-    if n_bg44 > 0 && chunk_n > max_chunk {
-        return Err(RenderError::ChunkOutOfRange {
-            chunk_n,
-            max: max_chunk,
-        });
-    }
-    if is_cancelled(cancel) {
-        return Ok(None);
-    }
-
-    let composite = Composite::decode(page, opts, Detail::Chunks(chunk_n + 1))?;
-    if is_cancelled(cancel) {
-        return Ok(None);
-    }
-    let pm = composite.region(region)?;
-    Ok(Some(rotate_pixmap(pm, opts.output_rotation(page))))
 }
 
 /// Render a sub-rectangle of a page, assembling the output from a per-page
@@ -5494,53 +5835,6 @@ pub(crate) fn native_rect(
             height: r.width,
         },
     }
-}
-
-/// [`render_region_tiled`] with `region` in display space: the coordinates
-/// address the rendered page after its combined INFO + user rotation, like
-/// the returned pixels. `opts.width`/`opts.height` stay native, as everywhere.
-///
-/// Pixels outside the display canvas are white, as in [`render_region`].
-#[cfg(feature = "std")]
-pub(crate) fn render_display_region_tiled(
-    page: &DjVuPage,
-    region: RenderRect,
-    opts: &RenderOptions,
-) -> Result<Pixmap, RenderError> {
-    use crate::info::Rotation;
-    let rotation = opts.output_rotation(page);
-    if rotation == Rotation::None {
-        return render_region_tiled(page, region, opts);
-    }
-    check_output_pixels(
-        "render_region_tiled",
-        page,
-        None,
-        region.width,
-        region.height,
-    )?;
-    let native = unrotated_size(page, opts);
-    let (dw, dh) = match rotation {
-        Rotation::Cw90 | Rotation::Ccw90 => (native.1, native.0),
-        Rotation::None | Rotation::Rot180 => native,
-    };
-    // Only the part inside the display canvas maps to native pixels.
-    let x1 = region.x.saturating_add(region.width).min(dw);
-    let y1 = region.y.saturating_add(region.height).min(dh);
-    if x1 <= region.x || y1 <= region.y {
-        return Ok(Pixmap::white(region.width, region.height));
-    }
-    let inside = RenderRect {
-        x: region.x,
-        y: region.y,
-        width: x1 - region.x,
-        height: y1 - region.y,
-    };
-    let pm = render_region_tiled(page, native_rect(rotation, native, inside), opts)?;
-    if (inside.width, inside.height) == (region.width, region.height) {
-        return Ok(pm);
-    }
-    Ok(white_crop(&pm, (region.x, region.y), region))
 }
 
 /// [`render_region_tiled`] with a cooperative cancel flag (#691 slice 3).
@@ -5796,12 +6090,14 @@ pub fn render_pages_parallel(
 ///
 /// Returns `Ok(None)` when the page has no BG44 chunks.
 pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pixmap>, RenderError> {
-    check_output_pixels("render_coarse", page, None, opts.width, opts.height)?;
-    let composite = Composite::decode(page, opts, Detail::Coarse)?;
-    if !composite.has_background() {
-        return Ok(None);
+    match RenderRequest::new(opts.clone())
+        .quality(Quality::Coarse)
+        .operation("render_coarse")
+        .pixmap(page)
+    {
+        Err(RenderError::NoBackground) => Ok(None),
+        result => result.map(Some),
     }
-    composite.page_pixmap(None).map(Some)
 }
 
 /// Progressive render: decode BG44 chunks 1..=chunk_n and all other layers.
@@ -8884,8 +9180,8 @@ mod tests {
         assert_eq!(unrotated_size(page, &opts), (70, 90));
     }
 
-    /// Every option applies to `render_region` and to the progressive region
-    /// render: each returns the exact crop of the matching whole-page render.
+    /// Every option applies to `render_region` and to a progressive region
+    /// request: each returns the exact crop of the matching whole-page render.
     /// Anti-aliasing crops the halved page (odd sizes too), Lanczos-3 the
     /// rescaled page (which ignores `aa`, as `render_pixmap` does).
     #[test]
@@ -8940,18 +9236,189 @@ mod tests {
                     "render_region, {what}"
                 );
                 for (step, whole) in [(0, &first), (last, &full)] {
-                    let part = render_region_progressive(page, region, opts, step, None)
-                        .unwrap()
+                    let part = RenderRequest::new(upright.clone())
+                        .region(region)
+                        .quality(Quality::Step(step))
+                        .pixmap(page)
                         .unwrap();
-                    assert!(part.data == expect(whole), "step {step}, {what}");
+                    assert!(
+                        part.data == reference_crop(whole, region),
+                        "step {step}, {what}"
+                    );
                 }
             }
         }
     }
 
-    /// The tiled region renders fall back to `render_region` under
-    /// anti-aliasing: display-space regions of a rotated, anti-aliased page
-    /// are the matching crops of the whole render.
+    /// A request region is the display-space crop of the whole-page request
+    /// in every mode (rotation, anti-aliasing, Lanczos-3), at every quality,
+    /// cached or not; and each whole-page request equals its legacy function.
+    #[test]
+    fn render_request_regions_crop_the_whole_page() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let size = |width, height| RenderOptions {
+            width,
+            height,
+            ..Default::default()
+        };
+        let modes = [
+            size(91, 121),
+            RenderOptions {
+                aa: true,
+                rotation: UserRotation::Cw90,
+                ..size(91, 121)
+            },
+            RenderOptions {
+                resampling: Resampling::Lanczos3,
+                rotation: UserRotation::Rot180,
+                ..size(70, 90)
+            },
+        ];
+        for opts in &modes {
+            for quality in [Quality::Full, Quality::Step(0), Quality::Coarse] {
+                let request = RenderRequest::new(opts.clone()).quality(quality);
+                let whole = request.pixmap(page).unwrap();
+                let legacy = match quality {
+                    Quality::Full => render_pixmap(page, opts).unwrap(),
+                    Quality::Step(k) => render_progressive(page, opts, k).unwrap(),
+                    _ => render_coarse(page, opts).unwrap().unwrap(),
+                };
+                assert!(whole == legacy, "{opts:?} {quality:?}: legacy");
+                for region in regions_around(whole.width, whole.height) {
+                    for cached in [false, true] {
+                        let part = request
+                            .clone()
+                            .region(region)
+                            .cached(cached)
+                            .pixmap(page)
+                            .unwrap();
+                        assert!(
+                            part.data == reference_crop(&whole, region),
+                            "{opts:?} {quality:?} {region:?} cached={cached}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The buffer and row outputs give the pixmap's bytes, for the whole page
+    /// and for a region; a streamed region must lie inside the page.
+    #[test]
+    fn render_request_streams_match_the_pixmap() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 91,
+            height: 121,
+            ..Default::default()
+        };
+        let region = RenderRect {
+            x: 10,
+            y: 20,
+            width: 50,
+            height: 40,
+        };
+        for quality in [Quality::Full, Quality::Step(1), Quality::Coarse] {
+            for region in [None, Some(region)] {
+                let mut request = RenderRequest::new(opts.clone()).quality(quality);
+                if let Some(region) = region {
+                    request = request.region(region);
+                }
+                let pm = request.pixmap(page).unwrap();
+                let mut buf = vec![0u8; pm.data.len()];
+                request.write_rgba(page, &mut buf).unwrap();
+                assert!(buf == pm.data, "{quality:?} {region:?}: buffer");
+                let row_len = pm.width as usize * 4;
+                let mut rows = Vec::new();
+                request
+                    .rows(page, |y, row| {
+                        assert_eq!(y * row_len, rows.len());
+                        rows.extend_from_slice(row);
+                    })
+                    .unwrap();
+                assert!(rows == pm.data, "{quality:?} {region:?}: rows");
+            }
+        }
+        let past_edge = RenderRequest::new(opts.clone()).region(RenderRect {
+            x: 80,
+            y: 0,
+            width: 20,
+            height: 10,
+        });
+        assert!(matches!(
+            past_edge.write_rgba(page, &mut [0u8; 800]),
+            Err(RenderError::UnsupportedOption(_))
+        ));
+        let rotated = RenderRequest::new(RenderOptions {
+            rotation: UserRotation::Cw90,
+            ..opts
+        });
+        assert!(matches!(
+            rotated.rows(page, |_, _| {}),
+            Err(RenderError::UnsupportedOption(_))
+        ));
+    }
+
+    /// A cancelled token stops every output with `Cancelled`; quality errors
+    /// name the problem.
+    #[test]
+    fn render_request_cancel_and_quality_errors() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let opts = RenderOptions {
+            width: 60,
+            height: 80,
+            ..Default::default()
+        };
+        let token = CancelToken::new();
+        let request = RenderRequest::new(opts.clone()).cancel(token.clone());
+        assert!(request.pixmap(page).is_ok());
+        token.cancel();
+        let region = RenderRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        let cancelled = |r: Result<(), RenderError>| matches!(r, Err(RenderError::Cancelled));
+        assert!(cancelled(request.pixmap(page).map(drop)));
+        for cached in [false, true] {
+            let part = request.clone().region(region).cached(cached);
+            assert!(cancelled(part.pixmap(page).map(drop)), "cached={cached}");
+        }
+        assert!(cancelled(
+            request.write_rgba(page, &mut vec![0; 60 * 80 * 4])
+        ));
+        assert!(cancelled(request.rows(page, |_, _| {})));
+
+        let steps = progressive_steps(page);
+        let past_last = RenderRequest::new(opts.clone()).quality(Quality::Step(steps));
+        assert!(matches!(
+            past_last.pixmap(page),
+            Err(RenderError::ChunkOutOfRange { chunk_n, max }) if chunk_n == steps && max == steps - 1
+        ));
+
+        let doc = load_doc("boy_jb2.djvu");
+        let bilevel = doc.page(0).unwrap();
+        let coarse = RenderRequest::new(opts.clone()).quality(Quality::Coarse);
+        assert!(matches!(
+            coarse.pixmap(bilevel),
+            Err(RenderError::NoBackground)
+        ));
+        // A page without BG44 chunks has one frame: the full render.
+        assert!(
+            RenderRequest::new(opts.clone())
+                .quality(Quality::Step(0))
+                .pixmap(bilevel)
+                .unwrap()
+                == render_pixmap(bilevel, &opts).unwrap()
+        );
+    }
+
+    /// Cached display-space regions of a rotated, anti-aliased page are the
+    /// matching crops of the whole render.
     #[test]
     fn display_region_tiled_crops_the_anti_aliased_page() {
         let doc = load_doc("chicken.djvu");
@@ -8970,7 +9437,11 @@ mod tests {
         let full = render_pixmap(page, &opts).unwrap();
         assert_eq!((full.width, full.height), (60, 45));
         for region in regions_around(full.width, full.height) {
-            let tiled = render_display_region_tiled(page, region, &opts).unwrap();
+            let tiled = RenderRequest::new(opts.clone())
+                .region(region)
+                .cached(true)
+                .pixmap(page)
+                .unwrap();
             assert!(
                 tiled.data == reference_crop(&full, region),
                 "display region {region:?}"
