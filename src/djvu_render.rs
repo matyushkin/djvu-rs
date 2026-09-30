@@ -247,7 +247,13 @@ pub struct RenderOptions {
     pub scale: f32,
     /// Bold level: number of dilation passes on the JB2 mask (0 = no dilation).
     pub bold: u8,
-    /// Whether to apply anti-aliasing downscale pass.
+    /// Whether to apply anti-aliasing downscale pass: the page is composited
+    /// at `width`×`height` and each 2×2 block is averaged, so the output is
+    /// half the requested size.
+    ///
+    /// Ignored when [`Resampling::Lanczos3`] rescales the page (any size other
+    /// than the native one): the Lanczos-3 filter already smooths the page,
+    /// and the output keeps the requested size.
     pub aa: bool,
     /// User-requested rotation, combined with the INFO chunk rotation.
     pub rotation: UserRotation,
@@ -4899,7 +4905,7 @@ impl<'p> Composite<'p> {
     ) -> Result<Pixmap, RenderError> {
         let pm = match self.lanczos_canvas(limits)? {
             Some(pm) => pm,
-            None if self.canvas.aa => aa_downscale(&self.pixmap(self.whole())?),
+            None if aa_halves(self.page, &self.canvas) => aa_downscale(&self.pixmap(self.whole())?),
             None => self.pixmap(self.whole())?,
         };
         Ok(rotate_pixmap(pm, self.canvas.output_rotation(self.page)))
@@ -4913,7 +4919,7 @@ impl<'p> Composite<'p> {
         if let Some(full) = self.lanczos_canvas(None)? {
             return Ok(white_crop(&full, (0, 0), window));
         }
-        if !self.canvas.aa {
+        if !aa_halves(self.page, &self.canvas) {
             return self.pixmap(window);
         }
         // Pixel (x, y) of the halved page averages canvas pixels 2x..=2x+1,
@@ -4945,7 +4951,8 @@ impl<'p> Composite<'p> {
     ///
     /// The native composite is unrotated and not anti-aliased, like every
     /// canvas. It stays `None` when that composite fails (over the output
-    /// limit, or a decode error), so the caller keeps the bilinear canvas.
+    /// limit, or a decode error), so the caller keeps the bilinear canvas at
+    /// the same size: [`aa_halves`] is false either way.
     fn lanczos_canvas(
         &self,
         limits: Option<crate::resource_limits::ResourceLimits>,
@@ -5071,13 +5078,24 @@ fn lanczos_rescales(page: &DjVuPage, resampling: Resampling, full: (u32, u32)) -
         && (page.width() as u32 != full.0 || page.height() as u32 != full.1)
 }
 
+/// Whether a render of `page` with `opts` halves the canvas for
+/// anti-aliasing: `opts.aa`, unless Lanczos-3 rescales the page, which
+/// ignores `aa`.
+///
+/// The answer depends on the options alone, so the output size does too: a
+/// Lanczos-3 render whose native composite fails falls back to the bilinear
+/// canvas at the requested size, still without the halving.
+fn aa_halves(page: &DjVuPage, opts: &RenderOptions) -> bool {
+    let full = (opts.width.max(1), opts.height.max(1));
+    opts.aa && !lanczos_rescales(page, opts.resampling, full)
+}
+
 /// The size of the page [`render_pixmap`] returns for `opts`, before
-/// rotation: the requested size, halved by anti-aliasing unless Lanczos-3
-/// rescales the page to the requested size.
+/// rotation: the requested size, halved when [`aa_halves`].
 #[cfg(feature = "std")]
 fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32) {
     let full = (opts.width.max(1), opts.height.max(1));
-    if opts.aa && !lanczos_rescales(page, opts.resampling, full) {
+    if aa_halves(page, opts) {
         ((full.0 / 2).max(1), (full.1 / 2).max(1))
     } else {
         full
@@ -8692,6 +8710,40 @@ mod tests {
             rect(0, 0, w + 1, h + 1),
             rect(w + 2, 0, 5, 5),
         ]
+    }
+
+    /// Lanczos-3 at a scaled size ignores `aa` on its fallback too: when the
+    /// native composite fails, the bilinear canvas keeps the requested size
+    /// rather than being halved.
+    #[test]
+    fn lanczos_fallback_ignores_aa() {
+        let doc = load_doc("chicken.djvu");
+        let page = doc.page(0).unwrap();
+        let bilinear = RenderOptions {
+            width: 70,
+            height: 90,
+            ..Default::default()
+        };
+        let opts = RenderOptions {
+            aa: true,
+            resampling: Resampling::Lanczos3,
+            ..bilinear
+        };
+        // Room for the output, not for the native composite Lanczos-3 rescales.
+        let limits = crate::resource_limits::ResourceLimits {
+            max_render_pixels: Some(70 * 90),
+            ..Default::default()
+        };
+        assert!(page.width() as u64 * page.height() as u64 > 70 * 90);
+
+        let fallback = render_pixmap_with_limits(page, &opts, Some(limits)).unwrap();
+        let expected = render_pixmap(page, &bilinear).unwrap();
+        assert_eq!((fallback.width, fallback.height), (70, 90));
+        assert!(fallback.data == expected.data);
+
+        // `region` and the tiled display render take the same rule.
+        assert!(!aa_halves(page, &opts));
+        assert_eq!(unrotated_size(page, &opts), (70, 90));
     }
 
     /// Every option applies to `render_region` and to the progressive region
