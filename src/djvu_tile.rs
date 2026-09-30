@@ -45,11 +45,6 @@
 //!
 //! Layer selection and async/wasm surfaces are later slices of #691.
 
-#[cfg(not(feature = "std"))]
-use alloc::sync::Arc;
-#[cfg(feature = "std")]
-use std::sync::Arc;
-
 use crate::djvu_document::DjVuPage;
 use crate::djvu_render::{
     RenderError, RenderOptions, RenderRect, combine_rotations, render_region,
@@ -290,46 +285,10 @@ pub fn render_tile_cached(
     )?)
 }
 
-/// Cooperative cancellation token for tile work (#691 slice 3).
-///
-/// Clones share one flag: cancel any clone and every operation holding a
-/// clone stops at its next checkpoint with [`TileError::Cancelled`].
-/// Checkpoints sit *between* units of work — before each tile, before each
-/// internal cache tile, and between layer decode and composite — so an
-/// in-flight decode always runs to completion; cancellation bounds further
-/// work, not the current unit. A token is one-way: once cancelled it stays
-/// cancelled (create a fresh token per request generation instead of
-/// resetting).
-///
-/// Cancellation never changes rendered bytes and never corrupts caches:
-/// work either completes a unit fully or abandons it without publishing
-/// anything partial.
-#[derive(Debug, Clone, Default)]
-pub struct TileCancelToken {
-    flag: Arc<core::sync::atomic::AtomicBool>,
-}
-
-impl TileCancelToken {
-    /// A fresh, un-cancelled token.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Signal every holder of a clone of this token to stop.
-    pub fn cancel(&self) {
-        self.flag.store(true, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Whether [`cancel`](Self::cancel) has been called on any clone.
-    pub fn is_cancelled(&self) -> bool {
-        self.flag.load(core::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The raw flag the render internals poll.
-    fn as_flag(&self) -> &core::sync::atomic::AtomicBool {
-        &self.flag
-    }
-}
+/// Cooperative cancellation token for tile work (#691 slice 3): the shared
+/// [`CancelToken`](crate::djvu_render::CancelToken). A cancelled tile render
+/// stops with [`TileError::Cancelled`].
+pub type TileCancelToken = crate::djvu_render::CancelToken;
 
 /// Per-call controls for [`render_tile_with`] (#691 slice 3).
 ///
@@ -390,37 +349,28 @@ pub fn render_tile_with(
 ) -> Result<Pixmap, TileError> {
     let layout = TileLayout::new(page, opts, tile_size)?;
     let rect = layout.tile_rect(col, row)?;
-    let cancel = controls.cancel.as_ref();
-    if cancel.is_some_and(TileCancelToken::is_cancelled) {
-        return Err(TileError::Cancelled);
-    }
-    let flag = cancel.map(TileCancelToken::as_flag);
-    let render_rect = layout.to_render_rect(rect);
-
-    if let Some(step) = controls.quality_step {
-        let steps = crate::djvu_render::progressive_steps(page);
-        if step >= steps {
-            return Err(TileError::Render(RenderError::ChunkOutOfRange {
-                chunk_n: step,
-                max: steps - 1,
-            }));
-        }
-        if page.bg44_chunks().is_empty() {
-            // No BG44 refinement ladder: the single step is the full render
-            // (mirrors `render_progressive_step`'s fallback).
-            return Ok(render_region(page, render_rect, opts)?);
-        }
-        return crate::djvu_render::render_region_progressive(page, render_rect, opts, step, flag)?
-            .ok_or(TileError::Cancelled);
-    }
-
+    let mut request = crate::djvu_render::RenderRequest::new(opts.clone())
+        .region(RenderRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        })
+        .operation("render_tile");
     #[cfg(feature = "std")]
-    if controls.use_cache {
-        return crate::djvu_render::render_region_tiled_cancellable(page, render_rect, opts, flag)?
-            .ok_or(TileError::Cancelled);
+    {
+        request = request.cached(controls.use_cache);
     }
-
-    Ok(render_region(page, render_rect, opts)?)
+    if let Some(step) = controls.quality_step {
+        request = request.quality(crate::djvu_render::Quality::Step(step));
+    }
+    if let Some(token) = &controls.cancel {
+        request = request.cancel(token.clone());
+    }
+    match request.pixmap(page) {
+        Err(RenderError::Cancelled) => Err(TileError::Cancelled),
+        result => Ok(result?),
+    }
 }
 
 /// Snapshot of one page's composited-tile cache (#691 slice 2).

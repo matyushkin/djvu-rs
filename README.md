@@ -473,6 +473,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Render requests
+
+[`RenderRequest`](https://docs.rs/djvu-rs/latest/djvu_rs/djvu_render/struct.RenderRequest.html)
+gathers every render choice in one value: the page size and look
+(`RenderOptions`), an optional region of the output page, the quality (full,
+a progressive step, or a coarse preview), per-render resource limits, a
+`CancelToken`, and the composited-tile cache. One method then picks the
+output: a new pixmap, a caller's RGBA buffer, or a row sink. A region is
+always the exact crop of the whole-page render.
+
+```rust,no_run
+use djvu_rs::DjVuDocument;
+use djvu_rs::djvu_render::{CancelToken, Quality, RenderOptions, RenderRect, RenderRequest};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read("book.djvu")?;
+    let doc = DjVuDocument::parse(&data)?;
+    let page = doc.page(0)?;
+    let opts = RenderOptions::fit_to_width(page, 1600);
+
+    // A fast preview first, then the viewport at full quality from the tile cache.
+    let preview = RenderRequest::new(opts.clone()).quality(Quality::Step(0)).pixmap(page)?;
+    let cancel = CancelToken::new(); // call cancel.cancel() to stop a stale render
+    let viewport = RenderRect { x: 0, y: 400, width: 1600, height: 900 };
+    let part = RenderRequest::new(opts)
+        .region(viewport)
+        .cached(true)
+        .cancel(cancel)
+        .pixmap(page)?;
+    let _ = (preview, part);
+    Ok(())
+}
+```
+
+The `render_*` functions (`render_pixmap`, `render_into`,
+`render_streaming`, `render_coarse`, …) remain as shorthands for common
+requests.
+
 ### Tile rendering
 
 For viewer engines: [`djvu_tile`](https://docs.rs/djvu-rs/latest/djvu_rs/djvu_tile/)
@@ -506,7 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `render_tile_cached` memoizes composited tiles per page; the cache is
 tile-granular and controllable (`tile_cache_usage`, `set_tile_cache_budget`,
 `clear_tile_cache`, `invalidate_tile_region`). `render_tile_with` +
-`TileRenderControls` / `TileCancelToken` add progressive quality steps and
+`TileRenderControls` / `TileCancelToken` (the shared `CancelToken`) add progressive quality steps and
 cooperative cancellation, and with the `parallel` feature `prefetch_tiles` /
 `prefetch_tiles_cancellable` warm the cache in the background with a bounded
 worker pool. The full contract lives in
