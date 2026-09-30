@@ -123,9 +123,11 @@ fn bench_render_coarse(c: &mut Criterion) {
         mask_aa: false,
     };
 
+    let request = djvu_rs::djvu_render::RenderRequest::new(opts)
+        .quality(djvu_rs::djvu_render::Quality::Coarse);
     c.bench_function("render_coarse", |b| {
         b.iter(|| {
-            let _ = djvu_rs::djvu_render::render_coarse(black_box(page), black_box(&opts));
+            let _ = black_box(&request).pixmap(black_box(page));
         });
     });
 }
@@ -292,12 +294,9 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
         let mut buf = vec![0u8; buf_len];
         group.bench_function(BenchmarkId::new("render_into_reuse_buffer", label), |b| {
             b.iter(|| {
-                djvu_rs::djvu_render::render_into(
-                    black_box(page),
-                    black_box(&opts),
-                    black_box(buf.as_mut_slice()),
-                )
-                .expect("render_into");
+                djvu_rs::djvu_render::RenderRequest::new(black_box(&opts).clone())
+                    .write_rgba(black_box(page), black_box(buf.as_mut_slice()))
+                    .expect("render_into");
                 black_box(&buf);
             });
         });
@@ -305,12 +304,11 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("render_streaming_discard", label), |b| {
             b.iter(|| {
                 let mut bytes = 0usize;
-                djvu_rs::djvu_render::render_streaming(
-                    black_box(page),
-                    black_box(&opts),
-                    |_, row| bytes = bytes.wrapping_add(row.len()),
-                )
-                .expect("render_streaming");
+                djvu_rs::djvu_render::RenderRequest::new(black_box(&opts).clone())
+                    .rows(black_box(page), |_, row| {
+                        bytes = bytes.wrapping_add(row.len())
+                    })
+                    .expect("render_streaming");
                 black_box(bytes);
             });
         });
@@ -420,12 +418,9 @@ fn bench_render_compositor_only(c: &mut Criterion) {
 
         group.bench_function(label, |b| {
             b.iter(|| {
-                djvu_rs::djvu_render::render_into(
-                    black_box(page),
-                    black_box(&opts),
-                    black_box(buf.as_mut_slice()),
-                )
-                .expect("render_into");
+                djvu_rs::djvu_render::RenderRequest::new(black_box(&opts).clone())
+                    .write_rgba(black_box(page), black_box(buf.as_mut_slice()))
+                    .expect("render_into");
                 black_box(&buf);
             });
         });
@@ -508,27 +503,21 @@ fn bench_render_row_scratch_ab(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("direct_render_into", label), |b| {
             b.iter(|| {
-                djvu_rs::djvu_render::render_into(
-                    black_box(page),
-                    black_box(&opts),
-                    black_box(direct_buf.as_mut_slice()),
-                )
-                .expect("render_into");
+                djvu_rs::djvu_render::RenderRequest::new(black_box(&opts).clone())
+                    .write_rgba(black_box(page), black_box(direct_buf.as_mut_slice()))
+                    .expect("render_into");
                 black_box(&direct_buf);
             });
         });
 
         group.bench_function(BenchmarkId::new("row_scratch_copy", label), |b| {
             b.iter(|| {
-                djvu_rs::djvu_render::render_streaming(
-                    black_box(page),
-                    black_box(&opts),
-                    |y, row| {
+                djvu_rs::djvu_render::RenderRequest::new(black_box(&opts).clone())
+                    .rows(black_box(page), |y, row| {
                         let start = y * width as usize * 4;
                         scratch_buf[start..start + row.len()].copy_from_slice(row);
-                    },
-                )
-                .expect("render_streaming");
+                    })
+                    .expect("render_streaming");
                 black_box(&scratch_buf);
             });
         });
@@ -940,9 +929,10 @@ fn bench_render_region_bilevel(c: &mut Criterion) {
         width: 512,
         height: full_h,
     };
+    let request = djvu_rs::djvu_render::RenderRequest::new(opts).region(region);
     c.bench_function("render_region_bilevel", |b| {
         b.iter(|| {
-            let _ = djvu_rs::djvu_render::render_region(black_box(page), region, black_box(&opts));
+            let _ = black_box(&request).pixmap(black_box(page));
         });
     });
 }
