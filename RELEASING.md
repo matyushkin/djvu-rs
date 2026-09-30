@@ -1,8 +1,8 @@
 # Releasing djvu-rs
 
-Releases are cut by **merging the release-please PR**. Everything after that merge is
-automatic and runs on the built-in `GITHUB_TOKEN` — no personal access token is on the
-release path.
+Releases are cut by **merging the release-please PR**. Nothing else is manual: the PR's
+checks start on their own, and everything after the merge is automatic. No personal
+access token is on the release path.
 
 ## Standard release procedure
 
@@ -11,20 +11,23 @@ release path.
    the Python and npm package versions, `.release-please-manifest.json`, and adds the
    `CHANGELOG.md` section built from Conventional Commits since the last release.
 
-2. **Approve the checks, then merge.** The PR is opened and updated by `GITHUB_TOKEN`,
-   so GitHub holds its `pull_request` runs in an approval-required state: the required
-   checks stay "Expected" and the PR shows as blocked. Open the PR on GitHub and select
-   **Approve workflows to run** in the merge box. Every push to the release branch asks
-   again, so approve only the final state, just before the merge. When the checks turn
-   green, merge normally, or enable auto-merge first:
+2. **Merge.** Enable auto-merge; it merges when the required checks are green:
 
    ```sh
    gh pr merge <N> --squash --auto
    ```
 
-   An admin bypass (`--admin`) is not needed. Do not dispatch `ci.yml` on the release
-   branch instead: checks from a `workflow_dispatch` run are not linked to the PR and do
-   not satisfy the required checks (#800 tried that; 0.32.1–0.38.0 still needed a bypass).
+   The PR is opened and updated with a token of the **djvu-rs release** GitHub App, so
+   its `pull_request` checks start like on any other PR. A PR pushed by `GITHUB_TOKEN`
+   gets its runs held for manual approval instead, and its required checks stay
+   "Expected" (0.32.1–0.38.0 needed an admin bypass for that reason). Dispatching
+   `ci.yml` on the release branch does not help: checks from a `workflow_dispatch` run
+   are not linked to the PR (#800).
+
+   The App lives in the repository settings as the `RELEASE_APP_CLIENT_ID` variable
+   and the `RELEASE_APP_PRIVATE_KEY` secret. If the release PR stops getting checks,
+   check that the App is still installed on this repository and that the key is
+   valid; a new key is made on the App's settings page.
 
 3. **The rest happens on its own.** Merging pushes a `chore(main): release X.Y.Z` commit
    to `main`, which starts `release-please.yml` again. That run:
