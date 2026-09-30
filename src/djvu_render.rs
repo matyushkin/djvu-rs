@@ -5739,7 +5739,7 @@ pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> b
 }
 
 /// Render a sub-rectangle of a page, assembling the output from a per-page
-/// cache of composited [`TILE_SIZE`]×`TILE_SIZE` output tiles.
+/// cache of composited `TILE_SIZE`×`TILE_SIZE` output tiles.
 ///
 /// # Why this exists (C4_TILE_CACHE)
 ///
@@ -5783,7 +5783,7 @@ pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> b
 /// - `opts.permissive`: strict and permissive requests share tiles. Layers
 ///   decode before any tile lookup, so a strict request on a damaged page
 ///   still fails there. On an intact page both modes decode identical
-///   layers (the same background chunks too, see [`full_detail_chunks`]),
+///   layers (the same background chunks too, see `full_detail_chunks`),
 ///   hence identical tiles, whichever mode fills the cache first.
 ///
 /// This is an **opt-in** entry point: call it where you want tile caching
@@ -6230,7 +6230,7 @@ impl<'a> ProgressiveDecoder<'a> {
     /// chunk.
     ///
     /// Errors: [`RenderError::InvalidDimensions`] if `opts.width`/`height` is 0;
-    /// [`RenderError::Unsupported`] if `opts.resampling` is not `Bilinear` or
+    /// [`RenderError::UnsupportedOption`] if `opts.resampling` is not `Bilinear` or
     /// `opts.permissive` is set (see the type docs); or a decode error from the
     /// foreground.
     pub fn new(page: &'a DjVuPage, opts: &RenderOptions) -> Result<Self, RenderError> {

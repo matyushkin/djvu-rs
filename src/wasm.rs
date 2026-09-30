@@ -469,7 +469,7 @@ impl WasmPage {
     /// Number of BG44 background chunks on this page.
     ///
     /// Determines how many refinement steps are available via
-    /// [`render_progressive`]. Returns `0` for bilevel-only pages.
+    /// [`render_progressive`](Self::render_progressive). Returns `0` for bilevel-only pages.
     pub fn bg44_chunk_count(&self) -> u32 {
         self.doc
             .page(self.index)
@@ -483,8 +483,8 @@ impl WasmPage {
     /// @deprecated Use `render_request` with `set_coarse()`.
     ///
     /// Returns `undefined` for bilevel-only pages (no BG44 data); use
-    /// [`render`] for those.  For color pages the result is a blurry but
-    /// instantly visible preview; call [`render_progressive`] or [`render`]
+    /// [`render`](Self::render) for those.  For color pages the result is a blurry but
+    /// instantly visible preview; call [`render_progressive`](Self::render_progressive) or [`render`](Self::render)
     /// on a Web Worker to produce the final image.
     ///
     /// Throws on decode error.
@@ -509,12 +509,12 @@ impl WasmPage {
     ///
     /// @deprecated Use `render_request` with `set_step(chunk_n)`.
     ///
-    /// `chunk_n = 0` is equivalent to [`render_coarse`] but also composites
+    /// `chunk_n = 0` is equivalent to [`render_coarse`](Self::render_coarse) but also composites
     /// the mask. Each subsequent call with `chunk_n += 1` adds one more
     /// wavelet refinement pass. After the last chunk the result is identical
-    /// to [`render`].
+    /// to [`render`](Self::render).
     ///
-    /// Use [`bg44_chunk_count`] to find the maximum valid `chunk_n`
+    /// Use [`bg44_chunk_count`](Self::bg44_chunk_count) to find the maximum valid `chunk_n`
     /// (`bg44_chunk_count() - 1`).
     ///
     /// Throws on decode error or if `chunk_n` is out of range.

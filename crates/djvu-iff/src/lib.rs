@@ -552,7 +552,7 @@ fn emit_chunk_inner(chunk: &Chunk, out: &mut Vec<u8>, suppress_inner_pad: bool) 
 /// and any word-alignment pad byte.
 ///
 /// This is the single source of the framing/size arithmetic. It walks the same
-/// `suppress_last_pad` parity rule as [`emit_chunk_inner`], so `emitted_size`
+/// `suppress_last_pad` parity rule as `emit_chunk_inner`, so `emitted_size`
 /// and `emit` can never disagree — a guarantee callers that pre-compute byte
 /// offsets (e.g. DIRM offset recomputation in the document mutator) rely on for
 /// correctness.

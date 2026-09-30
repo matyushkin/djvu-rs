@@ -26,7 +26,7 @@
 //! mode, maparea with rect/oval/poly/line/text shapes, border, and hilite).
 //! Every other top-level form (`metadata`, `align`, `xmp`, symbolic zoom, …)
 //! and every other maparea option (`border_avis`, `opacity`, `width`, …) is
-//! kept as S-expression text in [`Annotation::extra`] / [`MapArea::extra`],
+//! kept as S-expression text in [`Annotation::extra`](crate::annotation::Annotation::extra) / [`MapArea::extra`](crate::annotation::MapArea::extra),
 //! so a parse → edit → encode round trip loses nothing DjVuLibre reads.
 
 #[cfg(not(feature = "std"))]

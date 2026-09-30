@@ -11,7 +11,7 @@
 //! Indirect `FORM:DJVM` mutation via the plain
 //! [`from_bytes`](crate::djvu_mut::DjVuDocumentMut::from_bytes) entry point
 //! remains unsupported ([`page_mut`](crate::djvu_mut::DjVuDocumentMut::page_mut)
-//! returns [`MutError::IndirectDjvmUnsupported`]). To edit an indirect document,
+//! returns [`MutError::IndirectDjvmUnsupported`](crate::djvu_mut::MutError::IndirectDjvmUnsupported)). To edit an indirect document,
 //! use [`from_indirect_resolved`](crate::djvu_mut::DjVuDocumentMut::from_indirect_resolved),
 //! which resolves the external components and rebundles them into an owned
 //! bundled `FORM:DJVM` tree; see

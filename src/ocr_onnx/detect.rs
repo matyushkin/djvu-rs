@@ -2,7 +2,7 @@
 //!
 //! [`TextDetector`] loads the pinned detection model through
 //! [`manifest`](super::manifest) (weights are SHA-256-verified, never trusted
-//! blindly), preprocesses pages with [`preprocess`](super::preprocess), and
+//! blindly), preprocesses pages with [`preprocess`], and
 //! turns the model's probability map into axis-aligned text-region rectangles
 //! in page coordinates.
 //!

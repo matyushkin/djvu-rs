@@ -81,7 +81,7 @@ pub struct ZpDecoder<'a> {
     /// `0xFF` padding read past the end of `data`** — it is not clamped at
     /// `data.len()`. The overshoot `pos - data.len()` is therefore the number of
     /// synthetic bytes emitted so far; see [`synthetic_bytes`](Self::synthetic_bytes).
-    /// Every byte reader (this struct's [`read_byte`](Self::read_byte) and the
+    /// Every byte reader (this struct's `read_byte` and the
     /// inlined hot-path readers in djvu-jb2 / djvu-iw44 / djvu-bzz) advances `pos`
     /// the same way, so the overshoot is consistent regardless of which path read.
     pub pos: usize,
@@ -211,7 +211,7 @@ impl<'a> ZpDecoder<'a> {
     /// Number of synthetic `0xFF` bytes emitted past the end of the real input.
     ///
     /// Computed as the overshoot of [`pos`](Self::pos) beyond `data.len()`. Every
-    /// byte reader — this struct's [`read_byte`](Self::read_byte) and the inlined
+    /// byte reader — this struct's `read_byte` and the inlined
     /// hot-path readers in djvu-jb2 / djvu-iw44 / djvu-bzz — advances `pos` past
     /// the end of `data` on each post-EOF read, so this is the true total across
     /// all of them.

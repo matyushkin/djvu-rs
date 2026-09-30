@@ -19,7 +19,7 @@
 //!
 //! # Thumbnail size
 //!
-//! The long side is scaled to at most [`THUMBNAIL_MAX_SIDE`] pixels (default
+//! The long side is scaled to at most [`THUMBNAIL_MAX_SIDE`](crate::thumbnail::THUMBNAIL_MAX_SIDE) pixels (default
 //! 128), with the short side scaled proportionally.  A minimum of 1×1 is
 //! always returned (even for degenerate inputs).
 

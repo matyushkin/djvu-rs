@@ -260,7 +260,7 @@ struct RawChunk {
 
 /// Shared, owned backing store for a document's bytes (an owned `Vec<u8>` from
 /// [`crate::Document::from_bytes`], or a `memmap2::Mmap`). Lazily-constructed
-/// pages ([`ChunkStore::Lazy`]) hold an `Arc` clone of this so their chunk bytes
+/// pages (`ChunkStore::Lazy`) hold an `Arc` clone of this so their chunk bytes
 /// can be materialised on first access without copying them at open time.
 #[cfg(feature = "std")]
 pub(crate) type Backing = Arc<dyn AsRef<[u8]> + Send + Sync>;
@@ -553,7 +553,7 @@ impl DjVuPage {
     ///
     /// A rendered page memoises its decoded background (including the full-res
     /// RGB pixmap — up to `width × height × 4` bytes), mask, and foreground in a
-    /// [`crate::djvu_render::PageLayers`] that lives as long as the owning
+    /// `PageLayers` cache that lives as long as the owning
     /// document. Rendering many pages of a large document therefore accumulates
     /// one such cache per page — the peak RSS grows linearly with pages rendered
     /// (measured ≈ 11 MB/page on `colorbook.djvu`), which can exhaust memory in a
@@ -743,7 +743,7 @@ impl DjVuPage {
     /// then cached in the page's render-tier layer cache.  Subsequent
     /// calls return the cached value immediately.  The wavelet inverse-transform
     /// and YCbCr→RGB conversion are also cached for subsample=1 (the common
-    /// full-resolution case) via [`decoded_bg_rgb_s1`](Self::decoded_bg_rgb_s1);
+    /// full-resolution case) via `decoded_bg_rgb_s1`;
     /// other subsample levels recompute the conversion each call.
     #[cfg(feature = "std")]
     pub fn decoded_bg44(&self) -> Option<Arc<Iw44Image>> {
@@ -1051,7 +1051,7 @@ impl DjVuPage {
     /// Return the decoded JB2 mask (Sjbz), decoding and caching on first call.
     ///
     /// Unlike [`Self::extract_mask`] this method caches the result (in the
-    /// page's [`crate::djvu_render::PageLayers`]) so that repeated renders of
+    /// page's `PageLayers` cache) so that repeated renders of
     /// the same page — e.g. at different DPI levels — do not re-run the ZP
     /// arithmetic + symbol decode.
     ///
@@ -1294,7 +1294,7 @@ impl DjVuDocument {
 
     /// Parse a DjVu document with configurable resource limits.
     ///
-    /// When [`ParseOptions::limits`] is set, header-only estimates are checked
+    /// When [`ParseOptions::limits`](crate::resource_limits::ParseOptions::limits) is set, header-only estimates are checked
     /// before the document is fully parsed. The same limits are stored on the
     /// returned document and inherited by subsequent render calls unless
     /// overridden via [`render_pixmap_with_limits`](crate::djvu_render::render_pixmap_with_limits).
@@ -1635,7 +1635,7 @@ impl DjVuDocument {
     /// Requires an `Arc<DjVuDocument>` so the spawned task can outlive this
     /// call — the background closure holds its own clone of the `Arc` and
     /// writes into the *same* page's existing `OnceLock`-backed
-    /// [`crate::djvu_render::PageLayers`] cache, so there is no separate
+    /// `PageLayers` cache, so there is no separate
     /// "prefetch buffer" to race against: whichever caller (the background
     /// task or a later foreground render) reaches `get_or_init` first does
     /// the decode, the other observes the cached result. Out-of-range
@@ -2164,7 +2164,7 @@ impl MmapDocument {
 
     /// Consume this `MmapDocument`, returning the owned [`DjVuDocument`].
     ///
-    /// Bundled documents' lazily-constructed pages ([`ChunkStore::Lazy`])
+    /// Bundled documents' lazily-constructed pages (`ChunkStore::Lazy`)
     /// hold their own `Arc` clone of the memory mapping, so it stays mapped
     /// for as long as any page needs it — dropping this wrapper's own
     /// reference here is safe (indirect documents' pages are eager and don't

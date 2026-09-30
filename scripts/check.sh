@@ -16,6 +16,9 @@ run cargo check --all-targets --features ocr-onnx           # ocr_onnx test tree
 run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
 run scripts/check_package_versions.sh                       # py/npm versions track crate (#692)
 run cargo build --no-default-features                       # no_std (host)
+# Broken or private intra-doc links (mirrors the "Rustdoc" Lint step).
+run env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude djvu-py --no-deps \
+  --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,ocr-neural,experimental,iw44-probe
 
 # wasm32 — the gate that catches no_std `vec!` / leaked `std::*` (#448 class).
 if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown'; then

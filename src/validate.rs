@@ -1,7 +1,7 @@
 //! Layered, non-rendering validation for DjVu byte streams.
 //!
 //! The validator implements the structural, dependency, codec, and resource
-//! layers. [`Layer::Semantic`] is intentionally part of the public schema now,
+//! layers. [`Layer::Semantic`](crate::validate::Layer::Semantic) is intentionally part of the public schema now,
 //! but has no checks until a later validator slice.
 //! By default codec validation is probe-level: it checks IW44 headers and BZZ
 //! streams but never renders pixels. Set [`ValidateOptions::decode_pages`] to
@@ -137,7 +137,7 @@ pub struct ResourceEstimate {
     /// Sum of every page's pixel area.
     pub total_pixels: u64,
     /// Estimated peak decoded-page memory in bytes: the largest page's area
-    /// times [`DECODED_BYTES_PER_PIXEL`].
+    /// times `DECODED_BYTES_PER_PIXEL`.
     pub peak_decoded_bytes: u64,
 }
 

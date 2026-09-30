@@ -11,7 +11,7 @@
 //! 1. Crop the line from the page pixmap (clamped to the page).
 //! 2. Resize to height [`REC_HEIGHT`] keeping aspect ratio (the same
 //!    fixed-point bilinear resampler the detector uses), pad the width up to
-//!    a bucket of [`REC_WIDTH_BUCKET`] so a handful of tract plans serve all
+//!    a bucket of `REC_WIDTH_BUCKET` so a handful of tract plans serve all
 //!    line lengths.
 //! 3. Normalize to `(v/255 − 0.5)/0.5` in **BGR** channel order (the pinned
 //!    config's `DecodeImage: img_mode: BGR`); padded columns hold 0.0
