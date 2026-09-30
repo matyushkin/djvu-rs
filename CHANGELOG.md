@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.0](https://github.com/matyushkin/djvu-rs/compare/v0.38.1...v0.39.0) (2026-09-30)
+
+
+### Features
+
+* deprecate the render_* variants in favour of RenderRequest ([#882](https://github.com/matyushkin/djvu-rs/issues/882)) ([86ea96a](https://github.com/matyushkin/djvu-rs/commit/86ea96af1501d8bb448fdd9235603a21b8082f23))
+* one RenderRequest for every render ([#881](https://github.com/matyushkin/djvu-rs/issues/881)) ([f9dd177](https://github.com/matyushkin/djvu-rs/commit/f9dd1774ac4cdb2478768675e7ed85f1ab0b4620))
+* tiles support anti-aliasing and Lanczos-3 ([#879](https://github.com/matyushkin/djvu-rs/issues/879)) ([0784912](https://github.com/matyushkin/djvu-rs/commit/0784912f0a37365336da6b9f411b737658ef1dac))
+
 ## [0.38.1](https://github.com/matyushkin/djvu-rs/compare/v0.38.0...v0.38.1) (2026-09-30)
 
 
