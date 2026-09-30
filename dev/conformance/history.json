@@ -1,14 +1,5 @@
 [
   {
-    "timestamp": "2026-08-11T18:48:49+00:00",
-    "commit": "2b131064e544cf3a7b5a59c07482a38a525457ef",
-    "status": "pass",
-    "pages_compared": 14,
-    "max_mismatch_pct": 0.7488,
-    "corpus_digest": "18484443086b73f299d8ba13486d97508dab6dff8e44af6aa7a6ac1e05e0c6fd",
-    "failures": []
-  },
-  {
     "timestamp": "2026-08-11T19:46:29+00:00",
     "commit": "beade4c26ce80e53933b1b8d1340fcee2c6ab0f5",
     "status": "pass",
@@ -893,6 +884,15 @@
   {
     "timestamp": "2026-09-30T03:14:12+00:00",
     "commit": "0784912f0a37365336da6b9f411b737658ef1dac",
+    "status": "pass",
+    "pages_compared": 167,
+    "max_mismatch_pct": 0.0,
+    "corpus_digest": "baed323711cbb4cee23036b0249feb5c6508ce644485e0b5c9bfba27b9d8030a",
+    "failures": []
+  },
+  {
+    "timestamp": "2026-09-30T04:21:09+00:00",
+    "commit": "f9dd1774ac4cdb2478768675e7ed85f1ab0b4620",
     "status": "pass",
     "pages_compared": 167,
     "max_mismatch_pct": 0.0,
