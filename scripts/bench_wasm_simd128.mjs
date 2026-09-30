@@ -96,7 +96,7 @@ function timeIt(fn) {
 }
 
 function benchPackage(label, pkg, bytes, args) {
-  const { WasmDocument } = pkg;
+  const { WasmDocument, WasmPixmap, WasmRenderRequest } = pkg;
 
   const benches = [
     {
@@ -127,10 +127,13 @@ function benchPackage(label, pkg, bytes, args) {
       name: `progressive_${args.dpi}dpi_chunk0`,
       setup: () => {
         const doc = WasmDocument.from_bytes(bytes);
-        return doc.page(0);
+        const request = new WasmRenderRequest(args.dpi);
+        request.set_step(0);
+        return { page: doc.page(0), request, pixmap: new WasmPixmap() };
       },
-      fn: (page) => {
-        const pixels = page.render_progressive(args.dpi, 0);
+      fn: ({ page, request, pixmap }) => {
+        page.render_request(request, pixmap);
+        const pixels = pixmap.to_bytes();
         return pixelChecksum(pixels) ^ page.bg44_chunk_count();
       },
     },

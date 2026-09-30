@@ -4,6 +4,7 @@
 //!
 //! - [`WasmDocument`] — parsed DjVu document, created from raw bytes.
 //! - [`WasmPage`]     — a single page, capable of rendering to RGBA pixels.
+//! - [`WasmRenderRequest`] — what to render: a DPI, a region, a quality.
 //!
 //! ## Usage (JavaScript)
 //!
@@ -18,13 +19,18 @@
 //! const img = new ImageData(pixels, page.width_at(150), page.height_at(150));
 //! ctx.putImageData(img, 0, 0);
 //!
-//! // Progressive render: instant coarse preview, then refine
-//! const coarse = page.render_coarse(150); // undefined for bilevel pages
-//! if (coarse) ctx.putImageData(new ImageData(coarse, page.width_at(150), page.height_at(150)), 0, 0);
+//! // One request for everything else: a region, a progressive step, a
+//! // coarse preview. The pixmap buffer is reused across renders.
+//! const pm = new WasmPixmap();
+//! const req = new WasmRenderRequest(150);
 //! for (let n = 0; n < page.bg44_chunk_count(); n++) {
-//!   const refined = page.render_progressive(150, n);
-//!   ctx.putImageData(new ImageData(refined, page.width_at(150), page.height_at(150)), 0, 0);
+//!   req.set_step(n); // background chunks 0..=n: refine step by step
+//!   page.render_request(req, pm);
+//!   ctx.putImageData(new ImageData(pm.view(), pm.width(), pm.height()), 0, 0);
 //! }
+//! req.set_full();
+//! req.set_region(0, 0, 400, 300); // only the visible part, from the tile cache
+//! page.render_request(req, pm);
 //!
 //! // Tile-first render (#691): only composite what is on screen
 //! const ts = 256;
@@ -43,7 +49,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     djvu_document::DjVuDocument,
-    djvu_render::{Quality, RenderError, RenderOptions, RenderRequest},
+    djvu_render::{Quality, RenderError, RenderOptions, RenderRect, RenderRequest},
     djvu_tile,
     pixmap::Pixmap,
     render_size::RenderSize,
@@ -91,8 +97,7 @@ fn render_progressive(
 ///   — `ImageData` copies). The view is invalidated by wasm memory growth and
 ///   by dropping/re-rendering the pixmap; never store it.
 /// - **Buffer reuse**: pass the same `WasmPixmap` back to
-///   [`render_into_pixmap`](WasmPage::render_into_pixmap) /
-///   [`render_progressive_into_pixmap`](WasmPage::render_progressive_into_pixmap)
+///   [`render_request`](WasmPage::render_request)
 ///   — the Rust-side allocation is reused across frames (a progressive
 ///   session allocates once instead of once per refinement pass).
 ///
@@ -164,6 +169,106 @@ impl Default for WasmPixmap {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── WasmRenderRequest — what to render ───────────────────────────────────────
+
+/// What to render: the page at a DPI, optionally one rectangle of it, at a
+/// chosen quality. Pass it to [`WasmPage::render_request`], the one render
+/// call that covers a viewport, a progressive step, and a coarse preview.
+///
+/// ```js
+/// const req = new WasmRenderRequest(150);
+/// req.set_region(0, 200, 800, 600); // a viewport, from the tile cache
+/// req.set_step(0);                  // background chunk 0 only
+/// page.render_request(req, pixmap);
+/// ```
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct WasmRenderRequest {
+    target_dpi: u32,
+    region: Option<RenderRect>,
+    quality: Quality,
+}
+
+#[wasm_bindgen]
+impl WasmRenderRequest {
+    /// A full-quality render of the whole page at `target_dpi`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(target_dpi: u32) -> WasmRenderRequest {
+        WasmRenderRequest {
+            target_dpi,
+            region: None,
+            quality: Quality::Full,
+        }
+    }
+
+    /// Render only the rectangle `(x, y, width, height)` of the page at
+    /// `target_dpi`, in canvas pixels after the page's INFO rotation. The
+    /// output is `width × height`; pixels outside the page are white. A
+    /// full-quality region comes from the page's composited-tile cache, so
+    /// a viewer's pans cost only their new tiles.
+    pub fn set_region(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        self.region = Some(RenderRect {
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+
+    /// Render the whole page again (undo [`set_region`](Self::set_region)).
+    pub fn clear_region(&mut self) {
+        self.region = None;
+    }
+
+    /// Full quality: every background chunk (the default).
+    pub fn set_full(&mut self) {
+        self.quality = Quality::Full;
+    }
+
+    /// A progressive step: background chunks `0..=chunk_n` plus every other
+    /// layer. `chunk_n = bg44_chunk_count() - 1` is the full render; a step
+    /// past it throws.
+    pub fn set_step(&mut self, chunk_n: u32) {
+        self.quality = Quality::Step(chunk_n as usize);
+    }
+
+    /// A fast, blurry preview from the first background chunk only. Throws
+    /// on a page without a background (`bg44_chunk_count() == 0`).
+    pub fn set_coarse(&mut self) {
+        self.quality = Quality::Coarse;
+    }
+}
+
+/// Run `request` on `page` into `out`, reusing its buffer. A whole-page
+/// render that can stream writes straight into the buffer; the rest go
+/// through a pixmap.
+fn render_request_into(
+    page: &crate::djvu_document::DjVuPage,
+    request: &WasmRenderRequest,
+    out: &mut WasmPixmap,
+) -> Result<(), RenderError> {
+    let opts = crate::foreign::render_opts_for_dpi(page, request.target_dpi as f32);
+    let streams = request.region.is_none() && opts.can_stream(page);
+    let (width, height) = (opts.width, opts.height);
+    let mut render = RenderRequest::new(opts).quality(request.quality);
+    if let Some(region) = request.region {
+        render = render.region(region).cached(true);
+    }
+    if streams {
+        out.data.resize(width as usize * height as usize * 4, 0);
+        render.write_rgba(page, &mut out.data)?;
+        out.width = width;
+        out.height = height;
+    } else {
+        let pm = render.pixmap(page)?;
+        out.data.clear();
+        out.data.extend_from_slice(&pm.data);
+        out.width = pm.width;
+        out.height = pm.height;
+    }
+    Ok(())
 }
 
 // ── Thread pool (opt-in, `wasm-threads` feature) ─────────────────────────────
@@ -375,6 +480,8 @@ impl WasmPage {
     /// Fast coarse render — decodes only the first BG44 chunk (~5 ms for a
     /// typical color page).
     ///
+    /// @deprecated Use `render_request` with `set_coarse()`.
+    ///
     /// Returns `undefined` for bilevel-only pages (no BG44 data); use
     /// [`render`] for those.  For color pages the result is a blurry but
     /// instantly visible preview; call [`render_progressive`] or [`render`]
@@ -399,6 +506,8 @@ impl WasmPage {
 
     /// Progressive render — decodes BG44 chunks 0..=`chunk_n` plus all
     /// foreground layers (JB2 mask, text).
+    ///
+    /// @deprecated Use `render_request` with `set_step(chunk_n)`.
     ///
     /// `chunk_n = 0` is equivalent to [`render_coarse`] but also composites
     /// the mask. Each subsequent call with `chunk_n += 1` adds one more
@@ -442,56 +551,45 @@ impl WasmPage {
         Ok(arr)
     }
 
-    /// Render into a caller-owned [`WasmPixmap`], reusing its Rust-side
-    /// allocation (#611). No JS-side allocation, no wasm→JS copy — consume
-    /// the pixels via [`WasmPixmap::view`].
-    pub fn render_into_pixmap(&self, target_dpi: u32, out: &mut WasmPixmap) -> Result<(), JsError> {
+    /// Render `request` into a caller-owned [`WasmPixmap`], reusing its
+    /// Rust-side allocation (#611): the page or a region of it, at full,
+    /// progressive, or coarse quality (see [`WasmRenderRequest`]). No
+    /// JS-side allocation, no wasm→JS copy — consume the pixels via
+    /// [`WasmPixmap::view`], or copy them with [`WasmPixmap::to_bytes`].
+    ///
+    /// Throws on decode error, a step past the last chunk, or a coarse
+    /// render of a page without a background.
+    pub fn render_request(
+        &self,
+        request: &WasmRenderRequest,
+        out: &mut WasmPixmap,
+    ) -> Result<(), JsError> {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-        if !opts.can_stream(page) {
-            // `render_into` refuses the whole-pixmap steps (rotation, and
-            // Lanczos-3 at a scaled size); those renders go through the pixmap
-            // path instead.
-            let pm = crate::djvu_render::render_pixmap(page, &opts)
-                .map_err(|e| JsError::new(&e.to_string()))?;
-            out.data.clear();
-            out.data.extend_from_slice(&pm.data);
-            out.width = pm.width;
-            out.height = pm.height;
-            return Ok(());
-        }
-        let need = opts.width as usize * opts.height as usize * 4;
-        out.data.resize(need, 0);
-        RenderRequest::new(opts.clone())
-            .operation("render_into")
-            .write_rgba(page, &mut out.data)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        out.width = opts.width;
-        out.height = opts.height;
-        Ok(())
+        render_request_into(page, request, out).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Render into a caller-owned [`WasmPixmap`], reusing its Rust-side
+    /// allocation (#611).
+    ///
+    /// @deprecated Use `render_request(new WasmRenderRequest(target_dpi), out)`.
+    pub fn render_into_pixmap(&self, target_dpi: u32, out: &mut WasmPixmap) -> Result<(), JsError> {
+        self.render_request(&WasmRenderRequest::new(target_dpi), out)
     }
 
     /// Progressive render into a caller-owned [`WasmPixmap`] (#611): the same
-    /// refinement semantics as [`render_progressive`](Self::render_progressive),
-    /// but an N-pass progressive session reuses one buffer instead of
-    /// allocating and copying N full frames.
+    /// refinement semantics as [`render_progressive`](Self::render_progressive).
+    ///
+    /// @deprecated Use `render_request` with `set_step(chunk_n)`.
     pub fn render_progressive_into_pixmap(
         &self,
         target_dpi: u32,
         chunk_n: u32,
         out: &mut WasmPixmap,
     ) -> Result<(), JsError> {
-        let page = crate::foreign::page(&self.doc, self.index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-        let pm = render_progressive(page, &opts, chunk_n as usize)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        out.width = pm.width;
-        out.height = pm.height;
-        out.data.clear();
-        out.data.extend_from_slice(&pm.data);
-        Ok(())
+        let mut request = WasmRenderRequest::new(target_dpi);
+        request.set_step(chunk_n);
+        self.render_request(&request, out)
     }
 
     // ── Tile-first rendering (#691, contract in docs/tile-rendering.md) ──────
@@ -1177,6 +1275,82 @@ mod native_tests {
         let opts = crate::foreign::render_opts_for_dpi(page, 150.0);
         let pm = render_progressive(page, &opts, 0).expect("render_progressive failed");
         assert_eq!(pm.data.len(), (w * h * 4) as usize);
+    }
+
+    fn run(page: &crate::djvu_document::DjVuPage, request: &WasmRenderRequest) -> WasmPixmap {
+        let mut out = WasmPixmap::new();
+        render_request_into(page, request, &mut out).expect("render_request failed");
+        assert_eq!(out.data.len(), out.width as usize * out.height as usize * 4);
+        out
+    }
+
+    /// Every request gives the bytes of the matching render; one pixmap
+    /// serves them all.
+    #[test]
+    fn wasm_render_request_matches_renders() {
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let opts = crate::foreign::render_opts_for_dpi(page, 150.0);
+        let full = render_pixmap(page, &opts).unwrap();
+
+        let mut request = WasmRenderRequest::new(150);
+        let out = run(page, &request);
+        assert_eq!((out.width, out.height), (full.width, full.height));
+        assert_eq!(out.data, full.data);
+
+        request.set_region(20, 30, 64, 48);
+        let out = run(page, &request);
+        assert_eq!((out.width, out.height), (64, 48));
+        let stride = full.width as usize * 4;
+        for row in 0..48 {
+            let start = (30 + row) * stride + 20 * 4;
+            assert_eq!(
+                &out.data[row * 64 * 4..(row + 1) * 64 * 4],
+                &full.data[start..start + 64 * 4],
+                "row {row}"
+            );
+        }
+
+        request.clear_region();
+        request.set_step(0);
+        assert_eq!(
+            run(page, &request).data,
+            render_progressive(page, &opts, 0).unwrap().data
+        );
+
+        request.set_coarse();
+        assert_eq!(
+            run(page, &request).data,
+            render_coarse(page, &opts).unwrap().unwrap().data
+        );
+
+        request.set_full();
+        assert_eq!(run(page, &request).data, full.data);
+    }
+
+    /// A coarse render of a page without a background, and a step past the
+    /// last chunk, are errors.
+    #[test]
+    fn wasm_render_request_errors() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/boy_jb2.djvu");
+        let bytes = std::fs::read(path).unwrap();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        let mut request = WasmRenderRequest::new(100);
+        request.set_coarse();
+        let mut out = WasmPixmap::new();
+        assert!(matches!(
+            render_request_into(page, &request, &mut out),
+            Err(RenderError::NoBackground)
+        ));
+
+        let bytes = boy_bytes();
+        let doc = DjVuDocument::parse(&bytes).unwrap();
+        let page = doc.page(0).unwrap();
+        request.set_step(page.bg44_chunks().len() as u32);
+        assert!(render_request_into(page, &request, &mut out).is_err());
     }
 }
 

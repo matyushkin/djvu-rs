@@ -515,6 +515,15 @@ still work and will be removed only in a future breaking release. Note that a
 `RenderRequest` region is in display (rotated) coordinates, while the old
 `render_region` took the rectangle before rotation.
 
+The bindings follow the same shape. In Python, `Page.render(dpi, size=...,
+region=(x, y, w, h), quality="coarse" | n)` replaces `render_region`,
+`render_coarse` and `render_progressive`, which now raise a
+`DeprecationWarning`. In the browser, a `WasmRenderRequest` (a DPI, plus
+`set_region`, `set_step`, `set_coarse`) goes to `WasmPage.render_request`,
+which replaces `render_coarse`, `render_progressive`,
+`render_into_pixmap` and `render_progressive_into_pixmap`. The high-level
+`Page` runs any `RenderRequest` with `Page::render_request`.
+
 ### Tile rendering
 
 For viewer engines: [`djvu_tile`](https://docs.rs/djvu-rs/latest/djvu_rs/djvu_tile/)
