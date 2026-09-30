@@ -11,12 +11,20 @@ release path.
    the Python and npm package versions, `.release-please-manifest.json`, and adds the
    `CHANGELOG.md` section built from Conventional Commits since the last release.
 
-2. **Wait for the checks, then merge normally.** The PR is opened by `GITHUB_TOKEN`, and
-   GitHub does not start `pull_request` workflows for such events. The `dispatch-ci` job
-   in [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml)
-   works around that: it starts `ci.yml` on the release branch through
-   `workflow_dispatch`, which is exempt from the same guard. Those check runs land on the
-   PR head commit, so the required checks turn green and an admin bypass is not needed.
+2. **Approve the checks, then merge.** The PR is opened and updated by `GITHUB_TOKEN`,
+   so GitHub holds its `pull_request` runs in an approval-required state: the required
+   checks stay "Expected" and the PR shows as blocked. Open the PR on GitHub and select
+   **Approve workflows to run** in the merge box. Every push to the release branch asks
+   again, so approve only the final state, just before the merge. When the checks turn
+   green, merge normally, or enable auto-merge first:
+
+   ```sh
+   gh pr merge <N> --squash --auto
+   ```
+
+   An admin bypass (`--admin`) is not needed. Do not dispatch `ci.yml` on the release
+   branch instead: checks from a `workflow_dispatch` run are not linked to the PR and do
+   not satisfy the required checks (#800 tried that; 0.32.1–0.38.0 still needed a bypass).
 
 3. **The rest happens on its own.** Merging pushes a `chore(main): release X.Y.Z` commit
    to `main`, which starts `release-please.yml` again. That run:
