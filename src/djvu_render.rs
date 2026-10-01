@@ -3558,6 +3558,36 @@ fn bg_rows_needed(
     }
 }
 
+/// The background plane columns that output columns `cols` read, widened by
+/// every sampler's reach, so that a band decoded with only these columns
+/// ([`Iw44Image::rgb_window`]) holds every pixel the composite reads.
+///
+/// Mirrors the column arithmetic of the compositor, truncated `fx_step`
+/// included: at `FRACBITS = 4` that truncation moves a column far from the
+/// page origin by several plane pixels. The reach adds one output pixel's
+/// footprint in the plane (the area average reads that much), the bilinear
+/// and scaler neighbour, and a pixel of rounding on each side.
+fn bg_cols_needed(
+    page_w: u32,
+    full_w: u32,
+    plane_w: u32,
+    cols: core::ops::Range<u32>,
+) -> core::ops::Range<u32> {
+    if cols.is_empty() || plane_w == 0 {
+        return 0..0;
+    }
+    let fx_step = (u64::from(page_w) * u64::from(FRAC)) / u64::from(full_w.max(1));
+    let (bg_x_q24, _) = bg_q24(Some((plane_w, 1)), page_w, 1);
+    let to_plane =
+        |ox: u32| (((u64::from(ox) * fx_step + u64::from(FRAC / 2)) * bg_x_q24) >> 24) >> FRACBITS;
+    let reach = (((fx_step * bg_x_q24) >> 24) >> FRACBITS) + 2;
+    let lo = to_plane(cols.start)
+        .saturating_sub(reach)
+        .min(u64::from(plane_w));
+    let hi = (to_plane(cols.end) + reach + 1).min(u64::from(plane_w));
+    lo as u32..hi as u32
+}
+
 /// How many output rows one background band covers, so that the plane rows
 /// [`bg_rows_needed`] asks for stay within `band_rows` — the memory budget
 /// [`Iw44Image::rgb_band_rows`] sized. `offset_y`/`out_h` are the output
@@ -3640,6 +3670,7 @@ where
     let template = CompositeContext::from_layers(
         page, opts, None, mask, mask_shift, fg_palette, blit_map, fg44, gamma_lut, offset, out,
     );
+    let cols = bg_cols_needed(page_dims.0, full.0, plane.0, offset.0..offset.0 + out.0);
     let mut oy0 = 0u32;
     while oy0 < out.1 {
         let rows = bg_band_out_rows(
@@ -3652,7 +3683,7 @@ where
         );
         let oy1 = oy0 + rows;
         let (lo, hi) = bg_rows_needed(page_dims, full, plane, offset.1 + oy0..offset.1 + oy1);
-        let band = image.rgb_rows(lo..hi)?;
+        let band = image.rgb_window(lo..hi, cols.clone())?;
         let view = PlaneView::band(&band, plane.1, lo);
         let mut ctx = template.with_bg(Some(view));
         ctx.offset_y = offset.1 + oy0;
@@ -6017,7 +6048,14 @@ pub(crate) fn render_region_tiled_cancellable(
                             (image.width, image.height),
                             tile_y0..tile_y0 + tile_h,
                         );
-                        row_band = Some((image.rgb_rows(lo..hi)?, lo));
+                        // Only the columns of this region's tiles.
+                        let cols = bg_cols_needed(
+                            page.width() as u32,
+                            full_w,
+                            image.width,
+                            tx0 * TILE_SIZE..(tx1 + 1).saturating_mul(TILE_SIZE).min(full_w),
+                        );
+                        row_band = Some((image.rgb_window(lo..hi, cols)?, lo));
                     }
                     let mut tile_ctx = match (banded, &row_band) {
                         (Some(image), Some((band, lo))) => {
@@ -6515,7 +6553,12 @@ mod tests {
             );
             let whole = Background::Whole(Arc::new(img.to_rgb_subsample(1).unwrap()));
             let (pw, ph) = (page.width() as u32, page.height() as u32);
-            let sizes = [(pw, ph), (pw * 7 / 5, ph * 7 / 5), (pw * 5 / 7, ph * 5 / 7)];
+            let sizes = [
+                (pw, ph),
+                (pw * 7 / 5, ph * 7 / 5),
+                (pw * 5 / 7, ph * 5 / 7),
+                (pw / 4, ph / 4),
+            ];
             let band_sizes: &[u32] = if small { &[9, 37] } else { &[37, 300] };
             for (w, h) in sizes {
                 let opts = RenderOptions {
@@ -6523,14 +6566,29 @@ mod tests {
                     height: h,
                     ..Default::default()
                 };
-                // The whole output, or two regions: one off the top-left
-                // corner and one at the bottom-right edge, with a ragged
-                // height so the last band is a partial one.
+                // The whole output, or regions: one off the top-left corner,
+                // one at the bottom-right edge with a ragged height so the
+                // last band is a partial one, and narrow ones in the middle,
+                // whose bands decode only some columns of the plane.
                 let cases: Vec<((u32, u32), (u32, u32))> = if small {
-                    vec![((0, 0), (w, h)), ((13, 29), (w - 40, h - 61))]
+                    vec![
+                        ((0, 0), (w, h)),
+                        // Saturating: at a quarter of the size the page
+                        // is barely taller than this region's offset.
+                        (
+                            (13, 29),
+                            (w.saturating_sub(40).max(1), h.saturating_sub(61).max(1)),
+                        ),
+                        ((w / 2 - 3, 7), (1, h - 7)),
+                    ]
                 } else {
-                    let (rw, rh) = (200, 333);
-                    vec![((13, 29), (rw, rh)), ((w - rw, h - rh), (rw, rh))]
+                    let (rw, rh) = (200.min(w), 333.min(h));
+                    vec![
+                        ((13, 29), (rw, rh)),
+                        ((w - rw, h - rh), (rw, rh)),
+                        ((w / 2 - 61, h / 3), (97, rh)),
+                        ((w / 3 + 1, 0), (1, rh)),
+                    ]
                 };
                 for (offset, out) in cases {
                     let expect = composite_with_bg(page, &opts, &whole, offset, out, false);
@@ -6551,6 +6609,66 @@ mod tests {
                 }
             }
             println!("{file}: checked in {:?}", started.elapsed());
+        }
+    }
+
+    /// On a page whose background really is banded, a tile decodes only the
+    /// plane columns it reads. Each tile, through the tile cache and as a plain
+    /// region, must equal the same pixels of a strip of the whole page width,
+    /// at a downscale, at the page size and on an upscale, with bilinear and
+    /// with Lanczos-3.
+    #[test]
+    fn banded_tiles_match_a_full_width_strip() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/corpus/big_scanned_page.djvu"
+        ))
+        .expect("corpus page");
+        let doc = DjVuDocument::parse(&data).unwrap();
+        let page = doc.page(0).unwrap();
+        let img = page.decoded_bg44().expect("a BG44 background");
+        assert!(img.rgb_band_rows().is_some(), "the page must be banded");
+        let (pw, ph) = (page.width() as u32, page.height() as u32);
+        for (w, h) in [(pw / 4, ph / 4), (pw, ph), (pw * 2, ph * 2)] {
+            for resampling in [Resampling::Bilinear, Resampling::Lanczos3] {
+                let opts = RenderOptions {
+                    width: w,
+                    height: h,
+                    resampling,
+                    ..Default::default()
+                };
+                let y = h / 3;
+                let strip = RenderRect {
+                    x: 0,
+                    y,
+                    width: w,
+                    height: TILE_SIZE,
+                };
+                let whole = render_region(page, strip, &opts).unwrap();
+                let at = |x: u32, width: u32| RenderRect {
+                    x,
+                    y,
+                    width,
+                    height: TILE_SIZE,
+                };
+                for r in [
+                    at(0, TILE_SIZE),
+                    at(w / 2 - 77, 100),
+                    at(w - 1, 1),
+                    at(w - TILE_SIZE, TILE_SIZE),
+                ] {
+                    let want = crop(&whole, RenderRect { y: 0, ..r });
+                    assert!(
+                        render_region(page, r, &opts).unwrap().data == want,
+                        "{w}x{h} {resampling:?} region {r:?}"
+                    );
+                    page.render_layers().clear_tile_cache();
+                    assert!(
+                        render_region_tiled(page, r, &opts).unwrap().data == want,
+                        "{w}x{h} {resampling:?} tiled region {r:?}"
+                    );
+                }
+            }
         }
     }
 

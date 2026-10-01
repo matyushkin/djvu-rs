@@ -1935,11 +1935,13 @@ impl PlaneDecoder {
         plane
     }
 
-    /// Reconstruct a horizontal band of the full-resolution plane.
+    /// Reconstruct a window of the full-resolution plane: block rows
+    /// `[first_block, last_block)` and block columns `[first_col, last_col)`.
     ///
-    /// The band covers block rows `[first_block, last_block)`; the returned
-    /// plane's row 0 is the image's absolute row `first_block * 32`, and its
-    /// stride is the same as `reconstruct(1)` would give.
+    /// The returned plane's row 0 and column 0 are the image's absolute row
+    /// `first_block * 32` and column `first_col * 32` (`* 16` in the compact
+    /// scale-2 plane). All block columns give a horizontal band with the
+    /// stride `reconstruct(1)` would give.
     ///
     /// The inverse wavelet couples rows: a pass at scale `s` reads three
     /// samples either side, so an output row depends on rows up to
@@ -1947,13 +1949,21 @@ impl PlaneDecoder {
     /// lifting stages of each pass. A caller therefore asks for more block rows
     /// than it keeps — see [`BAND_HALO_BLOCKS`] — and uses only the interior.
     /// The edges of the band carry the transform's own boundary handling, which
-    /// is correct only where the band edge is the image edge.
+    /// is correct only where the band edge is the image edge. The transform
+    /// reaches as far across columns as across rows, so a window needs the
+    /// same halo on its left and right as above and below.
     ///
-    /// Callers must keep `first_block` on a block boundary, which is what makes
-    /// the band's row coordinates agree with the full plane's on every scale:
-    /// 32 is a multiple of the coarsest pass's 16.
-    fn reconstruct_band(&self, first_block: usize, last_block: usize, sub: usize) -> FlatPlane {
+    /// Block coordinates are what make the window's row and column
+    /// coordinates agree with the full plane's on every scale: 32 is a
+    /// multiple of the coarsest pass's 16.
+    fn reconstruct_window(
+        &self,
+        (first_block, last_block): (usize, usize),
+        (first_col, last_col): (usize, usize),
+        sub: usize,
+    ) -> FlatPlane {
         debug_assert!(first_block < last_block);
+        debug_assert!(first_col < last_col);
         debug_assert!(sub == 1 || sub == 2);
         // A block contributes `side` rows and columns: all 32 at full
         // resolution, or the 16x16 even samples of the compact scale-2 plane
@@ -1968,7 +1978,8 @@ impl PlaneDecoder {
         };
         let block_rows = self.height.div_ceil(32);
         let last_block = last_block.min(block_rows);
-        let stride = self.block_cols * side;
+        let last_col = last_col.min(self.block_cols);
+        let stride = (last_col - first_col) * side;
         let band_rows = (last_block - first_block) * side;
 
         // Safety: as in `reconstruct` — the scatter below writes every element
@@ -1981,10 +1992,10 @@ impl PlaneDecoder {
 
         let mut full = [0i16; 1024];
         for r in first_block..last_block {
-            for c in 0..self.block_cols {
+            for c in first_col..last_col {
                 self.blocks[r * self.block_cols + c].materialize(&mut full[..side * side]);
                 let row_base = (r - first_block) * side;
-                let col_base = c * side;
+                let col_base = (c - first_col) * side;
                 for row in 0..side {
                     let dst_base = (row_base + row) * stride + col_base;
                     let inv_base = row * side;
@@ -2003,7 +2014,13 @@ impl PlaneDecoder {
         } else {
             band_rows
         };
-        inverse_wavelet_transform_from(&mut plane, self.width.div_ceil(sub), logical, 1, 16 / sub);
+        // The same for the right edge.
+        let logical_w = if last_col == self.block_cols {
+            self.width.div_ceil(sub) - first_col * side
+        } else {
+            stride
+        };
+        inverse_wavelet_transform_from(&mut plane, logical_w, logical, 1, 16 / sub);
         plane
     }
 }
@@ -2046,10 +2063,13 @@ fn reconstruct_planes(
 
 /// Write image rows `rows` of a full-resolution colour page into `out`.
 ///
-/// `out` holds exactly those rows as RGBA, top to bottom. The planes need not
+/// `out` holds exactly those rows as RGBA, top to bottom, each `pw` pixels
+/// wide; only columns `cols` of each row are written. The planes need not
 /// cover the whole image: `y_row0` and `c_row0` say which plane row each
-/// plane's row 0 holds, which is what lets a banded caller pass a slice of the
-/// page. With `chroma_half` the chroma planes are the scale-2 reconstruction,
+/// plane's row 0 holds, and `y_col0` and `c_col0` which column its column 0
+/// holds, which is what lets a banded or windowed caller pass a slice of the
+/// page. With `chroma_half`, `cols.start` must be even, so that each chroma
+/// value still covers a pair of columns. With `chroma_half` the chroma planes are the scale-2 reconstruction,
 /// one row per two image rows, and `c_row0` counts those half rows. DjVu stores rows bottom-to-top, so image row `r` is the output row
 /// `ph - 1 - r` of the whole picture, and the first row of `out`.
 #[allow(clippy::too_many_arguments)]
@@ -2060,37 +2080,43 @@ fn convert_rgb_rows(
     cb: &FlatPlane,
     cr: &FlatPlane,
     c_row0: usize,
+    (y_col0, c_col0): (usize, usize),
     rows: core::ops::Range<usize>,
+    cols: core::ops::Range<usize>,
     pw: usize,
     ph: usize,
     out: &mut [u8],
 ) {
     let out_lo = ph - rows.end;
     debug_assert_eq!(out.len(), rows.len() * pw * 4);
+    debug_assert!(cols.start <= cols.end && cols.end <= pw);
+    debug_assert!(!chroma_half || cols.start.is_multiple_of(2));
+    let (x0, n) = (cols.start, cols.len());
 
     // One output row. With `chroma_half` the chroma planes hold one value per
     // 2x2 block, so image row `row` reads chroma row `row / 2` and each value
     // covers two columns: DjVuLibre's `Map::image` replication, rows paired
     // from the bottom as the planes store them.
     let convert_row = |row: usize, row_data: &mut [u8]| {
-        let y_off = (row - y_row0) * y.stride;
-        let y_row = &y.data[y_off..y_off + pw];
+        let y_off = (row - y_row0) * y.stride + (x0 - y_col0);
+        let y_row = &y.data[y_off..y_off + n];
+        let row_data = &mut row_data[x0 * 4..(x0 + n) * 4];
         if chroma_half {
-            let c_off = (row / 2 - c_row0) * cb.stride;
-            let cw = pw.div_ceil(2);
+            let c_off = (row / 2 - c_row0) * cb.stride + (x0 / 2 - c_col0);
+            let cw = n.div_ceil(2);
             ycbcr_row_from_i16_half(
                 y_row,
                 &cb.data[c_off..c_off + cw],
                 &cr.data[c_off..c_off + cw],
                 row_data,
-                pw,
+                n,
             );
         } else {
-            let c_off = (row - c_row0) * cb.stride;
+            let c_off = (row - c_row0) * cb.stride + (x0 - c_col0);
             ycbcr_row_from_i16(
                 y_row,
-                &cb.data[c_off..c_off + pw],
-                &cr.data[c_off..c_off + pw],
+                &cb.data[c_off..c_off + n],
+                &cr.data[c_off..c_off + n],
                 row_data,
             );
         }
@@ -2165,7 +2191,7 @@ fn band_keep_blocks(
 
 /// Block rows of overlap a band needs on each side before its interior is
 /// exact. The transform's vertical reach is 186 rows (see
-/// [`PlaneDecoder::reconstruct_band`]); 8 block rows is 256, the next block
+/// [`PlaneDecoder::reconstruct_window`]); 8 block rows is 256, the next block
 /// multiple above it with margin to spare.
 const BAND_HALO_BLOCKS: usize = 8;
 
@@ -3765,7 +3791,9 @@ impl Iw44Image {
                     &cb_plane,
                     &cr_plane,
                     0,
+                    (0, 0),
                     0..ph,
+                    0..pw,
                     pw,
                     ph,
                     &mut pm.data,
@@ -3875,7 +3903,7 @@ impl Iw44Image {
                 break;
             }
             let out = &mut pm.data[(ph - r1) * pw * 4..(ph - r0) * pw * 4];
-            self.rgb_sub1_band(y_dec, cb_dec, cr_dec, r0, r1, pw, ph, out);
+            self.rgb_sub1_band(y_dec, cb_dec, cr_dec, r0, r1, 0..pw, pw, ph, out);
             first = last;
         }
     }
@@ -3886,6 +3914,10 @@ impl Iw44Image {
     /// `out` holds exactly those rows as RGBA, top to bottom (see
     /// [`convert_rgb_rows`]). The band may start on any row: the halo below
     /// and above is what makes its rows exact, wherever it starts.
+    ///
+    /// Only the block columns covering `cols`, plus the same halo, are
+    /// reconstructed, and only those columns of `out` are written: every
+    /// column of a block that `cols` touches, so at least `cols`.
     #[allow(clippy::too_many_arguments)]
     fn rgb_sub1_band(
         &self,
@@ -3894,6 +3926,7 @@ impl Iw44Image {
         cr_dec: &PlaneDecoder,
         r0: usize,
         r1: usize,
+        cols: core::ops::Range<usize>,
         pw: usize,
         ph: usize,
         out: &mut [u8],
@@ -3902,6 +3935,14 @@ impl Iw44Image {
         let (first, last) = (r0 / 32, r1.div_ceil(32));
         let lo = first.saturating_sub(BAND_HALO_BLOCKS);
         let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
+
+        // The same for columns. The written columns are whole blocks, so
+        // they start on an even column, as `chroma_half` needs.
+        let block_cols = pw.div_ceil(32);
+        let (first_col, last_col) = (cols.start / 32, cols.end.div_ceil(32));
+        let col_lo = first_col.saturating_sub(BAND_HALO_BLOCKS);
+        let col_hi = (last_col + BAND_HALO_BLOCKS).min(block_cols);
+        let written = first_col * 32..(last_col * 32).min(pw);
 
         // Chroma rows this band reads. With `chroma_half` they are rows of
         // the compact scale-2 plane, where image row `r` reads row `r / 2`
@@ -3912,15 +3953,20 @@ impl Iw44Image {
         let (c_r0, c_r1) = (r0 / c_sub, r1.div_ceil(c_sub));
         let c_lo = (c_r0 / c_side).saturating_sub(BAND_HALO_BLOCKS);
         let c_hi = (c_r1.div_ceil(c_side) + BAND_HALO_BLOCKS).min(block_rows);
+        let (c_x0, c_x1) = (written.start / c_sub, written.end.div_ceil(c_sub));
+        let c_col_lo = (c_x0 / c_side).saturating_sub(BAND_HALO_BLOCKS);
+        let c_col_hi = (c_x1.div_ceil(c_side) + BAND_HALO_BLOCKS).min(block_cols);
+        let y_cols = (col_lo, col_hi);
+        let c_cols = (c_col_lo, c_col_hi);
 
         #[cfg(feature = "parallel")]
         let (y_band, cb_band, cr_band) = {
             let (y, (cb, cr)) = rayon::join(
-                || y_dec.reconstruct_band(lo, hi, 1),
+                || y_dec.reconstruct_window((lo, hi), y_cols, 1),
                 || {
                     rayon::join(
-                        || cb_dec.reconstruct_band(c_lo, c_hi, c_sub),
-                        || cr_dec.reconstruct_band(c_lo, c_hi, c_sub),
+                        || cb_dec.reconstruct_window((c_lo, c_hi), c_cols, c_sub),
+                        || cr_dec.reconstruct_window((c_lo, c_hi), c_cols, c_sub),
                     )
                 },
             );
@@ -3928,9 +3974,9 @@ impl Iw44Image {
         };
         #[cfg(not(feature = "parallel"))]
         let (y_band, cb_band, cr_band) = (
-            y_dec.reconstruct_band(lo, hi, 1),
-            cb_dec.reconstruct_band(c_lo, c_hi, c_sub),
-            cr_dec.reconstruct_band(c_lo, c_hi, c_sub),
+            y_dec.reconstruct_window((lo, hi), y_cols, 1),
+            cb_dec.reconstruct_window((c_lo, c_hi), c_cols, c_sub),
+            cr_dec.reconstruct_window((c_lo, c_hi), c_cols, c_sub),
         );
 
         convert_rgb_rows(
@@ -3940,7 +3986,9 @@ impl Iw44Image {
             &cb_band,
             &cr_band,
             c_lo * c_side,
+            (col_lo * 32, c_col_lo * c_side),
             r0..r1,
+            written,
             pw,
             ph,
             out,
@@ -3979,6 +4027,29 @@ impl Iw44Image {
     /// planes yet; [`Iw44Error::Invalid`] when `rows` is not within the
     /// picture's height.
     pub fn rgb_rows(&self, rows: core::ops::Range<u32>) -> Result<Pixmap, Iw44Error> {
+        self.rgb_window(rows, 0..self.width)
+    }
+
+    /// Rows `rows` of the full-resolution colour picture, like
+    /// [`rgb_rows`](Self::rgb_rows), but with only columns `cols` decoded.
+    ///
+    /// The pixmap is still `self.width` wide, so a pixel keeps its column.
+    /// Columns `cols` hold the picture, byte-identical to
+    /// [`to_rgb`](Self::to_rgb). Every other column is either the picture
+    /// too or all zeros, alpha included. Only the block columns covering
+    /// `cols`, plus a halo, are reconstructed, so a narrow window of a wide
+    /// picture costs a fraction of its full rows. The zero columns are
+    /// allocated but never written.
+    ///
+    /// # Errors
+    ///
+    /// As [`rgb_rows`](Self::rgb_rows); also [`Iw44Error::Invalid`] when
+    /// `cols` is not within the picture's width.
+    pub fn rgb_window(
+        &self,
+        rows: core::ops::Range<u32>,
+        cols: core::ops::Range<u32>,
+    ) -> Result<Pixmap, Iw44Error> {
         if !self.is_color {
             return Err(Iw44Error::MissingCodec);
         }
@@ -3987,11 +4058,12 @@ impl Iw44Image {
         let cr_dec = self.cr.as_ref().ok_or(Iw44Error::MissingCodec)?;
         let (pw, ph) = (self.width as usize, self.height as usize);
         let (o0, o1) = (rows.start as usize, rows.end as usize);
-        if o0 > o1 || o1 > ph {
+        let (x0, x1) = (cols.start as usize, cols.end as usize);
+        if o0 > o1 || o1 > ph || x0 > x1 || x1 > pw {
             return Err(Iw44Error::Invalid);
         }
-        let mut pm = Pixmap::try_new(self.width, (o1 - o0) as u32, 0, 0, 0, 255)?;
-        if o0 == o1 {
+        let mut pm = Pixmap::try_new(self.width, (o1 - o0) as u32, 0, 0, 0, 0)?;
+        if o0 == o1 || x0 == x1 {
             return Ok(pm);
         }
         // Output row `o` is image row `ph - 1 - o`, so output rows `o0..o1`
@@ -4002,6 +4074,7 @@ impl Iw44Image {
             cr_dec,
             ph - o1,
             ph - o0,
+            x0..x1,
             pw,
             ph,
             &mut pm.data,
@@ -4395,7 +4468,7 @@ mod tests {
                 let last = (first + keep).min(block_rows);
                 let lo = first.saturating_sub(BAND_HALO_BLOCKS);
                 let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
-                let band = y.reconstruct_band(lo, hi, 1);
+                let band = y.reconstruct_window((lo, hi), (0, y.block_cols), 1);
                 for r in first * 32..(last * 32).min(y.height) {
                     let a = &full.data[r * full.stride..r * full.stride + y.width];
                     let b = &band.data[(r - lo * 32) * band.stride..][..y.width];
@@ -4406,6 +4479,58 @@ mod tests {
                     );
                 }
                 first = last;
+            }
+        }
+    }
+
+    /// A window of block columns must be exact too: the transform reaches as
+    /// far across columns as across rows, so the same halo on the left and
+    /// right makes the interior columns equal the whole-plane transform. Both
+    /// the full-resolution and the compact scale-2 plane are checked.
+    #[test]
+    fn reconstruct_window_matches_the_whole_plane() {
+        let data = std::fs::read(assets_path().join("carte.djvu")).expect("carte.djvu");
+        let file = djvu_iff::parse(&data).expect("parse");
+        let mut img = Iw44Image::new();
+        for c in &extract_bg44_chunks(&file) {
+            img.decode_chunk(c).expect("decode_chunk");
+        }
+        let y = img.y.as_ref().expect("luma plane");
+        let (block_rows, block_cols) = (y.height.div_ceil(32), y.block_cols);
+        assert!(
+            block_cols >= 2 * BAND_HALO_BLOCKS + 2,
+            "the fixture must be wide enough to hold an interior window"
+        );
+        for sub in [1usize, 2] {
+            let side = 32 / sub;
+            let (w, h) = (y.width.div_ceil(sub), y.height.div_ceil(sub));
+            let full = y.reconstruct(sub);
+            for keep in [1usize, 3] {
+                let mut first_col = 0;
+                while first_col < block_cols {
+                    let last_col = (first_col + keep).min(block_cols);
+                    let col_lo = first_col.saturating_sub(BAND_HALO_BLOCKS);
+                    let col_hi = (last_col + BAND_HALO_BLOCKS).min(block_cols);
+                    // One band of rows in the middle and one at the bottom.
+                    for first in [block_rows / 2, block_rows - 1] {
+                        let last = (first + 2).min(block_rows);
+                        let lo = first.saturating_sub(BAND_HALO_BLOCKS);
+                        let hi = (last + BAND_HALO_BLOCKS).min(block_rows);
+                        let win = y.reconstruct_window((lo, hi), (col_lo, col_hi), sub);
+                        let (c0, c1) = (first_col * side, (last_col * side).min(w));
+                        for r in first * side..(last * side).min(h) {
+                            let a = &full.data[r * full.stride + c0..r * full.stride + c1];
+                            let off = (r - lo * side) * win.stride + (c0 - col_lo * side);
+                            let b = &win.data[off..off + (c1 - c0)];
+                            assert_eq!(
+                                a, b,
+                                "sub {sub}: window rows [{lo}..{hi}) cols [{col_lo}..{col_hi}), \
+                                 image row {r} cols {c0}..{c1} differ from the whole plane"
+                            );
+                        }
+                    }
+                    first_col = last_col;
+                }
             }
         }
     }
@@ -4450,6 +4575,68 @@ mod tests {
                      band differs from the whole-plane conversion"
                 );
             }
+        }
+    }
+
+    /// `rgb_window` must give the bytes of `to_rgb` in every column it was
+    /// asked for, and either those bytes or zeros elsewhere, for windows that
+    /// start on odd and even columns, one column wide, and at both edges.
+    #[test]
+    fn rgb_window_matches_the_whole_picture() {
+        for asset in ["carte.djvu", "chicken.djvu", "colorbook.djvu"] {
+            let data = std::fs::read(assets_path().join(asset)).expect("asset");
+            let file = djvu_iff::parse(&data).expect("parse");
+            let chunks = extract_bg44_chunks(&file);
+            if chunks.is_empty() {
+                continue;
+            }
+            let mut img = Iw44Image::new();
+            for c in &chunks {
+                img.decode_chunk(c).expect("decode_chunk");
+            }
+            if !img.is_color {
+                continue;
+            }
+            let whole = img.to_rgb().expect("to_rgb");
+            let (w, h) = (img.width, img.height);
+            let stride = w as usize * 4;
+            let rows = [0..h, 37..h / 2 + 3, h - 1..h];
+            let cols = [
+                0..w,
+                0..1,
+                w - 1..w,
+                1..2,
+                33..34,
+                31..w / 2 + 7,
+                w / 3 + 1..w - 9,
+                w / 2..w,
+            ];
+            for r in &rows {
+                for c in &cols {
+                    let pm = img.rgb_window(r.clone(), c.clone()).expect("rgb_window");
+                    assert_eq!((pm.width, pm.height), (w, r.len() as u32));
+                    for (i, y) in r.clone().enumerate() {
+                        let want = &whole.data[y as usize * stride..][..stride];
+                        let got = &pm.data[i * stride..][..stride];
+                        for x in 0..w as usize {
+                            let (a, b) = (&want[x * 4..x * 4 + 4], &got[x * 4..x * 4 + 4]);
+                            if c.contains(&(x as u32)) {
+                                assert_eq!(
+                                    a, b,
+                                    "{asset}: rows {r:?} cols {c:?}: pixel ({x}, {y})"
+                                );
+                            } else {
+                                assert!(
+                                    a == b || b == [0; 4],
+                                    "{asset}: rows {r:?} cols {c:?}: pixel ({x}, {y}) outside"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(img.rgb_window(0..1, 0..w + 1).is_err());
+            assert!(img.rgb_window(0..1, 2..1).is_err());
         }
     }
 
@@ -5595,7 +5782,7 @@ mod tests {
 
     /// With `crcb_half` DjVuLibre's `Map::image(fast)` runs `backward(.., 32, 2)`
     /// on the full-size plane and repeats each even sample over its 2x2 block.
-    /// The compact scale-2 plane that `reconstruct(2)` and `reconstruct_band`
+    /// The compact scale-2 plane that `reconstruct(2)` and `reconstruct_window`
     /// transform must hold exactly those even samples, at every size.
     #[test]
     fn compact_scale2_transform_matches_djvulibre_fast_mode() {

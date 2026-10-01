@@ -16410,3 +16410,46 @@ large zoomed pages render instead of failing. Output is byte-identical
 big_scanned_page), each Lanczos-3 miss still decodes the background band at
 native resolution: about 65 ms per 256-px tile. A band cache for the
 native composite would cut that.
+
+### BG_COLUMN_WINDOW (2026-10-01) — a banded background decodes only the columns a tile reads
+
+**Issue.** Follow-up of LANCZOS_REGION_WINDOW. On a page whose background
+is banded (#811, big_scanned_page, 6780×9148), every tile miss decoded
+full-width background bands. A ¼-scale Lanczos-3 tile spent 69 of its
+~88 ms in `Iw44Image::rgb_rows` (6780 columns) and 7 ms in the rescale.
+
+**Approach.** A band cache was rejected: one band is ~28 MB, more than the
+8 MiB tile budget. Instead the IW44 decoder gets a column window:
+`PlaneDecoder::reconstruct_window` (replaces `reconstruct_band`) runs the
+inverse wavelet on block columns `first..last` plus the same 8-block halo
+the row bands use (reach 186 px < 256 px). The new public
+`Iw44Image::rgb_window(rows, cols)` returns a full-width pixmap with zeros
+outside the decoded columns, so plane readers keep absolute indices
+(`rgb_rows` is now `rgb_window(rows, 0..width)`). The compositor
+(`for_each_bg_band`) and the tiled region path ask for the plane columns
+`bg_cols_needed` computes. That function mirrors the compositor's column
+arithmetic, truncated `fx_step` included: at `FRACBITS = 4` the
+truncation moves a far column by up to ~14 plane pixels, and a first
+version that mapped exactly painted black columns (caught by the new
+narrow-region cases in `banded_background_composites_like_the_whole_one`).
+
+**Numbers.** M1 Max, release, big_scanned_page, one cached 256-px tile per
+call over three tile rows (first tile includes the one native decode).
+
+| Scale, resampling | Before total / median | After total / median |
+|---|---:|---:|
+| ¼, Lanczos-3 | 1744 ms / 88.2 ms | 626 ms / 23.1 ms |
+| ½, Lanczos-3 | 1595 ms / 57.1 ms | 524 ms / 9.5 ms |
+| 2×, bilinear | 830 ms / 26.5 ms | 274 ms / 2.5 ms |
+| 2×, Lanczos-3 | 837 ms / 26.0 ms | 260 ms / 2.8 ms |
+
+Bilinear downscale is unchanged (0.2 ms per tile): it does not use bands.
+
+**Decision.** Kept.
+
+**Reason.** Tile cost on a banded page now follows the tile width, not the
+page width: 3.8× to 10× faster per tile. Output is byte-identical (new
+tests `reconstruct_window_matches_the_whole_plane`,
+`rgb_window_matches_the_whole_picture`,
+`banded_tiles_match_a_full_width_strip`; extended
+`banded_background_composites_like_the_whole_one`).
