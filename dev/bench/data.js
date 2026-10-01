@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790890524102,
+  "lastUpdate": 1790895482154,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22558,6 +22558,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47424000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab037bf508d2817bbf98632616cf9cf5868b9a51",
+          "message": "refactor(render): split djvu_render.rs into a module per concern (#889) (#891)\n\nsrc/djvu_render.rs had grown to 11 021 lines: about 6 400 of code and\n4 600 of tests. It becomes the directory module src/djvu_render/ with one\nfile per concern:\n\n- options.rs: errors and RenderOptions\n- sampling.rs: gamma, bilinear, SIMD and area-average helpers\n- rotate.rs: page rotation\n- cache.rs: tile cache and per-page layer caches (std only)\n- layers.rs: layer decoding (mask, palette, background, JPEG)\n- composite.rs: the compositor\n- pipeline.rs: the Detail / Composite stages\n- request.rs: RenderRequest and the render_* entry points\n- progressive.rs: progressive rendering\n- tests/: the tests, split by the same concerns\n\nFormerly private items are pub(super): the same reach they had in the\nsingle file. The public API is unchanged (identical rustdoc item list)\nand the test count is the same (1847). The release profile uses fat LTO\nwith one codegen unit, so the layout does not affect the generated code.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-01T22:30:13Z",
+          "tree_id": "bc027c1776afa0882fc9a534f0dec2e497d0ad72",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/ab037bf508d2817bbf98632616cf9cf5868b9a51"
+        },
+        "date": 1790895479896,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 188000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 10201000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 61894000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 59402000,
             "range": "± 0",
             "unit": "ns/iter"
           }
