@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790811384125,
+  "lastUpdate": 1790850485385,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -21874,6 +21874,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40166000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1dfbbaba36fb4c29d21969c7a1b1571df84892b8",
+          "message": "perf: a Lanczos-3 region filters only its own window (#887)\n\nA Lanczos-3 region (any size other than native) composited the whole\npage at native resolution, rescaled all of it, then cropped. Each output\npixel reads a fixed span of source pixels, so a window of the output\nneeds only a window of the source.\n\n- `scale_lanczos3_window` rescales one output window from the native\n  source window it reads. It sums the same taps with the same weights in\n  the same order, so the result is byte-identical to a crop of the whole\n  rescale. `scale_lanczos3` now calls it with the full window.\n- `Composite::region` and the tile cache use it. The tile cache filters\n  the block of tiles a request covers instead of the whole page.\n- The pixel-limit check still uses the full native size, so the fallback\n  rule does not change.\n\nNumbers (load-noisy machine, alternating A/B, minimums):\n- 2x viewport region, watchmaker: 359 ms -> 3 ms\n- cold six-step pan: 2128 ms -> 48 ms\n- whole-page grid of cached tiles at 150 dpi: 4151 ms -> 123 ms\n- big_scanned_page 2x region: pixel-limit error -> 49 ms\n- whole-page Lanczos: unchanged\n\nRecorded as LANCZOS_REGION_WINDOW in PERF_EXPERIMENTS.md.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-01T10:02:42Z",
+          "tree_id": "6f7203ee8b0c5c7d6648c1029ccda422f0d7ccc7",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/1dfbbaba36fb4c29d21969c7a1b1571df84892b8"
+        },
+        "date": 1790850483492,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8259000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49461000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47429000,
             "range": "± 0",
             "unit": "ns/iter"
           }
