@@ -1537,7 +1537,7 @@ impl PlaneEncoder {
 // (PERF_EXPERIMENTS.md ENCODE_SPARSE_RECON). The grid has to stay — every
 // slice walks every block — but the planes are read exactly once, by
 // `gather`, and only after the transform. So the transform runs over bands of
-// block rows, mirroring `PlaneDecoder::reconstruct_band` on the decode side:
+// block rows, mirroring `PlaneDecoder::reconstruct_window` on the decode side:
 // each band carries [`crate::BAND_HALO_BLOCKS`] extra block rows on each side,
 // which absorb the transform's vertical reach and are thrown away.
 
