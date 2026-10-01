@@ -16358,3 +16358,55 @@ Old code measured against itself stayed within ±4% (noise band of this run).
 its gains on small scales (72 dpi, colorbook), which come from the inlined
 area-average row. Output is unchanged (codegen only). Measured on aarch64
 only; the Callgrind job in CI covers x86.
+
+### LANCZOS_REGION_WINDOW (2026-10-01) — a Lanczos-3 region filters only its own window
+
+**Issue.** A region render with Lanczos-3 resampling composited the whole
+page at its native size, rescaled the whole page, and then cut the region.
+The cost followed the page, not the region. A 512×512 viewport at 2× zoom
+on watchmaker took 359 ms against 1.3 ms for bilinear. On big_scanned_page
+the same request failed: the whole 2× page (13560×9148) is over
+`Pixmap::MAX_PIXELS`. The tile cache had the same flaw. A whole Lanczos-3
+page over the cache budget is not cached, so every tile miss rescaled the
+whole page again.
+
+**Approach.** The Lanczos-3 filter is separable, and each output pixel reads
+a fixed span of source pixels. New `scale_lanczos3_window` rescales one
+output window from just the native source window it reads
+(`lanczos3_source_window`). Both passes take their taps from one `Axis`
+helper, so the window sums the same pixels with the same weights in the same
+order: byte-identical to the crop of the whole rescale. `scale_lanczos3` is
+now the window that covers the whole page. `Composite::region` and the tile
+cache composite and rescale only the window they need. The tile cache no
+longer caches the whole Lanczos-3 page on the first miss
+(`cache_whole_page` removed): it filters the tiles of the request.
+
+**Numbers.** M1 Max, release, default features, median of 9. The machine
+was under heavy load (load average 26–39), so only large changes count.
+
+| Scenario | Before | After |
+|---|---:|---:|
+| watchmaker 512×512 region at 2×, Lanczos-3 | 359 ms | 3.0 ms |
+| goody_twoshoes, same | — | 2.9 ms |
+| conquete_paix, same | — | 2.8 ms |
+| big_scanned_page, same | error (over the pixel limit) | 49 ms |
+| watchmaker, six cold cached regions panning at 2× | 2128 ms | 48 ms |
+| watchmaker, whole 150 dpi page as cached 256-px regions | 4151 ms (first 129 ms) | 123 ms (first 12 ms) |
+| watchmaker, whole page at ¾ as cached 256-px regions | 11130 ms | 161 ms |
+
+Whole-page Lanczos-3 (`render_pixmap`): eight alternating rounds of the old
+and new binaries, best of each. boy.djvu at ½: 1.20 → 1.06 ms. colorbook at
+½: 293 → 279 ms. No regression. One Criterion run showed +93% for the new
+code. The alternating runs show that this was noise from the load.
+
+**Decision.** Kept.
+
+**Reason.** Region and tile cost now follow the request, not the page, and
+large zoomed pages render instead of failing. Output is byte-identical
+(new tests `scale_lanczos3_window_matches_whole_crop` and
+`lanczos_window_matches_the_page_crop`).
+
+**Follow-up.** On a page whose background is banded (#811,
+big_scanned_page), each Lanczos-3 miss still decodes the background band at
+native resolution: about 65 ms per 256-px tile. A band cache for the
+native composite would cut that.

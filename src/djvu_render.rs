@@ -2185,15 +2185,6 @@ impl PageLayers {
         freed
     }
 
-    /// Whether a tile is cached, without touching its recency or telemetry.
-    fn has_tile(&self, key: &TileKey) -> bool {
-        self.tile_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map
-            .contains_key(key)
-    }
-
     /// Tile-cache telemetry snapshot `(hits, misses, evictions)` (#576).
     #[cfg(test)]
     fn tile_cache_stats(&self) -> (usize, usize, usize) {
@@ -4975,8 +4966,23 @@ impl<'p> Composite<'p> {
     /// rotation. Cut from the Lanczos-3 canvas, or averaged from the doubled
     /// window of the canvas under anti-aliasing, or composited directly.
     fn region(&self, window: RenderRect) -> Result<Pixmap, RenderError> {
-        if let Some(full) = self.lanczos_canvas(None)? {
-            return Ok(white_crop(&full, (0, 0), window));
+        let full = (self.canvas.width, self.canvas.height);
+        if lanczos_rescales(self.page, self.canvas.resampling, full) {
+            // Only the part of `window` on the page goes through the filter.
+            let x1 = window.x.saturating_add(window.width).min(full.0);
+            let y1 = window.y.saturating_add(window.height).min(full.1);
+            if x1 <= window.x || y1 <= window.y {
+                return Ok(Pixmap::white(window.width, window.height));
+            }
+            let on_page = RenderRect {
+                x: window.x,
+                y: window.y,
+                width: x1 - window.x,
+                height: y1 - window.y,
+            };
+            if let Some(pm) = self.lanczos_window(None, on_page)? {
+                return Ok(white_crop(&pm, (window.x, window.y), window));
+            }
         }
         if !aa_halves(self.page, &self.canvas) {
             return self.pixmap(window);
@@ -5016,11 +5022,38 @@ impl<'p> Composite<'p> {
         &self,
         limits: Option<crate::resource_limits::ResourceLimits>,
     ) -> Result<Option<Pixmap>, RenderError> {
+        self.lanczos_window(limits, self.whole())
+    }
+
+    /// `window` of the [`lanczos_canvas`](Self::lanczos_canvas), byte for
+    /// byte, at the cost of the window: only the part of the native page the
+    /// filter reads for `window` is composited and rescaled. `window` must be
+    /// non-empty and inside the canvas.
+    ///
+    /// `None` under the same rule as the whole canvas: no Lanczos-3 rescale,
+    /// or a native page over the output limit or failing to composite.
+    fn lanczos_window(
+        &self,
+        limits: Option<crate::resource_limits::ResourceLimits>,
+        window: RenderRect,
+    ) -> Result<Option<Pixmap>, RenderError> {
         let full = (self.canvas.width, self.canvas.height);
         if !lanczos_rescales(self.page, self.canvas.resampling, full) {
             return Ok(None);
         }
         let native_opts = native_render_opts(self.page, &self.canvas);
+        let native_full = (native_opts.width, native_opts.height);
+        let (x, y, width, height) = crate::pixmap::lanczos3_source_window(
+            native_full,
+            full,
+            (window.x, window.y, window.width, window.height),
+        );
+        let source = RenderRect {
+            x,
+            y,
+            width,
+            height,
+        };
         let native = check_output_pixels(
             "render_native",
             self.page,
@@ -5029,13 +5062,17 @@ impl<'p> Composite<'p> {
             native_opts.height,
         )
         .and_then(|()| Composite::decode(self.page, &native_opts, self.detail))
-        .and_then(|native| native.pixmap(native.whole()));
+        .and_then(|native| native.pixmap(source));
         match native {
             // The scaler refuses an output above `Pixmap::MAX_PIXELS`; that is
             // a render-output limit, reported as one rather than as a blank
             // page.
-            Ok(native) => Ok(Some(crate::pixmap::scale_lanczos3(
-                &native, full.0, full.1,
+            Ok(native) => Ok(Some(crate::pixmap::scale_lanczos3_window(
+                &native,
+                (x, y),
+                native_full,
+                full,
+                (window.x, window.y, window.width, window.height),
             )?)),
             Err(_) => Ok(None),
         }
@@ -5888,10 +5925,11 @@ pub(crate) fn render_region_tiled_cancellable(
     let rotation = opts.output_rotation(page);
 
     let composite = Composite::decode(page, opts, Detail::Full)?;
-    // The Lanczos-3 page, computed on the first miss and cropped for every
-    // other miss of this call. `Some(None)`: its native composite failed, and
-    // tiles come from the bilinear canvas, as in `Composite::region`.
-    let mut lanczos_page: Option<Option<Pixmap>> = None;
+    // The Lanczos-3 tiles of this region, filtered together on the first miss
+    // and cut for every other miss of this call, with their origin.
+    // `Some(None)`: the native composite failed, and tiles come from the
+    // bilinear canvas, as in `Composite::region`.
+    let mut lanczos_block: Option<Option<(Pixmap, (u32, u32))>> = None;
     // Template context for the whole full_w×full_h render; each tile below
     // copies it (cheap: `Copy`) and only overwrites offset/out fields.
     let ctx_template = composite.context();
@@ -5948,15 +5986,22 @@ pub(crate) fn render_region_tiled_cancellable(
             let tile = match layers.get_tile(key) {
                 Some(t) => t,
                 None if lanczos => {
-                    if lanczos_page.is_none() {
-                        let full = composite.lanczos_canvas(None)?;
-                        if let Some(full) = &full {
-                            cache_whole_page(layers, full, key);
-                        }
-                        lanczos_page = Some(full);
+                    if lanczos_block.is_none() {
+                        let (x, y) = (tx0 * TILE_SIZE, ty0 * TILE_SIZE);
+                        let block = RenderRect {
+                            x,
+                            y,
+                            width: (tx1 + 1).saturating_mul(TILE_SIZE).min(full_w) - x,
+                            height: (ty1 + 1).saturating_mul(TILE_SIZE).min(full_h) - y,
+                        };
+                        lanczos_block = Some(
+                            composite
+                                .lanczos_window(None, block)?
+                                .map(|pm| (pm, (x, y))),
+                        );
                     }
-                    let pm = match &lanczos_page {
-                        Some(Some(full)) => white_crop(full, (0, 0), tile_rect),
+                    let pm = match &lanczos_block {
+                        Some(Some((block, origin))) => white_crop(block, *origin, tile_rect),
                         _ => composite.pixmap(tile_rect)?,
                     };
                     insert_pixmap_tile(layers, key, pm)
@@ -6032,35 +6077,6 @@ fn insert_pixmap_tile(layers: &PageLayers, key: TileKey, pm: Pixmap) -> std::syn
     });
     layers.insert_tile(key, entry.clone());
     entry
-}
-
-/// Cache every tile of `full`, a whole output page, under `key`'s options,
-/// when the whole page fits the page's tile-cache budget.
-///
-/// A Lanczos-3 page costs a native composite and a rescale of the whole
-/// page, however small the request. Cutting all of its tiles at once lets
-/// the rest of the grid hit the cache. A page over the budget would evict
-/// its own tiles as they go in, so it caches none beyond the requested ones.
-#[cfg(feature = "std")]
-fn cache_whole_page(layers: &PageLayers, full: &Pixmap, key: TileKey) {
-    if full.data.len() > layers.tile_cache_budget() {
-        return;
-    }
-    for y in (0..full.height).step_by(TILE_SIZE as usize) {
-        for x in (0..full.width).step_by(TILE_SIZE as usize) {
-            let key = TileKey { x, y, ..key };
-            if layers.has_tile(&key) {
-                continue;
-            }
-            let rect = RenderRect {
-                x,
-                y,
-                width: TILE_SIZE.min(full.width - x),
-                height: TILE_SIZE.min(full.height - y),
-            };
-            insert_pixmap_tile(layers, key, white_crop(full, (0, 0), rect));
-        }
-    }
 }
 
 /// Render a `DjVuPage` to an 8-bit grayscale image.
@@ -10720,6 +10736,55 @@ mod tests {
                 row[16..].iter().all(|&b| b == 255),
                 "outside the canvas is white"
             );
+        }
+    }
+
+    /// A Lanczos-3 region filters only the part of the native page it reads,
+    /// yet stays byte-identical to the crop of the whole Lanczos-3 page:
+    /// downscaled and upscaled, colour and bilevel, at the corners, along the
+    /// edges and across tile seams, untiled and tiled.
+    #[test]
+    fn lanczos_window_matches_the_page_crop() {
+        for name in ["chicken.djvu", "boy_jb2.djvu"] {
+            let doc = load_doc(name);
+            let page = doc.page(0).unwrap();
+            assert_eq!(page.rotation(), crate::info::Rotation::None);
+            let (pw, ph) = (page.width() as u32, page.height() as u32);
+            for (w, h) in [(pw / 3, ph / 3), (pw * 2, ph * 2), (pw * 2 / 3 + 1, ph + 7)] {
+                let opts = RenderOptions {
+                    width: w,
+                    height: h,
+                    resampling: Resampling::Lanczos3,
+                    ..Default::default()
+                };
+                let full = render_pixmap(page, &opts).unwrap();
+                assert_eq!((full.width, full.height), (w, h));
+                let seam = TILE_SIZE.min(w).min(h).saturating_sub(5);
+                for (x, y, rw, rh) in [
+                    (0, 0, 1, 1),
+                    (w - 1, h - 1, 1, 1),
+                    (0, 0, w, 1),
+                    (w / 2, 0, 7, h),
+                    (seam, seam, 10, 10),
+                    (w / 5, h / 7, w / 2, h / 3),
+                ] {
+                    let r = RenderRect {
+                        x,
+                        y,
+                        width: rw.min(w - x),
+                        height: rh.min(h - y),
+                    };
+                    let want = crop(&full, r);
+                    assert!(
+                        render_region(page, r, &opts).unwrap().data == want,
+                        "{name} {w}x{h} region {r:?}"
+                    );
+                    assert!(
+                        render_region_tiled(page, r, &opts).unwrap().data == want,
+                        "{name} {w}x{h} tiled region {r:?}"
+                    );
+                }
+            }
         }
     }
 
