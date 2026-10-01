@@ -608,7 +608,8 @@ mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
     use crate::djvu_render::{
-        Resampling, UserRotation, progressive_steps, render_pixmap, render_progressive_step,
+        RenderRequest, Resampling, UserRotation, progressive_steps, render_pixmap,
+        render_progressive_step,
     };
 
     fn assets_path() -> std::path::PathBuf {
@@ -875,10 +876,10 @@ mod tests {
         }
     }
 
-    /// One Lanczos-3 miss caches the whole rescaled page, so the rest of the
-    /// grid hits: the rescale runs once, not once per tile.
+    /// A Lanczos-3 miss rescales only the internal tiles the request
+    /// touches, not the whole page: its cost follows the request.
     #[test]
-    fn lanczos_tiles_rescale_the_page_once() {
+    fn lanczos_tiles_rescale_only_the_request() {
         let doc = load_doc("chicken.djvu");
         let page = doc.page(0).unwrap();
         let opts = RenderOptions {
@@ -889,9 +890,29 @@ mod tests {
         };
         clear_tile_cache(page);
         render_tile_cached(page, &opts, 64, 0, 0).unwrap();
-        // 600×400 is a 3×2 grid of internal 256-pixel tiles.
-        assert_eq!(tile_cache_usage(page).tiles, 6);
-        assert_eq!(tile_cache_usage(page).bytes, 600 * 400 * 4);
+        // 600×400 is a 3×2 grid of internal 256-pixel tiles; the first
+        // 64-pixel tile lies in the first.
+        assert_eq!(tile_cache_usage(page).tiles, 1);
+        assert_eq!(tile_cache_usage(page).bytes, 256 * 256 * 4);
+        // A 96-pixel tile at (192, 192) crosses both seams at 256, so it
+        // fills the four internal tiles around them.
+        render_tile_cached(page, &opts, 96, 2, 2).unwrap();
+        assert_eq!(tile_cache_usage(page).tiles, 4);
+    }
+
+    /// Fill the tile cache with every internal tile of `opts`' page.
+    fn cache_every_tile(page: &DjVuPage, opts: &RenderOptions) {
+        let whole = RenderRect {
+            x: 0,
+            y: 0,
+            width: opts.width,
+            height: opts.height,
+        };
+        RenderRequest::new(opts.clone())
+            .region(whole)
+            .cached(true)
+            .pixmap(page)
+            .unwrap();
     }
 
     /// Invalidation reaches Lanczos-3 tiles within the filter's spread of
@@ -913,14 +934,15 @@ mod tests {
             height: 1,
         };
         clear_tile_cache(page);
-        render_tile_cached(page, &opts, 64, 0, 0).unwrap();
+        cache_every_tile(page, &opts);
+        assert_eq!(tile_cache_usage(page).tiles, 6);
         // A pixel 2 left of the x = 256 seam also drops the tiles right of it.
         invalidate_tile_region(page, &opts, one_pixel_left_of(256)).unwrap();
         assert_eq!(tile_cache_usage(page).tiles, 4);
 
         // Far from any seam, only the tile holding the pixel goes.
         clear_tile_cache(page);
-        render_tile_cached(page, &opts, 64, 0, 0).unwrap();
+        cache_every_tile(page, &opts);
         invalidate_tile_region(page, &opts, one_pixel_left_of(130)).unwrap();
         assert_eq!(tile_cache_usage(page).tiles, 5);
     }
