@@ -6,7 +6,7 @@
 //! [`tokio::io::AsyncWrite`] sink. This keeps CPU-bound rendering off the async
 //! runtime and bounds adapter-owned output buffering to eight 64 KiB chunks.
 //!
-//! [`DjVuDocument`](crate::DjVuDocument) is not `Clone`, so the PDF adapter
+//! [`DjVuDocument`] is not `Clone`, so the PDF adapter
 //! accepts an [`std::sync::Arc`] document. Its pages already use shared backing
 //! data, and the `Arc` lets the blocking task borrow the same parsed document
 //! without copying it.
