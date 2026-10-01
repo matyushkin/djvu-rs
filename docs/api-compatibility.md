@@ -290,12 +290,12 @@ of ceilings lives in [`../SECURITY.md`](../SECURITY.md#decode-time-resource-ceil
 budget via [`ParseOptions::limits`](../../src/validate.rs) on
 [`DjVuDocument::parse_with_options`](../../src/djvu_document.rs) /
 [`Document::from_bytes_with_options`](../../src/lib.rs), or via
-[`RenderRequest::limits`](../../src/djvu_render.rs) on a render.
+[`RenderRequest::limits`](../../src/djvu_render/request.rs) on a render.
 Unset fields mean “no limit on this axis”. When render calls omit an explicit
 override, the document inherits limits stored at parse time. When both are
 unset, render output inherits [`DEFAULT_MAX_RENDER_PIXELS`]. Use
 [`ResourceLimits::inherited`] for the documented default render ceiling only.
-Per-render tightening uses [`RenderRequest::limits`](../../src/djvu_render.rs).
+Per-render tightening uses [`RenderRequest::limits`](../../src/djvu_render/request.rs).
 The validator and `djvu validate --limits` use the same type.
 
 **Render caches are bounded by default (since 0.33).** The decode results a
@@ -332,7 +332,7 @@ the failing entry point returns a typed error naming the axis and operation:
 | JB2 too many records | `Jb2Error::TooManyRecords` | `DjVuError::Jb2` |
 | IW44 image too large | `Iw44Error::ImageTooLarge` | `DjVuError::Iw44` |
 | BZZ block / output too large | `BzzError::BlockSizeTooLarge(_)` / `OutputTooLarge` | `DjVuError::Bzz` |
-| Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render.rs) |
+| Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render/options.rs) |
 
 The `DjVuError` variant (`Iff` / `Jb2` / `Iw44` / `Bzz`) identifies which
 decode stage rejected the input; the inner variant identifies the axis.
