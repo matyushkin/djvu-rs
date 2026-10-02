@@ -165,10 +165,10 @@ the break:
 
 | Item | Was | Is |
 |------|-----|-----|
-| [`DjVuPage::decoded_bg44`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
-| [`DjVuPage::decoded_bg44_partial`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
-| [`DjVuPage::decoded_mask`](../src/djvu_document.rs) | `Option<&Bitmap>` | `Option<Arc<Bitmap>>` |
-| [`DjVuPage::decoded_fg44`](../src/djvu_document.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+| [`DjVuPage::decoded_bg44`](../src/djvu_document/page.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+| [`DjVuPage::decoded_bg44_partial`](../src/djvu_document/page.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
+| [`DjVuPage::decoded_mask`](../src/djvu_document/page.rs) | `Option<&Bitmap>` | `Option<Arc<Bitmap>>` |
+| [`DjVuPage::decoded_fg44`](../src/djvu_document/page.rs) | `Option<&Iw44Image>` | `Option<Arc<Iw44Image>>` |
 
 `Arc<T>` derefs to `T`, so most call sites need no change; a site that stored
 the returned reference now stores an owned handle instead, which is what makes
@@ -288,7 +288,7 @@ of ceilings lives in [`../SECURITY.md`](../SECURITY.md#decode-time-resource-ceil
 
 **Configurable budgets.** Callers may supply a [`ResourceLimits`](../../src/validate.rs)
 budget via [`ParseOptions::limits`](../../src/validate.rs) on
-[`DjVuDocument::parse_with_options`](../../src/djvu_document.rs) /
+[`DjVuDocument::parse_with_options`](../../src/djvu_document/document.rs) /
 [`Document::from_bytes_with_options`](../../src/lib.rs), or via
 [`RenderRequest::limits`](../../src/djvu_render/request.rs) on a render.
 Unset fields mean “no limit on this axis”. When render calls omit an explicit
@@ -332,7 +332,7 @@ the failing entry point returns a typed error naming the axis and operation:
 | JB2 too many records | `Jb2Error::TooManyRecords` | `DjVuError::Jb2` |
 | IW44 image too large | `Iw44Error::ImageTooLarge` | `DjVuError::Iw44` |
 | BZZ block / output too large | `BzzError::BlockSizeTooLarge(_)` / `OutputTooLarge` | `DjVuError::Bzz` |
-| Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render/options.rs) |
+| Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document/error.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render/options.rs) |
 
 The `DjVuError` variant (`Iff` / `Jb2` / `Iw44` / `Bzz`) identifies which
 decode stage rejected the input; the inner variant identifies the axis.
