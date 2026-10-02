@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.1](https://github.com/matyushkin/djvu-rs/compare/v0.40.0...v0.40.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **deps:** tract 0.23 for ocr-onnx; that feature now needs Rust 1.91 ([#897](https://github.com/matyushkin/djvu-rs/issues/897)) ([d5ae893](https://github.com/matyushkin/djvu-rs/commit/d5ae8936cf6347ff8d694f702f095a6ff6d035f1))
+
+
+### Performance Improvements
+
+* a banded background decodes only the columns a tile reads ([#890](https://github.com/matyushkin/djvu-rs/issues/890)) ([6e9095c](https://github.com/matyushkin/djvu-rs/commit/6e9095cecde542eecd8ad9da1e1ebf50aad0a651))
+* a Lanczos-3 region filters only its own window ([#887](https://github.com/matyushkin/djvu-rs/issues/887)) ([1dfbbab](https://github.com/matyushkin/djvu-rs/commit/1dfbbaba36fb4c29d21969c7a1b1571df84892b8))
+
 ## [0.40.0](https://github.com/matyushkin/djvu-rs/compare/v0.39.0...v0.40.0) (2026-09-30)
 
 
