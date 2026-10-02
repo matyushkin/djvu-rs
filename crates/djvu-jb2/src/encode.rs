@@ -1948,7 +1948,7 @@ pub fn encode_jb2_dict_with_symbols_refined(
 /// This lets a caller precompute per-symbol data (e.g. average colour under
 /// each component, for `FGbz`) before the shared dictionary is known —
 /// letting the pixmap that data is sampled from be dropped earlier in a
-/// multi-page pipeline. See `djvu_encode.rs`'s `PreparedPage::cc_colors`.
+/// multi-page pipeline. See `djvu_encode/mod.rs`'s `PreparedPage::cc_colors`.
 pub fn symbol_boxes_in_emission_order(bitmap: &Bitmap, opts: &Jb2EncodeOptions) -> Vec<SymbolBox> {
     if bitmap.width == 0 || bitmap.height == 0 {
         return Vec::new();
