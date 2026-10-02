@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790953603769,
+  "lastUpdate": 1790957094501,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22750,6 +22750,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47449000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d5ae8936cf6347ff8d694f702f095a6ff6d035f1",
+          "message": "fix(deps): tract 0.23 for ocr-onnx; that feature now needs Rust 1.91 (#897)\n\ntract-onnx 0.22 pulled liquid -> anymap2, which RUSTSEC-2026-0319 marks\nunmaintained (#896 ignored it to unblock CI). tract 0.23 swaps liquid for\nminijinja, so the advisory and its deny.toml ignore line go away.\n\ntract 0.23 needs Rust 1.91. Only the experimental ocr-onnx feature pulls\nit, so the crate keeps MSRV 1.88 for every other feature; README and\ndocs/api-compatibility.md state the exception.\n\nAPI changes are two renames: SimplePlan<F, O, Graph> becomes\nArc<TypedRunnableModel>, and to_array_view becomes to_plain_array_view.\n\nThe model-gated OCR tests pass under 0.23.8 with the same metrics as\nunder 0.22.3 (CER/WER 0.000, line IoU 0.937 / 0.827).\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-02T15:44:02Z",
+          "tree_id": "e7d7e5bc4a9e6e65ef0be36d3f3de4a8cf73d0b0",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/d5ae8936cf6347ff8d694f702f095a6ff6d035f1"
+        },
+        "date": 1790957092797,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 101000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5039000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30562000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 28655000,
             "range": "± 0",
             "unit": "ns/iter"
           }
