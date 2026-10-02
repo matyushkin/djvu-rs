@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790901469547,
+  "lastUpdate": 1790952118958,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22654,6 +22654,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47191000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7c9535978b1f1241bb644006c7d44866b3a5caea",
+          "message": "refactor: move the djvu_mut and djvu_encode tests into their own files (#893) (#895)\n\nBoth files were about half tests. Each becomes a directory module:\nsrc/djvu_mut/mod.rs + tests, src/djvu_encode/mod.rs + tests.rs. The code\nitself is unchanged.\n\nThe djvu_mut tests were 2077 lines, so their branch-coverage edge cases\nmove on into tests/edge_cases.rs. Test helpers the two files share are\npub(super). Doc links that pointed at the old files now point at mod.rs.\n\nCloses #893.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-02T14:16:32Z",
+          "tree_id": "7ed753a7c990fbc0621bce8995efdca12729a984",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/7c9535978b1f1241bb644006c7d44866b3a5caea"
+        },
+        "date": 1790952116853,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 167000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8212000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49768000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47584000,
             "range": "± 0",
             "unit": "ns/iter"
           }
