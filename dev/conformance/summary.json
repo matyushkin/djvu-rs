@@ -30,14 +30,14 @@
     "new_failure_count": 0,
     "new_failures": [],
     "pages_delta": 0,
-    "previous_commit": "31ba333c84b87b92ea3ddcaeb56c78afa2a089e6",
+    "previous_commit": "d5ae8936cf6347ff8d694f702f095a6ff6d035f1",
     "previous_status": "pass",
     "regression": false,
     "resolved_failure_count": 0,
     "resolved_failures": [],
     "status_changed": false
   },
-  "commit": "d5ae8936cf6347ff8d694f702f095a6ff6d035f1",
+  "commit": "001f91d565d7334e40fa856075cf123c6d1367aa",
   "corpus_digest": "baed323711cbb4cee23036b0249feb5c6508ce644485e0b5c9bfba27b9d8030a",
   "diff_fuzz_registry": {
     "categories": {
@@ -6348,9 +6348,9 @@
     }
   ],
   "status": "pass",
-  "timestamp": "2026-10-02T15:47:21+00:00",
+  "timestamp": "2026-10-02T16:58:39+00:00",
   "tools": {
-    "djvu_rs": "d5ae8936cf6347ff8d694f702f095a6ff6d035f1",
+    "djvu_rs": "001f91d565d7334e40fa856075cf123c6d1367aa",
     "djvulibre": "DDJVU --- DjVuLibre-3.5.28 (Ubuntu 3.5.28-2ubuntu0.24.04.2)"
   },
   "writer_conformance": {
