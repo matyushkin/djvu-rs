@@ -76,10 +76,10 @@ wasm-bindgen-rayon = { version = "1.3", optional = true }
 tesseract = { version = "0.15", optional = true }
 # Dev-only allocation profiling (#600): global allocator for examples/alloc_profile.rs.
 dhat = { version = "0.3", optional = true }
-# Floor 0.22.2: RUSTSEC-2026-0217 fix (tract-nnef tensor-parser OOB read); the
-# patched 0.21.x line pins `time <0.3.42`, which is itself vulnerable
-# (RUSTSEC-2026-0009). 0.23.x needs Rust 1.91 > our MSRV 1.88.
-tract-onnx = { version = "0.22.2", optional = true }
+# 0.23 drops `liquid` (and its unmaintained `anymap2`, RUSTSEC-2026-0319).
+# It needs Rust 1.91: the `ocr-onnx` feature alone has that higher MSRV; the
+# crate's default and other features keep MSRV 1.88.
+tract-onnx = { version = "0.23", optional = true }
 # SHA-256 verification of OCR model weights against docs/ocr-model-manifest.toml
 # (#693): unverified weights are never loaded.
 sha2 = { version = "0.10", optional = true }
