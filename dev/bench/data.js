@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790952118958,
+  "lastUpdate": 1790953603769,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22702,6 +22702,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 47584000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "31ba333c84b87b92ea3ddcaeb56c78afa2a089e6",
+          "message": "refactor(document): split djvu_document.rs into a module per concern (#893) (#894)\n\nThe 4470-line file becomes src/djvu_document/ with one file per concern:\ncomponent, error, bookmark (with the NAVM parser), page, document, mmap\n(gated whole on the mmap feature), parse, and tests. The existing\nassembly.rs stays as is.\n\nItems a sibling needs are pub(super): the same reach a private item had\nwhen the module was one file. The public rustdoc item list is identical\nto main; nextest still runs 1847 tests. Doc links that pointed at the\nold file now point at the new ones.\n\nPart of #893.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-02T14:18:24Z",
+          "tree_id": "74d4ce7829479d90af981ac9284ea9f506080748",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/31ba333c84b87b92ea3ddcaeb56c78afa2a089e6"
+        },
+        "date": 1790953601979,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8210000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49327000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47449000,
             "range": "± 0",
             "unit": "ns/iter"
           }
