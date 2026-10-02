@@ -116,7 +116,7 @@ pub(super) struct BilinearX {
     pub(super) tx: u32,
 }
 
-/// A row's background source in [`composite_rows_bilinear_one`].
+/// A row's background source in [`zoom_row`].
 #[derive(Clone, Copy)]
 pub(super) enum BgRow<'s> {
     /// DjVuLibre's vertical pass, rounded to 8 bits, and its first plane
@@ -958,6 +958,9 @@ pub(super) fn bg_blend_pixel(
 
 /// Write one bilinear row into `row_buf` (upscale / 1:1).
 ///
+/// A 1:1 row goes to [`native_row_bg_mask`] or [`native_row`]; every other
+/// row goes to [`zoom_row`].
+///
 /// `bx` is the optional per-column table from [`precompute_bilinear_x`]
 /// (`None` falls back to the in-loop fixed-point walk — byte-identical).
 /// `vblend` is caller-owned scratch for the vertically pre-blended bg row;
@@ -976,312 +979,378 @@ pub(super) fn composite_rows_bilinear_one(
     bx: Option<&[BilinearX]>,
     vblend: &mut Vec<u16>,
 ) {
-    let (page_w, page_h) = (ctx.page_w, ctx.page_h);
-    let fy = (oy + ctx.offset_y) * fy_step;
-    let py = (fy >> FRACBITS).min(page_h.saturating_sub(1));
-
     // 1:1 fast path: fx and fy land on exact pixel centres (tx = ty = 0), so
     // bilinear interpolation degrades to nearest-neighbour. Guard on the bg
     // plane ratio too: if bg is at subsample > 1, the bg coordinates are not
     // integer-aligned even at native scale and bilinear blending is needed.
     if fx_step == FRAC && fy_step == FRAC && ctx.bg_x_q24 == (1 << 24) && ctx.bg_y_q24 == (1 << 24)
     {
+        let (fy, py) = row_page_y(ctx, oy, fy_step);
         // Extra-tight path for the common corpus case: bg present, mask
-        // present, no palette, no FG44, zero horizontal offset. Precompute
-        // the bg row and mask row slices so the inner loop only touches
-        // sequential memory with no per-pixel coordinate mapping calls.
+        // present, no palette, no FG44, zero horizontal offset.
         if ctx.offset_x == 0
             && ctx.fg_palette.is_none()
             && ctx.fg44.is_none()
             && let Some(bg) = ctx.bg
         {
-            let bg_row = bg.row(py.min(bg.height().saturating_sub(1)));
-            let lut = &ctx.gamma_lut;
-
-            if let Some(mask) = ctx.mask {
-                // Has mask: check each pixel for foreground (black).
-                let mask_stride = mask.row_stride();
-                let mask_py = py.min(mask.height.saturating_sub(1)) as usize;
-                let mask_row = mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
-
-                // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
-                let bg_max_px = (bg.width() as usize).saturating_sub(1);
-                let mask_limit = mask.width as usize;
-                let out_w = row_buf.len() / 4;
-                // D1: hoist gamma identity check outside the pixel loop.
-                macro_rules! a2_has_mask_loop {
-                    ($write:expr) => {
-                        for mb_idx in 0..out_w.div_ceil(8) {
-                            let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
-                            let exp = &MASK_EXPAND[mb as usize];
-                            for j in 0..8usize {
-                                let ox = mb_idx * 8 + j;
-                                if ox >= out_w {
-                                    break;
-                                }
-                                let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
-                                let px = ox.min(bg_max_px);
-                                let off = px * 4;
-                                let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
-                                let (r, g, b) = if let Some(q) = bg_row.get(off..off + 4) {
-                                    (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
-                                } else {
-                                    (!fg_m, !fg_m, !fg_m)
-                                };
-                                $write(pixel, r, g, b);
-                            }
-                        }
-                    };
-                }
-                if ctx.gamma_is_identity {
-                    a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
-                        pixel[0] = r;
-                        pixel[1] = g;
-                        pixel[2] = b;
-                        pixel[3] = 255;
-                    });
-                } else {
-                    a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
-                        pixel[0] = lut[r as usize];
-                        pixel[1] = lut[g as usize];
-                        pixel[2] = lut[b as usize];
-                        pixel[3] = 255;
-                    });
-                }
-            } else {
-                // No mask: pure background copy with gamma correction.
-                // D1: hoist gamma identity check outside the pixel loop.
-                if ctx.gamma_is_identity {
-                    let out_w = row_buf.len() / 4;
-                    // E1: when bg covers the full output width, bulk-copy the row
-                    // via memcpy — bg Pixmap always has alpha=255 from YCbCr decode.
-                    if bg.width() as usize >= out_w {
-                        row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
-                    } else {
-                        for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                            let px = ox.min((bg.width() as usize).saturating_sub(1));
-                            let off = px * 4;
-                            if let Some(q) = bg_row.get(off..off + 4) {
-                                pixel[0] = q[0];
-                                pixel[1] = q[1];
-                                pixel[2] = q[2];
-                            } else {
-                                pixel[0] = 255;
-                                pixel[1] = 255;
-                                pixel[2] = 255;
-                            }
-                            pixel[3] = 255;
-                        }
-                    }
-                } else {
-                    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                        let px = ox.min((bg.width() as usize).saturating_sub(1));
-                        let off = px * 4;
-                        if let Some(q) = bg_row.get(off..off + 4) {
-                            pixel[0] = lut[q[0] as usize];
-                            pixel[1] = lut[q[1] as usize];
-                            pixel[2] = lut[q[2] as usize];
-                        } else {
-                            pixel[0] = 255;
-                            pixel[1] = 255;
-                            pixel[2] = 255;
-                        }
-                        pixel[3] = 255;
-                    }
-                }
-            }
-            return;
-        }
-
-        // General 1:1 nearest-neighbour path (offset, palette, or FG44 present).
-
-        // C2: Pre-hoist FG44 y-rows (row-invariant, analogous to bg_rows in B-series path).
-        // Eliminates per-fg-pixel: map_plane_center_frac(fy), y0/y1/ty computation, row lookups.
-        let fg_rows_1x1 = ctx.fg44.filter(|_| ctx.fg_palette.is_none()).map(|fg| {
-            let fg_fy = if ctx.fg_red != 0 {
-                fg_native_frac(0, py, page_h, ctx.fg_red, fg).1
-            } else {
-                map_plane_center_frac(fy, ctx.fg_y_q24)
-            };
-            let y0 = (fg_fy >> FRACBITS).min(fg.height.saturating_sub(1)) as usize;
-            let y1 = (y0 + 1).min(fg.height.saturating_sub(1) as usize);
-            let ty = fg_fy & FRAC_MASK;
-            let stride = fg.width as usize * 4;
-            let row0 = fg.data.get(y0 * stride..).unwrap_or(&[]);
-            let row1 = fg.data.get(y1 * stride..).unwrap_or(&[]);
-            (row0, row1, fg.width, ty)
-        });
-        // C2b: Pre-hoist bg row slice (bg_x_q24 == bg_y_q24 == 1<<24 guaranteed by outer
-        // condition, so bg_fx == fx and the bg row index == py clamped to bg.height).
-        let bg_row_1x1 = ctx
-            .bg
-            .map(|bg| (bg.row(py.min(bg.height().saturating_sub(1))), bg.width()));
-        // C3: Pre-hoist mask row (py is row-invariant; eliminates y*stride multiply per pixel).
-        let mask_row_1x1 = ctx.mask.and_then(|m| {
-            if py >= m.height {
-                return None;
-            }
-            let stride = m.row_stride();
-            m.data.get(py as usize * stride..).map(|row| (row, m.width))
-        });
-
-        // F2: whole-row background fast path.
-        // If the mask row has no foreground bits (page margins, blank inter-line gaps — typically
-        // 30-40% of rows in text documents), bulk-copy from bg_row instead of dispatching
-        // per-pixel between FG44 bilinear and BG44 lookup.
-        {
-            let row_is_all_bg = match mask_row_1x1 {
-                None => true,
-                Some((mask_row, mask_w)) => {
-                    let check_bytes = (mask_w as usize).div_ceil(8).min(mask_row.len());
-                    mask_row[..check_bytes].iter().all(|&b| b == 0)
-                }
-            };
-            if row_is_all_bg && ctx.gamma_is_identity {
-                let out_w = row_buf.len() / 4;
-                let offset_x = ctx.offset_x as usize;
-                if let Some((bg_row, bg_w)) = bg_row_1x1 {
-                    if offset_x + out_w <= bg_w as usize {
-                        row_buf.copy_from_slice(&bg_row[offset_x * 4..(offset_x + out_w) * 4]);
-                        return;
-                    }
-                    // Edge case (out_w clamped beyond bg_w): fall through to per-pixel loop.
-                } else {
-                    row_buf.fill(255);
-                    return;
-                }
-            } else if row_is_all_bg {
-                // #443: F2 for non-identity gamma. An all-bg row is just the gamma
-                // LUT applied to the bg row (or to white when there is no bg) — a
-                // sequential LUT pass that skips the G1 pre-expansion + per-pixel
-                // dispatch. Byte-identical to the per-pixel loop for these rows.
-                let out_w = row_buf.len() / 4;
-                let offset_x = ctx.offset_x as usize;
-                let lut = &ctx.gamma_lut;
-                if let Some((bg_row, bg_w)) = bg_row_1x1 {
-                    if offset_x + out_w <= bg_w as usize {
-                        let src = &bg_row[offset_x * 4..(offset_x + out_w) * 4];
-                        for (chunk, s) in row_buf
-                            .as_chunks_mut::<4>()
-                            .0
-                            .iter_mut()
-                            .zip(src.as_chunks::<4>().0)
-                        {
-                            chunk[0] = lut[s[0] as usize];
-                            chunk[1] = lut[s[1] as usize];
-                            chunk[2] = lut[s[2] as usize];
-                            chunk[3] = 255;
-                        }
-                        return;
-                    }
-                    // Edge case (out_w clamped beyond bg_w): fall through.
-                } else {
-                    let white = lut[255];
-                    for chunk in row_buf.as_chunks_mut::<4>().0 {
-                        chunk[0] = white;
-                        chunk[1] = white;
-                        chunk[2] = white;
-                        chunk[3] = 255;
-                    }
-                    return;
-                }
-            }
-        }
-
-        // G1: Pre-expand the mask row from bit-packed to per-pixel bytes via MASK_EXPAND LUT.
-        // Reduces per-pixel mask check from ~7 ops (shift, bounds-check, bit-extract) to a
-        // single byte load + compare. Buffer covers up to 600 DPI A4/US-letter (≤4096px);
-        // oversized pages fall through to the original bit-extraction path.
-        const G1_MAX: usize = 4096;
-        let mut g1_buf = [0u8; G1_MAX];
-        let g1_mask: &[u8] = if let Some((mask_row, mask_w)) = mask_row_1x1 {
-            let mw = mask_w as usize;
-            if mw <= G1_MAX {
-                let nb = mw.div_ceil(8);
-                for (i, &mb) in mask_row[..nb].iter().enumerate() {
-                    let exp = &MASK_EXPAND[mb as usize];
-                    let base = i * 8;
-                    // Write 8 bytes; g1_mask = &g1_buf[..mw] prevents reads past mask_w.
-                    g1_buf[base..base + 8].copy_from_slice(exp);
-                }
-                &g1_buf[..mw]
-            } else {
-                &g1_buf[..0] // page too wide: use fallback bit-extraction below
-            }
+            native_row_bg_mask(ctx, bg, py, row_buf);
         } else {
-            &g1_buf[..0] // no mask: all pixels are background
-        };
-
-        for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let fx = (ox as u32 + ctx.offset_x) * fx_step;
-            let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
-
-            // G1 fast path: single byte load. Falls back to bit-extraction when g1_mask
-            // is empty (no mask, or page wider than G1_MAX). LLVM hoists the is_empty()
-            // branch as loop-invariant and generates two loop versions.
-            let is_fg = if g1_mask.is_empty() {
-                mask_row_1x1.is_some_and(|(row, mask_w)| {
-                    let pxu = px as usize;
-                    pxu < mask_w as usize
-                        && (row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
-                })
-            } else {
-                g1_mask.get(px as usize).copied().unwrap_or(0) != 0
-            };
-
-            let (r, g, b) = if is_fg {
-                if let Some(pal) = ctx.fg_palette {
-                    let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
-                    (color.r, color.g, color.b)
-                } else if let Some((fg_row0, fg_row1, fg_w, fg_ty)) = fg_rows_1x1 {
-                    let fg_fx = match px.checked_div(ctx.fg_red) {
-                        Some(cell) => cell << FRACBITS,
-                        None => map_plane_center_frac(fx, ctx.fg_x_q24),
-                    };
-                    bilinear_from_rows(fg_row0, fg_row1, fg_w, fg_fx, fg_ty)
-                } else {
-                    (0, 0, 0)
-                }
-            } else if let Some((bg_row, bg_w)) = bg_row_1x1 {
-                let bx = (px as usize).min(bg_w.saturating_sub(1) as usize);
-                let off = bx * 4;
-                bg_row
-                    .get(off..off + 4)
-                    .map_or((255, 255, 255), |q| (q[0], q[1], q[2]))
-            } else {
-                (255, 255, 255)
-            };
-
-            if ctx.gamma_is_identity {
-                pixel[0] = r;
-                pixel[1] = g;
-                pixel[2] = b;
-            } else {
-                pixel[0] = ctx.gamma_lut[r as usize];
-                pixel[1] = ctx.gamma_lut[g as usize];
-                pixel[2] = ctx.gamma_lut[b as usize];
-            }
-            pixel[3] = 255;
+            native_row(ctx, fy, py, fx_step, row_buf);
         }
-        return;
+    } else {
+        zoom_row(ctx, oy, fx_step, fy_step, row_buf, bx, vblend);
     }
+}
 
-    // B1: hoist bg_fy (row-invariant) and replace per-pixel u64 mul for bg_fx with
-    // an exact u64 accumulator (add per pixel instead of multiply).
-    // bg_fx_q tracks (page_frac + FRAC/2) * bg_x_q24 in Q48; >> 24 gives the
-    // FRAC-fixed-point coordinate; subtract FRAC/2 to get the centered sample pos.
-    let bg_fy_hoist = ctx.bg.map(|_| map_plane_center_frac(fy, ctx.bg_y_q24));
-    let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
-    let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+/// The page-space fixed-point y of output row `oy` and its page row.
+#[inline(always)]
+fn row_page_y(ctx: &CompositeContext<'_>, oy: u32, fy_step: u32) -> (u32, u32) {
+    let fy = (oy + ctx.offset_y) * fy_step;
+    (fy, (fy >> FRACBITS).min(ctx.page_h.saturating_sub(1)))
+}
 
-    // B2b: pre-hoist mask row slice for py (eliminates y*stride multiply per pixel).
-    let mask_hoist = ctx.mask.and_then(|m| {
+/// Mask row `py` and the mask width, or `None` below the mask. Hoisted out
+/// of the pixel loop: `py` is row-invariant, so this saves a `y*stride`
+/// multiply per pixel.
+#[inline(always)]
+fn mask_row_at<'a>(ctx: &CompositeContext<'a>, py: u32) -> Option<(&'a [u8], u32)> {
+    ctx.mask.and_then(|m| {
         if py >= m.height {
             return None;
         }
         let stride = m.row_stride();
         m.data.get(py as usize * stride..).map(|row| (row, m.width))
+    })
+}
+
+/// True when a mask row has no foreground bit (page margins, blank gaps
+/// between text lines), or there is no mask row at all.
+#[inline(always)]
+fn mask_row_blank(mask_row: Option<(&[u8], u32)>) -> bool {
+    match mask_row {
+        None => true,
+        Some((mask_row, mask_w)) => {
+            let nb = (mask_w as usize).div_ceil(8).min(mask_row.len());
+            mask_row[..nb].iter().all(|&b| b == 0)
+        }
+    }
+}
+
+/// A 1:1 row with a background, no palette, no FG44 and no horizontal
+/// offset — the common corpus case. Precompute the bg row and mask row
+/// slices so the inner loop only touches sequential memory with no
+/// per-pixel coordinate mapping calls.
+#[inline(always)]
+fn native_row_bg_mask(ctx: &CompositeContext<'_>, bg: PlaneView<'_>, py: u32, row_buf: &mut [u8]) {
+    let bg_row = bg.row(py.min(bg.height().saturating_sub(1)));
+    let lut = &ctx.gamma_lut;
+
+    if let Some(mask) = ctx.mask {
+        // Has mask: check each pixel for foreground (black).
+        let mask_stride = mask.row_stride();
+        let mask_py = py.min(mask.height.saturating_sub(1)) as usize;
+        let mask_row = mask.data.get(mask_py * mask_stride..).unwrap_or(&[]);
+
+        // A2: pre-expand mask bits to bytes via LUT, then branchless blend.
+        let bg_max_px = (bg.width() as usize).saturating_sub(1);
+        let mask_limit = mask.width as usize;
+        let out_w = row_buf.len() / 4;
+        // D1: hoist gamma identity check outside the pixel loop.
+        macro_rules! a2_has_mask_loop {
+            ($write:expr) => {
+                for mb_idx in 0..out_w.div_ceil(8) {
+                    let mb = mask_row.get(mb_idx).copied().unwrap_or(0);
+                    let exp = &MASK_EXPAND[mb as usize];
+                    for j in 0..8usize {
+                        let ox = mb_idx * 8 + j;
+                        if ox >= out_w {
+                            break;
+                        }
+                        let fg_m = if ox < mask_limit { exp[j] } else { 0u8 };
+                        let px = ox.min(bg_max_px);
+                        let off = px * 4;
+                        let pixel = &mut row_buf[ox * 4..(ox + 1) * 4];
+                        let (r, g, b) = if let Some(q) = bg_row.get(off..off + 4) {
+                            (q[0] & !fg_m, q[1] & !fg_m, q[2] & !fg_m)
+                        } else {
+                            (!fg_m, !fg_m, !fg_m)
+                        };
+                        $write(pixel, r, g, b);
+                    }
+                }
+            };
+        }
+        if ctx.gamma_is_identity {
+            a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                pixel[0] = r;
+                pixel[1] = g;
+                pixel[2] = b;
+                pixel[3] = 255;
+            });
+        } else {
+            a2_has_mask_loop!(|pixel: &mut [u8], r, g, b| {
+                pixel[0] = lut[r as usize];
+                pixel[1] = lut[g as usize];
+                pixel[2] = lut[b as usize];
+                pixel[3] = 255;
+            });
+        }
+    } else {
+        // No mask: pure background copy with gamma correction.
+        // D1: hoist gamma identity check outside the pixel loop.
+        if ctx.gamma_is_identity {
+            let out_w = row_buf.len() / 4;
+            // E1: when bg covers the full output width, bulk-copy the row
+            // via memcpy — bg Pixmap always has alpha=255 from YCbCr decode.
+            if bg.width() as usize >= out_w {
+                row_buf[..out_w * 4].copy_from_slice(&bg_row[..out_w * 4]);
+            } else {
+                for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let px = ox.min((bg.width() as usize).saturating_sub(1));
+                    let off = px * 4;
+                    if let Some(q) = bg_row.get(off..off + 4) {
+                        pixel[0] = q[0];
+                        pixel[1] = q[1];
+                        pixel[2] = q[2];
+                    } else {
+                        pixel[0] = 255;
+                        pixel[1] = 255;
+                        pixel[2] = 255;
+                    }
+                    pixel[3] = 255;
+                }
+            }
+        } else {
+            for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let px = ox.min((bg.width() as usize).saturating_sub(1));
+                let off = px * 4;
+                if let Some(q) = bg_row.get(off..off + 4) {
+                    pixel[0] = lut[q[0] as usize];
+                    pixel[1] = lut[q[1] as usize];
+                    pixel[2] = lut[q[2] as usize];
+                } else {
+                    pixel[0] = 255;
+                    pixel[1] = 255;
+                    pixel[2] = 255;
+                }
+                pixel[3] = 255;
+            }
+        }
+    }
+}
+
+/// A general 1:1 row (offset, palette, or FG44 present): nearest-neighbour.
+#[inline(always)]
+fn native_row(ctx: &CompositeContext<'_>, fy: u32, py: u32, fx_step: u32, row_buf: &mut [u8]) {
+    let (page_w, page_h) = (ctx.page_w, ctx.page_h);
+    // C2: Pre-hoist FG44 y-rows (row-invariant, analogous to bg_rows in B-series path).
+    // Eliminates per-fg-pixel: map_plane_center_frac(fy), y0/y1/ty computation, row lookups.
+    let fg_rows_1x1 = ctx.fg44.filter(|_| ctx.fg_palette.is_none()).map(|fg| {
+        let fg_fy = if ctx.fg_red != 0 {
+            fg_native_frac(0, py, page_h, ctx.fg_red, fg).1
+        } else {
+            map_plane_center_frac(fy, ctx.fg_y_q24)
+        };
+        let y0 = (fg_fy >> FRACBITS).min(fg.height.saturating_sub(1)) as usize;
+        let y1 = (y0 + 1).min(fg.height.saturating_sub(1) as usize);
+        let ty = fg_fy & FRAC_MASK;
+        let stride = fg.width as usize * 4;
+        let row0 = fg.data.get(y0 * stride..).unwrap_or(&[]);
+        let row1 = fg.data.get(y1 * stride..).unwrap_or(&[]);
+        (row0, row1, fg.width, ty)
     });
+    // C2b: Pre-hoist bg row slice (bg_x_q24 == bg_y_q24 == 1<<24 guaranteed by outer
+    // condition, so bg_fx == fx and the bg row index == py clamped to bg.height).
+    let bg_row_1x1 = ctx
+        .bg
+        .map(|bg| (bg.row(py.min(bg.height().saturating_sub(1))), bg.width()));
+    // C3: Pre-hoist mask row (py is row-invariant; eliminates y*stride multiply per pixel).
+    let mask_row_1x1 = mask_row_at(ctx, py);
+
+    // F2: whole-row background fast path.
+    // If the mask row has no foreground bits (page margins, blank inter-line gaps — typically
+    // 30-40% of rows in text documents), bulk-copy from bg_row instead of dispatching
+    // per-pixel between FG44 bilinear and BG44 lookup.
+    if mask_row_blank(mask_row_1x1) && native_row_blank(ctx, bg_row_1x1, row_buf) {
+        return;
+    }
+
+    // G1: Pre-expand the mask row from bit-packed to per-pixel bytes via MASK_EXPAND LUT.
+    // Reduces per-pixel mask check from ~7 ops (shift, bounds-check, bit-extract) to a
+    // single byte load + compare. Buffer covers up to 600 DPI A4/US-letter (≤4096px);
+    // oversized pages fall through to the original bit-extraction path.
+    let mut g1_buf = [0u8; G1_MAX];
+    let g1_mask = expand_mask_row(mask_row_1x1, &mut g1_buf);
+
+    for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let fx = (ox as u32 + ctx.offset_x) * fx_step;
+        let px = (fx >> FRACBITS).min(page_w.saturating_sub(1));
+
+        // G1 fast path: single byte load. Falls back to bit-extraction when g1_mask
+        // is empty (no mask, or page wider than G1_MAX). LLVM hoists the is_empty()
+        // branch as loop-invariant and generates two loop versions.
+        let is_fg = if g1_mask.is_empty() {
+            mask_row_1x1.is_some_and(|(row, mask_w)| {
+                let pxu = px as usize;
+                pxu < mask_w as usize
+                    && (row.get(pxu >> 3).copied().unwrap_or(0) >> (7 - (pxu & 7))) & 1 != 0
+            })
+        } else {
+            g1_mask.get(px as usize).copied().unwrap_or(0) != 0
+        };
+
+        let (r, g, b) = if is_fg {
+            if let Some(pal) = ctx.fg_palette {
+                let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
+                (color.r, color.g, color.b)
+            } else if let Some((fg_row0, fg_row1, fg_w, fg_ty)) = fg_rows_1x1 {
+                let fg_fx = match px.checked_div(ctx.fg_red) {
+                    Some(cell) => cell << FRACBITS,
+                    None => map_plane_center_frac(fx, ctx.fg_x_q24),
+                };
+                bilinear_from_rows(fg_row0, fg_row1, fg_w, fg_fx, fg_ty)
+            } else {
+                (0, 0, 0)
+            }
+        } else if let Some((bg_row, bg_w)) = bg_row_1x1 {
+            let bx = (px as usize).min(bg_w.saturating_sub(1) as usize);
+            let off = bx * 4;
+            bg_row
+                .get(off..off + 4)
+                .map_or((255, 255, 255), |q| (q[0], q[1], q[2]))
+        } else {
+            (255, 255, 255)
+        };
+
+        if ctx.gamma_is_identity {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        } else {
+            pixel[0] = ctx.gamma_lut[r as usize];
+            pixel[1] = ctx.gamma_lut[g as usize];
+            pixel[2] = ctx.gamma_lut[b as usize];
+        }
+        pixel[3] = 255;
+    }
+}
+
+/// F2: write a 1:1 row whose mask row is blank. Returns `false`, writing
+/// nothing, in the edge case where the output reaches past the background
+/// (`out_w` clamped beyond `bg_w`); the caller then runs the per-pixel loop.
+#[inline(always)]
+fn native_row_blank(
+    ctx: &CompositeContext<'_>,
+    bg_row_1x1: Option<(&[u8], u32)>,
+    row_buf: &mut [u8],
+) -> bool {
+    if ctx.gamma_is_identity {
+        let out_w = row_buf.len() / 4;
+        let offset_x = ctx.offset_x as usize;
+        if let Some((bg_row, bg_w)) = bg_row_1x1 {
+            if offset_x + out_w <= bg_w as usize {
+                row_buf.copy_from_slice(&bg_row[offset_x * 4..(offset_x + out_w) * 4]);
+                return true;
+            }
+            // Edge case (out_w clamped beyond bg_w): fall through to per-pixel loop.
+        } else {
+            row_buf.fill(255);
+            return true;
+        }
+    } else {
+        // #443: F2 for non-identity gamma. An all-bg row is just the gamma
+        // LUT applied to the bg row (or to white when there is no bg) — a
+        // sequential LUT pass that skips the G1 pre-expansion + per-pixel
+        // dispatch. Byte-identical to the per-pixel loop for these rows.
+        let out_w = row_buf.len() / 4;
+        let offset_x = ctx.offset_x as usize;
+        let lut = &ctx.gamma_lut;
+        if let Some((bg_row, bg_w)) = bg_row_1x1 {
+            if offset_x + out_w <= bg_w as usize {
+                let src = &bg_row[offset_x * 4..(offset_x + out_w) * 4];
+                for (chunk, s) in row_buf
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<4>().0)
+                {
+                    chunk[0] = lut[s[0] as usize];
+                    chunk[1] = lut[s[1] as usize];
+                    chunk[2] = lut[s[2] as usize];
+                    chunk[3] = 255;
+                }
+                return true;
+            }
+            // Edge case (out_w clamped beyond bg_w): fall through.
+        } else {
+            let white = lut[255];
+            for chunk in row_buf.as_chunks_mut::<4>().0 {
+                chunk[0] = white;
+                chunk[1] = white;
+                chunk[2] = white;
+                chunk[3] = 255;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// G1: the widest mask row [`expand_mask_row`] expands — 600 DPI
+/// A4/US-letter.
+const G1_MAX: usize = 4096;
+
+/// G1: expand a bit-packed mask row into one byte per pixel in `g1_buf`.
+/// Empty when there is no mask or the page is wider than [`G1_MAX`]; the
+/// caller then falls back to bit extraction.
+#[inline(always)]
+fn expand_mask_row<'b>(mask_row: Option<(&[u8], u32)>, g1_buf: &'b mut [u8; G1_MAX]) -> &'b [u8] {
+    if let Some((mask_row, mask_w)) = mask_row {
+        let mw = mask_w as usize;
+        if mw <= G1_MAX {
+            let nb = mw.div_ceil(8);
+            for (i, &mb) in mask_row[..nb].iter().enumerate() {
+                let exp = &MASK_EXPAND[mb as usize];
+                let base = i * 8;
+                // Write 8 bytes; g1_mask = &g1_buf[..mw] prevents reads past mask_w.
+                g1_buf[base..base + 8].copy_from_slice(exp);
+            }
+            &g1_buf[..mw]
+        } else {
+            &g1_buf[..0] // page too wide: use fallback bit-extraction below
+        }
+    } else {
+        &g1_buf[..0] // no mask: all pixels are background
+    }
+}
+
+/// A zoomed row, or a 1:1 row over a subsampled background: bilinear.
+///
+/// `inline(never)`: inlined into [`composite_rows_bilinear_one`], zoomed
+/// renders ran 2–4% slower (COMPOSITE_BILINEAR_SPLIT in
+/// `PERF_EXPERIMENTS.md`).
+#[inline(never)]
+fn zoom_row(
+    ctx: &CompositeContext<'_>,
+    oy: u32,
+    fx_step: u32,
+    fy_step: u32,
+    row_buf: &mut [u8],
+    bx: Option<&[BilinearX]>,
+    vblend: &mut Vec<u16>,
+) {
+    let (page_w, page_h) = (ctx.page_w, ctx.page_h);
+    let (fy, py) = row_page_y(ctx, oy, fy_step);
+
+    // B1: replace the per-pixel u64 mul for bg_fx with an exact u64
+    // accumulator (add per pixel instead of multiply).
+    // bg_fx_q tracks (page_frac + FRAC/2) * bg_x_q24 in Q48; >> 24 gives the
+    // FRAC-fixed-point coordinate; subtract FRAC/2 to get the centered sample pos.
+    let bg_fx_step_q: u64 = fx_step as u64 * ctx.bg_x_q24;
+    let mut bg_fx_q: u64 = (ctx.offset_x as u64 * fx_step as u64 + FRAC as u64 / 2) * ctx.bg_x_q24;
+
+    // B2b: pre-hoist mask row slice for py (eliminates y*stride multiply per pixel).
+    let mask_hoist = mask_row_at(ctx, py);
 
     // #435: row-level all-bg fast path (F2 analog for the B-series path). Pre-scan
     // the hoisted mask row once; if it has no foreground bits (blank margins /
@@ -1289,13 +1358,7 @@ pub(super) fn composite_rows_bilinear_one(
     // `!mask_all_bg &&` short-circuit lets LLVM unswitch the loop and drop the
     // per-pixel bit-extraction. Unlike F2 the bg pixels still need per-pixel
     // resampling, so this saves only the is_fg check (not the whole bg copy).
-    let mask_all_bg = match mask_hoist {
-        None => true,
-        Some((mask_row, mask_w)) => {
-            let nb = (mask_w as usize).div_ceil(8).min(mask_row.len());
-            !mask_row[..nb].iter().any(|&b| b != 0)
-        }
-    };
+    let mask_all_bg = mask_row_blank(mask_hoist);
 
     // B2/B3: precompute bg row slices (y0/y1 are row-invariant), then run the
     // vertical half of the separable bilinear blend once per bg column: with
@@ -1313,87 +1376,20 @@ pub(super) fn composite_rows_bilinear_one(
     // DjVuLibre's `GPixmapScaler`: the vertical pass, rounded to 8 bits,
     // over the columns the row reads; `bg_at` then applies the horizontal
     // pass to each pixel that shows the background.
-    let bg_src: Option<BgRow<'_>> = match ctx.bg {
+    let bg_src = match ctx.bg {
         None => None,
         Some(bg) if ctx.bg_red != 0 => {
-            let red = ctx.bg_red;
-            let out_w = row_buf.len() / 4;
-            let (lower, upper, f) = scaler_rows(oy + ctx.offset_y, page_h, red, bg.height());
-            let entry = |ox: usize| {
-                bx.and_then(|t| t.get(ox).copied())
-                    .unwrap_or_else(|| scaler_x(ox as u32 + ctx.offset_x, red, bg.width()))
-            };
-            let col_start = entry(0).x0;
-            let col_end = entry(out_w.saturating_sub(1)).x1.max(col_start);
-            let ncols = (col_end - col_start + 1) as usize;
-            vblend.clear();
-            vblend.resize(ncols * 4, 0);
-            let (r0, r1) = (bg.row(lower), bg.row(upper));
-            let span = col_start as usize * 4..(col_end as usize + 1) * 4;
-            if let (Some(a), Some(b)) = (r0.get(span.clone()), r1.get(span)) {
-                for ((v, &a), &b) in vblend.iter_mut().zip(a).zip(b) {
-                    *v = scaler_lerp(a as u32, b as u32, f) as u16;
-                }
-            } else {
-                for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                    // Truncated rows (partial/streaming decode) read as zeros,
-                    // as in the bilinear arm below.
-                    let off = (col_start as usize + i) * 4;
-                    let p0 = r0.get(off..off + 4);
-                    let p1 = r1.get(off..off + 4);
-                    for ch in 0..3 {
-                        let a = p0.map_or(0, |q| q[ch] as u32);
-                        let b = p1.map_or(0, |q| q[ch] as u32);
-                        v[ch] = scaler_lerp(a, b, f) as u16;
-                    }
-                }
-            }
-            Some(BgRow::Scaled(vblend.as_chunks::<4>().0, col_start))
+            Some(scaled_bg_row(ctx, bg, oy, row_buf.len() / 4, bx, vblend))
         }
-        Some(bg) => {
-            let bg_fy = bg_fy_hoist.unwrap_or(0);
-            let clamp_h = bg.height().saturating_sub(1);
-            let y0 = (bg_fy >> FRACBITS).min(clamp_h);
-            let y1 = (y0 + 1).min(clamp_h);
-            let ty = bg_fy & FRAC_MASK;
-            let ity = FRAC - ty;
-            let row0 = bg.row(y0);
-            let row1 = bg.row(y1);
-            let clamp_w = bg.width().saturating_sub(1);
-            let fx_at = |q: u64| ((q >> 24) as u32).saturating_sub(FRAC / 2);
-            let col_start = (fx_at(bg_fx_q) >> FRACBITS).min(clamp_w);
-            let last_q =
-                bg_fx_q.wrapping_add(bg_fx_step_q.wrapping_mul(ctx.out_w.saturating_sub(1) as u64));
-            let col_end = ((fx_at(last_q) >> FRACBITS).min(clamp_w) + 1).min(clamp_w);
-            let ncols = (col_end - col_start + 1) as usize;
-            vblend.clear();
-            vblend.resize(ncols * 4, 0);
-            for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                // Truncated rows (partial/streaming decode) contribute zeros,
-                // exactly like bilinear_from_rows' out-of-range corners.
-                let off = (col_start as usize + i) * 4;
-                let p0 = row0.get(off..off + 4);
-                let p1 = row1.get(off..off + 4);
-                for ch in 0..4 {
-                    let a = p0.map_or(0, |q| q[ch] as u32);
-                    let b = p1.map_or(0, |q| q[ch] as u32);
-                    v[ch] = (a * ity + b * ty) as u16;
-                }
-            }
-            Some(BgRow::Blend(
-                vblend.as_chunks::<4>().0,
-                bg.width(),
-                col_start,
-            ))
-        }
+        Some(bg) => Some(blend_bg_row(ctx, bg, fy, bg_fx_q, bg_fx_step_q, vblend)),
     };
 
     // D_AA_ZOOM (opt-in): this function is only invoked when `!downscale`
     // (composite_into/composite_rows dispatch downscale to the area-average
     // path), but that includes an exact page-level 1:1 render whose *bg*
     // plane is subsampled (bg_x_q24/bg_y_q24 != 1<<24) — very common for
-    // scanned BG44 pages — which fails the "extra-tight" 1:1 fast path above
-    // and falls through here too. Mask AA must only kick in on a genuine
+    // scanned BG44 pages — which fails the 1:1 test in
+    // `composite_rows_bilinear_one` and lands here too. Mask AA must only kick in on a genuine
     // zoom (upscale in at least one axis), never on that native 1:1 case, so
     // gate on `fx_step`/`fy_step` directly rather than reusing `!downscale`.
     let mask_upscale =
@@ -1499,6 +1495,94 @@ pub(super) fn composite_rows_bilinear_one(
             )
         }),
     }
+}
+
+/// The #831 arm of [`zoom_row`]: DjVuLibre's `GPixmapScaler` vertical pass,
+/// rounded to 8 bits, over the plane columns the row reads.
+#[inline(always)]
+fn scaled_bg_row<'v>(
+    ctx: &CompositeContext<'_>,
+    bg: PlaneView<'_>,
+    oy: u32,
+    out_w: usize,
+    bx: Option<&[BilinearX]>,
+    vblend: &'v mut Vec<u16>,
+) -> BgRow<'v> {
+    let red = ctx.bg_red;
+    let (lower, upper, f) = scaler_rows(oy + ctx.offset_y, ctx.page_h, red, bg.height());
+    let entry = |ox: usize| {
+        bx.and_then(|t| t.get(ox).copied())
+            .unwrap_or_else(|| scaler_x(ox as u32 + ctx.offset_x, red, bg.width()))
+    };
+    let col_start = entry(0).x0;
+    let col_end = entry(out_w.saturating_sub(1)).x1.max(col_start);
+    let ncols = (col_end - col_start + 1) as usize;
+    vblend.clear();
+    vblend.resize(ncols * 4, 0);
+    let (r0, r1) = (bg.row(lower), bg.row(upper));
+    let span = col_start as usize * 4..(col_end as usize + 1) * 4;
+    if let (Some(a), Some(b)) = (r0.get(span.clone()), r1.get(span)) {
+        for ((v, &a), &b) in vblend.iter_mut().zip(a).zip(b) {
+            *v = scaler_lerp(a as u32, b as u32, f) as u16;
+        }
+    } else {
+        for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            // Truncated rows (partial/streaming decode) read as zeros,
+            // as in the bilinear arm below.
+            let off = (col_start as usize + i) * 4;
+            let p0 = r0.get(off..off + 4);
+            let p1 = r1.get(off..off + 4);
+            for ch in 0..3 {
+                let a = p0.map_or(0, |q| q[ch] as u32);
+                let b = p1.map_or(0, |q| q[ch] as u32);
+                v[ch] = scaler_lerp(a, b, f) as u16;
+            }
+        }
+    }
+    BgRow::Scaled(vblend.as_chunks::<4>().0, col_start)
+}
+
+/// The bilinear arm of [`zoom_row`]: the vertical half of the separable
+/// blend over the plane columns the row reads.
+#[inline(always)]
+fn blend_bg_row<'v>(
+    ctx: &CompositeContext<'_>,
+    bg: PlaneView<'_>,
+    fy: u32,
+    bg_fx_q: u64,
+    bg_fx_step_q: u64,
+    vblend: &'v mut Vec<u16>,
+) -> BgRow<'v> {
+    let bg_fy = map_plane_center_frac(fy, ctx.bg_y_q24);
+    let clamp_h = bg.height().saturating_sub(1);
+    let y0 = (bg_fy >> FRACBITS).min(clamp_h);
+    let y1 = (y0 + 1).min(clamp_h);
+    let ty = bg_fy & FRAC_MASK;
+    let ity = FRAC - ty;
+    let row0 = bg.row(y0);
+    let row1 = bg.row(y1);
+    let clamp_w = bg.width().saturating_sub(1);
+    let fx_at = |q: u64| ((q >> 24) as u32).saturating_sub(FRAC / 2);
+    let col_start = (fx_at(bg_fx_q) >> FRACBITS).min(clamp_w);
+    let last_q =
+        bg_fx_q.wrapping_add(bg_fx_step_q.wrapping_mul(ctx.out_w.saturating_sub(1) as u64));
+    let col_end = ((fx_at(last_q) >> FRACBITS).min(clamp_w) + 1).min(clamp_w);
+    let ncols = (col_end - col_start + 1) as usize;
+    vblend.clear();
+    vblend.resize(ncols * 4, 0);
+    for (i, v) in vblend.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        // Truncated rows (partial/streaming decode) contribute zeros,
+        // exactly like bilinear_from_rows' out-of-range corners.
+        let off = (col_start as usize + i) * 4;
+        let p0 = row0.get(off..off + 4);
+        let p1 = row1.get(off..off + 4);
+        for ch in 0..4 {
+            let a = p0.map_or(0, |q| q[ch] as u32);
+            let b = p1.map_or(0, |q| q[ch] as u32);
+            v[ch] = (a * ity + b * ty) as u16;
+        }
+    }
+    BgRow::Blend(vblend.as_chunks::<4>().0, bg.width(), col_start)
 }
 
 /// Write one area-average row into `row_buf` (downscale).

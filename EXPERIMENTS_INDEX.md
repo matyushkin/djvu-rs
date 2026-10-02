@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-01.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-02.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| COMPOSITE_BILINEAR_SPLIT | 2026-10-02 | render (compositor, `src/djvu_render/composite.rs`) | **K** | 537-line `composite_rows_bilinear_one` split into a dispatcher + `native_row_bg_mask` / `native_row` / `zoom_row` (+ small helpers). With `zoom_row` `#[inline(never)]`: native and zoom benches −2.7…0%, `render_page/dpi/144` +3.0% (≈11 µs, code layout); inlined `zoom_row` was +1…4% on zoom | Follow-up of #889. Pixel code moved, not changed. Inlining-sensitive like COMPOSITE_BILINEAR_NOINLINE. |
 | BG_COLUMN_WINDOW | 2026-10-01 | IW44 column window + banded background (`crates/djvu-iw44/src/lib.rs`, `src/djvu_render.rs`) | **K** | big_scanned_page cached 256-px tile, median: ¼ Lanczos 88 → 23 ms; ½ Lanczos 57 → 9.5 ms; 2× bilinear 26.5 → 2.5 ms. Byte-identical | `Iw44Image::rgb_window(rows, cols)` decodes only the block columns a band reads (+8-block halo); `bg_cols_needed` mirrors the compositor column mapping (truncated `fx_step` matters). Band cache rejected: one band (~28 MB) exceeds the 8 MiB tile budget. |
 | LANCZOS_REGION_WINDOW | 2026-10-01 | Lanczos-3 resampler + region / tile cache (`src/pixmap.rs`, `src/djvu_render.rs`) | **K** | 2× viewport region 359 → 3 ms (~120×); cold 6-step pan 2128 → 48 ms; whole-page grid of cached tiles 4151 → 123 ms; big_scanned_page 2× region: error → 49 ms. Byte-identical | `scale_lanczos3_window` rescales only the native window a region reads; one `Axis` gives both passes their taps. The tile cache filters the tiles of the request instead of the whole page (`cache_whole_page` removed). Whole-page Lanczos unchanged. Follow-up: banded backgrounds re-decode the band at native resolution per miss (~65 ms/tile). |
 | COMPOSITE_BILINEAR_NOINLINE | 2026-09-29 | render (compositor, `src/djvu_render.rs`) | **K** | Removes the #872 regression: native-size renders +11–14% → −1.5…+1.7%, 144–600 dpi +8% → +1–2% vs f4dd12c; keeps the #872 gains (72 dpi −41%, colorbook −29%). Output unchanged | `#[inline(never)]` on `composite_rows_bilinear_one` only; also forbidding the area-average row loses the small-scale gains (v1), forbidding only that one keeps the regression (v3). Found with `sample`; CI hid it under runner drift. aarch64 only. |

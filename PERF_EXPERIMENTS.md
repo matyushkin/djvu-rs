@@ -16453,3 +16453,47 @@ tests `reconstruct_window_matches_the_whole_plane`,
 `rgb_window_matches_the_whole_picture`,
 `banded_tiles_match_a_full_width_strip`; extended
 `banded_background_composites_like_the_whole_one`).
+
+### COMPOSITE_BILINEAR_SPLIT (2026-10-02) — the bilinear row function split by path
+
+**Issue.** Follow-up of #889. After the module split,
+`composite_rows_bilinear_one` was still one function of 537 lines: the 1:1
+fast path, the general 1:1 path and the zoom path in one body. Its speed is
+sensitive to inlining (COMPOSITE_BILINEAR_NOINLINE), so the split had to be
+measured.
+
+**Approach.** The function now only dispatches: `native_row_bg_mask` (1:1,
+background and mask only), `native_row` (other 1:1 rows) or `zoom_row`.
+Small shared helpers: `row_page_y`, `mask_row_at`, `mask_row_blank`,
+`native_row_blank` (F2), `expand_mask_row` (G1), `scaled_bg_row` and
+`blend_bg_row` (the two `BgRow` arms). All helpers are `#[inline(always)]`;
+the pixel code is moved, not changed. Two variants: v1 with `zoom_row`
+inlined, v2 with `zoom_row` `#[inline(never)]`.
+
+**Numbers.** M1 Max, `benches/render.rs`, three bench binaries (before,
+v1, v2) run in turn, three rounds, best of three, change vs before.
+
+| Benchmark | v1 inlined | **v2 `zoom_row` out of line** |
+|---|---:|---:|
+| `render_page/dpi/144` (boy, 1.44× zoom) | +4.0% | **+3.0%** |
+| `render_page/dpi/300` (3× zoom) | +2.1% | **−0.0%** |
+| `render_native_stages/render_pixmap/watchmaker_color` | +1.1% | **−1.0%** |
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | −0.0% | **−1.0%** |
+| `render_native_stages/render_pixmap/cable_bilevel` | −0.4% | **−1.6%** |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | −0.4% | **−1.3%** |
+| `render_compositor_only/color_native_cached` | +1.1% | **−1.0%** |
+| `render_compositor_only/bilevel_native_cached` | +2.6% | **−0.7%** |
+| `render_compositor_only/palette_native_cached` | −0.8% | **−2.7%** |
+| `render_scaled_large_colorbook/bilinear` | +0.5% | **−0.4%** |
+
+A first full run of v1 (19 benchmarks) put every downscale benchmark
+within ±1.2%; downscale rows do not go through this function.
+
+**Decision.** Kept v2.
+
+**Reason.** The largest piece is now `zoom_row`, about 170 lines, most of
+them the pixel loop. v2 is equal or faster on nine of ten benchmarks. The
+one loss, `dpi/144` +3.0% (about 11 µs on a 0.38 ms render), was steady
+across rounds but did not show at `dpi/300`, which runs the same path on
+four times as many pixels; it looks like code layout, not extra work.
+Output is unchanged: the 163 render unit tests and the full suite pass.
