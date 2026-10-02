@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790895482154,
+  "lastUpdate": 1790901469547,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22606,6 +22606,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 59402000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "48350409f7be25bed98cfc545d73d55acc9df11e",
+          "message": "refactor(render): split the 537-line bilinear row function by path (#892)\n\nFollow-up of #889. composite_rows_bilinear_one held the 1:1 fast path,\nthe general 1:1 path and the zoom path in one 537-line body. It now only\ndispatches to native_row_bg_mask, native_row or zoom_row, with small\nshared helpers (row_page_y, mask_row_at, mask_row_blank,\nnative_row_blank, expand_mask_row, scaled_bg_row, blend_bg_row). The\npixel code is moved, not changed.\n\nzoom_row stays out of line: inlined, zoomed renders ran 2-4% slower.\nWith it out of line, nine of ten render benchmarks are equal or 1-2.7%\nfaster; render_page/dpi/144 is +3.0% (about 11 us, code layout).\nRecorded as COMPOSITE_BILINEAR_SPLIT.\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-02T00:13:15Z",
+          "tree_id": "6aa068d4a86a2381d7e2b8e03af6b8d893717291",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/48350409f7be25bed98cfc545d73d55acc9df11e"
+        },
+        "date": 1790901468347,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8167000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49359000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47191000,
             "range": "± 0",
             "unit": "ns/iter"
           }
