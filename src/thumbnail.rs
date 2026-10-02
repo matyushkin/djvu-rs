@@ -9,7 +9,7 @@
 //! Thumbnails are embedded as `TH44` chunks **inside the page's own
 //! `FORM:DJVU`** component — one or more consecutive `TH44` sub-chunks form
 //! a single IW44 stream, just like BG44 chunks. This is the layout the
-//! per-page `thumbnail()` reader in `djvu_document.rs` expects: it collects
+//! per-page `thumbnail()` reader in `djvu_document/page.rs` expects: it collects
 //! all `TH44` chunks from `self.chunks` and feeds them to the IW44 decoder.
 //!
 //! The alternative — a separate `FORM:THUM` component in the DIRM — is an
