@@ -197,6 +197,9 @@ Behaviour also changed: the render caches are now bounded by default. See §7.
 - MSRV is a **required** CI gate (the `MSRV (1.88)` job builds the crate on the
   pinned toolchain). A PR that uses a newer-than-MSRV language or std feature
   fails that gate.
+- One exception: the experimental `ocr-onnx` feature needs Rust **1.91**, the
+  MSRV of its `tract-onnx` 0.23 dependency. The MSRV job builds the default
+  features, so it does not cover `ocr-onnx`.
 
 ## 4. Feature combinations and targets
 

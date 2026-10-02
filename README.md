@@ -900,7 +900,7 @@ Honest boundaries, so you can decide fast:
 | `wasm-lazy` | disabled | Lazy Range-based document loading in the browser: a JS `(offset, len)` reader fetches only the pages you open |
 | `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
 | `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
-| `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx` (#693): pinned manifest + SHA-256-verified weights, DBNet detection, Cyrillic CTC recognition, CLI `--backend onnx` |
+| `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx` (#693; needs Rust 1.91): pinned manifest + SHA-256-verified weights, DBNet detection, Cyrillic CTC recognition, CLI `--backend onnx` |
 | `ocr-neural` | disabled | Placeholder backend only — `CandleBackend::load` returns a clear unsupported error |
 | `ocr-neural-candle` | disabled | Deprecated no-op alias for `ocr-neural` |
 | `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |
@@ -967,6 +967,9 @@ Recent targeted experiments are recorded in
 ## Minimum supported Rust version (MSRV)
 
 Rust **1.88** (edition 2024 — let-chains stabilized in 1.88)
+
+One exception: the experimental `ocr-onnx` feature needs Rust **1.91**, the
+MSRV of its `tract-onnx` 0.23 dependency.
 
 ## Roadmap
 

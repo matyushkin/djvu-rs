@@ -29,14 +29,7 @@ use crate::ocr::{OcrBackend, OcrError, OcrOptions};
 use crate::pixmap::Pixmap;
 use crate::text::{Rect, TextLayer, TextZone, TextZoneKind};
 
-type OnnxModel = tract_onnx::prelude::SimplePlan<
-    tract_onnx::prelude::TypedFact,
-    Box<dyn tract_onnx::prelude::TypedOp>,
-    tract_onnx::prelude::Graph<
-        tract_onnx::prelude::TypedFact,
-        Box<dyn tract_onnx::prelude::TypedOp>,
-    >,
->;
+type OnnxModel = tract_onnx::prelude::Arc<tract_onnx::prelude::TypedRunnableModel>;
 
 /// Experimental ONNX-based OCR backend using tract.
 ///
@@ -139,7 +132,7 @@ impl OcrBackend for OnnxBackend {
             .map_err(|e| OcrError::RecognitionFailed(format!("model inference failed: {e}")))?;
 
         let output = result[0]
-            .to_array_view::<f32>()
+            .to_plain_array_view::<f32>()
             .map_err(|e| OcrError::RecognitionFailed(format!("output tensor error: {e}")))?;
 
         let shape = output.shape();
