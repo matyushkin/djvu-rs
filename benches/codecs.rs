@@ -48,6 +48,33 @@ fn first_sjbz_chunk(data: &[u8]) -> Option<Vec<u8>> {
     find_chunk_legacy(file.root.children(), b"Sjbz")
 }
 
+/// Extract page 0's Sjbz plus the shared Djbz dictionary it `INCL`s.
+///
+/// Multi-page scans keep their JB2 symbols in a shared `DJVI` component;
+/// decoding the `Sjbz` without it fails with `MissingSharedDict`.  The `INCL`
+/// id is looked up in the DIRM directory, whose order matches the top-level
+/// FORMs in the file.
+fn first_page_sjbz_with_dict(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let doc = djvu_rs::DjVuDocument::parse(data).ok()?;
+    let page = doc.page(0).ok()?;
+    let sjbz = page.raw_chunk(b"Sjbz")?.to_vec();
+    let incl = std::str::from_utf8(page.raw_chunk(b"INCL")?).ok()?.trim();
+    let index = doc
+        .component_directory()
+        .ok()?
+        .iter()
+        .position(|entry| entry.id == incl)?;
+    let file = djvu_rs::iff::parse(data).ok()?;
+    let component = file
+        .root
+        .children()
+        .iter()
+        .filter(|c| matches!(c, djvu_rs::iff::Chunk::Form { .. }))
+        .nth(index)?;
+    let djbz = find_chunk_legacy(std::slice::from_ref(component), b"Djbz")?;
+    Some((sjbz, djbz))
+}
+
 /// Extract the first BZZ-encoded chunk data (DIRM or NAVM) from a multi-page DjVu.
 fn first_bzz_payload(data: &[u8]) -> Option<Vec<u8>> {
     let form = djvu_rs::iff::parse_form(data).ok()?;
@@ -147,10 +174,9 @@ fn bench_jb2_decode(c: &mut Criterion) {
         }
     };
 
+    djvu_rs::jb2::decode(&sjbz, None).expect("Sjbz decodes without a shared dict");
     c.bench_function("jb2_decode", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
-        });
+        b.iter(|| black_box(djvu_rs::jb2::decode(black_box(&sjbz), None)));
     });
 }
 
@@ -199,10 +225,9 @@ fn bench_jb2_decode_corpus(c: &mut Criterion) {
             return;
         }
     };
+    djvu_rs::jb2::decode(&sjbz, None).expect("Sjbz decodes without a shared dict");
     c.bench_function("jb2_decode_corpus_bilevel", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
-        });
+        b.iter(|| black_box(djvu_rs::jb2::decode(black_box(&sjbz), None)));
     });
 }
 
@@ -244,18 +269,26 @@ fn bench_jb2_decode_large(c: &mut Criterion) {
             return;
         }
     };
-    let sjbz = match first_sjbz_chunk(&data) {
+    let (sjbz, djbz) = match first_page_sjbz_with_dict(&data) {
         Some(c) => c,
         None => {
-            eprintln!("skipping bench_jb2_decode_large: no Sjbz chunk found");
+            eprintln!("skipping bench_jb2_decode_large: no Sjbz + shared Djbz found");
             return;
         }
     };
-    eprintln!("bench_jb2_decode_large: Sjbz chunk = {} bytes", sjbz.len());
+    // The page INCLs a shared dictionary; decoding without it returns
+    // `MissingSharedDict` at once, which is what this bench used to time (#906).
+    let dict = djvu_rs::jb2::decode_dict(&djbz, None).expect("shared Djbz decodes");
+    let bitmap = djvu_rs::jb2::decode(&sjbz, Some(&dict)).expect("large-page Sjbz decodes");
+    eprintln!(
+        "bench_jb2_decode_large: Sjbz = {} bytes, Djbz = {} bytes, page = {}x{}",
+        sjbz.len(),
+        djbz.len(),
+        bitmap.width,
+        bitmap.height
+    );
     c.bench_function("jb2_decode_large_600dpi", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::jb2::decode(black_box(&sjbz), None);
-        });
+        b.iter(|| black_box(djvu_rs::jb2::decode(black_box(&sjbz), Some(&dict))));
     });
 }
 
