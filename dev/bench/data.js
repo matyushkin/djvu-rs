@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791033423260,
+  "lastUpdate": 1791036891852,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22894,6 +22894,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 34830000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "26dce7d30951e780b47ff784d520f84a1eb7dcff",
+          "message": "refactor(djvm): split src/djvm.rs into a module per concern (#907) (#910)\n\nsrc/djvm.rs had 2799 lines: five concerns plus ~1470 lines of tests.\nMove it to a directory module with no code change:\n\n- mod.rs       module docs, imports, DjvmError\n- stream.rs    DjvmStreamWriter, DjvmSpool and the spool storage\n- bundle.rs    Bundle, BundlePart, build_djvm, FORM helpers\n- edit.rs      remove_pages, dedup_shared_components and their types\n- indirect.rs  to_indirect, create_indirect*, IndirectDocument\n- merge.rs     merge, split\n- tests.rs     the former inline test module\n\nPrivate items a sibling needs are now pub(super), the same reach they\nhad when the module was one file. BundlePart and build_djvm keep their\npub(crate) path crate::djvm::*. The rustdoc item list matches main.\n\nCloses #907\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-03T13:53:53Z",
+          "tree_id": "403414a840b4866884b5bf7771814a787d57800b",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/26dce7d30951e780b47ff784d520f84a1eb7dcff"
+        },
+        "date": 1791036890458,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 99000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 4959000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30632000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29157000,
             "range": "± 0",
             "unit": "ns/iter"
           }
