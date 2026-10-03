@@ -13,7 +13,7 @@ Read, render, convert, and create DjVu files. Pure-Rust library with a CLI,
 WebAssembly, and Python bindings — on [crates.io](https://crates.io/crates/djvu-rs),
 [PyPI](https://pypi.org/project/djvu-rs/), and [npm](https://www.npmjs.com/package/djvu-rs)
 as `djvu-rs`. MIT licensed, no GPL dependencies, written from the public DjVu v3
-specification.
+specification. Renders and encodes [1.1–2.2× faster than DjVuLibre](#performance).
 
 | Your task | How |
 |-----------|-----|
@@ -943,6 +943,32 @@ combinations and targets), and is enforced in CI. In short:
   [`SECURITY.md`](SECURITY.md#decode-time-resource-ceilings).
 
 ## Performance
+
+**Faster than DjVuLibre** 3.5.29, the reference C implementation, on every
+measured render and encode case (Apple M1 Max, 2026-10-03, same machine for
+both):
+
+| Render (page already open) | djvu-rs | DjVuLibre | djvu-rs |
+|----------------------------|--------:|----------:|--------:|
+| `boy.djvu` @ 72 dpi, small colour page | 61.7 µs | 124 µs | **2.0× faster** |
+| `colorbook.djvu` @ 150 dpi, large colour page downscaled | 4.46 ms | 6.37 ms | **1.4× faster** |
+| `watchmaker.djvu` @ 300 dpi, colour scan, full size | 26.8 ms | 37.8 ms | **1.4× faster** |
+| `cable_1973_100133.djvu` @ 300 dpi, black-and-white scan | 22.6 ms | 36.8 ms | **1.6× faster** |
+
+| Encode | djvu-rs | DjVuLibre | Speed | File size |
+|--------|--------:|----------:|------:|----------:|
+| colour scan (`watchmaker`), IW44 vs `c44` | 283 ms | 628 ms | **2.2× faster** | 1.025× |
+| illustrated colour page (`goody two-shoes`), IW44 vs `c44` | 406 ms | 503 ms | **1.2× faster** | 1.040× |
+| map atlas, lossless JB2 vs `cjb2` | 162 ms | 359 ms | **2.2× faster** | **0.952×** |
+| text page (`cable`), lossless JB2 vs `cjb2` | 26.0 ms | 28.4 ms | 1.1× faster | 1.011× |
+
+The DjVuLibre render column times `ddjvu_page_render` on a page it has already
+decoded; djvu-rs times a repeat `render_pixmap` of the same page. A cold
+first render — parse the file, decode, render — is also faster:
+`colorbook.djvu` takes 13.7 ms in djvu-rs against 41.6 ms for DjVuLibre's
+open + decode + render. Encoded colour pages match or beat `c44` fidelity
+(decoded PSNR); JB2 output decodes pixel-exact. In June 2026 djvu-rs was still
+1.2–2.1× *slower* than DjVuLibre on the same render matrix.
 
 See [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md) for Criterion numbers,
 methodology, and a DjVuLibre comparison (run via

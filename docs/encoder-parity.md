@@ -92,6 +92,20 @@ JB2 lossless is now **0.952–1.011×** `cjb2` (was 0.952–2.100×) and still
 faster than `cjb2`. The cost is encode time on pages where tiles win: map
 atlas 29.6 → 149.4 ms, because both encodings run.
 
+## 2026-10-03 snapshot
+
+Rerun on djvu-rs `3e64096`, Rust 1.98, DjVuLibre 3.5.29, Apple M1 Max, three
+repetitions, `--no-ocr`. Sizes are unchanged from the snapshots above; djvu-rs
+is faster than DjVuLibre on every case.
+
+| Case | Mode | DjVuLibre B | djvu-rs B | Size ratio | DjVuLibre ms | djvu-rs ms | DjVuLibre RSS | djvu-rs RSS | Quality |
+|------|------|------------:|----------:|-----------:|--------------:|------------:|--------------:|------------:|---------|
+| watchmaker | IW44 photo / `c44` | 665,625 | 682,598 | 1.025× | 627.9 | 283.1 | 145,696 | 141,456 | PSNR 45.96 / 45.28 dB |
+| goody two-shoes | IW44 photo / `c44` | 327,798 | 340,872 | 1.040× | 503.4 | 405.8 | 135,664 | 183,136 | PSNR 41.14 / 40.83 dB |
+| cable | JB2 lossless / `cjb2` | 2,248 | 2,272 | 1.011× | 28.4 | 26.0 | 17,168 | 16,288 | pixel-exact |
+| map atlas | JB2 lossless / `cjb2` | 145,592 | 138,672 | 0.952× | 358.7 | 161.5 | 35,360 | 22,368 | pixel-exact |
+| Chinese cookbook | JB2 lossless / `cjb2` | 67 | 66 | 0.985× | 24.0 | 21.7 | 15,168 | 14,528 | pixel-exact |
+
 ## Decision boundary
 
 The scorecard is the measurement harness; the two IW44 fixes above were promoted
