@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.2](https://github.com/matyushkin/djvu-rs/compare/v0.40.1...v0.40.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **bench:** decode the large JB2 page with its shared dictionary ([#906](https://github.com/matyushkin/djvu-rs/issues/906)) ([#908](https://github.com/matyushkin/djvu-rs/issues/908)) ([54fde7c](https://github.com/matyushkin/djvu-rs/commit/54fde7cfbc9a5125fed7bd2ec2d1df47a552ec4e))
+* **bench:** make bzz_decode and the large IW44 benches measure real work ([#915](https://github.com/matyushkin/djvu-rs/issues/915)) ([#916](https://github.com/matyushkin/djvu-rs/issues/916)) ([3e64096](https://github.com/matyushkin/djvu-rs/commit/3e640960476a3d1991c3179c3ee2565d66fd5881))
+
 ## [0.40.1](https://github.com/matyushkin/djvu-rs/compare/v0.40.0...v0.40.1) (2026-10-02)
 
 
