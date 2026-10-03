@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791036891852,
+  "lastUpdate": 1791041561457,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22942,6 +22942,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29157000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f17ce673609c236bf71e7824498700e4c1ed3904",
+          "message": "refactor(pdf): split src/pdf.rs into a module per concern (#911) (#913)\n\nsrc/pdf.rs had 2626 lines: five concerns around the public entry points\nplus ~1300 lines of tests. Move it to a directory module with no code\nchange:\n\n- mod.rs      module docs, PdfError, PdfOptions, djvu_to_pdf* and the driver\n- writer.rs   low-level PDF syntax: object writer, stream builders, formatting\n- page.rs     per-page geometry, background image, links, page objects\n- mask.rs     JB2 foreground masks and per-colour stencil layers\n- text.rs     the invisible text layer\n- outline.rs  bookmarks as the PDF outline\n- tests.rs    the former inline test module\n\nPrivate items a sibling needs are now pub(super), the same reach they\nhad when the module was one file. The rustdoc item list matches main;\npdf_export_sequential is unchanged (+0.3%, noise).\n\nCloses #911\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-03T15:07:48Z",
+          "tree_id": "67649a1f6756cdd81c619c1020e13662273cb4f8",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/f17ce673609c236bf71e7824498700e4c1ed3904"
+        },
+        "date": 1791041559342,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 162000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8734000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 53378000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51445000,
             "range": "± 0",
             "unit": "ns/iter"
           }
