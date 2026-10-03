@@ -75,16 +75,15 @@ fn first_page_sjbz_with_dict(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((sjbz, djbz))
 }
 
-/// Extract the first BZZ-encoded chunk data (DIRM or NAVM) from a multi-page DjVu.
-fn first_bzz_payload(data: &[u8]) -> Option<Vec<u8>> {
+/// Extract the NAVM chunk of a DjVu file. NAVM is BZZ-compressed from its
+/// first byte. (A bundled DIRM is not: its BZZ part follows the flags, the
+/// count and the component offsets.)
+fn navm_bzz_payload(data: &[u8]) -> Option<Vec<u8>> {
     let form = djvu_rs::iff::parse_form(data).ok()?;
-    for chunk in &form.chunks {
-        if (&chunk.id == b"DIRM" || &chunk.id == b"NAVM") && chunk.data.len() > 1 {
-            // Skip the 1-byte flags field
-            return Some(chunk.data[1..].to_vec());
-        }
-    }
-    None
+    form.chunks
+        .iter()
+        .find(|chunk| &chunk.id == b"NAVM")
+        .map(|chunk| chunk.data.to_vec())
 }
 
 fn bench_bzz_decode(c: &mut Criterion) {
@@ -97,7 +96,7 @@ fn bench_bzz_decode(c: &mut Criterion) {
         }
     };
 
-    let bzz_payload = match first_bzz_payload(&data) {
+    let bzz_payload = match navm_bzz_payload(&data) {
         Some(p) => p,
         None => {
             eprintln!("skipping bench_bzz_decode: no BZZ payload found");
@@ -105,10 +104,24 @@ fn bench_bzz_decode(c: &mut Criterion) {
         }
     };
 
+    // The old input (DIRM minus one byte) was not BZZ, so every iteration
+    // returned an error at once (#915).
+    djvu_rs::bzz::bzz_decode(&bzz_payload).expect("NAVM payload decodes");
     c.bench_function("bzz_decode", |b| {
-        b.iter(|| {
-            let _ = djvu_rs::bzz::bzz_decode(black_box(&bzz_payload));
-        });
+        b.iter(|| black_box(djvu_rs::bzz::bzz_decode(black_box(&bzz_payload))));
+    });
+
+    // A realistic, larger payload: the cable corpus page's text layer.
+    let Some(txtz) = std::fs::read(corpus_path().join("cable_1973_100133.djvu"))
+        .ok()
+        .and_then(|d| first_txtz_payload(&d))
+    else {
+        eprintln!("skipping bzz_decode_txtz: cable_1973_100133.djvu TXTz not found");
+        return;
+    };
+    djvu_rs::bzz::bzz_decode(&txtz).expect("TXTz payload decodes");
+    c.bench_function("bzz_decode_txtz", |b| {
+        b.iter(|| black_box(djvu_rs::bzz::bzz_decode(black_box(&txtz))));
     });
 }
 
@@ -292,17 +305,15 @@ fn bench_jb2_decode_large(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: decode ALL BG44 chunks for pathogenic_bacteria_1896.djvu page 0
-/// (large mixed-content page, 600 dpi).  This isolates the ZP arithmetic decode
+/// Benchmark: decode ALL BG44 chunks for war_1812.djvu page 0
+/// (large colour page, 2753x4048, four BG44 chunks).  This isolates the ZP arithmetic decode
 /// cost without any wavelet reconstruction or colour conversion.
 fn bench_iw44_decode_large_all_chunks(c: &mut Criterion) {
-    let path = corpus_path().join("pathogenic_bacteria_1896.djvu");
+    let path = corpus_path().join("war_1812.djvu");
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(_) => {
-            eprintln!(
-                "skipping bench_iw44_decode_large_all_chunks: pathogenic_bacteria_1896.djvu not found"
-            );
+            eprintln!("skipping bench_iw44_decode_large_all_chunks: war_1812.djvu not found");
             return;
         }
     };
@@ -321,10 +332,12 @@ fn bench_iw44_decode_large_all_chunks(c: &mut Criterion) {
         }
     };
     let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
-    if chunks.is_empty() {
-        eprintln!("skipping bench_iw44_decode_large_all_chunks: no BG44 chunks");
-        return;
-    }
+    // An empty list here means the bench input is wrong, not missing: fail
+    // loudly instead of silently skipping (#915).
+    assert!(
+        !chunks.is_empty(),
+        "war_1812.djvu page 0 must have BG44 chunks"
+    );
     eprintln!(
         "bench_iw44_decode_large_all_chunks: {} BG44 chunks, total {} bytes",
         chunks.len(),
@@ -341,14 +354,15 @@ fn bench_iw44_decode_large_all_chunks(c: &mut Criterion) {
     });
 }
 
-/// Benchmark: `to_rgb()` on a pre-decoded large page — isolates wavelet
+/// Benchmark: `to_rgb()` on a pre-decoded large page (war_1812.djvu page 0,
+/// 2753x4048) — isolates wavelet
 /// reconstruction + colour conversion from ZP arithmetic decode.
 fn bench_iw44_to_rgb_large(c: &mut Criterion) {
-    let path = corpus_path().join("pathogenic_bacteria_1896.djvu");
+    let path = corpus_path().join("war_1812.djvu");
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(_) => {
-            eprintln!("skipping bench_iw44_to_rgb_large: pathogenic_bacteria_1896.djvu not found");
+            eprintln!("skipping bench_iw44_to_rgb_large: war_1812.djvu not found");
             return;
         }
     };
@@ -367,10 +381,12 @@ fn bench_iw44_to_rgb_large(c: &mut Criterion) {
         }
     };
     let chunks: Vec<Vec<u8>> = page.bg44_chunks().iter().map(|s| s.to_vec()).collect();
-    if chunks.is_empty() {
-        eprintln!("skipping bench_iw44_to_rgb_large: no BG44 chunks");
-        return;
-    }
+    // An empty list here means the bench input is wrong, not missing: fail
+    // loudly instead of silently skipping (#915).
+    assert!(
+        !chunks.is_empty(),
+        "war_1812.djvu page 0 must have BG44 chunks"
+    );
 
     // Pre-decode once; benchmark only to_rgb().
     let mut img = djvu_rs::iw44::Iw44Image::new();

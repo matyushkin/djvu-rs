@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-02.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-03.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -313,17 +313,29 @@ Decode pipeline:
 
 ---
 
-## Current Baselines (cool state, M1 Max, aarch64, Rust 1.88)
+## Current Baselines (M1 Max, aarch64, Rust 1.98, measured 2026-10-03)
 
-| Benchmark | Time | Path exercised |
-|-----------|------|----------------|
-| `bilevel_native_cached` | ~37 ms | bilevel 1:1 (P2 + I3 active) |
-| `color_native_cached` | ~47 ms | color 1:1 (G1 + F2 active) |
-| `color_downscale_mixed_cached` | ~15–20 ms | B-series bilinear (watchmaker @150/300) |
-| `render_corpus_bilevel_dpi/72` | ~7 ms | bilevel downscale (POPCNT) |
-| `render_corpus_bilevel_dpi/150` | ~23 ms | bilevel downscale (POPCNT) |
-| `render_colorbook` | ~3.5 ms | area-avg downscale (AREA_FIX) |
-| `encode_color_page_quality_bgheavy` | ~40 ms | single-page colour encode on the BG-heavy composited fixture (seg 21 / jb2 7.8 / iw44 1.8 ms) — the round-56 bench for colour-encode micro-parallelism |
+Best of 3 runs for the rows the June table had; one full `cargo bench --bench render --bench codecs`
+run for the rest. "June" is the previous table (2026-06-24, Rust 1.88); the gap is the sum of the
+kept render/codec experiments since then, not a single change.
+
+| Benchmark | Time | June | Path exercised |
+|-----------|------|------|----------------|
+| `bilevel_native_cached` | ~22 ms | ~37 ms | bilevel 1:1 (P2 + I3 active) |
+| `color_native_cached` | ~26 ms | ~47 ms | color 1:1 (G1 + F2 active) |
+| `color_downscale_mixed_cached` | ~12 ms | ~15–20 ms | B-series bilinear (watchmaker @150/300) |
+| `render_corpus_bilevel_dpi/72` | ~1.7 ms | ~7 ms | bilevel downscale (POPCNT) |
+| `render_corpus_bilevel_dpi/150` | ~6.2 ms | ~23 ms | bilevel downscale (POPCNT) |
+| `render_colorbook` | ~4.4 ms | ~3.5 ms\* | area-avg downscale (AREA_FIX); ~93 % of it is the JB2 mask decode (`render_colorbook_stages/mask_decode` ~4.1 ms) |
+| `encode_color_page_quality_bgheavy` | ~31 ms | ~40 ms | single-page colour encode on the BG-heavy composited fixture — the round-56 bench for colour-encode micro-parallelism |
+| `jb2_decode_large_600dpi` | ~2.4 ms | — | JB2 decode of a 2649x4530 page with its shared Djbz (fixed in #906; it timed an error before) |
+| `iw44_decode_large_all_chunks` | ~25 ms | — | IW44 ZP decode, 4 BG44 chunks of a 2753x4048 page (ran for the first time in #915) |
+| `iw44_to_rgb_large_page` | ~7.4 ms | — | IW44 wavelet reconstruction + YCbCr→RGB, same page (#915) |
+| `bzz_decode_txtz` | ~21 µs | — | BZZ decode of a real text layer (#915) |
+| `pdf_export_sequential` | ~700 ms | — | full DjVu→PDF export of watchmaker (`--features pdf`, `benches/render.rs`) |
+
+\* Not comparable: the bench body changed after June. Its own history in `PERF_EXPERIMENTS.md`
+runs ~7.6 → ~6.3 ms (−16.7 %) → ~4.4 ms (−29 %), so the current figure is the low point, not a regression.
 
 Thermal methodology: use intra-session ratio `target / control` to cancel M1 Max throttling.
 Control for bilevel experiments: `color_native_cached`. Control for color: `bilevel_native_cached`.
