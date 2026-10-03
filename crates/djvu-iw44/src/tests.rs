@@ -472,7 +472,9 @@ fn rgb_window_matches_the_whole_picture() {
             }
         }
         assert!(img.rgb_window(0..1, 0..w + 1).is_err());
-        assert!(img.rgb_window(0..1, 2..1).is_err());
+        #[allow(clippy::reversed_empty_ranges)] // the reversed range is the point
+        let reversed = img.rgb_window(0..1, 2..1);
+        assert!(reversed.is_err());
     }
 }
 
