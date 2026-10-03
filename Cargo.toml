@@ -175,7 +175,7 @@ ab_glyph = "0.2"
 
 [[bin]]
 name = "djvu"
-path = "src/bin/djvu.rs"
+path = "src/bin/djvu/main.rs"
 required-features = ["cli"]
 
 [[example]]
