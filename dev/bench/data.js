@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791053767899,
+  "lastUpdate": 1791068973546,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -23104,6 +23104,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 27219000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "335799138+djvu-rs-release-matyushkin[bot]@users.noreply.github.com",
+            "name": "djvu-rs-release-matyushkin[bot]",
+            "username": "djvu-rs-release-matyushkin[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fa6a85825608e6419f393672e1d81294752e6d93",
+          "message": "chore(main): release 0.40.2 (#909)\n\nCo-authored-by: djvu-rs-release-matyushkin[bot] <335799138+djvu-rs-release-matyushkin[bot]@users.noreply.github.com>",
+          "timestamp": "2026-10-04T00:46:40+02:00",
+          "tree_id": "3128a9bc417e9dca398efad57e4c96330d1fdfa7",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/fa6a85825608e6419f393672e1d81294752e6d93"
+        },
+        "date": 1791068971482,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode_txtz",
+            "value": 18467,
+            "range": "± 303",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_large_all_chunks",
+            "value": 24946890,
+            "range": "± 183276",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_large_page",
+            "value": 8126047,
+            "range": "± 212578",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 106000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5261000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34951000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34298000,
             "range": "± 0",
             "unit": "ns/iter"
           }
