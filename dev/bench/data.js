@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791045325998,
+  "lastUpdate": 1791053767899,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -23038,6 +23038,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29394000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3e640960476a3d1991c3179c3ee2565d66fd5881",
+          "message": "fix(bench): make bzz_decode and the large IW44 benches measure real work (#915) (#916)\n\nA full local bench run, done to refresh the baselines, found three more\nbenches in benches/codecs.rs that did not measure what their names say:\n\n- bzz_decode fed DIRM minus one byte, which is not a BZZ stream, so every\n  iteration returned BlockSizeTooLarge at once (~64 ns). It now decodes\n  the NAVM chunk (BZZ from byte 0, ~2.9 us) and asserts that it decodes.\n  New bzz_decode_txtz decodes a real text layer (~21 us).\n- iw44_decode_large_all_chunks and iw44_to_rgb_large_page used\n  pathogenic_bacteria_1896.djvu, which has no BG44 on any of its 520\n  pages, so they always skipped. They now use war_1812.djvu page 0\n  (2753x4048, 4 BG44 chunks): ~25 ms and ~7.4 ms. A missing BG44 is now\n  an assert, not a silent skip.\n\nRefresh the \"Current Baselines\" table in EXPERIMENTS_INDEX.md: Rust 1.98,\n2026-10-03, with the June figures kept for comparison, and new rows for\nthe fixed benches and pdf_export_sequential.\n\nCloses #915\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-03T18:34:26Z",
+          "tree_id": "c8ab3812c2e6865f4d415c2c54132a7fc1355de9",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/3e640960476a3d1991c3179c3ee2565d66fd5881"
+        },
+        "date": 1791053765835,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode_txtz",
+            "value": 15900,
+            "range": "± 181",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_large_all_chunks",
+            "value": 22008923,
+            "range": "± 611835",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_large_page",
+            "value": 6723038,
+            "range": "± 188878",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 93000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 4627000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 28534000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 27219000,
             "range": "± 0",
             "unit": "ns/iter"
           }
