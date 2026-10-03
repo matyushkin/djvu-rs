@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791041561457,
+  "lastUpdate": 1791045325998,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22990,6 +22990,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 51445000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "06d0e6bf424c788f4aba501502cbe1e1c7329b51",
+          "message": "refactor(cli): split src/bin/djvu.rs into a module per subcommand group (#912) (#914)\n\nThe djvu CLI was one 2487-line file. Move it to src/bin/djvu/ with no\nbehavior change:\n\n- main.rs      clap definitions (Cli, Cmd, argument enums), main, run,\n               ValidateExit, shared open/page_idx helpers, tests\n- optimize.rs  optimize, plus the atomic output writers\n- merge.rs     merge, split\n- inspect.rs   info, inspect\n- validate.rs  validate, diff\n- render.rs    render (PNG, PDF, EPUB, CBZ)\n- ocr.rs       ocr and backend selection\n- text.rs      text\n- bzz.rs       bzz-encode, bzz-decode\n- encode.rs    encode\n\nItems a sibling needs are pub(super). The OCR feature gate moves from\neach function to the `mod ocr` declaration, so builds without an OCR\nbackend do not compile an empty module. The [[bin]] path in Cargo.toml\npoints at src/bin/djvu/main.rs. `djvu --help` and every subcommand's\n--help are byte-identical to main.\n\nCloses #912\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-03T16:14:45Z",
+          "tree_id": "06274c0c53559f64d5c06d305517d14be6a5eb94",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/06d0e6bf424c788f4aba501502cbe1e1c7329b51"
+        },
+        "date": 1791045324358,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 101000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6106000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30871000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29394000,
             "range": "± 0",
             "unit": "ns/iter"
           }
