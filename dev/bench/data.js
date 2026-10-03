@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790983144358,
+  "lastUpdate": 1791033423260,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -22846,6 +22846,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40448000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "54fde7cfbc9a5125fed7bd2ec2d1df47a552ec4e",
+          "message": "fix(bench): decode the large JB2 page with its shared dictionary (#906) (#908)\n\n`jb2_decode_large_600dpi` called `jb2::decode(&sjbz, None)` on a page that\nINCLs a shared Djbz, so every iteration returned `MissingSharedDict` at once\nand the bench timed ~2 µs of error handling.\n\nResolve page 0's INCL through the DIRM directory to its DJVI component,\ndecode that Djbz once outside the timed loop, and pass it to `decode`. The\npage now decodes for real (2649x4530, ~4.3 ms). The other two JB2 decode\nbenches assert once that their input decodes, and all three `black_box`\nthe result instead of discarding it.\n\nAlso silence clippy's `reversed_empty_ranges` on the djvu-iw44 test that\ndeliberately passes `2..1` to `rgb_window`; `cargo clippy -p djvu-iw44\n--all-targets -- -D warnings` failed on it.\n\nCloses #906\n\nClaude-Session: https://claude.ai/code/session_016MqxVUcsw3UbG8SefEzogH",
+          "timestamp": "2026-10-03T12:52:57Z",
+          "tree_id": "2f9291f067cfe330ea082724bf7f69d5779981ae",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/54fde7cfbc9a5125fed7bd2ec2d1df47a552ec4e"
+        },
+        "date": 1791033421270,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 120000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6108000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 36891000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 34830000,
             "range": "± 0",
             "unit": "ns/iter"
           }
