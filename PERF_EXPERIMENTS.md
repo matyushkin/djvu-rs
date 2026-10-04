@@ -16586,3 +16586,41 @@ values, against one `encode_bit` per bit) and
 1024, against a plain per-pixel context loop; a broken window update fails
 it). The dictionary encode is now most of the Lossless time on these
 pages.
+
+
+### JB2_CC_PACKED_SCAN (2026-10-04)
+
+**Issue.** After JB2_DIRECT_WHITE_RUN, `extract_ccs` (connected-component
+search) was most of the Lossless encode time: about 63% on the cable page
+and 75% on the blank Chinese cookbook page (`sample` with the stages kept
+out of line). It unpacked the page into one byte per pixel (7.6 MB for the
+cookbook page) and tested every byte, so a white page still cost ~4 ms.
+
+**Approach.** The DFS (depth-first search) marks visited pixels by clearing
+their bits in a copy of the packed rows (1 bit per pixel; row padding bits
+cleared first). The seed scan skips eight zero bytes (64 white pixels) per
+step and takes the leftmost set bit of a byte with `leading_zeros`. The DFS
+only clears bits, so that bit is the next seed a per-pixel raster scan
+finds; the neighbour order is unchanged. Same components in the same order.
+
+**Numbers.** M1 Max, `encode_jb2_lossless` on the page-1 PBM, median of 15,
+two rounds, base (main after #921) and new in turn:
+
+| Page | Lossless before → after |
+|---|---:|
+| cable | 8.7–8.8 → **4.3–4.4 ms** |
+| Chinese cookbook | 5.5–5.6 → **1.5 ms** |
+| map atlas (22% black) | 145–146 → 142–143 ms |
+
+`encoder_parity_scorecard --repeats 5` (vs cjb2 3.5.29): cable 12.9 →
+**7.8 ms** (cjb2 26.9), cookbook 9.6 → **4.9 ms** (cjb2 23.6), map atlas
+154.5 → **151.4 ms** (cjb2 362.6). Output bytes unchanged (`cmp`, three
+pages). The byte grid (w·h bytes) is gone from the peak.
+
+**Decision.** Kept.
+
+**Reason.** 2–3.8× faster Lossless on text pages, byte-identical. Test
+`extract_ccs_matches_per_pixel_scan` compares components, order and pixels
+with a per-pixel scan on random bitmaps with junk padding bits (it fails
+when the padding mask is removed). On the dense map atlas page
+`encode_jb2_dict_with_ccs` is now ~45% and the direct tiles ~25%.
