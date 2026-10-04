@@ -125,6 +125,28 @@ fn banded_color_encoders(px: &Pixmap, keep: usize, halo: usize) -> [PlaneEncoder
     encs
 }
 
+/// `from_plane` gathers in place, inside the plane's own memory; the grid
+/// must equal the one `gather_rows` copies out of a separate flat plane.
+#[test]
+fn from_plane_matches_gather_rows() {
+    let (w, h) = (101, 70); // 4 x 3 blocks, both edges partial
+    let mut plane = PlaneEncoder::new_plane(w, h);
+    for (i, v) in plane.as_flattened_mut().iter_mut().enumerate() {
+        *v = (i as i32 * 7919 % 65_521 - 32_760) as i16;
+    }
+    let flat = plane.as_flattened().to_vec();
+    let stride = w.div_ceil(32) * 32;
+    let mut copied = PlaneEncoder::new(w, h);
+    copied.gather_rows(&flat, stride, 0, 0, h.div_ceil(32));
+    let in_place = PlaneEncoder::from_plane(w, h, plane);
+    assert_eq!(in_place.block_cols, copied.block_cols);
+    assert_eq!(in_place.recon.len(), copied.recon.len());
+    assert_eq!(
+        differing_block_rows(&in_place, &copied),
+        Vec::<usize>::new()
+    );
+}
+
 /// Block rows that differ between two gathered grids, for the messages.
 fn differing_block_rows(a: &PlaneEncoder, b: &PlaneEncoder) -> Vec<usize> {
     assert_eq!(a.blocks.len(), b.blocks.len());
