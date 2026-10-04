@@ -347,18 +347,22 @@ The libdjvulibre C API harness intentionally avoids upscale cases because
 `ddjvu_page_render` can return a zero buffer when the requested output
 rectangle is larger than the native page.
 
-### Encode (encoder parity scorecard, same run)
+### Encode (encoder parity scorecard, re-run 2026-10-05)
 
-`cargo run --release --example encoder_parity_scorecard -- --no-ocr --repeats 3`;
+`cargo run --release --example encoder_parity_scorecard -- --no-ocr --repeats 5`;
 median wall time, see [`docs/encoder-parity.md`](docs/encoder-parity.md).
+Re-run after the JB2 Lossless speed-ups (#921–#924; `PERF_EXPERIMENTS.md`
+JB2_DIRECT_WHITE_RUN to JB2_REFINE_GRID_BOUND) and the IW44 plane-memory
+change (#919). The 2026-10-03 run had cable 26.0 ms, map atlas 161.5 ms,
+cookbook 21.7 ms. Output sizes are unchanged.
 
 | Case | DjVuLibre | djvu-rs | Speed | Size ratio |
 |------|----------:|--------:|------:|-----------:|
-| watchmaker, IW44 vs `c44` | 627.9 ms | 283.1 ms | djvu-rs **2.2x faster** | 1.025x |
-| goody two-shoes, IW44 vs `c44` | 503.4 ms | 405.8 ms | djvu-rs **1.2x faster** | 1.040x |
-| cable, JB2 lossless vs `cjb2` | 28.4 ms | 26.0 ms | djvu-rs **1.1x faster** | 1.011x |
-| map atlas, JB2 lossless vs `cjb2` | 358.7 ms | 161.5 ms | djvu-rs **2.2x faster** | 0.952x |
-| Chinese cookbook, JB2 lossless vs `cjb2` | 24.0 ms | 21.7 ms | djvu-rs **1.1x faster** | 0.985x |
+| watchmaker, IW44 vs `c44` | 546.5 ms | 283.3 ms | djvu-rs **1.9x faster** | 1.025x |
+| goody two-shoes, IW44 vs `c44` | 440.5 ms | 306.8 ms | djvu-rs **1.4x faster** | 1.040x |
+| cable, JB2 lossless vs `cjb2` | 27.3 ms | 7.8 ms | djvu-rs **3.5x faster** | 1.011x |
+| map atlas, JB2 lossless vs `cjb2` | 383.3 ms | 132.9 ms | djvu-rs **2.9x faster** | 0.952x |
+| Chinese cookbook, JB2 lossless vs `cjb2` | 23.9 ms | 4.9 ms | djvu-rs **4.9x faster** | 0.985x |
 
 ### Summary
 
@@ -368,7 +372,7 @@ median wall time, see [`docs/encoder-parity.md`](docs/encoder-parity.md).
 | Native-resolution corpus render, warm | **djvu-rs** | 1.4-1.6x faster |
 | Cold colorbook render | **djvu-rs** | 13.7 ms vs 41.6 ms (not identical measurements) |
 | `ddjvu` CLI subprocess baseline | slower than either library call | 33.0-85.6 ms across measured cases |
-| Encode (IW44 photo, JB2 lossless) | **djvu-rs** | 1.1-2.2x faster; size 0.952-1.040x |
+| Encode (IW44 photo, JB2 lossless) | **djvu-rs** | 1.4-4.9x faster; size 0.952-1.040x |
 | Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.29 ms |
 
 ---
