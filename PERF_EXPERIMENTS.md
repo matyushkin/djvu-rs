@@ -16660,3 +16660,42 @@ and junk padding bits (it fails without the cand-width mask). Remaining on
 the map page: direct tiles + ZP output ~43%, `extract_ccs` DFS ~18%,
 refinement search ~30% (still 1.18 M compares; a stronger lower bound
 than the ink difference could cut them).
+
+
+### JB2_REFINE_GRID_BOUND (2026-10-04)
+
+**Issue.** After JB2_REFINE_ROW_WORDS the aligned refinement search was
+still ~30% of the map atlas Lossless encode. Counters on the page: 4829
+searches, 1.56 M dictionary entries seen, the ink bound rejected only
+371 k (24%), so 1.19 M compares ran. They stopped after 3.5 of ~7.3 rows
+on average, and only 13 k ended within the limit.
+
+**Approach.** A stronger lower bound, still O(1) per entry. Each bitmap
+gets an `InkGrid`: its black pixels in a 4 × 4 grid of cells set by the
+row and column offsets from the centre (bands < -2, -2..0, 0..2, ≥ 2),
+the same centres `aligned_hamming` lines up. Aligned pixels share a cell,
+so the sum of per-cell count differences is a lower bound on the distance
+(only missing reference ink counts when the reference box is not inside
+the candidate's). It runs after the ink bound. Any valid lower bound skips
+only entries that could not win, so the choices and bytes do not change.
+Offline rejection of the 1.19 M compares: quadrants 43%, 3 × 3 66%,
+4 × 4 72%. Dictionary grids are built once in `RefineIndex::push`; the
+candidate's grid only when an entry passes the ink bound.
+
+**Numbers.** M1 Max, `encode_jb2_lossless`, page-1 PBM, median of 15, two
+rounds in turn: map atlas 126–130 → **116–118 ms** (−8%); cable 4.3 ms
+both. `encoder_parity_scorecard --repeats 5`: map atlas 132.9 →
+**124.6 ms** (cjb2 350.1), cable 7.7 → 8.0 ms and cookbook 4.8 ms (noise,
+few compares). Output bytes unchanged (`cmp`).
+
+Rejected variants: grid counted pixel by pixel, built eagerly for every
+candidate: 131 ms (slower; `ink_grid` 12% of samples, the page has huge
+map-line components); 5 × 5 grid (bands at ±1, ±3): 135–137 ms.
+
+**Decision.** Kept (4 × 4, counted per byte with edge masks, lazy for the
+candidate).
+
+**Reason.** −8% on dense pages, byte-identical. Tests: `ink_grid` matches
+a per-pixel band count, a one-pixel pair that `aligned_hamming` lines up
+always gets bound 0 (catches a top-down/Jbm row flip), and the bound
+never exceeds the exact distance on random pairs within ±3 px.
