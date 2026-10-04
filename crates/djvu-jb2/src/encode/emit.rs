@@ -81,16 +81,19 @@ pub(super) fn encode_jb2_dict_with_ccs(
     let mut dict_entries: Vec<&Bitmap> = Vec::new();
     // Index of dict entries by (w, h) for O(1) lookup of refinement candidates.
     let mut by_size: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
-    // Black-pixel count per dict entry, for the aligned-refinement prefilter.
-    let mut dict_ink: Vec<u32> = Vec::new();
+    // Ink count and row words per dict entry, for the aligned refinement search.
+    let mut refine_index = RefineIndex::default();
     let ink = |bm: &Bitmap| -> u32 { bm.data.iter().map(|b| b.count_ones()).sum() };
     for sym in shared_symbols {
         if aligned.is_some() {
-            dict_ink.push(if is_tight(sym) {
-                ink(sym)
-            } else {
-                NOT_REFINABLE
-            });
+            refine_index.push(
+                sym,
+                if is_tight(sym) {
+                    ink(sym)
+                } else {
+                    NOT_REFINABLE
+                },
+            );
         }
         let idx = dict_entries.len();
         dedup
@@ -172,7 +175,7 @@ pub(super) fn encode_jb2_dict_with_ccs(
                     &cc.bitmap,
                     cc_ink,
                     &dict_entries,
-                    &dict_ink,
+                    &refine_index,
                     &by_size,
                     a.max_dim_delta,
                     a.max_hamming_fraction,
@@ -339,7 +342,7 @@ pub(super) fn encode_jb2_dict_with_ccs(
         let extends_dict = matches!(action, Action::New | Action::RefineAligned(_, true));
         if extends_dict {
             if aligned.is_some() {
-                dict_ink.push(cc_ink);
+                refine_index.push(&cc.bitmap, cc_ink);
             }
             let next_idx = dict_entries.len();
             dedup.entry(dkey).or_default().push(next_idx);

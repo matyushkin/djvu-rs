@@ -170,6 +170,91 @@ pub(super) fn aligned_hamming(cand: &Bitmap, reference: &Bitmap, limit: u32) -> 
     diff
 }
 
+/// Append `bm`'s rows to `out`, one u64 each with the leftmost pixel in the
+/// top bit and the row padding bits cleared. Returns `false`, appending
+/// nothing, when `bm` is not 1 to 64 pixels wide.
+pub(super) fn push_row_words(bm: &Bitmap, out: &mut Vec<u64>) -> bool {
+    if !(1..=64).contains(&bm.width) {
+        return false;
+    }
+    let width_mask = !0u64 << (64 - bm.width);
+    for row in bm
+        .data
+        .chunks_exact(bm.row_stride())
+        .take(bm.height as usize)
+    {
+        let v = row
+            .iter()
+            .enumerate()
+            .fold(0u64, |v, (k, &b)| v | u64::from(b) << (56 - 8 * k));
+        out.push(v & width_mask);
+    }
+    true
+}
+
+/// [`aligned_hamming`] on [`push_row_words`] rows: `cand` is `cw` pixels
+/// wide, `reference` `mw`. Aligning a row is one shift, its distance one
+/// popcount.
+pub(super) fn aligned_hamming_words(
+    cand: &[u64],
+    cw: u32,
+    reference: &[u64],
+    mw: u32,
+    limit: u32,
+) -> u32 {
+    let ch = cand.len() as i32;
+    let mh = reference.len() as i32;
+    let row_shift = ((mh - 1) >> 1) - ((ch - 1) >> 1);
+    let col_shift = ((mw as i32 - 1) >> 1) - ((cw as i32 - 1) >> 1);
+    let cand_mask = !0u64 << (64 - cw);
+    let mut diff = 0u32;
+    for (y, &c) in cand.iter().enumerate() {
+        let my = mh - 1 - (ch - 1 - y as i32 + row_shift);
+        let m = match reference.get(my as usize) {
+            // Reference bit `x + col_shift` lines up with cand bit `x`.
+            Some(&m) if my >= 0 => {
+                if col_shift >= 0 {
+                    m << col_shift
+                } else {
+                    m >> -col_shift
+                }
+            }
+            _ => 0,
+        };
+        diff += ((c ^ m) & cand_mask).count_ones();
+        if diff > limit {
+            return diff;
+        }
+    }
+    diff
+}
+
+/// What the aligned refinement search keeps per dictionary entry: its ink
+/// count (or [`NOT_REFINABLE`]) and, for entries at most 64 pixels wide,
+/// its rows as [`push_row_words`] words, built once instead of per compare.
+#[derive(Default)]
+pub(super) struct RefineIndex {
+    ink: Vec<u32>,
+    /// Each entry's rows in `words`; empty for wide entries.
+    rows: Vec<core::ops::Range<usize>>,
+    words: Vec<u64>,
+}
+
+impl RefineIndex {
+    /// Add the next dictionary entry, `bm`, with ink count `ink`.
+    pub(super) fn push(&mut self, bm: &Bitmap, ink: u32) {
+        let start = self.words.len();
+        push_row_words(bm, &mut self.words);
+        self.ink.push(ink);
+        self.rows.push(start..self.words.len());
+    }
+
+    fn words(&self, idx: usize) -> Option<&[u64]> {
+        let rows = self.rows[idx].clone();
+        (!rows.is_empty()).then(|| &self.words[rows])
+    }
+}
+
 /// `dict_ink` marker for a dict entry that must not be a refinement reference.
 ///
 /// Both decoders align a refinement on the reference's content box: ours
@@ -193,7 +278,7 @@ pub(super) fn is_tight(bm: &Bitmap) -> bool {
 /// Nearest dict entry within `max_dim_delta` per axis (same size included) by
 /// [`aligned_hamming`], accepted within `area × max_hamming_fraction`.
 ///
-/// `dict_ink[i]` is the black-pixel count of `dict_entries[i]`. The ink
+/// `index` holds the black-pixel count of each dict entry. The ink
 /// difference is a lower bound on the aligned distance (both ways when the
 /// reference box fits inside `cand`'s), so most candidates are rejected
 /// without a pixel scan. Buckets are scanned newest entry first, and the
@@ -202,7 +287,7 @@ pub(super) fn find_aligned_refine_ref(
     cand: &Bitmap,
     cand_ink: u32,
     dict_entries: &[&Bitmap],
-    dict_ink: &[u32],
+    index: &RefineIndex,
     by_size: &BTreeMap<(u32, u32), Vec<usize>>,
     max_dim_delta: u32,
     max_hamming_fraction: f32,
@@ -212,6 +297,8 @@ pub(super) fn find_aligned_refine_ref(
         return None;
     }
     let mut limit = ((area as f64) * (max_hamming_fraction as f64)).round() as u32;
+    let mut cand_words = Vec::new();
+    let narrow = push_row_words(cand, &mut cand_words);
     let mut best: Option<usize> = None;
     for w in cand.width.saturating_sub(max_dim_delta)..=cand.width + max_dim_delta {
         for h in cand.height.saturating_sub(max_dim_delta)..=cand.height + max_dim_delta {
@@ -220,7 +307,7 @@ pub(super) fn find_aligned_refine_ref(
             };
             let inside = w <= cand.width && h <= cand.height;
             for &idx in indices.iter().rev() {
-                let ink = dict_ink[idx];
+                let ink = index.ink[idx];
                 if ink == NOT_REFINABLE {
                     continue;
                 }
@@ -232,7 +319,17 @@ pub(super) fn find_aligned_refine_ref(
                 if bound > limit {
                     continue;
                 }
-                let d = aligned_hamming(cand, dict_entries[idx], limit);
+                let reference = dict_entries[idx];
+                let d = match index.words(idx) {
+                    Some(words) if narrow => aligned_hamming_words(
+                        &cand_words,
+                        cand.width,
+                        words,
+                        reference.width,
+                        limit,
+                    ),
+                    _ => aligned_hamming(cand, reference, limit),
+                };
                 if d < limit || (d == limit && best.is_none()) {
                     limit = d;
                     best = Some(idx);

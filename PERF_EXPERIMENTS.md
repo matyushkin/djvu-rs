@@ -16624,3 +16624,39 @@ pages). The byte grid (w·h bytes) is gone from the peak.
 with a per-pixel scan on random bitmaps with junk padding bits (it fails
 when the padding mask is removed). On the dense map atlas page
 `encode_jb2_dict_with_ccs` is now ~45% and the direct tiles ~25%.
+
+
+### JB2_REFINE_ROW_WORDS (2026-10-04)
+
+**Issue.** On the dense map atlas page (22% black) the aligned refinement
+search was the largest part of `encode_jb2_dict_with_ccs`:
+`aligned_hamming` ~33% and `find_aligned_refine_ref` ~7.5% of the Lossless
+encode (`sample`, stages out of line). Counters showed 1.18 M
+`aligned_hamming` calls on the page, almost all with both bitmaps at most
+64 px wide and a limit of 6–16 pixels. Each call rebuilt every row from
+bytes with bounds checks per byte.
+
+**Approach.** First try: a one-u64-per-row path inside `aligned_hamming`,
+rows still built per call: −1% (140 → 139 ms), not enough. Kept version:
+`RefineIndex` (replaces `dict_ink`) stores each dictionary entry's ink
+count and, for entries 1–64 px wide, its rows as u64 words
+(`push_row_words`: leftmost pixel in the top bit, padding cleared), built
+once when the entry is added. The candidate's words are built once per
+search. `aligned_hamming_words` aligns a row with one shift and counts it
+with one popcount, with the same per-row early exit; wider pairs still use
+`aligned_hamming`. Same distances, so the same choices.
+
+**Numbers.** M1 Max, `encode_jb2_lossless`, page-1 PBM, median of 15, two
+rounds in turn: map atlas 141–142 → **126–127 ms** (−11%); cable 4.3 →
+4.3 ms (few candidates). `encoder_parity_scorecard --repeats 5`: map atlas
+151.4 → **132.9 ms** (cjb2 354.1), cable 7.7 ms, cookbook 4.8 ms. Output
+bytes unchanged (`cmp`).
+
+**Decision.** Kept.
+
+**Reason.** −11% on dense pages, byte-identical. `aligned_hamming_matches_per_pixel_count`
+now also checks `aligned_hamming_words`, adds widths 62–90 (both paths)
+and junk padding bits (it fails without the cand-width mask). Remaining on
+the map page: direct tiles + ZP output ~43%, `extract_ccs` DFS ~18%,
+refinement search ~30% (still 1.18 M compares; a stronger lower bound
+than the ink difference could cut them).
