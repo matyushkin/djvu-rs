@@ -1540,3 +1540,80 @@ fn encode_bitmap_direct_matches_per_pixel_loop() {
         assert_eq!(fast_zp.finish(), slow_zp.finish(), "{w}x{h}");
     }
 }
+
+/// `extract_ccs` (packed-bit scan) finds the same components, in the same
+/// order and with the same pixels, as a per-pixel raster scan with the same
+/// DFS; row padding bits never become ink.
+#[test]
+fn extract_ccs_matches_per_pixel_scan() {
+    let mut seed = 0x0123_4567_89ab_cdefu64;
+    for (w, h, sparsity) in [
+        (1u32, 1u32, 2u64),
+        (7, 5, 2),
+        (9, 9, 3),
+        (64, 17, 5),
+        (70, 40, 9),
+        (131, 23, 40),
+        (300, 11, 400),
+    ] {
+        let mut bm = Bitmap::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                bm.set(x, y, seed.is_multiple_of(sparsity));
+            }
+        }
+        // Junk in the padding bits past `w` must be ignored.
+        let stride = bm.row_stride();
+        if !w.is_multiple_of(8) {
+            for y in 0..h as usize {
+                bm.data[y * stride + stride - 1] |= 0xFF >> (w % 8);
+            }
+        }
+
+        let (wu, hu) = (w as usize, h as usize);
+        let mut seen = vec![false; wu * hu];
+        let mut expected = Vec::new();
+        for y0 in 0..hu {
+            for x0 in 0..wu {
+                if seen[y0 * wu + x0] || !bm.get(x0 as u32, y0 as u32) {
+                    continue;
+                }
+                seen[y0 * wu + x0] = true;
+                let mut stack = vec![(x0, y0)];
+                let mut pixels = Vec::new();
+                while let Some((cx, cy)) = stack.pop() {
+                    pixels.push((cx, cy));
+                    for ny in cy.saturating_sub(1)..=(cy + 1).min(hu - 1) {
+                        for nx in cx.saturating_sub(1)..=(cx + 1).min(wu - 1) {
+                            if !seen[ny * wu + nx] && bm.get(nx as u32, ny as u32) {
+                                seen[ny * wu + nx] = true;
+                                stack.push((nx, ny));
+                            }
+                        }
+                    }
+                }
+                let min_x = pixels.iter().map(|p| p.0).min().unwrap();
+                let min_y = pixels.iter().map(|p| p.1).min().unwrap();
+                expected.push((min_x as u32, min_y as u32, pixels));
+            }
+        }
+
+        let ccs = extract_ccs(&bm);
+        assert_eq!(ccs.len(), expected.len(), "{w}x{h}");
+        for (cc, (x, y, pixels)) in ccs.iter().zip(&expected) {
+            assert_eq!((cc.x, cc.y), (*x, *y), "{w}x{h}");
+            assert_eq!(cc.pixel_count as usize, pixels.len(), "{w}x{h}");
+            for &(px, py) in pixels {
+                assert!(cc.bitmap.get(px as u32 - x, py as u32 - y), "{w}x{h}");
+            }
+            let ink = (0..cc.bitmap.height)
+                .flat_map(|yy| (0..cc.bitmap.width).map(move |xx| (xx, yy)))
+                .filter(|&(xx, yy)| cc.bitmap.get(xx, yy))
+                .count();
+            assert_eq!(ink, pixels.len(), "{w}x{h}");
+        }
+    }
+}

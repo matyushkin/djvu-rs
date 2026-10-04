@@ -31,49 +31,49 @@ pub(super) fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
         return Vec::new();
     }
 
-    // Unpack into a mutable byte grid — 1 = black-unvisited, 0 = white-or-visited.
-    // Byte-unpack the MSB-first packed rows (8 pixels per byte, constant shifts)
-    // instead of a per-pixel `bitmap.get()` that recomputes `y*stride + x/8` and
-    // `7-(x%8)` (a hidden divide) for every pixel — the same win as the
-    // `encode_bitmap_direct` byte-unpack (PS2). Byte-identical `pix` output.
-    let mut pix = vec![0u8; w * h];
+    // Pixels not yet visited, one bit each in the packed layout (MSB-first,
+    // `stride` bytes per row): a DFS clears a pixel's bit when it pushes it.
+    // Scanning packed words skips 64 white pixels at a time and needs no
+    // byte-per-pixel copy of the page. Row padding bits are cleared so they
+    // never seed a component.
     let stride = bitmap.row_stride();
-    let full_bytes = w / 8;
-    for y in 0..h {
-        let src = &bitmap.data[y * stride..y * stride + stride];
-        let dst = &mut pix[y * w..y * w + w];
-        let (chunks, tail) = dst.as_chunks_mut::<8>();
-        for (&byte, chunk) in src.iter().zip(chunks) {
-            chunk[0] = (byte >> 7) & 1;
-            chunk[1] = (byte >> 6) & 1;
-            chunk[2] = (byte >> 5) & 1;
-            chunk[3] = (byte >> 4) & 1;
-            chunk[4] = (byte >> 3) & 1;
-            chunk[5] = (byte >> 2) & 1;
-            chunk[6] = (byte >> 1) & 1;
-            chunk[7] = byte & 1;
-        }
-        if !tail.is_empty() {
-            let byte = src[full_bytes];
-            for (bit, slot) in tail.iter_mut().enumerate() {
-                *slot = (byte >> (7 - bit)) & 1;
-            }
+    let mut bits = bitmap.data[..stride * h].to_vec();
+    if !w.is_multiple_of(8) {
+        let pad_mask = 0xFFu8 << (8 - w % 8);
+        for row in bits.chunks_exact_mut(stride) {
+            row[stride - 1] &= pad_mask;
         }
     }
+    let mask = |x: usize| 0x80u8 >> (x & 7);
 
     let mut out = Vec::new();
     let mut stack: Vec<(u32, u32)> = Vec::new();
     let mut cc_pixels: Vec<(u32, u32)> = Vec::new();
 
     for y0 in 0..h {
-        for x0 in 0..w {
-            if pix[y0 * w + x0] == 0 {
+        let row0 = y0 * stride;
+        let mut bi = 0;
+        while bi < stride {
+            // Skip eight white bytes at a time.
+            if bi + 8 <= stride
+                && u64::from_ne_bytes(bits[row0 + bi..row0 + bi + 8].try_into().expect("8 bytes"))
+                    == 0
+            {
+                bi += 8;
                 continue;
             }
+            let byte = bits[row0 + bi];
+            if byte == 0 {
+                bi += 1;
+                continue;
+            }
+            // Leftmost unvisited pixel: the DFS only clears bits, so this is
+            // the raster-order seed a per-pixel scan would find next.
+            let x0 = bi * 8 + byte.leading_zeros() as usize;
             stack.clear();
             cc_pixels.clear();
             stack.push((x0 as u32, y0 as u32));
-            pix[y0 * w + x0] = 0;
+            bits[row0 + x0 / 8] &= !mask(x0);
 
             let mut min_x = x0;
             let mut max_x = x0;
@@ -102,10 +102,11 @@ pub(super) fn extract_ccs(bitmap: &Bitmap) -> Vec<Cc> {
                 let lo_y = cyi.saturating_sub(1);
                 let hi_y = (cyi + 1).min(h - 1);
                 for ny in lo_y..=hi_y {
-                    let row_base = ny * w;
+                    let row_base = ny * stride;
                     for nx in lo_x..=hi_x {
-                        if pix[row_base + nx] != 0 {
-                            pix[row_base + nx] = 0;
+                        let b = &mut bits[row_base + nx / 8];
+                        if *b & mask(nx) != 0 {
+                            *b &= !mask(nx);
                             stack.push((nx as u32, ny as u32));
                         }
                     }
