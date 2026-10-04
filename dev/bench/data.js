@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791068973546,
+  "lastUpdate": 1791138893157,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -23170,6 +23170,72 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 34298000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5863e2353b4d63f438c2854cc5cd31c0a85b793f",
+          "message": "chore(build): keep only line tables in dev debug info (#918)\n\nFull debug info for 84 examples and 26 benches, kept across feature sets\nand versions, let a local target/ reach 290 GB and fill the disk\n(2026-10-04). Line tables keep file and line in panics and backtraces;\ndependencies get none. One clean dev build of tests and examples drops\nfrom 1.5 GB to 1.2 GB and from 29 s to 18 s. For a debugger session,\nset debug = true temporarily.\n\nClaude-Session: https://claude.ai/code/session_01GUJhvrq6GLQCYpMSn867dc",
+          "timestamp": "2026-10-04T18:09:47Z",
+          "tree_id": "f55afe347715d718e90e8042460e5263ac894066",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/5863e2353b4d63f438c2854cc5cd31c0a85b793f"
+        },
+        "date": 1791138891805,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "bzz_decode_txtz",
+            "value": 27118,
+            "range": "± 90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_decode_large_all_chunks",
+            "value": 31141602,
+            "range": "± 133360",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "iw44_to_rgb_large_page",
+            "value": 11966113,
+            "range": "± 113936",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 163000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8215999,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 51622000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47432000,
             "range": "± 0",
             "unit": "ns/iter"
           }
