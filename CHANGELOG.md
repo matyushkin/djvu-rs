@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.3](https://github.com/matyushkin/djvu-rs/compare/v0.40.2...v0.40.3) (2026-10-04)
+
+
+### Performance Improvements
+
+* **iw44:** gather each encoder plane in its own memory ([#919](https://github.com/matyushkin/djvu-rs/issues/919)) ([a924890](https://github.com/matyushkin/djvu-rs/commit/a924890dc7cf86c6ff85021de7e1cf393963c7db))
+* **jb2:** code white runs of direct tiles in one ZP call ([#921](https://github.com/matyushkin/djvu-rs/issues/921)) ([4ce7059](https://github.com/matyushkin/djvu-rs/commit/4ce70598439dd671e0d4edf194dc1303e6430109))
+* **jb2:** find connected components on packed bits ([#922](https://github.com/matyushkin/djvu-rs/issues/922)) ([659438f](https://github.com/matyushkin/djvu-rs/commit/659438f35507bc18cffec9a453cb63bda3e113f9))
+* **jb2:** keep dictionary rows as words for the refinement search ([#923](https://github.com/matyushkin/djvu-rs/issues/923)) ([9214f92](https://github.com/matyushkin/djvu-rs/commit/9214f9244204c9758dfae20000380bff46dde1f5))
+* **jb2:** reject refinement candidates by a centre-aligned ink grid ([#924](https://github.com/matyushkin/djvu-rs/issues/924)) ([cdfdd3d](https://github.com/matyushkin/djvu-rs/commit/cdfdd3d5f6b562ec864d14590c876a891a1e4492))
+
 ## [0.40.2](https://github.com/matyushkin/djvu-rs/compare/v0.40.1...v0.40.2) (2026-10-03)
 
 
