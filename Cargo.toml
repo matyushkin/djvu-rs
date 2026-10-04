@@ -283,6 +283,16 @@ name = "viewer"
 harness = false
 
 
+# Dev builds keep only line tables (panics and backtraces still name file and
+# line) and drop debug info for dependencies: full debug info for 84 examples
+# and 26 benches let a local target/ reach 290 GB. For a debugger session,
+# set `debug = true` temporarily.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
