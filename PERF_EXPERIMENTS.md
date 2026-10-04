@@ -16497,3 +16497,50 @@ one loss, `dpi/144` +3.0% (about 11 µs on a 0.38 ms render), was steady
 across rounds but did not show at `dpi/300`, which runs the same path on
 four times as many pixels; it looks like code layout, not extra work.
 Output is unchanged: the 163 render unit tests and the full suite pass.
+
+### IW44_ENCODE_INPLACE_GATHER (2026-10-04) — the IW44 encoder gathers each plane in its own memory
+
+The fresh encoder parity scorecard (2026-10-03) showed one case where djvu-rs
+used more memory than DjVuLibre: the IW44 `Photo` encode of goody two-shoes,
+**182.6 MB** peak RSS against **135.7 MB** for `c44`. dhat on the encode alone
+(pixmap already built) showed why: for pages below the banding threshold
+(ENCODE_BANDED_PLANES), `encode_iw44_color` held three flat `i16` planes
+(Y, Cb, Cr) *and* three `PlaneEncoder` grids of the same size at once — six
+`w*h*2` buffers, 15.8 MB each on that page. The flat plane is dead once the
+gather has copied it into zigzag blocks.
+
+**Approach.** The plane is now allocated as the encoder's own block storage,
+`Vec<[i16; 1024]>` (`PlaneEncoder::new_plane`), and the transform runs on its
+`as_flattened_mut()` view. Block row `r` of the grid and plane rows
+`32r..32r+32` cover the same memory, so `PlaneEncoder::from_plane` gathers in
+place: each 32-row strip is copied to a one-strip buffer (`32 * stride`
+samples, 164 KB at 2560 px) and scattered back into its own blocks. The
+scatter loop is the old `gather_rows` body, moved into `scatter_strip` and
+shared by both paths. No `unsafe` beyond the existing unchecked indexing.
+Used by the colour and gray whole-plane paths (sequential and `parallel`);
+the banded path is unchanged.
+
+**Numbers.** M1 Max, release, default features.
+
+| Page | Measure | Before | After | Change |
+|---|---|---:|---:|---:|
+| goody two-shoes (2454×3192) | dhat peak, encode over the pixmap | 102 998 595 B | 55 689 795 B | **−45.9 %** |
+| goody two-shoes | dhat peak, whole process | 134 331 267 B | 87 022 467 B | −35.2 % |
+| goody two-shoes | scorecard peak RSS (c44: 135 664 KB) | 182 560 KB | 136 912 KB | **−25.0 %** |
+| watchmaker (2550×3301) | dhat peak, encode over the pixmap | 49 176 624 B | 32 137 264 B | −34.6 % |
+| watchmaker | scorecard peak RSS (c44: 145 728 KB) | 141 536 KB | 124 912 KB | −11.7 % |
+| goody two-shoes | `encode_iw44_color` median, 8×5 interleaved | 267.5 ms | 266.0 ms | −0.6 % (noise) |
+| watchmaker | `encode_iw44_color` median, 8×5 interleaved | 354.0 ms | 348.4 ms | −1.6 % (noise) |
+
+Output is byte-identical on both pages (`cmp` of the full DjVu files). The
+existing single-band-equals-whole-plane test covers the bytes; the new
+`from_plane_matches_gather_rows` test checks the grid on a 101×70 plane with
+partial edge blocks.
+
+**Decision.** Kept.
+
+**Reason.** The goody encode now peaks at the same RSS as `c44` (136.9 vs
+135.7 MB), at no time cost. What remains of the gap to `c44` in the scorecard
+worker is the harness itself: it holds the PPM file, the parsed RGB and the
+RGBA pixmap (≈ 78 MB on goody) while it encodes, where `c44` keeps one 3 B/px
+image.

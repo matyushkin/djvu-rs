@@ -73,7 +73,9 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
         );
     }
 
-    let mut y_plane = vec![0i16; stride * plane_h];
+    // Each plane is the encoder's block storage, flattened: the gather turns
+    // it into the coefficient grid in place (`PlaneEncoder::from_plane`).
+    let mut y_plane = PlaneEncoder::new_plane(w, h);
 
     // `chroma_half` remains in the public options for source compatibility,
     // but its old half-plane encoding was not a valid IW44 v1.2 stream: both
@@ -86,8 +88,10 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
     };
     let c_stride = cw.div_ceil(32) * 32;
     let c_plane_h = ch.div_ceil(32) * 32;
-    let mut cb_plane = vec![0i16; c_stride * c_plane_h];
-    let mut cr_plane = vec![0i16; c_stride * c_plane_h];
+    let mut cb_plane = PlaneEncoder::new_plane(cw, ch);
+    let mut cr_plane = PlaneEncoder::new_plane(cw, ch);
+    debug_assert_eq!(y_plane.len() * 1024, stride * plane_h);
+    debug_assert_eq!(cb_plane.len() * 1024, c_stride * c_plane_h);
 
     // DjVu stores images bottom-to-top: wavelet row 0 = image bottom row.
     // The decoder's to_rgb flips via out_row = h-1-row, so mirror that here.
@@ -95,6 +99,11 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
     //
     // Single pass: compute Y for every pixel; if chroma_half, accumulate 2×2
     // box-filter for Cb/Cr (matches DjVuLibre's chroma downsampling).
+    let (y_flat, cb_flat, cr_flat) = (
+        y_plane.as_flattened_mut(),
+        cb_plane.as_flattened_mut(),
+        cr_plane.as_flattened_mut(),
+    );
     if chroma_half {
         // Single pass: fill Y and accumulate 2×2 box-filter chroma (matches
         // DjVuLibre's c44 downsampling).  Each chroma output cell receives
@@ -105,11 +114,11 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
             for col in 0..w {
                 let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
                 let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
-                y_plane[wavelet_row * stride + col] = (y as i32 * 64) as i16;
+                y_flat[wavelet_row * stride + col] = (y as i32 * 64) as i16;
                 let cc = col / 2;
                 let cr_row = wavelet_row / 2;
-                cb_plane[cr_row * c_stride + cc] += (cb as i32 * 16) as i16;
-                cr_plane[cr_row * c_stride + cc] += (cr as i32 * 16) as i16;
+                cb_flat[cr_row * c_stride + cc] += (cb as i32 * 16) as i16;
+                cr_flat[cr_row * c_stride + cc] += (cr as i32 * 16) as i16;
             }
         }
     } else {
@@ -118,9 +127,9 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
             for col in 0..w {
                 let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
                 let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
-                y_plane[wavelet_row * stride + col] = (y as i32 * 64) as i16;
-                cb_plane[wavelet_row * c_stride + col] = (cb as i32 * 64) as i16;
-                cr_plane[wavelet_row * c_stride + col] = (cr as i32 * 64) as i16;
+                y_flat[wavelet_row * stride + col] = (y as i32 * 64) as i16;
+                cb_flat[wavelet_row * c_stride + col] = (cb as i32 * 64) as i16;
+                cr_flat[wavelet_row * c_stride + col] = (cr as i32 * 64) as i16;
             }
         }
     }
@@ -137,53 +146,43 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
         use rayon::join;
         let (ye, (cbe, cre)) = join(
             move || {
-                forward_wavelet_transform(&mut y_plane, w, h, stride);
-                let mut enc = PlaneEncoder::new(w, h);
-                enc.gather(&y_plane, stride);
-                enc
+                forward_wavelet_transform(y_plane.as_flattened_mut(), w, h, stride);
+                PlaneEncoder::from_plane(w, h, y_plane)
             },
             move || {
                 join(
                     move || {
-                        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
-                        let mut enc = PlaneEncoder::new(cw, ch);
-                        enc.gather(&cb_plane, c_stride);
-                        enc
+                        forward_wavelet_transform(cb_plane.as_flattened_mut(), cw, ch, c_stride);
+                        PlaneEncoder::from_plane(cw, ch, cb_plane)
                     },
                     move || {
-                        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
-                        let mut enc = PlaneEncoder::new(cw, ch);
-                        enc.gather(&cr_plane, c_stride);
-                        enc
+                        forward_wavelet_transform(cr_plane.as_flattened_mut(), cw, ch, c_stride);
+                        PlaneEncoder::from_plane(cw, ch, cr_plane)
                     },
                 )
             },
         );
         (ye, cbe, cre)
     } else {
-        forward_wavelet_transform(&mut y_plane, w, h, stride);
-        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
-        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
-        let mut y_enc = PlaneEncoder::new(w, h);
-        let mut cb_enc = PlaneEncoder::new(cw, ch);
-        let mut cr_enc = PlaneEncoder::new(cw, ch);
-        y_enc.gather(&y_plane, stride);
-        cb_enc.gather(&cb_plane, c_stride);
-        cr_enc.gather(&cr_plane, c_stride);
-        (y_enc, cb_enc, cr_enc)
+        forward_wavelet_transform(y_plane.as_flattened_mut(), w, h, stride);
+        forward_wavelet_transform(cb_plane.as_flattened_mut(), cw, ch, c_stride);
+        forward_wavelet_transform(cr_plane.as_flattened_mut(), cw, ch, c_stride);
+        (
+            PlaneEncoder::from_plane(w, h, y_plane),
+            PlaneEncoder::from_plane(cw, ch, cb_plane),
+            PlaneEncoder::from_plane(cw, ch, cr_plane),
+        )
     };
     #[cfg(not(feature = "parallel"))]
     let (mut y_enc, mut cb_enc, mut cr_enc) = {
-        forward_wavelet_transform(&mut y_plane, w, h, stride);
-        forward_wavelet_transform(&mut cb_plane, cw, ch, c_stride);
-        forward_wavelet_transform(&mut cr_plane, cw, ch, c_stride);
-        let mut y_enc = PlaneEncoder::new(w, h);
-        let mut cb_enc = PlaneEncoder::new(cw, ch);
-        let mut cr_enc = PlaneEncoder::new(cw, ch);
-        y_enc.gather(&y_plane, stride);
-        cb_enc.gather(&cb_plane, c_stride);
-        cr_enc.gather(&cr_plane, c_stride);
-        (y_enc, cb_enc, cr_enc)
+        forward_wavelet_transform(y_plane.as_flattened_mut(), w, h, stride);
+        forward_wavelet_transform(cb_plane.as_flattened_mut(), cw, ch, c_stride);
+        forward_wavelet_transform(cr_plane.as_flattened_mut(), cw, ch, c_stride);
+        (
+            PlaneEncoder::from_plane(w, h, y_plane),
+            PlaneEncoder::from_plane(cw, ch, cb_plane),
+            PlaneEncoder::from_plane(cw, ch, cr_plane),
+        )
     };
 
     encode_chunks(
@@ -222,7 +221,8 @@ pub fn encode_iw44_gray(pixmap: &GrayPixmap, opts: &Iw44EncodeOptions) -> Vec<Ve
         return encode_chunks(&mut y_enc, None, None, w as u16, h as u16, false, opts);
     }
 
-    let mut y_plane = vec![0i16; stride * plane_h];
+    let mut y_plane = PlaneEncoder::new_plane(w, h);
+    let y_flat = y_plane.as_flattened_mut();
 
     // DjVu stores images bottom-to-top: wavelet row 0 = image bottom row.
     // The decoder's to_rgb flips via out_row = h-1-row, so we must mirror that.
@@ -231,14 +231,13 @@ pub fn encode_iw44_gray(pixmap: &GrayPixmap, opts: &Iw44EncodeOptions) -> Vec<Ve
         let wavelet_row = h - 1 - row;
         for col in 0..w {
             let p = pixmap.get(col as u32, row as u32) as i32;
-            y_plane[wavelet_row * stride + col] = ((127 - p) * 64) as i16;
+            y_flat[wavelet_row * stride + col] = ((127 - p) * 64) as i16;
         }
     }
 
-    forward_wavelet_transform(&mut y_plane, w, h, stride);
+    forward_wavelet_transform(y_flat, w, h, stride);
 
-    let mut y_enc = PlaneEncoder::new(w, h);
-    y_enc.gather(&y_plane, stride);
+    let mut y_enc = PlaneEncoder::from_plane(w, h, y_plane);
 
     encode_chunks(&mut y_enc, None, None, w as u16, h as u16, false, opts)
 }

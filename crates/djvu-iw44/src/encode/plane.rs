@@ -48,14 +48,53 @@ pub(super) struct PlaneEncoder {
     pub(super) bbstate: u8,
 }
 
+/// Scatter one 32-row strip of a row-major plane into its blocks, in zigzag
+/// order.
+///
+/// Reads the strip in row-major (sequential) order and scatters into the small
+/// 2 KB, L1-resident block via `ZIGZAG_INV`, rather than reading the plane in
+/// scattered zigzag order (ZIGZAG_ROW/COL) with a sequential block write. This
+/// mirrors the decoder's `reconstruct()` scatter (see lib.rs) for the same
+/// reason: keep the scattered access on the tiny L1-resident block, and stream
+/// the multi-KB plane one cache line at a time.
+///
+/// Safety invariant: `stride` = `blocks.len() * 32` and `strip` holds at least
+/// 32 rows of it, which the asserts below check once. For any block `c`,
+/// row, col < 32:
+///   src = row * stride + (c*32 + col) ≤ strip.len() - 1
+///   i   = ZIGZAG_INV[row*32 + col] ∈ [0, 1024) = block.len()
+/// Both indices are therefore always in bounds; `get_unchecked` drops the
+/// dead branches from the inner loop.
+#[cfg(feature = "std")]
+#[allow(unsafe_code)]
+fn scatter_strip(strip: &[i16], stride: usize, blocks: &mut [[i16; 1024]]) {
+    assert_eq!(stride, blocks.len() * 32);
+    assert!(strip.len() >= 32 * stride);
+    for (c, block) in blocks.iter_mut().enumerate() {
+        let col_base = c << 5;
+        for row in 0..32usize {
+            let src_base = row * stride + col_base;
+            let inv_base = row << 5;
+            for col in 0..32usize {
+                // SAFETY: see invariant above.
+                let i = unsafe { *crate::ZIGZAG_INV.get_unchecked(inv_base + col) } as usize;
+                *unsafe { block.get_unchecked_mut(i) } =
+                    unsafe { *strip.get_unchecked(src_base + col) };
+            }
+        }
+    }
+}
+
 #[cfg(feature = "std")]
 impl PlaneEncoder {
     pub(super) fn new(width: usize, height: usize) -> Self {
-        let block_cols = width.div_ceil(32);
-        let block_rows = height.div_ceil(32);
-        let n_blocks = block_cols * block_rows;
+        Self::with_blocks(Self::new_plane(width, height), width.div_ceil(32))
+    }
+
+    fn with_blocks(blocks: Vec<[i16; 1024]>, block_cols: usize) -> Self {
+        let n_blocks = blocks.len();
         PlaneEncoder {
-            blocks: vec![[0i16; 1024]; n_blocks],
+            blocks,
             recon: vec![CoefBlock::default(); n_blocks],
             block_cols,
             quant_lo: QUANT_LO_INIT,
@@ -71,10 +110,35 @@ impl PlaneEncoder {
         }
     }
 
-    /// Gather wavelet coefficients from a flat plane into zigzag blocks.
-    pub(super) fn gather(&mut self, plane: &[i16], stride: usize) {
-        let block_rows = self.blocks.len() / self.block_cols;
-        self.gather_rows(plane, stride, 0, 0, block_rows);
+    /// A zeroed plane for `width`×`height`, laid out as the encoder's own
+    /// block storage.
+    ///
+    /// Flattened, it is the row-major plane the transform works on (`stride`
+    /// = `block_cols * 32`). Block row `r` of the grid and plane rows
+    /// `32r..32r+32` cover the same memory, which is what lets
+    /// [`Self::from_plane`] gather in place.
+    pub(super) fn new_plane(width: usize, height: usize) -> Vec<[i16; 1024]> {
+        vec![[0i16; 1024]; width.div_ceil(32) * height.div_ceil(32)]
+    }
+
+    /// Build the encoder from a plane made by [`Self::new_plane`] that already
+    /// holds the transformed coefficients in row-major order.
+    ///
+    /// The plane's memory becomes the coefficient grid: each 32-row strip is
+    /// copied out to a one-strip buffer and scattered back into its own blocks.
+    /// The page never holds a second plane-sized grid beside the plane
+    /// (PERF_EXPERIMENTS.md IW44_ENCODE_INPLACE_GATHER).
+    pub(super) fn from_plane(width: usize, height: usize, mut plane: Vec<[i16; 1024]>) -> Self {
+        let block_cols = width.div_ceil(32);
+        let block_rows = height.div_ceil(32);
+        assert_eq!(plane.len(), block_cols * block_rows);
+        let stride = block_cols * 32;
+        let mut strip = vec![0i16; 32 * stride];
+        for blocks in plane.chunks_exact_mut(block_cols) {
+            strip.copy_from_slice(blocks.as_flattened());
+            scatter_strip(&strip, stride, blocks);
+        }
+        Self::with_blocks(plane, block_cols)
     }
 
     /// Gather block rows `first_block..last_block` from `plane`, whose row 0
@@ -82,7 +146,6 @@ impl PlaneEncoder {
     ///
     /// This is what lets [`forward_gather_banded`] feed the grid one band at a
     /// time: the band's buffer starts at its halo, not at the page's top.
-    #[allow(unsafe_code)]
     pub(super) fn gather_rows(
         &mut self,
         plane: &[i16],
@@ -91,46 +154,16 @@ impl PlaneEncoder {
         first_block: usize,
         last_block: usize,
     ) {
-        // Read the large plane in row-major (sequential) order and scatter into
-        // the small 2 KB, L1-resident block via `ZIGZAG_INV`, rather than reading
-        // the plane in scattered zigzag order (ZIGZAG_ROW/COL) with a sequential
-        // block write. This mirrors the decoder's `reconstruct()` scatter (see
-        // lib.rs) for the same reason: keep the scattered access on the tiny
-        // L1-resident block, and stream the multi-KB plane one cache line at a
-        // time. Byte-identical — same (row, col) → block-index mapping, only the
-        // iteration order changes.
-        //
-        // Safety invariant: `stride` = block_cols*32 and `plane` holds at least
-        // `(last_block - buf_first_block) * 32` rows of it, which the asserts
-        // below check once. For any r in first_block..last_block,
-        // c < block_cols, row,col < 32:
-        //   src = ((r - buf_first_block)*32 + row) * stride + (c*32 + col)
-        //       ≤ plane.len() - 1
-        //   i   = ZIGZAG_INV[row*32 + col] ∈ [0, 1024) = block.len()
-        // Both indices are therefore always in bounds; `get_unchecked` drops the
-        // dead branches from the inner loop.
         let block_rows = self.blocks.len() / self.block_cols;
         assert!(buf_first_block <= first_block && first_block <= last_block);
         assert!(last_block <= block_rows);
         assert_eq!(stride, self.block_cols * 32);
         assert!(plane.len() >= (last_block - buf_first_block) * 32 * stride);
+        let strip_len = 32 * stride;
         for r in first_block..last_block {
-            for c in 0..self.block_cols {
-                let block = &mut self.blocks[r * self.block_cols + c];
-                let row_base = (r - buf_first_block) << 5;
-                let col_base = c << 5;
-                for row in 0..32usize {
-                    let src_base = (row_base + row) * stride + col_base;
-                    let inv_base = row << 5;
-                    for col in 0..32usize {
-                        // SAFETY: see invariant above.
-                        let i =
-                            unsafe { *crate::ZIGZAG_INV.get_unchecked(inv_base + col) } as usize;
-                        *unsafe { block.get_unchecked_mut(i) } =
-                            unsafe { *plane.get_unchecked(src_base + col) };
-                    }
-                }
-            }
+            let from = (r - buf_first_block) * strip_len;
+            let blocks = &mut self.blocks[r * self.block_cols..(r + 1) * self.block_cols];
+            scatter_strip(&plane[from..from + strip_len], stride, blocks);
         }
     }
 

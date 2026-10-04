@@ -272,11 +272,12 @@ fn band_idx_range(band: usize) -> (usize, usize) {
 
 /// Forward-transform + gather a luma PlaneEncoder, like `encode_iw44_color`.
 fn y_plane_encoder(px: &Pixmap) -> PlaneEncoder {
-    let (mut y_plane, w, h, stride) = build_y_plane(px);
-    forward_wavelet_transform(&mut y_plane, w, h, stride);
-    let mut enc = PlaneEncoder::new(w, h);
-    enc.gather(&y_plane, stride);
-    enc
+    let (y_plane, w, h, stride) = build_y_plane(px);
+    let mut plane = PlaneEncoder::new_plane(w, h);
+    let flat = plane.as_flattened_mut();
+    flat.copy_from_slice(&y_plane);
+    forward_wavelet_transform(flat, w, h, stride);
+    PlaneEncoder::from_plane(w, h, plane)
 }
 
 /// Per-band (energy = Σ|blocks|, residual = Σ|blocks − recon|).
