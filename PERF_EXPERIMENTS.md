@@ -16544,3 +16544,45 @@ partial edge blocks.
 worker is the harness itself: it holds the PPM file, the parsed RGB and the
 RGBA pixmap (≈ 78 MB on goody) while it encodes, where `c44` keeps one 3 B/px
 image.
+
+### JB2_DIRECT_WHITE_RUN (2026-10-04)
+
+**Issue.** The JB2 Lossless profile is the dictionary encode plus the
+direct-tile encode (`encode_jb2`), keeping the smaller (JB2_ALIGNED_REC4).
+The direct encode codes every page pixel through one `ZpEncoder::encode_bit`
+call, about 1.5 ns per pixel. White areas cost as much as text: on the
+cable page it was 13.4 of the 20 ms Lossless encode, and on the nearly blank
+Chinese cookbook page 11.7 of 16 ms.
+
+**Approach.** In white areas the 10-pixel context is 0 and the bit is
+`false`. Most such bits take the ZP fast path, which only adds `p` to `a`.
+New `ZpEncoder::encode_run(ctx, bit, n)`: it does the fast steps of a run
+as one multiply-add (`a += k·p`) and calls `encode_mps` only for the bits
+that reach 0x8000; an LPS bit still goes through `encode_lps`.
+`encode_bitmap_direct` finds a run with `white_run` (eight byte-per-pixel
+columns of the three rows per step) and codes it with one `encode_run`.
+Same bytes and same context states by construction.
+
+**Numbers.** M1 Max, `encode_jb2_lossless` on the page-1 PBM (ddjvu),
+median of 15, two rounds, old and new binaries in turn:
+
+| Page | `encode_jb2` before → after | Lossless before → after |
+|---|---:|---:|
+| cable (2550×3301) | 13.4 → 2.6 ms | 20.5 → 8.9–9.1 ms |
+| Chinese cookbook | 11.7 → 1.3 ms | 15.9–16.2 → 5.7–5.8 ms |
+| map atlas (dense) | 27.0 → 26.9 ms | 159–161 → 145–149 ms |
+
+`encoder_parity_scorecard --repeats 5` (worker process, vs cjb2 3.5.29):
+cable 26.0 → **12.9 ms** (cjb2 27.3), cookbook 21.7 → **9.6 ms** (cjb2 23.2),
+map atlas 161.5 → **154.5 ms** (cjb2 352.4). Output bytes unchanged
+(`cmp` on all three pages).
+
+**Decision.** Kept.
+
+**Reason.** 2.2–2.8× faster Lossless encode on text pages, byte-identical.
+Tests: `encode_run_matches_encode_bit` (random runs up to 70,000 bits, both
+values, against one `encode_bit` per bit) and
+`encode_bitmap_direct_matches_per_pixel_loop` (random bitmaps, widths 1 to
+1024, against a plain per-pixel context loop; a broken window update fails
+it). The dictionary encode is now most of the Lossless time on these
+pages.

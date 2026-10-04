@@ -1489,3 +1489,54 @@ fn cluster_shared_symbols_caps_total_pixel_budget() {
     crate::decode_dict(&djbz, None)
         .expect("encoded shared Djbz must round-trip through decode_dict");
 }
+
+/// `encode_bitmap_direct`, which codes white runs in one call, emits the same
+/// bytes and contexts as a plain per-pixel loop over the 10-pixel context.
+#[test]
+fn encode_bitmap_direct_matches_per_pixel_loop() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for (w, h, sparsity) in [
+        (1u32, 1u32, 2u64),
+        (5, 3, 3),
+        (8, 4, 5),
+        (13, 9, 7),
+        (64, 20, 40),
+        (100, 37, 200),
+        (257, 31, 1000),
+        (1024, 6, 100_000),
+    ] {
+        let mut bm = Bitmap::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                bm.set(x, y, seed.is_multiple_of(sparsity));
+            }
+        }
+        let mut fast_zp = ZpEncoder::new();
+        let mut fast_ctx = vec![0u8; 1024];
+        encode_bitmap_direct(&mut fast_zp, &mut fast_ctx, &bm);
+
+        let px = |x: i32, y: i32| -> u32 {
+            u32::from(x >= 0 && y >= 0 && x < w as i32 && bm.get(x as u32, y as u32))
+        };
+        let mut slow_zp = ZpEncoder::new();
+        let mut slow_ctx = vec![0u8; 1024];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let r2 = px(x - 1, y - 2) << 2 | px(x, y - 2) << 1 | px(x + 1, y - 2);
+                let r1 = px(x - 2, y - 1) << 4
+                    | px(x - 1, y - 1) << 3
+                    | px(x, y - 1) << 2
+                    | px(x + 1, y - 1) << 1
+                    | px(x + 2, y - 1);
+                let r0 = px(x - 2, y) << 1 | px(x - 1, y);
+                let idx = (r2 << 7 | r1 << 2 | r0) as usize;
+                slow_zp.encode_bit(&mut slow_ctx[idx], px(x, y) != 0);
+            }
+        }
+        assert_eq!(fast_ctx, slow_ctx, "{w}x{h}");
+        assert_eq!(fast_zp.finish(), slow_zp.finish(), "{w}x{h}");
+    }
+}
