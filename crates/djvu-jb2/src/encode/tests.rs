@@ -15,9 +15,29 @@ fn aligned_hamming_matches_per_pixel_count() {
                 bm.set(x, y, seed.is_multiple_of(3));
             }
         }
+        // Junk in the row padding bits must not count.
+        if !w.is_multiple_of(8) {
+            let stride = bm.row_stride();
+            for row in bm.data.chunks_exact_mut(stride) {
+                row[stride - 1] |= 0xFF >> (w % 8);
+            }
+        }
         bm
     };
-    for (cw, ch) in [(1u32, 1u32), (7, 5), (8, 8), (9, 13), (17, 4), (33, 21)] {
+    // Widths around 64 cover `aligned_hamming_words` (both at most 64 px)
+    // and pairs that only the byte path takes.
+    for (cw, ch) in [
+        (1u32, 1u32),
+        (7, 5),
+        (8, 8),
+        (9, 13),
+        (17, 4),
+        (33, 21),
+        (62, 6),
+        (64, 7),
+        (66, 5),
+        (90, 4),
+    ] {
         let cand = random_bitmap(cw, ch);
         for dw in -3i32..=3 {
             for dh in -3i32..=3 {
@@ -44,6 +64,16 @@ fn aligned_hamming_matches_per_pixel_count() {
                     want,
                     "{cw}x{ch} vs {mw}x{mh}"
                 );
+                if cw <= 64 && mw <= 64 {
+                    let (mut c, mut m) = (Vec::new(), Vec::new());
+                    assert!(push_row_words(&cand, &mut c));
+                    assert!(push_row_words(&reference, &mut m));
+                    assert_eq!(
+                        aligned_hamming_words(&c, cw, &m, mw, u32::MAX),
+                        want,
+                        "words {cw}x{ch} vs {mw}x{mh}"
+                    );
+                }
             }
         }
     }
