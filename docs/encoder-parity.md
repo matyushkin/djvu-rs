@@ -15,6 +15,12 @@ probe runs Tesseract over the source and both decoded raster artifacts and recor
 character/word counts; it is a readability smoke signal, not a substitute for
 OCR ground truth.
 
+For photo cases the scorecard also runs `c44` a second time with our slice
+schedule (`-slice 10,20,…,100`, from `Iw44EncodeOptions::default()`) and
+records it as `matched_baseline` with `size_ratio_ours_over_matched`. The
+default `c44` schedule is `74,89,99`: one slice fewer than ours, so the plain
+size ratio compares two different quality points.
+
 Run it from the repository root:
 
 ```sh
@@ -106,12 +112,32 @@ is faster than DjVuLibre on every case.
 | map atlas | JB2 lossless / `cjb2` | 145,592 | 138,672 | 0.952× | 358.7 | 161.5 | 35,360 | 22,368 | pixel-exact |
 | Chinese cookbook | JB2 lossless / `cjb2` | 67 | 66 | 0.985× | 24.0 | 21.7 | 15,168 | 14,528 | pixel-exact |
 
+## 2026-10-05 snapshot (equal slice count)
+
+djvu-rs `b7481f3` plus the matched baseline, Rust 1.98, DjVuLibre 3.5.29,
+Apple M1 Max, three repetitions, `--no-ocr`. "Equal slices" is `c44` with
+our schedule; PSNR is decoded RGB against the source.
+
+| Case | Mode | c44 default B | c44 equal slices B | djvu-rs B | Ratio (default) | Ratio (equal slices) | PSNR c44 equal / ours | DjVuLibre ms | djvu-rs ms |
+|------|------|-------------:|-------------------:|----------:|----------------:|---------------------:|----------------------:|-------------:|-----------:|
+| watchmaker | IW44 photo | 665,625 | 684,544 | 682,598 | 1.025× | **0.997×** | 46.00 / 45.96 dB | 493.7 | 252.4 |
+| goody two-shoes | IW44 photo | 327,798 | 340,926 | 340,872 | 1.040× | **1.000×** | 41.15 / 41.14 dB | 398.2 | 311.9 |
+| cable | JB2 lossless / `cjb2` | 2,248 | — | 2,272 | 1.011× | — | pixel-exact | 26.4 | 7.4 |
+| map atlas | JB2 lossless / `cjb2` | 145,592 | — | 138,672 | 0.952× | — | pixel-exact | 353.7 | 121.6 |
+| Chinese cookbook | JB2 lossless / `cjb2` | 67 | — | 66 | 0.985× | — | pixel-exact | 21.6 | 4.4 |
+
+At an equal slice count the IW44 sizes and PSNR are at parity. The
+1.025–1.040× ratio against default `c44` is the cost of our 100th slice
+(+0.2–0.7 dB), not a coding gap. A nine-page check at 99 slices on both
+sides agrees (`IW44_SIZE_PARITY` in `PERF_EXPERIMENTS.md`).
+
 ## Decision boundary
 
 The scorecard is the measurement harness; the two IW44 fixes above were promoted
 to the default bitstream only after this scorecard, byte-exact `ddjvu` interop,
 and the full test suite confirmed them (recorded Kept in `PERF_EXPERIMENTS.md`).
-IW44 photo now sits at 1.025–1.040× `c44` at matched-or-better fidelity; the
+IW44 photo now sits at 1.025–1.040× default `c44` at higher fidelity, and at
+0.997–1.000× `c44` at an equal slice count; the
 JB2 lossless profile, after the 2026-09-27 dictionary switch, sits at
 0.952–1.011× `cjb2`.
 
