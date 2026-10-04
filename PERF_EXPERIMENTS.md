@@ -16699,3 +16699,47 @@ candidate).
 a per-pixel band count, a one-pixel pair that `aligned_hamming` lines up
 always gets bound 0 (catches a top-down/Jbm row flip), and the bound
 never exceeds the exact distance on random pairs within ±3 px.
+
+
+### IW44_SIZE_PARITY (2026-10-05)
+
+**Issue.** The encoder parity scorecard shows IW44 Photo at 1.025×
+(watchmaker) and 1.040× (goody two-shoes) the bytes of `c44`. The
+question: is there an entropy-coding gap left to close?
+
+**Approach.** Encode the same PPM at equal slice counts on both sides.
+The default `c44` schedule is `-slice 74,89,99` (3 chunks, 99 slices;
+checked: the default output is identical to that flag). Ours is 100
+slices in chunks of 10. Scratch tool: our `PageEncoder` Photo profile
+with `Iw44EncodeOptions { total_slices: 99 }`, against `c44 -slice
+74,89,99`; both decoded by `ddjvu`, RGB PSNR against the source.
+
+**Numbers.** 99 slices, bytes / PSNR, c44 vs ours:
+
+| Page | c44 B | c44 dB | ours B | ours dB |
+|------|------:|-------:|-------:|--------:|
+| watchmaker | 665,625 | 45.280 | 663,542 | 45.245 |
+| goody two-shoes | 327,798 | 39.368 | 327,852 | 39.358 |
+| boy | 4,564 | 46.738 | 4,642 | 46.688 |
+| chicken | 12,434 | 46.915 | 12,536 | 46.954 |
+| colorbook p1 | 230,841 | 44.092 | 230,898 | 44.081 |
+| colorbook p61 | 172,275 | 43.713 | 172,366 | 43.687 |
+| carte | 1,471,121 | 33.970 | 1,471,174 | 33.966 |
+| vega | 333,967 | 42.275 | 332,530 | 42.227 |
+| conquete | 544,993 | 51.261 | 544,966 | 51.229 |
+
+Each extra chunk costs ~11 B. The scorecard gap is slice 100: it adds
+2.5–4% bytes and 0.2–0.7 dB. The scorecard now runs `c44` a second time
+with our schedule (`-slice 10,20,…,100`): watchmaker 684,544 B /
+46.00 dB vs ours 682,598 B / 45.96 dB (**0.997×**); goody 340,926 B /
+41.15 dB vs ours 340,872 B / 41.14 dB (**1.000×**).
+
+**Decision.** Diagnostic. Encoder defaults unchanged (100 slices, 10 per
+chunk). The scorecard reports `matched_baseline` (c44 at our schedule)
+and `size_ratio_ours_over_matched` next to the default-`c44` ratio.
+
+**Reason.** At equal slices the sizes and PSNR are at parity, so there is
+no coding gap to chase. The 1.025–1.040× ratio buys higher fidelity than
+default `c44`; dropping to 99 slices would only match `c44`'s quality
+point. Do not reopen "IW44 is 2.5–4% larger than c44" without an
+equal-slice comparison.

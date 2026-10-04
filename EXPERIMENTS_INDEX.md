@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-04.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-05.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_SIZE_PARITY | 2026-10-05 | encode (IW44 Photo vs `c44`, `examples/encoder_parity_scorecard.rs`) | **D** | At equal slices ours is 0.997–1.000× `c44` bytes at equal PSNR (9 pages at 99 slices; scorecard at 100). The 1.025–1.040× scorecard gap is our slice 100 (+2.5–4% B, +0.2–0.7 dB) vs default `c44 -slice 74,89,99` | No entropy gap. Defaults kept; scorecard now also runs `c44` at our schedule (`matched_baseline`). Do not re-chase the gap without an equal-slice run. |
 | JB2_REFINE_GRID_BOUND | 2026-10-04 | encode (JB2 aligned refinement search, `crates/djvu-jb2/src/encode/refine.rs`) | **K** | Map atlas Lossless 127 → 117 ms (−8%), scorecard 132.9 → 124.6 ms (cjb2 350.1); text pages unchanged. Byte-identical | 4 × 4 centre-aligned ink grid per bitmap; sum of per-cell differences is a lower bound, rejects 72% of the compares the ink bound let through. Eager per-pixel grid was slower (131 ms); 5 × 5 grid slower (136 ms). |
 | JB2_REFINE_ROW_WORDS | 2026-10-04 | encode (JB2 aligned refinement search, `crates/djvu-jb2/src/encode/refine.rs` + `emit.rs`) | **K** | Map atlas Lossless 141 → 126 ms (−11%), scorecard 151.4 → 132.9 ms (cjb2 354.1); text pages unchanged. Byte-identical | `RefineIndex` keeps each dict entry's rows as u64 words (≤ 64 px wide), built once; `aligned_hamming_words` = shift + popcount per row. Per-call u64 rows inside `aligned_hamming` gave only −1%. Still 1.18 M compares per map page. |
 | JB2_CC_PACKED_SCAN | 2026-10-04 | encode (JB2 connected components, `crates/djvu-jb2/src/encode/cc.rs`) | **K** | Lossless scorecard cable 12.9 → 7.8 ms, cookbook 9.6 → 4.9 ms (cjb2 26.9 / 23.6), map atlas 154.5 → 151.4 ms. Byte-identical | `extract_ccs` scans packed rows (64 white px per step) and marks visits by clearing bits, instead of a byte-per-pixel page copy. Same seeds and DFS order. Map atlas: dict emit ~45%, direct tiles ~25%. |
