@@ -84,6 +84,37 @@ impl ZpEncoder {
         }
     }
 
+    /// Encode `n` copies of `bit` in one context: the same bytes and final
+    /// context state as `n` calls to [`encode_bit`](Self::encode_bit).
+    ///
+    /// An MPS bit on the fast path (`a + p < 0x8000`) only adds `p` to `a`,
+    /// so a run of them collapses into one multiply-add; only the bits that
+    /// reach `0x8000` (one shift each) take the full MPS step.
+    pub fn encode_run(&mut self, ctx: &mut u8, bit: bool, mut n: usize) {
+        while n > 0 {
+            let state = *ctx as usize;
+            let p = PROB[state] as u32;
+            if bit != ((state & 1) != 0) {
+                self.encode_lps(ctx, self.a + p);
+                n -= 1;
+                continue;
+            }
+            if p == 0 {
+                // Padding states only: `z = a` stays on the fast path.
+                return;
+            }
+            // Fast steps before `a + p` reaches 0x8000 (`a < 0x8000` always).
+            let fast = (0x7fff_u32.saturating_sub(self.a) / p) as usize;
+            if fast >= n {
+                self.a += n as u32 * p;
+                return;
+            }
+            self.a += fast as u32 * p;
+            self.encode_mps(ctx, self.a + p);
+            n -= fast + 1;
+        }
+    }
+
     /// Encode one bit in IW44 passthrough mode (threshold `z = 0x8000 + 3a/8`).
     ///
     /// Counterpart to [`ZpDecoder::decode_passthrough_iw44`](crate::ZpDecoder::decode_passthrough_iw44); must produce a
@@ -399,5 +430,40 @@ mod tests {
             let got = dec.decode_bit(&mut dec_ctx[ci]);
             assert_eq!(got, expected, "mismatch at bit {i} ctx {ci}");
         }
+    }
+
+    /// `encode_run` must produce the same bytes and context state as one
+    /// `encode_bit` per bit: runs of both values, short and long, mixed with
+    /// single bits in a second context.
+    #[test]
+    fn encode_run_matches_encode_bit() {
+        let mut rng: u32 = 0x2545_f491;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        let (mut run_enc, mut bit_enc) = (ZpEncoder::new(), ZpEncoder::new());
+        let (mut run_ctx, mut bit_ctx) = ([0u8; 2], [0u8; 2]);
+        for _ in 0..3000 {
+            let r = next();
+            let bit = r % 7 == 0;
+            let n = match r % 5 {
+                0 => 0,
+                1 => 1,
+                2 => (r >> 8) as usize % 16,
+                _ => (r >> 8) as usize % 70_000,
+            };
+            run_enc.encode_run(&mut run_ctx[0], bit, n);
+            for _ in 0..n {
+                bit_enc.encode_bit(&mut bit_ctx[0], bit);
+            }
+            assert_eq!(run_ctx, bit_ctx);
+            let other = r & 0x100 != 0;
+            run_enc.encode_bit(&mut run_ctx[1], other);
+            bit_enc.encode_bit(&mut bit_ctx[1], other);
+        }
+        assert_eq!(run_enc.finish(), bit_enc.finish());
     }
 }

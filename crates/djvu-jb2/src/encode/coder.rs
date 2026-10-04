@@ -151,9 +151,25 @@ pub(super) fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitm
         let mut r1 = (row_p1[0] as u32) << 2 | (row_p1[1] as u32) << 1 | row_p1[2] as u32;
         let mut r0: u32 = 0;
 
-        for col in 0..w {
+        let mut col = 0;
+        while col < w {
             let idx = ((r2 << 7) | (r1 << 2) | r0) as usize;
             let bit = row_cur[col] != 0;
+            if idx == 0 && !bit {
+                // White on white: every pixel of the run codes `false` in
+                // context 0, so the ZP coder takes it as one run.
+                let n = white_run(row_cur, row_p1, row_p2, col, w);
+                // Context 0 at `col` means the first pixel already qualifies.
+                debug_assert!(n >= 1);
+                zp.encode_run(&mut ctx[0], false, n);
+                col += n;
+                // The run leaves zeros in every window bit except the
+                // newest one of the two rows above.
+                r2 = row_p2[col + 1] as u32;
+                r1 = row_p1[col + 2] as u32;
+                r0 = 0;
+                continue;
+            }
             // Safety: r2 ≤ 7, r1 ≤ 31, r0 ≤ 3 by the & masks above,
             // so idx ≤ (7<<7)|(31<<2)|3 = 1023 < ctx.len() = 1024.
             let ctx_byte = unsafe { ctx.get_unchecked_mut(idx) };
@@ -163,8 +179,32 @@ pub(super) fn encode_bitmap_direct(zp: &mut ZpEncoder, ctx: &mut [u8], bm: &Bitm
             r2 = ((r2 << 1) & 0b111) | row_p2[col + 2] as u32;
             r1 = ((r1 << 1) & 0b11111) | row_p1[col + 3] as u32;
             r0 = ((r0 << 1) & 0b11) | bit as u32;
+            col += 1;
         }
     }
+}
+
+/// Length of the white run that starts at `col`, where the context is 0 and
+/// the pixel is white: pixel `col + j` keeps both while it, the pixel at
+/// `col + j + 1` in the row above-above, and the one at `col + j + 2` in the
+/// row above are white. Rows carry 4 zero padding columns past `w`.
+fn white_run(cur: &[u8], p1: &[u8], p2: &[u8], col: usize, w: usize) -> usize {
+    let mut j = col;
+    // Eight byte-per-pixel columns per step; the last read is p1[j + 9] < w + 2.
+    while j + 8 <= w {
+        let word = |row: &[u8], at: usize| {
+            u64::from_le_bytes(row[at..at + 8].try_into().expect("8 bytes"))
+        };
+        let any = word(cur, j) | word(p2, j + 1) | word(p1, j + 2);
+        if any != 0 {
+            return j + (any.trailing_zeros() / 8) as usize - col;
+        }
+        j += 8;
+    }
+    while j < w && (cur[j] | p2[j + 1] | p1[j + 2]) == 0 {
+        j += 1;
+    }
+    j - col
 }
 
 /// Encode `cbm` relative to a reference (matched) bitmap `mbm` using the
