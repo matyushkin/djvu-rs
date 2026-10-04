@@ -945,8 +945,8 @@ combinations and targets), and is enforced in CI. In short:
 ## Performance
 
 **Faster than DjVuLibre** 3.5.29, the reference C implementation, on every
-measured render and encode case (Apple M1 Max, 2026-10-03, same machine for
-both):
+measured render and encode case (Apple M1 Max, same machine for both; render
+2026-10-03, encode 2026-10-05):
 
 | Render (page already open) | djvu-rs | DjVuLibre | djvu-rs |
 |----------------------------|--------:|----------:|--------:|
@@ -957,10 +957,10 @@ both):
 
 | Encode | djvu-rs | DjVuLibre | Speed | File size |
 |--------|--------:|----------:|------:|----------:|
-| colour scan (`watchmaker`), IW44 vs `c44` | 283 ms | 628 ms | **2.2× faster** | 1.025× |
-| illustrated colour page (`goody two-shoes`), IW44 vs `c44` | 406 ms | 503 ms | **1.2× faster** | 1.040× |
-| map atlas, lossless JB2 vs `cjb2` | 162 ms | 359 ms | **2.2× faster** | **0.952×** |
-| text page (`cable`), lossless JB2 vs `cjb2` | 26.0 ms | 28.4 ms | 1.1× faster | 1.011× |
+| colour scan (`watchmaker`), IW44 vs `c44` | 283 ms | 547 ms | **1.9× faster** | 1.025× |
+| illustrated colour page (`goody two-shoes`), IW44 vs `c44` | 307 ms | 441 ms | **1.4× faster** | 1.040× |
+| map atlas, lossless JB2 vs `cjb2` | 133 ms | 383 ms | **2.9× faster** | **0.952×** |
+| text page (`cable`), lossless JB2 vs `cjb2` | 7.8 ms | 27.3 ms | **3.5× faster** | 1.011× |
 
 The DjVuLibre render column times `ddjvu_page_render` on a page it has already
 decoded; djvu-rs times a repeat `render_pixmap` of the same page. A cold
