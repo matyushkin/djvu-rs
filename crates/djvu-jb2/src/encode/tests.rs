@@ -64,6 +64,11 @@ fn aligned_hamming_matches_per_pixel_count() {
                     want,
                     "{cw}x{ch} vs {mw}x{mh}"
                 );
+                let inside = mw <= cw && mh <= ch;
+                assert!(
+                    grid_bound(&ink_grid(&cand), &ink_grid(&reference), inside) <= want,
+                    "grid {cw}x{ch} vs {mw}x{mh}"
+                );
                 if cw <= 64 && mw <= 64 {
                     let (mut c, mut m) = (Vec::new(), Vec::new());
                     assert!(push_row_words(&cand, &mut c));
@@ -78,6 +83,62 @@ fn aligned_hamming_matches_per_pixel_count() {
         }
     }
 }
+
+/// `ink_grid` counts each pixel in the cell of its offsets from the centre,
+/// and two pixels that `aligned_hamming` lines up share a cell, so
+/// `grid_bound` is 0 for a one-pixel pair that lines up.
+#[test]
+fn ink_grid_cells_follow_the_alignment() {
+    // Cell band of an offset from the centre: < -2, -2..0, 0..2, >= 2.
+    let band = |off: i32| (off >= -2) as usize + (off >= 0) as usize + (off >= 2) as usize;
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for (cw, ch) in [(1u32, 1u32), (5, 7), (8, 8), (9, 4), (12, 11), (21, 3)] {
+        let mut cand = Bitmap::new(cw, ch);
+        let mut want = [0u32; 16];
+        for y in 0..ch as i32 {
+            for x in 0..cw as i32 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                if seed.is_multiple_of(3) {
+                    cand.set(x as u32, y as u32, true);
+                    let r = ch as i32 - 1 - y - ((ch as i32 - 1) >> 1);
+                    want[4 * band(r) + band(x - ((cw as i32 - 1) >> 1))] += 1;
+                }
+            }
+        }
+        assert_eq!(ink_grid(&cand), want, "{cw}x{ch}");
+        for dw in -3i32..=3 {
+            for dh in -3i32..=3 {
+                let (mw, mh) = (cw as i32 + dw, ch as i32 + dh);
+                if mw < 1 || mh < 1 {
+                    continue;
+                }
+                let row_shift = ((mh - 1) >> 1) - ((ch as i32 - 1) >> 1);
+                let col_shift = ((mw - 1) >> 1) - ((cw as i32 - 1) >> 1);
+                for y in 0..ch as i32 {
+                    let my = mh - 1 - (ch as i32 - 1 - y + row_shift);
+                    for x in 0..cw as i32 {
+                        let mx = x + col_shift;
+                        if !(0..mh).contains(&my) || !(0..mw).contains(&mx) {
+                            continue;
+                        }
+                        let mut c = Bitmap::new(cw, ch);
+                        c.set(x as u32, y as u32, true);
+                        let mut m = Bitmap::new(mw as u32, mh as u32);
+                        m.set(mx as u32, my as u32, true);
+                        assert_eq!(
+                            grid_bound(&ink_grid(&c), &ink_grid(&m), true),
+                            0,
+                            "{cw}x{ch} ({x},{y}) vs {mw}x{mh} ({mx},{my})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 use crate as jb2;
 use djvu_bitmap::Bitmap;
 

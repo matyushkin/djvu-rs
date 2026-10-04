@@ -229,12 +229,78 @@ pub(super) fn aligned_hamming_words(
     diff
 }
 
+/// Black pixels of a bitmap in a 4 × 4 grid of cells placed around its
+/// centre the way [`aligned_hamming`] aligns two bitmaps: a row's band is
+/// set by its Jbm offset from the centre row, a column's by its offset from
+/// the centre column (bands: < -2, -2..0, 0..2, ≥ 2). Aligned pixels of two
+/// bitmaps therefore always fall in the same cell.
+pub(super) type InkGrid = [u32; 16];
+
+fn grid_band(offset: i32) -> usize {
+    match offset {
+        ..-2 => 0,
+        -2..0 => 1,
+        0..2 => 2,
+        _ => 3,
+    }
+}
+
+/// The [`InkGrid`] of `bm`.
+pub(super) fn ink_grid(bm: &Bitmap) -> InkGrid {
+    let (w, h) = (bm.width as i32, bm.height as i32);
+    let (crow, ccol) = ((h - 1) >> 1, (w - 1) >> 1);
+    // Column band `b` covers columns `edges[b]..edges[b + 1]`.
+    let edges = [0, ccol - 2, ccol, ccol + 2, w].map(|x| x.clamp(0, w) as usize);
+    let stride = bm.row_stride();
+    let mut grid = [0u32; 16];
+    for y in 0..h {
+        let row = &bm.data[y as usize * stride..(y as usize + 1) * stride];
+        // Top-down row `y` is Jbm row `h - 1 - y`.
+        let cells = &mut grid[4 * grid_band(h - 1 - y - crow)..][..4];
+        for (cell, x) in cells.iter_mut().zip(edges.windows(2)) {
+            *cell += ones_in(row, x[0], x[1]);
+        }
+    }
+    grid
+}
+
+/// Set bits of the MSB-first packed `row` in columns `a..b`.
+fn ones_in(row: &[u8], a: usize, b: usize) -> u32 {
+    if a >= b {
+        return 0;
+    }
+    // `head` keeps columns from `a` on in its byte, `tail` those before `b`.
+    let (first, last) = (a / 8, (b - 1) / 8);
+    let head = 0xFFu8 >> (a % 8);
+    let tail = 0xFFu8 << (7 - (b - 1) % 8);
+    if first == last {
+        return (row[first] & head & tail).count_ones();
+    }
+    let middle: u32 = row[first + 1..last].iter().map(|b| b.count_ones()).sum();
+    (row[first] & head).count_ones() + middle + (row[last] & tail).count_ones()
+}
+
+/// A lower bound on [`aligned_hamming`] from the two [`InkGrid`]s: a cell
+/// differs in at least as many pixels as its counts do. When the
+/// reference's box is not `inside` `cand`'s, its pixels outside `cand`'s box
+/// are not counted, so only missing reference ink counts.
+pub(super) fn grid_bound(cand: &InkGrid, reference: &InkGrid, inside: bool) -> u32 {
+    let pairs = cand.iter().zip(reference);
+    if inside {
+        pairs.map(|(&c, &m)| c.abs_diff(m)).sum()
+    } else {
+        pairs.map(|(&c, &m)| c.saturating_sub(m)).sum()
+    }
+}
+
 /// What the aligned refinement search keeps per dictionary entry: its ink
-/// count (or [`NOT_REFINABLE`]) and, for entries at most 64 pixels wide,
-/// its rows as [`push_row_words`] words, built once instead of per compare.
+/// count (or [`NOT_REFINABLE`]), its [`InkGrid`] and, for entries at most 64
+/// pixels wide, its rows as [`push_row_words`] words, built once instead of
+/// per compare.
 #[derive(Default)]
 pub(super) struct RefineIndex {
     ink: Vec<u32>,
+    grids: Vec<InkGrid>,
     /// Each entry's rows in `words`; empty for wide entries.
     rows: Vec<core::ops::Range<usize>>,
     words: Vec<u64>,
@@ -246,6 +312,7 @@ impl RefineIndex {
         let start = self.words.len();
         push_row_words(bm, &mut self.words);
         self.ink.push(ink);
+        self.grids.push(ink_grid(bm));
         self.rows.push(start..self.words.len());
     }
 
@@ -278,11 +345,12 @@ pub(super) fn is_tight(bm: &Bitmap) -> bool {
 /// Nearest dict entry within `max_dim_delta` per axis (same size included) by
 /// [`aligned_hamming`], accepted within `area × max_hamming_fraction`.
 ///
-/// `index` holds the black-pixel count of each dict entry. The ink
-/// difference is a lower bound on the aligned distance (both ways when the
-/// reference box fits inside `cand`'s), so most candidates are rejected
-/// without a pixel scan. Buckets are scanned newest entry first, and the
-/// budget shrinks to the best distance found so far.
+/// `index` holds the black-pixel count and [`InkGrid`] of each dict entry.
+/// The ink difference, then the [`grid_bound`], are lower bounds on the
+/// aligned distance (both ways when the reference box fits inside
+/// `cand`'s), so most candidates are rejected without a pixel scan. Buckets
+/// are scanned newest entry first, and the budget shrinks to the best
+/// distance found so far.
 pub(super) fn find_aligned_refine_ref(
     cand: &Bitmap,
     cand_ink: u32,
@@ -299,6 +367,8 @@ pub(super) fn find_aligned_refine_ref(
     let mut limit = ((area as f64) * (max_hamming_fraction as f64)).round() as u32;
     let mut cand_words = Vec::new();
     let narrow = push_row_words(cand, &mut cand_words);
+    // Built on the first candidate that passes the ink bound.
+    let mut cand_grid = None;
     let mut best: Option<usize> = None;
     for w in cand.width.saturating_sub(max_dim_delta)..=cand.width + max_dim_delta {
         for h in cand.height.saturating_sub(max_dim_delta)..=cand.height + max_dim_delta {
@@ -317,6 +387,10 @@ pub(super) fn find_aligned_refine_ref(
                     cand_ink.saturating_sub(ink)
                 };
                 if bound > limit {
+                    continue;
+                }
+                let cand_grid = cand_grid.get_or_insert_with(|| ink_grid(cand));
+                if grid_bound(cand_grid, &index.grids[idx], inside) > limit {
                     continue;
                 }
                 let reference = dict_entries[idx];
