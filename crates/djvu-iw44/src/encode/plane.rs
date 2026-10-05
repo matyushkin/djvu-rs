@@ -30,6 +30,12 @@ pub(super) struct PlaneEncoder {
     /// its buckets are ever written (PERF_EXPERIMENTS.md ENCODE_SPARSE_RECON).
     pub(super) recon: Vec<CoefBlock>,
     pub(super) block_cols: usize,
+    /// Per block, the largest `|v|` in each of bands 1..=9; empty until the
+    /// first slice, when `blocks` is final. See [`Self::skip_quiet_block`].
+    band_max: Vec<[u16; 9]>,
+    /// Test switch: always run the full passes, for comparing bytes.
+    #[cfg(test)]
+    pub(super) full_passes: bool,
 
     pub(super) quant_lo: [u32; 16],
     pub(super) quant_hi: [u32; 10],
@@ -85,6 +91,36 @@ fn scatter_strip(strip: &[i16], stride: usize, blocks: &mut [[i16; 1024]]) {
     }
 }
 
+/// Whether any UNK coefficient of a bucket reaches its step: `|v| >= s`,
+/// the encoder's significance test.
+///
+/// Branch-free over the 16 lanes so it vectorises; the per-coefficient
+/// early exit it replaces was 40% of a Photo encode. Steps are clamped to
+/// `u16`: a step of `0x8000` or more never belongs to an UNK coefficient
+/// (`is_null_slice` marks it ZERO or skips the slice), so the clamp cannot
+/// change the answer.
+#[cfg(feature = "std")]
+#[inline]
+fn any_unk_reaches(states: &[u8; 16], coefs: &[i16], steps: &[u16; 16]) -> bool {
+    let coefs: &[i16; 16] = coefs.try_into().expect("a bucket holds 16 coefficients");
+    let mut any = false;
+    for k in 0..16 {
+        any |= (states[k] == UNK) & (coefs[k].unsigned_abs() >= steps[k]);
+    }
+    any
+}
+
+/// The largest `|v|` of a block's coefficients in each of bands 1..=9.
+#[cfg(feature = "std")]
+fn band_maxima(block: &[i16; 1024]) -> [u16; 9] {
+    core::array::from_fn(|i| {
+        let (from, to) = BAND_BUCKETS[i + 1];
+        block[from << 4..(to + 1) << 4]
+            .iter()
+            .fold(0, |max, v| max.max(v.unsigned_abs()))
+    })
+}
+
 #[cfg(feature = "std")]
 impl PlaneEncoder {
     pub(super) fn new(width: usize, height: usize) -> Self {
@@ -97,6 +133,9 @@ impl PlaneEncoder {
             blocks,
             recon: vec![CoefBlock::default(); n_blocks],
             block_cols,
+            band_max: Vec::new(),
+            #[cfg(test)]
+            full_passes: false,
             quant_lo: QUANT_LO_INIT,
             quant_hi: QUANT_HI_INIT,
             curband: 0,
@@ -213,7 +252,13 @@ impl PlaneEncoder {
         #[cfg(feature = "iw44-probe")]
         let (probe_band, probe_before) = (self.curband, zp.bytes_written());
         if !self.is_null_slice() {
+            if self.band_max.is_empty() {
+                self.band_max = self.blocks.iter().map(band_maxima).collect();
+            }
             for block_idx in 0..self.blocks.len() {
+                if self.skip_quiet_block(zp, block_idx) {
+                    continue;
+                }
                 self.preliminary_flag_computation(block_idx);
                 let emit = self.block_band_encoding_pass(zp, block_idx);
                 if emit {
@@ -228,6 +273,49 @@ impl PlaneEncoder {
         self.finish_slice();
         #[cfg(feature = "iw44-probe")]
         probe::add_bytes(probe_band, (zp.bytes_written() - probe_before) as u64);
+    }
+
+    /// Codes a block whose band is still all zero in `recon` and stays so this
+    /// slice, without the passes; returns false, coding nothing, otherwise.
+    ///
+    /// Such a block is most of a page in the early slices of every band but
+    /// 0. With `recon` zero every coefficient is UNK, so the passes would code
+    /// exactly this: one "no new bucket" bit for a 16-bucket band, else one
+    /// "not new" bit per bucket, in the context `bucket_encoding_pass` takes
+    /// from the bucket's parent coefficients `4i..4i+4` in a lower band
+    /// (never active in this band). Nothing else changes, so the bytes and
+    /// context states match the full passes.
+    fn skip_quiet_block(&mut self, zp: &mut ZpEncoder, block_idx: usize) -> bool {
+        #[cfg(test)]
+        if self.full_passes {
+            return false;
+        }
+        let band = self.curband;
+        let (from, to) = BAND_BUCKETS[band];
+        if band == 0
+            || self.recon[block_idx].has_bucket(from)
+            || u32::from(self.band_max[block_idx][band - 1]) >= self.quant_hi[band]
+        {
+            return false;
+        }
+        let bcount = to - from + 1;
+        if bcount >= 16 {
+            zp.encode_bit(&mut self.ctx_decode_bucket[0], false);
+            #[cfg(feature = "iw44-probe")]
+            probe::record_block_band(band, false);
+        } else {
+            let recon = &self.recon[block_idx];
+            for i in from..=to {
+                let n = (4 * i..4 * i + 4)
+                    .filter(|&j| recon.coef(j) != 0)
+                    .count()
+                    .min(3);
+                zp.encode_bit(&mut self.ctx_decode_coef[n + band * 8], false);
+                #[cfg(feature = "iw44-probe")]
+                probe::record_bucket_new(band, false);
+            }
+        }
+        true
     }
 
     /// Mirrors decoder's `block_band_decoding_pass`.
@@ -262,36 +350,34 @@ impl PlaneEncoder {
 
     /// Returns true if any UNK coefficient in `[from..=to]` buckets will activate
     /// at the current quantization step.
+    ///
+    /// Significance must use the encoder's `|V| >= s` threshold. Activating at
+    /// the decoder's lower 11s/16 decision boundary starts a coefficient one
+    /// bitplane too early; its reconstruction is then too large for later
+    /// refinement to bring back down on dense pages.
     pub(super) fn any_unk_activates(&self, block_idx: usize, from: usize, to: usize) -> bool {
-        let step_hi = self.quant_hi[self.curband] as i32;
-        for (boff, j) in (from..=to).enumerate() {
-            for k in 0..16 {
-                if self.coeffstate[boff][k] != UNK {
-                    continue;
-                }
-                let coef_idx = if self.curband == 0 { k } else { (j << 4) | k };
-                let s = if self.curband == 0 {
-                    self.quant_lo[k] as i32
-                } else {
-                    step_hi
-                };
-                let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                // Significance must use the encoder's `|V| >= s` threshold.
-                // Activating at the decoder's lower 11s/16 decision boundary starts
-                // a coefficient one bitplane too early; its reconstruction is then
-                // too large for later refinement to bring back down on dense pages.
-                if v >= s {
-                    return true;
-                }
-            }
+        let steps = self.steps();
+        let block = &self.blocks[block_idx];
+        (from..=to).enumerate().any(|(boff, j)| {
+            any_unk_reaches(&self.coeffstate[boff], &block[j << 4..(j + 1) << 4], &steps)
+        })
+    }
+
+    /// The step of each of a bucket's 16 coefficients in the current band,
+    /// clamped to `u16` for [`any_unk_reaches`].
+    fn steps(&self) -> [u16; 16] {
+        let clamp = |step: u32| step.min(u32::from(u16::MAX)) as u16;
+        if self.curband == 0 {
+            self.quant_lo.map(clamp)
+        } else {
+            [clamp(self.quant_hi[self.curband]); 16]
         }
-        false
     }
 
     /// Mirrors decoder's `bucket_decoding_pass` — encodes per-bucket NEW bits.
     pub(super) fn bucket_encoding_pass(&mut self, zp: &mut ZpEncoder, block_idx: usize) {
         let (from, to) = BAND_BUCKETS[self.curband];
-        let step_hi = self.quant_hi[self.curband] as i32;
+        let steps = self.steps();
         for (boff, i) in (from..=to).enumerate() {
             if (self.bucketstate[boff] & UNK) == 0 {
                 continue;
@@ -312,20 +398,13 @@ impl PlaneEncoder {
             if (self.bbstate & ACTIVE) != 0 {
                 n |= 4;
             }
-            // Will any UNK coefficient in this bucket become active?
-            let is_new = (0..16usize).any(|k| {
-                if self.coeffstate[boff][k] != UNK {
-                    return false;
-                }
-                let coef_idx = if self.curband == 0 { k } else { (i << 4) | k };
-                let s = if self.curband == 0 {
-                    self.quant_lo[k] as i32
-                } else {
-                    step_hi
-                };
-                let v = self.blocks[block_idx][coef_idx].unsigned_abs() as i32;
-                v >= s // Match `any_unk_activates` and the coefficient gate below.
-            });
+            // Will any UNK coefficient in this bucket become active? Same
+            // test as `any_unk_activates` and the coefficient gate below.
+            let is_new = any_unk_reaches(
+                &self.coeffstate[boff],
+                &self.blocks[block_idx][i << 4..(i + 1) << 4],
+                &steps,
+            );
             if is_new {
                 self.bucketstate[boff] |= NEW;
             }
