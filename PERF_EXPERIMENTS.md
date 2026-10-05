@@ -16786,3 +16786,45 @@ transform 28%, ZP coder 27%, colour conversion 11%.
 `quiet_block_skip_matches_the_full_passes` compares the bytes with a
 test-only switch that forces the full passes; it fails on the context-0
 version.
+
+### IW44_FWD_WAVELET_NEON (2026-10-05)
+
+**Issue.** After IW44_ENCODE_QUIET_BLOCKS the forward wavelet transform
+was 28% of the IW44 Photo encode. Per-scale timing on goody two-shoes
+(3 planes): row pass s=1 38.0 ms, s=2 17.6 ms; column pass s=1 14.2 ms,
+s=2 8.1 ms. The s=1 row pass was already NEON, yet the slowest.
+
+**Approach.** Three byte-identical changes in `encode/wavelet.rs`:
+
+1. `forward_row_neon_s1_row`, odd pass: carry `pair1` over from the
+   previous chunk's `pair2` instead of reloading it. The reload read
+   across the 16 samples just stored at `chunk * 16 + 2`; the partial
+   overlap defeats store-to-load forwarding and stalled every chunk.
+   Only the lane-0 odd changed since the load, and that lane is unused.
+2. Row pass at s≥2: gather the row's every-`s`-th sample into a dense
+   buffer (`vld2q` at s=2), run the NEON s=1 row there, scatter back.
+3. Column pass at s=2: the s=1 NEON predict/lift helpers take a const
+   `S`; at `S = 2` they load the even lanes with `vld2q` and store with
+   `vst2q`, keeping the odd lanes.
+
+**Numbers.** M1 Max, goody, per-scale time (3 planes):
+
+| Pass | before | after |
+|------|-------:|------:|
+| row s=1 | 38.0 ms | 6.0 ms |
+| row s=2 | 17.6 ms | 2.6 ms |
+| col s=1 | 14.2 ms | 5.5 ms |
+| col s=2 | 8.1 ms | 2.4 ms |
+
+`PageEncoder` Photo, median of 9: goody 170.9 → **144.0 ms** (−16%),
+carte 492.2 → **430.7 ms** (−12%), vega 82.3 → **78.4 ms**. Output
+identical (`cmp`) on 8 colour pages.
+
+**Decision.** Kept.
+
+**Reason.** −12…16% on large photo pages, byte-identical. Test
+`forward_transform_matches_portable_reference` compares the full
+transform with the portable passes (columns via a transposed row pass)
+on sizes that hit every tail; it fails when the s=2 store drops the odd
+lanes. The decoder's `row_pass_neon_s1_row` may have the same
+store-forwarding stall — not checked here.
