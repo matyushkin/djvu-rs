@@ -16857,3 +16857,36 @@ in both orders (new vs old baseline, then old vs new baseline):
 
 **Reason.** −20% on full-page IW44 reconstruction, both bench orders
 agree. The new test fails when `pair1` is reloaded stale.
+
+### IW44_DEC_ROW_GATHER_S2 (2026-10-06)
+
+**Issue.** After IW44_DEC_ROW_STORE_FORWARD, an audit of every NEON
+load/store site (`crates/djvu-iw44/src/{color,plane,wavelet}.rs`,
+`encode/wavelet.rs`) for the same partial store/load overlap found no
+other case: `color.rs` stores to a separate output, `plane.rs` stores
+once per call, and the s≥2 decoder paths store and reload the same
+32-byte span (an exact overlap, which forwards). The audit did note that
+the decoder's row pass at s≥2 uses the 8-rows-at-a-time path with scalar
+per-sample gathers (`load_rows8` / `store_rows8`).
+
+**Approach.** As in the encoder (IW44_FWD_WAVELET_NEON): gather each
+active row's every-`s`-th sample into a dense buffer (`vld2q` at s=2),
+run the NEON s=1 row (`row_pass_neon_s1_row`), scatter back.
+
+**Numbers.** M1 Max, `cargo bench --bench codecs`, criterion, both
+orders (new vs old baseline, then old vs new baseline):
+
+| Bench | new vs old | old vs new |
+|-------|-----------:|-----------:|
+| iw44_to_rgb_large_page | +5.4% | −3.3% (old faster) |
+| iw44_gray_decode_large/gray_direct | +5.3% | −5.8% (old faster) |
+| iw44_to_rgb_colorbook/sub1_full_decode | −3.5% | −3.5% (contradicts) |
+| gray_direct_sub4 | −4.1% | −3.3% (contradicts) |
+
+**Decision.** Rejected.
+
+**Reason.** Large-page decode is 3–5% slower in both orders; the rest is
+noise. The 8-row path already amortises its gathers over 8 rows and keeps
+all state in registers, while gather + NEON row + scatter touches each
+row three times. Unlike the encoder, which had a scalar strided loop at
+s≥2, the decoder has no slow s≥2 path to replace.
