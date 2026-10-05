@@ -556,9 +556,18 @@ pub(super) unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, widt
         0
     };
 
+    // pair1: evens[chunk*8..+7] in .0, odds[chunk*8..+7] in .1. It carries
+    // over from the previous chunk's `pair2`. Reloading it would read across
+    // the 16 samples just stored at `chunk * 16 + 2`; the partial overlap
+    // defeats store-to-load forwarding and stalls every chunk. Only its
+    // lane-0 odd changed since the load, and that lane is never used
+    // (`curr_odds` starts at lane 1).
+    let mut pair1 = if odd_chunks > 0 {
+        vld2q_s16(ptr as *const i16)
+    } else {
+        int16x8x2_t(vdupq_n_s16(0), vdupq_n_s16(0))
+    };
     for chunk in 0..odd_chunks {
-        // pair1: evens[chunk*8..+7] in .0, odds[chunk*8..+7] in .1
-        let pair1 = vld2q_s16(ptr.add(chunk * 16) as *const i16);
         // pair2: evens[(chunk+1)*8..+7] in .0, odds[(chunk+1)*8..+7] in .1
         let pair2 = vld2q_s16(ptr.add((chunk + 1) * 16) as *const i16);
 
@@ -604,6 +613,7 @@ pub(super) unsafe fn row_pass_neon_s1_row(data: &mut [i16], row_off: usize, widt
 
         // Store: evens at chunk*16+2,+4,...,+16 unchanged (= p1_e), odds updated.
         vst2q_s16(ptr.add(chunk * 16 + 2), int16x8x2_t(p1_e, new_odds));
+        pair1 = pair2;
     }
 
     // Scalar odd tail: k = 3+odd_chunks*16, ..., kmax (inner then boundary).
