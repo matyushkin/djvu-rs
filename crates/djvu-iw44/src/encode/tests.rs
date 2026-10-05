@@ -125,6 +125,37 @@ fn banded_color_encoders(px: &Pixmap, keep: usize, halo: usize) -> [PlaneEncoder
     encs
 }
 
+/// `skip_quiet_block` codes a still-zero block band in one step. Its bytes
+/// must equal the full passes on a page that mixes flat blocks (skipped in
+/// most slices) with noisy ones (never skipped), over every band and slice.
+#[test]
+fn quiet_block_skip_matches_the_full_passes() {
+    let px = make_pixmap(200, 136, |x, y| {
+        if x < 96 {
+            ((x / 2) as u8, (y / 2) as u8, 90)
+        } else {
+            let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503))
+                .wrapping_mul(2_246_822_519)
+                >> 8;
+            (v as u8, (v >> 8) as u8, (v >> 16) as u8)
+        }
+    });
+    let coded = |full_passes: bool| {
+        let mut encs = banded_color_encoders(&px, usize::MAX, 0);
+        encs.iter_mut()
+            .map(|enc| {
+                enc.full_passes = full_passes;
+                let mut zp = ZpEncoder::new();
+                for _ in 0..100 {
+                    enc.encode_slice(&mut zp);
+                }
+                zp.finish()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(coded(false), coded(true));
+}
+
 /// `from_plane` gathers in place, inside the plane's own memory; the grid
 /// must equal the one `gather_rows` copies out of a separate flat plane.
 #[test]

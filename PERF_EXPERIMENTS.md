@@ -16743,3 +16743,46 @@ no coding gap to chase. The 1.025–1.040× ratio buys higher fidelity than
 default `c44`; dropping to 99 slices would only match `c44`'s quality
 point. Do not reopen "IW44 is 2.5–4% larger than c44" without an
 equal-slice comparison.
+
+
+### IW44_ENCODE_QUIET_BLOCKS (2026-10-05)
+
+**Issue.** IW44 Photo encode of goody two-shoes (2454 × 3192) took 284 ms,
+only 1.3× faster than `c44`. A `sample` profile with the passes kept out
+of line: `block_band_encoding_pass` 25%, `bucket_encoding_pass` 16%,
+`preliminary_flag_computation` 5% — every slice walks every block, and
+most blocks code nothing but "no new coefficient" bits.
+
+**Approach.** Two byte-identical changes in `encode/plane.rs`:
+
+1. `any_unk_reaches`: the "does any UNK coefficient reach its step" scan
+   over a bucket is branch-free over the 16 lanes (steps clamped to `u16`;
+   a step ≥ 0x8000 never belongs to an UNK coefficient), so it
+   vectorises. Used by `any_unk_activates` and `bucket_encoding_pass`.
+2. `skip_quiet_block`: per block, the largest `|v|` in each of bands 1..=9
+   (`band_max`, 18 B per block, built at the first slice). When a block's
+   band is still absent from `recon` (all UNK) and its maximum is below
+   the step, the passes would code only one "no new bucket" bit (16-bucket
+   bands) or one "not new" bit per bucket. The fast path codes exactly
+   those bits. The per-bucket context comes from the parent coefficients
+   `4i..4i+4` in a lower band, which can be active — a first version used
+   context 0 and changed the bytes.
+
+**Numbers.** M1 Max, `PageEncoder` Photo, median of 9:
+
+| Page | before | step 1 | steps 1+2 |
+|------|-------:|-------:|----------:|
+| goody two-shoes | 284 ms | 230 ms | **175 ms** |
+| (other colour page, 4267 × 6853) | 1186 ms | — | **606 ms** |
+
+`encoder_parity_scorecard --repeats 5`: goody 311.9 → **189.7 ms**
+(c44 407.9), watchmaker 252.4 → **219.3 ms** (c44 522.5). Output
+identical (`cmp`) on 8 colour pages. Remaining profile: forward wavelet
+transform 28%, ZP coder 27%, colour conversion 11%.
+
+**Decision.** Kept.
+
+**Reason.** −38% on goody, −49% on the large page, byte-identical. Test
+`quiet_block_skip_matches_the_full_passes` compares the bytes with a
+test-only switch that forces the full passes; it fails on the context-0
+version.

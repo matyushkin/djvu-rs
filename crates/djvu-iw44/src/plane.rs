@@ -331,6 +331,14 @@ impl CoefBlock {
         grow
     }
 
+    /// Whether bucket `b` exists. Buckets grow in order, so an absent bucket
+    /// means every bucket above it is absent too.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn has_bucket(&self, b: usize) -> bool {
+        b == 0 || self.hi.len() >= b * 16
+    }
+
     /// Bucket `b`, which must already exist (see [`grow_through`](Self::grow_through)).
     #[inline]
     pub(crate) fn bucket_mut(&mut self, b: usize) -> &mut [i16; 16] {
