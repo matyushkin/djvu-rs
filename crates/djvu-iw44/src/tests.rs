@@ -1004,6 +1004,28 @@ fn simd_row_pass_matches_scalar() {
     );
 }
 
+/// At width 32 the NEON s=1 row runs no 16-sample chunk. These widths run
+/// one to several chunks in a row, so the pair carried between odd chunks
+/// and every tail length are compared with the scalar path.
+#[test]
+fn simd_row_pass_matches_scalar_on_wide_rows() {
+    let height = 3usize;
+    for width in [47usize, 48, 63, 64, 79, 97, 130, 201] {
+        let n = width * height;
+        let initial: Vec<i16> = (0..n)
+            .map(|i| ((i * 7919 + 13) % 4093) as i16 - 2046)
+            .collect();
+
+        let mut scalar_data = initial.clone();
+        super::row_pass_inner(&mut scalar_data, width, height, width, 1, 0, false);
+
+        let mut simd_data = initial;
+        super::row_pass_inner(&mut simd_data, width, height, width, 1, 0, true);
+
+        assert_eq!(scalar_data, simd_data, "width {width}");
+    }
+}
+
 /// Same as `simd_row_pass_matches_scalar` but for s=2 (sd=1).
 ///
 /// Active rows are every other row; active columns are every other column.

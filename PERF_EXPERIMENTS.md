@@ -16828,3 +16828,32 @@ transform with the portable passes (columns via a transposed row pass)
 on sizes that hit every tail; it fails when the s=2 store drops the odd
 lanes. The decoder's `row_pass_neon_s1_row` may have the same
 store-forwarding stall — not checked here.
+### IW44_DEC_ROW_STORE_FORWARD (2026-10-05)
+
+**Issue.** IW44_FWD_WAVELET_NEON found a store-to-load forwarding stall
+in the encoder's NEON s=1 row pass. The decoder's `row_pass_neon_s1_row`
+(`crates/djvu-iw44/src/wavelet.rs`) has the same odd (prediction) loop:
+each chunk reloads `pair1` at `chunk * 16`, which partly overlaps the
+16 samples the previous chunk just stored at `chunk * 16 + 2`.
+
+**Approach.** Carry `pair1` over from the previous chunk's `pair2`, as
+in the encoder. Only its lane-0 odd changed since the load, and
+`curr_odds` never uses that lane. The existing NEON-vs-scalar test used
+width 32, which runs no NEON chunk; new test
+`simd_row_pass_matches_scalar_on_wide_rows` covers widths 47…201.
+
+**Numbers.** M1 Max, `cargo bench --bench codecs`, criterion, measured
+in both orders (new vs old baseline, then old vs new baseline):
+
+| Bench | old | new | change |
+|-------|----:|----:|-------:|
+| iw44_to_rgb_large_page | 8.72 ms | 6.81 ms | −20…22% |
+| iw44_to_rgb_colorbook/sub1_full_decode | 6.28 ms | 5.06 ms | −19…24% |
+| iw44_gray_decode_large/gray_direct | 2.72 ms | 2.38 ms | −12…19% |
+| iw44_to_rgb_colorbook/sub2_partial_decode | 1.60 ms | 1.28 ms | −20% |
+| iw44_decode_large_all_chunks (no wavelet) | — | 26.6 ms | −3% |
+
+**Decision.** Kept.
+
+**Reason.** −20% on full-page IW44 reconstruction, both bench orders
+agree. The new test fails when `pair1` is reloaded stale.
