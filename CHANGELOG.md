@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.0](https://github.com/matyushkin/djvu-rs/compare/v0.40.3...v0.41.0) (2026-10-05)
+
+
+### Features
+
+* **scorecard:** compare IW44 with c44 at an equal slice count ([#926](https://github.com/matyushkin/djvu-rs/issues/926)) ([2bfeba5](https://github.com/matyushkin/djvu-rs/commit/2bfeba5e09ab139e31721c08ff7421ce5897e4f9))
+
+
+### Performance Improvements
+
+* **iw44:** remove a store-forwarding stall in the decoder's row pass ([#930](https://github.com/matyushkin/djvu-rs/issues/930)) ([4536b6c](https://github.com/matyushkin/djvu-rs/commit/4536b6ceb2a513af74e6f0aadb311cc75bc0792f))
+* **iw44:** skip quiet blocks in the encoder's slice passes ([#928](https://github.com/matyushkin/djvu-rs/issues/928)) ([4e56bc4](https://github.com/matyushkin/djvu-rs/commit/4e56bc420a40e5086188ba215ac8ff5e90a4f188))
+* **iw44:** speed up the encoder's forward wavelet with NEON ([#929](https://github.com/matyushkin/djvu-rs/issues/929)) ([f740368](https://github.com/matyushkin/djvu-rs/commit/f74036853583be1fb7230b11cf6ef9b5b46b1c35))
+
 ## [0.40.3](https://github.com/matyushkin/djvu-rs/compare/v0.40.2...v0.40.3) (2026-10-04)
 
 
