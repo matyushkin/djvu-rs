@@ -13,7 +13,7 @@ Read, render, convert, and create DjVu files. Pure-Rust library with a CLI,
 WebAssembly, and Python bindings — on [crates.io](https://crates.io/crates/djvu-rs),
 [PyPI](https://pypi.org/project/djvu-rs/), and [npm](https://www.npmjs.com/package/djvu-rs)
 as `djvu-rs`. MIT licensed, no GPL dependencies, written from the public DjVu v3
-specification. Renders and encodes [1.4–3.0× faster than DjVuLibre](#performance).
+specification. Renders and encodes [1.4–3.5× faster than DjVuLibre](#performance).
 
 | Your task | How |
 |-----------|-----|
@@ -957,10 +957,10 @@ measured render and encode case (Apple M1 Max, same machine for both; render
 
 | Encode | djvu-rs | DjVuLibre | Speed | File size |
 |--------|--------:|----------:|------:|----------:|
-| colour scan (`watchmaker`), IW44 vs `c44` | 199 ms | 484 ms | **2.4× faster** | 1.025× |
-| illustrated colour page (`goody two-shoes`), IW44 vs `c44` | 153 ms | 362 ms | **2.4× faster** | 1.040× |
-| map atlas, lossless JB2 vs `cjb2` | 128 ms | 356 ms | **2.8× faster** | **0.952×** |
-| text page (`cable`), lossless JB2 vs `cjb2` | 8.7 ms | 26.5 ms | **3.0× faster** | 1.011× |
+| colour scan (`watchmaker`), IW44 vs `c44` | 156 ms | 491 ms | **3.1× faster** | 1.025× |
+| illustrated colour page (`goody two-shoes`), IW44 vs `c44` | 123 ms | 382 ms | **3.1× faster** | 1.040× |
+| map atlas, lossless JB2 vs `cjb2` | 104 ms | 361 ms | **3.5× faster** | **0.952×** |
+| text page (`cable`), lossless JB2 vs `cjb2` | 7.6 ms | 26.7 ms | **3.5× faster** | 1.011× |
 
 The DjVuLibre render column times `ddjvu_page_render` on a page it has already
 decoded; djvu-rs times a repeat `render_pixmap` of the same page. A cold
