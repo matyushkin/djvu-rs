@@ -190,12 +190,7 @@ pub(super) fn fill_color_band(
         let y_row = &mut y_buf[off..off + stride];
         let cb_row = &mut cb_buf[off..off + stride];
         let cr_row = &mut cr_buf[off..off + stride];
-        for (col, px) in src.as_chunks::<4>().0.iter().enumerate() {
-            let (y, cb, cr) = rgb_to_ycbcr(px[0], px[1], px[2]);
-            y_row[col] = (y as i32 * 64) as i16;
-            cb_row[col] = (cb as i32 * 64) as i16;
-            cr_row[col] = (cr as i32 * 64) as i16;
-        }
+        ycbcr_row(src, y_row, cb_row, cr_row);
         y_row[w..].fill(0);
         cb_row[w..].fill(0);
         cr_row[w..].fill(0);
