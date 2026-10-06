@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-05.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-06.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| ZP_ENCODE_BATCH_EMIT | 2026-10-06 | encode (ZP coder emit, `crates/djvu-zp/src/encoder.rs`; IW44, JB2, BZZ) | **K** | goody Photo 140 → 117 ms (−16%); scorecard watchmaker 201 → 158 ms, map atlas 126 → 106 ms; bzz_encode −24%, iw44_encode_color −22%, jb2_encode_dict −10%; both bench orders agree. Byte-identical | DjVuLibre per-bit `zemit`/`outbit` (24-bit buffer + follow-bit counter) replaced by adding all `k` shift bits to a u64 accumulator at once; borrows decrement written bytes. Old encoder kept in tests as reference (4000 random streams). |
 | IW44_DEC_ROW_GATHER_S2 | 2026-10-06 | decode (IW44 inverse wavelet row pass s≥2, `crates/djvu-iw44/src/wavelet.rs`) | **X** | iw44_to_rgb_large_page +3…5% slower in both bench orders; rest noise | Gather row to dense buffer + NEON s=1 row (the encoder win) loses to the existing 8-rows-at-a-time path. Same entry: NEON audit found no other partial store/load overlap. |
 | IW44_DEC_ROW_STORE_FORWARD | 2026-10-05 | decode (IW44 inverse wavelet, `crates/djvu-iw44/src/wavelet.rs`) | **K** | iw44_to_rgb_large_page 8.72 → 6.81 ms (−20…22%), colorbook full decode 6.28 → 5.06 ms; both bench orders agree | Same stall as IW44_FWD_WAVELET_NEON: the s=1 NEON odd pass reloaded a vector overlapping its own store; now carried. Old test width 32 ran no NEON chunk; new wide-row test. |
 | IW44_FWD_WAVELET_NEON | 2026-10-05 | encode (IW44 forward wavelet, `crates/djvu-iw44/src/encode/wavelet.rs`) | **K** | goody Photo 170.9 → 144.0 ms (−16%), carte 492.2 → 430.7 ms (−12%); row s=1 38.0 → 6.0 ms. Byte-identical | s=1 row odd pass reloaded a vector overlapping its own store (store-forwarding stall); now carried. s≥2 rows gather into a dense buffer for the NEON s=1 row; s=2 columns use `vld2q`/`vst2q`. |

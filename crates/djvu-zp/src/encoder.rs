@@ -7,25 +7,30 @@ use super::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
 
 /// ZP adaptive binary arithmetic encoder.
 ///
-/// All internal registers (`a`, `subend`) are `u32` to match DjVuLibre's
-/// `unsigned int` types. They hold u16-range values but intermediate
-/// arithmetic can exceed 0xFFFF, which is critical for correct carry
-/// propagation in `zemit`.
+/// `a` and `subend` are `u32` to match DjVuLibre's `unsigned int` types.
+/// They hold u16-range values, but `subend` can exceed 0xFFFF between an
+/// LPS add and its shifts; that excess is the carry the next emitted bits
+/// subtract.
+///
+/// DjVuLibre pushes each emitted bit `b = 1 - (subend >> 15)` through a
+/// 24-bit buffer and a Witten–Neal–Cleary follow-bit counter. The bytes
+/// that scheme writes are the plain binary value of the emitted bits,
+/// with borrows applied, minus the 24-bit `0xFFFFFF` start value and the
+/// all-ones tail that `finish` flushes. This encoder builds that value
+/// directly: a shift of `k` bits adds `2^k - 1 - (subend >> (16 - k))` to
+/// `acc`, whole bytes leave from the top, and a borrow decrements bytes
+/// already written.
 pub struct ZpEncoder {
     /// Current interval width — stored as u32 but logically u16 after shifts.
     a: u32,
     /// Sub-interval lower bound for bit emission — u32 for carry propagation.
     subend: u32,
-    /// 24-bit shift buffer for carry propagation (initialized to 0xFFFFFF).
-    buffer: u32,
-    /// Pending zero-byte run count for carry propagation.
-    nrun: i32,
-    /// Delay counter: first 25 outbit calls are absorbed.
-    delay: i32,
-    /// Byte accumulator for output.
-    byte: u8,
-    /// Bits accumulated in `byte` (0..8).
-    scount: u32,
+    /// The newest `nacc` emitted bits; starts as the 24-bit `0xFFFFFF`.
+    acc: u64,
+    /// Bits held in `acc` (24..56).
+    nacc: u32,
+    /// Leading bytes still to drop: the 24 start bits are never written.
+    skip: u32,
     /// Output bytes.
     output: Vec<u8>,
 }
@@ -41,11 +46,9 @@ impl ZpEncoder {
         Self {
             a: 0,
             subend: 0,
-            buffer: 0xffffff,
-            nrun: 0,
-            delay: 25,
-            byte: 0,
-            scount: 0,
+            acc: 0xffffff,
+            nacc: 24,
+            skip: 3,
             output: Vec::new(),
         }
     }
@@ -53,8 +56,8 @@ impl ZpEncoder {
     /// Bytes flushed to the output buffer so far.
     ///
     /// Diagnostic accessor only — a read-only snapshot of `output.len()` mid-stream
-    /// (subject to the encoder's ~25-bit initial delay and carry-propagation
-    /// buffering, so it is a monotonic approximation, not an exact per-bit byte
+    /// (the encoder holds the newest 32–40 bits and drops its 24-bit start
+    /// value, so it is a monotonic approximation, not an exact per-bit byte
     /// count). Does not affect encoding state or the emitted bytes in any way, so
     /// it cannot change what a decoder reads. Used by encoder-side size-attribution
     /// probes (e.g. per-band byte accounting) that need a running total without
@@ -126,18 +129,12 @@ impl ZpEncoder {
         if !bit {
             self.a = z;
             // z ≥ 0x8000 always — single unconditional shift
-            self.zemit(1 - (self.subend >> 15) as i32);
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
+            self.shift(1);
         } else {
             let z_comp = 0x10000 - z;
             self.subend += z_comp;
             self.a += z_comp;
-            while self.a >= 0x8000 {
-                self.zemit(1 - (self.subend >> 15) as i32);
-                self.subend = (self.subend << 1) & 0xffff;
-                self.a = (self.a << 1) & 0xffff;
-            }
+            self.renormalize();
         }
     }
 
@@ -147,46 +144,42 @@ impl ZpEncoder {
         if !bit {
             // false (MPS-like): a = z, single unconditional shift
             self.a = z;
-            self.zemit(1 - (self.subend >> 15) as i32);
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
+            self.shift(1);
         } else {
             // true (LPS-like): z_comp = 0x10000 - z
             let z_comp = 0x10000 - z;
             self.subend += z_comp;
             self.a += z_comp;
-            while self.a >= 0x8000 {
-                self.zemit(1 - (self.subend >> 15) as i32);
-                self.subend = (self.subend << 1) & 0xffff;
-                self.a = (self.a << 1) & 0xffff;
-            }
+            self.renormalize();
         }
     }
 
     /// Flush the encoder and return the compressed byte stream.
     pub fn finish(mut self) -> Vec<u8> {
-        // eflush: round subend up to disambiguate
+        // eflush: round subend up to disambiguate, then emit its one bit.
         if self.subend > 0x8000 {
             self.subend = 0x10000;
         } else if self.subend > 0 {
             self.subend = 0x8000;
         }
-        // Emit until buffer is flushed and subend is 0
-        while self.buffer != 0xffffff || self.subend != 0 {
-            self.zemit(1 - (self.subend >> 15) as i32);
-            self.subend = (self.subend << 1) & 0xffff;
+        if self.subend != 0 {
+            self.shift(1);
         }
-        // Final bits
-        self.outbit(1);
-        while self.nrun > 0 {
-            self.nrun -= 1;
-            self.outbit(0);
+        // DjVuLibre then emits ones until its 24-bit buffer is all ones and
+        // never writes that buffer: drop the trailing ones of the last 24
+        // bits, which is what is left of the value once those are cut off.
+        let t = (self.acc as u32 | 0xff00_0000).trailing_ones().min(24);
+        self.acc >>= t;
+        self.nacc -= t;
+        while self.nacc >= 8 {
+            self.nacc -= 8;
+            self.put_byte((self.acc >> self.nacc) as u8);
         }
-        // Pad remaining byte with 1s
-        while self.scount > 0 {
-            self.outbit(1);
+        // Pad the last byte with ones.
+        if self.nacc > 0 {
+            let pad = 8 - self.nacc;
+            self.put_byte(((self.acc << pad) | ((1 << pad) - 1)) as u8);
         }
-        self.delay = 0xff; // prevent further output
         // Ensure minimum 2 bytes for decoder initialization
         while self.output.len() < 2 {
             self.output.push(0xff);
@@ -204,9 +197,7 @@ impl ZpEncoder {
         }
         // Code MPS bit + single shift
         self.a = z;
-        self.zemit(1 - (self.subend >> 15) as i32);
-        self.subend = (self.subend << 1) & 0xffff;
-        self.a = (self.a << 1) & 0xffff;
+        self.shift(1);
     }
 
     fn encode_lps(&mut self, ctx: &mut u8, z: u32) {
@@ -218,54 +209,74 @@ impl ZpEncoder {
         let z_comp = 0x10000 - z;
         self.subend += z_comp;
         self.a += z_comp;
-        while self.a >= 0x8000 {
-            self.zemit(1 - (self.subend >> 15) as i32);
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
+        self.renormalize();
+    }
+
+    /// Shift `a` and `subend` left until `a < 0x8000`, emitting one bit
+    /// per shift. `a < 0x10000` here, so the shift count is the number of
+    /// leading ones of `a` as a 16-bit value.
+    #[inline(always)]
+    fn renormalize(&mut self) {
+        debug_assert!(self.a < 0x10000);
+        let k = (!(self.a << 16)).leading_zeros();
+        if k > 0 {
+            self.shift(k);
         }
     }
 
-    /// Emit one bit through the 24-bit carry-propagation buffer.
-    fn zemit(&mut self, b: i32) {
-        self.buffer = (self.buffer << 1).wrapping_add(b as u32);
-        let top = self.buffer >> 24;
-        self.buffer &= 0xffffff;
-        match top {
-            1 => {
-                self.outbit(1);
-                while self.nrun > 0 {
-                    self.nrun -= 1;
-                    self.outbit(0);
-                }
-            }
-            0xff => {
-                self.outbit(0);
-                while self.nrun > 0 {
-                    self.nrun -= 1;
-                    self.outbit(1);
-                }
-            }
-            0 => {
-                self.nrun += 1;
-            }
-            _ => {} // shouldn't happen
+    /// Shift `a` and `subend` left by `k` (1..=16) bits and emit the bits
+    /// DjVuLibre's per-bit loop would: `1 - (subend >> 15)` each, i.e.
+    /// `2^k - 1 - (subend >> (16 - k))` together. `subend >= 0x10000`
+    /// makes that negative: a borrow from the bits already emitted.
+    #[inline(always)]
+    fn shift(&mut self, k: u32) {
+        let term = ((1u64 << k) - 1).wrapping_sub(u64::from(self.subend >> (16 - k)));
+        self.subend = (self.subend << k) & 0xffff;
+        self.a = (self.a << k) & 0xffff;
+        let nacc = self.nacc + k;
+        let acc = (self.acc << k).wrapping_add(term);
+        if acc >> nacc != 0 {
+            // The sum went negative: wrap to `nacc` bits and borrow one
+            // from the bytes above `acc`.
+            self.borrow();
+        }
+        self.acc = acc & ((1u64 << nacc) - 1);
+        self.nacc = nacc;
+        if nacc >= 40 {
+            self.flush();
         }
     }
 
-    /// Emit one bit to the output byte stream (with delay).
-    fn outbit(&mut self, bit: i32) {
-        if self.delay > 0 {
-            if self.delay < 0xff {
-                self.delay -= 1;
-            }
-            return;
+    /// Write the top bytes of `acc`, keeping 32..40 bits.
+    #[cold]
+    #[inline(never)]
+    fn flush(&mut self) {
+        while self.nacc >= 40 {
+            self.nacc -= 8;
+            self.put_byte((self.acc >> self.nacc) as u8);
         }
-        self.byte = (self.byte << 1) | (bit as u8);
-        self.scount += 1;
-        if self.scount == 8 {
-            self.output.push(self.byte);
-            self.scount = 0;
-            self.byte = 0;
+        self.acc &= (1u64 << self.nacc) - 1;
+    }
+
+    fn put_byte(&mut self, byte: u8) {
+        if self.skip > 0 {
+            self.skip -= 1;
+        } else {
+            self.output.push(byte);
+        }
+    }
+
+    /// Subtract one from the bytes written so far. A borrow past the first
+    /// byte lands in the dropped start bits and has no effect.
+    #[cold]
+    #[inline(never)]
+    fn borrow(&mut self) {
+        for byte in self.output.iter_mut().rev() {
+            let (v, under) = byte.overflowing_sub(1);
+            *byte = v;
+            if !under {
+                return;
+            }
         }
     }
 }
@@ -429,6 +440,268 @@ mod tests {
         for (i, &(ci, expected)) in bits.iter().enumerate() {
             let got = dec.decode_bit(&mut dec_ctx[ci]);
             assert_eq!(got, expected, "mismatch at bit {i} ctx {ci}");
+        }
+    }
+
+    /// DjVuLibre's per-bit `zemit` / `outbit` encoder, kept as the
+    /// reference for the batched one.
+    mod reference {
+        use crate::tables::{LPS_NEXT, MPS_NEXT, PROB, THRESHOLD};
+
+        pub struct Reference {
+            /// Current interval width — stored as u32 but logically u16 after shifts.
+            a: u32,
+            /// Sub-interval lower bound for bit emission — u32 for carry propagation.
+            subend: u32,
+            /// 24-bit shift buffer for carry propagation (initialized to 0xFFFFFF).
+            buffer: u32,
+            /// Pending zero-byte run count for carry propagation.
+            nrun: i32,
+            /// Delay counter: first 25 outbit calls are absorbed.
+            delay: i32,
+            /// Byte accumulator for output.
+            byte: u8,
+            /// Bits accumulated in `byte` (0..8).
+            scount: u32,
+            /// Output bytes.
+            output: Vec<u8>,
+        }
+
+        impl Reference {
+            pub(super) fn new() -> Self {
+                Self {
+                    a: 0,
+                    subend: 0,
+                    buffer: 0xffffff,
+                    nrun: 0,
+                    delay: 25,
+                    byte: 0,
+                    scount: 0,
+                    output: Vec::new(),
+                }
+            }
+
+            /// Encode one bit using an adaptive probability context.
+            ///
+            /// Matches DjVuLibre's inline `encoder(int bit, BitContext &ctx)`:
+            /// - LPS always calls encode_lps
+            /// - MPS with z >= 0x8000 calls encode_mps
+            /// - MPS with z < 0x8000 takes fast path (a = z, no shift)
+            pub(super) fn encode_bit(&mut self, ctx: &mut u8, bit: bool) {
+                let state = *ctx as usize;
+                let mps_bit = (state & 1) != 0;
+                let z = self.a + PROB[state] as u32;
+
+                if bit != mps_bit {
+                    self.encode_lps(ctx, z);
+                } else if z >= 0x8000 {
+                    self.encode_mps(ctx, z);
+                } else {
+                    // Fast path: MPS and z < 0x8000 — just update a, no shift
+                    self.a = z;
+                }
+            }
+
+            /// Encode one bit in IW44 passthrough mode (threshold `z = 0x8000 + 3a/8`).
+            ///
+            /// Counterpart to [`ZpDecoder::decode_passthrough_iw44`](crate::ZpDecoder::decode_passthrough_iw44); must produce a
+            /// stream that it correctly decodes.
+            pub(super) fn encode_passthrough_iw44(&mut self, bit: bool) {
+                let z = 0x8000 + (3 * self.a / 8);
+                // Invariant: self.a < 0x8000 (all encode paths maintain this).
+                // Therefore z = 0x8000 + 3a/8 ∈ [0x8000, 0xB000) — always ≥ 0x8000.
+                if !bit {
+                    self.a = z;
+                    // z ≥ 0x8000 always — single unconditional shift
+                    self.zemit(1 - (self.subend >> 15) as i32);
+                    self.subend = (self.subend << 1) & 0xffff;
+                    self.a = (self.a << 1) & 0xffff;
+                } else {
+                    let z_comp = 0x10000 - z;
+                    self.subend += z_comp;
+                    self.a += z_comp;
+                    while self.a >= 0x8000 {
+                        self.zemit(1 - (self.subend >> 15) as i32);
+                        self.subend = (self.subend << 1) & 0xffff;
+                        self.a = (self.a << 1) & 0xffff;
+                    }
+                }
+            }
+
+            pub(super) fn encode_passthrough(&mut self, bit: bool) {
+                let z = 0x8000 + (self.a >> 1);
+                // Invariant: self.a < 0x8000, so z = 0x8000 + a/2 ∈ [0x8000, 0xC000) — always ≥ 0x8000.
+                if !bit {
+                    // false (MPS-like): a = z, single unconditional shift
+                    self.a = z;
+                    self.zemit(1 - (self.subend >> 15) as i32);
+                    self.subend = (self.subend << 1) & 0xffff;
+                    self.a = (self.a << 1) & 0xffff;
+                } else {
+                    // true (LPS-like): z_comp = 0x10000 - z
+                    let z_comp = 0x10000 - z;
+                    self.subend += z_comp;
+                    self.a += z_comp;
+                    while self.a >= 0x8000 {
+                        self.zemit(1 - (self.subend >> 15) as i32);
+                        self.subend = (self.subend << 1) & 0xffff;
+                        self.a = (self.a << 1) & 0xffff;
+                    }
+                }
+            }
+
+            /// Flush the encoder and return the compressed byte stream.
+            pub(super) fn finish(mut self) -> Vec<u8> {
+                // eflush: round subend up to disambiguate
+                if self.subend > 0x8000 {
+                    self.subend = 0x10000;
+                } else if self.subend > 0 {
+                    self.subend = 0x8000;
+                }
+                // Emit until buffer is flushed and subend is 0
+                while self.buffer != 0xffffff || self.subend != 0 {
+                    self.zemit(1 - (self.subend >> 15) as i32);
+                    self.subend = (self.subend << 1) & 0xffff;
+                }
+                // Final bits
+                self.outbit(1);
+                while self.nrun > 0 {
+                    self.nrun -= 1;
+                    self.outbit(0);
+                }
+                // Pad remaining byte with 1s
+                while self.scount > 0 {
+                    self.outbit(1);
+                }
+                self.delay = 0xff; // prevent further output
+                // Ensure minimum 2 bytes for decoder initialization
+                while self.output.len() < 2 {
+                    self.output.push(0xff);
+                }
+                self.output
+            }
+
+            fn encode_mps(&mut self, ctx: &mut u8, z: u32) {
+                // Clamp z: d = 0x6000 + (z + a) / 4
+                let d = 0x6000 + ((z + self.a) >> 2);
+                let z = z.min(d);
+
+                if (self.a & 0xffff) as u16 >= THRESHOLD[*ctx as usize] {
+                    *ctx = MPS_NEXT[*ctx as usize];
+                }
+                // Code MPS bit + single shift
+                self.a = z;
+                self.zemit(1 - (self.subend >> 15) as i32);
+                self.subend = (self.subend << 1) & 0xffff;
+                self.a = (self.a << 1) & 0xffff;
+            }
+
+            fn encode_lps(&mut self, ctx: &mut u8, z: u32) {
+                // Clamp z
+                let d = 0x6000 + ((z + self.a) >> 2);
+                let z = z.min(d);
+
+                *ctx = LPS_NEXT[*ctx as usize];
+                let z_comp = 0x10000 - z;
+                self.subend += z_comp;
+                self.a += z_comp;
+                while self.a >= 0x8000 {
+                    self.zemit(1 - (self.subend >> 15) as i32);
+                    self.subend = (self.subend << 1) & 0xffff;
+                    self.a = (self.a << 1) & 0xffff;
+                }
+            }
+
+            /// Emit one bit through the 24-bit carry-propagation buffer.
+            fn zemit(&mut self, b: i32) {
+                self.buffer = (self.buffer << 1).wrapping_add(b as u32);
+                let top = self.buffer >> 24;
+                self.buffer &= 0xffffff;
+                match top {
+                    1 => {
+                        self.outbit(1);
+                        while self.nrun > 0 {
+                            self.nrun -= 1;
+                            self.outbit(0);
+                        }
+                    }
+                    0xff => {
+                        self.outbit(0);
+                        while self.nrun > 0 {
+                            self.nrun -= 1;
+                            self.outbit(1);
+                        }
+                    }
+                    0 => {
+                        self.nrun += 1;
+                    }
+                    _ => {} // shouldn't happen
+                }
+            }
+
+            /// Emit one bit to the output byte stream (with delay).
+            fn outbit(&mut self, bit: i32) {
+                if self.delay > 0 {
+                    if self.delay < 0xff {
+                        self.delay -= 1;
+                    }
+                    return;
+                }
+                self.byte = (self.byte << 1) | (bit as u8);
+                self.scount += 1;
+                if self.scount == 8 {
+                    self.output.push(self.byte);
+                    self.scount = 0;
+                    self.byte = 0;
+                }
+            }
+        }
+    }
+
+    /// The batched encoder writes the same bytes as DjVuLibre's per-bit
+    /// scheme: random mixes of context bits (skewed, so long MPS runs and
+    /// LPS carries both occur), both passthrough modes, and short streams
+    /// that end inside the 24-bit start buffer.
+    #[test]
+    fn batched_emit_matches_per_bit_reference() {
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for case in 0..4000 {
+            let len = match case % 4 {
+                0 => (next() % 8) as usize,
+                1 => (next() % 64) as usize,
+                2 => (next() % 600) as usize,
+                _ => (next() % 20_000) as usize,
+            };
+            let skew = 1 + (next() % 40) as u32;
+            let (mut new, mut old) = (ZpEncoder::new(), reference::Reference::new());
+            let (mut new_ctx, mut old_ctx) = ([0u8; 4], [0u8; 4]);
+            for _ in 0..len {
+                let r = next();
+                let bit = (r >> 8) as u32 % skew == 0;
+                match r % 16 {
+                    0 => {
+                        new.encode_passthrough(bit);
+                        old.encode_passthrough(bit);
+                    }
+                    1 => {
+                        new.encode_passthrough_iw44(bit);
+                        old.encode_passthrough_iw44(bit);
+                    }
+                    c => {
+                        let c = c as usize % 4;
+                        new.encode_bit(&mut new_ctx[c], bit);
+                        old.encode_bit(&mut old_ctx[c], bit);
+                    }
+                }
+            }
+            assert_eq!(new_ctx, old_ctx);
+            assert_eq!(new.finish(), old.finish(), "case {case}, {len} bits");
         }
     }
 
