@@ -33,6 +33,25 @@ pub(super) fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (i16, i16, i16) {
     )
 }
 
+/// Convert one row of RGBA pixels into the Y, Cb and Cr plane rows, each
+/// scaled by 64 (`normalize()` divides by 64 on decode).
+///
+/// Writes the first `src.len() / 4` entries of each row. Indexing the
+/// pixels directly, instead of `Pixmap::get_rgb` per pixel, lets the loop
+/// vectorise.
+#[inline]
+pub(super) fn ycbcr_row(src: &[u8], y_row: &mut [i16], cb_row: &mut [i16], cr_row: &mut [i16]) {
+    let px = src.as_chunks::<4>().0;
+    let n = px.len();
+    let (y_row, cb_row, cr_row) = (&mut y_row[..n], &mut cb_row[..n], &mut cr_row[..n]);
+    for i in 0..n {
+        let (y, cb, cr) = rgb_to_ycbcr(px[i][0], px[i][1], px[i][2]);
+        y_row[i] = y * 64;
+        cb_row[i] = cb * 64;
+        cr_row[i] = cr * 64;
+    }
+}
+
 #[cfg(feature = "std")]
 /// Encode a color [`Pixmap`] into BG44 chunk payloads (one `Vec<u8>` per chunk).
 ///
@@ -123,14 +142,14 @@ pub fn encode_iw44_color(pixmap: &Pixmap, opts: &Iw44EncodeOptions) -> Vec<Vec<u
         }
     } else {
         for row in 0..h {
-            let wavelet_row = h - 1 - row;
-            for col in 0..w {
-                let (r, g, b) = pixmap.get_rgb(col as u32, row as u32);
-                let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
-                y_flat[wavelet_row * stride + col] = (y as i32 * 64) as i16;
-                cb_flat[wavelet_row * c_stride + col] = (cb as i32 * 64) as i16;
-                cr_flat[wavelet_row * c_stride + col] = (cr as i32 * 64) as i16;
-            }
+            let off = (h - 1 - row) * stride;
+            let c_off = (h - 1 - row) * c_stride;
+            ycbcr_row(
+                &pixmap.data[row * w * 4..(row + 1) * w * 4],
+                &mut y_flat[off..off + w],
+                &mut cb_flat[c_off..c_off + w],
+                &mut cr_flat[c_off..c_off + w],
+            );
         }
     }
 

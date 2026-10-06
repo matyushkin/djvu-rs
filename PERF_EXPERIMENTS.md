@@ -16945,3 +16945,61 @@ bench orders agree, byte-identical. Test
 of 0–20 000 bits) through the old per-bit encoder, kept in the test
 module, and the new one; it fails when the borrow is skipped or when
 `finish` drops too few tail bits.
+
+### IW44_ENC_YCBCR_ROWS (2026-10-06)
+
+**Issue.** A profile of `PageEncoder` Photo on goody (after
+ZP_ENCODE_BATCH_EMIT) put 15% of the samples in `encode_iw44_color`
+itself. Its whole-plane path converted RGB to YCbCr one pixel at a time
+through `Pixmap::get_rgb`, which checks bounds per pixel and computes
+three strided destination indices; the loop did not vectorise. The banded
+path (`fill_color_band`) already walked rows.
+
+**Approach.** One helper, `ycbcr_row`, converts a row of RGBA pixels into
+the Y, Cb and Cr rows (same `rgb_to_ycbcr` integer math, `* 64`). Both the
+whole-plane path and `fill_color_band` call it on row slices. Tried the
+same row walk for the gray path (`encode_iw44_gray`).
+
+**Numbers.** M1 Max, load average 7–9. Criterion `--bench codecs --
+iw44_encode`, both orders:
+
+| Bench | new vs old | old vs new |
+|-------|-----------:|-----------:|
+| iw44_encode_color | −7…−11% | +6…+9% |
+| iw44_encode_large_1024x1024 | −23…−27% | +28% |
+| iw44_encode_gray_1024x1024 (gray row walk) | +18% | −15% |
+
+`PageEncoder` Photo, interleaved rounds of 15: goody 115–118 → 104–107 ms
+(about −10%); watchmaker unchanged (it takes the banded path, which
+already walked rows). Output identical (`cmp`) on goody, watchmaker,
+cable, colorbook, boy.
+
+**Decision.** Kept for colour; the gray row walk reverted.
+
+**Reason.** Colour is faster in both bench orders and byte-identical. The
+gray row walk was slower in both orders for no clear reason; with the gray
+loop back to the original the gray bench reads +3% against the old
+baseline, which is noise (the code is identical).
+
+### IW44_ENC_QUIET_RUN (2026-10-06)
+
+**Issue.** `skip_quiet_block` was 6.4% of the goody profile, and each
+quiet block of a 16-bucket band (bands 7–9) codes the same "no new bucket"
+bit in the same context, `ctx_decode_bucket[0]`.
+
+**Approach.** Split the skip into a pure check (`is_quiet_block`) and the
+coding; count consecutive quiet 16-bucket blocks and code them with one
+`ZpEncoder::encode_run`, flushed before any block that runs the passes and
+at the end of the slice. Byte-identical; the quiet-block test, widened to
+16-block flat runs, failed when the final flush was removed.
+
+**Numbers.** Same harness, 5 alternating rounds of 20, against the
+colour-row version: watchmaker median 136.4 → 140.2 ms (+2.8%), goody
+106.6 → 105.2 ms (−1.3%).
+
+**Decision.** Rejected.
+
+**Reason.** A quiet-block bit is almost always the MPS fast path, a single
+add to `a`, so `encode_run` saves little; the extra run bookkeeping in the
+block loop costs more on watchmaker than it saves on goody. The diff is
+not kept.
