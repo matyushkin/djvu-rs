@@ -16890,3 +16890,58 @@ noise. The 8-row path already amortises its gathers over 8 rows and keeps
 all state in registers, while gather + NEON row + scatter touches each
 row three times. Unlike the encoder, which had a scalar strided loop at
 s≥2, the decoder has no slow s≥2 path to replace.
+
+### ZP_ENCODE_BATCH_EMIT (2026-10-06)
+
+**Issue.** After IW44_FWD_WAVELET_NEON a `sample` profile of the IW44
+Photo encode of goody two-shoes (2454 × 3192, 143 ms) put the ZP encoder
+first: `ZpEncoder::encode_bit` 18% and `zemit` 15% self time, ahead of
+the slice passes (27%) and the forward wavelet (15%). `zemit` is
+DjVuLibre's scheme: each emitted bit goes through a 24-bit buffer and a
+Witten–Neal–Cleary follow-bit counter (`nrun`), then `outbit` checks a
+25-bit start delay and packs it. An LPS shifts up to 16 times, one
+`zemit` per shift.
+
+**Approach.** Byte-identical rewrite of the emit side of
+`crates/djvu-zp/src/encoder.rs`. The bytes the old scheme writes are the
+plain binary value of the emitted bits `b = 1 - (subend >> 15)`, borrows
+applied, without the 24-bit `0xFFFFFF` start value and without the
+all-ones tail `finish` flushes. So:
+
+1. A shift of `k` bits adds `2^k - 1 - (subend >> (16 - k))` to a u64
+   accumulator in one step; an LPS finds `k` with one `leading_zeros`.
+2. `subend >= 0x10000` makes that sum negative: a borrow decrements the
+   bytes already written (cold path).
+3. Whole bytes leave from the top once 40 bits are held; the first three
+   (the start value) are dropped.
+4. `finish` emits the rounded `subend` bit, then drops the trailing ones
+   of the last 24 bits instead of emitting ones until the buffer fills.
+
+**Numbers.** M1 Max, machine under background load (load average 9–40).
+Criterion `--bench codecs`, both orders (new vs old baseline, then old
+vs new baseline):
+
+| Bench | new vs old | old vs new |
+|-------|-----------:|-----------:|
+| bzz_encode | −24% | +35% |
+| iw44_encode_color | −22% | +29% |
+| jb2_encode | −36% | +13% |
+| jb2_encode_multitile | −15% | +9% |
+| jb2_encode_dict | −10% | +10% |
+| iw44_encode_large_1024x1024 | +0.7% (noise) | +1.9% (noise) |
+
+`PageEncoder` Photo, goody, 4 interleaved rounds of 11: median 140 →
+117 ms (−16%). `encoder_parity_scorecard --no-ocr --repeats 5`:
+watchmaker 201.2 → 157.6 ms, goody 161.2 → 141.8 ms, map atlas 125.6 →
+106.1 ms, cable 8.5 → 7.8 ms. Output identical (`cmp`, IW44 and JB2) on
+goody, watchmaker, cable, colorbook, boy; scorecard sizes unchanged.
+
+**Decision.** Kept.
+
+**Reason.** −12…22% on IW44 and JB2 page encodes and −24% on BZZ, both
+bench orders agree, byte-identical. Test
+`batched_emit_matches_per_bit_reference` runs 4000 random streams
+(context bits with skewed probabilities, both passthrough modes, streams
+of 0–20 000 bits) through the old per-bit encoder, kept in the test
+module, and the new one; it fails when the borrow is skipped or when
+`finish` drops too few tail bits.
