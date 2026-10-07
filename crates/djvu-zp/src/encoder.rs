@@ -87,6 +87,28 @@ impl ZpEncoder {
         }
     }
 
+    /// [`encode_bit`](Self::encode_bit), always inlined, with the LPS and
+    /// shifting MPS steps kept out of line.
+    ///
+    /// Same bytes and context state as `encode_bit`. For a loop that codes a
+    /// bit per coefficient (IW44): the fast path is one add, so the call costs
+    /// more than the code it inlines. JB2 keeps `encode_bit`, where inlining
+    /// measured slower.
+    #[inline(always)]
+    pub fn encode_bit_inline(&mut self, ctx: &mut u8, bit: bool) {
+        let state = *ctx as usize;
+        let mps_bit = (state & 1) != 0;
+        let z = self.a + PROB[state] as u32;
+
+        if bit != mps_bit {
+            self.encode_lps_cold(ctx, z);
+        } else if z >= 0x8000 {
+            self.encode_mps_cold(ctx, z);
+        } else {
+            self.a = z;
+        }
+    }
+
     /// Encode `n` copies of `bit` in one context: the same bytes and final
     /// context state as `n` calls to [`encode_bit`](Self::encode_bit).
     ///
@@ -185,6 +207,16 @@ impl ZpEncoder {
             self.output.push(0xff);
         }
         self.output
+    }
+
+    #[inline(never)]
+    fn encode_mps_cold(&mut self, ctx: &mut u8, z: u32) {
+        self.encode_mps(ctx, z);
+    }
+
+    #[inline(never)]
+    fn encode_lps_cold(&mut self, ctx: &mut u8, z: u32) {
+        self.encode_lps(ctx, z);
     }
 
     fn encode_mps(&mut self, ctx: &mut u8, z: u32) {
@@ -738,5 +770,28 @@ mod tests {
             bit_enc.encode_bit(&mut bit_ctx[1], other);
         }
         assert_eq!(run_enc.finish(), bit_enc.finish());
+    }
+
+    #[test]
+    fn encode_bit_inline_matches_encode_bit() {
+        let mut rng: u32 = 0x1b87_3593;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        let (mut inl, mut bit) = (ZpEncoder::new(), ZpEncoder::new());
+        let (mut inl_ctx, mut bit_ctx) = ([0u8; 8], [0u8; 8]);
+        for _ in 0..200_000 {
+            let r = next();
+            let c = (r & 7) as usize;
+            // Skewed toward 0 so contexts reach the fast MPS path.
+            let b = (r >> 8) % (2 + c as u32 * 5) == 0;
+            inl.encode_bit_inline(&mut inl_ctx[c], b);
+            bit.encode_bit(&mut bit_ctx[c], b);
+        }
+        assert_eq!(inl_ctx, bit_ctx);
+        assert_eq!(inl.finish(), bit.finish());
     }
 }

@@ -17003,3 +17003,63 @@ colour-row version: watchmaker median 136.4 → 140.2 ms (+2.8%), goody
 add to `a`, so `encode_run` saves little; the extra run bookkeeping in the
 block loop costs more on watchmaker than it saves on goody. The diff is
 not kept.
+
+### IW44_ENC_NEWLY_ACTIVE_HOIST (2026-10-07)
+
+**Issue.** `newly_active_encoding_pass` was about 27% of the goody
+profile. It re-indexes `self.blocks[block_idx]` and `self.recon[block_idx]`
+for every coefficient and counts the UNK states in a separate loop.
+
+**Approach.** Hoist the block slice, the `recon` block, the bucket state and
+the 16 coefficients out of the inner loop; count UNK states with
+`iter().filter().count()`; pick the step per coefficient instead of a
+mutable `step`. Byte-identical on five pages.
+
+**Numbers.** `PageEncoder` Photo harness, 3 alternating rounds of 7:
+watchmaker (gray) 132–136 → 181–213 ms (+30%); goody (colour) unchanged.
+A profile shows the extra time inside the rewritten pass itself.
+
+**Decision.** Rejected.
+
+**Reason.** The hoisting gives LLVM nothing it lacked on goody and makes
+the gray path much slower, most likely through a worse inlining or
+register-allocation choice in `encode_slice`. Not chased further; the diff
+is not kept.
+
+### IW44_ENC_BIT_INLINE (2026-10-07)
+
+**Issue.** `ZpEncoder::encode_bit` is about 19% of the goody encode profile
+and is never inlined (fat LTO, one codegen unit). Its common case, an MPS
+bit with `a + p < 0x8000`, is a single add, so the call costs more than the
+work. Forcing `#[inline(always)]` on `encode_bit` itself (with the slow
+steps `#[inline(never)]`) helped IW44 and BZZ but made `jb2_encode` 1–3%
+and `jb2_encode_multitile` up to 5.6% slower.
+
+**Approach.** A second entry point, `encode_bit_inline`: the same fast path,
+`#[inline(always)]`, with the LPS and shifting MPS steps behind
+`#[inline(never)]` wrappers. Only the six IW44 coefficient-pass call sites
+use it; `encode_bit` and every JB2 and BZZ caller are unchanged. A
+randomised test checks it gives the same bytes and contexts as
+`encode_bit`; a one-off off-by-one in its fast path fails that test.
+Variant tried first: only the `#[inline(never)]` attributes on the slow
+steps, no forced inline — watchmaker 134 → 140 ms, rejected.
+
+**Numbers.** Criterion, both orders (new vs base / base vs new):
+
+| Benchmark | new vs base | base vs new |
+|---|---|---|
+| iw44_encode_large_1024x1024 | −6.2% | +6.2% |
+| iw44_encode_gray_1024x1024 | −1.7% | +2.5% |
+| iw44_encode_color | −2.0% | +1.5% (p = 0.14) |
+| jb2_encode / jb2_encode_dict | −4.5% / −3.2% | +4.5% / +5.3% |
+| jb2_encode_multitile, bzz_encode | noise | noise |
+
+JB2 source is untouched; its change is code layout. `PageEncoder` Photo
+harness, 2 alternating rounds of 7: goody 104 → 103 ms, watchmaker 134 →
+133 ms. Output byte-identical on goody, watchmaker, cable, colorbook, boy.
+
+**Decision.** Kept.
+
+**Reason.** A consistent IW44 gain in both bench orders, largest on the big
+page, with no JB2 cost — the trade-off that blocked the plain
+`#[inline(always)]` variant.

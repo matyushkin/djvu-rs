@@ -300,7 +300,7 @@ impl PlaneEncoder {
         }
         let bcount = to - from + 1;
         if bcount >= 16 {
-            zp.encode_bit(&mut self.ctx_decode_bucket[0], false);
+            zp.encode_bit_inline(&mut self.ctx_decode_bucket[0], false);
             #[cfg(feature = "iw44-probe")]
             probe::record_block_band(band, false);
         } else {
@@ -310,7 +310,7 @@ impl PlaneEncoder {
                     .filter(|&j| recon.coef(j) != 0)
                     .count()
                     .min(3);
-                zp.encode_bit(&mut self.ctx_decode_coef[n + band * 8], false);
+                zp.encode_bit_inline(&mut self.ctx_decode_coef[n + band * 8], false);
                 #[cfg(feature = "iw44-probe")]
                 probe::record_bucket_new(band, false);
             }
@@ -336,7 +336,7 @@ impl PlaneEncoder {
         if should_encode_bit {
             // Determine if any UNK coefficient in this block-band will become active.
             let any_will_activate = self.any_unk_activates(block_idx, from, to);
-            zp.encode_bit(&mut self.ctx_decode_bucket[0], any_will_activate);
+            zp.encode_bit_inline(&mut self.ctx_decode_bucket[0], any_will_activate);
             #[cfg(feature = "iw44-probe")]
             probe::record_block_band(self.curband, any_will_activate);
             if any_will_activate {
@@ -408,7 +408,7 @@ impl PlaneEncoder {
             if is_new {
                 self.bucketstate[boff] |= NEW;
             }
-            zp.encode_bit(&mut self.ctx_decode_coef[n + self.curband * 8], is_new);
+            zp.encode_bit_inline(&mut self.ctx_decode_coef[n + self.curband * 8], is_new);
             #[cfg(feature = "iw44-probe")]
             probe::record_bucket_new(self.curband, is_new);
         }
@@ -448,7 +448,7 @@ impl PlaneEncoder {
                     // The IW44 encoder makes a coefficient significant once its
                     // magnitude reaches this bitplane's quantization step.
                     let is_active = true_val.unsigned_abs() as i32 >= s;
-                    zp.encode_bit(&mut self.ctx_activate_coef[shift + ip], is_active);
+                    zp.encode_bit_inline(&mut self.ctx_activate_coef[shift + ip], is_active);
                     #[cfg(feature = "iw44-probe")]
                     probe::record_activate(self.curband, is_active);
                     if is_active {
@@ -517,7 +517,7 @@ impl PlaneEncoder {
                 if abs_d <= 3 * s {
                     des = abs_v > abs_d + (s >> 2);
                     new_abs_d += s >> 2;
-                    zp.encode_bit(&mut self.ctx_increase_coef[0], des);
+                    zp.encode_bit_inline(&mut self.ctx_increase_coef[0], des);
                 } else {
                     des = abs_v > abs_d;
                     zp.encode_passthrough_iw44(des);

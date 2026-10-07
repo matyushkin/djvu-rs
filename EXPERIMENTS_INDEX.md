@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-06.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-07.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,8 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| IW44_ENC_BIT_INLINE | 2026-10-07 | encode (ZP bit coding in IW44 passes, `crates/djvu-zp/src/encoder.rs`) | **K** | iw44_encode_large_1024x1024 −6.2%, gray −1.7…2.5%, color −1.5…2%, both orders; JB2 no cost. Byte-identical | New `encode_bit_inline` (forced inline, slow steps out of line) used only by the IW44 passes; plain `#[inline(always)]` on `encode_bit` cost JB2 up to 5.6%, so JB2/BZZ keep `encode_bit`. |
+| IW44_ENC_NEWLY_ACTIVE_HOIST | 2026-10-07 | encode (IW44 newly-active pass, `crates/djvu-iw44/src/encode/plane.rs`) | **X** | watchmaker +30% (132–136 → 181–213 ms), goody unchanged | Hoisting block/recon/coef slices out of the per-coefficient loop; byte-identical but the gray path got much slower. |
 | IW44_ENC_QUIET_RUN | 2026-10-06 | encode (IW44 quiet blocks, `crates/djvu-iw44/src/encode/plane.rs`) | **X** | watchmaker +2.8%, goody −1.3% (PageEncoder Photo) | One `encode_run` for consecutive quiet 16-bucket blocks; byte-identical, but the bit is nearly always the one-add MPS fast path, so the bookkeeping costs more than it saves. |
 | IW44_ENC_YCBCR_ROWS | 2026-10-06 | encode (IW44 RGB→YCbCr fill, `crates/djvu-iw44/src/encode/encoder.rs`) | **K** | iw44_encode_color −7…11%, iw44_encode_large_1024x1024 −23…27%, both orders; goody Photo 115 → 105 ms. Byte-identical | Row helper `ycbcr_row` replaces per-pixel `get_rgb`; shared with the banded fill. Same row walk on the gray path was +15…18% slower in both orders, reverted. |
 | ZP_ENCODE_BATCH_EMIT | 2026-10-06 | encode (ZP coder emit, `crates/djvu-zp/src/encoder.rs`; IW44, JB2, BZZ) | **K** | goody Photo 140 → 117 ms (−16%); scorecard watchmaker 201 → 158 ms, map atlas 126 → 106 ms; bzz_encode −24%, iw44_encode_color −22%, jb2_encode_dict −10%; both bench orders agree. Byte-identical | DjVuLibre per-bit `zemit`/`outbit` (24-bit buffer + follow-bit counter) replaced by adding all `k` shift bits to a u64 accumulator at once; borrows decrement written bytes. Old encoder kept in tests as reference (4000 random streams). |
