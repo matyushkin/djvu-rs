@@ -44,7 +44,8 @@ else
 fi
 
 # README doctests — nextest skips doctests; this compiles every rust block in
-# README.md via the ReadmeDoctests include in src/lib.rs (doc-sync gate,
+# README.md and docs/guide.md via the ReadmeDoctests / GuideDoctests includes
+# in src/lib.rs (doc-sync gate,
 # mirrors the "README doctests" CI step).
 run cargo test --doc --features cli,tiff,async,serde,image,epub
 
