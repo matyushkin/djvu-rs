@@ -17063,3 +17063,24 @@ harness, 2 alternating rounds of 7: goody 104 → 103 ms, watchmaker 134 →
 **Reason.** A consistent IW44 gain in both bench orders, largest on the big
 page, with no JB2 cost — the trade-off that blocked the plain
 `#[inline(always)]` variant.
+
+### BZZ_ENC_BIT_INLINE (2026-10-07)
+
+**Issue.** Follow-up to IW44_ENC_BIT_INLINE. When `#[inline(always)]` was
+tried on `encode_bit` itself, `bzz_encode` gained 5–7%; the new
+`encode_bit_inline` entry point lets BZZ take that gain without JB2.
+
+**Approach.** The 19 `encode_bit` calls in `crates/djvu-bzz/src/encode.rs`
+call `encode_bit_inline` instead. `encode_bit_inline` is pinned to
+`encode_bit` by a randomised test, so the bytes cannot change.
+
+**Numbers.** The machine was loaded (load average up to 35), so the usual
+`--save-baseline` A/B was noisy (one base-vs-new run showed untouched JB2
++34%). Two prebuilt bench binaries, run alternately, 4 rounds of
+`bzz_encode`: base 99.8 / 98.7 / 99.0 / 102.4 µs, new 98.3 / 95.6 / 94.2 /
+92.7 µs — new faster in every round, mean 100.0 → 95.2 µs (−4.8%).
+
+**Decision.** Kept.
+
+**Reason.** Same mechanism as the IW44 change, a consistent gain in every
+alternating round, and no effect on other codecs.
