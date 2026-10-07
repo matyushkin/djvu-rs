@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791281884395,
+  "lastUpdate": 1791396087411,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -23332,6 +23332,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 46545000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2ef05f570f1316454c1284b74474e5bc6b4f63a7",
+          "message": "docs: slim README to a task-first landing page (#942)\n\nREADME.md was ~1000 lines mixing quick start, a full CLI reference, a\nlibrary guide, format tables, and benchmark history. Shrink it to ~230\nlines (task table, install, quick start, CLI/Python/WASM essentials,\nlimitations, feature flags, performance summary, docs index) and move\nthe rest into dedicated pages:\n\n- docs/cli.md: full CLI reference and encoding profiles\n- docs/guide.md: export, async/lazy loading, render requests, tiles,\n  encoders, indirect DJVM, editing, OCR\n- docs/format-coverage.md: chunk-level coverage and no_std crates\n\nThe doc-sync gates follow the content: docs/guide.md examples compile as\ndoctests via a new GuideDoctests include, and the CLI subcommand/flag\nroll call now reads docs/cli.md. The feature-flag roll call stays on the\nREADME.\n\n\nClaude-Session: https://claude.ai/code/session_01LFtHdbTXrLBjrpz385g1h6\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-10-07T19:36:29+02:00",
+          "tree_id": "5749818eb772715d422a94541d99409521880d0a",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2ef05f570f1316454c1284b74474e5bc6b4f63a7"
+        },
+        "date": 1791396085655,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 8279000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 49775000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47579000,
             "range": "± 0",
             "unit": "ns/iter"
           }
