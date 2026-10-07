@@ -10,7 +10,7 @@
 Read, render, convert, and create DjVu files. Pure-Rust library with a CLI,
 WebAssembly, and Python bindings — all published as `djvu-rs`. MIT licensed,
 no GPL dependencies, written from the public DjVu v3 specification. Renders
-and encodes [1.4–3.5× faster than DjVuLibre](#performance).
+and encodes [1.4–3.8× faster than DjVuLibre](#performance).
 
 | Your task | How |
 |-----------|-----|
@@ -196,8 +196,8 @@ M1 Max, same machine for both):
 | Render `colorbook.djvu` @ 150 dpi (page open) | 4.46 ms | 6.37 ms | **1.4×** |
 | Render `cable_1973_100133.djvu` @ 300 dpi, B&W | 22.6 ms | 36.8 ms | **1.6×** |
 | Cold open + decode + render, `colorbook.djvu` | 13.7 ms | 41.6 ms | **3.0×** |
-| Encode colour scan, IW44 vs `c44` | 156 ms | 491 ms | **3.1×** |
-| Encode text page, lossless JB2 vs `cjb2` | 7.6 ms | 26.7 ms | **3.5×** |
+| Encode colour scan, IW44 vs `c44` | 151 ms | 474 ms | **3.1×** |
+| Encode text page, lossless JB2 vs `cjb2` | 7.0 ms | 26.6 ms | **3.8×** |
 
 Full matrix and methodology: [BENCHMARKS_RESULTS.md](BENCHMARKS_RESULTS.md);
 live [benchmark](https://matyushkin.github.io/djvu-rs/dev/bench/) and
