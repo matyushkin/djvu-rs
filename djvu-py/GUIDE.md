@@ -2,6 +2,8 @@
 
 Reference for the `djvu_rs` package beyond the [README quick start](README.md#quick-start).
 The authoritative signatures are in the type stub [`djvu_rs.pyi`](djvu_rs.pyi).
+Every ```` ```python ```` block here and in the README runs in CI
+(`tests/test_doc_examples.py`), so the examples cannot drift from the module.
 
 ## Rendering
 
