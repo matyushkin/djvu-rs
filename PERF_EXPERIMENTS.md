@@ -17084,3 +17084,46 @@ call `encode_bit_inline` instead. `encode_bit_inline` is pinned to
 
 **Reason.** Same mechanism as the IW44 change, a consistent gain in every
 alternating round, and no effect on other codecs.
+
+### IW44_ENC_SCATTER_NEON (2026-10-07)
+
+**Issue.** `scatter_strip` copies each 32x32 block of the wavelet plane
+into zigzag order. It was about 6% of the goody encode profile: one table
+load, one source load and one scattered store per coefficient.
+
+**Approach.** The zigzag index interleaves the coordinate bits low to
+high, `i = r0 c0 r1 c1 r2 c2 | r3 c3 r4 c4`. The top six bits name one of
+64 runs of 16 consecutive coefficients by the low three bits of row and
+column; the bottom four bits place an entry in its run by the high two
+bits, a 4x4 grid of pixels 8 apart. So for a fixed low row and `r3`,
+eight 8-lane row loads (rows `rl + 8 r3 + 16 r4`, column chunks
+`c3 + 2 c4`) hold in lane `cl` the eight entries of run `(rl, cl)` at
+places `r3 c3 r4 c4`. One 8x8 `i16` transpose (`trn1/trn2` at 16, 32 and
+64 bits) turns them into eight 16-byte stores. A block is 16 loads + 16
+transposes + 128 stores instead of 1 024 scalar triples. AArch64 only;
+the scalar loop stays for other targets and as the test reference.
+
+A randomised test compares the NEON and scalar results on 1, 2 and 5
+block columns; storing a half-run at the wrong offset fails it.
+
+**Numbers.** The machine was heavily loaded (load average 20–96; a
+concurrent `make check` from a pre-push hook ran during the first
+Criterion order, which then showed a bogus −50%). The clean
+base-vs-new order: `iw44_encode_large_1024x1024` +10.5%,
+`iw44_encode_gray_1024x1024` +8.7%, `iw44_encode_color` +5.7% for the
+base. Two prebuilt bench binaries run alternately, 3 rounds, means:
+
+| Benchmark | base | new | Change |
+|---|---|---|---|
+| iw44_encode_large_1024x1024 | 5.93 ms | 5.08 ms | −14% |
+| iw44_encode_gray_1024x1024 | 2.51 ms | 2.25 ms | −10% |
+| iw44_encode_color | 0.988 ms | 0.957 ms | −3% |
+
+`PageEncoder` Photo harness, 3 alternating rounds of 7: goody 99.4 →
+93.3 ms (−6%), watchmaker 138 → 135 ms (−2%). Output byte-identical on
+goody, watchmaker, cable, colorbook, boy.
+
+**Decision.** Kept.
+
+**Reason.** A clear gain in every alternating round and in the clean
+Criterion order, exact by construction and by test.
