@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| BZZ_ENC_BIT_INLINE | 2026-10-07 | encode (BZZ, `crates/djvu-bzz/src/encode.rs`) | **K** | bzz_encode 100.0 → 95.2 µs (−4.8%), new faster in 4/4 alternating rounds | BZZ calls `encode_bit_inline` (from IW44_ENC_BIT_INLINE) instead of `encode_bit`; byte-identical by the pinning test. |
 | IW44_ENC_BIT_INLINE | 2026-10-07 | encode (ZP bit coding in IW44 passes, `crates/djvu-zp/src/encoder.rs`) | **K** | iw44_encode_large_1024x1024 −6.2%, gray −1.7…2.5%, color −1.5…2%, both orders; JB2 no cost. Byte-identical | New `encode_bit_inline` (forced inline, slow steps out of line) used only by the IW44 passes; plain `#[inline(always)]` on `encode_bit` cost JB2 up to 5.6%, so JB2/BZZ keep `encode_bit`. |
 | IW44_ENC_NEWLY_ACTIVE_HOIST | 2026-10-07 | encode (IW44 newly-active pass, `crates/djvu-iw44/src/encode/plane.rs`) | **X** | watchmaker +30% (132–136 → 181–213 ms), goody unchanged | Hoisting block/recon/coef slices out of the per-coefficient loop; byte-identical but the gray path got much slower. |
 | IW44_ENC_QUIET_RUN | 2026-10-06 | encode (IW44 quiet blocks, `crates/djvu-iw44/src/encode/plane.rs`) | **X** | watchmaker +2.8%, goody −1.3% (PageEncoder Photo) | One `encode_run` for consecutive quiet 16-bucket blocks; byte-identical, but the bit is nearly always the one-add MPS fast path, so the bookkeeping costs more than it saves. |

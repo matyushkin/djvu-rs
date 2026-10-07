@@ -80,7 +80,7 @@ fn encode_context_bits(
     let mut n = 1u32;
     for i in (0..bit_count).rev() {
         let bit = ((coded >> i) & 1) != 0;
-        enc.encode_bit(&mut ctx[subtree_offset + n as usize], bit);
+        enc.encode_bit_inline(&mut ctx[subtree_offset + n as usize], bit);
         n = (n << 1) | (bit as u32);
     }
 }
@@ -172,81 +172,81 @@ fn encode_mtf_position(enc: &mut ZpEncoder, ctx: &mut [u8; CTX_COUNT], ctx_id: u
 
     // Level 0: position 0
     if pos == 0 {
-        enc.encode_bit(&mut ctx[ctx_offset + ctx_id], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset + ctx_id], true);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset + ctx_id], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset + ctx_id], false);
     ctx_offset += LEVEL_CTXIDS;
 
     // Level 1: position 1
     if pos == 1 {
-        enc.encode_bit(&mut ctx[ctx_offset + ctx_id], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset + ctx_id], true);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset + ctx_id], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset + ctx_id], false);
     ctx_offset += LEVEL_CTXIDS;
 
     // Level 2: positions [2, 3]
     if pos < 4 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 1, pos - 2);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 2;
 
     // Level 3: positions [4, 7]
     if pos < 8 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 2, pos - 4);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 4;
 
     // Level 4: positions [8, 15]
     if pos < 16 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 3, pos - 8);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 8;
 
     // Level 5: positions [16, 31]
     if pos < 32 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 4, pos - 16);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 16;
 
     // Level 6: positions [32, 63]
     if pos < 64 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 5, pos - 32);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 32;
 
     // Level 7: positions [64, 127]
     if pos < 128 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 6, pos - 64);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     ctx_offset += 64;
 
     // Level 8: positions [128, 255]
     if pos < 256 {
-        enc.encode_bit(&mut ctx[ctx_offset], true);
+        enc.encode_bit_inline(&mut ctx[ctx_offset], true);
         encode_context_bits(enc, ctx, ctx_offset + 1, 7, pos - 128);
         return;
     }
-    enc.encode_bit(&mut ctx[ctx_offset], false);
+    enc.encode_bit_inline(&mut ctx[ctx_offset], false);
     // pos == 256 → BWT marker (no additional bits)
 }
 
