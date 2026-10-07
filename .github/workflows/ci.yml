@@ -352,12 +352,13 @@ jobs:
         run: cargo test --features ocr-onnx ocr_onnx
 
   # ── Python bindings (djvu-py) ────────────────────────────────────────────────
-  # Non-required (informational): builds the extension module via maturin into
-  # a uv-managed venv and runs the pytest suite covering the public API surface,
-  # including the round-41 (PY_GIL_DETACH/PY_ZEROCOPY, #530) additions — buffer
-  # protocol, zero-copy numpy/PIL views, Pixmap lifetime safety, and GIL release.
-  # Not part of the branch-protection required-checks list (see CLAUDE.md);
-  # kept fast: one Python version, cached cargo build. See djvu-py/Makefile.
+  # Required check: builds the extension module via maturin into a uv-managed
+  # venv and runs the pytest suite covering the public API surface, including
+  # the round-41 (PY_GIL_DETACH/PY_ZEROCOPY, #530) additions — buffer protocol,
+  # zero-copy numpy/PIL views, Pixmap lifetime safety, and GIL release — plus
+  # every Python example in djvu-py/README.md and GUIDE.md
+  # (tests/test_doc_examples.py). Listed in CLAUDE.md's required checks; kept
+  # fast: one Python version, cached cargo build. See djvu-py/Makefile.
   djvu-py:
     name: djvu-py (pytest)
     runs-on: ubuntu-latest
