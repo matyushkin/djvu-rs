@@ -351,22 +351,23 @@ rectangle is larger than the native page.
 
 `cargo run --release --example encoder_parity_scorecard -- --no-ocr --repeats 5`;
 median wall time, see [`docs/encoder-parity.md`](docs/encoder-parity.md).
-Re-run after the encoder speed-ups #933 (ZP coder emits a shift's bits in
-one step) and #935 (IW44 colour conversion a row at a time);
-`PERF_EXPERIMENTS.md` ZP_ENCODE_BATCH_EMIT, IW44_ENC_YCBCR_ROWS. The
-earlier 2026-10-06 run, after #928 and #929, had watchmaker 199.3 ms,
-goody two-shoes 153.1 ms, map atlas 128.0 ms and cable 8.7 ms. Output sizes
-are unchanged. The machine was under heavy background load during this
-run; each djvu-rs / DjVuLibre pair ran back to back, so the ratios compare
-like with like.
+Re-run after the encoder speed-ups #937 (ZP bit coder inlined in the IW44
+passes), #938 (the same in BZZ) and #939 (NEON zigzag scatter of IW44
+blocks); `PERF_EXPERIMENTS.md` IW44_ENC_BIT_INLINE, BZZ_ENC_BIT_INLINE,
+IW44_ENC_SCATTER_NEON. The previous run, after #933 and #935, had
+watchmaker 156.4 ms, goody two-shoes 123.5 ms, map atlas 103.8 ms and cable
+7.6 ms. Output sizes are unchanged. The machine was under background load
+(load average about 10); each djvu-rs / DjVuLibre pair ran back to back, so
+the ratios compare like with like. A second run agreed within 5% on every
+case above 100 ms; the table shows the first, lower-ratio run.
 
 | Case | DjVuLibre | djvu-rs | Speed | Size ratio |
 |------|----------:|--------:|------:|-----------:|
-| watchmaker, IW44 vs `c44` | 491.1 ms | 156.4 ms | djvu-rs **3.1x faster** | 1.025x |
-| goody two-shoes, IW44 vs `c44` | 382.1 ms | 123.5 ms | djvu-rs **3.1x faster** | 1.040x |
-| cable, JB2 lossless vs `cjb2` | 26.7 ms | 7.6 ms | djvu-rs **3.5x faster** | 1.011x |
-| map atlas, JB2 lossless vs `cjb2` | 360.9 ms | 103.8 ms | djvu-rs **3.5x faster** | 0.952x |
-| Chinese cookbook, JB2 lossless vs `cjb2` | 23.8 ms | 5.5 ms | djvu-rs **4.3x faster** | 0.985x |
+| watchmaker, IW44 vs `c44` | 473.8 ms | 150.7 ms | djvu-rs **3.1x faster** | 1.025x |
+| goody two-shoes, IW44 vs `c44` | 364.7 ms | 111.7 ms | djvu-rs **3.3x faster** | 1.040x |
+| cable, JB2 lossless vs `cjb2` | 26.6 ms | 7.0 ms | djvu-rs **3.8x faster** | 1.011x |
+| map atlas, JB2 lossless vs `cjb2` | 352.7 ms | 102.0 ms | djvu-rs **3.5x faster** | 0.952x |
+| Chinese cookbook, JB2 lossless vs `cjb2` | 23.9 ms | 5.4 ms | djvu-rs **4.4x faster** | 0.985x |
 
 ### Summary
 
@@ -376,7 +377,7 @@ like with like.
 | Native-resolution corpus render, warm | **djvu-rs** | 1.4-1.6x faster |
 | Cold colorbook render | **djvu-rs** | 13.7 ms vs 41.6 ms (not identical measurements) |
 | `ddjvu` CLI subprocess baseline | slower than either library call | 33.0-85.6 ms across measured cases |
-| Encode (IW44 photo, JB2 lossless) | **djvu-rs** | 3.1-4.3x faster; size 0.952-1.040x |
+| Encode (IW44 photo, JB2 lossless) | **djvu-rs** | 3.1-4.4x faster; size 0.952-1.040x |
 | Document open / parse | **djvu-rs** | `parse_multipage_520p`: 2.29 ms |
 
 ---
