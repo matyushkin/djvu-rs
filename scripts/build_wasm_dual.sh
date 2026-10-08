@@ -50,7 +50,9 @@ let selectedVariant;
 export let WasmDocument;
 export let WasmPage;
 export let WasmPixmap;
+export let WasmRenderRequest;
 export let WasmLazyDocument;
+export let WasmLazyIndirectDocument;
 export let initThreadPool;
 
 export function wasmSimd128Supported() {
@@ -76,7 +78,9 @@ export default async function init(input) {
   WasmDocument = selectedModule.WasmDocument;
   WasmPage = selectedModule.WasmPage;
   WasmPixmap = selectedModule.WasmPixmap;
+  WasmRenderRequest = selectedModule.WasmRenderRequest;
   WasmLazyDocument = selectedModule.WasmLazyDocument;
+  WasmLazyIndirectDocument = selectedModule.WasmLazyIndirectDocument;
   initThreadPool = selectedModule.initThreadPool;
 
   return selectedModule;
@@ -88,7 +92,8 @@ export function initSync() {
 EOF_JS
 
 cp "$SCALAR_OUT/djvu_rs.d.ts" "$OUT/djvu_rs.d.ts"
-cp "$SCALAR_OUT/README.md" "$OUT/README.md"
+# npm gets its own landing page; wasm-pack would copy the Rust crate README.
+cp "$ROOT/examples/wasm/README.npm.md" "$OUT/README.md"
 cp "$SCALAR_OUT/LICENSE" "$OUT/LICENSE"
 cat >> "$OUT/djvu_rs.d.ts" <<'EOF_DTS'
 
