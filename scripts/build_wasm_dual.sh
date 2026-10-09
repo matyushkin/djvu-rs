@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OUT:-$ROOT/examples/wasm/pkg}"
-FEATURES="${FEATURES:-wasm}"
+# wasm-lazy (a superset of wasm) adds the HTTP Range loaders; the npm package ships it.
+FEATURES="${FEATURES:-wasm-lazy}"
 
 SCALAR_OUT="$OUT/scalar"
 SIMD_OUT="$OUT/simd128"
