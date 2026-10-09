@@ -99,6 +99,18 @@ async function smokeNode(pkgDir, fixturePath, expectVersion) {
     throw new Error(`unexpected wasm variant: ${variant}`);
   }
 
+  // Every class the TypeScript declarations promise must be a live export of
+  // the dual loader: a class declared but not re-exported type-checks, then
+  // fails at link time ("does not provide an export named ...").
+  const declared = [
+    ...readFileSync(join(pkgDir, "djvu_rs.d.ts"), "utf8").matchAll(/^export class (\w+)/gm),
+  ].map((m) => m[1]);
+  const missing = declared.filter((name) => typeof mod[name] !== "function");
+  if (missing.length > 0) {
+    throw new Error(`classes declared in djvu_rs.d.ts but not exported: ${missing.join(", ")}`);
+  }
+  console.log(`exports ok: ${declared.join(", ")}`);
+
   const bytes = new Uint8Array(readFileSync(fixturePath));
   const doc = mod.WasmDocument.from_bytes(bytes);
   const pageCount = doc.page_count();
