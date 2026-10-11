@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+* slim README to a task-first landing page ([#942](https://github.com/matyushkin/djvu-rs/issues/942)) ([2ef05f5](https://github.com/matyushkin/djvu-rs/commit/2ef05f570f1316454c1284b74474e5bc6b4f63a7))
 * **packaging:** describe the npm README, wasm-lazy default, export check ([#946](https://github.com/matyushkin/djvu-rs/issues/946)) ([8d2a83b](https://github.com/matyushkin/djvu-rs/commit/8d2a83b63631bc6fe958948ea1595ac1d1f61339))
+* **py:** slim djvu-py README to a task-first landing page ([#943](https://github.com/matyushkin/djvu-rs/issues/943)) ([e460771](https://github.com/matyushkin/djvu-rs/commit/e4607712cf2430791c7d6331219bb613beb26e7f))
 
 ## [0.41.0](https://github.com/matyushkin/djvu-rs/compare/v0.40.3...v0.41.0) (2026-10-05)
 
