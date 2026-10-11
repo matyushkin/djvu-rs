@@ -442,7 +442,7 @@ impl WasmPage {
     /// by `render(target_dpi)`.  Leaf zones are the finest granularity stored in the
     /// text layer (word-level for richly OCR'd files, line-level otherwise).
     ///
-    /// Returns `null` if the page has no text layer.
+    /// Returns `undefined` (JS `None`) if the page has no text layer.
     /// Throws a JavaScript `Error` on decode failure.
     pub fn text_zones_json(&self, target_dpi: u32) -> Result<Option<String>, JsError> {
         let page = crate::foreign::page(&self.doc, self.index)

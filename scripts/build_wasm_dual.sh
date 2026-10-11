@@ -120,6 +120,11 @@ pkg.files = [
   "simd128/djvu_rs_bg.wasm.d.ts",
 ];
 pkg.type = "module";
+// The crate's description and keywords cover the CLI/Python encoders and
+// PDF export, which the JS package does not ship.
+pkg.description =
+  "Open and render DjVu files in the browser or Node: pure-Rust WebAssembly, lazy HTTP Range loading, text layer, TypeScript types. MIT, no GPL.";
+pkg.keywords = ["djvu", "viewer", "render", "wasm", "webassembly", "document", "scan"];
 pkg.module = "djvu_rs.js";
 pkg.main = "djvu_rs.js";
 pkg.types = "djvu_rs.d.ts";
