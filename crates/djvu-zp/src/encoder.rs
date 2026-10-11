@@ -91,9 +91,9 @@ impl ZpEncoder {
     /// shifting MPS steps kept out of line.
     ///
     /// Same bytes and context state as `encode_bit`. For a loop that codes a
-    /// bit per coefficient (IW44): the fast path is one add, so the call costs
-    /// more than the code it inlines. JB2 keeps `encode_bit`, where inlining
-    /// measured slower.
+    /// bit per symbol (IW44 coefficients, BZZ): the fast path is one add, so
+    /// the call costs more than the code it inlines. JB2 keeps `encode_bit`,
+    /// where inlining measured slower.
     #[inline(always)]
     pub fn encode_bit_inline(&mut self, ctx: &mut u8, bit: bool) {
         let state = *ctx as usize;

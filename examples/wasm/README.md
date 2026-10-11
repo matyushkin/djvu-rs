@@ -106,8 +106,9 @@ npm pack    # or: npm publish  (requires npm login + PUBLISH_NPM)
 `pkg/simd128/djvu_rs_bg.wasm` is selected at runtime when
 `WebAssembly.validate()` accepts the SIMD probe. TypeScript declarations are
 included (`djvu_rs.d.ts`). Use `OUT=...` to write the generated package
-elsewhere and `FEATURES=wasm-lazy` when publishing the lazy Range-loading
-bindings.
+elsewhere. The default `FEATURES=wasm-lazy` (what the npm package ships)
+includes the lazy Range-loading bindings; `FEATURES=wasm` builds the smaller
+eager-only package.
 
 ## Threaded rendering (`wasm-threads`, opt-in, experimental)
 

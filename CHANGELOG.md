@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0](https://github.com/matyushkin/djvu-rs/compare/v0.41.0...v0.42.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **npm:** export WasmRenderRequest, ship lazy Range loaders, npm-specific README ([#945](https://github.com/matyushkin/djvu-rs/issues/945)) ([45175c7](https://github.com/matyushkin/djvu-rs/commit/45175c7b9aea7f92d5f06e09f905820ff89f86a3))
+
+
+### Performance Improvements
+
+* **bzz:** use the inlined ZP bit coder in the BZZ encoder ([#938](https://github.com/matyushkin/djvu-rs/issues/938)) ([51cbe70](https://github.com/matyushkin/djvu-rs/commit/51cbe700a2af84c138a8c0ffa0d6ba858d4447d0))
+* **iw44:** convert colour to YCbCr a row at a time in the encoder ([#935](https://github.com/matyushkin/djvu-rs/issues/935)) ([7461e8a](https://github.com/matyushkin/djvu-rs/commit/7461e8a5b92152101ac38ca80b383fd21dd2407f))
+* **iw44:** inline the ZP bit coder in the encoder's coefficient passes ([#937](https://github.com/matyushkin/djvu-rs/issues/937)) ([186a385](https://github.com/matyushkin/djvu-rs/commit/186a3850760516d72dad4d7d850f8cc43ea49b7e))
+* **iw44:** scatter encoder blocks into zigzag order with NEON transposes ([#939](https://github.com/matyushkin/djvu-rs/issues/939)) ([fe16571](https://github.com/matyushkin/djvu-rs/commit/fe16571da3b1b4c545418b0bc9cbbcae50a17cdb))
+* **zp:** emit the encoder's shift bits in one step ([#933](https://github.com/matyushkin/djvu-rs/issues/933)) ([553d03e](https://github.com/matyushkin/djvu-rs/commit/553d03e79d70192bbf6a3bf99be70f5135dc73b1))
+
+
+### Documentation
+
+* **packaging:** describe the npm README, wasm-lazy default, export check ([#946](https://github.com/matyushkin/djvu-rs/issues/946)) ([8d2a83b](https://github.com/matyushkin/djvu-rs/commit/8d2a83b63631bc6fe958948ea1595ac1d1f61339))
+
 ## [0.41.0](https://github.com/matyushkin/djvu-rs/compare/v0.40.3...v0.41.0) (2026-10-05)
 
 

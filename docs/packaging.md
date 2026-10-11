@@ -73,6 +73,10 @@ atomically.
 
 ### Smoke tests
 
+`smoke_npm_package.mjs` also fails when a class declared in `djvu_rs.d.ts` is
+not exported by the dual loader `djvu_rs.js` (0.41.0 shipped without
+`WasmRenderRequest` that way).
+
 ```sh
 pip install dist/djvu_rs-*.whl
 python scripts/smoke_python_wheel.py \
@@ -95,6 +99,13 @@ make wasm                    # → examples/wasm/pkg
 The package includes TypeScript declarations (`djvu_rs.d.ts`) and both wasm
 artifacts under `scalar/` and `simd128/`. Runtime selection uses
 `WebAssembly.validate()` on a SIMD probe.
+
+The default build uses `FEATURES=wasm-lazy`, so the package ships the lazy
+HTTP Range loaders (`WasmLazyDocument`, `WasmLazyIndirectDocument`) next to
+the eager `WasmDocument`. `FEATURES=wasm make wasm` builds the smaller
+eager-only package. Its `README.md` is
+[`examples/wasm/README.npm.md`](../examples/wasm/README.npm.md), not the Rust
+crate README.
 
 ### Smoke tests
 
@@ -144,5 +155,7 @@ checksums as workflow artifacts for manual verification.
 ## Related docs
 
 - [`RELEASING.md`](../RELEASING.md) — crates.io tag flow
-- [`djvu-py/README.md`](../djvu-py/README.md) — Python quick start
+- [`djvu-py/README.md`](../djvu-py/README.md) — Python quick start (the PyPI page);
+  [`djvu-py/GUIDE.md`](../djvu-py/GUIDE.md) — Python reference
+- [`examples/wasm/README.npm.md`](../examples/wasm/README.npm.md) — JavaScript quick start (the npm page)
 - [`examples/wasm/README.md`](../examples/wasm/README.md) — wasm demo + npm layout

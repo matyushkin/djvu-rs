@@ -17063,3 +17063,67 @@ harness, 2 alternating rounds of 7: goody 104 → 103 ms, watchmaker 134 →
 **Reason.** A consistent IW44 gain in both bench orders, largest on the big
 page, with no JB2 cost — the trade-off that blocked the plain
 `#[inline(always)]` variant.
+
+### BZZ_ENC_BIT_INLINE (2026-10-07)
+
+**Issue.** Follow-up to IW44_ENC_BIT_INLINE. When `#[inline(always)]` was
+tried on `encode_bit` itself, `bzz_encode` gained 5–7%; the new
+`encode_bit_inline` entry point lets BZZ take that gain without JB2.
+
+**Approach.** The 19 `encode_bit` calls in `crates/djvu-bzz/src/encode.rs`
+call `encode_bit_inline` instead. `encode_bit_inline` is pinned to
+`encode_bit` by a randomised test, so the bytes cannot change.
+
+**Numbers.** The machine was loaded (load average up to 35), so the usual
+`--save-baseline` A/B was noisy (one base-vs-new run showed untouched JB2
++34%). Two prebuilt bench binaries, run alternately, 4 rounds of
+`bzz_encode`: base 99.8 / 98.7 / 99.0 / 102.4 µs, new 98.3 / 95.6 / 94.2 /
+92.7 µs — new faster in every round, mean 100.0 → 95.2 µs (−4.8%).
+
+**Decision.** Kept.
+
+**Reason.** Same mechanism as the IW44 change, a consistent gain in every
+alternating round, and no effect on other codecs.
+
+### IW44_ENC_SCATTER_NEON (2026-10-07)
+
+**Issue.** `scatter_strip` copies each 32x32 block of the wavelet plane
+into zigzag order. It was about 6% of the goody encode profile: one table
+load, one source load and one scattered store per coefficient.
+
+**Approach.** The zigzag index interleaves the coordinate bits low to
+high, `i = r0 c0 r1 c1 r2 c2 | r3 c3 r4 c4`. The top six bits name one of
+64 runs of 16 consecutive coefficients by the low three bits of row and
+column; the bottom four bits place an entry in its run by the high two
+bits, a 4x4 grid of pixels 8 apart. So for a fixed low row and `r3`,
+eight 8-lane row loads (rows `rl + 8 r3 + 16 r4`, column chunks
+`c3 + 2 c4`) hold in lane `cl` the eight entries of run `(rl, cl)` at
+places `r3 c3 r4 c4`. One 8x8 `i16` transpose (`trn1/trn2` at 16, 32 and
+64 bits) turns them into eight 16-byte stores. A block is 16 loads + 16
+transposes + 128 stores instead of 1 024 scalar triples. AArch64 only;
+the scalar loop stays for other targets and as the test reference.
+
+A randomised test compares the NEON and scalar results on 1, 2 and 5
+block columns; storing a half-run at the wrong offset fails it.
+
+**Numbers.** The machine was heavily loaded (load average 20–96; a
+concurrent `make check` from a pre-push hook ran during the first
+Criterion order, which then showed a bogus −50%). The clean
+base-vs-new order: `iw44_encode_large_1024x1024` +10.5%,
+`iw44_encode_gray_1024x1024` +8.7%, `iw44_encode_color` +5.7% for the
+base. Two prebuilt bench binaries run alternately, 3 rounds, means:
+
+| Benchmark | base | new | Change |
+|---|---|---|---|
+| iw44_encode_large_1024x1024 | 5.93 ms | 5.08 ms | −14% |
+| iw44_encode_gray_1024x1024 | 2.51 ms | 2.25 ms | −10% |
+| iw44_encode_color | 0.988 ms | 0.957 ms | −3% |
+
+`PageEncoder` Photo harness, 3 alternating rounds of 7: goody 99.4 →
+93.3 ms (−6%), watchmaker 138 → 135 ms (−2%). Output byte-identical on
+goody, watchmaker, cable, colorbook, boy.
+
+**Decision.** Kept.
+
+**Reason.** A clear gain in every alternating round and in the clean
+Criterion order, exact by construction and by test.
