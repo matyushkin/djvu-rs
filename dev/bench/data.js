@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791555070641,
+  "lastUpdate": 1791797369891,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -23428,6 +23428,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40369000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2f7bc3cbc65e1b1acfb504c195bd140cdd0b6cf0",
+          "message": "docs(npm): JS-accurate package description, keywords, text_zones_json doc (#948)\n\nThe npm package.json no longer inherits the crate's description and\nkeywords (encoder, pdf, converter), which the JS package does not ship.\nWasmPage::text_zones_json documents `undefined`, not `null`, for a page\nwithout a text layer.",
+          "timestamp": "2026-10-12T11:05:47+02:00",
+          "tree_id": "1bbac519e03b03f789b1929c86c4f5bad2ac92ff",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/2f7bc3cbc65e1b1acfb504c195bd140cdd0b6cf0"
+        },
+        "date": 1791797367516,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 125000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6860000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41541000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 39731000,
             "range": "± 0",
             "unit": "ns/iter"
           }
