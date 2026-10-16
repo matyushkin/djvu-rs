@@ -107,6 +107,15 @@ eager-only package. Its `README.md` is
 [`examples/wasm/README.npm.md`](../examples/wasm/README.npm.md), not the Rust
 crate README.
 
+`THIRD_PARTY_NOTICES` lists every crate linked into the `.wasm` binaries with
+its license text. `scripts/third_party_notices.py` generates it from the build's
+own dependency graph (target `wasm32-unknown-unknown`, the same `FEATURES`) using
+[cargo-about](https://github.com/EmbarkStudios/cargo-about); install it with
+`cargo install cargo-about --locked --features cli`. The release workflow
+requires it, while a local `make wasm` without cargo-about skips the file
+with a warning. Copyleft licenses never reach this file: `cargo-deny`
+(`deny.toml`) rejects any license outside the permissive allow-list.
+
 ### Smoke tests
 
 ```sh

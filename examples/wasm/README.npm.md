@@ -125,4 +125,7 @@ calls `resolve(name, kind)` once per page file it needs — see
 | The Rust library, CLI, and Python bindings | [djvu-rs README](https://github.com/matyushkin/djvu-rs#readme) |
 | Release and versioning contract | [`docs/packaging.md`](https://github.com/matyushkin/djvu-rs/blob/main/docs/packaging.md) |
 
-MIT licensed. Written from the public DjVu v3 specification.
+MIT licensed. Written from the public DjVu v3 specification. All Rust
+dependencies compiled into the `.wasm` are permissively licensed (MIT,
+Apache-2.0, Zlib, Unicode-3.0, or similar; no GPL/LGPL); their license texts
+are in `THIRD_PARTY_NOTICES` in this package.

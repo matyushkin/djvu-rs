@@ -96,6 +96,17 @@ cp "$SCALAR_OUT/djvu_rs.d.ts" "$OUT/djvu_rs.d.ts"
 # npm gets its own landing page; wasm-pack would copy the Rust crate README.
 cp "$ROOT/examples/wasm/README.npm.md" "$OUT/README.md"
 cp "$SCALAR_OUT/LICENSE" "$OUT/LICENSE"
+# License texts for the third-party crates linked into the .wasm (#949). Needs
+# cargo-about; CI (and so every published package) requires it, a local demo
+# build without it just skips the file.
+if command -v cargo-about >/dev/null 2>&1; then
+  python3 "$ROOT/scripts/third_party_notices.py" --features "$FEATURES" --out "$OUT/THIRD_PARTY_NOTICES"
+elif [[ -n "${CI:-}" ]]; then
+  echo "error: cargo-about is required to build the npm package (cargo install cargo-about --locked --features cli)" >&2
+  exit 1
+else
+  echo "warning: cargo-about not found; skipping THIRD_PARTY_NOTICES (cargo install cargo-about --locked --features cli)" >&2
+fi
 cat >> "$OUT/djvu_rs.d.ts" <<'EOF_DTS'
 
 export function wasmSimd128Supported(): boolean;
@@ -110,6 +121,7 @@ pkg.files = [
   "djvu_rs.d.ts",
   "README.md",
   "LICENSE",
+  "THIRD_PARTY_NOTICES",
   "scalar/djvu_rs.js",
   "scalar/djvu_rs.d.ts",
   "scalar/djvu_rs_bg.wasm",
