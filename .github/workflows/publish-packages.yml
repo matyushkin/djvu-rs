@@ -118,11 +118,31 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      # License texts of the crates linked into the extension (#949); listed in
+      # pyproject `license-files`, so the sdist and every wheel carry it.
+      - name: Generate third-party notices
+        run: python scripts/third_party_notices.py py --out djvu-py/THIRD_PARTY_NOTICES
+
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --manifest-path djvu-py/Cargo.toml --out dist
+
+      - name: Verify license files in sdist
+        run: |
+          set -euo pipefail
+          # maturin places the workspace LICENSE next to pyproject.toml itself.
+          # List first: `grep -q` exiting early would SIGPIPE tar under pipefail.
+          listing="$(tar tzf dist/*.tar.gz)"
+          for f in LICENSE THIRD_PARTY_NOTICES; do
+            grep -q "/$f\$" <<<"$listing" || { echo "::error::sdist lacks $f"; exit 1; }
+          done
 
       - name: Upload sdist
         uses: actions/upload-artifact@v4
@@ -222,6 +242,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install cargo-about
+        if: steps.gate.outputs.run == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      # `license-files` resolves next to pyproject.toml. The sdist gets the
+      # workspace LICENSE there from maturin; a wheel built from the checkout
+      # needs the copy (a committed one would collide in the sdist).
+      - name: Generate third-party notices
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          cp LICENSE djvu-py/LICENSE
+          python scripts/third_party_notices.py py --out djvu-py/THIRD_PARTY_NOTICES
+
       - name: Build wheels
         if: steps.gate.outputs.run == 'true'
         uses: PyO3/maturin-action@v1
@@ -230,6 +266,25 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           args: --release --manifest-path djvu-py/Cargo.toml --out dist --find-interpreter
           sccache: 'true'
+
+      # maturin silently skips a missing `license-files` entry, so check.
+      - name: Verify license files in wheels
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheels = glob.glob("dist/*.whl")
+          bad = []
+          for whl in wheels:
+              names = zipfile.ZipFile(whl).namelist()
+              for f in ("LICENSE", "THIRD_PARTY_NOTICES"):
+                  if not any(n.endswith(".dist-info/licenses/" + f) for n in names):
+                      bad.append(f"{whl}: {f}")
+          if not wheels or bad:
+              sys.exit("missing license files: " + (", ".join(bad) or "no wheels"))
+          print(f"{len(wheels)} wheels carry LICENSE + THIRD_PARTY_NOTICES")
+          PY
 
       - name: Upload wheels
         if: steps.gate.outputs.run == 'true'
