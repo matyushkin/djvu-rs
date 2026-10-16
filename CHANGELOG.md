@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **deps:** bump zip 2 -&gt; 9; every zip 2.x release is yanked, so fresh ([208d9b2](https://github.com/matyushkin/djvu-rs/commit/208d9b259698755e3669bc6d1a65f10cde7e7aeb))
+* **deps:** bump zip 2 → 9: every zip 2.x release is yanked, so fresh dependency resolution failed for any feature set ([#950](https://github.com/matyushkin/djvu-rs/issues/950)) ([208d9b2](https://github.com/matyushkin/djvu-rs/commit/208d9b259698755e3669bc6d1a65f10cde7e7aeb))
 
 ## [0.42.0](https://github.com/matyushkin/djvu-rs/compare/v0.41.0...v0.42.0) (2026-10-09)
 
