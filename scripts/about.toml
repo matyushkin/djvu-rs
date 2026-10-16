@@ -1,4 +1,5 @@
-# cargo-about config for the npm package's THIRD_PARTY_NOTICES (#949).
+# cargo-about config for the THIRD_PARTY_NOTICES in the npm package and the
+# Python wheels (#949); scripts/third_party_notices.py passes the targets.
 # Mirrors the [licenses] allow-list in deny.toml; cargo-deny remains the gate
 # that rejects copyleft, this file only drives notice generation.
 accepted = [
@@ -15,6 +16,5 @@ accepted = [
     "IJG",
     "0BSD",
 ]
-targets = ["wasm32-unknown-unknown"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true

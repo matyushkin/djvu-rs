@@ -44,6 +44,18 @@ pip install djvu-rs          # preferred once published
 pip install ./djvu-py        # requires Rust + maturin
 ```
 
+### License files
+
+Every wheel and the sdist carry `LICENSE` and `THIRD_PARTY_NOTICES` under
+`*.dist-info/licenses/` (pyproject `license-files`, PEP 639). The notices file
+holds the license texts of the crates linked into the extension module: the
+union over all wheel platforms, so it is identical in every wheel. The wheel and
+sdist jobs generate it with `scripts/third_party_notices.py py` (cargo-about, see
+the npm section) and fail if a built artifact lacks either file. The wheel jobs
+also copy `LICENSE` into `djvu-py/`; the sdist gets it from maturin. A local
+`maturin develop` without these generated files builds fine and just leaves
+them out.
+
 ### Stable surface
 
 Exposed today: open / `from_bytes`, page metadata, render (including region /
@@ -108,7 +120,7 @@ eager-only package. Its `README.md` is
 crate README.
 
 `THIRD_PARTY_NOTICES` lists every crate linked into the `.wasm` binaries with
-its license text. `scripts/third_party_notices.py` generates it from the build's
+its license text. `scripts/third_party_notices.py npm` generates it from the build's
 own dependency graph (target `wasm32-unknown-unknown`, the same `FEATURES`) using
 [cargo-about](https://github.com/EmbarkStudios/cargo-about); install it with
 `cargo install cargo-about --locked --features cli`. The release workflow
