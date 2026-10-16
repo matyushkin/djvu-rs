@@ -138,8 +138,10 @@ jobs:
         run: |
           set -euo pipefail
           # maturin places the workspace LICENSE next to pyproject.toml itself.
+          # List first: `grep -q` exiting early would SIGPIPE tar under pipefail.
+          listing="$(tar tzf dist/*.tar.gz)"
           for f in LICENSE THIRD_PARTY_NOTICES; do
-            tar tzf dist/*.tar.gz | grep -q "/$f\$" || { echo "::error::sdist lacks $f"; exit 1; }
+            grep -q "/$f\$" <<<"$listing" || { echo "::error::sdist lacks $f"; exit 1; }
           done
 
       - name: Upload sdist
