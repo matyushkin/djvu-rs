@@ -883,7 +883,7 @@ mod tests {
             .expect("partial archive must remain readable");
         let page_images = archive
             .file_names()
-            .filter(|name| name.starts_with("OEBPS/images/"))
+            .filter(|name| name.as_ref().unwrap().starts_with("OEBPS/images/"))
             .count();
         assert!(page_images <= 1, "no additional page may be written");
     }

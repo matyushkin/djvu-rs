@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(archive.len(), doc.page_count());
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
-            assert_eq!(entry.name(), format!("page_{:04}.png", i + 1));
+            assert_eq!(entry.name().unwrap(), format!("page_{:04}.png", i + 1));
         }
         // PNG magic on the first entry
         use std::io::Read;

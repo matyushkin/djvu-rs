@@ -46,12 +46,12 @@ djvu-iw44 = { version = "0.42.0", path = "crates/djvu-iw44", default-features = 
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
 png = { version = "0.17", optional = true }
-# `deflate-flate2` + `flate2` only (NOT the `deflate` umbrella): zip 2.x's
+# `deflate-flate2` only (NOT the `deflate` umbrella): zip's
 # `deflate` also enables `deflate-zopfli`, dragging zopfli + bumpalo into the
 # build for a compression backend we never select (#509). zip declares flate2
 # without a backend, so we depend on flate2 directly (below) to pick the
 # pure-Rust backend via feature unification.
-zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"], optional = true }
 # Backend selector for zip's deflate (see comment on `zip` above).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 miniz_oxide = { version = "0.8", optional = true }
@@ -162,7 +162,7 @@ futures = "0.3"
 # minimal (rt/macros/io-util/sync) — consumers bring their own tokio; only the
 # doc-sync gate needs `fs` here.
 tokio = { version = "1", features = ["fs", "rt", "macros", "io-util", "sync"] }
-zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Backend for the dev zip's deflate — mirrors the normal-deps trick so test
 # builds without the `epub` feature still give flate2 a backend.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
