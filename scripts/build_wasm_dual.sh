@@ -100,7 +100,7 @@ cp "$SCALAR_OUT/LICENSE" "$OUT/LICENSE"
 # cargo-about; CI (and so every published package) requires it, a local demo
 # build without it just skips the file.
 if command -v cargo-about >/dev/null 2>&1; then
-  python3 "$ROOT/scripts/third_party_notices.py" --features "$FEATURES" --out "$OUT/THIRD_PARTY_NOTICES"
+  python3 "$ROOT/scripts/third_party_notices.py" npm --features "$FEATURES" --out "$OUT/THIRD_PARTY_NOTICES"
 elif [[ -n "${CI:-}" ]]; then
   echo "error: cargo-about is required to build the npm package (cargo install cargo-about --locked --features cli)" >&2
   exit 1
