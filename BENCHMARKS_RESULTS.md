@@ -34,12 +34,12 @@ not used for public render claims.
 
 ---
 
-## Encoder parity scorecard (#684, 2026-07-13)
+## Encoder parity scorecard (#684, refreshed 2026-10-31)
 
 The reproducible harness is [`examples/encoder_parity_scorecard.rs`](examples/encoder_parity_scorecard.rs);
 methodology and the JSON schema are documented in
 [`docs/encoder-parity.md`](docs/encoder-parity.md). It renders each checked-in
-corpus page to the same PPM/PBM input, measures DjVuLibre 3.5.29's `c44` or
+corpus page to the same PPM/PBM input, measures DjVuLibre's `c44` or
 `cjb2` against the matching archival-safe `PageEncoder` profile, and decodes
 both outputs with `ddjvu` for the fidelity gate.
 
@@ -50,22 +50,34 @@ cargo run --release --example encoder_parity_scorecard -- \
   --case watchmaker-color --case goody-twoshoes-color \
   --case cable-bilevel --case map-atlas-bilevel \
   --case chinese-cookbook-bilevel --no-ocr --repeats 3 \
-  --output target/encoder-parity-2026-07-13.json
+  --output target/encoder-parity-2026-10-31.json
 ```
 
-Platform: macOS Darwin 25.5 / Apple Silicon arm64, Rust 1.92.0,
-repository SHA `94636e5`, DjVuLibre 3.5.29. Times are median milliseconds;
-RSS is KiB. `c44`/`cjb2` and djvu-rs outputs all passed dimensions and their
-mode-specific fidelity gate; the optional Tesseract probe is recorded in the
-methodology document.
+Platform: Linux 6.18 x86_64 (4 vCPU cloud container), Rust 1.97.0,
+repository SHA `437cff6` (v0.44.0), DjVuLibre 3.5.28. Times are median
+milliseconds; RSS is KiB. `c44`/`cjb2` and djvu-rs outputs all passed
+dimensions and their mode-specific fidelity gate. Fidelity is
+baseline / djvu-rs.
 
 | Case | Mode | Baseline B | djvu-rs B | Ratio | Baseline ms | djvu-rs ms | Baseline RSS | djvu-rs RSS | Fidelity |
 |------|------|-----------:|----------:|------:|------------:|------------:|-------------:|------------:|----------|
-| watchmaker | IW44 / `c44` | 665,625 | 692,182 | 1.040× | 481.4 | 269.3 | 145,712 | 161,600 | PSNR 45.28 / 38.73 dB; SSIM 0.9950 / 0.9899 |
-| goody two-shoes | IW44 / `c44` | 327,798 | 440,864 | 1.345× | 367.3 | 375.0 | 135,648 | 265,408 | PSNR 40.83 / 26.39 dB; SSIM 0.9808 / 0.9142 |
-| cable | JB2 / `cjb2` | 2,248 | 4,720 | 2.100× | 27.2 | 16.6 | 17,088 | 7,824 | pixel-exact / pixel-exact |
-| map atlas | JB2 / `cjb2` | 145,592 | 138,672 | 0.952× | 348.6 | 29.6 | 33,792 | 6,736 | pixel-exact / pixel-exact |
-| Chinese cookbook | JB2 / `cjb2` | 67 | 140 | 2.090× | 23.1 | 14.1 | 15,104 | 6,320 | pixel-exact / pixel-exact |
+| watchmaker | IW44 / `c44` | 665,625 | 682,598 | 1.025× | 1147.1 | 400.2 | 143,300 | 117,052 | PSNR 45.28 / 45.96 dB; SSIM 0.9950 / 0.9950 |
+| goody two-shoes | IW44 / `c44` | 327,798 | 340,872 | 1.040× | 957.8 | 400.8 | 133,232 | 135,596 | PSNR 40.83 / 41.14 dB; SSIM 0.9808 / 0.9811 |
+| cable | JB2 / `cjb2` | 2,248 | 2,272 | 1.011× | 50.4 | 18.3 | 14,652 | 7,064 | pixel-exact / pixel-exact |
+| map atlas | JB2 / `cjb2` | 145,694 | 138,672 | 0.952× | 611.1 | 217.5 | 16,692 | 15,100 | pixel-exact / pixel-exact |
+| Chinese cookbook | JB2 / `cjb2` | 67 | 66 | 0.985× | 40.8 | 10.5 | 13,320 | 6,616 | pixel-exact / pixel-exact |
+
+At equal slice counts the IW44 rows are size-neutral (watchmaker 0.997×,
+goody two-shoes 1.000× against the slice-matched `c44` run). The 2026-07-13
+table (macOS arm64, SHA `94636e5`) showed goody two-shoes at 1.345× with
+PSNR 26.39 dB and cable/cookbook at ~2.1×; those gaps are closed on v0.44.0.
+Times are not comparable across the two tables (different hosts).
+
+The djvu-rs RSS column needs the 2026-10-31 harness fix: on Linux,
+`RUSAGE_SELF.ru_maxrss` of the spawned worker carried over the scorecard
+parent's high-water mark across `exec`, so a case run after a large one
+reported the parent's peak (goody two-shoes: 619,788 KiB instead of
+135,596). The worker now reads `VmHWM` from `/proc/self/status`.
 
 `big_scanned_page.djvu` is 62,023,440 pixels and is explicitly skipped by the
 default 20M-pixel safety bound. The current result is diagnostic: it records

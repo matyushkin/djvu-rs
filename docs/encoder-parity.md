@@ -15,6 +15,14 @@ probe runs Tesseract over the source and both decoded raster artifacts and recor
 character/word counts; it is a readability smoke signal, not a substitute for
 OCR ground truth.
 
+Peak RSS of each encoder is taken in a separate worker process. On Linux the
+djvu-rs worker reads `VmHWM` from `/proc/self/status` rather than
+`RUSAGE_SELF.ru_maxrss`: the latter carries the pre-`exec` address space's
+high-water mark, and because the worker is spawned with `posix_spawn`
+(`CLONE_VM`) that was the scorecard parent's. A case run after a large one
+reported the parent's peak (goody two-shoes after watchmaker: 619,788 KiB vs
+135,596 KiB alone). Other platforms still use `ru_maxrss`.
+
 For photo cases the scorecard also runs `c44` a second time with our slice
 schedule (`-slice 10,20,…,100`, from `Iw44EncodeOptions::default()`) and
 records it as `matched_baseline` with `size_ratio_ours_over_matched`. The
