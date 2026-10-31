@@ -489,7 +489,37 @@ fn peak_rss_for(who: libc::c_int) -> Option<u64> {
     Some(raw)
 }
 
+/// `VmHWM` from `/proc/self/status`: the high-water RSS of this process's
+/// current address space only.
+#[cfg(target_os = "linux")]
+fn linux_vm_hwm_kb() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    parse_vm_hwm_kb(&status)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_vm_hwm_kb(status: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    line.trim_start_matches("VmHWM:")
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()
+}
+
 fn self_peak_rss_kb() -> Option<u64> {
+    // Linux folds the pre-exec address space's high-water mark into
+    // `RUSAGE_SELF.ru_maxrss` (exec records the old mm into
+    // `signal->maxrss`). The worker is spawned with `posix_spawn`, i.e.
+    // `CLONE_VM`, so that old mm is the scorecard parent's: after a large
+    // earlier case the worker reported the parent's peak instead of its own
+    // (620 MB vs 136 MB for goody-twoshoes run after watchmaker). `VmHWM`
+    // is per-mm and reset on exec, so it measures the encode alone.
+    #[cfg(target_os = "linux")]
+    if let Some(kb) = linux_vm_hwm_kb() {
+        return Some(kb);
+    }
     #[cfg(unix)]
     {
         peak_rss_for(libc::RUSAGE_SELF)
@@ -1118,6 +1148,14 @@ mod tests {
         );
         assert_eq!(parse_rss_kb("maximum resident set size: 2049\n"), Some(3));
         assert_eq!(parse_rss_kb("no rss here"), None);
+    }
+
+    #[test]
+    fn parses_vm_hwm_from_proc_status() {
+        let status =
+            "Name:\tworker\nVmPeak:\t  700000 kB\nVmHWM:\t  135640 kB\nVmRSS:\t  1200 kB\n";
+        assert_eq!(parse_vm_hwm_kb(status), Some(135_640));
+        assert_eq!(parse_vm_hwm_kb("Name:\tworker\n"), None);
     }
 
     #[test]

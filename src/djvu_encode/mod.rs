@@ -85,9 +85,9 @@ use crate::text_encode::encode_text_layer;
 /// enums "`#[non_exhaustive]` in spirit" — consumers must not rely on the
 /// absence of variants, and adding one is a compatible change. This makes
 /// that literal, so the next variant (there will be one) does not trip the
-/// API-breakage gate again; the gate's own TODO in
-/// `.github/workflows/api-stability.yml` names this as the intended end
-/// state. Downstream code must match with a `_` arm.
+/// API-breakage gate in `.github/workflows/api-stability.yml` (blocking
+/// since v0.32.0, once #796 marked every public error enum this way).
+/// Downstream code must match with a `_` arm.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EncodeError {
