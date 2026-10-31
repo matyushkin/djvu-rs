@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793474019690,
+  "lastUpdate": 1793478714607,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -24832,6 +24832,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 44750000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b36c6f0387b928d946bf67648f255f4b2e7ec7c7",
+          "message": "fix(bench): measure the encoder worker's own peak RSS on Linux (#955)\n\nThe encoder parity scorecard spawns a worker per encode and read its\npeak from RUSAGE_SELF.ru_maxrss. On Linux exec folds the old address\nspace's high-water mark into that counter, and posix_spawn (CLONE_VM)\nmakes the old address space the scorecard parent's. A case run after a\nlarge one therefore reported the parent's peak: goody two-shoes after\nwatchmaker showed 619,788 KiB instead of 135,596 KiB. The worker now\nreads VmHWM from /proc/self/status, which is per address space and\nreset on exec.\n\nAlso refresh the stale 2026-07-13 table in BENCHMARKS_RESULTS.md on\nv0.44.0 (the goody two-shoes 1.345x / 26 dB and the ~2.1x JB2 rows are\nlong closed), document the RSS method in docs/encoder-parity.md, and\ndrop a reference to a TODO in api-stability.yml that no longer exists.\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T22:08:40+02:00",
+          "tree_id": "47f10c79efe2998b16006bd477bbef586f167565",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/b36c6f0387b928d946bf67648f255f4b2e7ec7c7"
+        },
+        "date": 1793478712261,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 126000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6780000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43930000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 42348000,
             "range": "± 0",
             "unit": "ns/iter"
           }
