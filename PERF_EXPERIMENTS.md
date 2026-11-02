@@ -17190,3 +17190,38 @@ zero-fill would save only the 2.5 % `memset`, and the faults remain.
 **Reason.** At equal buffer handling djvu-rs renders these native pages as
 fast as libdjvulibre; the remaining cost belongs to the caller's choice of
 API, which the docs now name.
+
+---
+
+### AVX2_VALIDATION_PARSER: the x86-64-v3 validation comment lost every baseline row — **Diagnostic, harness fixed** (2026-11-02)
+
+**Issue.** On #957 the `Benchmark (x86-64-v3 AVX2 validation)` comment
+showed "—" in every *default ns* cell and still gave the verdict "No
+measurable difference … consider reverting #251/#252".
+
+**Cause.** In the baseline run criterion printed
+`Criterion.rs ERROR: error: Failed to access file
+".../target/criterion/<bench>/base/sample.json"` inside the
+`test <bench> ... ` line (state restored from the rust-cache without
+`base/`), so `bench: N ns/iter` landed on the next line. The parser only
+matched `test … bench:` on one line, found no baseline rows, and the
+verdict branch for "no speedup and no regression" fired on an empty
+comparison.
+
+**Real numbers from the same job** (ubuntu-26.04 runner, ns/iter, default
+→ `-C target-cpu=x86-64-v3`): `jb2_decode` 262,032 → 157,338 (−40 %),
+`render_colorbook_stages/mask_decode` 7,496,328 → 5,281,886 (−30 %),
+`jb2_decode_large_600dpi` −23 %, `iw44_decode_corpus_color` −21 %,
+`iw44_to_rgb_colorbook/sub2_partial_decode` −15 %, `render_colorbook_cold`
+−15 %; nothing slower. One run, so treat the sizes as indicative; the
+direction is the opposite of the posted verdict.
+
+**Change.** `bench.yml`: reset `target/criterion` before the baseline run
+too; the parser takes `bench:` from the line after `test NAME ...`; a bench
+present on only one side yields "Verdict. None … incomplete" instead of a
+recommendation. Checked by re-running the job's own log through the new
+parser (all 18 pairs, "measurably faster") and with one baseline row
+removed ("None").
+
+**Decision.** Diagnostic; harness fixed. Do not act on the earlier
+"revert #251/#252" verdict.
