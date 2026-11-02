@@ -17166,10 +17166,13 @@ Raising only the mmap threshold did not help (80.7–82.5 ms): with the
 default trim threshold glibc returns the freed heap top to the OS and the
 next call faults the pages in again.
 
-So the compositor is at parity with libdjvulibre on these pages; the
-reported gap is the allocation. On CI's runner it is smaller (#939:
-`render_pixmap` 58.25 vs `render_into_reuse_buffer` 54.74 ms) because
-page faults are cheaper there than in this container.
+So most of the reported gap is the allocation. In this container the
+reused-buffer path is level with libdjvulibre. On CI's runner (#957, same
+job) it is not quite: watchmaker 43.84 ms reused buffer vs 40.83 ms C
+(1.07×), while `render_pixmap` read 58.76 ms (1.44×); cable 36.58 vs
+39.10 ms (0.94×). A ~7 % residual on native colour remains, as does the
+colorbook @ 150 dpi downscale row (7.14 vs 6.13 ms, 1.17×, a 4.7 MB pixmap
+under the mmap threshold) — neither is explained by this entry.
 
 **Change.** `scripts/djvulibre_compare.py` compares the two native rows
 against `render_native_stages/render_into_reuse_buffer/{watchmaker_color,
@@ -17187,9 +17190,10 @@ zero-fill would save only the 2.5 % `memset`, and the faults remain.
 
 **Decision.** Diagnostic; harness and docs fixed. No compositor change.
 
-**Reason.** At equal buffer handling djvu-rs renders these native pages as
-fast as libdjvulibre; the remaining cost belongs to the caller's choice of
-API, which the docs now name.
+**Reason.** The allocation accounted for most of the native gap (1.44× →
+1.07× on CI for watchmaker) and belongs to the caller's choice of API,
+which the docs now name. The residual native-colour ~7 % and the colorbook
+downscale 1.17× are open leads, not closed by this entry.
 
 ---
 
