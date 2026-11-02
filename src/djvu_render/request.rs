@@ -566,6 +566,12 @@ pub fn render_pixmap_with_report(
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options: the
 /// whole page at full quality, the same as
 /// [`RenderRequest::new`]`(opts).`[`pixmap`](RenderRequest::pixmap)`(page)`.
+///
+/// Every call allocates a fresh `width * height * 4` byte pixmap. To render
+/// many pages at the same size, reuse one buffer with
+/// [`RenderRequest::write_rgba`] instead: a 300 dpi Letter page is 33.6 MB,
+/// above glibc's 32 MiB mmap threshold, so on Linux each new pixmap is mapped
+/// and page-faulted in again, about a quarter of the native render time.
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     RenderRequest::new(opts.clone())
         .operation("render_pixmap")

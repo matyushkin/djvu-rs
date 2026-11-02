@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-10-07.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-11-02.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| RENDER_VS_DJVULIBRE_ALLOC | 2026-11-02 | render (native 300 dpi vs libdjvulibre, `scripts/djvulibre_compare.py`) | **D** | Gap was allocation, not compositor: watchmaker `render_pixmap` 77–88 ms vs reused buffer 59–66 ms vs C 56–67 ms (same session); glibc-tuned `render_pixmap` 61–70 ms | Fresh 33.6 MB RGBA pixmap > glibc 32 MiB mmap threshold → mmap + page faults every call. DjVuLibre table now compares native rows against `render_into_reuse_buffer`; `render_pixmap` doc points to `write_rgba` |
 | IW44_ENC_SCATTER_NEON | 2026-10-07 | encode (IW44 block scatter, `crates/djvu-iw44/src/encode/plane.rs`) | **K** | iw44_encode_large_1024x1024 −14%, gray −10%, color −3% (alternating prebuilt binaries); goody Photo 99 → 93 ms. Byte-identical | `scatter_strip` as 8x8 `i16` NEON transposes: for fixed low row and `r3`, lane `cl` of 8 row loads is run `(rl, cl)`. Scalar kept for non-AArch64 and as test reference. |
 | BZZ_ENC_BIT_INLINE | 2026-10-07 | encode (BZZ, `crates/djvu-bzz/src/encode.rs`) | **K** | bzz_encode 100.0 → 95.2 µs (−4.8%), new faster in 4/4 alternating rounds | BZZ calls `encode_bit_inline` (from IW44_ENC_BIT_INLINE) instead of `encode_bit`; byte-identical by the pinning test. |
 | IW44_ENC_BIT_INLINE | 2026-10-07 | encode (ZP bit coding in IW44 passes, `crates/djvu-zp/src/encoder.rs`) | **K** | iw44_encode_large_1024x1024 −6.2%, gray −1.7…2.5%, color −1.5…2%, both orders; JB2 no cost. Byte-identical | New `encode_bit_inline` (forced inline, slow steps out of line) used only by the IW44 passes; plain `#[inline(always)]` on `encode_bit` cost JB2 up to 5.6%, so JB2/BZZ keep `encode_bit`. |

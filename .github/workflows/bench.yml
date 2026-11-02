@@ -95,8 +95,8 @@ jobs:
       # Fast sanity check on the comparison/drift-detection logic itself,
       # before spending ~20 min on the actual benchmark run below. Covers the
       # cross-runner drift heuristic (see scripts/bench_compare.py docstring).
-      - name: Unit-test bench_compare.py
-        run: python3 -m unittest scripts/test_bench_compare.py -v
+      - name: Unit-test bench_compare.py and djvulibre_compare.py
+        run: python3 -m unittest scripts/test_bench_compare.py scripts/test_djvulibre_compare.py -v
 
       # ── Download baseline from last successful main-branch run (PR only) ────
       - name: Download baseline

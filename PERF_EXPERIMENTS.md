@@ -17127,3 +17127,66 @@ goody, watchmaker, cable, colorbook, boy.
 
 **Reason.** A clear gain in every alternating round and in the clean
 Criterion order, exact by construction and by test.
+
+---
+
+### RENDER_VS_DJVULIBRE_ALLOC: native render "gap" vs libdjvulibre is a fresh-pixmap allocation — **Diagnostic, harness fixed** (2026-11-02)
+
+**Issue.** The PR bench comment's DjVuLibre table showed native-resolution
+renders behind libdjvulibre: on #939, watchmaker @ 300 dpi 57.83 vs 49.43 ms
+("1.2× slower"), cable @ 300 dpi 49.72 vs 47.40 ms ("≈ equal"). Spike: is
+there a compositor lever left?
+
+**Profile.** `perf record` of `render_corpus_color` (Linux x86_64, 4 vCPU
+container): `composite::zoom_row` 67 %, `sample_bilinear` 7 %, then ~13 %
+kernel page-fault work (`do_user_addr_fault`, memcg charge, `clear_page`,
+`zap_present_ptes`) and 2.5 % `memset`. The compositor itself has been
+through G1/G2/A3/A4 fill-then-overlay (rejected) and the #831 per-variant
+pixel loop; nothing new stood out in it.
+
+**Cause.** The two sides do not measure the same thing.
+`scripts/djvulibre_bench.c` renders with `ddjvu_page_render` into one
+caller buffer reused across iterations. `render_corpus_color` /
+`render_corpus_bilevel` call `render_pixmap`, which allocates a fresh
+2550 × 3301 × 4 = 33.6 MB RGBA pixmap each time. That is above glibc's
+maximum dynamic mmap threshold (32 MiB), so every call `mmap`s new pages,
+faults them in and `munmap`s them on drop. DjVuLibre's internal GPixmap is
+RGB (25.3 MB), under the threshold, and is recycled from the heap.
+
+**Numbers.** Same container, same session, interleaved; Criterion
+medians, C harness means over 20 renders.
+
+| Case | C `ddjvu_page_render` | `render_pixmap` | `render_pixmap`, glibc tuned¹ | `write_rgba`, reused buffer |
+|---|---:|---:|---:|---:|
+| watchmaker 300 dpi | 55.7–67.0 ms | 77.4–88.2 ms | 60.8–70.4 ms | 59.0–66.4 ms |
+| cable 300 dpi | 54.6–68.6 ms | 66.2–71.3 ms | 51.9–56.9 ms | 50.3–66.9 ms |
+
+¹ `MALLOC_MMAP_THRESHOLD_=67108864 MALLOC_TRIM_THRESHOLD_=268435456`.
+Raising only the mmap threshold did not help (80.7–82.5 ms): with the
+default trim threshold glibc returns the freed heap top to the OS and the
+next call faults the pages in again.
+
+So the compositor is at parity with libdjvulibre on these pages; the
+reported gap is the allocation. On CI's runner it is smaller (#939:
+`render_pixmap` 58.25 vs `render_into_reuse_buffer` 54.74 ms) because
+page faults are cheaper there than in this container.
+
+**Change.** `scripts/djvulibre_compare.py` compares the two native rows
+against `render_native_stages/render_into_reuse_buffer/{watchmaker_color,
+cable_bilevel}` (falling back to `render_corpus_*` for result directories
+without the stage bench), so both sides render into a reused caller buffer.
+The downscale rows (boy @ 72, colorbook @ 150: 0.1 / 4.7 MB pixmaps, under
+the threshold) keep `render_pixmap`. `render_pixmap`'s rustdoc now points
+repeated renders at `RenderRequest::write_rgba`. Unit test:
+`scripts/test_djvulibre_compare.py`, run in `bench.yml` with the
+`bench_compare.py` tests.
+
+**Not done.** Making `render_pixmap` itself cheaper would need a buffer
+pool or a different allocator; neither belongs in the library. Skipping the
+zero-fill would save only the 2.5 % `memset`, and the faults remain.
+
+**Decision.** Diagnostic; harness and docs fixed. No compositor change.
+
+**Reason.** At equal buffer handling djvu-rs renders these native pages as
+fast as libdjvulibre; the remaining cost belongs to the caller's choice of
+API, which the docs now name.

@@ -38,6 +38,15 @@ def load_criterion_ms(criterion_dir: Path, rel: str) -> float | None:
         return None
 
 
+def load_first_criterion_ms(criterion_dir: Path, rels: str | tuple[str, ...]) -> float | None:
+    """Mean time of the first of `rels` that has Criterion results, or None."""
+    for rel in (rels,) if isinstance(rels, str) else rels:
+        ms = load_criterion_ms(criterion_dir, rel)
+        if ms is not None:
+            return ms
+    return None
+
+
 # ---------------------------------------------------------------------------
 # djvulibre_bench output parser
 # ---------------------------------------------------------------------------
@@ -114,8 +123,20 @@ def ratio_cell(djvurs_ms: float | None, lib_ms: float | None) -> str:
 # ---------------------------------------------------------------------------
 # Comparison table definition
 # ---------------------------------------------------------------------------
-# Each row: (label, criterion_rel_path, lib_bench_key, ddjvu_key)
+# Each row: (label, criterion_rel_path(s), lib_bench_key, ddjvu_key)
 #
+# The criterion entry may be a tuple of paths: the first one present is used.
+#
+# The native 2550x3301 rows compare against `render_native_stages/
+# render_into_reuse_buffer`, not `render_corpus_*`: `ddjvu_page_render` writes
+# into the caller's buffer, which the harness reuses, while `render_pixmap`
+# allocates a fresh 33.6 MB RGBA pixmap per call. That is above glibc's
+# 32 MiB maximum mmap threshold, so every call mmaps new pages and faults
+# them in (DjVuLibre's internal 25 MB RGB GPixmap stays under it and is
+# reused). On Linux that allocation alone made `render_corpus_color` read
+# 1.2x slower than libdjvulibre while the compositor was at parity
+# (RENDER_VS_DJVULIBRE_ALLOC in PERF_EXPERIMENTS.md). The `render_corpus_*`
+# path is the fallback for result directories that predate the stage bench.
 ROWS = [
     (
         "boy.djvu @ 72 dpi (small color IW44)",
@@ -131,13 +152,19 @@ ROWS = [
     ),
     (
         "watchmaker.djvu @ 300 dpi (color corpus, native)",
-        "render_corpus_color",
+        (
+            "render_native_stages/render_into_reuse_buffer/watchmaker_color",
+            "render_corpus_color",
+        ),
         "watchmaker.djvu@300dpi",
         "watchmaker.djvu@300dpi",
     ),
     (
         "cable_1973_100133.djvu @ 300 dpi (bilevel JB2 corpus, native)",
-        "render_corpus_bilevel",
+        (
+            "render_native_stages/render_into_reuse_buffer/cable_bilevel",
+            "render_corpus_bilevel",
+        ),
         "cable_1973_100133.djvu@300dpi",
         "cable_1973_100133.djvu@300dpi",
     ),
@@ -166,7 +193,7 @@ def main() -> int:
     # Collect rows that have at least one non-None value
     table_rows = []
     for label, crit_rel, lib_key, ddjvu_key in ROWS:
-        djvurs_ms = load_criterion_ms(args.criterion, crit_rel)
+        djvurs_ms = load_first_criterion_ms(args.criterion, crit_rel)
         lib_ms = lib.get(lib_key, {}).get("render_ms")
         ddjvu_ms = ddjvu.get(ddjvu_key)
         table_rows.append((label, djvurs_ms, lib_ms, ddjvu_ms))
@@ -177,6 +204,8 @@ def main() -> int:
 
     print("\n### vs DjVuLibre 3.5.29\n")
     print("> **libdjvulibre (C API)**: render-only, page already decoded in memory.")
+    print("> **djvu-rs**: native-resolution rows render into a reused buffer,"
+          " as the C harness does; the downscale rows use `render_pixmap`.")
     print("> **ddjvu CLI**: includes process startup (~7 ms) and PPM output to `/dev/null`.")
     print("> Matrix: small color IW44 downscale, large color IW44 downscale,"
           " native-resolution color corpus, and native-resolution bilevel JB2 corpus.\n")
