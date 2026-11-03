@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.1](https://github.com/matyushkin/djvu-rs/compare/v0.44.0...v0.44.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **bench:** honest native-render and AVX2 comparisons in the bench comments ([#957](https://github.com/matyushkin/djvu-rs/issues/957)) ([24ea1d6](https://github.com/matyushkin/djvu-rs/commit/24ea1d69be52dba9d3acbbe02e81a5cdac969695))
+* **bench:** measure the encoder worker's own peak RSS on Linux ([#955](https://github.com/matyushkin/djvu-rs/issues/955)) ([b36c6f0](https://github.com/matyushkin/djvu-rs/commit/b36c6f0387b928d946bf67648f255f4b2e7ec7c7))
+
+
+### Performance Improvements
+
+* **render:** hoist row-invariant mask and background reads in area-average downscale ([#959](https://github.com/matyushkin/djvu-rs/issues/959)) ([0a3d5a3](https://github.com/matyushkin/djvu-rs/commit/0a3d5a31f3d54435bebbe4a500e209a65f7df9ce))
+
 ## [0.44.0](https://github.com/matyushkin/djvu-rs/compare/v0.43.0...v0.44.0) (2026-10-24)
 
 
