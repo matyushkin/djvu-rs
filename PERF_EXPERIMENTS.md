@@ -17127,3 +17127,105 @@ goody, watchmaker, cable, colorbook, boy.
 
 **Reason.** A clear gain in every alternating round and in the clean
 Criterion order, exact by construction and by test.
+
+---
+
+### RENDER_VS_DJVULIBRE_ALLOC: native render "gap" vs libdjvulibre is a fresh-pixmap allocation — **Diagnostic, harness fixed** (2026-11-02)
+
+**Issue.** The PR bench comment's DjVuLibre table showed native-resolution
+renders behind libdjvulibre: on #939, watchmaker @ 300 dpi 57.83 vs 49.43 ms
+("1.2× slower"), cable @ 300 dpi 49.72 vs 47.40 ms ("≈ equal"). Spike: is
+there a compositor lever left?
+
+**Profile.** `perf record` of `render_corpus_color` (Linux x86_64, 4 vCPU
+container): `composite::zoom_row` 67 %, `sample_bilinear` 7 %, then ~13 %
+kernel page-fault work (`do_user_addr_fault`, memcg charge, `clear_page`,
+`zap_present_ptes`) and 2.5 % `memset`. The compositor itself has been
+through G1/G2/A3/A4 fill-then-overlay (rejected) and the #831 per-variant
+pixel loop; nothing new stood out in it.
+
+**Cause.** The two sides do not measure the same thing.
+`scripts/djvulibre_bench.c` renders with `ddjvu_page_render` into one
+caller buffer reused across iterations. `render_corpus_color` /
+`render_corpus_bilevel` call `render_pixmap`, which allocates a fresh
+2550 × 3301 × 4 = 33.6 MB RGBA pixmap each time. That is above glibc's
+maximum dynamic mmap threshold (32 MiB), so every call `mmap`s new pages,
+faults them in and `munmap`s them on drop. DjVuLibre's internal GPixmap is
+RGB (25.3 MB), under the threshold, and is recycled from the heap.
+
+**Numbers.** Same container, same session, interleaved; Criterion
+medians, C harness means over 20 renders.
+
+| Case | C `ddjvu_page_render` | `render_pixmap` | `render_pixmap`, glibc tuned¹ | `write_rgba`, reused buffer |
+|---|---:|---:|---:|---:|
+| watchmaker 300 dpi | 55.7–67.0 ms | 77.4–88.2 ms | 60.8–70.4 ms | 59.0–66.4 ms |
+| cable 300 dpi | 54.6–68.6 ms | 66.2–71.3 ms | 51.9–56.9 ms | 50.3–66.9 ms |
+
+¹ `MALLOC_MMAP_THRESHOLD_=67108864 MALLOC_TRIM_THRESHOLD_=268435456`.
+Raising only the mmap threshold did not help (80.7–82.5 ms): with the
+default trim threshold glibc returns the freed heap top to the OS and the
+next call faults the pages in again.
+
+So most of the reported gap is the allocation. In this container the
+reused-buffer path is level with libdjvulibre. On CI's runner (#957, same
+job) it is not quite: watchmaker 43.84 ms reused buffer vs 40.83 ms C
+(1.07×), while `render_pixmap` read 58.76 ms (1.44×); cable 36.58 vs
+39.10 ms (0.94×). A ~7 % residual on native colour remains, as does the
+colorbook @ 150 dpi downscale row (7.14 vs 6.13 ms, 1.17×, a 4.7 MB pixmap
+under the mmap threshold) — neither is explained by this entry.
+
+**Change.** `scripts/djvulibre_compare.py` compares the two native rows
+against `render_native_stages/render_into_reuse_buffer/{watchmaker_color,
+cable_bilevel}` (falling back to `render_corpus_*` for result directories
+without the stage bench), so both sides render into a reused caller buffer.
+The downscale rows (boy @ 72, colorbook @ 150: 0.1 / 4.7 MB pixmaps, under
+the threshold) keep `render_pixmap`. `render_pixmap`'s rustdoc now points
+repeated renders at `RenderRequest::write_rgba`. Unit test:
+`scripts/test_djvulibre_compare.py`, run in `bench.yml` with the
+`bench_compare.py` tests.
+
+**Not done.** Making `render_pixmap` itself cheaper would need a buffer
+pool or a different allocator; neither belongs in the library. Skipping the
+zero-fill would save only the 2.5 % `memset`, and the faults remain.
+
+**Decision.** Diagnostic; harness and docs fixed. No compositor change.
+
+**Reason.** The allocation accounted for most of the native gap (1.44× →
+1.07× on CI for watchmaker) and belongs to the caller's choice of API,
+which the docs now name. The residual native-colour ~7 % and the colorbook
+downscale 1.17× are open leads, not closed by this entry.
+
+---
+
+### AVX2_VALIDATION_PARSER: the x86-64-v3 validation comment lost every baseline row — **Diagnostic, harness fixed** (2026-11-02)
+
+**Issue.** On #957 the `Benchmark (x86-64-v3 AVX2 validation)` comment
+showed "—" in every *default ns* cell and still gave the verdict "No
+measurable difference … consider reverting #251/#252".
+
+**Cause.** In the baseline run criterion printed
+`Criterion.rs ERROR: error: Failed to access file
+".../target/criterion/<bench>/base/sample.json"` inside the
+`test <bench> ... ` line (state restored from the rust-cache without
+`base/`), so `bench: N ns/iter` landed on the next line. The parser only
+matched `test … bench:` on one line, found no baseline rows, and the
+verdict branch for "no speedup and no regression" fired on an empty
+comparison.
+
+**Real numbers from the same job** (ubuntu-26.04 runner, ns/iter, default
+→ `-C target-cpu=x86-64-v3`): `jb2_decode` 262,032 → 157,338 (−40 %),
+`render_colorbook_stages/mask_decode` 7,496,328 → 5,281,886 (−30 %),
+`jb2_decode_large_600dpi` −23 %, `iw44_decode_corpus_color` −21 %,
+`iw44_to_rgb_colorbook/sub2_partial_decode` −15 %, `render_colorbook_cold`
+−15 %; nothing slower. One run, so treat the sizes as indicative; the
+direction is the opposite of the posted verdict.
+
+**Change.** `bench.yml`: reset `target/criterion` before the baseline run
+too; the parser takes `bench:` from the line after `test NAME ...`; a bench
+present on only one side yields "Verdict. None … incomplete" instead of a
+recommendation. Checked by re-running the job's own log through the new
+parser (all 18 pairs, "measurably faster") and with one baseline row
+removed ("None").
+
+**Decision.** Diagnostic; harness fixed. Do not act on the earlier
+"revert #251/#252" verdict.

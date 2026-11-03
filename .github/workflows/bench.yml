@@ -95,8 +95,8 @@ jobs:
       # Fast sanity check on the comparison/drift-detection logic itself,
       # before spending ~20 min on the actual benchmark run below. Covers the
       # cross-runner drift heuristic (see scripts/bench_compare.py docstring).
-      - name: Unit-test bench_compare.py
-        run: python3 -m unittest scripts/test_bench_compare.py -v
+      - name: Unit-test bench_compare.py and djvulibre_compare.py
+        run: python3 -m unittest scripts/test_bench_compare.py scripts/test_djvulibre_compare.py -v
 
       # ── Download baseline from last successful main-branch run (PR only) ────
       - name: Download baseline
@@ -333,6 +333,13 @@ jobs:
       # so the shared ZP-decoder `refill!` loop is measured on x86 too (see the
       # ZP-U64 note in the job comment above) — those two are cheap to add
       # since the binary/runner are already built for this job.
+      # Start from an empty criterion dir: the restored cache can hold
+      # criterion state without `base/`, and criterion then prints
+      # "ERROR: Failed to access file .../base/sample.json" into the
+      # `test NAME ...` line, which pushed `bench:` onto the next line.
+      - name: Reset criterion state (baseline)
+        run: rm -rf target/criterion
+
       - name: Bench codecs (default RUSTFLAGS — baseline)
         run: |
           cargo bench --bench codecs -- 'iw44_to_rgb|iw44_decode|jb2_decode|bzz_decode' --output-format bencher 2>&1 \
@@ -370,20 +377,26 @@ jobs:
         run: |
           python3 - <<'PYEOF' | tee bench_v3_comment.md
           import re, os
-          BENCHER_RE = re.compile(
-              r"^test\s+(?P<name>\S+)\s+\.\.\.\s+bench:\s+"
-              r"(?P<ns>[\d,]+)\s+ns/iter"
-          )
+          # `bench:` may sit on the line after `test NAME ...` when criterion
+          # prints an error in between (#957: every baseline row was lost
+          # that way and the verdict below compared nothing).
+          TEST_RE = re.compile(r"^test\s+(?P<name>\S+)\s+\.\.\.")
+          BENCH_RE = re.compile(r"bench:\s+(?P<ns>[\d,]+)\s+ns/iter")
 
           def parse(path):
               out = {}
               if not os.path.exists(path):
                   return out
+              name = None
               for line in open(path):
-                  m = BENCHER_RE.match(line.strip())
-                  if not m:
-                      continue
-                  out[m.group("name")] = int(m.group("ns").replace(",", ""))
+                  line = line.strip()
+                  t = TEST_RE.match(line)
+                  if t:
+                      name = t.group("name")
+                  b = BENCH_RE.search(line)
+                  if b and name is not None:
+                      out[name] = int(b.group("ns").replace(",", ""))
+                      name = None
               return out
 
           sections = [
@@ -397,6 +410,7 @@ jobs:
           print()
           any_speedup = False
           any_regression = False
+          missing = 0
           for title, default_path, v3_path in sections:
               d = parse(default_path)
               v = parse(v3_path)
@@ -411,6 +425,7 @@ jobs:
                   a = d.get(n)
                   b = v.get(n)
                   if a is None or b is None:
+                      missing += 1
                       print(f"| `{n}` | {a if a is not None else '—'} | {b if b is not None else '—'} | — |")
                       continue
                   delta = (b - a) / a * 100.0
@@ -422,7 +437,10 @@ jobs:
               print()
 
           print("---")
-          if any_speedup and not any_regression:
+          if missing:
+              print(f"**Verdict.** None: {missing} bench(es) have a result on only "
+                    "one side, so the comparison is incomplete. Check the job log.")
+          elif any_speedup and not any_regression:
               print("**Verdict.** AVX2 path measurably faster (≥3% on ≥1 bench, no regressions).")
           elif any_regression and not any_speedup:
               print("**Verdict.** No AVX2 speedup — and at least one regression (≥3%). "
