@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793693042801,
+  "lastUpdate": 1793703571975,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -24928,6 +24928,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 38500000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0a3d5a31f3d54435bebbe4a500e209a65f7df9ce",
+          "message": "perf(render): hoist row-invariant mask and background reads in area-average downscale (#959)\n\n* perf(render): hoist row-invariant mask and background reads in area-average downscale\n\nThe colour downscale loop looked up two row-invariant things per pixel:\nthe coarse-mask row for the mask_shift > 0 (max-pool) branch, through\nBitmap::get (y * stride, bounds-checked load, bit test), and the\nbackground row inside sample_area_avg_bounds's 1x1 fast path, through\nPlaneView::row (checked_mul + get). Together they were ~25% of\nrender_colorbook in a source-line profile. #438's blank-row\nshort-circuit also skipped the max-pool branch.\n\nFetch both rows once per output row, and let a blank coarse-mask row\nset mask_all_bg. Output is byte-identical: 1430 renders (every corpus\nand djvujs page at 30-200 dpi downscale, mask_aa on/off) hash equal to\nmain.\n\n5 alternating rounds of prebuilt binaries, both orders:\nrender_colorbook 9.5-12.5 -> 6.3-8.0 ms, color_downscale_cached\n9.8-11.0 -> 5.6-8.4 ms; nothing slower. A const-generic unswitched\nloop was tried first and was slower in every round (logged as\nAREA_AVG_UNSWITCH).\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\n* docs(perf): record CI's numbers for AREA_AVG_ROW_HOIST\n\nSame-job DjVuLibre table on #959: colorbook @ 150 dpi 4.26 vs 9.18 ms\n(2.2x faster, was 1.17x slower), boy @ 72 dpi 2.0x faster; every\narea-average bench faster in raw time even on a runner ~66% slower\nthan the baseline's.\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-11-03T12:32:20+02:00",
+          "tree_id": "91378288bbd5552c675049825c43b2f02b33fcc2",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/0a3d5a31f3d54435bebbe4a500e209a65f7df9ce"
+        },
+        "date": 1793703569996,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 143000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7504000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47167000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45286000,
             "range": "± 0",
             "unit": "ns/iter"
           }
