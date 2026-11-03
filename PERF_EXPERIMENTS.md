@@ -17229,3 +17229,66 @@ removed ("None").
 
 **Decision.** Diagnostic; harness fixed. Do not act on the earlier
 "revert #251/#252" verdict.
+
+---
+
+### AREA_AVG_ROW_HOIST: hoist the coarse-mask row and the 1-row background row out of the area-average pixel loop — **Kept** (2026-11-03)
+
+**Issue.** Open lead from RENDER_VS_DJVULIBRE_ALLOC: on CI `render_colorbook`
+(colorbook p1, 400 → 150 dpi area-average downscale, 4.7 MB pixmap, so not the
+allocation effect) read 7.14 ms vs libdjvulibre 6.13 ms (1.17×).
+
+**Profile.** `perf` with `CARGO_PROFILE_BENCH_DEBUG=true`, by source line:
+~20 % in the coarse-mask bit test of the `mask_shift > 0` (max-pool) branch
+(`Bitmap::get` → `djvu-bitmap/src/lib.rs:52–54`, `composite.rs` call site:
+`y * stride` multiply, bounds-checked byte load and bit test per pixel), and a
+per-pixel `PlaneView::row(y0)` (`layers.rs:534`, a `checked_mul` + `get` — the
+`jo` in the hot asm) inside `sample_area_avg_bounds`'s 1×1 fast path, which
+almost every colorbook pixel takes (the BG plane is coarser than the output).
+Both are row-invariant. #438's blank-row short-circuit also excluded the
+`mask_shift > 0` branch, so blank rows still paid the per-pixel bit test.
+
+**Rejected first: AREA_AVG_UNSWITCH.** A const-generic copy of the row loop
+per `(mask_shift > 0, gamma_is_identity)` (the #831 trick that won 13–21 %
+on the native path). Both `#[inline(always)]` and `#[inline(never)]` versions
+were slower in every alternating round (e.g. `render_colorbook` 13.3–17.4 vs
+10.3–12.2 ms, `small_color_downscale_cached` ~2×). The flags are not what
+costs here.
+
+**Change.** In `composite_rows_area_avg_one`, once per output row:
+- for `mask_shift > 0`, slice the coarse-mask row (`None` when `pym` is past
+  the mask) and test bits from it; a row with no set byte sets
+  `mask_all_bg`, so the per-pixel test is skipped entirely (#438 for the
+  max-pool branch);
+- when the background footprint is one row tall, fetch that row once; a
+  pixel whose footprint is also one column wide reads it directly, exactly as
+  `sample_area_avg_bounds`'s 1×1 fast path does; everything else still calls
+  `sample_area_avg_bounds`.
+
+**Exactness.** Byte-identical: FNV hash of `render_pixmap` for every page
+(≤ 12 per file) of `tests/corpus/*.djvu` and the djvujs assets at 30, 72,
+100, 150 and 200 dpi (downscale only), `mask_aa` on and off — 1 430 renders,
+all equal to `main`. `tests/document_and_render.rs` (incl. the ddjvu digest
+guards) passes.
+
+**Numbers.** Linux x86_64 container (noisy); two prebuilt bench binaries,
+5 alternating rounds (3 base-first, 2 new-first), Criterion medians:
+
+| Benchmark | base | new |
+|---|---:|---:|
+| `render_colorbook` | 9.51–12.54 ms | 6.31–8.04 ms |
+| `render_compositor_only/color_downscale_cached` | 9.81–11.03 ms | 5.58–8.43 ms |
+| `render_compositor_only/small_color_downscale_cached` | 50.2–76.0 µs | 39.1–56.4 µs |
+| `render_page/dpi/72` | 105–145 µs | 89–106 µs |
+| `render_compositor_only/color_downscale_mixed_cached` | 29.5–38.8 ms | 28.2–30.2 ms |
+| `render_scaled_0.5x/bilinear` | 56.0–57.1 µs | 46.1–56.7 µs |
+
+New was faster on `render_colorbook` and `color_downscale_cached` in all 5
+rounds (≈ −35…−40 % at the medians); no bench was slower. libdjvulibre on
+the same box rendered colorbook @ 150 dpi in 12.7 ms, so locally the 1.17×
+gap is gone; CI's same-job table will give the runner number.
+
+**Decision.** Kept.
+
+**Reason.** Exact by construction and by a 1 430-render sweep, and a
+consistent large gain on every area-average colour downscale bench.
