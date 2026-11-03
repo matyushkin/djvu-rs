@@ -1606,15 +1606,41 @@ pub(super) fn composite_rows_area_avg_one(
     // mask footprint's y-band [y0, y1) is row-invariant; if it has no foreground
     // bits, `mask_box_any` would return false for every output pixel, so the
     // `!mask_all_bg &&` short-circuit skips the per-pixel footprint scan entirely.
-    // Only the `mask_shift == 0` (mask_box_any) path is covered — the max-pool
-    // sub-path indexes a coarser mask. The y range matches `mask_box_any`.
-    let mask_all_bg = ctx.mask_shift == 0
-        && ctx.mask.is_none_or(|m| {
+    // For `mask_shift == 0` the y range matches `mask_box_coverage`.
+    //
+    // AREA_AVG_ROW_HOIST: the max-pool sub-path (mask_shift > 0) reads one
+    // coarse-mask row per output row, so take that row once here and give it
+    // the same blank-row short-circuit. `None` with `mask_shift > 0` means the
+    // row is outside the mask, where `Bitmap::get` would never be reached.
+    let shifted_row: Option<&[u8]> = match ctx.mask {
+        Some(m) if ctx.mask_shift > 0 => {
+            let pym = fy >> (FRACBITS + ctx.mask_shift);
+            let stride = m.row_stride();
+            let start = pym as usize * stride;
+            (pym < m.height)
+                .then(|| m.data.get(start..start + stride))
+                .flatten()
+        }
+        _ => None,
+    };
+    let mask_all_bg = if ctx.mask_shift == 0 {
+        ctx.mask.is_none_or(|m| {
             let stride = m.row_stride();
             let y0 = (fy >> FRACBITS).min(m.height.saturating_sub(1)) as usize;
             let y1 = ((fy + fy_step) >> FRACBITS).min(m.height) as usize;
             y1 <= y0 || !m.data[y0 * stride..y1 * stride].iter().any(|&b| b != 0)
-        });
+        })
+    } else {
+        shifted_row.is_none_or(|row| !row.iter().any(|&b| b != 0))
+    };
+
+    // AREA_AVG_ROW_HOIST: when the background footprint is one row tall
+    // (`sample_area_avg_bounds`'s 1x1 fast path for every 1-column pixel),
+    // fetch that row once instead of per pixel.
+    let bg_row1: Option<&[u8]> = match (ctx.bg, bg_y) {
+        (Some(bg), Some((bg_y0, bg_y1))) if bg_y1 - bg_y0 <= 1 => Some(bg.row(bg_y0)),
+        _ => None,
+    };
 
     for (ox, pixel) in row_buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let fallback;
@@ -1639,13 +1665,12 @@ pub(super) fn composite_rows_area_avg_one(
             0
         } else if let Some(m) = ctx.mask {
             if ctx.mask_shift > 0 {
+                // Same bit as `m.get(px, pym)`; `shifted_row` is that row.
                 let px = fx >> (FRACBITS + ctx.mask_shift);
-                let pym = fy >> (FRACBITS + ctx.mask_shift);
-                if px < m.width && pym < m.height && m.get(px, pym) {
-                    255
-                } else {
-                    0
-                }
+                let set = px < m.width
+                    && shifted_row
+                        .is_some_and(|row| (row[(px / 8) as usize] >> (7 - (px % 8))) & 1 == 1);
+                if set { 255 } else { 0 }
             } else {
                 mask_box_coverage(m, fx, fy, fx_step, fy_step)
             }
@@ -1655,6 +1680,15 @@ pub(super) fn composite_rows_area_avg_one(
 
         let bg_sample = || -> (u8, u8, u8) {
             // `bg_y` is `Some` exactly when `ctx.bg` is.
+            if let Some(row) = bg_row1
+                && ax.bg_x1 - ax.bg_x0 <= 1
+            {
+                // `sample_area_avg_bounds`'s 1x1 fast path on the hoisted row.
+                let off = ax.bg_x0 as usize * 4;
+                return row
+                    .get(off..off + 4)
+                    .map_or((0, 0, 0), |q| (q[0], q[1], q[2]));
+            }
             match (ctx.bg, bg_y) {
                 (Some(bg), Some((bg_y0, bg_y1))) => {
                     sample_area_avg_bounds(bg, ax.bg_x0, ax.bg_x1, bg_y0, bg_y1)

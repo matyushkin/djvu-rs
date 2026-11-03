@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-11-02.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-11-03.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,8 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| AREA_AVG_ROW_HOIST | 2026-11-03 | render (area-avg colour downscale, `src/djvu_render/composite.rs`) | **K** | `render_colorbook` 9.5–12.5 → 6.3–8.0 ms, `color_downscale_cached` 9.8–11.0 → 5.6–8.4 ms (5 alternating rounds, both orders); byte-identical over 1 430 renders | Hoist coarse-mask row (+ blank-row skip for `mask_shift > 0`, #438 analog) and the 1-row BG row out of the pixel loop. Closes the colorbook @150 gap from RENDER_VS_DJVULIBRE_ALLOC: CI same-job colorbook 4.26 ms vs libdjvulibre 9.18 ms (2.2× faster, was 1.17× slower) |
+| AREA_AVG_UNSWITCH | 2026-11-03 | render (area-avg colour downscale) | **X** | slower in every round (`render_colorbook` 13.3–17.4 vs 10.3–12.2 ms; small downscale ~2×), inline(always) and inline(never) | Const-generic loop copies per (mask_shift>0, gamma identity) — the #831 trick does not transfer; see AREA_AVG_ROW_HOIST |
 | AVX2_VALIDATION_PARSER | 2026-11-02 | CI (x86-64-v3 validation comment, `.github/workflows/bench.yml`) | **D** | Posted "no difference, consider reverting #251/#252" with an empty baseline column; the same job's log shows v3 faster (jb2_decode −40 %, mask_decode −30 %, nothing slower) | Criterion error text split `test …`/`bench:` across lines. Fixed: reset criterion dir before baseline, two-line parse, no verdict when a side is missing |
 | RENDER_VS_DJVULIBRE_ALLOC | 2026-11-02 | render (native 300 dpi vs libdjvulibre, `scripts/djvulibre_compare.py`) | **D** / F | Most of the gap was allocation: CI watchmaker `render_pixmap` 1.44× → reused buffer 1.07× vs C (cable 0.94×); container: reused buffer level with C, glibc-tuned `render_pixmap` 61–70 ms. **Open:** native colour ~7 %, colorbook @150 downscale 1.17× | Fresh 33.6 MB RGBA pixmap > glibc 32 MiB mmap threshold → mmap + page faults every call. DjVuLibre table now compares native rows against `render_into_reuse_buffer`; `render_pixmap` doc points to `write_rgba` |
 | IW44_ENC_SCATTER_NEON | 2026-10-07 | encode (IW44 block scatter, `crates/djvu-iw44/src/encode/plane.rs`) | **K** | iw44_encode_large_1024x1024 −14%, gray −10%, color −3% (alternating prebuilt binaries); goody Photo 99 → 93 ms. Byte-identical | `scatter_strip` as 8x8 `i16` NEON transposes: for fixed low row and `r3`, lane `cl` of 8 row loads is run `(rl, cl)`. Scalar kept for non-AArch64 and as test reference. |
