@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793478714607,
+  "lastUpdate": 1793693042801,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -24880,6 +24880,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 42348000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "24ea1d69be52dba9d3acbbe02e81a5cdac969695",
+          "message": "fix(bench): honest native-render and AVX2 comparisons in the bench comments (#957)\n\n* fix(bench): compare native renders with libdjvulibre on a reused buffer\n\nThe PR bench comment showed watchmaker @ 300 dpi \"1.2x slower\" than\nlibdjvulibre. A profile and interleaved runs show the compositor is at\nparity: the C harness renders into one reused caller buffer, while\nrender_corpus_* calls render_pixmap, which allocates a fresh 33.6 MB\nRGBA pixmap per call. That is above glibc's 32 MiB mmap threshold, so\nevery call maps and page-faults it in again (watchmaker: render_pixmap\n77-88 ms, reused buffer 59-66 ms, C 56-67 ms, same session; glibc tuned\nto keep the pixmap on the heap brings render_pixmap to 61-70 ms).\n\n- djvulibre_compare.py: the two native rows use\n  render_native_stages/render_into_reuse_buffer, falling back to\n  render_corpus_* for older result directories; unit-tested in\n  scripts/test_djvulibre_compare.py, run by bench.yml.\n- render_pixmap rustdoc points repeated renders at\n  RenderRequest::write_rgba.\n- PERF_EXPERIMENTS.md / EXPERIMENTS_INDEX.md: RENDER_VS_DJVULIBRE_ALLOC.\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\n* fix(bench): stop the AVX2 validation comment dropping baseline rows\n\nOn this PR the x86-64-v3 validation comment showed no default-RUSTFLAGS\nnumbers and still recommended reverting #251/#252. Criterion had\nprinted a \"Failed to access file .../base/sample.json\" error into each\n`test NAME ...` line (state restored from the cache without base/), so\n`bench:` landed on the next line and the one-line parser matched\nnothing. The job's own log shows x86-64-v3 faster (jb2_decode -40%,\nmask_decode -30%, nothing slower).\n\n- Reset target/criterion before the baseline run as well.\n- Take `bench:` from the line after `test NAME ...`.\n- Give no verdict when a bench has a result on only one side.\n\nLogged as AVX2_VALIDATION_PARSER in PERF_EXPERIMENTS.md.\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\n* docs(perf): record CI's numbers for the reused-buffer DjVuLibre rows\n\nThe first CI run with the new comparison shows the allocation explains\nmost of the native gap but not all of it: watchmaker 1.44x -> 1.07x\n(43.84 vs 40.83 ms), cable 0.94x. Say so instead of \"at parity\", and\nlist the native-colour ~7% and colorbook @ 150 dpi 1.17x as open leads.\n\nClaude-Session: https://claude.ai/code/session_013WxUSVo8X8xL7mvWSkKB85\n\n---------\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+          "timestamp": "2026-11-03T09:41:09+02:00",
+          "tree_id": "f63080c24823d26f8610918ad9ce4a9fa90f10c9",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/24ea1d69be52dba9d3acbbe02e81a5cdac969695"
+        },
+        "date": 1793693040478,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 109000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6127000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40398000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38500000,
             "range": "± 0",
             "unit": "ns/iter"
           }
