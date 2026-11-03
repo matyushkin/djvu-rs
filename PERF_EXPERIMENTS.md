@@ -17285,8 +17285,15 @@ guards) passes.
 
 New was faster on `render_colorbook` and `color_downscale_cached` in all 5
 rounds (≈ −35…−40 % at the medians); no bench was slower. libdjvulibre on
-the same box rendered colorbook @ 150 dpi in 12.7 ms, so locally the 1.17×
-gap is gone; CI's same-job table will give the runner number.
+the same box rendered colorbook @ 150 dpi in 12.7 ms.
+
+CI (#959, one job, runner ~66 % slower than the bench baseline's): every
+area-average bench still got faster in raw time against that baseline
+(`render_colorbook` 4.98 → 4.26 ms, `color_downscale_cached` 5.11 → 4.20 ms,
+`small_color_downscale_cached` 41.2 → 32.8 µs, `render_page/dpi/72`
+80.0 → 69.2 µs). Same-job DjVuLibre table: colorbook @ 150 dpi
+**4.26 vs 9.18 ms (2.2× faster)**, boy @ 72 dpi 69 vs 141 µs (2.0× faster) —
+the 1.17× "slower" row from #957 is gone.
 
 **Decision.** Kept.
 
