@@ -50,7 +50,12 @@ env:
 jobs:
   conformance:
     name: Differential conformance
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the conformance digests are DjVuLibre
+    # 3.5.28 output and the next step refuses any other version. 24.04
+    # ships 3.5.28; ubuntu-latest moved to 26.04, which ships 3.5.29, and
+    # the job then failed in that step on every run. Moving the reference
+    # to a newer DjVuLibre means re-checking the recorded digests.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
