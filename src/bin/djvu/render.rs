@@ -174,11 +174,14 @@ pub(super) fn render_png(
     rotate: djvu_rs::djvu_render::UserRotation,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // One pixmap for every page: a 300 dpi Letter page is 33.6 MB, and a
+    // fresh one per page is mmap'd and page-faulted in again on Linux (#965).
+    let mut pixmap = djvu_rs::Pixmap::default();
     if all {
         std::fs::create_dir_all(output)?;
         for i in 0..count {
             let out = output.join(format!("page_{:04}.png", i + 1));
-            render_page_png(doc, i, dpi, rotate, &out)?;
+            render_page_png(doc, i, dpi, rotate, &out, &mut pixmap)?;
         }
     } else {
         let idx = page_idx(page, count)?;
@@ -187,7 +190,7 @@ pub(super) fn render_png(
         {
             std::fs::create_dir_all(parent)?;
         }
-        render_page_png(doc, idx, dpi, rotate, output)?;
+        render_page_png(doc, idx, dpi, rotate, output, &mut pixmap)?;
     }
     Ok(())
 }
@@ -306,11 +309,19 @@ pub(super) fn render_page_png(
     dpi: u32,
     rotate: djvu_rs::djvu_render::UserRotation,
     out: &Path,
+    pixmap: &mut djvu_rs::Pixmap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(idx)?;
     let (w, h) = page.size_at_dpi(dpi as f32);
-    let pixmap = page.render_to_size(w, h)?;
-    let pixmap = apply_user_rotation(pixmap, rotate);
+    djvu_rs::djvu_render::RenderRequest::new(page.options_for_size(w, h))
+        .pixmap_into(doc.inner().page(idx)?, pixmap)?;
+    let rotated;
+    let pixmap = if matches!(rotate, djvu_rs::djvu_render::UserRotation::None) {
+        &*pixmap
+    } else {
+        rotated = apply_user_rotation(std::mem::take(pixmap), rotate);
+        &rotated
+    };
     let file = std::fs::File::create(out)?;
     let mut writer = std::io::BufWriter::new(file);
     encode_png(&mut writer, pixmap.width, pixmap.height, &pixmap.data)?;

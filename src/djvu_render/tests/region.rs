@@ -310,6 +310,46 @@ fn render_request_streams_match_the_pixmap() {
     ));
 }
 
+/// `pixmap_into` gives the pixmap's bytes and keeps the buffer of an earlier
+/// same-size render; whole-pixmap options fall back to a fresh pixmap (#965).
+#[test]
+fn pixmap_into_matches_the_pixmap_and_reuses_the_buffer() {
+    let doc = load_doc("chicken.djvu");
+    let page = doc.page(0).unwrap();
+    let opts = RenderOptions {
+        width: 91,
+        height: 121,
+        ..Default::default()
+    };
+    let mut out = Pixmap::default();
+    let request = RenderRequest::new(opts.clone());
+    request.pixmap_into(page, &mut out).unwrap();
+    assert_eq!(out, request.pixmap(page).unwrap());
+    let ptr = out.data.as_ptr();
+    request.pixmap_into(page, &mut out).unwrap();
+    assert_eq!(out.data.as_ptr(), ptr, "same-size render reallocated");
+
+    for whole in [
+        RenderOptions {
+            aa: true,
+            ..opts.clone()
+        },
+        RenderOptions {
+            rotation: UserRotation::Cw90,
+            ..opts.clone()
+        },
+    ] {
+        let request = RenderRequest::new(whole);
+        request.pixmap_into(page, &mut out).unwrap();
+        assert_eq!(out, request.pixmap(page).unwrap());
+    }
+    let zero = RenderRequest::new(RenderOptions { width: 0, ..opts });
+    assert!(matches!(
+        zero.pixmap_into(page, &mut out),
+        Err(RenderError::InvalidDimensions { .. })
+    ));
+}
+
 /// A cancelled token stops every output with `Cancelled`; quality errors
 /// name the problem.
 #[test]

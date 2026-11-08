@@ -129,12 +129,44 @@ where
     Ok(PageRun::Finished)
 }
 
+/// Page-sized byte buffers reused across the pages of one export (#965).
+///
+/// A 300 dpi Letter page is 33.6 MB of RGBA, above glibc's 32 MiB mmap
+/// threshold, so a fresh buffer per page is mapped and page-faulted in again
+/// every time. [`export_pages`] runs `build` in parallel under the `parallel`
+/// feature, so each page in flight takes its own buffer: at most one per
+/// worker thread, all freed when the pool drops at the end of the export.
+///
+/// `#[allow(dead_code)]`: only the `cbz`/`epub`-gated exporters use it.
+#[allow(dead_code)]
+#[derive(Default)]
+pub(crate) struct ScratchPool(std::sync::Mutex<Vec<Vec<u8>>>);
+
+#[allow(dead_code)]
+impl ScratchPool {
+    /// Run `f` with an empty buffer that keeps an earlier page's capacity.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+        let mut buf = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut free| free.pop())
+            .unwrap_or_default();
+        buf.clear();
+        let result = f(&mut buf);
+        if let Ok(mut free) = self.0.lock() {
+            free.push(buf);
+        }
+        result
+    }
+}
+
 /// Append the RGB bytes of one RGBA scanline to `dst`, dropping the alpha.
 ///
 /// The per-row strip both the PDF and TIFF streaming encoders build from their
 /// [`render_streaming`](crate::djvu_render::render_streaming) callback.
 ///
-/// `#[allow(dead_code)]`: only the `pdf`/`tiff`-gated exporters call it.
+/// `#[allow(dead_code)]`: only the `pdf`/`tiff`/`cbz`-gated exporters call it.
 #[allow(dead_code)]
 pub(crate) fn rgba_row_to_rgb(dst: &mut Vec<u8>, rgba_row: &[u8]) {
     for rgba in rgba_row.as_chunks::<4>().0 {

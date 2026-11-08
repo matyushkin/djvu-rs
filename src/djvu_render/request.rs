@@ -217,6 +217,39 @@ impl RenderRequest {
         .ok_or(RenderError::Cancelled)
     }
 
+    /// Render into `out`, reusing its allocation: the pixels of
+    /// [`pixmap`](Self::pixmap), for loops that render many pages.
+    ///
+    /// A render that can stream (see [`write_rgba`](Self::write_rgba)) goes
+    /// straight into `out.data`, resized to `width × height × 4` bytes, so a
+    /// buffer that already held a page this size is not reallocated. A 300
+    /// dpi Letter page is 33.6 MB, above glibc's 32 MiB mmap threshold: a
+    /// fresh pixmap per page is mapped and page-faulted in again each time
+    /// (#965). The whole-pixmap steps — anti-aliasing, Lanczos-3 at a scaled
+    /// size, rotation — and a region that leaves the page still build a new
+    /// pixmap, which replaces `out`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`pixmap`](Self::pixmap). On error `out` holds unspecified
+    /// pixels.
+    pub fn pixmap_into(&self, page: &DjVuPage, out: &mut Pixmap) -> Result<(), RenderError> {
+        let (w, h) = self.output_size();
+        let need = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4));
+        let (Ok(_), Some(need)) = (self.stream_window(page), need) else {
+            *out = self.pixmap(page)?;
+            return Ok(());
+        };
+        // Before the resize, so an over-limit size never allocates.
+        check_output_pixels(self.operation, page, self.limits, w, h)?;
+        out.data.resize(need, 0);
+        out.width = w;
+        out.height = h;
+        self.write_rgba(page, &mut out.data)
+    }
+
     /// Like [`pixmap`](Self::pixmap), with a [`RenderReport`] of the layers
     /// a permissive render skipped or recovered (#696).
     ///
@@ -569,9 +602,10 @@ pub fn render_pixmap_with_report(
 ///
 /// Every call allocates a fresh `width * height * 4` byte pixmap. To render
 /// many pages at the same size, reuse one buffer with
-/// [`RenderRequest::write_rgba`] instead: a 300 dpi Letter page is 33.6 MB,
-/// above glibc's 32 MiB mmap threshold, so on Linux each new pixmap is mapped
-/// and page-faulted in again, about a quarter of the native render time.
+/// [`RenderRequest::pixmap_into`] or [`RenderRequest::write_rgba`] instead: a
+/// 300 dpi Letter page is 33.6 MB, above glibc's 32 MiB mmap threshold, so on
+/// Linux each new pixmap is mapped and page-faulted in again, about a quarter
+/// of the native render time.
 pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, RenderError> {
     RenderRequest::new(opts.clone())
         .operation("render_pixmap")

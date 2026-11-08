@@ -16,7 +16,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
 use crate::djvu_render::{RenderError, UserRotation, render_pixmap};
-use crate::export_common::{PageRun, export_pages};
+use crate::export_common::{PageRun, ScratchPool, export_pages};
 use crate::export_control::{ExportObserver, NoOpObserver};
 
 /// Errors during CBZ conversion.
@@ -135,10 +135,11 @@ pub fn write_pages_with_observer<W: Write + Seek>(
     // #629: pages render on cold clones so decode caches drop per page
     // instead of accumulating O(pages) on the document. The ZIP writer is
     // serial, so entries are written in page order.
+    let scratch = ScratchPool::default();
     let run = export_pages(
         &pages,
         observer,
-        |i| build_page_png(&doc.page(i)?.clone(), opts),
+        |i| scratch.with(|rgb| build_page_png(&doc.page(i)?.clone(), opts, rgb)),
         |position, png| write_page_png(zip, position + 1, &png, entry_opts),
     )?;
     match run {
@@ -159,34 +160,51 @@ fn write_page_png<W: Write + Seek>(
 }
 
 /// Render one page at the target DPI, apply user rotation, encode to PNG.
-fn build_page_png(page: &DjVuPage, opts: &CbzOptions) -> Result<Vec<u8>, CbzError> {
+///
+/// `rgb` is scratch for the page's pixels: empty, but it may keep the
+/// capacity of an earlier page (#965).
+fn build_page_png(
+    page: &DjVuPage,
+    opts: &CbzOptions,
+    rgb: &mut Vec<u8>,
+) -> Result<Vec<u8>, CbzError> {
     let size = crate::render_size::RenderSize::at_dpi(page, opts.dpi as f32);
-    let pixmap = render_pixmap(page, &size.options())?;
-    let pixmap = match opts.rotation {
-        UserRotation::None => pixmap,
-        UserRotation::Cw90 => pixmap.rotate_cw90(),
-        UserRotation::Rot180 => pixmap.rotate_180(),
-        UserRotation::Ccw90 => pixmap.rotate_ccw90(),
-    };
-
+    let render_opts = size.options();
     // Pages are always opaque (alpha=255 inline — ALPHA_INL), so encode RGB:
     // 25% less raw data into deflate, smaller archives, identical pixels
     // (#599).
-    let mut rgb = Vec::with_capacity(pixmap.data.len() / 4 * 3);
-    for px in pixmap.data.as_chunks::<4>().0 {
-        rgb.extend_from_slice(&px[..3]);
-    }
+    let (width, height) = if matches!(opts.rotation, UserRotation::None) {
+        // No RGBA page buffer at all: rows go straight into `rgb` (#965).
+        let (w, h) = size.display;
+        rgb.reserve(w as usize * h as usize * 3);
+        crate::export_common::render_rows_or_pixmap(page, &render_opts, |row| {
+            crate::export_common::rgba_row_to_rgb(rgb, row);
+        })?;
+        (w, h)
+    } else {
+        let pixmap = render_pixmap(page, &render_opts)?;
+        let pixmap = match opts.rotation {
+            UserRotation::Cw90 => pixmap.rotate_cw90(),
+            UserRotation::Rot180 => pixmap.rotate_180(),
+            UserRotation::Ccw90 => pixmap.rotate_ccw90(),
+            UserRotation::None => pixmap,
+        };
+        rgb.reserve(pixmap.data.len() / 4 * 3);
+        for px in pixmap.data.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        (pixmap.width, pixmap.height)
+    };
     let mut buf = Vec::new();
     {
-        let mut enc =
-            png::Encoder::new(std::io::Cursor::new(&mut buf), pixmap.width, pixmap.height);
+        let mut enc = png::Encoder::new(std::io::Cursor::new(&mut buf), width, height);
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         let mut writer = enc
             .write_header()
             .map_err(|e| CbzError::Png(e.to_string()))?;
         writer
-            .write_image_data(&rgb)
+            .write_image_data(rgb)
             .map_err(|e| CbzError::Png(e.to_string()))?;
     }
     Ok(buf)
