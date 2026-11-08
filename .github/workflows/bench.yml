@@ -153,11 +153,64 @@ jobs:
             baseline \
             target/criterion \
             --suspects-out suspects.txt \
+            --summary-out compare_summary.txt \
             > bench_comment.md
           compare_exit=$?
           set -e
           echo "compare_exit=$compare_exit" >> "$GITHUB_OUTPUT"
+          # drift_suspect=true|false, drift=<fraction>; absent when there was
+          # no baseline (then drift_suspect reads as empty, i.e. not suspect).
+          cat compare_summary.txt >> "$GITHUB_OUTPUT" 2>/dev/null || true
           cat bench_comment.md
+
+      # ── Same-runner full baseline (PR only, drift-suspect runs) ─────────────
+      # A drift-suspect artifact compare (median delta beyond ±3%) means the
+      # baseline runner was a different speed class, and the drift is not
+      # uniform across bench families: on #959 (median +61.5%) untouched
+      # benches sat 27-100% above the median (IW44 to-RGB, bzz_encode).
+      # Subtracting the median cannot isolate the code's effect under that
+      # spread, so a real ~20% regression would pass (#960). Drift-suspect
+      # runs were the common case by late 2026, so instead of trusting that
+      # compare, rebuild the merge base here and run the FULL suite on this
+      # runner (~20 min extra), then compare without restriction. Drift
+      # between two runs on one runner is small, so this compare is the
+      # verdict; anything it flags is re-measured back-to-back in the next
+      # step. Runs whether or not the artifact compare flagged regressions:
+      # a uniformly faster runner can hide a regression entirely (exit 0).
+      - name: Same-runner full baseline (drift-suspect runs)
+        if: >
+          github.event_name == 'pull_request' &&
+          needs.detect.outputs.code == 'true' &&
+          steps.compare.outputs.drift_suspect == 'true'
+        id: samerunner
+        run: |
+          set +e
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git worktree add ../base-src "${{ github.event.pull_request.base.sha }}"
+          pushd ../base-src
+          cargo bench --bench codecs -- --output-format bencher > /dev/null || true
+          cargo bench --bench render --features pdf -- --output-format bencher > /dev/null || true
+          popd
+          # bench_compare.py reads an empty baseline as "no baseline" and
+          # exits 0. Here that would mean the merge base failed to build or
+          # bench, and passing on it would fail open — report bad input.
+          rm -f suspects.txt
+          if [ -z "$(find ../base-src/target/criterion -name estimates.json -path '*/new/*' -print -quit 2>/dev/null)" ]; then
+            echo "Merge base produced no Criterion results on this runner." | tee samerunner_comment.md
+            samerunner_exit=2
+          else
+            python3 scripts/bench_compare.py \
+              ../base-src/target/criterion \
+              target/criterion \
+              --suspects-out suspects.txt \
+              --title "Same-runner comparison (merge base rebuilt and fully re-run on this runner)" \
+              > samerunner_comment.md
+            samerunner_exit=$?
+          fi
+          set -e
+          echo "samerunner_exit=$samerunner_exit" >> "$GITHUB_OUTPUT"
+          cat samerunner_comment.md
+          cat samerunner_comment.md >> bench_comment.md
 
       # ── Same-runner re-check (PR only, only when the artifact compare flags) ──
       # The artifact baseline comes from a different runner whose CPU generation
@@ -166,21 +219,28 @@ jobs:
       # Re-measure ONLY the flagged benches from the merge base on THIS runner
       # and let that comparison be the verdict.
       #
-      # Only runs when compare_exit == 1 (regressions, NOT already flagged as
-      # drift-suspect by bench_compare.py's own median-delta check). compare_exit
-      # == 3 means bench_compare.py already saw a runner-wide drift signature
-      # (see the "Cross-runner drift detection" note at the top of that script)
-      # strong enough to explain the flagged benches on its own — spending
-      # another full rebuild+rerun on the same conclusion isn't worth the CI time.
+      # Runs when the artifact compare flagged regressions without drift
+      # (compare_exit == 1), or when the same-runner full baseline above
+      # flagged any (1, or 3 if even that pass drifted, e.g. thermal/order
+      # skew across the ~20 min between the two full runs). suspects.txt then
+      # holds that pass's suspects. A drift-suspect artifact compare is never
+      # re-checked from its own suspects: the full same-runner pass replaces it.
       - name: Re-check suspects against merge base (same runner)
-        if: github.event_name == 'pull_request' && steps.compare.outputs.compare_exit == '1'
+        if: >
+          github.event_name == 'pull_request' &&
+          (steps.compare.outputs.compare_exit == '1' ||
+           steps.samerunner.outputs.samerunner_exit == '1' ||
+           steps.samerunner.outputs.samerunner_exit == '3')
         id: recheck
         run: |
           set +e
           filter=$(paste -sd'|' suspects.txt | sed 's/[^a-zA-Z0-9_|\/]/./g')
           echo "suspect filter: $filter"
-          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
-          git worktree add ../base-src "${{ github.event.pull_request.base.sha }}"
+          # The same-runner full baseline step may already have built it.
+          if [ ! -d ../base-src ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+            git worktree add ../base-src "${{ github.event.pull_request.base.sha }}"
+          fi
           pushd ../base-src
           cargo bench --bench codecs -- "$filter" || true
           cargo bench --bench render --features pdf -- "$filter" || true
@@ -225,29 +285,54 @@ jobs:
         continue-on-error: true  # comment failure must not hide regression result
 
       # Preserve the comment even when compare detects a regression, then make
-      # every failing compare result fail the job (1 = regression not explained
-      # by drift, 2 = bad or missing current Criterion output). compare_exit ==
-      # 3 (regressions found, but bench_compare.py's own median-delta drift
-      # check flagged the whole run as a probable cross-runner speed change —
-      # see PERF_EXPERIMENTS.md's PR #779/#787 entries for the false-positive
-      # history this is meant to stop repeating) is deliberately fail-soft: the
-      # comment still posts and still lists the flagged benches, but the job
-      # passes so a human isn't paged for noise. This must not be `bash -e`'s
-      # direct exit: that would skip writing the step output and fail open.
+      # every failing result fail the job. Two paths:
+      #
+      # - Drift-suspect artifact compare (drift_suspect == true): that compare
+      #   decides nothing (#960). The verdict is the same-runner full
+      #   baseline: 0 passes; 1 or 3 passes only if the back-to-back re-check
+      #   of its suspects comes back 0; 2 (merge base gave no results) or a
+      #   missing result fails. Before #960 this case (compare_exit == 3)
+      #   passed outright, which let real regressions through on drifted runs.
+      # - Otherwise: 1 = regression, confirmed unless the same-runner re-check
+      #   returns 0 (phantom, see PERF_EXPERIMENTS.md's PR #779/#787 entries);
+      #   2 = bad or missing current Criterion output.
+      #
+      # This must not be `bash -e`'s direct exit: that would skip writing the
+      # step outputs and fail open.
       - name: Fail on benchmark comparison
-        if: github.event_name == 'pull_request' && needs.detect.outputs.code == 'true' && steps.compare.outputs.compare_exit != '0'
+        if: >
+          github.event_name == 'pull_request' &&
+          needs.detect.outputs.code == 'true' &&
+          (steps.compare.outputs.compare_exit != '0' ||
+           steps.compare.outputs.drift_suspect == 'true')
         run: |
-          if [ "${{ steps.compare.outputs.compare_exit }}" = "1" ]; then
-            if [ "${{ steps.recheck.outputs.recheck_exit }}" = "0" ]; then
+          compare_exit="${{ steps.compare.outputs.compare_exit }}"
+          samerunner_exit="${{ steps.samerunner.outputs.samerunner_exit }}"
+          recheck_exit="${{ steps.recheck.outputs.recheck_exit }}"
+          if [ "${{ steps.compare.outputs.drift_suspect }}" = "true" ]; then
+            case "$samerunner_exit" in
+              0)
+                echo "Artifact baseline drifted; the same-runner full comparison against the merge base found no regressions."
+                exit 0 ;;
+              1|3)
+                if [ "$recheck_exit" = "0" ]; then
+                  echo "Same-runner suspects did not reproduce on the back-to-back re-check — noise."
+                  exit 0
+                fi
+                echo "Benchmark regressions confirmed against the merge base on this runner — see PR comment." ;;
+              2)
+                echo "Same-runner comparison failed: the merge base produced no Criterion results." ;;
+              *)
+                echo "Same-runner comparison did not run to completion (samerunner_exit='$samerunner_exit')." ;;
+            esac
+          elif [ "$compare_exit" = "1" ]; then
+            if [ "$recheck_exit" = "0" ]; then
               echo "Artifact-baseline regressions did not reproduce against the merge base on this runner — phantom (cross-runner variance)."
               exit 0
             fi
             echo "Benchmark regressions detected and confirmed on a same-runner merge-base re-check — see PR comment."
-          elif [ "${{ steps.compare.outputs.compare_exit }}" = "3" ]; then
-            echo "Benchmark regressions flagged, but the run's own median delta across all benchmarks looks like cross-runner drift (see PR comment) — not failing."
-            exit 0
           else
-            echo "Benchmark comparison failed: current Criterion results are missing or invalid."
+            echo "Benchmark comparison failed: current Criterion results are missing or invalid (compare_exit='$compare_exit')."
           fi
           exit 1
 
