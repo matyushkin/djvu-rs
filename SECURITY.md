@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.1.x   | Yes       |
+Only the latest minor release (the newest `0.x` on crates.io, PyPI and npm)
+gets security fixes. Fixes are not backported to older minor releases: upgrade
+to the latest release to pick them up. While the crate is pre-1.0, a minor
+release can change the API; [`CHANGELOG.md`](CHANGELOG.md) lists every change.
 
 ## Scope
 
@@ -34,7 +35,16 @@ prefer otherwise.
 
 ## Fuzzing
 
-The `fuzz/` directory contains libFuzzer targets for the main codec entry points.
+The `fuzz/` directory contains libFuzzer targets for the decoders, the encoders,
+the document parser and the metadata/validation paths (one per file in
+`fuzz/fuzz_targets/`). CI (`.github/workflows/fuzz.yml`) runs every target for
+60 seconds on each push to `main` and every Monday.
+
+djvu-rs is **not yet fuzzed on OSS-Fuzz**. The integration files live in
+[`oss-fuzz/`](oss-fuzz/); the submission
+([google/oss-fuzz#15331](https://github.com/google/oss-fuzz/pull/15331)) is still
+open. [`oss-fuzz/README.md`](oss-fuzz/README.md) tracks its status.
+
 If you find a crash via fuzzing, please include the minimized corpus input.
 
 ## Decode-time resource ceilings
