@@ -17450,3 +17450,63 @@ faults cost more. The change costs no extra memory.
 **Open.** djvu-py `Page.render` in a loop still allocates per page. A fix
 needs a new Python API (render into an existing `Pixmap`), which is a design
 decision, not part of this change.
+### ZOOM_ROW_FG_NATIVE_CELL: read the native FG44 cell directly instead of a whole-cell bilinear blend — **Kept** (2026-11-08)
+
+**Issue.** #963. With both sides rendering into a reused buffer, CI's
+same-job DjVuLibre table still showed native colour behind: watchmaker @
+300 dpi 43.84 vs 40.83 ms (1.07×) on #957. `composite::zoom_row` was 67 %
+of the profile and `sample_bilinear` 7 %.
+
+**Per-runner picture first.** The residual depends on the runner's CPU, so
+one row is not the whole story. Same-job rows (djvu-rs reused buffer vs
+`ddjvu_page_render`) on the `ubuntu-26.04` bench runs listed in
+BENCH_RUNNER_FAMILY_SKEW: 31.49 vs 35.44 ms (0.89×), 43.92 vs 41.06
+(1.07×), and 54.19 / 54.78 / 55.01 vs 47.1–47.4 ms (1.15–1.16×) on the slow
+runner class. On Apple M1 Max (this entry's machine) djvu-rs is already
+ahead: 30.7 vs 42.7 ms.
+
+**Cause.** On a native render the FG44 plane is read through
+`fg_native_frac`, which returns whole-cell coordinates (tx = ty = 0), and
+then `sample_bilinear`, which still fetches four pixels with bounds checks
+and blends them with 12 multiplies — to return the one pixel at
+`(px / red, row)`. Each FG pixel also paid two integer divisions (row and
+column). Integer division is cheap on Apple cores and slow on common x86
+parts, which matches a gap that shows on x86 runners only.
+
+**Change.** `zoom_row` hoists the FG44 row once per output row
+(`FgNativeRow`) and reads the cell directly. The column division becomes a
+multiply by `floor(2^32 / red) + 1`, exact for every `px < 2^32 / red`
+(INFO widths are 16-bit). The non-native FG44 path keeps
+`sample_bilinear`.
+
+**Exactness.** Byte-identical. Unit test
+`fg_native_row_matches_whole_cell_bilinear` checks `FgNativeRow::at`
+against `fg_native_frac` + `sample_bilinear` for every reduction 1–12 and
+every column of a 65 535-px-wide page, plus a truncated row. Sweep: FNV of
+`render_pixmap` for ≤ 12 pages of each `tests/corpus/*.djvu` and djvujs
+asset at native size and 72/150/300/600 dpi, `mask_aa` on and off — 1 474
+renders, all equal to `main`.
+
+**Numbers.** Apple M1 Max, two prebuilt bench binaries, alternating
+rounds (5 for the native rows, 3 for the rest), Criterion medians:
+
+| Benchmark | base | new |
+|---|---:|---:|
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | 30.45–32.12 ms | 27.13–27.34 ms |
+| `render_corpus_color` | 30.93–31.10 ms | 27.60–27.72 ms |
+| `render_compositor_only/color_native_cached` | 30.52–30.83 ms | 27.13–27.33 ms |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | 25.68–25.82 ms | 25.04–25.23 ms |
+| `render_page/dpi/144` (boy, upscale) | 0.460 ms | 0.466 ms |
+| `render_page/dpi/600` | 5.96–6.00 ms | 5.94–5.97 ms |
+
+New was faster on every native colour row in every round, both orders
+(≈ −11 %). Zoomed, downscale and Lanczos rows moved within ±1.3 %
+(`render_page/dpi/144` +1.3 % is the largest; it does not take this path).
+The x86 effect should be larger, since the two divisions are gone; the
+PR's same-job DjVuLibre table is the check.
+
+**Decision.** Kept.
+
+**Reason.** Exact by algebra, by an exhaustive unit test and by a
+1 474-render sweep, and a consistent ~11 % gain on native colour pages
+with no measurable cost elsewhere.

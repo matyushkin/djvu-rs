@@ -1395,6 +1395,20 @@ fn zoom_row(
     let mask_upscale =
         ctx.opts.mask_aa && ctx.mask_shift == 0 && (fx_step < FRAC || fy_step < FRAC);
 
+    // #963: on a native render the FG44 sample is a whole cell
+    // ([`fg_native_frac`]: tx = ty = 0), where `sample_bilinear` returns
+    // pixel (px / red, row) exactly. Hoist that row and read the cell
+    // directly: no per-pixel row division, no four-tap blend.
+    let fg_native = match (ctx.fg44, ctx.fg_palette) {
+        (Some(fg), None) if ctx.fg_red != 0 => {
+            let row = fg_native_frac(0, py, page_h, ctx.fg_red, fg).1 >> FRACBITS;
+            let stride = fg.width as usize * 4;
+            let row = fg.data.get(row as usize * stride..).unwrap_or(&[]);
+            Some(FgNativeRow::new(row, fg.width, ctx.fg_red))
+        }
+        _ => None,
+    };
+
     // The loop is expanded once per `BgRow` variant, so each copy calls its
     // background sampler directly. A per-pixel match on the variant cost
     // 11-13 % on zoomed renders (#831).
@@ -1437,15 +1451,11 @@ fn zoom_row(
                     let (fr, fg_g, fb) = if let Some(pal) = ctx.fg_palette {
                         let color = lookup_palette_color(pal, ctx.blit_map, ctx.mask, px, py);
                         (color.r, color.g, color.b)
+                    } else if let Some(n) = &fg_native {
+                        n.at(px)
                     } else if let Some(fg) = ctx.fg44 {
-                        let (fg_fx, fg_fy) = if ctx.fg_red != 0 {
-                            fg_native_frac(px, py, page_h, ctx.fg_red, fg)
-                        } else {
-                            (
-                                map_plane_center_frac(fx, ctx.fg_x_q24),
-                                map_plane_center_frac(fy, ctx.fg_y_q24),
-                            )
-                        };
+                        let fg_fx = map_plane_center_frac(fx, ctx.fg_x_q24);
+                        let fg_fy = map_plane_center_frac(fy, ctx.fg_y_q24);
                         sample_bilinear(fg, fg_fx, fg_fy)
                     } else {
                         (0, 0, 0)
@@ -1494,6 +1504,37 @@ fn zoom_row(
                 q,
             )
         }),
+    }
+}
+
+/// One FG44 row of a native render, for [`zoom_row`] (#963): the cell under
+/// page column `px` is `px / red`, as [`fg_native_frac`] maps it.
+pub(super) struct FgNativeRow<'a> {
+    row: &'a [u8],
+    last: u32,
+    /// `floor(2^32 / red) + 1`: `(px * recip) >> 32 == px / red` for every
+    /// `px < 2^32 / red`, far above any page width (INFO widths are 16-bit),
+    /// so the per-pixel division becomes a multiply.
+    recip: u64,
+}
+
+impl<'a> FgNativeRow<'a> {
+    pub(super) fn new(row: &'a [u8], width: u32, red: u32) -> Self {
+        Self {
+            row,
+            last: width.saturating_sub(1),
+            recip: (1u64 << 32) / red as u64 + 1,
+        }
+    }
+
+    /// `sample_bilinear` at the whole cell: the clamped pixel itself, or
+    /// black past a truncated plane, as `Pixmap::get_rgb` reads it.
+    #[inline(always)]
+    pub(super) fn at(&self, px: u32) -> (u8, u8, u8) {
+        let cell = (((px as u64 * self.recip) >> 32) as u32).min(self.last) as usize;
+        self.row
+            .get(cell * 4..cell * 4 + 3)
+            .map_or((0, 0, 0), |q| (q[0], q[1], q[2]))
     }
 }
 
