@@ -4,12 +4,10 @@ on:
   push:
     branches: [main]
 
+# Read-only by default; each job below widens the token only as far as it
+# needs (#961).
 permissions:
-  contents: write
-  pull-requests: write
-  # actions: write lets the dispatch-publish-packages job below start
-  # publish-packages.yml via `gh workflow run` (workflow_dispatch).
-  actions: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -17,6 +15,9 @@ env:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # pass 1 creates the tag and the GitHub Release
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -33,7 +34,7 @@ jobs:
       # (PyPI + npm). workflow_dispatch is exempt from that guard (GitHub docs:
       # "workflow_dispatch and repository_dispatch events always create workflow
       # runs"), so the dispatch-publish-packages job starts it explicitly.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -51,13 +52,13 @@ jobs:
       # its client ID is the RELEASE_APP_CLIENT_ID variable and its private key the
       # RELEASE_APP_PRIVATE_KEY secret. A short-lived token is minted per run, so
       # nothing expires (a personal access token broke the 0.25.0 release).
-      - uses: actions/create-github-app-token@v3
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           token: ${{ steps.app-token.outputs.token }}
           skip-github-release: true
@@ -70,10 +71,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
 
       - name: Publish crates to crates.io
         env:
@@ -124,6 +127,10 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
+    permissions:
+      # Lets this job start publish-packages.yml via `gh workflow run`
+      # (workflow_dispatch).
+      actions: write
     steps:
       # publish-packages.yml also listens for `push: tags:`, but the tag this
       # workflow just created was pushed by GITHUB_TOKEN, so that push event never

@@ -31,6 +31,10 @@ on:
   # Allow manual runs (e.g. to seed the initial baseline).
   workflow_dispatch:
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -51,6 +55,9 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       simd: ${{ steps.filter.outputs.simd }}
+    permissions:
+      contents: read
+      pull-requests: read  # dorny/paths-filter lists the PR's files via the API
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3

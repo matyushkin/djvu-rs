@@ -13,6 +13,10 @@ on:
     - cron: '0 4 * * 1'  # every Monday at 04:00 UTC, after the fuzz run
   workflow_dispatch:
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

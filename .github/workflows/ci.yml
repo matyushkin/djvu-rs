@@ -7,6 +7,10 @@ on:
   # Manual runs — e.g. collecting Coverage for a PR branch (main-only otherwise).
   workflow_dispatch:
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
