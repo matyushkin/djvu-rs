@@ -92,6 +92,16 @@ jobs:
         with:
           key: bench-ubuntu
 
+      # Record the runner's CPU model (#964). Most run-to-run drift between
+      # bench jobs is the runner's CPU class, and it is not uniform across
+      # bench families. The file lands in target/criterion, so it rides along
+      # in the bench-baseline artifact and the PR comment can name both CPUs.
+      - name: Record runner CPU
+        run: |
+          mkdir -p target/criterion
+          echo "$(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) vCPU" \
+            | tee target/criterion/runner_cpu.txt
+
       # Fast sanity check on the comparison/drift-detection logic itself,
       # before spending ~20 min on the actual benchmark run below. Covers the
       # cross-runner drift heuristic (see scripts/bench_compare.py docstring).
@@ -161,6 +171,11 @@ jobs:
           # drift_suspect=true|false, drift=<fraction>; absent when there was
           # no baseline (then drift_suspect reads as empty, i.e. not suspect).
           cat compare_summary.txt >> "$GITHUB_OUTPUT" 2>/dev/null || true
+          {
+            echo ""
+            echo "Runner CPU: this run \`$(cat target/criterion/runner_cpu.txt 2>/dev/null || echo unknown)\`," \
+              "baseline \`$(cat baseline/runner_cpu.txt 2>/dev/null || echo unknown)\`."
+          } >> bench_comment.md
           cat bench_comment.md
 
       # ── Same-runner full baseline (PR only, drift-suspect runs) ─────────────

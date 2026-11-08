@@ -2,7 +2,7 @@
 
 
 
-Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-11-03.
+Navigation map for `PERF_EXPERIMENTS.md`. Read this first; open the full entry only when you need numbers or code. Updated: 2026-11-08.
 
 **Maintenance rule:** every `###` entry appended to `PERF_EXPERIMENTS.md` gets a row here in the same PR. A 2026-07-10 audit found ~75 entries missing (the 2026-06-09..19 compositor sweep, the 2026-07-01/02 perf-swarm + parallelism sweeps, round 56, and everything before 2026-05-16); four freshly-filed experiment issues (#587, #574, #560, #564) had to be closed as already-answered by those unindexed entries. An incomplete index actively causes duplicate work.
 
@@ -16,6 +16,7 @@ Status: **K** = Kept · **R** = Reverted · **X** = Rejected · **D** = Diagnost
 
 | ID | Date | Component | Status | Effect | Notes / Related |
 |----|------|-----------|--------|--------|-----------------|
+| BENCH_RUNNER_FAMILY_SKEW | 2026-11-08 | CI (bench runner skew, `.github/workflows/bench.yml`) | **D** | A/A pairs (same code, main push vs release-please PR run): IW44 to-RGB, upscaled render and lanczos3 sit +10…39 % above the median on one pair, −17…−19 % (render dpi) on another, ±3 % when the runners match | #964: runner artefact, no x86 lead. Bench job now records `lscpu` model name in `runner_cpu.txt` (carried in the baseline artifact) and the PR comment names both CPUs. See #960 same-runner baseline |
 | AREA_AVG_ROW_HOIST | 2026-11-03 | render (area-avg colour downscale, `src/djvu_render/composite.rs`) | **K** | `render_colorbook` 9.5–12.5 → 6.3–8.0 ms, `color_downscale_cached` 9.8–11.0 → 5.6–8.4 ms (5 alternating rounds, both orders); byte-identical over 1 430 renders | Hoist coarse-mask row (+ blank-row skip for `mask_shift > 0`, #438 analog) and the 1-row BG row out of the pixel loop. Closes the colorbook @150 gap from RENDER_VS_DJVULIBRE_ALLOC: CI same-job colorbook 4.26 ms vs libdjvulibre 9.18 ms (2.2× faster, was 1.17× slower) |
 | AREA_AVG_UNSWITCH | 2026-11-03 | render (area-avg colour downscale) | **X** | slower in every round (`render_colorbook` 13.3–17.4 vs 10.3–12.2 ms; small downscale ~2×), inline(always) and inline(never) | Const-generic loop copies per (mask_shift>0, gamma identity) — the #831 trick does not transfer; see AREA_AVG_ROW_HOIST |
 | AVX2_VALIDATION_PARSER | 2026-11-02 | CI (x86-64-v3 validation comment, `.github/workflows/bench.yml`) | **D** | Posted "no difference, consider reverting #251/#252" with an empty baseline column; the same job's log shows v3 faster (jb2_decode −40 %, mask_decode −30 %, nothing slower) | Criterion error text split `test …`/`bench:` across lines. Fixed: reset criterion dir before baseline, two-line parse, no verdict when a side is missing |
