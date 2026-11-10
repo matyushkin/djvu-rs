@@ -194,7 +194,9 @@ jobs:
             manylinux: ''
             when: release
           - label: macos-arm64
-            os: macos-14
+            # macos-14 was retired by GitHub on 2026-11-02; a job on it is
+            # cancelled with "configuration ... is not supported".
+            os: macos-15
             target: aarch64
             manylinux: ''
             when: release
@@ -247,6 +249,15 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-about
+
+      # cargo-about ships no prebuilt binary for x86_64 macOS. install-action
+      # then falls back to a source build without the `cli` feature, which
+      # installs no binary and still reports success. That failed the macos-x64
+      # leg of the v0.44.0 run (41231372869) and cancelled the publish.
+      - name: Build cargo-about from source when no binary was installed
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: command -v cargo-about || cargo install cargo-about --locked --features cli
 
       # `license-files` resolves next to pyproject.toml. The sdist gets the
       # workspace LICENSE there from maturin; a wheel built from the checkout
@@ -401,7 +412,9 @@ jobs:
   npm-smoke:
     name: npm smoke (node + bundler + browser)
     needs: [resolve, npm-package]
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.53.0 cannot install Chromium on ubuntu-26.04, where
+    # `ubuntu-latest` now lands ("does not support chromium on ubuntu26.04-x64").
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
