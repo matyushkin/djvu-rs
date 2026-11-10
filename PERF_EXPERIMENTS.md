@@ -17450,3 +17450,108 @@ faults cost more. The change costs no extra memory.
 **Open.** djvu-py `Page.render` in a loop still allocates per page. A fix
 needs a new Python API (render into an existing `Pixmap`), which is a design
 decision, not part of this change.
+### ZOOM_ROW_FG_NATIVE_CELL: read the native FG44 cell directly instead of a whole-cell bilinear blend — **Kept** (2026-11-08)
+
+**Issue.** #963. With both sides rendering into a reused buffer, CI's
+same-job DjVuLibre table still showed native colour behind: watchmaker @
+300 dpi 43.84 vs 40.83 ms (1.07×) on #957. `composite::zoom_row` was 67 %
+of the profile and `sample_bilinear` 7 %.
+
+**Per-runner picture first.** The residual depends on the runner's CPU, so
+one row is not the whole story. Same-job rows (djvu-rs reused buffer vs
+`ddjvu_page_render`) on the `ubuntu-26.04` bench runs listed in
+BENCH_RUNNER_FAMILY_SKEW: 31.49 vs 35.44 ms (0.89×), 43.92 vs 41.06
+(1.07×), and 54.19 / 54.78 / 55.01 vs 47.1–47.4 ms (1.15–1.16×) on the slow
+runner class. On Apple M1 Max (this entry's machine) djvu-rs is already
+ahead: 30.7 vs 42.7 ms.
+
+**Cause.** On a native render the FG44 plane is read through
+`fg_native_frac`, which returns whole-cell coordinates (tx = ty = 0), and
+then `sample_bilinear`, which still fetches four pixels with bounds checks
+and blends them with 12 multiplies — to return the one pixel at
+`(px / red, row)`. Each FG pixel also paid two integer divisions (row and
+column). Integer division is cheap on Apple cores and slow on common x86
+parts, which matches a gap that shows on x86 runners only.
+
+**Change.** `zoom_row` hoists the FG44 row once per output row
+(`FgNativeRow`) and reads the cell directly. The column division becomes a
+multiply by `floor(2^32 / red) + 1`, exact for every `px < 2^32 / red`
+(INFO widths are 16-bit). The non-native FG44 path keeps
+`sample_bilinear`.
+
+**Exactness.** Byte-identical. Unit test
+`fg_native_row_matches_whole_cell_bilinear` checks `FgNativeRow::at`
+against `fg_native_frac` + `sample_bilinear` for every reduction 1–12 and
+every column of a 65 535-px-wide page, plus a truncated row. Sweep: FNV of
+`render_pixmap` for ≤ 12 pages of each `tests/corpus/*.djvu` and djvujs
+asset at native size and 72/150/300/600 dpi, `mask_aa` on and off — 1 474
+renders, all equal to `main`.
+
+**Numbers.** Apple M1 Max, two prebuilt bench binaries, alternating
+rounds (5 for the native rows, 3 for the rest), Criterion medians:
+
+| Benchmark | base | new |
+|---|---:|---:|
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | 30.45–32.12 ms | 27.13–27.34 ms |
+| `render_corpus_color` | 30.93–31.10 ms | 27.60–27.72 ms |
+| `render_compositor_only/color_native_cached` | 30.52–30.83 ms | 27.13–27.33 ms |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | 25.68–25.82 ms | 25.04–25.23 ms |
+| `render_page/dpi/144` (boy, upscale) | 0.460 ms | 0.466 ms |
+| `render_page/dpi/600` | 5.96–6.00 ms | 5.94–5.97 ms |
+
+New was faster on every native colour row in every round, both orders
+(≈ −11 %). Zoomed, downscale and Lanczos rows moved within ±1.3 %
+(`render_page/dpi/144` +1.3 % is the largest; it does not take this path).
+
+**x86 check (CI run 42687565965, PR #971).** Compared with the `main`
+artifact (median delta −0.3 % over 81 benches, so not a drift suspect) the
+native colour rows read −6.3…−8.5 %:
+`render_into_reuse_buffer/watchmaker_color` 43.92 → 40.92 ms,
+`render_streaming_discard/watchmaker_color` 43.87 → 41.06 ms,
+`color_native_cached` 44.01 → 40.85 ms. The native bilevel rows, which share
+the compositor but not this path, read +1.1…+2.8 % in the same table. The
+same-job DjVuLibre row is 40.92 vs 39.68 ms (1.03×); runs of the old code
+gave 1.07× (#957) and 1.10–1.15× (#969, #970, #972). So x86 gains about
+7–9 %, no more than the M1. The guess that dropping two divisions would pay
+more on x86 did not hold. `render_page/dpi/300` and `/600` read −9.6 % and
+−13.7 % in that table, but they do not take this path and were flat
+locally: that is the runner skew of BENCH_RUNNER_FAMILY_SKEW.
+
+**Second x86 check (CI run 42861058346, AMD EPYC 7763, same-runner gate).**
+The branch was then stacked on #970, so the measured diff is #970 plus
+this change. The merge base (`e72d016`) was rebuilt and run on the same
+runner. The Benchmark job failed on one row.
+
+| Benchmark | base | new | delta |
+|---|---:|---:|---:|
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | 54.71 ms | 45.83 ms | −16.2 % |
+| `render_compositor_only/color_native_cached` | 54.88 ms | 45.81 ms | −16.5 % |
+| `render_corpus_color` | 70.62 ms | 62.55 ms | −11.4 % |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | 46.19 ms | 42.86 ms | −7.2 % |
+| `render_compositor_only/palette_native_cached` | 48.17 ms | 44.73 ms | −7.1 % |
+| `render_page/dpi/144` (fastest of 3 rounds) | 713.1 µs | 774.5 µs | **+8.6 %** |
+| `render_page/dpi/300` (fastest of 3 rounds) | 2.65 ms | 2.78 ms | +4.6 % |
+| `render_page/dpi/600` | 9.72 ms | 9.93 ms | +2.2 % |
+
+The same-job DjVuLibre row is 45.83 vs 47.10 ms (0.97×) on this slow
+runner class, where the old code read 1.15–1.16×.
+
+The failed row does not take the changed path: `fg_red` is 0 on a zoomed
+render, so `render_page/dpi/144` still calls `sample_bilinear`. The bilevel
+and palette rows do not take it either, and they moved the other way. All
+of them run the `zoom_row` pixel loop, which this change recompiles. The
+signs also flip between machines: the first x86 run read
+`render_page/dpi/144` −4.0 % and native bilevel +1.1…+2.8 %; this run reads
++8.6 % and −6…−7 %; the M1 reads +1.3 % and −2 %. So this is machine-code
+movement inside `zoom_row`, not extra work per pixel. It is steady on a
+given CPU (the three-round re-check kept it), so on EPYC 7763 a small
+zoomed page is about 60 µs slower with this build.
+
+**Decision.** Kept.
+
+**Reason.** Exact by algebra, by an exhaustive unit test and by a
+1 474-render sweep, and a consistent gain on native colour pages (~11 % on
+Apple M1 Max, 7–16 % on the x86 CI runners). The cost is machine-code
+movement in the `zoom_row` loop: rows that do not take the new path move
+by −7…+9 %, with a sign that depends on the CPU. The one row above the 5 %
+gate is a 0.7 ms zoomed render of a small page on one runner class.

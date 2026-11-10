@@ -365,3 +365,31 @@ fn mask_box_coverage_values() {
     let bm_empty = Bitmap::new(2, 2);
     assert_eq!(mask_box_coverage(&bm_empty, 0, 0, 2 * FRAC, 2 * FRAC), 0);
 }
+
+/// #963: `FgNativeRow::at` replaces `fg_native_frac` + `sample_bilinear` on
+/// native renders. Check it against them for every reduction `compute_red`
+/// allows and every column of a 16-bit-wide page, plus a truncated row.
+#[test]
+fn fg_native_row_matches_whole_cell_bilinear() {
+    for red in 1..=12u32 {
+        let page_w = u16::MAX as u32;
+        let fg = Pixmap {
+            width: page_w.div_ceil(red),
+            height: 2,
+            data: (0..page_w.div_ceil(red) * 2 * 4)
+                .map(|i| (i * 7 % 251) as u8)
+                .collect(),
+        };
+        let row = fg_native_frac(0, 0, 2 * red, red, &fg).1 >> FRACBITS;
+        let stride = fg.width as usize * 4;
+        let n = FgNativeRow::new(&fg.data[row as usize * stride..], fg.width, red);
+        for px in 0..page_w {
+            let (fx, fy) = fg_native_frac(px, 0, 2 * red, red, &fg);
+            assert_eq!(n.at(px), sample_bilinear(&fg, fx, fy), "red {red} px {px}");
+        }
+    }
+    // A truncated plane reads as black, as `Pixmap::get_rgb` does.
+    let short = FgNativeRow::new(&[1, 2, 3, 4, 5, 6], 4, 1);
+    assert_eq!(short.at(0), (1, 2, 3));
+    assert_eq!(short.at(1), (0, 0, 0));
+}
