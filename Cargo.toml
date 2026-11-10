@@ -35,7 +35,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 thiserror = "2"
-wide = "0.7"
+wide = "1.7"
 djvu-zp = { version = "0.44.1", path = "crates/djvu-zp", default-features = false }
 djvu-bzz = { version = "0.44.1", path = "crates/djvu-bzz", default-features = false }
 djvu-iff = { version = "0.44.1", path = "crates/djvu-iff", default-features = false }
@@ -45,7 +45,7 @@ djvu-pixmap = { version = "0.44.1", path = "crates/djvu-pixmap", default-feature
 djvu-iw44 = { version = "0.44.1", path = "crates/djvu-iw44", default-features = false }
 # Used only by the djvu CLI binary.
 clap = { version = "4", features = ["derive"], optional = true }
-png = { version = "0.17", optional = true }
+png = { version = "0.18", optional = true }
 # `deflate-flate2` only (NOT the `deflate` umbrella): zip's
 # `deflate` also enables `deflate-zopfli`, dragging zopfli + bumpalo into the
 # build for a compression backend we never select (#509). zip declares flate2
@@ -54,10 +54,10 @@ png = { version = "0.17", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"], optional = true }
 # Backend selector for zip's deflate (see comment on `zip` above).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
-miniz_oxide = { version = "0.8", optional = true }
+miniz_oxide = { version = "0.9", optional = true }
 zune-jpeg = { version = "0.5", optional = true }
-tiff = { version = "0.9", optional = true }
-jpeg-encoder = { version = "0.6", optional = true }
+tiff = { version = "0.11", optional = true }
+jpeg-encoder = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["rt", "macros", "io-util", "sync", "time"], optional = true }
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
@@ -82,7 +82,7 @@ dhat = { version = "0.3", optional = true }
 tract-onnx = { version = "0.23", optional = true }
 # SHA-256 verification of OCR model weights against docs/ocr-model-manifest.toml
 # (#693): unverified weights are never loaded.
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -146,12 +146,12 @@ experimental = ["std", "djvu-jb2/experimental"]
 iw44-probe = ["std", "djvu-iw44/iw44-probe"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 # Tests/examples synthesize JPEG fixtures and deflate streams directly; as
 # dev-deps these stay available regardless of which crate features are on
 # (they left the `std` feature in #509).
-jpeg-encoder = "0.6"
-miniz_oxide = "0.8"
+jpeg-encoder = "0.7"
+miniz_oxide = "0.9"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
