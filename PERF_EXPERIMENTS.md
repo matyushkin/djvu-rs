@@ -17624,3 +17624,58 @@ both phases. For three targets the first phase alone uses the 60 s:
 corpus has had 681 files since at least 2026-10-12. Not fixed in this
 change: it needs a decision between a longer budget, corpus minimisation,
 and a separate target for large planes.
+
+### FUZZ_CORPUS_REPLAY_BUDGET: corpus replay used the whole fuzz budget for three targets — **Diagnostic, harness fixed** (2026-11-10)
+
+**Issue.** Left open by FUZZ_CI_SEED_TIMEOUT: `fuzz_iw44`, `fuzz_jb2` and
+`fuzz_full` generated no new inputs on CI. libFuzzer executes the whole
+cached corpus before it mutates anything, `-max_total_time=60` covers both
+phases, and the replay alone took 61–164 s.
+
+**Approach.** A throwaway workflow uploaded the three cached corpora. Each
+input was timed on an Apple M1 Max in a native release build, each corpus
+was minimised locally with `cargo fuzz cmin`, and then run 42893147932
+minimised and fuzzed all 11 targets on CI (fix branch, slow runner:
+`Slowest unit: 13 s`).
+
+**Findings.** A few inputs carry the replay time:
+
+| target | files | native replay, M1 | share of the time in the slowest inputs |
+|---|---:|---:|---|
+| `fuzz_iw44` | 682 | 8.0 s | 23 files (3 %) take 82 % |
+| `fuzz_jb2` | 1191 | 6.0 s | 17 files (1.4 %) take 89 % |
+| `fuzz_full` | 1057 | 9.9 s | 32 files (3 %) take 65 % |
+
+Minimising removes 50–86 % of the files of every target, but it keeps the
+slow IW44 inputs: they are the ones that reach the large-plane paths.
+
+| target | files before → after | replay before | replay after | runs after the replay |
+|---|---:|---:|---:|---:|
+| `fuzz_iw44` | 682 → 263 | 86–164 s | 105 s | 0 → 580 (in a 240 s budget) |
+| `fuzz_jb2` | 1191 → 434 | 61–121 s | 32 s | 0 → 1 265 |
+| `fuzz_full` | 1057 → 519 | 64 s | 31 s | 0 → 1 552 |
+| `fuzz_encode` | 2189 → 892 | — | 14 s | about 700 → 3 533 |
+| `fuzz_bzz` | 1234 → 416 | — | 12 s | about 2 750 → 2 749 |
+
+"Before" comes from runs on faster and slower runners; "after" is one run
+on a slow runner. The other six targets were not short of time; their
+corpora shrank to 14–47 % of the files (`fuzz_metadata` 6489 → 1260,
+`fuzz_bzz_encode` 4469 → 623).
+
+Minimising costs more than one replay: 230 s for `fuzz_iw44`, 175 s for
+`fuzz_jb2`, 66–97 s for `fuzz_full`, `fuzz_encode` and `fuzz_bzz`. The
+`fuzz_iw44` job took 494 s in total.
+
+**Decision.** In `.github/workflows/fuzz.yml`:
+- a `Minimise the corpus` step (`cargo fuzz cmin`) runs on the weekly
+  schedule and on a manual run with `minimise: true`, not on every push;
+- `fuzz_iw44` gets a 240 s budget (`matrix.seconds`), the other targets
+  keep 60 s;
+- the job limit goes from 10 to 20 minutes.
+
+**Reason.** Minimising alone fixes `fuzz_jb2` and `fuzz_full`. It does not
+fix `fuzz_iw44`: 105 s of replay still exceeds 60 s, so that target needs
+the longer budget. Minimising on every push would add 1–4 minutes per
+target for a corpus that changes little between pushes. `fuzz_iw44` stays
+slow (about 4 runs per second): a real fix needs a second target with a
+plane-size cap, next to this one. That is not done here.
