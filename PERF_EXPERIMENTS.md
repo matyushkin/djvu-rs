@@ -17555,3 +17555,72 @@ Apple M1 Max, 7–16 % on the x86 CI runners). The cost is machine-code
 movement in the `zoom_row` loop: rows that do not take the new path move
 by −7…+9 %, with a sign that depends on the CPU. The one row above the 5 %
 gate is a 0.7 ms zoomed render of a small page on one runner class.
+
+### FUZZ_CI_SEED_TIMEOUT: cap-bounded corpus inputs trip the 10 s fuzz timeout on CI — **Diagnostic, harness fixed** (2026-11-10)
+
+**Issue.** The `Fuzz` workflow failed on 5 of 8 pushes to `main` on
+2026-11-10, after weeks of green runs: `fuzz_iw44` four times (runs
+42856977308, 42858433913, 42868610010, 42877220750) and `fuzz_jb2` once
+(42856958828). Three of the five commits changed only documentation or
+workflows.
+
+**Approach.** Read the failed logs, downloaded the two `timeout-*`
+artifacts, and timed each on an Apple M1 Max: once in a native release
+build, once in the fuzz binary (`cargo +nightly fuzz run <target> <file>`,
+ASan + SanCov).
+
+**Findings.** Every failure is libFuzzer's `timeout` on a seed (`MS: 0`):
+the input is already in the cached corpus, and each run replays it. The
+four IW44 failures are one and the same input.
+
+| input | what it declares | native release | fuzz binary, M1 | fuzz binary, CI |
+|---|---|---:|---:|---:|
+| `fuzz_iw44`, 23 bytes | colour, 8194 × 4096 (33.6 MP, half the 64 MP cap), 159 slices | 0.26 s | 4.1 s | 10–13 s |
+| `fuzz_jb2`, 460 bytes | ends with a decode error | 0.28 s | 4.6 s | ≥ 10 s |
+
+Instrumentation costs about 16× (IW44_SLOWUNIT_TRIAGE measured ~14×), and
+the CI runner is about 3× slower than the M1. So an input that costs
+0.26 s natively sits at the 10 s limit on CI. Both inputs are inside the
+decoders' own caps, and the caps hold.
+
+The limit was already crossed in green runs. Runs 41620098157 (2026-11-03)
+and 42607378591 (2026-11-09) report `Slowest unit: 12 s` and `13 s` for
+`fuzz_iw44` and `11 s` for `fuzz_jb2`, and passed. libFuzzer checks the
+limit only on a timer that fires every `timeout / 2 + 1` seconds, so an
+input a few seconds over the limit passes or fails by the timer phase.
+On faster runners every input stays under 10 s (runs 38237084684,
+40294321204, 42856939295 and 42873270062 report no slow unit). The check
+was therefore unstable for at least a week before it turned red.
+
+**Decision.** No codec change. `-timeout` in `.github/workflows/fuzz.yml`
+goes from 10 to 60 seconds.
+
+**Reason.** The limit must clear the slowest input the caps allow. For
+IW44 that is 0.8 s native and 11.5 s in the fuzz binary on the M1
+(IW44_SLOWUNIT_TRIAGE), so an estimated 35 s on CI. 60 s leaves a margin
+of about 1.7× and still reports a real hang: the job runs for
+`-max_total_time=60` and has a 10-minute limit. A size cap in the fuzz
+targets was rejected: the banded IW44 decode path starts at 128 MiB per
+plane, so a cap would take that path out of fuzzing.
+
+**Check.** Run 42884541295 started the workflow on the fix branch. It
+restored the corpus that the failed `main` run 42877220750 saved
+(`fuzz-corpus-fuzz_iw44-42877220750-1`). All 11 targets passed. The
+slowest inputs took 14 s (`fuzz_iw44`) and 11 s (`fuzz_jb2`), on a slow
+runner, with no error.
+
+**Open: three targets generate no new inputs.** libFuzzer executes the
+whole corpus before it mutates anything, and `-max_total_time=60` covers
+both phases. For three targets the first phase alone uses the 60 s:
+
+| target | corpus files | corpus replay | runs after the replay |
+|---|---:|---:|---:|
+| `fuzz_iw44` | 681 | 86–164 s (six runs, 2026-10-12 … 2026-11-10) | 0 |
+| `fuzz_jb2` | 1190 | 61–121 s (same six runs) | 0 |
+| `fuzz_full` | 1057 (78 MB) | 64 s (one run) | 0 |
+
+`fuzz_encode` gets about 700 runs after the replay and `fuzz_bzz` about
+2 750; the other six targets get from 12 700 to 16.8 million. The IW44
+corpus has had 681 files since at least 2026-10-12. Not fixed in this
+change: it needs a decision between a longer budget, corpus minimisation,
+and a separate target for large planes.
