@@ -71,8 +71,15 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
 
+      # `-timeout` is per input. It must clear the slowest input the decoder
+      # caps allow, under ASan + SanCov on this runner. That is about 16x the
+      # native time, on a runner about 3x slower than an Apple M1: the IW44
+      # worst case under the 64 MP cap is 0.8 s native, 11.5 s on the M1 and
+      # an estimated 35 s here. With 10 s, two cap-bounded inputs in the
+      # cached corpus (0.26 s and 0.28 s native) failed 5 of 8 runs on
+      # 2026-11-10 (FUZZ_CI_SEED_TIMEOUT in PERF_EXPERIMENTS.md).
       - name: Run ${{ matrix.target }} for 60 s
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=60
 
       # Save updated corpus (unique key ensures this run's findings are always stored)
       - name: Save fuzz corpus

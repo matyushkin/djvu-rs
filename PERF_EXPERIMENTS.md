@@ -17555,3 +17555,42 @@ Apple M1 Max, 7–16 % on the x86 CI runners). The cost is machine-code
 movement in the `zoom_row` loop: rows that do not take the new path move
 by −7…+9 %, with a sign that depends on the CPU. The one row above the 5 %
 gate is a 0.7 ms zoomed render of a small page on one runner class.
+
+### FUZZ_CI_SEED_TIMEOUT: cap-bounded corpus inputs trip the 10 s fuzz timeout on CI — **Diagnostic, harness fixed** (2026-11-10)
+
+**Issue.** The `Fuzz` workflow failed on 5 of 8 pushes to `main` on
+2026-11-10, after weeks of green runs: `fuzz_iw44` four times (runs
+42856977308, 42858433913, 42868610010, 42877220750) and `fuzz_jb2` once
+(42856958828). Three of the five commits changed only documentation or
+workflows.
+
+**Approach.** Read the failed logs, downloaded the two `timeout-*`
+artifacts, and timed each on an Apple M1 Max: once in a native release
+build, once in the fuzz binary (`cargo +nightly fuzz run <target> <file>`,
+ASan + SanCov).
+
+**Findings.** Every failure is libFuzzer's `timeout` on a seed (`MS: 0`):
+the input is already in the cached corpus, and each run replays it. The
+four IW44 failures are one and the same input.
+
+| input | what it declares | native release | fuzz binary, M1 | fuzz binary, CI |
+|---|---|---:|---:|---:|
+| `fuzz_iw44`, 23 bytes | colour, 8194 × 4096 (33.6 MP, half the 64 MP cap), 159 slices | 0.26 s | 4.1 s | 10–13 s |
+| `fuzz_jb2`, 460 bytes | ends with a decode error | 0.28 s | 4.6 s | ≥ 10 s |
+
+Instrumentation costs about 16× (IW44_SLOWUNIT_TRIAGE measured ~14×), and
+the CI runner is about 3× slower than the M1. So an input that costs
+0.26 s natively sits at the 10 s limit on CI: it passes on a fast runner
+and fails on a slow one. Both inputs are inside the decoders' own caps,
+and the caps hold.
+
+**Decision.** No codec change. `-timeout` in `.github/workflows/fuzz.yml`
+goes from 10 to 60 seconds.
+
+**Reason.** The limit must clear the slowest input the caps allow. For
+IW44 that is 0.8 s native and 11.5 s in the fuzz binary on the M1
+(IW44_SLOWUNIT_TRIAGE), so an estimated 35 s on CI. 60 s leaves a margin
+of about 1.7× and still reports a real hang: the job runs for
+`-max_total_time=60` and has a 10-minute limit. A size cap in the fuzz
+targets was rejected: the banded IW44 decode path starts at 128 MiB per
+plane, so a cap would take that path out of fuzzing.
