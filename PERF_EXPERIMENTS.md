@@ -17502,11 +17502,24 @@ rounds (5 for the native rows, 3 for the rest), Criterion medians:
 New was faster on every native colour row in every round, both orders
 (≈ −11 %). Zoomed, downscale and Lanczos rows moved within ±1.3 %
 (`render_page/dpi/144` +1.3 % is the largest; it does not take this path).
-The x86 effect should be larger, since the two divisions are gone; the
-PR's same-job DjVuLibre table is the check.
+
+**x86 check (CI run 42687565965, PR #971).** Compared with the `main`
+artifact (median delta −0.3 % over 81 benches, so not a drift suspect) the
+native colour rows read −6.3…−8.5 %:
+`render_into_reuse_buffer/watchmaker_color` 43.92 → 40.92 ms,
+`render_streaming_discard/watchmaker_color` 43.87 → 41.06 ms,
+`color_native_cached` 44.01 → 40.85 ms. The native bilevel rows, which share
+the compositor but not this path, read +1.1…+2.8 % in the same table. The
+same-job DjVuLibre row is 40.92 vs 39.68 ms (1.03×); runs of the old code
+gave 1.07× (#957) and 1.10–1.15× (#969, #970, #972). So x86 gains about
+7–9 %, no more than the M1. The guess that dropping two divisions would pay
+more on x86 did not hold. `render_page/dpi/300` and `/600` read −9.6 % and
+−13.7 % in that table, but they do not take this path and were flat
+locally: that is the runner skew of BENCH_RUNNER_FAMILY_SKEW.
 
 **Decision.** Kept.
 
 **Reason.** Exact by algebra, by an exhaustive unit test and by a
-1 474-render sweep, and a consistent ~11 % gain on native colour pages
-with no measurable cost elsewhere.
+1 474-render sweep, and a consistent gain on native colour pages (~11 % on
+Apple M1 Max, ~7–9 % on the x86 CI runner) with no measurable cost
+elsewhere.
