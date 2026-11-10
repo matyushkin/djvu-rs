@@ -31,7 +31,7 @@
 
 use std::io::{Cursor, Seek, Write};
 
-use tiff::encoder::{Rational, TiffEncoder, colortype, compression::Deflate};
+use tiff::encoder::{Compression, DeflateLevel, Rational, TiffEncoder, colortype};
 use tiff::tags::ResolutionUnit;
 
 use crate::{
@@ -183,7 +183,14 @@ pub fn djvu_to_tiff_writer_with_observer<W: Write + Seek>(
     if opts.mode == TiffMode::Bilevel && opts.bilevel_compression == TiffBilevelCompression::G4 {
         return write_bilevel_g4_tiff(doc, writer, observer);
     }
-    let mut encoder = TiffEncoder::new(writer)?;
+    // `tiff` 0.11 sets compression per encoder, not per image. The mode is per
+    // document, so every page of one file takes the same choice: colour pages
+    // stay uncompressed, bilevel pages are Gray8 strips with Deflate.
+    let compression = match opts.mode {
+        TiffMode::Color => Compression::Uncompressed,
+        TiffMode::Bilevel => Compression::Deflate(DeflateLevel::default()),
+    };
+    let mut encoder = TiffEncoder::new(writer)?.with_compression(compression);
     let indices: Vec<usize> = (0..doc.page_count()).collect();
 
     // Building a page's pixel buffer (color: render → RGB; bilevel: mask →
@@ -291,11 +298,7 @@ fn write_page_image<W: Write + Seek>(
             image.write_data(rgb)?;
         }
         PageImageData::GrayDeflate(gray) => {
-            let mut image = encoder.new_image_with_compression::<colortype::Gray8, _>(
-                img.w,
-                img.h,
-                Deflate::default(),
-            )?;
+            let mut image = encoder.new_image::<colortype::Gray8>(img.w, img.h)?;
             image.resolution(ResolutionUnit::Inch, Rational { n: img.dpi, d: 1 });
             image.write_data(gray)?;
         }
@@ -424,8 +427,7 @@ fn write_bilevel_page<W: std::io::Write + std::io::Seek>(
     // so Deflate shrinks the Gray8 strip by ~20–50× — far past the 8× of a true
     // 1-bit packing, which the `tiff` crate's high-level encoder cannot emit (no
     // 1-bit ColorType). Deflate (tag 8) is universally readable.
-    let mut img =
-        encoder.new_image_with_compression::<colortype::Gray8, _>(w, h, Deflate::default())?;
+    let mut img = encoder.new_image::<colortype::Gray8>(w, h)?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi, d: 1 });
     img.write_data(&gray)?;
     Ok(())
