@@ -16,6 +16,15 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    ignore:
+      # pythonize 0.29 requires pyo3 0.29, and Cargo links one pyo3 per build.
+      # A pyo3 0.30 requirement makes the whole workspace unresolvable, so the
+      # grouped PR fails every check and the Dependabot run itself fails (#974).
+      # Remove this rule when pythonize supports the next pyo3 line.
+      - dependency-name: "pyo3*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
     commit-message:
       prefix: "chore(deps)"
 
