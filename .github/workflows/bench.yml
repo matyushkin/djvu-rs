@@ -231,8 +231,9 @@ jobs:
       # The artifact baseline comes from a different runner whose CPU generation
       # can differ enough to flag phantom regressions on micro benches (observed
       # +11%/+34% on bzz_decode/bzz_encode across PRs that do not touch BZZ).
-      # Re-measure ONLY the flagged benches from the merge base on THIS runner
-      # and let that comparison be the verdict.
+      # Re-measure ONLY the flagged benches on THIS runner, merge base and PR
+      # in three alternating rounds, and let the fastest round of each side
+      # be the verdict (~1 min per bench binary, side and round).
       #
       # Runs when the artifact compare flagged regressions without drift
       # (compare_exit == 1), or when the same-runner full baseline above
@@ -256,26 +257,71 @@ jobs:
             git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
             git worktree add ../base-src "${{ github.event.pull_request.base.sha }}"
           fi
-          pushd ../base-src
-          cargo bench --bench codecs -- "$filter" || true
-          cargo bench --bench render --features pdf -- "$filter" || true
-          popd
-          # Re-measure the PR side of the suspects too, back-to-back with the
-          # merge-base numbers: comparing a fresh baseline against PR numbers
-          # taken ~20 minutes earlier in the job reintroduces thermal/order
-          # skew (observed as a borderline +5.8% on an untouched bench in
+          # Each bench binary spends about a minute on setup even when the
+          # filter selects one bench, so run only the binaries that own a
+          # suspect (names come from the full run's bencher output). If the
+          # lookup finds nothing, run both rather than skip the re-check.
+          owns_suspect() {
+            awk '$1 == "test" { print $2 }' "$1" 2>/dev/null | grep -qxFf suspects.txt
+          }
+          benches=""
+          if owns_suspect codec_bench.txt; then benches="codecs"; fi
+          if owns_suspect render_bench.txt; then benches="$benches render"; fi
+          if [ -z "$benches" ]; then benches="codecs render"; fi
+          echo "bench binaries to re-run:$benches"
+          run_suspects() {
+            for bench in $benches; do
+              if [ "$bench" = render ]; then
+                cargo bench --bench render --features pdf -- "$filter" || true
+              else
+                cargo bench --bench codecs -- "$filter" || true
+              fi
+            done
+          }
+          # snapshot <criterion dir> <dest>: keep this round's estimates.
+          snapshot() {
+            mkdir -p "$2"
+            (cd "$1" && find . -path '*/new/estimates.json' | while read -r f; do
+              mkdir -p "$2/$(dirname "$f")" && cp "$f" "$2/$f"
+            done)
+          }
+          # Three alternating rounds, judged on each side's fastest round.
+          # The PR side is re-measured too, back-to-back with the merge base:
+          # PR numbers taken ~20 minutes earlier in the job reintroduce
+          # thermal/order skew (a borderline +5.8% on an untouched bench in
           # #622's run; locally that PR was 2.3% faster on the same bench).
+          # One pair is not enough either: on #972's run one PR-side process
+          # of an untouched bench sat 9% above another process of the same
+          # binary, and a single pair failed it at +12.9%. Noise only adds
+          # time, so the fastest of three rounds per side is the fair read; a
+          # real regression is slow in every round.
           # Criterion only overwrites the filtered benches, so the archived
           # full results keep every other bench's numbers.
-          cargo bench --bench codecs -- "$filter" || true
-          cargo bench --bench render --features pdf -- "$filter" || true
-          python3 scripts/bench_compare.py \
-            ../base-src/target/criterion \
-            target/criterion \
-            --restrict suspects.txt \
-            --title "Same-runner re-check (merge base rebuilt on this runner)" \
-            > recheck_comment.md
-          recheck_exit=$?
+          rounds="$(cd .. && pwd)/recheck-rounds"
+          rm -rf "$rounds"
+          for round in 1 2 3; do
+            pushd ../base-src
+            run_suspects
+            popd
+            snapshot ../base-src/target/criterion "$rounds/base-$round"
+            run_suspects
+            snapshot target/criterion "$rounds/head-$round"
+          done
+          # An empty baseline reads as "no baseline" and exits 0, which would
+          # clear every suspect when the merge base failed to build or bench.
+          if [ -z "$(find "$rounds"/base-* -name estimates.json -print -quit 2>/dev/null)" ]; then
+            echo "Merge base produced no Criterion results for the re-check." | tee recheck_comment.md
+            recheck_exit=2
+          else
+            python3 scripts/bench_compare.py \
+              "$rounds/base-1" "$rounds/head-1" \
+              --baseline-also "$rounds/base-2" --baseline-also "$rounds/base-3" \
+              --current-also "$rounds/head-2" --current-also "$rounds/head-3" \
+              --restrict suspects.txt \
+              --title "Same-runner re-check (merge base rebuilt on this runner; fastest of 3 alternating rounds)" \
+              > recheck_comment.md
+            recheck_exit=$?
+          fi
           set -e
           echo "recheck_exit=$recheck_exit" >> "$GITHUB_OUTPUT"
           cat recheck_comment.md

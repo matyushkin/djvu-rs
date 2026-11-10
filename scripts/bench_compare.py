@@ -3,7 +3,8 @@
 
 Usage:
     python3 scripts/bench_compare.py <baseline_criterion_dir> <current_criterion_dir> \
-        [--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE]
+        [--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE] \
+        [--baseline-also DIR]... [--current-also DIR]...
 
 Exit codes:
     0   no regressions above threshold (on a drift-suspect run this proves
@@ -31,6 +32,12 @@ baseline was rebuilt from the merge base on the *same* machine (the artifact
 baseline comes from a different runner, whose CPU generation can differ enough
 to flag phantom regressions on micro benches — observed +11%/+34% on
 `bzz_decode`/`bzz_encode` across PRs that do not touch BZZ at all).
+
+`--baseline-also DIR` / `--current-also DIR` (repeatable) add further
+measurements of the same side. Each bench is then judged on its *fastest*
+measurement per side. The re-check uses this for its alternating rounds: one
+bench process can sit several percent slow from start to finish (see
+"Best-of-rounds re-check" below), and noise only ever adds time.
 
 ── Cross-runner drift detection ─────────────────────────────────────────────
 Two Benchmark CI runs (PR #779, PR #787 — see PERF_EXPERIMENTS.md) reported
@@ -81,6 +88,18 @@ a drift-suspect run as "artifact baseline unusable": bench.yml rebuilds the
 merge base on the same runner, runs the full suite there, and compares again
 (drift on the same runner is small), then re-measures whatever that pass flags
 back-to-back on both sides. That pass, not this one, decides the job.
+
+── Best-of-rounds re-check ──────────────────────────────────────────────────
+The first end-to-end run of that gate (PR #972, a deliberate ~20% slowdown of
+`bzz_decode`) caught the slowdown, and also failed an untouched bench:
+`render_native_stages/render_into_reuse_buffer/watchmaker_color` read +5.7%
+in the full same-runner pass and +12.9% in the re-check. The PR binary gave
+47.75 ms and 52.10 ms in two processes on one runner, each with a confidence
+interval under 1% — the spread is between processes, not inside one, so a
+single back-to-back pair cannot average it away. The re-check therefore runs
+three alternating rounds (base, PR, base, PR, ...) and compares the fastest
+round of each side via `--baseline-also` / `--current-also`. A real regression
+is slow in every round and still fails.
 """
 
 import json
@@ -106,6 +125,20 @@ def load_results(criterion_dir: Path) -> dict[str, float]:
         except (KeyError, json.JSONDecodeError):
             continue
     return results
+
+
+def load_best(criterion_dirs: list[Path]) -> dict[str, float]:
+    """Return each bench's fastest mean across several measurement rounds.
+
+    A bench missing from some rounds is judged on the rounds that have it.
+    """
+    best: dict[str, float] = {}
+    for d in criterion_dirs:
+        if not d.exists():
+            continue
+        for name, ns in load_results(d).items():
+            best[name] = min(ns, best.get(name, ns))
+    return best
 
 
 def fmt_ns(ns: float) -> str:
@@ -267,6 +300,8 @@ def main() -> int:
     restrict_file = None
     title = "Benchmark comparison"
     summary_out = None
+    baseline_also: list[Path] = []
+    current_also: list[Path] = []
     positional: list[str] = []
     i = 0
     while i < len(args):
@@ -282,13 +317,20 @@ def main() -> int:
         elif args[i] == "--title" and i + 1 < len(args):
             title = args[i + 1]
             i += 2
+        elif args[i] == "--baseline-also" and i + 1 < len(args):
+            baseline_also.append(Path(args[i + 1]))
+            i += 2
+        elif args[i] == "--current-also" and i + 1 < len(args):
+            current_also.append(Path(args[i + 1]))
+            i += 2
         else:
             positional.append(args[i])
             i += 1
     if len(positional) != 2:
         print(
             f"usage: {sys.argv[0]} <baseline_dir> <current_dir> "
-            "[--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE]",
+            "[--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE] "
+            "[--baseline-also DIR]... [--current-also DIR]...",
             file=sys.stderr,
         )
         return 2
@@ -304,8 +346,8 @@ def main() -> int:
             if line.strip()
         }
 
-    baseline = load_results(baseline_dir) if baseline_dir.exists() else {}
-    current = load_results(current_dir) if current_dir.exists() else {}
+    baseline = load_best([baseline_dir, *baseline_also])
+    current = load_best([current_dir, *current_also])
 
     if not current:
         print("No benchmark results found in current run.", file=sys.stderr)

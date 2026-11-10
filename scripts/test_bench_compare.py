@@ -256,5 +256,92 @@ class SameRunnerSignalTests(unittest.TestCase):
             )
 
 
+class BestOfRoundsTests(unittest.TestCase):
+    """--baseline-also / --current-also: each side is judged on its fastest
+    round, so one slow bench process cannot fail (or clear) a bench alone."""
+
+    @staticmethod
+    def _write(root: Path, results: dict[str, float]) -> Path:
+        for name, ns in results.items():
+            d = root / name / "new"
+            d.mkdir(parents=True)
+            (d / "estimates.json").write_text(
+                json.dumps({"mean": {"point_estimate": ns}})
+            )
+        return root
+
+    @staticmethod
+    def _run(argv: list[str]) -> tuple[int, str]:
+        out = io.StringIO()
+        old_argv, sys.argv = sys.argv, ["bench_compare.py", *argv]
+        try:
+            with contextlib.redirect_stdout(out):
+                code = bc.main()
+        finally:
+            sys.argv = old_argv
+        return code, out.getvalue()
+
+    def test_load_best_takes_fastest_round_per_bench(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            a = self._write(tmp / "a", {"g/x": 100.0, "g/y": 50.0})
+            b = self._write(tmp / "b", {"g/x": 90.0, "g/z": 7.0})
+            best = bc.load_best([a, b, tmp / "missing"])
+        self.assertEqual(best, {"g/x": 90.0, "g/y": 50.0, "g/z": 7.0})
+
+    def test_one_slow_process_does_not_fail_and_real_regression_does(self):
+        # Numbers from PR #972's run: `noisy` is the untouched watchmaker
+        # reuse-buffer bench (one PR-side process sat at 52 ms), `real` is
+        # the deliberately slowed bzz_decode.
+        base_rounds = [
+            {"g/noisy": 46.07e6, "g/real": 3300.0},
+            {"g/noisy": 45.16e6, "g/real": 3340.0},
+            {"g/noisy": 46.50e6, "g/real": 3310.0},
+        ]
+        head_rounds = [
+            {"g/noisy": 52.00e6, "g/real": 4000.0},
+            {"g/noisy": 45.90e6, "g/real": 4020.0},
+            {"g/noisy": 47.75e6, "g/real": 3990.0},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            bases = [self._write(tmp / f"b{i}", r) for i, r in enumerate(base_rounds)]
+            heads = [self._write(tmp / f"h{i}", r) for i, r in enumerate(head_rounds)]
+            restrict = tmp / "suspects.txt"
+            restrict.write_text("g/noisy\ng/real\n")
+
+            single_code, single_out = self._run(
+                [str(bases[0]), str(heads[0]), "--restrict", str(restrict)]
+            )
+            best_code, best_out = self._run(
+                [
+                    str(bases[0]),
+                    str(heads[0]),
+                    "--baseline-also", str(bases[1]),
+                    "--baseline-also", str(bases[2]),
+                    "--current-also", str(heads[1]),
+                    "--current-also", str(heads[2]),
+                    "--restrict", str(restrict),
+                ]
+            )
+
+        self.assertEqual(single_code, 1)
+        self.assertIn("2 regression(s)", single_out)
+        self.assertEqual(best_code, 1, "the real regression still fails")
+        self.assertIn("1 regression(s)", best_out)
+        self.assertIn("- `g/real`", best_out)
+        self.assertNotIn("- `g/noisy`", best_out)
+
+    def test_missing_baseline_rounds_read_as_no_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            head = self._write(tmp / "h", {"g/x": 1.0})
+            code, out = self._run(
+                [str(tmp / "nope"), str(head), "--baseline-also", str(tmp / "nope2")]
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("no baseline for comparison", out)
+
+
 if __name__ == "__main__":
     unittest.main()
