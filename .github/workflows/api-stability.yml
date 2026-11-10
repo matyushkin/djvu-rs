@@ -61,7 +61,7 @@ jobs:
     # re-add continue-on-error. Adding a variant to an error enum is not a
     # break and does not trip this.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # --baseline-rev checks out the parent commit from local history.
           fetch-depth: 0
@@ -142,7 +142,7 @@ jobs:
           - name: "kitchen-sink"
             flags: "--features cli,tiff,async,serde,image,epub,mmap,parallel"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -171,7 +171,7 @@ jobs:
           - name: "wasm-lazy"
             flags: "--features wasm-lazy"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -195,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

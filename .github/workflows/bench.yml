@@ -59,8 +59,8 @@ jobs:
       contents: read
       pull-requests: read  # dorny/paths-filter lists the PR's files via the API
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -89,7 +89,7 @@ jobs:
       pull-requests: write  # needed to post the comparison comment
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -118,7 +118,7 @@ jobs:
       # ── Download baseline from last successful main-branch run (PR only) ────
       - name: Download baseline
         if: github.event_name == 'pull_request'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v28
         with:
           name: bench-baseline
           branch: main
@@ -352,7 +352,7 @@ jobs:
 
       - name: Post benchmark comment
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: bench
           path: bench_comment.md
@@ -415,7 +415,7 @@ jobs:
         if: >
           github.event_name == 'push' &&
           (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-baseline
           # Overwrite the previous baseline so PRs always compare against HEAD of main.
@@ -426,7 +426,7 @@ jobs:
       # ── Always archive full results ──────────────────────────────────────────
       - name: Upload full results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-results-${{ github.sha }}
           path: |
@@ -476,7 +476,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -616,7 +616,7 @@ jobs:
 
       - name: Post AVX2 validation comment
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: bench-x86-64-v3
           path: bench_v3_comment.md
@@ -624,7 +624,7 @@ jobs:
 
       - name: Upload AVX2 validation artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-x86-64-v3-${{ github.sha }}
           path: |
@@ -644,7 +644,7 @@ jobs:
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -686,7 +686,7 @@ jobs:
 
       - name: Upload full results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-results-macos-${{ github.sha }}
           path: |
@@ -705,7 +705,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -716,7 +716,7 @@ jobs:
         run: bash scripts/x86_feature_callgrind.sh
       - name: Upload bisect results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: x86-feature-bisect-${{ github.sha }}
           path: target/x86-feature-bisect/
@@ -729,7 +729,7 @@ jobs:
     # Diagnostic while #557 calibrates same-code variance and baseline policy.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -745,7 +745,7 @@ jobs:
           done
       - name: Upload Callgrind results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: callgrind-${{ github.sha }}
           path: target/callgrind.*
