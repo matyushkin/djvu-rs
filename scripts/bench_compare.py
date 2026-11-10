@@ -3,19 +3,27 @@
 
 Usage:
     python3 scripts/bench_compare.py <baseline_criterion_dir> <current_criterion_dir> \
-        [--suspects-out FILE] [--restrict FILE] [--title TEXT]
+        [--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE] \
+        [--baseline-also DIR]... [--current-also DIR]...
 
 Exit codes:
-    0   no regressions above threshold (or every flagged regression was
-        subsumed by a drift-suspect run — see below)
+    0   no regressions above threshold (on a drift-suspect run this proves
+        nothing: a faster runner can hide a regression — CI checks
+        `drift_suspect` from --summary-out, not just the exit code)
     1   real regression(s) detected — the run does NOT look like uniform
         cross-runner drift, so this should fail CI
     2   bad or missing input (no current results, or nothing left to
         compare after --restrict)
-    3   regression(s) detected, but the run is a drift suspect: fail-soft —
-        report only, do not fail the job
+    3   regression(s) detected, but the run is a drift suspect: this
+        comparison cannot judge them; CI decides from a same-runner run of
+        the merge base instead (#960)
 
 Outputs a Markdown table suitable for posting as a PR comment.
+
+`--summary-out FILE` writes `drift_suspect=true|false` and `drift=<fraction>`
+(empty when there were too few benches) as `key=value` lines, ready to append
+to `$GITHUB_OUTPUT`. CI uses `drift_suspect` to decide whether the artifact
+baseline can be trusted at all (see "Same-runner baseline" below).
 
 `--suspects-out FILE` writes the regressed bench names (one per line) so CI can
 re-measure just those. `--restrict FILE` limits the comparison to the bench
@@ -24,6 +32,12 @@ baseline was rebuilt from the merge base on the *same* machine (the artifact
 baseline comes from a different runner, whose CPU generation can differ enough
 to flag phantom regressions on micro benches — observed +11%/+34% on
 `bzz_decode`/`bzz_encode` across PRs that do not touch BZZ at all).
+
+`--baseline-also DIR` / `--current-also DIR` (repeatable) add further
+measurements of the same side. Each bench is then judged on its *fastest*
+measurement per side. The re-check uses this for its alternating rounds: one
+bench process can sit several percent slow from start to finish (see
+"Best-of-rounds re-check" below), and noise only ever adds time.
 
 ── Cross-runner drift detection ─────────────────────────────────────────────
 Two Benchmark CI runs (PR #779, PR #787 — see PERF_EXPERIMENTS.md) reported
@@ -45,7 +59,7 @@ around. If |drift| exceeds `DRIFT_THRESHOLD` (3%) across at least
 `MIN_BENCHES_FOR_DRIFT` (5) overlapping benchmarks, the run is a *drift
 suspect*: any regressions found are still listed in full (raw numbers,
 unmodified threshold — transparency over cleverness), but the comparison
-exits 3 instead of 1 so CI can report the result without failing the job. A
+exits 3 instead of 1 so CI knows this comparison cannot judge them. A
 single real regression against an otherwise-flat table (|drift| ~ 0) still
 exits 1 and still fails, exactly as before. Deltas printed in the table are
 always raw (baseline vs current, unmodified); when a run is a drift suspect,
@@ -60,6 +74,32 @@ brittle (crate boundaries, shared decoder code, `bzz_encode` calling
 in PERF_EXPERIMENTS.md for exactly this trap) and easy to get quietly wrong.
 Instead the comment lists every benchmark that moved, raw numbers included,
 and lets a human weigh which ones plausibly relate to the diff.
+
+── Same-runner baseline for drift-suspect runs (#960) ───────────────────────
+By late 2026 drift-suspect runs were common, and the drift was not uniform.
+On #959 the median delta was +61.5%, yet untouched benches sat anywhere from
++27% (IW44 to-RGB decode) to +100% (`bzz_encode`) above that median. The PR
+itself sped up downscaled render, so many render benches sat 40–110% below
+it — but from this comparison alone nobody can tell which moves are the code
+and which are the runner. The `Corrected` column cannot isolate the code's
+effect under that spread, and exit 3 used to pass the job, so a real ~20%
+regression could get through. CI therefore treats this script's verdict on
+a drift-suspect run as "artifact baseline unusable": bench.yml rebuilds the
+merge base on the same runner, runs the full suite there, and compares again
+(drift on the same runner is small), then re-measures whatever that pass flags
+back-to-back on both sides. That pass, not this one, decides the job.
+
+── Best-of-rounds re-check ──────────────────────────────────────────────────
+The first end-to-end run of that gate (PR #972, a deliberate ~20% slowdown of
+`bzz_decode`) caught the slowdown, and also failed an untouched bench:
+`render_native_stages/render_into_reuse_buffer/watchmaker_color` read +5.7%
+in the full same-runner pass and +12.9% in the re-check. The PR binary gave
+47.75 ms and 52.10 ms in two processes on one runner, each with a confidence
+interval under 1% — the spread is between processes, not inside one, so a
+single back-to-back pair cannot average it away. The re-check therefore runs
+three alternating rounds (base, PR, base, PR, ...) and compares the fastest
+round of each side via `--baseline-also` / `--current-also`. A real regression
+is slow in every round and still fails.
 """
 
 import json
@@ -85,6 +125,20 @@ def load_results(criterion_dir: Path) -> dict[str, float]:
         except (KeyError, json.JSONDecodeError):
             continue
     return results
+
+
+def load_best(criterion_dirs: list[Path]) -> dict[str, float]:
+    """Return each bench's fastest mean across several measurement rounds.
+
+    A bench missing from some rounds is judged on the rounds that have it.
+    """
+    best: dict[str, float] = {}
+    for d in criterion_dirs:
+        if not d.exists():
+            continue
+        for name, ns in load_results(d).items():
+            best[name] = min(ns, best.get(name, ns))
+    return best
 
 
 def fmt_ns(ns: float) -> str:
@@ -189,6 +243,11 @@ class Comparison:
             return 0
         return 3 if self.suspect else 1
 
+    def summary(self) -> str:
+        """`key=value` lines for `$GITHUB_OUTPUT` (see `--summary-out`)."""
+        drift = "" if self.drift is None else f"{self.drift:.4f}"
+        return f"drift_suspect={'true' if self.suspect else 'false'}\ndrift={drift}\n"
+
     def render(self) -> str:
         out: list[str] = []
         out.append(f"### {self.title}\n")
@@ -201,15 +260,16 @@ class Comparison:
                 f"{'+' if self.drift >= 0 else ''}{self.drift * 100:.1f}%, "
                 f"above the {DRIFT_THRESHOLD * 100:.0f}% suspect threshold — "
                 f"this run's CPU/runner was probably just faster or slower "
-                f"than the baseline's, not the code. Flagged regressions "
-                f"below are reported but did **not** fail the job. Deltas in "
-                f"the table are raw; the `Corrected` column subtracts the "
-                f"drift (delta − {self.drift * 100:.1f}%) for reference — it "
-                f"does not change the verdict.\n"
+                f"than the baseline's, not the code. This table does **not** "
+                f"decide the job: CI re-runs the full suite on the merge base "
+                f"on this runner and judges from that comparison instead. "
+                f"Deltas in the table are raw; the `Corrected` column "
+                f"subtracts the drift (delta − {self.drift * 100:.1f}%) for "
+                f"reference only.\n"
             )
 
         if self.regressions:
-            qualifier = " (drift-suspect — not failing)" if self.suspect else ""
+            qualifier = " (drift-suspect — see the same-runner comparison)" if self.suspect else ""
             out.append(
                 f"> **{len(self.regressions)} regression(s) detected** "
                 f"(threshold: {REGRESSION_THRESHOLD * 100:.0f}%){qualifier}\n"
@@ -239,6 +299,9 @@ def main() -> int:
     suspects_out = None
     restrict_file = None
     title = "Benchmark comparison"
+    summary_out = None
+    baseline_also: list[Path] = []
+    current_also: list[Path] = []
     positional: list[str] = []
     i = 0
     while i < len(args):
@@ -248,8 +311,17 @@ def main() -> int:
         elif args[i] == "--restrict" and i + 1 < len(args):
             restrict_file = Path(args[i + 1])
             i += 2
+        elif args[i] == "--summary-out" and i + 1 < len(args):
+            summary_out = Path(args[i + 1])
+            i += 2
         elif args[i] == "--title" and i + 1 < len(args):
             title = args[i + 1]
+            i += 2
+        elif args[i] == "--baseline-also" and i + 1 < len(args):
+            baseline_also.append(Path(args[i + 1]))
+            i += 2
+        elif args[i] == "--current-also" and i + 1 < len(args):
+            current_also.append(Path(args[i + 1]))
             i += 2
         else:
             positional.append(args[i])
@@ -257,7 +329,8 @@ def main() -> int:
     if len(positional) != 2:
         print(
             f"usage: {sys.argv[0]} <baseline_dir> <current_dir> "
-            "[--suspects-out FILE] [--restrict FILE] [--title TEXT]",
+            "[--suspects-out FILE] [--restrict FILE] [--title TEXT] [--summary-out FILE] "
+            "[--baseline-also DIR]... [--current-also DIR]...",
             file=sys.stderr,
         )
         return 2
@@ -273,8 +346,8 @@ def main() -> int:
             if line.strip()
         }
 
-    baseline = load_results(baseline_dir) if baseline_dir.exists() else {}
-    current = load_results(current_dir) if current_dir.exists() else {}
+    baseline = load_best([baseline_dir, *baseline_also])
+    current = load_best([current_dir, *current_also])
 
     if not current:
         print("No benchmark results found in current run.", file=sys.stderr)
@@ -296,6 +369,9 @@ def main() -> int:
 
     comparison = Comparison(baseline, current, restrict=restrict, title=title)
     print(comparison.render())
+
+    if summary_out is not None:
+        summary_out.write_text(comparison.summary())
 
     if comparison.regressions and suspects_out is not None:
         suspects_out.write_text(

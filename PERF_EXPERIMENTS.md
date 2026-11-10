@@ -17299,3 +17299,108 @@ the 1.17× "slower" row from #957 is gone.
 
 **Reason.** Exact by construction and by a 1 430-render sweep, and a
 consistent large gain on every area-average colour downscale bench.
+
+### BENCH_RUNNER_FAMILY_SKEW: IW44 to-RGB and upscaled render "slow on x86" is the runner, not the code — **Diagnostic, harness fixed** (2026-11-08)
+
+**Issue.** #964. On the bench runs of #959 and #957, which did not touch
+these paths, `iw44_gray_decode_large/rgb_then_gray*` (+32…39 %),
+`iw44_to_rgb_colorbook/*` (+33…42 %), `iw44_to_rgb_large_page` (+39 %),
+`render_page/dpi/{144,300,600}` (+40…45 %) and `render_scaled_*/lanczos3`
+(+29…37 %) sat well above the run's median drift, while `jb2_*` and `bzz_*`
+sat at or below it. Question: are these paths slow on common x86 parts, or is
+it the runner?
+
+**Approach.** An A/A test (same code on both sides) from runs that already
+exist. Each release-please PR run starts within a minute of the `main` push
+run it follows, and its diff is only version numbers. So each pair measures
+the same code on two runners. Three pairs, all 81 Criterion medians, the
+same runner image on both sides of each pair. The table shows each family's
+delta minus the pair's median delta:
+
+| Pair (main push → release PR), image | Median delta | rgb_then_gray | iw44_to_rgb_colorbook | iw44_to_rgb_large | render dpi 144–600 | lanczos3 | jb2 | bzz |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 24ea1d6 → 2d72096 (41597957001 → 41598005927), 26.04 | +70.4 % | +20…39 % | +9…31 % | +29 % | +10…17 % | +10…16 % | −19…+7 % | −1…+107 % |
+| 0a3d5a3 → 6d5f376 (41620097951 → 41620219305), 26.04 | +24.6 % | −2…+3 % | −5…−3 % | −4 % | **−19…−17 %** | −9…−8 % | 0…+57 % | +6…+56 % |
+| b36c6f0 → ebdb26f (41237507076 → 41237537699), 24.04 | −2.3 % | −2…+3 % | −2…0 % | −1 % | −2…+1 % | 0…+1 % | −3…+1 % | −7…−1 % |
+
+- The first pair reproduces the #964 pattern on identical code: the same
+  families sit 10–39 % above the median, and `bzz_encode` is again the top
+  outlier (+107 %).
+- The second pair has the same code and the opposite sign for upscaled
+  render (−17…−19 %); there the JB2 and BZZ benches are the slow ones.
+- When the two runners match (third pair, median −2.3 %), every listed
+  family sits within ±3 % of the median. That pair ran on `ubuntu-24.04`;
+  both skewed pairs ran after `ubuntu-latest` moved to `ubuntu-26.04`
+  (image 20261025.179.1), which looks like a more mixed CPU pool. Three pairs
+  cannot prove that.
+
+`bench_compare.py` already flags the first pair as drift-suspect (exit 3,
+drift 0.7052), so the same-runner full baseline from #960 would judge it.
+
+**Decision.** Runner artefact; no x86 code lead. The per-family skew follows
+the runner pair, its sign flips between pairs, and it vanishes when the
+runners match. The runner log does not say which CPU a job got,
+so the bench job now records it: a "Record runner CPU" step writes
+`target/criterion/runner_cpu.txt` (`lscpu` model name, vCPU count), the
+file rides along in the `bench-baseline` artifact, and the PR comment prints
+"Runner CPU: this run …, baseline …".
+
+**Reason.** A family that is slow on x86 would be slow on both sides of an
+A/A pair, so it could not differ from the median. A remaining x86-only
+question (does `-C target-cpu=x86-64-v3` help IW44 more than measured) is
+covered by the existing AVX2 validation job, not by this issue.
+
+### BENCH_SAME_RUNNER_GATE_E2E: the same-runner bench gate catches a planted ~20 % slowdown; three-round re-check — **Diagnostic, harness fixed** (2026-11-10)
+
+**Issue.** #960. The same-runner verdict for drift-suspect runs had never run
+end to end. Its done-when: a PR with a deliberately slowed bench must fail
+the job even when the artifact baseline has drifted.
+
+**Approach.** Draft PR #972 (not for merge) on top of this branch: every
+fifth `bzz_decode` call decodes twice, so `bzz_decode*` is ~20 % slower and
+nothing else changes. Two bench runs, each on a different runner CPU than
+its baseline.
+
+| Run | Runner CPU | Artifact drift | Same-runner compare | Re-check | Job |
+|---|---|---:|---|---|---|
+| 42798039696 (one re-check pair) | Intel Xeon Platinum 8573C | +8.3 % | `bzz_decode` +22.6 %, `bzz_decode_txtz` +22.5 %, `render_native_stages/render_into_reuse_buffer/watchmaker_color` +5.7 % | +20.9 %, +21.4 %, watchmaker **+12.9 %** | failed, 43 min |
+| 42811621353 (three rounds) | AMD EPYC 7763 | +24.0 % | `bzz_decode` +20.4 %, `bzz_decode_txtz` +21.2 %, plus 4 untouched benches +5.9…+9.2 % | +21.0 %, +21.4 %, plus 2 untouched benches +9.3 %, +8.9 % | failed, 54 min |
+
+- Both runs were drift-suspect, so the old gate would have passed them.
+  The new gate failed both on the planted slowdown.
+- Run 1 also failed an untouched bench. Two processes of the same PR
+  binary read 47.75 and 52.10 ms, each with a confidence interval under
+  1 %. One base/PR pair cannot tell that from a regression.
+- Fix after run 1: three alternating rounds (base, PR, base, PR, …), each
+  side judged on its fastest round (`bench_compare.py --baseline-also` /
+  `--current-also`). Only the bench binaries that own a suspect are re-run.
+- Run 2, per round (base → PR):
+
+| Bench | Round 1 | Round 2 | Round 3 | Fastest vs fastest |
+|---|---:|---:|---:|---:|
+| `bzz_decode` (planted) | 3.86 → 4.54 µs | 3.74 → 4.53 | 3.76 → 4.52 | +20.9 % |
+| `bzz_decode_txtz` (planted) | 26.88 → 32.45 µs | 26.75 → 32.49 | 26.79 → 32.63 | +21.3 % |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2.218 → 2.116 ms | 2.139 → 2.120 | 2.127 → 2.107 | −1.0 % (cleared) |
+| `render_row_scratch_ab/row_scratch_copy/colorbook_downscale` | 4.120 → 4.326 ms | 4.150 → 4.342 | 4.162 → 4.311 | +4.6 % (cleared) |
+| `render_row_scratch_ab/row_scratch_copy/thumbnail_dpi72` | 70.20 → 77.42 µs | 70.06 → 77.87 | 70.29 → 76.68 | +9.5 % (flagged) |
+| `render_row_scratch_ab/row_scratch_copy/thumbnail_half_bilinear` | 35.01 → 37.98 µs | 34.85 → 37.96 | 35.41 → 38.35 | +8.9 % (flagged) |
+
+- The two rows still flagged are not process noise: every round shows the
+  same delta. They are not the planted slowdown either: the timed loop
+  renders a parsed page and calls no BZZ code. In the same-runner compare
+  their A/B twins (`direct_render_into/thumbnail_*`, the same render through
+  another entry point) read 8.1 % and 7.7 % *faster*. A change in one crate
+  moved machine code in the bench binary (code layout), and two ~35–75 µs
+  loops landed on the other side of it.
+
+**Decision.** Gate kept; #960 done-when met. Three-round re-check kept: it
+clears process noise (two of four noise suspects here, and the run-1 kind
+of false failure) and keeps a real 20 % slowdown. Code-layout deltas stay a
+known limit. When the re-check fails, the PR comment now tells the reader
+to check whether the PR touches the flagged bench's code path.
+
+**Reason.** Timing alone cannot separate a steady layout delta from a real
+regression: both repeat in every round. The Bench job is not a required
+check, so a human reads the comment. Cost: the same-runner full baseline
+adds ~19 min, the three-round re-check ~15 min when both bench binaries own
+a suspect (~1 min of setup per binary, side and round).

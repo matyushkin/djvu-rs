@@ -10,10 +10,20 @@ entries):
       reported as drift-suspect, must NOT fail the job
   (c) everything flat                                       → must pass
 
+plus the #960 signal CI keys the same-runner full baseline on: every
+drift-suspect run reports `drift_suspect=true` via `--summary-out`, including
+ones whose artifact compare exits 0 or whose drift is non-uniform enough that
+the `Corrected` column points the wrong way.
+
 Run with: python3 -m unittest scripts/test_bench_compare.py
 """
 
+import contextlib
 import importlib.util
+import io
+import json
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -90,7 +100,7 @@ class DriftSuspectTests(unittest.TestCase):
         text = cmp.render()
         self.assertIn("Probable cross-runner drift", text)
         self.assertIn("Corrected", text)
-        self.assertIn("did **not** fail the job", text)
+        self.assertIn("does **not** decide the job", text)
 
     def test_few_benchmarks_never_trigger_drift(self):
         # Below MIN_BENCHES_FOR_DRIFT: even a uniform shift shouldn't be
@@ -152,6 +162,185 @@ class NewAndRemovedBenchTests(unittest.TestCase):
         self.assertEqual(cmp.exit_code, 0)
         self.assertTrue(any("removed" in row for row in cmp.rows))
         self.assertTrue(any("new" in row for row in cmp.rows))
+
+
+class SameRunnerSignalTests(unittest.TestCase):
+    """#960: a drift-suspect artifact compare must hand the verdict to the
+    same-runner full baseline, whatever its own exit code says."""
+
+    def test_uniformly_faster_runner_hides_regression_but_flags_drift(self):
+        # The current runner is 15% faster across the board, so a real +21%
+        # regression lands at +3% raw: under the 5% threshold, exit 0. Only
+        # drift_suspect tells CI that this "pass" means nothing.
+        baseline = _flat_suite(30)
+        current = {name: base * 0.85 for name, base in baseline.items()}
+        current["group/bench_0"] = baseline["group/bench_0"] * 0.85 * 1.21
+
+        cmp = bc.Comparison(baseline, current)
+
+        self.assertEqual(cmp.regressions, [])
+        self.assertEqual(cmp.exit_code, 0)
+        self.assertTrue(cmp.suspect)
+        self.assertIn("drift_suspect=true", cmp.summary())
+
+    def test_non_uniform_drift_makes_corrected_column_misleading(self):
+        # A #959-like shape: most benches +61%, one family a further ~+40%, one
+        # family not drifted at all. A real +20% regression in the undrifted
+        # family reads as about -41% corrected, while untouched benches in the
+        # fast-drifting family read as about +40% corrected. No single-number
+        # correction separates the two, hence the full same-runner rerun.
+        baseline = _flat_suite(40)
+        current = {}
+        for i, (name, base) in enumerate(baseline.items()):
+            if i < 25:
+                current[name] = base * 1.61
+            elif i < 35:
+                current[name] = base * 2.25  # IW44 / upscale render family
+            else:
+                current[name] = base * 1.00  # bilevel render family
+        real = "group/bench_39"
+        current[real] = baseline[real] * 1.20
+
+        cmp = bc.Comparison(baseline, current)
+
+        self.assertTrue(cmp.suspect)
+        self.assertEqual(cmp.exit_code, 3)
+        corrected_real = current[real] / baseline[real] - 1 - cmp.drift
+        corrected_untouched = current["group/bench_30"] / 1000.0 - 1 - cmp.drift
+        self.assertLess(corrected_real, -0.30)
+        self.assertGreater(corrected_untouched, 0.30)
+        self.assertIn("drift_suspect=true", cmp.summary())
+
+    def test_summary_lines(self):
+        flat = _flat_suite(10)
+        self.assertEqual(
+            bc.Comparison(flat, dict(flat)).summary(),
+            "drift_suspect=false\ndrift=0.0000\n",
+        )
+        few = _flat_suite(3)
+        self.assertEqual(
+            bc.Comparison(few, {n: v * 0.5 for n, v in few.items()}).summary(),
+            "drift_suspect=false\ndrift=\n",
+        )
+
+    def test_main_writes_summary_out(self):
+        def write_tree(root: Path, scale: float) -> None:
+            for i in range(10):
+                d = root / "group" / f"bench_{i}" / "new"
+                d.mkdir(parents=True)
+                est = {"mean": {"point_estimate": 1000.0 * scale}}
+                (d / "estimates.json").write_text(json.dumps(est))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_tree(tmp / "base", 1.0)
+            write_tree(tmp / "cur", 1.30)
+            summary = tmp / "summary.txt"
+            argv = [
+                "bench_compare.py",
+                str(tmp / "base"),
+                str(tmp / "cur"),
+                "--summary-out",
+                str(summary),
+            ]
+            old_argv, sys.argv = sys.argv, argv
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    code = bc.main()
+            finally:
+                sys.argv = old_argv
+
+            self.assertEqual(code, 3)
+            self.assertEqual(
+                summary.read_text(), "drift_suspect=true\ndrift=0.3000\n"
+            )
+
+
+class BestOfRoundsTests(unittest.TestCase):
+    """--baseline-also / --current-also: each side is judged on its fastest
+    round, so one slow bench process cannot fail (or clear) a bench alone."""
+
+    @staticmethod
+    def _write(root: Path, results: dict[str, float]) -> Path:
+        for name, ns in results.items():
+            d = root / name / "new"
+            d.mkdir(parents=True)
+            (d / "estimates.json").write_text(
+                json.dumps({"mean": {"point_estimate": ns}})
+            )
+        return root
+
+    @staticmethod
+    def _run(argv: list[str]) -> tuple[int, str]:
+        out = io.StringIO()
+        old_argv, sys.argv = sys.argv, ["bench_compare.py", *argv]
+        try:
+            with contextlib.redirect_stdout(out):
+                code = bc.main()
+        finally:
+            sys.argv = old_argv
+        return code, out.getvalue()
+
+    def test_load_best_takes_fastest_round_per_bench(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            a = self._write(tmp / "a", {"g/x": 100.0, "g/y": 50.0})
+            b = self._write(tmp / "b", {"g/x": 90.0, "g/z": 7.0})
+            best = bc.load_best([a, b, tmp / "missing"])
+        self.assertEqual(best, {"g/x": 90.0, "g/y": 50.0, "g/z": 7.0})
+
+    def test_one_slow_process_does_not_fail_and_real_regression_does(self):
+        # Numbers from PR #972's run: `noisy` is the untouched watchmaker
+        # reuse-buffer bench (one PR-side process sat at 52 ms), `real` is
+        # the deliberately slowed bzz_decode.
+        base_rounds = [
+            {"g/noisy": 46.07e6, "g/real": 3300.0},
+            {"g/noisy": 45.16e6, "g/real": 3340.0},
+            {"g/noisy": 46.50e6, "g/real": 3310.0},
+        ]
+        head_rounds = [
+            {"g/noisy": 52.00e6, "g/real": 4000.0},
+            {"g/noisy": 45.90e6, "g/real": 4020.0},
+            {"g/noisy": 47.75e6, "g/real": 3990.0},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            bases = [self._write(tmp / f"b{i}", r) for i, r in enumerate(base_rounds)]
+            heads = [self._write(tmp / f"h{i}", r) for i, r in enumerate(head_rounds)]
+            restrict = tmp / "suspects.txt"
+            restrict.write_text("g/noisy\ng/real\n")
+
+            single_code, single_out = self._run(
+                [str(bases[0]), str(heads[0]), "--restrict", str(restrict)]
+            )
+            best_code, best_out = self._run(
+                [
+                    str(bases[0]),
+                    str(heads[0]),
+                    "--baseline-also", str(bases[1]),
+                    "--baseline-also", str(bases[2]),
+                    "--current-also", str(heads[1]),
+                    "--current-also", str(heads[2]),
+                    "--restrict", str(restrict),
+                ]
+            )
+
+        self.assertEqual(single_code, 1)
+        self.assertIn("2 regression(s)", single_out)
+        self.assertEqual(best_code, 1, "the real regression still fails")
+        self.assertIn("1 regression(s)", best_out)
+        self.assertIn("- `g/real`", best_out)
+        self.assertNotIn("- `g/noisy`", best_out)
+
+    def test_missing_baseline_rounds_read_as_no_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            head = self._write(tmp / "h", {"g/x": 1.0})
+            code, out = self._run(
+                [str(tmp / "nope"), str(head), "--baseline-also", str(tmp / "nope2")]
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("no baseline for comparison", out)
 
 
 if __name__ == "__main__":
