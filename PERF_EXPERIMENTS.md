@@ -17517,9 +17517,41 @@ more on x86 did not hold. `render_page/dpi/300` and `/600` read −9.6 % and
 −13.7 % in that table, but they do not take this path and were flat
 locally: that is the runner skew of BENCH_RUNNER_FAMILY_SKEW.
 
+**Second x86 check (CI run 42861058346, AMD EPYC 7763, same-runner gate).**
+The branch was then stacked on #970, so the measured diff is #970 plus
+this change. The merge base (`e72d016`) was rebuilt and run on the same
+runner. The Benchmark job failed on one row.
+
+| Benchmark | base | new | delta |
+|---|---:|---:|---:|
+| `render_native_stages/render_into_reuse_buffer/watchmaker_color` | 54.71 ms | 45.83 ms | −16.2 % |
+| `render_compositor_only/color_native_cached` | 54.88 ms | 45.81 ms | −16.5 % |
+| `render_corpus_color` | 70.62 ms | 62.55 ms | −11.4 % |
+| `render_native_stages/render_into_reuse_buffer/cable_bilevel` | 46.19 ms | 42.86 ms | −7.2 % |
+| `render_compositor_only/palette_native_cached` | 48.17 ms | 44.73 ms | −7.1 % |
+| `render_page/dpi/144` (fastest of 3 rounds) | 713.1 µs | 774.5 µs | **+8.6 %** |
+| `render_page/dpi/300` (fastest of 3 rounds) | 2.65 ms | 2.78 ms | +4.6 % |
+| `render_page/dpi/600` | 9.72 ms | 9.93 ms | +2.2 % |
+
+The same-job DjVuLibre row is 45.83 vs 47.10 ms (0.97×) on this slow
+runner class, where the old code read 1.15–1.16×.
+
+The failed row does not take the changed path: `fg_red` is 0 on a zoomed
+render, so `render_page/dpi/144` still calls `sample_bilinear`. The bilevel
+and palette rows do not take it either, and they moved the other way. All
+of them run the `zoom_row` pixel loop, which this change recompiles. The
+signs also flip between machines: the first x86 run read
+`render_page/dpi/144` −4.0 % and native bilevel +1.1…+2.8 %; this run reads
++8.6 % and −6…−7 %; the M1 reads +1.3 % and −2 %. So this is machine-code
+movement inside `zoom_row`, not extra work per pixel. It is steady on a
+given CPU (the three-round re-check kept it), so on EPYC 7763 a small
+zoomed page is about 60 µs slower with this build.
+
 **Decision.** Kept.
 
 **Reason.** Exact by algebra, by an exhaustive unit test and by a
 1 474-render sweep, and a consistent gain on native colour pages (~11 % on
-Apple M1 Max, ~7–9 % on the x86 CI runner) with no measurable cost
-elsewhere.
+Apple M1 Max, 7–16 % on the x86 CI runners). The cost is machine-code
+movement in the `zoom_row` loop: rows that do not take the new path move
+by −7…+9 %, with a sign that depends on the CPU. The one row above the 5 %
+gate is a 0.7 ms zoomed render of a small page on one runner class.
