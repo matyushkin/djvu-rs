@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '0 3 * * 1'  # every Monday at 03:00 UTC
   workflow_dispatch:
+    inputs:
+      minimise:
+        description: Minimise each cached corpus before the run (the weekly run always does)
+        type: boolean
+        default: false
 
 # Read-only token by default; jobs that need more widen it themselves (#961).
 permissions:
@@ -19,7 +24,7 @@ jobs:
   fuzz:
     name: Fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +40,14 @@ jobs:
           - fuzz_metadata
           - fuzz_graph
           - fuzz_validate
+        # Seconds for one run, corpus replay included. libFuzzer executes the
+        # whole cached corpus before it mutates anything, so the budget must
+        # exceed the replay. Default 60 s. The IW44 corpus replays in about
+        # 55-105 s even when minimised: a few inputs near the 64 MP cap carry
+        # most of the time (FUZZ_CORPUS_REPLAY_BUDGET in PERF_EXPERIMENTS.md).
+        include:
+          - target: fuzz_iw44
+            seconds: 240
 
     steps:
       - uses: actions/checkout@v7
@@ -78,8 +91,22 @@ jobs:
       # an estimated 35 s here. With 10 s, two cap-bounded inputs in the
       # cached corpus (0.26 s and 0.28 s native) failed 5 of 8 runs on
       # 2026-11-10 (FUZZ_CI_SEED_TIMEOUT in PERF_EXPERIMENTS.md).
-      - name: Run ${{ matrix.target }} for 60 s
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=60
+      # Drop inputs that add no coverage. Without this the corpus only grows,
+      # and its replay used the whole budget for fuzz_iw44, fuzz_jb2 and
+      # fuzz_full: they generated no new inputs. Minimising costs one replay,
+      # so it runs weekly and on request, not on every push.
+      - name: Minimise the corpus
+        if: github.event_name == 'schedule' || inputs.minimise
+        run: |
+          dir="fuzz/corpus/${{ matrix.target }}"
+          if [ -d "$dir" ] && [ -n "$(ls -A "$dir")" ]; then
+            echo "before: $(ls "$dir" | wc -l) files"
+            cargo +nightly fuzz cmin ${{ matrix.target }} -- -timeout=60
+            echo "after: $(ls "$dir" | wc -l) files"
+          fi
+
+      - name: Run ${{ matrix.target }} for ${{ matrix.seconds || 60 }} s
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=${{ matrix.seconds || 60 }} -timeout=60
 
       # Save updated corpus (unique key ensures this run's findings are always stored)
       - name: Save fuzz corpus
