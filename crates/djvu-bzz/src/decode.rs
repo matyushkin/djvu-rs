@@ -76,6 +76,19 @@ const SPIN_CHECK_INTERVAL: usize = 4096;
 ///
 /// Returns the decompressed bytes, or an error if the stream is malformed.
 pub fn bzz_decode(data: &[u8]) -> Result<Vec<u8>, BzzError> {
+    // THROWAWAY (#960 verification, never merge): every fifth call decodes
+    // the stream twice, a deterministic ~20 % slowdown of bzz_decode.
+    static CALLS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if CALLS
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(5)
+    {
+        core::hint::black_box(bzz_decode_inner(data)?);
+    }
+    bzz_decode_inner(data)
+}
+
+fn bzz_decode_inner(data: &[u8]) -> Result<Vec<u8>, BzzError> {
     let mut zp = ZpDecoder::new(data)?;
     let mut output = Vec::new();
     let mut block_ctx = [0u8; CTX_COUNT];
