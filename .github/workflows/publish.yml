@@ -12,6 +12,10 @@ on:
         description: 'Tag to publish (e.g. v0.6.0)'
         required: true
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -23,25 +27,31 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Resolve ref
+        # Inputs reach the script through env, never interpolated into it.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PUBLISH_REF="${{ inputs.tag }}"
-          elif [ "${{ github.event_name }}" = "release" ]; then
-            PUBLISH_REF="${{ github.event.release.tag_name }}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            PUBLISH_REF="$INPUT_TAG"
+          elif [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            PUBLISH_REF="$RELEASE_TAG"
           else
             PUBLISH_REF="${GITHUB_REF_NAME}"
           fi
           echo "PUBLISH_REF=$PUBLISH_REF" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.PUBLISH_REF }}
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Verify version matches tag
         run: |
@@ -55,7 +65,9 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
 
       - name: Run tests
         # Mirrors the CI Test (stable) job on main — the `cli` feature gates
@@ -81,25 +93,31 @@ jobs:
     environment: crates-io
     steps:
       - name: Resolve ref
+        # Inputs reach the script through env, never interpolated into it.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PUBLISH_REF="${{ inputs.tag }}"
-          elif [ "${{ github.event_name }}" = "release" ]; then
-            PUBLISH_REF="${{ github.event.release.tag_name }}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            PUBLISH_REF="$INPUT_TAG"
+          elif [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            PUBLISH_REF="$RELEASE_TAG"
           else
             PUBLISH_REF="${GITHUB_REF_NAME}"
           fi
           echo "PUBLISH_REF=$PUBLISH_REF" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.PUBLISH_REF }}
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: false
 

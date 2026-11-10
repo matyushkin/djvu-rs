@@ -1,0 +1,31 @@
+# Update PRs for Cargo dependencies and GitHub Actions (#961).
+#
+# Grouped and weekly so a quiet week costs at most one PR per ecosystem.
+# The release workflows pin actions by commit SHA with a `# vX.Y.Z` comment;
+# Dependabot bumps both together.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"

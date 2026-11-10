@@ -14,6 +14,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

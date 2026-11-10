@@ -7,6 +7,10 @@ on:
     - cron: '0 3 * * 1'  # every Monday at 03:00 UTC
   workflow_dispatch:
 
+# Read-only token by default; jobs that need more widen it themselves (#961).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
