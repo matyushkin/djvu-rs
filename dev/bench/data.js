@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794334342541,
+  "lastUpdate": 1794335921033,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -25630,6 +25630,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45247000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3d55adc428e7a01096c87986ef19197d6201f57c",
+          "message": "perf(render): read the native FG44 cell directly in zoom_row (#971)\n\n* perf(render): read the native FG44 cell directly in zoom_row (#963)\n\nOn a native render fg_native_frac maps a page pixel to a whole FG44\ncell (tx = ty = 0), yet every foreground pixel then ran\nsample_bilinear: four bounds-checked fetches and 12 multiplies that\nreturn the one pixel at (px / red, row), plus two integer divisions.\nDivision is cheap on Apple cores and slow on common x86 parts, which\nfits a residual that shows only on x86 runners.\n\nzoom_row now hoists the FG44 row once per output row (FgNativeRow) and\nreads the cell directly. The column division is a multiply by\nfloor(2^32 / red) + 1, exact for every px < 2^32 / red. The non-native\nFG44 path keeps sample_bilinear.\n\nByte-identical: an exhaustive unit test against fg_native_frac +\nsample_bilinear for reductions 1-12 over a 65 535-px row, and 1 474\ncorpus renders (native, 72-600 dpi, mask_aa on/off) equal to main.\n\nApple M1 Max, alternating prebuilt binaries: watchmaker @ 300 dpi into a\nreused buffer 30.5-32.1 -> 27.1-27.3 ms (-11 %) in every round, both\norders; other render rows within +/-1.3 %.\n\nLogged as ZOOM_ROW_FG_NATIVE_CELL in PERF_EXPERIMENTS.md and the index.\n\nCloses #963\n\n* docs(perf): record the x86 CI result for ZOOM_ROW_FG_NATIVE_CELL\n\nCI run 42687565965: native colour rows -6.3...-8.5 % against the main\nartifact (median delta -0.3 %), same-job ratio vs libdjvulibre 1.03x. The\ngain on x86 is about 7-9 %, no more than on the M1.\n\nRefs #963\n\n* docs(perf): record the second x86 run and the render_page/dpi/144 gate failure\n\nCI run 42861058346 (AMD EPYC 7763, same-runner gate): native colour rows\n-16 %, native bilevel and palette rows -7 %, render_page/dpi/144 +8.6 %.\nThe failed row does not take the new path; the sign flips between CPUs.\nIt is machine-code movement in the zoom_row loop.",
+          "timestamp": "2026-11-10T20:15:02+02:00",
+          "tree_id": "529d104382d4c5e18671e200e1885e3e50f4b0b0",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/3d55adc428e7a01096c87986ef19197d6201f57c"
+        },
+        "date": 1794335919130,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 109000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6149000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40600000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38867000,
             "range": "± 0",
             "unit": "ns/iter"
           }
