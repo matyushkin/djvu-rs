@@ -26,7 +26,7 @@ use crate::{
     annotation::MapArea,
     djvu_document::{DjVuBookmark, DjVuDocument, DjVuPage, DocError},
     djvu_render::RenderError,
-    export_common::{PageRun, export_pages},
+    export_common::{PageRun, ScratchPool, export_pages},
     export_control::{ExportObserver, NoOpObserver},
     text::Rect,
 };
@@ -181,10 +181,11 @@ pub fn djvu_to_epub_writer_with_observer<W: Write + Seek>(
     let page_count = doc.page_count();
     let pages: Vec<usize> = (0..page_count).collect();
     let mut image_names: Vec<String> = Vec::with_capacity(page_count);
+    let scratch = ScratchPool::default();
     let run = export_pages(
         &pages,
         observer,
-        |i| build_page_artifacts(&doc.page(i)?.clone(), i, opts),
+        |i| scratch.with(|rgba| build_page_artifacts(&doc.page(i)?.clone(), i, opts, rgba)),
         |_, art| {
             write_page_artifacts(&mut zip, &art)?;
             image_names.push(art.img_name);
@@ -257,10 +258,13 @@ fn write_page_artifacts<W: Write + Seek>(
     Ok(())
 }
 
+/// `rgba` is scratch for the page's pixels: empty, but it may keep the
+/// capacity of an earlier page (#965).
 fn build_page_artifacts(
     page: &DjVuPage,
     index: usize,
     opts: &EpubOptions,
+    rgba: &mut Vec<u8>,
 ) -> Result<PageArtifacts, EpubError> {
     // Scale to the requested output DPI. The image comes out in display
     // orientation (after the INFO rotation), so `w × h` is the display size.
@@ -269,7 +273,7 @@ fn build_page_artifacts(
     let render_opts = size.options();
     // Stream the RGBA scanlines when the page allows it, else fall back to a
     // full pixmap — the shared raster seam every exporter routes through.
-    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    rgba.reserve(w as usize * h as usize * 4);
     crate::export_common::render_rows_or_pixmap(page, &render_opts, |row| {
         rgba.extend_from_slice(row);
     })?;
@@ -283,8 +287,8 @@ fn build_page_artifacts(
         .0
         .iter()
         .all(|px| px[0] == px[1] && px[1] == px[2]);
-    let make_png = || encode_rgba_to_png(&rgba, w, h, gray);
-    let make_jpeg = |q: u8| encode_rgba_to_jpeg(&rgba, w, h, q, gray);
+    let make_png = || encode_rgba_to_png(rgba, w, h, gray);
+    let make_jpeg = |q: u8| encode_rgba_to_jpeg(rgba, w, h, q, gray);
     let (img_bytes, is_jpeg) = match (opts.jpeg_quality, opts.adaptive) {
         (None, _) => (make_png(), false),
         (Some(q), false) => {
@@ -1049,7 +1053,7 @@ mod tests {
         let doc = load_doc("boy_jb2_rotate90.djvu");
         let page = doc.page(0).unwrap();
         let opts = EpubOptions::default();
-        let art = build_page_artifacts(page, 0, &opts).unwrap();
+        let art = build_page_artifacts(page, 0, &opts, &mut Vec::new()).unwrap();
         let decoder = png::Decoder::new(std::io::Cursor::new(&art.png_bytes));
         let info = decoder.read_info().unwrap().info().clone();
         let want = crate::render_size::RenderSize::at_dpi(page, opts.dpi as f32).display;

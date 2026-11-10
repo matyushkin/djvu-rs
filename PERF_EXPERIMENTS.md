@@ -17404,3 +17404,49 @@ regression: both repeat in every round. The Bench job is not a required
 check, so a human reads the comment. Cost: the same-runner full baseline
 adds ~19 min, the three-round re-check ~15 min when both bench binaries own
 a suspect (~1 min of setup per binary, side and round).
+### RENDER_BUFFER_REUSE: reuse the page buffer across pages in the CLI and the CBZ/EPUB exporters — **Kept** (2026-11-08)
+
+**Issue.** #965, the follow-up to RENDER_VS_DJVULIBRE_ALLOC: every
+multi-page loop that allocates a fresh 300 dpi page buffer (33.6 MB RGBA,
+above glibc's 32 MiB mmap threshold) maps, faults in and unmaps it per page.
+
+**Audit.**
+
+| Path | Before | Change |
+|---|---|---|
+| CLI `render --format png` | `Page::render_to_size` per page | one `Pixmap`, `RenderRequest::pixmap_into` |
+| CBZ export (CLI, library, djvu-py `to_cbz`) | `render_pixmap` + RGBA→RGB copy per page | no RGBA buffer: rows stream into a pooled RGB buffer; a user rotation keeps the pixmap path |
+| EPUB export (library, djvu-py `to_epub`) | `Vec::with_capacity(w·h·4)` per page | pooled RGBA buffer |
+| PDF, TIFF export | already row-streamed | — |
+| wasm `WasmPage` render requests | already reuse `out.data` (`render_request_into`) | — |
+| djvu-py `Page.render` | fresh pixmap per call, owned by the returned Python object | none: reuse needs a new API (e.g. render into an existing `Pixmap`) |
+
+New public `RenderRequest::pixmap_into(page, &mut Pixmap)`: the pixels of
+`pixmap`, written into the caller's buffer when the render can stream; the
+whole-pixmap options (AA, Lanczos-3 at scale, rotation) still build a new
+pixmap and replace it. The exporters' build closures run in parallel under
+`parallel`, so they take buffers from a per-export `ScratchPool`
+(`Mutex<Vec<Vec<u8>>>`, at most one buffer per worker, freed with the export).
+
+**Numbers.** watchmaker, 12 pages, 300 dpi; Linux arm64 container (Docker
+on M1 Max); `strace -f -e trace=mmap,munmap`, counting calls ≥ 16 MiB.
+
+| Path | mmap ≥ 16 MiB before → after | Wall time before → after |
+|---|---:|---:|
+| CLI PNG | 12 → 1 | 1.015 → 1.001 s (best of 3) |
+| CLI CBZ | 13 → 1 | 1.275 → 1.219 s (best of 3) |
+| library EPUB at 300 dpi | 12 → 1 | median 1.034 → 1.018 s (10 interleaved runs) |
+| render loop, `pixmap` vs `pixmap_into` | 12 → 1 | median 0.654 → 0.626 s (10 interleaved runs) |
+
+The CLI's EPUB path renders at the default 150 dpi (8.4 MB pages, under the
+threshold): 0 large mmaps before and after. Outputs are byte-identical
+before/after: all 12 PNGs and every CBZ entry, with and without `--rotate cw90`.
+
+**Decision.** Kept. The mmap per page is gone on every path the library
+controls. The time saved in this container is small (2–4 %), well below the
+~25 % RENDER_VS_DJVULIBRE_ALLOC measured on an x86 container, where the page
+faults cost more. The change costs no extra memory.
+
+**Open.** djvu-py `Page.render` in a loop still allocates per page. A fix
+needs a new Python API (render into an existing `Pixmap`), which is a design
+decision, not part of this change.
