@@ -17349,3 +17349,58 @@ file rides along in the `bench-baseline` artifact, and the PR comment prints
 A/A pair, so it could not differ from the median. A remaining x86-only
 question (does `-C target-cpu=x86-64-v3` help IW44 more than measured) is
 covered by the existing AVX2 validation job, not by this issue.
+
+### BENCH_SAME_RUNNER_GATE_E2E: the same-runner bench gate catches a planted ~20 % slowdown; three-round re-check — **Diagnostic, harness fixed** (2026-11-10)
+
+**Issue.** #960. The same-runner verdict for drift-suspect runs had never run
+end to end. Its done-when: a PR with a deliberately slowed bench must fail
+the job even when the artifact baseline has drifted.
+
+**Approach.** Draft PR #972 (not for merge) on top of this branch: every
+fifth `bzz_decode` call decodes twice, so `bzz_decode*` is ~20 % slower and
+nothing else changes. Two bench runs, each on a different runner CPU than
+its baseline.
+
+| Run | Runner CPU | Artifact drift | Same-runner compare | Re-check | Job |
+|---|---|---:|---|---|---|
+| 42798039696 (one re-check pair) | Intel Xeon Platinum 8573C | +8.3 % | `bzz_decode` +22.6 %, `bzz_decode_txtz` +22.5 %, `render_native_stages/render_into_reuse_buffer/watchmaker_color` +5.7 % | +20.9 %, +21.4 %, watchmaker **+12.9 %** | failed, 43 min |
+| 42811621353 (three rounds) | AMD EPYC 7763 | +24.0 % | `bzz_decode` +20.4 %, `bzz_decode_txtz` +21.2 %, plus 4 untouched benches +5.9…+9.2 % | +21.0 %, +21.4 %, plus 2 untouched benches +9.3 %, +8.9 % | failed, 54 min |
+
+- Both runs were drift-suspect, so the old gate would have passed them.
+  The new gate failed both on the planted slowdown.
+- Run 1 also failed an untouched bench. Two processes of the same PR
+  binary read 47.75 and 52.10 ms, each with a confidence interval under
+  1 %. One base/PR pair cannot tell that from a regression.
+- Fix after run 1: three alternating rounds (base, PR, base, PR, …), each
+  side judged on its fastest round (`bench_compare.py --baseline-also` /
+  `--current-also`). Only the bench binaries that own a suspect are re-run.
+- Run 2, per round (base → PR):
+
+| Bench | Round 1 | Round 2 | Round 3 | Fastest vs fastest |
+|---|---:|---:|---:|---:|
+| `bzz_decode` (planted) | 3.86 → 4.54 µs | 3.74 → 4.53 | 3.76 → 4.52 | +20.9 % |
+| `bzz_decode_txtz` (planted) | 26.88 → 32.45 µs | 26.75 → 32.49 | 26.79 → 32.63 | +21.3 % |
+| `iw44_to_rgb_colorbook/sub2_partial_decode` | 2.218 → 2.116 ms | 2.139 → 2.120 | 2.127 → 2.107 | −1.0 % (cleared) |
+| `render_row_scratch_ab/row_scratch_copy/colorbook_downscale` | 4.120 → 4.326 ms | 4.150 → 4.342 | 4.162 → 4.311 | +4.6 % (cleared) |
+| `render_row_scratch_ab/row_scratch_copy/thumbnail_dpi72` | 70.20 → 77.42 µs | 70.06 → 77.87 | 70.29 → 76.68 | +9.5 % (flagged) |
+| `render_row_scratch_ab/row_scratch_copy/thumbnail_half_bilinear` | 35.01 → 37.98 µs | 34.85 → 37.96 | 35.41 → 38.35 | +8.9 % (flagged) |
+
+- The two rows still flagged are not process noise: every round shows the
+  same delta. They are not the planted slowdown either: the timed loop
+  renders a parsed page and calls no BZZ code. In the same-runner compare
+  their A/B twins (`direct_render_into/thumbnail_*`, the same render through
+  another entry point) read 8.1 % and 7.7 % *faster*. A change in one crate
+  moved machine code in the bench binary (code layout), and two ~35–75 µs
+  loops landed on the other side of it.
+
+**Decision.** Gate kept; #960 done-when met. Three-round re-check kept: it
+clears process noise (two of four noise suspects here, and the run-1 kind
+of false failure) and keeps a real 20 % slowdown. Code-layout deltas stay a
+known limit. When the re-check fails, the PR comment now tells the reader
+to check whether the PR touches the flagged bench's code path.
+
+**Reason.** Timing alone cannot separate a steady layout delta from a real
+regression: both repeat in every round. The Bench job is not a required
+check, so a human reads the comment. Cost: the same-runner full baseline
+adds ~19 min, the three-round re-check ~15 min when both bench binaries own
+a suspect (~1 min of setup per binary, side and round).

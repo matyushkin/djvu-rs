@@ -321,6 +321,12 @@ jobs:
               --title "Same-runner re-check (merge base rebuilt on this runner; fastest of 3 alternating rounds)" \
               > recheck_comment.md
             recheck_exit=$?
+            # Three rounds remove process noise, not code layout: on #972's
+            # second run two untouched µs benches read +9% in every round
+            # while their A/B twins read 8% faster. Tell the reader.
+            if [ "$recheck_exit" = "1" ]; then
+              printf '\n%s\n' "_A row for code this PR does not touch can still be real machine-code movement (code layout): the delta is then the same in every round, and three rounds do not remove it. Check whether the PR changes that bench's code path before you treat the row as a regression._" >> recheck_comment.md
+            fi
           fi
           set -e
           echo "recheck_exit=$recheck_exit" >> "$GITHUB_OUTPUT"
