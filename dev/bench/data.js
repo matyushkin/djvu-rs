@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794341071453,
+  "lastUpdate": 1794467732650,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -25726,6 +25726,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 28872000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9b38a1a1a3d6315af0c775b837e35ebdb8edffac",
+          "message": "chore(deps): bump png, tiff, miniz_oxide, jpeg-encoder, sha2 and criterion (#978)\n\npng 0.17 -> 0.18, tiff 0.9 -> 0.11, miniz_oxide 0.8 -> 0.9,\njpeg-encoder 0.6 -> 0.7, sha2 0.10 -> 0.11, criterion 0.5 -> 0.8.\n\nCode changes the new versions need:\n- png 0.18: Reader::output_buffer_size returns Option<usize>; a frame that\n  does not fit the address space is now a decode error in png_io.\n- tiff 0.11: compression is set per encoder, not per image. The export\n  mode is per document, so the encoder takes Deflate for bilevel files and\n  stays uncompressed for colour files.\n- jpeg-encoder 0.7: add_app_segment takes Vec<u8> (two test helpers).\n\nBilevel and colour TIFF output keeps its pixels and its compression; each\nfile grows by 28 bytes of TIFF structure.",
+          "timestamp": "2026-11-12T08:51:07+02:00",
+          "tree_id": "9499b8f6e4a7f0a35269ed5a238113cf4e85a0e9",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/9b38a1a1a3d6315af0c775b837e35ebdb8edffac"
+        },
+        "date": 1794467731091,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7452000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47324000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45313000,
             "range": "± 0",
             "unit": "ns/iter"
           }
