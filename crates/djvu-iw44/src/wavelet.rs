@@ -43,6 +43,18 @@ pub(super) fn load8s(slice: &[i16], phys_off: usize, s: usize) -> i32x8 {
             #[allow(unsafe_code)]
             return unsafe { load8s_s1_simd128(slice, phys_off) };
         }
+        // x86_64 baseline (SSE2, no AVX2): one unaligned load, then sign-extend
+        // each half with unpack + arithmetic shift. Written out so that the form
+        // does not depend on how LLVM vectorises eight scalar loads (WIDE_1_7_BUMP).
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe { load8s_s1_sse2(slice, phys_off) };
+        }
         #[allow(unsafe_code, unreachable_code)]
         return unsafe {
             // SAFETY: caller ensures phys_off+7 < slice.len().
@@ -98,6 +110,15 @@ pub(super) fn store8s(slice: &mut [i16], phys_off: usize, s: usize, v: i32x8) {
         {
             #[allow(unsafe_code)]
             return unsafe { store8s_s1_simd128(slice, phys_off, v) };
+        }
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            #[allow(unsafe_code)]
+            return unsafe { store8s_s1_sse2(slice, phys_off, v) };
         }
         #[allow(unsafe_code, unreachable_code)]
         return unsafe {
@@ -204,6 +225,47 @@ pub(super) unsafe fn store8s_s1_avx2(slice: &mut [i16], phys_off: usize, v: i32x
     let result = _mm256_castsi256_si128(permuted);
     let ptr = slice.as_mut_ptr().add(phys_off) as *mut __m128i;
     _mm_storeu_si128(ptr, result);
+}
+
+// ---- x86_64 SSE2 stride-1 load/store ----------------------------------------
+//
+// Without AVX2, `wide::i32x8` is `{a: i32x4, b: i32x4}` (`repr(C, align(32))`),
+// each half one `__m128i`, so `[__m128i; 2]` has the same size and field order.
+//
+// Load: `punpck{l,h}wd v, v` puts each i16 in the high half of an i32 lane;
+// `psrad 16` then sign-extends it.
+// Store: `pslld 16` + `psrad 16` sign-extends the low halfword of each lane, so
+// the saturating `packssdw` never saturates and gives the truncating `as i16`.
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "sse2",
+    not(target_feature = "avx2")
+))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+pub(super) unsafe fn load8s_s1_sse2(slice: &[i16], phys_off: usize) -> i32x8 {
+    use core::arch::x86_64::*;
+    let v16 = _mm_loadu_si128(slice.as_ptr().add(phys_off) as *const __m128i);
+    let lo = _mm_srai_epi32::<16>(_mm_unpacklo_epi16(v16, v16));
+    let hi = _mm_srai_epi32::<16>(_mm_unpackhi_epi16(v16, v16));
+    core::mem::transmute::<[__m128i; 2], i32x8>([lo, hi])
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "sse2",
+    not(target_feature = "avx2")
+))]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+pub(super) unsafe fn store8s_s1_sse2(slice: &mut [i16], phys_off: usize, v: i32x8) {
+    use core::arch::x86_64::*;
+    let [lo, hi] = core::mem::transmute::<i32x8, [__m128i; 2]>(v);
+    let lo = _mm_srai_epi32::<16>(_mm_slli_epi32::<16>(lo));
+    let hi = _mm_srai_epi32::<16>(_mm_slli_epi32::<16>(hi));
+    let packed = _mm_packs_epi32(lo, hi);
+    _mm_storeu_si128(slice.as_mut_ptr().add(phys_off) as *mut __m128i, packed);
 }
 
 #[cfg(target_arch = "aarch64")]
