@@ -1424,7 +1424,7 @@ mod jpeg_exif {
         }
         let mut encoder = jpeg_encoder::Encoder::new_file(path, 100).unwrap();
         if let Some(data) = app1 {
-            encoder.add_app_segment(1, data).unwrap();
+            encoder.add_app_segment(1, data.to_vec()).unwrap();
         }
         encoder
             .encode(&pixels, 3, 2, jpeg_encoder::ColorType::Rgb)
@@ -1677,7 +1677,7 @@ mod icc_policy {
         let mut app2 = b"ICC_PROFILE\0\x01\x01".to_vec();
         app2.extend_from_slice(PROFILE);
         let mut encoder = jpeg_encoder::Encoder::new_file(path, 90).unwrap();
-        encoder.add_app_segment(2, &app2).unwrap();
+        encoder.add_app_segment(2, app2).unwrap();
         encoder
             .encode(&[128], 1, 1, jpeg_encoder::ColorType::Luma)
             .unwrap();

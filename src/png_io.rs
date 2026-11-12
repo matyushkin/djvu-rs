@@ -51,7 +51,11 @@ pub fn decode_png_to_pixmap_with_policy(
     let (color, depth) = reader.output_color_type();
     let width = info.width;
     let height = info.height;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    // `None` means the decoded frame does not fit the address space (png 0.18).
+    let buf_len = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("{}: PNG image is too large to decode", path.display()))?;
+    let mut buf = vec![0u8; buf_len];
     let frame = reader.next_frame(&mut buf)?;
     buf.truncate(frame.buffer_size());
 
