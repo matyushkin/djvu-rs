@@ -217,7 +217,7 @@ experiment log in [PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md).
 | Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Roadmap | [GitHub milestones](https://github.com/matyushkin/djvu-rs/milestones) |
 
-**MSRV:** Rust 1.88 (edition 2024); the experimental `ocr-onnx` feature needs
+**MSRV:** Rust 1.89 (edition 2024); the experimental `ocr-onnx` feature needs
 1.91.
 
 ## License & specification

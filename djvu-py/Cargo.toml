@@ -2,7 +2,7 @@
 name = "djvu-py"
 version = "0.44.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "Python bindings for djvu-rs — pure-Rust DjVu decoder"
 publish = false

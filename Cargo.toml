@@ -6,7 +6,7 @@ exclude = ["fuzz", "tests/no_std_smoke"]
 name = "djvu-rs"
 version = "0.44.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "Read, render, convert, and create DjVu files. Pure-Rust DjVu decoder/encoder with CLI, WebAssembly, and Python bindings. DjVu to PDF, EPUB, TIFF, PNG, and text. MIT licensed, no GPL dependencies."
 repository = "https://github.com/matyushkin/djvu-rs"
@@ -35,7 +35,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 thiserror = "2"
-wide = "0.7"
+wide = "1.7"
 djvu-zp = { version = "0.44.1", path = "crates/djvu-zp", default-features = false }
 djvu-bzz = { version = "0.44.1", path = "crates/djvu-bzz", default-features = false }
 djvu-iff = { version = "0.44.1", path = "crates/djvu-iff", default-features = false }
@@ -78,7 +78,7 @@ tesseract = { version = "0.15", optional = true }
 dhat = { version = "0.3", optional = true }
 # 0.23 drops `liquid` (and its unmaintained `anymap2`, RUSTSEC-2026-0319).
 # It needs Rust 1.91: the `ocr-onnx` feature alone has that higher MSRV; the
-# crate's default and other features keep MSRV 1.88.
+# crate's default and other features keep MSRV 1.89.
 tract-onnx = { version = "0.23", optional = true }
 # SHA-256 verification of OCR model weights against docs/ocr-model-manifest.toml
 # (#693): unverified weights are never loaded.

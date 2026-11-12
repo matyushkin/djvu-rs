@@ -2,7 +2,7 @@
 name = "djvu-zp"
 version = "0.44.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "ZP adaptive binary arithmetic coder for the DjVu format — pure-Rust clean-room implementation, no_std-capable decoder."
 repository = "https://github.com/matyushkin/djvu-rs"

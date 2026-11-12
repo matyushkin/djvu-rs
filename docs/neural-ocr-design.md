@@ -38,7 +38,7 @@ Kraken/Calamari (handwriting-focused, no ONNX path).
 ### Known compatibility risk — must be spiked before slice 2
 
 The tract precedent above was established on **tract 0.23.4**; this crate is
-capped at **tract-onnx 0.22.x** (0.23 needs Rust 1.91 > MSRV 1.88, see the
+capped at **tract-onnx 0.22.x** (0.23 needs Rust 1.91 > MSRV 1.89, see the
 `Cargo.toml` comment). The 0.22→0.23 changelog shows only LLM-oriented
 operator additions — nothing touching Conv/BatchNorm/GlobalAveragePool — so
 0.22.x is *expected* to run these graphs, but nobody has published proof.
