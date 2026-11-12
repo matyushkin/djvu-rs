@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794515147496,
+  "lastUpdate": 1794517968585,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26476,6 +26476,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 49050000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9703060c2e6496d63d31e45fbaeac0243d53bcff",
+          "message": "ci(publish): decode cargo output as UTF-8 in the license-notices step (#986)\n\n* ci(publish): decode cargo output as UTF-8 in the license-notices step\n\nThe Windows wheel job of the v0.45.0 packaging run failed in\n\"Generate third-party notices\" (run 43296084957):\n\n  UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d\n\nscripts/third_party_notices.py read the output of `cargo about` with the\nlocale code page. On a Windows runner that is cp1252, which has no\ncharacter for byte 0x9d, the last byte of a UTF-8 right double quote. A\nlicense text that came in with the dependency updates since v0.44.1\nholds such a quote. The matrix is fail-fast, so the other wheel jobs\nwere cancelled and nothing reached PyPI or npm.\n\n- the script passes encoding=\"utf-8\" to subprocess.run and to\n  write_text;\n- both \"Generate third-party notices\" steps set PYTHONUTF8=1. The\n  workflow checks out the requested tag, so a rebuild of v0.45.0 runs\n  that tag's copy of the script; the variable fixes it from the workflow\n  side.\n\nPull requests build only the linux-x64-manylinux-pr wheel, so this\nfailure could not show before the release run.\n\n* style: satisfy clippy 1.100 (needless_range_loop, manual_is_multiple_of, type_complexity)\n\nRust 1.100.0 (2026-11-09) widened these lints, and CI on main turned red\non Lint and wasm32. The rewritten loops keep the same results; the\nno_std annotations_shared signature mirrors SharedAnnotations of the std\nbuild, so it gets an allow instead of a new public alias.",
+          "timestamp": "2026-11-12T22:49:27+02:00",
+          "tree_id": "82d905a2ffcb75406d5e411307555ead742d6015",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/9703060c2e6496d63d31e45fbaeac0243d53bcff"
+        },
+        "date": 1794517966140,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 78000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 4563000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30230000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 29920000,
             "range": "± 0",
             "unit": "ns/iter"
           }
