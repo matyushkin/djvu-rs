@@ -2,7 +2,7 @@
 name = "djvu-pixmap"
 version = "0.44.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "RGBA and grayscale pixmap types used by DjVu rendering"
 repository = "https://github.com/matyushkin/djvu-rs"

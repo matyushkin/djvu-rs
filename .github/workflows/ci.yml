@@ -217,21 +217,23 @@ jobs:
 
   # ── MSRV ─────────────────────────────────────────────────────────────────────
   msrv:
-    name: MSRV (1.88)
+    # The job name carries no version: the branch ruleset requires this check
+    # by name, so a versioned name needs a ruleset edit on every MSRV bump.
+    name: MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust 1.88
+      - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: "1.89"
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.88
+          key: msrv-1.89
 
       - name: Build
         run: cargo build

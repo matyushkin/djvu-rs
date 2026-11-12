@@ -190,11 +190,11 @@ Behaviour also changed: the render caches are now bounded by default. See §7.
 
 ## 3. Minimum supported Rust version (MSRV)
 
-- MSRV is **Rust 1.88** (edition 2024; let-chains). It is declared in
-  `rust-version` in every workspace `Cargo.toml`.
+- MSRV is **Rust 1.89** (edition 2024; the `wide` 1.x SIMD dependency needs
+  1.89). It is declared in `rust-version` in every workspace `Cargo.toml`.
 - Raising the MSRV is a **minor** (pre-1.0 breaking) change and is called out in
   the changelog.
-- MSRV is a **required** CI gate (the `MSRV (1.88)` job builds the crate on the
+- MSRV is a **required** CI gate (the `MSRV` job builds the crate on the
   pinned toolchain). A PR that uses a newer-than-MSRV language or std feature
   fails that gate.
 - One exception: the experimental `ocr-onnx` feature needs Rust **1.91**, the
@@ -359,7 +359,7 @@ in three places, and they must not drift:
 |----------------|------|
 | Stable API breakage detection | `cargo-semver-checks` (`.github/workflows/api-stability.yml`) |
 | Feature combinations / targets | feature-matrix job (`api-stability.yml`) + `scripts/check_feature_hygiene.sh` (`Lint`) |
-| MSRV | `MSRV (1.88)` job (required) |
+| MSRV | `MSRV` job (required) |
 | `no_std` builds | `Test (stable)` `Build (no_std check)` + `wasm32 build check` (both required) |
 | Panic-free contract | `tests/panic_free_corpus.rs`, proptests, fuzz/OSS-Fuzz |
 | `Send`/`Sync` contract | `tests/send_sync_contract.rs` |

@@ -14,7 +14,7 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-Rust **1.88** or later is required (uses let-chains from edition 2024).
+Rust **1.89** or later is required (edition 2024; the `wide` SIMD dependency needs 1.89).
 
 ## Before you open a PR
 
