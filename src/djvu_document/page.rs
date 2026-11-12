@@ -663,6 +663,7 @@ impl DjVuPage {
     }
 
     #[cfg(not(feature = "std"))]
+    #[allow(clippy::type_complexity)] // same shape as `SharedAnnotations` in the std build
     pub fn annotations_shared(
         &self,
     ) -> Result<Option<alloc::sync::Arc<(Annotation, Vec<MapArea>)>>, DocError> {
