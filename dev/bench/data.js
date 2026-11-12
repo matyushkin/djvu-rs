@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794467732650,
+  "lastUpdate": 1794489279592,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -25774,6 +25774,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45313000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "620961c5a26c793d19edc0aab0416b2fd7aefaa6",
+          "message": "build(deps)!: bump wide to 1.7 and raise the MSRV to 1.89 (#981)\n\n* build(deps)!: bump wide to 1.7 and raise the MSRV to 1.89\n\nwide 1.x (and every wide release since 0.8.3) declares rust-version 1.89.\nThe project MSRV was 1.88, so the bump needs the MSRV raise.\n\nBREAKING CHANGE: the minimum supported Rust version is now 1.89.\n\nThe CI job is renamed from 'MSRV (1.88)' to 'MSRV': the branch ruleset\nrequires this check by name, and a versioned name needs a ruleset edit on\nevery MSRV bump.\n\n* docs(perf): record the wide 1.7 benchmark (WIDE_1_7_BUMP)\n\n* perf(iw44): explicit SSE2 stride-1 load/store in the inverse wavelet\n\nWith wide 1.7 LLVM built the eight-value loads of the x86-64 baseline path\nfrom scalar movzwl + pinsrw chains, and the PR benchmark showed the IW44\nrender benches 3-5 % slower on the same runner. The stride-1 load and store\nnow use SSE2 intrinsics directly, as the AVX2, NEON and simd128 paths do.\n\ninverse_wavelet_transform_from, x86_64-unknown-linux-gnu, instructions:\n4924 (wide 0.7.33) -> 5121 (wide 1.7.1) -> 4872 (this commit).\n\n* docs(perf): record the x86-64 result of the wide 1.7 bump (WIDE_1_7_BUMP)",
+          "timestamp": "2026-11-12T14:50:01+02:00",
+          "tree_id": "6652caf4a86e7e19f9b3f2a38c08c26967d7db8e",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/620961c5a26c793d19edc0aab0416b2fd7aefaa6"
+        },
+        "date": 1794489277556,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7496000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47211000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45112000,
             "range": "± 0",
             "unit": "ns/iter"
           }
