@@ -35,7 +35,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 thiserror = "2"
-wide = "0.7"
+wide = "1.7"
 djvu-zp = { version = "0.44.1", path = "crates/djvu-zp", default-features = false }
 djvu-bzz = { version = "0.44.1", path = "crates/djvu-bzz", default-features = false }
 djvu-iff = { version = "0.44.1", path = "crates/djvu-iff", default-features = false }
