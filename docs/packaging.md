@@ -168,7 +168,12 @@ as released.
 | Secret / trust | Purpose |
 |----------------|---------|
 | `PYPI_API_TOKEN` or PyPI trusted publishing (`id-token`) | Upload wheels + sdist |
-| `NPM_TOKEN` | `npm publish` |
+| npm trusted publishing (`id-token`, environment `npm`) | `npm publish` |
+
+npm needs no stored token. On npmjs.com, package `djvu-rs` → Settings →
+Trusted publishing lists GitHub Actions with owner `matyushkin`, repository
+`djvu-rs`, workflow file `publish-packages.yml` and environment `npm`. The
+publish job must run on a GitHub-hosted runner with npm 11.5.1 or later.
 
 Until those are configured, tag builds still produce attested artifacts and
 checksums as workflow artifacts for manual verification.
