@@ -17680,7 +17680,7 @@ target for a corpus that changes little between pushes. `fuzz_iw44` stays
 slow (about 4 runs per second): a real fix needs a second target with a
 plane-size cap, next to this one. That is not done here.
 
-### WIDE_1_7_BUMP: `wide` 0.7.33 → 1.7.1 under the IW44 SIMD loops — **Kept, no change on aarch64** (2026-11-11)
+### WIDE_1_7_BUMP: `wide` 0.7.33 → 1.7.1 under the IW44 SIMD loops — **Kept, with an explicit SSE2 load/store on x86-64** (2026-11-12)
 
 **Issue.** Part two of the grouped Dependabot update #974. `wide` supplies
 `i32x8` for the IW44 wavelet and colour loops (`crates/djvu-iw44`). Every
@@ -17688,8 +17688,9 @@ plane-size cap, next to this one. That is not done here.
 MSRV was 1.88.
 
 **Approach.** Bump `wide` to 1.7 in the root manifest and in
-`crates/djvu-iw44`, raise `rust-version` to 1.89 in all nine manifests. No
-source change was needed. Measured on an Apple M1 with the criterion
+`crates/djvu-iw44`, raise `rust-version` to 1.89 in all nine manifests. The
+bump compiles without a source change; the x86-64 section below adds one.
+Measured on an Apple M1 with the criterion
 `codecs` (`iw44` filter) and `render` (`bg_to_rgb_warm`) benches, built
 once per side and run straight from the bench binaries: seven interleaved
 rounds, 1 s warm-up and 3 s measurement per bench. The estimate is the
@@ -17731,6 +17732,54 @@ medians of the seven rounds agree: every bench within ±1.8 %.
 **Reason.** The bump changes nothing measurable on aarch64, so it costs
 only the MSRV raise, and it ends the weekly Dependabot proposal. The job
 name loses its version because the branch ruleset requires the check by
-name: a versioned name needs a ruleset edit on every MSRV bump. This entry
-covers aarch64 only. On x86-64 the PR's `Benchmark` check is the
-measurement; it compares against the merge base on the same runner.
+name: a versioned name needs a ruleset edit on every MSRV bump.
+
+**x86-64 (2026-11-12).** The bump alone was slower on the x86-64 baseline
+build (SSE2, no AVX2). The `Benchmark` check of #981 re-checked two rows
+against the merge base on the same runner (AMD EPYC 7763, fastest of three
+alternating rounds):
+
+| bench | `wide` 0.7.33 | `wide` 1.7.1 | delta |
+|---|---:|---:|---:|
+| `iw44_to_rgb_large_page` | 11.99 ms | 12.57 ms | +4.9 % |
+| `iw44_gray_decode_large/gray_direct` | 3.82 ms | 3.95 ms | +3.3 % |
+
+The head was slower in each of the three rounds. The check passed, because
+both rows are under its 5 % threshold.
+
+`wide` itself is not the cause: `i32x8` is `{a: i32x4, b: i32x4}` in both
+versions and the array conversions are plain transmutes. The machine code of
+one function changes, `inverse_wavelet_transform_from` (cross-compiled to
+`x86_64-unknown-linux-gnu`, `--emit asm`): 4924 → 5121 instructions. LLVM
+builds the eight-value loads differently: `pinsrw` 0 → 30, `movzwl`
+150 → 262, `movdqu` 45 → 25. The generic path leaves that form to LLVM,
+because it writes `i32x8::from([a[0] as i32, …])` over scalar loads.
+
+Fix in the same PR: `load8s_s1_sse2` / `store8s_s1_sse2` in
+`crates/djvu-iw44/src/wavelet.rs` write the stride-1 load and store with
+SSE2 intrinsics (`punpck{l,h}wd` + `psrad` to widen, `pslld` + `psrad` +
+`packssdw` to narrow), as the AVX2, NEON and simd128 paths already do. The
+function is then 4872 instructions with no `pinsrw`. The strided and
+row-gather loads keep the generic form.
+
+Two `Benchmark` runs with the fix, each one full same-runner pass against
+the merge base (AMD EPYC 9V74, one round per side):
+
+| bench | run 1 | run 2 |
+|---|---:|---:|
+| `iw44_to_rgb_large_page` | −5.3 % | +2.6 % |
+| `iw44_gray_decode_large/gray_direct` | +3.3 % | +1.1 % |
+| `iw44_gray_decode_large/gray_direct_sub4` | +4.4 % | +1.0 % |
+| `iw44_to_rgb_colorbook/sub1_full_decode` | +2.1 % | +2.3 % |
+
+Benches that the change does not touch moved between −4.7 % and +3.8 % in
+run 1 and between −4.4 % and +4.0 % in run 2 (one noise outlier of +22 %
+was cleared by the three-round re-check). So a single pass resolves about
+±4 %. With the fix no slowdown is confirmed; a residual of 1–2 % on the
+IW44 render rows is neither shown nor excluded by these runs. The x86-64
+test suite passes with the SSE2 path (1436 tests, `x86_64-apple-darwin`
+under Rosetta).
+
+**Not done.** An explicit SSE2 form for the strided (`s > 1`) and row-gather
+loads (`load_rows8` / `store_rows8`). A measurement of it needs more than
+one round per side.
