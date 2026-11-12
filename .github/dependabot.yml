@@ -21,10 +21,13 @@ updates:
       # A pyo3 0.30 requirement makes the whole workspace unresolvable, so the
       # grouped PR fails every check and the Dependabot run itself fails (#974).
       # Remove this rule when pythonize supports the next pyo3 line.
+      #
+      # The rule names a version range, not `update-types`. Cargo.lock is not
+      # tracked, so Dependabot knows no current pyo3 version, and it applies
+      # `update-types` only relative to a current version: that form was
+      # accepted and then ignored (#977, #980).
       - dependency-name: "pyo3*"
-        update-types:
-          - "version-update:semver-major"
-          - "version-update:semver-minor"
+        versions: [">= 0.30.0"]
     commit-message:
       prefix: "chore(deps)"
 
