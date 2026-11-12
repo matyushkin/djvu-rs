@@ -135,6 +135,8 @@ jobs:
       # License texts of the crates linked into the extension (#949); listed in
       # pyproject `license-files`, so the sdist and every wheel carry it.
       - name: Generate third-party notices
+        env:
+          PYTHONUTF8: '1'  # see the wheel job below
         run: python scripts/third_party_notices.py py --out djvu-py/THIRD_PARTY_NOTICES
 
       - name: Build sdist
@@ -276,6 +278,12 @@ jobs:
       - name: Generate third-party notices
         if: steps.gate.outputs.run == 'true'
         shell: bash
+        # UTF-8 mode: the script reads cargo's UTF-8 output through a pipe, and
+        # Python on a Windows runner decodes pipes as cp1252 by default. The
+        # script sets the encoding itself now; this variable also covers a
+        # rebuild of an older tag, whose copy of the script does not.
+        env:
+          PYTHONUTF8: '1'
         run: |
           cp LICENSE djvu-py/LICENSE
           python scripts/third_party_notices.py py --out djvu-py/THIRD_PARTY_NOTICES

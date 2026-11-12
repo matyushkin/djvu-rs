@@ -70,7 +70,12 @@ dependency graph of this build: {targets}, features "{features}".
 
 
 def run(cmd):
-    return subprocess.run(cmd, cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    # cargo writes UTF-8. Without an explicit encoding Python decodes the pipe
+    # with the locale code page (cp1252 on Windows runners) and fails on the
+    # first license text that holds a typographic quote.
+    return subprocess.run(
+        cmd, cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout
 
 
 def target_args(targets):
@@ -141,7 +146,7 @@ def main():
         lines.append("")
         lines.append(text)
         lines.append("")
-    args.out.write_text("\n".join(lines))
+    args.out.write_text("\n".join(lines), encoding="utf-8")
     print(f"third_party_notices: {len(crates)} crates, {len(sections)} license texts -> {args.out}")
 
 
