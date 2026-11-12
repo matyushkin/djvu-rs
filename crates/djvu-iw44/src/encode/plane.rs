@@ -534,12 +534,7 @@ impl PlaneEncoder {
             } else {
                 0
             };
-            let mut np: usize = 0;
-            for k in 0..16 {
-                if self.coeffstate[boff][k] == UNK {
-                    np += 1;
-                }
-            }
+            let mut np: usize = self.coeffstate[boff].iter().filter(|&&s| s == UNK).count();
             for k in 0..16 {
                 if self.coeffstate[boff][k] == UNK {
                     let ip = np.min(7);
@@ -644,8 +639,8 @@ impl PlaneEncoder {
     pub(super) fn finish_slice(&mut self) {
         self.quant_hi[self.curband] >>= 1;
         if self.curband == 0 {
-            for i in 0..16 {
-                self.quant_lo[i] >>= 1;
+            for q in self.quant_lo.iter_mut() {
+                *q >>= 1;
             }
         }
         self.curband += 1;

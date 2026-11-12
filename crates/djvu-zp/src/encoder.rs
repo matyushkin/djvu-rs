@@ -715,7 +715,7 @@ mod tests {
             let (mut new_ctx, mut old_ctx) = ([0u8; 4], [0u8; 4]);
             for _ in 0..len {
                 let r = next();
-                let bit = (r >> 8) as u32 % skew == 0;
+                let bit = ((r >> 8) as u32).is_multiple_of(skew);
                 match r % 16 {
                     0 => {
                         new.encode_passthrough(bit);

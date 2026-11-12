@@ -557,12 +557,10 @@ impl PlaneDecoder {
                 } else {
                     0
                 };
-                let mut np: usize = 0;
-                for j in 0..16 {
-                    if (self.coeffstate[boff][j] & UNK) != 0 {
-                        np += 1;
-                    }
-                }
+                let mut np: usize = self.coeffstate[boff]
+                    .iter()
+                    .filter(|&&s| (s & UNK) != 0)
+                    .count();
                 for j in 0..16 {
                     if (self.coeffstate[boff][j] & UNK) != 0 {
                         let ip = np.min(7);
@@ -750,8 +748,8 @@ impl PlaneDecoder {
     pub(super) fn finish_slice(&mut self) {
         self.quant_hi[self.curband] >>= 1;
         if self.curband == 0 {
-            for i in 0..16 {
-                self.quant_lo[i] >>= 1;
+            for q in self.quant_lo.iter_mut() {
+                *q >>= 1;
             }
         }
         self.curband += 1;
