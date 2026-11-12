@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0](https://github.com/matyushkin/djvu-rs/compare/v0.44.1...v0.45.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** the minimum supported Rust version is now 1.89.
+
+### Build System
+
+* **deps:** bump wide to 1.7 and raise the MSRV to 1.89 ([#981](https://github.com/matyushkin/djvu-rs/issues/981)) ([620961c](https://github.com/matyushkin/djvu-rs/commit/620961c5a26c793d19edc0aab0416b2fd7aefaa6))
+
 ## [0.44.1](https://github.com/matyushkin/djvu-rs/compare/v0.44.0...v0.44.1) (2026-11-10)
 
 
