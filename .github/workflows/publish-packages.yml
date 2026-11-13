@@ -26,6 +26,9 @@ on:
       - 'docs/packaging.md'
       - '.github/workflows/publish-packages.yml'
       - 'Cargo.toml'
+      # A dependency bump changes the license texts that the notices step
+      # reads; v0.45.0 broke there on Windows only (#986).
+      - 'Cargo.lock'
       - 'Makefile'
 
 # Read-only token by default; jobs that need more widen it themselves (#961).
@@ -215,7 +218,9 @@ jobs:
             os: windows-latest
             target: x64
             manylinux: ''
-            when: release
+            # Also on pull requests: Windows is the one platform whose default
+            # text encoding is not UTF-8, so it fails where Linux passes (#986).
+            when: always
     steps:
       - name: Decide whether to run
         id: gate
@@ -223,7 +228,9 @@ jobs:
         run: |
           full="${{ needs.resolve.outputs.full_matrix }}"
           when="${{ matrix.when }}"
-          if [ "$full" = "true" ] && [ "$when" = "release" ]; then
+          if [ "$when" = "always" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$full" = "true" ] && [ "$when" = "release" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [ "$full" != "true" ] && [ "$when" = "pr" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
