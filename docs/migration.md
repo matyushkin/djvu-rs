@@ -1,0 +1,440 @@
+# Migration guide
+
+This guide is for a crate that depends on djvu-rs 0.30 or later and moves to
+a newer release. It lists the breaking changes of each release, with the code
+before and after.
+
+djvu-rs is at `0.x`. Cargo treats each `0.x` minor as its own compatibility
+line: a requirement of `djvu-rs = "0.33"` never selects 0.34. Fixes, security
+fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
+
+## How to read it
+
+1. Find the release you depend on.
+2. Read every section for a later release, oldest first. A release without a
+   section has no breaking change.
+3. Read [Fixes that change results](#fixes-that-change-results). These are
+   bug fixes, so the changelog does not mark them as breaking, but your
+   output can change.
+
+| Release | It concerns code that |
+|---------|-----------------------|
+| [0.31.0](#0310) | matches on `djvu_encode::EncodeError` |
+| [0.32.0](#0320) | matches on any djvu-rs error enum without a `_` arm |
+| [0.33.0](#0330) | stores the reference returned by `DjVuPage::decoded_bg44`, `decoded_mask` or `decoded_fg44` |
+| [0.34.0](#0340) | builds optimizer types with struct literals, or matches on `RewriteAction` |
+| [0.36.0](#0360) | builds `MapArea` or `Annotation` with struct literals, or uses `Border::style` |
+| [0.38.0](#0380) | renders pages that carry a rotation, uses `render_into` or `render_region`, writes metadata, exports PDF, or matches on `DjvmError` |
+| [0.45.0](#0450) | builds with Rust older than 1.89 |
+
+The calls below did not change between 0.30 and 0.45. Code that uses nothing
+else compiles after the version bump alone:
+
+- `DjVuDocument::parse`, `parse_from_dir`, `page_count`, `page`, `bookmarks`,
+  `metadata`, `component_directory`;
+- `DjVuPage::width`, `height`, `dpi`, `rotation`, `text_layer`;
+- `TextLayer::transform` and the `TextLayer`, `TextZone`, `TextZoneKind` and
+  `text::Rect` types;
+- `djvu_render::render_pixmap` and `RenderOptions::fit_to_box` (the result
+  on a rotated page changed in [0.38.0](#0380));
+- `DocumentEditor::apply` with `EditRequest` and `EditOperation::SetBookmarks`;
+- the legacy `Document::open` and `Document::bookmarks`.
+
+The three crates that depended on djvu-rs on crates.io in November 2026 use
+exactly these calls. Each of them compiled against 0.45.0 with only the
+version requirement changed
+([#992](https://github.com/matyushkin/djvu-rs/issues/992)).
+
+## 0.31.0
+
+`djvu_encode::EncodeError` is `#[non_exhaustive]` and has a new variant,
+`PageSource`. A `match` on it needs a `_` arm.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::djvu_encode::EncodeError;
+
+fn describe(error: &EncodeError) -> &'static str {
+    match error {
+        EncodeError::Unsupported(_) => "this input is not supported",
+    }
+}
+```
+
+After:
+
+```rust
+use djvu_rs::djvu_encode::EncodeError;
+
+fn describe(error: &EncodeError) -> &'static str {
+    match error {
+        EncodeError::Unsupported(_) => "this input is not supported",
+        EncodeError::PageSource(_) => "the page source failed",
+        _ => "another encode error",
+    }
+}
+```
+
+## 0.32.0
+
+Every public error enum is `#[non_exhaustive]`: `DocError`, `RenderError`,
+`DjvmError`, `MutError`, `EditError`, `MetadataError` and the others. A
+`match` that lists every variant needs a `_` arm. The variant names, their
+data and the error messages did not change.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::metadata::MetadataError;
+
+fn describe(error: &MetadataError) -> &'static str {
+    match error {
+        MetadataError::InvalidUtf8 => "the metadata is not valid UTF-8",
+    }
+}
+```
+
+After:
+
+```rust
+use djvu_rs::metadata::MetadataError;
+
+fn describe(error: &MetadataError) -> &'static str {
+    match error {
+        MetadataError::InvalidUtf8 => "the metadata is not valid UTF-8",
+        _ => "another metadata error",
+    }
+}
+```
+
+## 0.33.0
+
+`DjVuPage::decoded_bg44`, `decoded_bg44_partial`, `decoded_mask` and
+`decoded_fg44` return `Option<Arc<T>>`. Before, they returned `Option<&T>`.
+A call that only reads through the value compiles unchanged, because
+`Arc<T>` dereferences to `T`. Only code that names the reference type has to
+change.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::{Bitmap, DjVuPage};
+
+fn mask(page: &DjVuPage) -> Option<&Bitmap> {
+    page.decoded_mask()
+}
+```
+
+After:
+
+```rust
+use std::sync::Arc;
+
+use djvu_rs::{Bitmap, DjVuPage};
+
+fn mask(page: &DjVuPage) -> Option<Arc<Bitmap>> {
+    page.decoded_mask()
+}
+
+// Reading through the value needs no change.
+fn mask_width(page: &DjVuPage) -> Option<u32> {
+    page.decoded_mask().map(|mask| mask.width)
+}
+```
+
+## 0.34.0
+
+The optimizer types `OptimizationRequest`, `RewriteAction`,
+`RewrittenComponent`, `OptimizationPlan` and `OptimizationReport` are
+`#[non_exhaustive]`:
+
+- Build an `OptimizationRequest` with its constructors, not with a struct
+  literal.
+- Give a `match` on `RewriteAction` a `_` arm. The enum has two new
+  variants, `ReencodeBackground` and `ReencodeMask`.
+- `RewrittenComponent` no longer implements `Eq`. It still implements
+  `PartialEq`.
+- The JSON report has a new `"quality"` field per component and a new
+  `"min_ssim"` field at the top level.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::optimizer::{OptimizationPreset, OptimizationRequest};
+
+fn request() -> OptimizationRequest {
+    OptimizationRequest {
+        preset: OptimizationPreset::LosslessCleanup,
+        target_size: Some(1_000_000),
+        max_ssim_loss: None,
+    }
+}
+```
+
+After:
+
+```rust
+use djvu_rs::optimizer::{OptimizationRequest, RewriteAction};
+
+fn request() -> OptimizationRequest {
+    OptimizationRequest::lossless_cleanup().with_target_size(1_000_000)
+}
+
+fn describe(action: RewriteAction) -> &'static str {
+    match action {
+        RewriteAction::RemoveFreeChunk => "removes a padding chunk",
+        RewriteAction::ReencodeBackground => "re-encodes the background",
+        RewriteAction::ReencodeMask => "re-encodes the mask",
+        _ => "another rewrite",
+    }
+}
+```
+
+## 0.36.0
+
+`MapArea` has two new public fields, `target` and `extra`. `Annotation` has
+one new public field, `extra`. A struct literal must set them.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::annotation::{MapArea, Rect, Shape};
+
+fn link() -> MapArea {
+    MapArea {
+        url: "#12".to_string(),
+        description: String::new(),
+        shape: Shape::Rect(Rect { x: 10, y: 10, width: 200, height: 40 }),
+        border: None,
+        highlight: None,
+    }
+}
+```
+
+After:
+
+```rust
+use djvu_rs::annotation::{Annotation, MapArea, Rect, Shape};
+
+fn link() -> MapArea {
+    MapArea {
+        url: "#12".to_string(),
+        target: None,
+        description: String::new(),
+        shape: Shape::Rect(Rect { x: 10, y: 10, width: 200, height: 40 }),
+        border: None,
+        highlight: None,
+        extra: Vec::new(),
+    }
+}
+
+// `Annotation` implements `Default`; use it for the fields you do not set.
+fn zoomed() -> Annotation {
+    Annotation { zoom: Some(100), ..Annotation::default() }
+}
+```
+
+`Border::style` now holds the whole DjVuLibre border option without its
+parentheses. This compiles unchanged, so check each place that reads or
+writes the field:
+
+| Border in the file | `style` before 0.36.0 | `style` from 0.36.0 |
+|--------------------|-----------------------|---------------------|
+| `(border #FF0000)` | `#FF0000` | `border #FF0000` |
+| `(xor)` | no border was read | `xor` |
+| `(shadow_in 4)` | no border was read | `shadow_in 4` |
+
+```rust
+use djvu_rs::annotation::Border;
+
+fn red_border() -> Border {
+    // Before 0.36.0 this was `style: "#FF0000"`.
+    Border { style: "border #FF0000".to_string() }
+}
+```
+
+## 0.38.0
+
+This release made a rotated page behave in one way everywhere. A page is
+rotated when its `INFO` chunk carries a rotation, which
+`DjVuPage::rotation` returns. If none of your documents has such a page,
+only the metadata, `DjvmError` and PDF items below concern you.
+
+### Fitted render size on a rotated page
+
+On a page with a rotation of 90° or 270°, `RenderOptions::fit_to_width`,
+`fit_to_height` and `fit_to_box` now fit the page as the reader sees it,
+after the rotation. The `width` and `height` fields of the returned options
+hold the size before the rotation, so their sides are swapped against the
+output. Take the output size from the pixmap.
+
+A page of 192 × 256 pixels with a 90° rotation, fitted into a box of
+300 × 300, gives a pixmap of 225 × 300 before 0.38.0 and of 300 × 225 from
+0.38.0.
+
+```rust
+use djvu_rs::DjVuPage;
+use djvu_rs::djvu_render::{RenderError, RenderOptions, render_pixmap};
+
+fn thumbnail_size(page: &DjVuPage) -> Result<(u32, u32), RenderError> {
+    let options = RenderOptions::fit_to_box(page, 300, 300);
+    let pixmap = render_pixmap(page, &options)?;
+    // Not `(options.width, options.height)`: on a page with a 90° or 270°
+    // rotation these two are swapped against the pixmap.
+    Ok((pixmap.width, pixmap.height))
+}
+```
+
+The same release changed these sizes for the same pages:
+
+- `Page::size_at_dpi` (legacy API) and the WebAssembly `width_at` and
+  `height_at` return the size after the rotation.
+- A PDF page of a rotated DjVu page carries `/Rotate`.
+- The `image` crate decoder `DjVuDecoder` decodes the page after the
+  rotation. Its default size and `with_size` are sizes after the rotation.
+
+### `render_into` refuses options that need the whole page
+
+`render_into`, `render_into_with_limits` and `DjVuPage::render_into` return
+`RenderError::UnsupportedOption` for anti-aliasing, for Lanczos-3 at a scaled
+size, and for a rotation. Before, they ignored these options and wrote a
+buffer without them. `RenderOptions::can_stream` tells in advance.
+
+```rust
+use djvu_rs::DjVuPage;
+use djvu_rs::djvu_render::{RenderError, RenderOptions, render_into, render_pixmap};
+
+fn rgba(page: &DjVuPage, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
+    if options.can_stream(page) {
+        let mut buffer = vec![0; options.width as usize * options.height as usize * 4];
+        render_into(page, options, &mut buffer)?;
+        Ok(buffer)
+    } else {
+        // The pixmap can have another size than `options` asks for:
+        // anti-aliasing halves it and a 90° rotation swaps its sides.
+        Ok(render_pixmap(page, options)?.data)
+    }
+}
+```
+
+### Page regions
+
+- `djvu_render::render_region` with `RenderOptions::aa` returns a crop of
+  the anti-aliased page. That page is `width / 2 × height / 2`, and the
+  region addresses it. Before, the function returned a crop of the full-size
+  page without anti-aliasing.
+- On a rotated page, the `x`, `y`, `w` and `h` arguments of the legacy
+  `Page::render_region` (and of the Python `Page.render_region`) address the
+  page after the rotation. Before, they addressed the page before the
+  rotation.
+
+A region of `RenderRequest` always addresses the page as `render_pixmap`
+returns it, so it needs no special case:
+
+```rust
+use djvu_rs::{DjVuPage, Pixmap};
+use djvu_rs::djvu_render::{RenderError, RenderOptions, RenderRect, RenderRequest};
+
+fn top_left_tile(page: &DjVuPage, options: RenderOptions) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(options)
+        .region(RenderRect { x: 0, y: 0, width: 256, height: 256 })
+        .pixmap(page)
+}
+```
+
+Anti-aliasing also halves progressive frames, `ProgressiveDecoder` frames
+and the output of `render_coarse`. `render_coarse` applies Lanczos-3.
+
+### Metadata setters return a `Result`
+
+`DjVuDocumentMut::set_metadata` and `remove_metadata`, and the same two
+methods of `PageMut`, return `Result<(), MutError>`. Before, they returned
+nothing. They fail when the existing annotation chunk cannot be parsed
+(`MutError::Annotation`), for an indirect multi-file document, and for a
+legacy single-image file. A call that ignores the result still compiles,
+with an `unused_must_use` warning, and loses the error.
+
+```rust
+use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
+use djvu_rs::metadata::DjVuMetadata;
+
+fn set_title(bytes: &[u8], title: &str) -> Result<Vec<u8>, MutError> {
+    let mut document = DjVuDocumentMut::from_bytes(bytes)?;
+    let metadata = DjVuMetadata {
+        title: Some(title.to_string()),
+        ..DjVuMetadata::default()
+    };
+    // Before 0.38.0: `document.set_metadata(&metadata);`
+    document.set_metadata(&metadata)?;
+    Ok(document.into_bytes())
+}
+```
+
+### `DjvmError::ComponentDescriptorCountMismatch` is removed
+
+No writer can produce this error any more. Delete the `match` arm that
+names it.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::djvm::DjvmError;
+
+fn is_caller_mistake(error: &DjvmError) -> bool {
+    matches!(
+        error,
+        DjvmError::EmptyMerge | DjvmError::ComponentDescriptorCountMismatch { .. }
+    )
+}
+```
+
+After:
+
+```rust
+use djvu_rs::djvm::DjvmError;
+
+fn is_caller_mistake(error: &DjvmError) -> bool {
+    matches!(error, DjvmError::EmptyMerge)
+}
+```
+
+`DjvmStreamWriter::add_component` now ignores the name bit (`0x80`) and the
+title bit (`0x40`) of the component flags, and writes an unknown component
+type as a shared component.
+
+### PDF export fails on a page that cannot be rendered
+
+`djvu_to_pdf` and the other PDF export functions return an error for a
+document with a page that cannot be rendered. Before, they wrote a blank
+page in its place and returned `Ok`. If a partial PDF is what you want,
+export the good pages yourself.
+
+## 0.45.0
+
+The minimum supported Rust version is 1.89. Before, it was 1.88. Build with
+Rust 1.89 or newer. If your crate declares `rust-version`, raise it to at
+least `1.89`.
+
+## Fixes that change results
+
+These releases have no breaking change in the API. They fix decoding
+errors, so the same file can give another result. Update stored reference
+images, hashes and expected texts after the upgrade.
+
+| Release | What changed | Who sees it |
+|---------|--------------|-------------|
+| 0.35.1 | Background and foreground images decode as in DjVuLibre: half-resolution chroma, small images, the scaling of a low-resolution background. | Pixel values of some rendered pages. In a thumbnail render of the test corpus of this repository, 2 files of 54. |
+| 0.35.2 | `TextZone::text` of a zone that follows another zone on the same level is correct. Before, such zones had the wrong text or none, mostly in files written by DjVuLibre. | Code that reads `TextZone::text`. In the test corpus, 723 pages in 14 files of 54. `TextLayer::text` and the zone rectangles of these files did not change. |
+| 0.35.2 | The text layer encoder writes version 1, which DjVuLibre accepts. Files that an older djvu-rs wrote carry version 0 and the old zone offsets. | Save the text layer again to repair such a file. |
+| 0.35.2 | `DjVuDocument::metadata` also reads the shared annotation of a multi-page file, where DjVuLibre stores the metadata. | A file that gave `Ok(None)` can now give `Ok(Some(_))`. |
+
+## Keeping this guide current
+
+A change that breaks the API adds a section here in the same pull request,
+under the release it will ship in: the next minor while the crate is `0.x`.
+The test `tests/migration_sync.rs` fails when `CHANGELOG.md` lists breaking
+changes for a release that has no section here, so a release cannot ship
+without one. Every `rust` code block in this file is compiled as a doctest:
+a block marked `compile_fail` must fail to build, every other block must
+build.

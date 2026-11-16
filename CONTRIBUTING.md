@@ -100,6 +100,10 @@ Common types and their effect on versioning:
 | `chore` | — (no entry) | none |
 | `feat!` or `BREAKING CHANGE:` footer | — | major (minor while `0.x`) |
 
+A breaking change also needs a section in
+[`docs/migration.md`](docs/migration.md) in the same PR; see the last
+section of that file.
+
 Examples:
 
 ```

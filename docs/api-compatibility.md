@@ -127,6 +127,12 @@ then checks the PR as the breaking bump it will produce (`0.Y` on 0.x) and
 still fails on any break the PR does not declare. The version itself is never
 bumped by hand.
 
+A PR that declares a break also adds a section to
+[`docs/migration.md`](migration.md), under the release it will ship in, with
+the code before and after. `tests/migration_sync.rs` fails when
+`CHANGELOG.md` lists breaking changes for a release that has no section
+there, so the release PR stays red until the section exists.
+
 ### Intentional breaks, by release
 
 #### 0.34.0 — the optimizer's request and report types became extensible

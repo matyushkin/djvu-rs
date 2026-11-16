@@ -85,6 +85,12 @@ pub struct ReadmeDoctests;
 #[doc = include_str!("../docs/guide.md")]
 pub struct GuideDoctests;
 
+// `docs/migration.md` shows the code before and after each breaking change.
+// Its examples use only the default `std` surface.
+#[cfg(all(doctest, feature = "std"))]
+#[doc = include_str!("../docs/migration.md")]
+pub struct MigrationDoctests;
+
 // ---- Phase-1 modules -------------------------------------------------------
 //
 // Clean-room implementations written from the DjVu spec.
