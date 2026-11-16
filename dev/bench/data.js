@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794517968585,
+  "lastUpdate": 1794867780879,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26524,6 +26524,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 29920000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ad7bfedc69a933ca9c011dd1cdae14c9ba336028",
+          "message": "docs(migration): add an upgrade guide for 0.30 to 0.45 and a changelog roll call (#995)\n\nThree crates on crates.io depend on djvu-rs 0.30, 0.33 and 0.41 while the\ncurrent release is 0.45. Until now the only upgrade path was to read twelve\nchangelog entries (#992).\n\n- docs/migration.md: the breaking changes of every release from 0.31.0 to\n  0.45.0, each with the code before and after, and a table of the 0.35.x\n  bug fixes that change results without breaking the API.\n- src/lib.rs: compile the guide's examples as doctests. A block with old\n  code is marked compile_fail, so the build proves it no longer compiles.\n- tests/migration_sync.rs: fail when CHANGELOG.md lists breaking changes\n  for a release that has no section in the guide.\n- README.md, CONTRIBUTING.md, docs/api-compatibility.md: link the guide and\n  state the rule.\n\nEach old-code block was also built against the last release before its\nchange (passes) and against the release that made the change (fails with\nthe error the guide describes).",
+          "timestamp": "2026-11-17T00:00:47+02:00",
+          "tree_id": "731ee153243fb935276b1cdb1be9a5714ae46049",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/ad7bfedc69a933ca9c011dd1cdae14c9ba336028"
+        },
+        "date": 1794867779485,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 101000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 5225000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 31820000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 30230000,
             "range": "± 0",
             "unit": "ns/iter"
           }
