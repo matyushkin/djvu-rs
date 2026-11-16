@@ -259,9 +259,10 @@ every `djvu_render::*` entry point, and the standalone codec entry points.
   public decode/render entry point across the whole corpus and a set of
   adversarial byte patterns on every PR; any unwind fails the run.
 - `tests/proptest_codecs.rs` — property tests over the codec surface.
-- `fuzz/fuzz_targets/*` (libFuzzer) + OSS-Fuzz — continuous adversarial
-  coverage of IFF/BZZ/JB2/IW44/G4, encode, metadata, validate, and the full
-  parse→render pipeline (`fuzz_full`).
+- `fuzz/fuzz_targets/*` (libFuzzer, run by the `fuzz.yml` workflow) —
+  adversarial coverage of IFF/BZZ/JB2/IW44/G4, encode, metadata, validate,
+  and the full parse→render pipeline (`fuzz_full`). OSS-Fuzz is not live yet:
+  [`oss-fuzz/README.md`](../oss-fuzz/README.md) tracks the submission.
 
 The FFI/WASM boundaries additionally catch unwinds and convert them to error
 codes, so a hostile file can never unwind across the language boundary.
@@ -361,7 +362,7 @@ in three places, and they must not drift:
 | Feature combinations / targets | feature-matrix job (`api-stability.yml`) + `scripts/check_feature_hygiene.sh` (`Lint`) |
 | MSRV | `MSRV` job (required) |
 | `no_std` builds | `Test (stable)` `Build (no_std check)` + `wasm32 build check` (both required) |
-| Panic-free contract | `tests/panic_free_corpus.rs`, proptests, fuzz/OSS-Fuzz |
+| Panic-free contract | `tests/panic_free_corpus.rs`, proptests, `fuzz.yml` (libFuzzer) |
 | `Send`/`Sync` contract | `tests/send_sync_contract.rs` |
 | Resource limits | codec unit tests + fuzz; ceilings documented here and in `SECURITY.md` |
 

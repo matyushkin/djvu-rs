@@ -8,6 +8,7 @@ sanitizers:
   - address
   # MemorySanitizer is not yet supported for Rust by cargo-fuzz; revisit later.
 fuzzing_engines:
+  # libfuzzer only: with the current build.sh an afl build fails at link
+  # time (undefined __afl_* symbols, checked 2026-11-16).
   - libfuzzer
-  - afl
 file_github_issue: true
