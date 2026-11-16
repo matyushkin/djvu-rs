@@ -213,6 +213,7 @@ experiment log in [PERF_EXPERIMENTS.md](PERF_EXPERIMENTS.md).
 | CLI reference | [`docs/cli.md`](docs/cli.md) |
 | Chunk-level format coverage, `no_std` codec crates | [`docs/format-coverage.md`](docs/format-coverage.md) |
 | API stability, SemVer, thread-safety, panic-freedom | [`docs/api-compatibility.md`](docs/api-compatibility.md) |
+| Upgrading from an older release: breaking changes with code before and after | [`docs/migration.md`](docs/migration.md) |
 | Untrusted input and resource limits | [`SECURITY.md`](SECURITY.md) |
 | Contributing | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Roadmap | [GitHub milestones](https://github.com/matyushkin/djvu-rs/milestones) |
