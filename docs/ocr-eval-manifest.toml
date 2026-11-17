@@ -1,0 +1,246 @@
+# OCR real-scan evaluation set (#989).
+#
+# Real scanned pages with proofread text, used to measure the OCR backends
+# (`ocr-onnx`, `ocr-tesseract`) on the kind of input the crate is made for.
+# The protocol and the results are in `docs/ocr-model-metrics.md`.
+#
+# Nothing listed here is committed to this repository. Fetch the set
+# explicitly with `scripts/fetch_ocr_eval_set.sh` (default destination:
+# `models/ocr-eval/`, gitignored and excluded from the published crate).
+# The measurement (`tests/ocr_real_scans.rs`) refuses any file whose byte
+# size or SHA-256 does not match its entry here.
+#
+# [[scan]] — one DjVu file from Wikimedia Commons, public domain:
+#   name           — stable key
+#   file           — local file name
+#   url            — direct download URL of the current file version
+#   size, sha256   — exact byte size and lowercase hex SHA-256
+#   script         — "cyrillic" or "latin"; the results are pooled by script
+#   tesseract_lang — language passed to Tesseract for this scan
+#   work           — author, title, year of the printed edition
+#   license        — "PD": published before 1928, public domain
+#   source         — the Commons description page with the license statement
+#
+# [[page]] — the reference text of one page: the wikitext of a validated
+# Wikisource page (proofread by two people), pinned to one revision:
+#   scan           — the `name` of the [[scan]] it belongs to
+#   page           — 1-based page number in the DjVu file
+#   file           — local file name
+#   url            — raw wikitext of the pinned revision (`oldid`)
+#   size, sha256   — exact byte size and lowercase hex SHA-256
+# Wikisource text is CC BY-SA; that is why it is fetched and not committed.
+#
+# Page choice, fixed before any OCR run: per scan, take the validated pages
+# whose wikitext is at least 0.6 of the scan's median size, in page order,
+# and pick the pages at positions 0.1, 0.3, 0.5, 0.7 and 0.9 of that list.
+#
+# If Commons replaces a file, its `url` serves new bytes and the checksum
+# fails. The old version stays available under `/commons/archive/`.
+
+[[scan]]
+name = "bulgakov-rasskazy-1926"
+file = "bulgakov-rasskazy-1926.djvu"
+url = "https://upload.wikimedia.org/wikipedia/commons/f/f0/%D0%A0%D0%B0%D1%81%D1%81%D0%BA%D0%B0%D0%B7%D1%8B_%28%D0%91%D1%83%D0%BB%D0%B3%D0%B0%D0%BA%D0%BE%D0%B2%2C_1926%29.djvu"
+size = 1553555
+sha256 = "7b8403b93a9f45fed6d5ab90ee0b126b356957cfde3e9240f6b16c2137b7808f"
+script = "cyrillic"
+tesseract_lang = "rus"
+work = "M. Bulgakov, Rasskazy, 1926"
+license = "PD"
+source = "https://commons.wikimedia.org/wiki/File:%D0%A0%D0%B0%D1%81%D1%81%D0%BA%D0%B0%D0%B7%D1%8B_(%D0%91%D1%83%D0%BB%D0%B3%D0%B0%D0%BA%D0%BE%D0%B2,_1926).djvu"
+
+[[scan]]
+name = "bulgakov-diavoliada-1925"
+file = "bulgakov-diavoliada-1925.djvu"
+url = "https://upload.wikimedia.org/wikipedia/commons/e/eb/%D0%94%D1%8C%D1%8F%D0%B2%D0%BE%D0%BB%D0%B8%D0%B0%D0%B4%D0%B0_%28%D0%9C._%D0%91%D1%83%D0%BB%D0%B3%D0%B0%D0%BA%D0%BE%D0%B2%2C_1925%29.djvu"
+size = 13677367
+sha256 = "2e3347822df6c0e19268701327fa95b91d398dadf976a9d86b19c09d4a8a8fa9"
+script = "cyrillic"
+tesseract_lang = "rus"
+work = "M. Bulgakov, Diavoliada, 1925"
+license = "PD"
+source = "https://commons.wikimedia.org/wiki/File:%D0%94%D1%8C%D1%8F%D0%B2%D0%BE%D0%BB%D0%B8%D0%B0%D0%B4%D0%B0_(%D0%9C._%D0%91%D1%83%D0%BB%D0%B3%D0%B0%D0%BA%D0%BE%D0%B2,_1925).djvu"
+
+[[scan]]
+name = "twain-stormfield-1909"
+file = "twain-stormfield-1909.djvu"
+url = "https://upload.wikimedia.org/wikipedia/commons/5/5a/1909._Extract_from_Captain_Stormfield%27s_Visit_to_Heaven.djvu"
+size = 1597025
+sha256 = "41399b6a4da1765ce14da23b7330953a1fee87968ba98330a9ec6a4ae1da0d74"
+script = "latin"
+tesseract_lang = "eng"
+work = "M. Twain, Extract from Captain Stormfield's Visit to Heaven, 1909"
+license = "PD"
+source = "https://commons.wikimedia.org/wiki/File:1909._Extract_from_Captain_Stormfield%27s_Visit_to_Heaven.djvu"
+
+[[scan]]
+name = "herzl-jewish-state-1917"
+file = "herzl-jewish-state-1917.djvu"
+url = "https://upload.wikimedia.org/wikipedia/commons/0/03/A_Jewish_State_1917.djvu"
+size = 1012879
+sha256 = "f4299579c666400862cb4711b88e40e6c965b66396395dc55f4f6fd3997ea42c"
+script = "latin"
+tesseract_lang = "eng"
+work = "T. Herzl, A Jewish State, 1917"
+license = "PD"
+source = "https://commons.wikimedia.org/wiki/File:A_Jewish_State_1917.djvu"
+
+[[page]]
+scan = "bulgakov-rasskazy-1926"
+page = 12
+file = "bulgakov-rasskazy-1926-p012.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4493693&action=raw"
+size = 1207
+sha256 = "d5ca21bc6c3af31ef527a4d672fefc2dbac897f20d55330cf1846aa3da356910"
+
+[[page]]
+scan = "bulgakov-rasskazy-1926"
+page = 22
+file = "bulgakov-rasskazy-1926-p022.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4493703&action=raw"
+size = 2219
+sha256 = "b3e00ae8f411183dcc0528333e991c0df069306106f0704a0e9a620216750747"
+
+[[page]]
+scan = "bulgakov-rasskazy-1926"
+page = 34
+file = "bulgakov-rasskazy-1926-p034.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=5745241&action=raw"
+size = 1171
+sha256 = "a45c78b56473464847cd01582857966c10635d9e831a8fd4f03f94a10de1f8d7"
+
+[[page]]
+scan = "bulgakov-rasskazy-1926"
+page = 45
+file = "bulgakov-rasskazy-1926-p045.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4493726&action=raw"
+size = 1753
+sha256 = "b502f0c2a0185d6921c00cb69752013e8cf40ab2de0a9d9cb81f8a37d1633eb5"
+
+[[page]]
+scan = "bulgakov-rasskazy-1926"
+page = 55
+file = "bulgakov-rasskazy-1926-p055.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=5745244&action=raw"
+size = 1531
+sha256 = "3269d9e3ce2a61ce44e1f29a24be72ee850d12c7625a97c78cc73795b16b4c9e"
+
+[[page]]
+scan = "bulgakov-diavoliada-1925"
+page = 20
+file = "bulgakov-diavoliada-1925-p020.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=3358599&action=raw"
+size = 3151
+sha256 = "ced5edd93e50df912c4c9a26272b0fd17d14530b893ff8b52ede0348e95f7cbd"
+
+[[page]]
+scan = "bulgakov-diavoliada-1925"
+page = 52
+file = "bulgakov-diavoliada-1925-p052.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4412111&action=raw"
+size = 3392
+sha256 = "1351ba9f9b4d25da6d78b63190a6e8e746eb830e108d8d82016b90f39ae5bc7d"
+
+[[page]]
+scan = "bulgakov-diavoliada-1925"
+page = 82
+file = "bulgakov-diavoliada-1925-p082.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=3243581&action=raw"
+size = 3878
+sha256 = "45de5579d7079ae1fef7d92a3b1858516e7c7bd0e51e408d221ac16d6dc315d8"
+
+[[page]]
+scan = "bulgakov-diavoliada-1925"
+page = 112
+file = "bulgakov-diavoliada-1925-p112.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4480807&action=raw"
+size = 3309
+sha256 = "552e333d726c88de29884f31605d19d04917e75e296b2e756c207eaa06799a96"
+
+[[page]]
+scan = "bulgakov-diavoliada-1925"
+page = 145
+file = "bulgakov-diavoliada-1925-p145.wiki"
+url = "https://ru.wikisource.org/w/index.php?oldid=4480860&action=raw"
+size = 3534
+sha256 = "324ab3aac5276af283e6fa3eea6bfdabfecb7ad5997561db61a3543cc5a30377"
+
+[[page]]
+scan = "twain-stormfield-1909"
+page = 24
+file = "twain-stormfield-1909-p024.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=14053835&action=raw"
+size = 836
+sha256 = "b695f87c61a9b34fc54bd27e674f28b2d99acb3d30ae2962256610cb98fc223b"
+
+[[page]]
+scan = "twain-stormfield-1909"
+page = 48
+file = "twain-stormfield-1909-p048.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=14054041&action=raw"
+size = 840
+sha256 = "2b4ab484270638ac9c754e8b283648abbc0a7367c39de47046cef9c791430c64"
+
+[[page]]
+scan = "twain-stormfield-1909"
+page = 73
+file = "twain-stormfield-1909-p073.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=14053909&action=raw"
+size = 849
+sha256 = "f6ed76586229c35643d467c0fdc01fcd7a4e7f9314f1bfcd5e619639e95bc6d0"
+
+[[page]]
+scan = "twain-stormfield-1909"
+page = 97
+file = "twain-stormfield-1909-p097.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=14054070&action=raw"
+size = 796
+sha256 = "f660430472600063a98870e892809e5a611b36d22deb1e977c148696e09e1bc0"
+
+[[page]]
+scan = "twain-stormfield-1909"
+page = 121
+file = "twain-stormfield-1909-p121.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=14054003&action=raw"
+size = 852
+sha256 = "571f2f6ea8afc40b698c54473d4e5626396e77dfc838b435bb409d60a2160260"
+
+[[page]]
+scan = "herzl-jewish-state-1917"
+page = 13
+file = "herzl-jewish-state-1917-p013.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=15034636&action=raw"
+size = 2790
+sha256 = "64996594ea60c0d6b514ed80ad206ebe1afc1b6d61e0ac8756bec4e4ee595c77"
+
+[[page]]
+scan = "herzl-jewish-state-1917"
+page = 25
+file = "herzl-jewish-state-1917-p025.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=15034448&action=raw"
+size = 3831
+sha256 = "73e1d6bf2c4d2dda4156470d460b87a2b336b5d565130b3b65ccb3f2f91708bd"
+
+[[page]]
+scan = "herzl-jewish-state-1917"
+page = 35
+file = "herzl-jewish-state-1917-p035.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=15034465&action=raw"
+size = 3548
+sha256 = "1517940e11f1337c5c2c3d76c5001c448adcb653e689fbea044dbad25813adc8"
+
+[[page]]
+scan = "herzl-jewish-state-1917"
+page = 45
+file = "herzl-jewish-state-1917-p045.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=15034565&action=raw"
+size = 3511
+sha256 = "77bd25191695eb8e1a723c1f738ceff9b178260f32056fe65eac3b1a9ebbd5ff"
+
+[[page]]
+scan = "herzl-jewish-state-1917"
+page = 55
+file = "herzl-jewish-state-1917-p055.wiki"
+url = "https://en.wikisource.org/w/index.php?oldid=15034587&action=raw"
+size = 3216
+sha256 = "170b614de72f8fda2872247c8d4a57a81dea5b4dbe18ab41224aa78f3e43534e"

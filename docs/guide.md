@@ -524,3 +524,10 @@ downloaded implicitly; directory override: `DJVU_OCR_MODELS_DIR`). The
 pinned models is gated by a deterministic synthetic corpus with a recorded
 CER/WER/IoU baseline (`docs/ocr-model-metrics.md`).
 
+On 20 pages of real scans (#989) the character error rate of `ocr-onnx` is
+3.0 % against 5.6 % for Tesseract on Cyrillic pages, and 6.3 % against 1.3 %
+on Latin pages. It needs 2.5 to 2.8 times longer per page. So it stays
+experimental: use `ocr-tesseract` for Latin text. The set, the protocol and
+the tables are in
+[`docs/ocr-model-metrics.md`](ocr-model-metrics.md#real-scans-989).
+

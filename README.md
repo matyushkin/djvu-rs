@@ -152,7 +152,10 @@ demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
   thumbnails, legacy pages, and shared-dictionary masks. See
   [`docs/optimizer.md`](docs/optimizer.md).
 - **OCR: Tesseract is the supported backend.** `ocr-onnx` is experimental
-  (pinned models, options ignored).
+  (pinned models, options ignored). On 20 pages of real scans its character
+  error rate is 3.0 % against 5.6 % for Tesseract on Cyrillic, but 6.3 %
+  against 1.3 % on Latin, and it needs 2.5 to 2.8 times longer per page.
+  See [`docs/ocr-model-metrics.md`](docs/ocr-model-metrics.md#real-scans-989).
 
 ## Feature flags
 

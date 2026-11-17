@@ -17783,3 +17783,63 @@ under Rosetta).
 **Not done.** An explicit SSE2 form for the strided (`s > 1`) and row-gather
 loads (`load_rows8` / `store_rows8`). A measurement of it needs more than
 one round per side.
+
+### OCR_REAL_SCAN_EVAL: `ocr-onnx` against `ocr-tesseract` on real scans — **Diagnostic, `ocr-onnx` stays experimental** (2026-11-17)
+
+**Issue.** #989. `ocr-onnx` had numbers for a synthetic corpus only (one
+font, clean pages). Nothing showed how it compares with Tesseract on scanned
+books, so its experimental status had no measured basis.
+
+**Approach.** A set of 20 pages from four public-domain books on Wikimedia
+Commons: two Cyrillic (Bulgakov, 1925 and 1926) and two Latin (Twain 1909,
+Herzl 1917), five pages each. The reference text is the validated Wikisource
+transcription of each page at a fixed revision. `scripts/fetch_ocr_eval_set.sh`
+fetches the 24 files and checks them against the SHA-256 values in
+`docs/ocr-eval-manifest.toml`; no scan and no transcription is committed.
+The harness `tests/ocr_real_scans.rs` renders each page once at native size,
+gives the same pixmap to both backends, normalises both texts the same way
+and pools the edit distance per script. The pages were chosen by a fixed rule
+before any OCR run. The decision rule was committed before the run:
+`ocr-onnx` leaves the experimental status only if its pooled CER is no worse
+than Tesseract's on the Cyrillic pages and on the Latin pages.
+
+```sh
+scripts/fetch_ocr_models.sh
+scripts/fetch_ocr_eval_set.sh
+cargo test --release --features ocr-onnx,ocr-tesseract \
+  --test ocr_real_scans -- --ignored --nocapture
+```
+
+**Numbers.** Apple M1 Max, macOS 27.2.1, Rust 1.100.0, release profile;
+Tesseract 5.5.4 with the Homebrew `rus` and `eng` data; `tract-onnx` 0.23.8.
+One pass. Time is the wall time of `recognize`, render excluded.
+
+| Script | Reference chars | Backend | CER | WER | Median s/page |
+|---|---:|---|---:|---:|---:|
+| Cyrillic | 12462 | `ocr-onnx` | 0.0300 | 0.1354 | 6.97 |
+| Cyrillic | 12462 | `ocr-tesseract` | 0.0561 | 0.2388 | 2.45 |
+| Latin | 19712 | `ocr-onnx` | 0.0633 | 0.1155 | 6.60 |
+| Latin | 19712 | `ocr-tesseract` | 0.0128 | 0.0289 | 2.62 |
+
+Per scan, CER of `ocr-onnx` / `ocr-tesseract`: Bulgakov 1926 0.0409 / 0.0349,
+Bulgakov 1925 0.0255 / 0.0649, Twain 0.0055 / 0.0036, Herzl 0.0762 / 0.0148.
+The per-page table is in `docs/ocr-model-metrics.md`.
+
+**Decision.** `ocr-onnx` stays experimental. The README states the gap.
+No code of the pipeline changes.
+
+**Reason.** The rule needs both scripts. `ocr-onnx` passes on Cyrillic (about
+half the character errors of Tesseract) and fails on Latin (about five times
+the errors). It also needs 2.5 to 2.8 times longer per page. On the dense
+Herzl pages most of its errors are missing or misplaced text, not wrong
+letters: an approximate alignment gives 40 to 58 substituted characters per
+page and 250 to 360 missing or misplaced ones on the three worst pages.
+
+**Limits.** Four books and twenty pages. Each script's figure rests mostly
+on one book (Bulgakov 1925 holds 71 % of the Cyrillic characters, Herzl 82 %
+of the Latin ones). The Tesseract language data is not pinned by the
+repository; the entry in `docs/ocr-model-metrics.md` records its hashes.
+
+**Not done.** A measurement of line detection and line order on dense Latin
+pages. A test of the separate Latin recognition model, which the manifest
+pins and the pipeline does not use.
