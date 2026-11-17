@@ -267,8 +267,9 @@ every `djvu_render::*` entry point, and the standalone codec entry points.
 - `tests/proptest_codecs.rs` — property tests over the codec surface.
 - `fuzz/fuzz_targets/*` (libFuzzer, run by the `fuzz.yml` workflow) —
   adversarial coverage of IFF/BZZ/JB2/IW44/G4, encode, metadata, validate,
-  and the full parse→render pipeline (`fuzz_full`). OSS-Fuzz is not live yet:
-  [`oss-fuzz/README.md`](../oss-fuzz/README.md) tracks the submission.
+  and the full parse→render pipeline (`fuzz_full`). djvu-rs is not on
+  OSS-Fuzz: the submission was declined on 2026-11-16
+  ([`oss-fuzz/README.md`](../oss-fuzz/README.md)).
 
 The FFI/WASM boundaries additionally catch unwinds and convert them to error
 codes, so a hostile file can never unwind across the language boundary.

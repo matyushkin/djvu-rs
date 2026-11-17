@@ -126,6 +126,10 @@ See `RELEASING.md` for how commits drive the automated release process.
 
 ## Triaging an OSS-Fuzz finding
 
+djvu-rs is not on OSS-Fuzz at present; see
+[`oss-fuzz/README.md`](oss-fuzz/README.md). Steps 1 to 5 apply the same way
+to a crash that the `Fuzz` workflow (`.github/workflows/fuzz.yml`) finds.
+
 OSS-Fuzz reports arrive as private issues containing a testcase plus a
 reproducer command. Workflow:
 
