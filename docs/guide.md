@@ -522,9 +522,5 @@ downloaded implicitly; directory override: `DJVU_OCR_MODELS_DIR`). The
 `--model` flag is not used by this backend, and `OcrOptions`
 (`languages`/`dpi`) are advisory and ignored. Recognition quality of the
 pinned models is gated by a deterministic synthetic corpus with a recorded
-CER/WER/IoU baseline (`docs/ocr-model-metrics.md`). `ocr-neural` is a placeholder only: `CandleBackend` now
-returns a clear unsupported-backend error instead of constructing a backend that
-always fails at recognition time. The compatibility feature name
-`ocr-neural-candle` is a no-op and no longer pulls Candle/tokenizers into
-`--all-features` builds.
+CER/WER/IoU baseline (`docs/ocr-model-metrics.md`).
 

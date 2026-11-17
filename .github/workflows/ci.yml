@@ -68,7 +68,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: >-
           cargo doc --workspace --exclude djvu-py --no-deps
-          --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,ocr-neural,experimental,iw44-probe
+          --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,experimental,iw44-probe
 
   # ── Tests ────────────────────────────────────────────────────────────────────
   # stable: every push + PRs, full suite on main

@@ -143,13 +143,5 @@ pub(super) fn build_ocr_backend(
                 Err("ONNX OCR backend is not enabled; rebuild with --features ocr-onnx".into())
             }
         }
-        OcrBackendChoice::Candle => {
-            let _ = model_path;
-            Err(
-                "Candle OCR backend is experimental and has no supported model-specific \
-                 implementation yet; use --backend tesseract with --features ocr-tesseract"
-                    .into(),
-            )
-        }
     }
 }
