@@ -40,10 +40,11 @@ the document parser and the metadata/validation paths (one per file in
 `fuzz/fuzz_targets/`). CI (`.github/workflows/fuzz.yml`) runs every target for
 60 seconds on each push to `main` and every Monday.
 
-djvu-rs is **not yet fuzzed on OSS-Fuzz**. The integration files live in
-[`oss-fuzz/`](oss-fuzz/); the submission
-([google/oss-fuzz#15331](https://github.com/google/oss-fuzz/pull/15331)) is still
-open. [`oss-fuzz/README.md`](oss-fuzz/README.md) tracks its status.
+djvu-rs is **not fuzzed on OSS-Fuzz**. An OSS-Fuzz maintainer declined the
+submission ([google/oss-fuzz#15331](https://github.com/google/oss-fuzz/pull/15331))
+on 2026-11-16: the service takes projects that already have a wide user base.
+The integration files stay in [`oss-fuzz/`](oss-fuzz/) for a later submission.
+[`oss-fuzz/README.md`](oss-fuzz/README.md) has the details.
 
 If you find a crash via fuzzing, please include the minimized corpus input.
 

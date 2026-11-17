@@ -9,36 +9,48 @@ This directory contains the three files OSS-Fuzz expects under
 
 ## Status
 
-**Not yet live.** djvu-rs is not fuzzed on OSS-Fuzz infrastructure yet.
+**Declined.** djvu-rs is not fuzzed on OSS-Fuzz infrastructure.
 
 * Submitted as [google/oss-fuzz#15331](https://github.com/google/oss-fuzz/pull/15331)
-  on 2026-04-10. The PR is open and waits for a maintainer review.
-* Since 2026-11-15 the PR checks pass: `cla/google`, `header-check` and
-  `check-changes`. The trial build has not run yet.
-* The PR is one commit. Its `build.sh` builds all eleven targets.
-* The local container build of that commit passed on 2026-11-15:
-  `build_image`, `build_fuzzers --sanitizer address` and `check_build`.
-* Tracking issue: [#988](https://github.com/matyushkin/djvu-rs/issues/988).
-  The triage steps for OSS-Fuzz reports are already in
-  [`CONTRIBUTING.md`](../CONTRIBUTING.md#triaging-an-oss-fuzz-finding).
+  on 2026-04-10.
+* An OSS-Fuzz maintainer closed the PR on 2026-11-16 without a merge. The
+  reason given: OSS-Fuzz takes projects that already have a wide user base,
+  and djvu-rs does not have one yet. The maintainer suggested
+  [ClusterFuzzLite](https://github.com/google/clusterfuzzlite) instead.
+* The submission was not rejected for a defect. Its checks `cla/google`,
+  `header-check` and `check-changes` passed. The PR was one commit, and its
+  `build.sh` builds all eleven targets. The local container build of that
+  commit passed on 2026-11-15: `build_image`,
+  `build_fuzzers --sanitizer address` and `check_build`. The trial build on
+  OSS-Fuzz never ran.
+* Fuzzing continues in CI: `.github/workflows/fuzz.yml` runs every target on
+  each push to `main` and every Monday.
+* Former tracking issue: [#988](https://github.com/matyushkin/djvu-rs/issues/988).
 
-Remaining steps:
+When to submit again:
 
-1. Wait for the maintainer review and the merge of #15331.
-2. After the first green build: add the OSS-Fuzz badge to `README.md`, update
-   the "Fuzzing" section of `SECURITY.md`, and close #988.
+* The OSS-Fuzz rule is: "an open-source project must have a significant user
+  base and/or be critical to the global IT infrastructure"
+  ([Accepting new projects](https://google.github.io/oss-fuzz/getting-started/accepting-new-projects/)).
+  The OSS-Fuzz bot gave djvu-rs a criticality score of 0.21 on 2026-04-10.
+* Submit again when that changes: for example, when a widely used
+  application or a distribution package depends on djvu-rs. Name those
+  users in the new PR description.
+* The files to submit are on branch `add-djvu-rs` of the fork
+  `matyushkin/oss-fuzz`. Rebase the branch on the upstream `master` and
+  repeat the local build below before a new PR.
 
-## Differences from the upstream PR
+## Differences from the submitted copy
 
-The copy in `projects/djvu-rs/` of the PR is what OSS-Fuzz builds. This
-directory differs from it in these points:
+The submitted copy is `projects/djvu-rs/` on branch `add-djvu-rs` of the fork.
+This directory differs from it in these points:
 
 * The upstream `build.sh` and `Dockerfile` start with the Apache-2.0 license
   header. The OSS-Fuzz `header-check` requires it. The commands are the same.
 * `project.yaml` here also sets `auto_ccs` and `file_github_issue: true`. The
-  PR does not set them.
+  submitted copy does not set them.
 
-Rules for a change to the PR branch (`add-djvu-rs` in the fork):
+Rules for a change to that branch:
 
 * Do not add a `Co-Authored-By` trailer for an address without a signed Google
   CLA. The `cla/google` check counts each co-author as a contributor and fails.
@@ -48,7 +60,7 @@ Rules for a change to the PR branch (`add-djvu-rs` in the fork):
 
 ## Building locally
 
-Build from the PR branch until the PR merges:
+The files are not in `google/oss-fuzz`. Build from the fork branch:
 
 ```sh
 git clone --branch add-djvu-rs https://github.com/matyushkin/oss-fuzz.git
@@ -84,8 +96,8 @@ Mirrors `fuzz/fuzz_targets/` (`build.sh` copies every target listed here):
 
 `build.sh` zips `fuzz/corpus/<target>/` from the source tree into
 `$OUT/<target>_seed_corpus.zip` for every target that has committed seeds.
-`fuzz_graph` and `fuzz_validate` have none yet. OSS-Fuzz unpacks the zips on
-the first run so coverage-guided fuzzing starts from realistic inputs
+`fuzz_graph` and `fuzz_validate` have none yet. OSS-Fuzz would unpack the zips
+on the first run so coverage-guided fuzzing starts from realistic inputs
 (malformed headers, truncated chunks, codec edge cases).
 
 To extend a corpus, drop minimised reproducers into the relevant
