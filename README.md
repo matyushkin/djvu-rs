@@ -152,7 +152,7 @@ demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
   thumbnails, legacy pages, and shared-dictionary masks. See
   [`docs/optimizer.md`](docs/optimizer.md).
 - **OCR: Tesseract is the supported backend.** `ocr-onnx` is experimental
-  (pinned models, options ignored); `ocr-neural` is a placeholder that errors.
+  (pinned models, options ignored).
 
 ## Feature flags
 
@@ -175,8 +175,6 @@ demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
 | `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
 | `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
 | `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx` (#693; needs Rust 1.91): pinned manifest + SHA-256-verified weights, DBNet detection, Cyrillic CTC recognition, CLI `--backend onnx` |
-| `ocr-neural` | disabled | Placeholder backend only — `CandleBackend::load` returns a clear unsupported error |
-| `ocr-neural-candle` | disabled | Deprecated no-op alias for `ocr-neural` |
 | `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |
 | `iw44-probe` | disabled | IW44 encoder diagnostics probe (dev-only) |
 | `alloc-profile` | disabled | dhat allocation-profiling harness for `examples/alloc_profile.rs` (dev-only) |

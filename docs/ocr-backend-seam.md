@@ -85,6 +85,21 @@ configuration through the trait (models are pinned, language is fixed by the
 dictionary, detection scales with page extent), so both fields remain
 advisory hints that Tesseract alone honours.
 
+## Update (2026-11-17, #989)
+
+`CandleBackend`, the features `ocr-neural` and `ocr-neural-candle`, and the
+CLI value `--backend candle` are removed. The text above describes the code
+of 2026-06-17 and stays as the record of that decision.
+
+The reason to keep the placeholder was a typed "not yet" answer for neural
+OCR. That reason ended with #693: `--backend onnx` is a working neural
+backend. A placeholder that only returns an error must not be part of the
+API that the 1.0 release freezes.
+
+The decision on the trait does not change. `OcrBackend` now has two
+implementors, `TesseractBackend` and `NeuralOcrBackend`, and the CLI
+selects between them.
+
 ## Consequences
 
 - Future architecture-review passes should treat the `OcrBackend` seam as

@@ -461,10 +461,6 @@ pub mod ocr_tesseract;
 #[cfg(feature = "ocr-onnx")]
 pub mod ocr_onnx;
 
-/// Experimental neural OCR placeholder (requires `ocr-neural` feature).
-#[cfg(feature = "ocr-neural")]
-pub mod ocr_neural;
-
 /// TXTa/TXTz text layer encoder — writes [`text::TextLayer`] back to DjVu binary format.
 #[cfg(feature = "std")]
 pub mod text_encode;

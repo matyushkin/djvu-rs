@@ -18,11 +18,7 @@ mod bzz;
 mod encode;
 mod inspect;
 mod merge;
-#[cfg(any(
-    feature = "ocr-tesseract",
-    feature = "ocr-onnx",
-    feature = "ocr-neural"
-))]
+#[cfg(any(feature = "ocr-tesseract", feature = "ocr-onnx"))]
 mod ocr;
 mod optimize;
 mod render;
@@ -33,11 +29,7 @@ use bzz::*;
 use encode::*;
 use inspect::*;
 use merge::*;
-#[cfg(any(
-    feature = "ocr-tesseract",
-    feature = "ocr-onnx",
-    feature = "ocr-neural"
-))]
+#[cfg(any(feature = "ocr-tesseract", feature = "ocr-onnx"))]
 use ocr::*;
 use optimize::*;
 use render::*;
@@ -209,11 +201,7 @@ enum Cmd {
         dry_run: bool,
     },
     /// Run OCR on pages and write the text layer back into the file.
-    #[cfg(any(
-        feature = "ocr-tesseract",
-        feature = "ocr-onnx",
-        feature = "ocr-neural"
-    ))]
+    #[cfg(any(feature = "ocr-tesseract", feature = "ocr-onnx"))]
     Ocr {
         /// Path to the input DjVu file.
         file: PathBuf,
@@ -371,11 +359,7 @@ enum OptimizePresetArg {
     Archival,
 }
 
-#[cfg(any(
-    feature = "ocr-tesseract",
-    feature = "ocr-onnx",
-    feature = "ocr-neural"
-))]
+#[cfg(any(feature = "ocr-tesseract", feature = "ocr-onnx"))]
 #[derive(Clone, ValueEnum)]
 enum OcrBackendChoice {
     /// Supported backend: system Tesseract via tesseract-rs.
@@ -384,8 +368,6 @@ enum OcrBackendChoice {
     /// using the pinned model manifest; fetch models first with
     /// scripts/fetch_ocr_models.sh.
     Onnx,
-    /// Experimental neural placeholder; no supported model implementation yet.
-    Candle,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -488,11 +470,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rotate,
             output,
         } => cmd_render(&file, page, all, dpi, format, layer, rotate, &output),
-        #[cfg(any(
-            feature = "ocr-tesseract",
-            feature = "ocr-onnx",
-            feature = "ocr-neural"
-        ))]
+        #[cfg(any(feature = "ocr-tesseract", feature = "ocr-onnx"))]
         Cmd::Ocr {
             file,
             backend,

@@ -76,9 +76,7 @@ two ways, both of which must be present:
 - the surface is reachable only behind an experimental feature flag.
 
 Current experimental features: `experimental`, `iw44-probe`, `alloc-profile`,
-`ocr-onnx`, `wasm-threads`. Current experimental/placeholder items:
-`ocr-neural` (`CandleBackend` — `load()` returns an unsupported error and there
-is no stable model contract). These are **out of scope** for API freezing per
+`ocr-onnx`, `wasm-threads`. These are **out of scope** for API freezing per
 issue #695 and remain free to change.
 
 ### Deprecated
@@ -102,11 +100,10 @@ Current deprecated surfaces:
 |------|------|-------------|
 | `bzz_new` module | re-export alias | `bzz` |
 | `iw44_new` module | re-export alias | `iw44` |
-| `ocr-neural-candle` feature | no-op feature alias | `ocr-neural` |
 | `Pixmap::new` (since 0.34.0) | constructor that returns an empty pixmap on an oversized request | `Pixmap::try_new` (reports `PixmapError`) |
 
-These aliases are kept intentionally cheap (a `pub use` or a no-op feature) so
-they can outlive the minimum window without cost.
+These aliases are kept intentionally cheap (a `pub use`) so they can outlive
+the minimum window without cost.
 
 ## 2. Semantic versioning
 

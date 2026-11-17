@@ -2,24 +2,22 @@
 //!
 //! Provides [`OcrBackend`] — an abstraction over OCR engines.
 //!
-//! Supported user-facing OCR is currently limited to:
-//! - `ocr-tesseract` — system Tesseract via `tesseract-rs`.
-//!
-//! Experimental scaffolding is kept separate and is not exposed as a supported
-//! CLI backend:
-//! - `ocr-onnx` — generic tract/CTC helper with no stable model contract yet.
-//! - `ocr-neural` — placeholder Candle backend; `load()` returns a clear
-//!   unsupported-backend error until a concrete model implementation lands.
+//! Backends, each behind its own feature:
+//! - `ocr-tesseract` — system Tesseract via `tesseract-rs`. This is the
+//!   supported backend.
+//! - `ocr-onnx` — **experimental** neural PP-OCR pipeline on `tract`, with
+//!   pinned, SHA-256-verified models. It ignores [`OcrOptions`].
 //!
 //! ## Design
 //!
 //! The trait is a deliberate runtime seam, not a speculative abstraction: the
 //! `djvu ocr --backend` CLI selector builds a `Box<dyn OcrBackend>` and drives
-//! it polymorphically. It is retained by decision even though only Tesseract is
-//! fully wired today. See `docs/ocr-backend-seam.md` (issue #382) for the
-//! rationale and the deferred plan for `OcrOptions`.
+//! it polymorphically. It is retained by decision. See
+//! `docs/ocr-backend-seam.md` (issue #382) for the rationale and the deferred
+//! plan for `OcrOptions`.
 //!
 //! [`OcrBackend`]: crate::ocr::OcrBackend
+//! [`OcrOptions`]: crate::ocr::OcrOptions
 
 use crate::pixmap::Pixmap;
 use crate::text::TextLayer;

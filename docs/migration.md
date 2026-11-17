@@ -26,6 +26,7 @@ fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
 | [0.36.0](#0360) | builds `MapArea` or `Annotation` with struct literals, or uses `Border::style` |
 | [0.38.0](#0380) | renders pages that carry a rotation, uses `render_into` or `render_region`, writes metadata, exports PDF, or matches on `DjvmError` |
 | [0.45.0](#0450) | builds with Rust older than 1.89 |
+| [0.46.0](#0460) | enables the feature `ocr-neural` or `ocr-neural-candle`, or runs `djvu ocr --backend candle` |
 
 The calls below did not change between 0.30 and 0.45. Code that uses nothing
 else compiles after the version bump alone:
@@ -415,6 +416,35 @@ export the good pages yourself.
 The minimum supported Rust version is 1.89. Before, it was 1.88. Build with
 Rust 1.89 or newer. If your crate declares `rust-version`, raise it to at
 least `1.89`.
+
+## 0.46.0
+
+The features `ocr-neural` and `ocr-neural-candle` are removed, together with
+the module `ocr_neural` and its type `CandleBackend`. They were a
+placeholder: `CandleBackend::load` always returned `OcrError::InitFailed`,
+so no working code can depend on them.
+
+Remove the feature from your `Cargo.toml`. Cargo refuses a requirement that
+names a feature the crate does not have.
+
+Before:
+
+```toml
+djvu-rs = { version = "0.45", features = ["ocr-neural"] }
+```
+
+After:
+
+```toml
+djvu-rs = { version = "0.46", features = ["ocr-tesseract"] }
+```
+
+`ocr-tesseract` is the supported OCR backend; it needs a system Tesseract
+installation. `ocr-onnx` is the experimental neural backend; it needs Rust
+1.91 and the models that `scripts/fetch_ocr_models.sh` fetches.
+
+The `djvu ocr` command no longer accepts `--backend candle`. That value
+only printed an error. Use `--backend tesseract` or `--backend onnx`.
 
 ## Fixes that change results
 

@@ -130,12 +130,6 @@ epub = ["std", "dep:zip", "dep:flate2", "dep:jpeg-encoder"]
 cbz = ["std", "dep:zip", "dep:flate2"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "dep:sha2", "std"]
-# ocr-neural: experimental placeholder only. It exposes the CandleBackend type
-# but no supported model contract or CLI backend; load() returns a clear error.
-ocr-neural = ["std"]
-# Deprecated compatibility alias. Kept as a no-op to avoid pulling the former
-# Candle/tokenizers dependency stack into --all-features builds.
-ocr-neural-candle = ["ocr-neural"]
 # Experiment-only encoder surface in the codec crates (e.g. the #322 cross-size
 # rec-6 refinement probe and its analysis helpers). Off by default; not part of
 # the published API. Implies `std` since the encoders are std-only.

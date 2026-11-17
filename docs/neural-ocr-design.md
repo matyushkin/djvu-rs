@@ -114,6 +114,10 @@ Feature naming: the pipeline lands behind the existing `ocr-onnx` feature
 superseded by the PP-OCR-shaped pipeline rather than kept as a parallel
 contract. `src/ocr_neural.rs` (the Candle tombstone) stays untouched.
 
+*Update 2026-11-17:* the Candle tombstone and its features `ocr-neural` and
+`ocr-neural-candle` are removed
+([#989](https://github.com/matyushkin/djvu-rs/issues/989)).
+
 ## Versioned corpus metrics
 
 The standard OCR benchmark corpora are a licensing minefield (FUNSD and IAM
