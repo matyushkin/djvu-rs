@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794867780879,
+  "lastUpdate": 1794949896492,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26572,6 +26572,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 30230000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c1b47c198422605fab13f1c8cb9162115abffb7f",
+          "message": "feat(ocr)!: remove the ocr-neural placeholder and its alias (#999)\n\nThe `ocr-neural` feature exposed `ocr_neural::CandleBackend`, whose\n`load()` always returned `OcrError::InitFailed`. `ocr-neural-candle` was a\ndeprecated no-op alias for it (since 2026-05-17). Neither did any work,\nand a placeholder must not be in the surface that 1.0 freezes (#989, #993).\n\n- Delete `src/ocr_neural.rs` and both features.\n- Remove the `--backend candle` value of `djvu ocr`; it only printed an\n  error.\n- Drop two advisory ignores in `deny.toml` for crates that the former\n  Candle stack pulled in and that are no longer in `Cargo.lock`.\n- Add the 0.46.0 section to `docs/migration.md` and update the feature\n  lists in the README, the guide and the compatibility policy.\n\nPart of #989.\n\nBREAKING CHANGE: the features `ocr-neural` and `ocr-neural-candle`, the\nmodule `ocr_neural` with `CandleBackend`, and the CLI value\n`--backend candle` are removed. Use `ocr-tesseract`, or `ocr-onnx` for the\nexperimental neural backend.",
+          "timestamp": "2026-11-17T22:46:18+02:00",
+          "tree_id": "f72e025f72d7cae86c117c8a7f2219cfb0d44ca4",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/c1b47c198422605fab13f1c8cb9162115abffb7f"
+        },
+        "date": 1794949894452,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 110000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6190000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40600000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38643000,
             "range": "± 0",
             "unit": "ns/iter"
           }
