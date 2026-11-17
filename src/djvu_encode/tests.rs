@@ -218,10 +218,7 @@ fn with_iw44_options_is_threaded_into_background_codec() {
         .with_quality(EncodeQuality::Quality)
         .encode()
         .expect("default encode");
-    let trimmed = Iw44EncodeOptions {
-        total_slices: 20,
-        ..Iw44EncodeOptions::default()
-    };
+    let trimmed = Iw44EncodeOptions::default().with_total_slices(20);
     let trimmed_bytes = PageEncoder::from_pixmap(&pm)
         .with_quality(EncodeQuality::Quality)
         .with_iw44_options(trimmed)
@@ -243,19 +240,7 @@ fn with_jb2_options_lossy_threshold_round_trips() {
     // The JB2 knob is reachable through the builder and still produces a
     // decodable mask (lossy CC substitution stays within the format).
     let pm = mixed_lighting_fixture();
-    // Spell every field (cfg-gated like the Default impl) so this compiles
-    // cleanly whether or not the `experimental` feature is active — neither
-    // struct-update nor reassign-after-default triggers a clippy lint.
-    let jb2 = Jb2EncodeOptions {
-        lossy_threshold: 0.04,
-        despeckle: None,
-        #[cfg(feature = "experimental")]
-        cross_size_rec6_probe: None,
-        #[cfg(feature = "experimental")]
-        same_size_rec6: None,
-        #[cfg(feature = "experimental")]
-        aligned_refine: None,
-    };
+    let jb2 = Jb2EncodeOptions::default().with_lossy_threshold(0.04);
     let bytes = PageEncoder::from_pixmap(&pm)
         .with_quality(EncodeQuality::Quality)
         .with_jb2_options(jb2)
@@ -1770,10 +1755,7 @@ fn layered_shared_bundle_fgbz_unaffected_by_precomputed_colour_table() {
 fn lossy_threshold_falls_back_to_decode_based_fgbz_sampling() {
     let pm = mixed_lighting_fixture();
     let opts = EncodeQuality::Quality.default_segment_options();
-    let lossy_jb2_options = Jb2EncodeOptions {
-        lossy_threshold: 0.05,
-        ..Jb2EncodeOptions::default()
-    };
+    let lossy_jb2_options = Jb2EncodeOptions::default().with_lossy_threshold(0.05);
 
     // Phase 1: the fallback signal is `None`, not a (possibly wrong) table.
     let prepared = prepare_page(&pm, None, &opts, false, &lossy_jb2_options);

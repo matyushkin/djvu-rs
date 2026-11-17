@@ -126,6 +126,7 @@ pub enum EncodeError {
 /// its nearest resulting entry, trading exact per-blit colour for a smaller,
 /// perceptually-similar palette. See PERF_EXPERIMENTS.md `FGBZ_MEDIANCUT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum FgbzPaletteOptions {
     /// One palette entry per distinct per-blit average colour (current /
     /// pre-experiment behaviour). Byte-identical to all previous releases.
@@ -269,6 +270,7 @@ fn nearest_palette_index(palette: &[FgbzColor], c: FgbzColor) -> usize {
 /// The profile drives codec selection (JB2 vs IW44, mask-only vs
 /// layered, optional FGbz palette) and quality knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum EncodeQuality {
     /// Pixel-exact round-trip. Requires bilevel input
     /// ([`PageEncoder::from_bitmap`]); writes `INFO + Sjbz` (JB2).
@@ -299,6 +301,7 @@ pub enum EncodeQuality {
 /// run-length codec. The choice is opt-in because JB2 is usually smaller on
 /// text-heavy pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BilevelCodec {
     /// JB2 arithmetic-coded mask (`Sjbz`), the compatibility default.
     #[default]

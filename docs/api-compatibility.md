@@ -65,6 +65,40 @@ breakage, so the gate had to run with `continue-on-error` and could not block a
 real, unintended break either. Any new public error enum must be marked the same
 way.
 
+**Extensible-type rule.** A type that is expected to gain members is marked
+`#[non_exhaustive]`, so that adding a member is a compatible change:
+
+- **Options structs** (`RenderOptions`, `PdfOptions`, `ResourceLimits`,
+  `Jb2EncodeOptions`, `Iw44EncodeOptions`, …). Each implements `Default` and
+  has one `with_<field>` method per public field; `RenderOptions::new(width,
+  height)` sets the two fields every render needs. Consumers build them with
+  those methods, not with a struct literal. Reading a public field and
+  assigning to one stay supported. A new field arrives with a default that
+  keeps the earlier behavior, and with its `with_*` method.
+- **Report structs** — values the crate returns (`RenderReport`,
+  `ValidationReport`, `Finding`, `QualityReport`, `ComponentNode`,
+  `SegmentedPage`, `ChunkRecord`, …). Consumers read their fields; they do
+  not construct them.
+- **Options and classification enums** (`Resampling`, `EncodeQuality`,
+  `Iw44Target`, `Severity`, `EditOperation`, …). A `match` on one of them
+  must include a `_` arm.
+
+Adding a field or a variant to such a type is compatible. Removing or
+renaming one, or changing its type, is breaking.
+
+Plain data types are **not** extensible and stay constructible by literal:
+geometry (`Rect`, `RenderRect`, `TileRect`), pixels (`Pixmap`, `GrayPixmap`,
+`Bitmap`, `Color`, `FgbzColor`), and the document data models (`PageInfo`,
+`TextLayer`, `TextZone`, `DjVuBookmark`, `DjVuMetadata`, `EditRequest`,
+`ComponentId`, …). Adding a public field to one of them is breaking. So is
+adding a variant to an enum that the format or geometry closes
+(`TextZoneKind`, `Rotation`, `UserRotation`, `annotation::Shape`,
+`ComponentKind`, `PlaneStatus`, `iff::Chunk`).
+
+[`docs/migration.md`](migration.md#100) lists every type in each group as
+of 1.0.0. A new public options struct, report struct or options enum must be
+marked the same way.
+
 ### Experimental
 
 Opt-in, may change or be removed in any release **including a patch release**,
@@ -94,15 +128,9 @@ minor releases** after the release that introduced the deprecation, and never
 less than **90 days**, whichever is longer. Removal happens only in a
 breaking (major; pre-1.0 minor) release.
 
-Current deprecated surfaces:
-
-| Item | Kind | Replacement |
-|------|------|-------------|
-| `bzz_new` module | re-export alias | `bzz` |
-| `iw44_new` module | re-export alias | `iw44` |
-
-These aliases are kept intentionally cheap (a `pub use`) so they can outlive
-the minimum window without cost.
+Current deprecated surfaces: none. 1.0.0 removed every deprecated item,
+including the module aliases `bzz_new` and `iw44_new` (listed here since
+0.28.0); see [`docs/migration.md`](migration.md#100).
 
 ## 2. Semantic versioning
 
@@ -130,6 +158,22 @@ the code before and after. `tests/migration_sync.rs` fails when
 there, so the release PR stays red until the section exists.
 
 ### Intentional breaks, by release
+
+#### 1.0.0 — the deprecated surface is removed and the growing types are marked
+
+Two changes, both described with code in
+[`docs/migration.md`](migration.md#100):
+
+- Every item with a deprecation note is removed: the `render_*` variants
+  that `RenderRequest` replaces, `RenderOptions::scale`, `Pixmap::new`,
+  `OcrExportError`, the old render methods of the Python and npm packages,
+  and the module aliases `bzz_new` and `iw44_new`.
+- The options structs, the report structs and the options enums become
+  `#[non_exhaustive]` (the extensible-type rule in §1). This is the same
+  step 0.34.0 took for the optimizer types, made once for the whole stable
+  surface, so that 1.x releases can add options and report fields without a
+  major release. `Jb2EncodeOptions::with_lossy_threshold` and
+  `with_despeckle` change from constructors to methods on a value.
 
 #### 0.34.0 — the optimizer's request and report types became extensible
 

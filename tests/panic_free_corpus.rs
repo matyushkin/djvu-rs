@@ -148,11 +148,7 @@ fn panic_free_bilevel_page_larger_than_its_mask() {
             // The guarded code is the 1:1 fast path, so ask for exactly the
             // size the mutated INFO chunk declares. `RenderOptions::default()`
             // does not reach it.
-            let opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                ..RenderOptions::default()
-            };
+            let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
             let _ = render_pixmap(page, &opts);
         }
     }

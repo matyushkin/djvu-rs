@@ -41,11 +41,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
 }
 
 fn full_size(page: &DjVuPage) -> RenderOptions {
-    RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..Default::default()
-    }
+    RenderOptions::new(page.width() as u32, page.height() as u32)
 }
 
 /// Render the first `pages` pages of the subject and return the highest

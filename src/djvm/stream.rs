@@ -6,6 +6,7 @@ pub(super) static SPOOL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Storage policy for [`DjvmStreamWriter`] component bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DjvmSpool {
     /// Spool into an in-memory buffer (bounded by total component bytes; use
     /// only for modest documents).

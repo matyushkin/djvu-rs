@@ -143,6 +143,7 @@ pub(super) fn fits_decoder_budget(ccs: &[Cc], shared: bool) -> bool {
 /// matches) the shape is pixel-identical to what the decoder reconstructs;
 /// only lossy rec-7 substitution (`lossy_threshold > 0`) blits a near-twin
 /// whose pixels can differ from this original component.
+#[non_exhaustive]
 pub struct EncodedBlit {
     /// Top-left x of the blit in the page (0 = left edge).
     pub x: u32,
@@ -213,6 +214,7 @@ pub(super) fn extract_and_order_ccs(
 /// always carries the original connected component's pixels, never a
 /// substituted dict entry, so it matches the real emitted blit only when the
 /// component is emitted byte-exact (see [`symbol_boxes_in_emission_order`]).
+#[non_exhaustive]
 pub struct SymbolBox {
     /// Top-left x of the symbol in the page (0 = left edge).
     pub x: u32,

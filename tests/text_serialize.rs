@@ -68,10 +68,7 @@ mod tests {
     #[test]
     fn hocr_page_index_in_options() {
         let doc = doc_with_text().expect("need a test document");
-        let opts = HocrOptions {
-            page_index: Some(0),
-            ..HocrOptions::default()
-        };
+        let opts = HocrOptions::default().with_page_index(Some(0));
         let hocr = to_hocr(&doc, &opts).expect("hOCR single-page generation");
         // Only one page should be included (count div elements, not meta tag mentions)
         assert_eq!(hocr.matches("class=\"ocr_page\"").count(), 1);

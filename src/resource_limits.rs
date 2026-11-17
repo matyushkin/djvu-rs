@@ -5,6 +5,7 @@ pub const DEFAULT_MAX_RENDER_PIXELS: u64 = 512 * 1024 * 1024;
 
 /// Which configured resource axis was exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResourceLimitAxis {
     /// Input file size in bytes.
     FileBytes,
@@ -24,6 +25,7 @@ pub enum ResourceLimitAxis {
 
 /// A configured resource limit was exceeded by a public decode/render operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceLimitExceeded {
     /// Public entry point that rejected the input (for example `"document.parse"`
     /// or `"render_pixmap"`).
@@ -97,6 +99,7 @@ impl core::error::Error for ResourceLimitExceeded {}
 
 /// Configured processing limits checked by the resource layer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceLimits {
     /// Maximum accepted input size in bytes.
     pub max_file_bytes: Option<u64>,
@@ -112,6 +115,57 @@ pub struct ResourceLimits {
     pub max_decoded_bytes: Option<u64>,
     /// Maximum accepted render output pixel area (`width * height`).
     pub max_render_pixels: Option<u64>,
+}
+
+impl ResourceLimits {
+    /// Sets [`max_file_bytes`](Self::max_file_bytes).
+    #[must_use]
+    pub fn with_max_file_bytes(mut self, max_file_bytes: Option<u64>) -> Self {
+        self.max_file_bytes = max_file_bytes;
+        self
+    }
+
+    /// Sets [`max_pages`](Self::max_pages).
+    #[must_use]
+    pub fn with_max_pages(mut self, max_pages: Option<u64>) -> Self {
+        self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets [`max_components`](Self::max_components).
+    #[must_use]
+    pub fn with_max_components(mut self, max_components: Option<u64>) -> Self {
+        self.max_components = max_components;
+        self
+    }
+
+    /// Sets [`max_page_pixels`](Self::max_page_pixels).
+    #[must_use]
+    pub fn with_max_page_pixels(mut self, max_page_pixels: Option<u64>) -> Self {
+        self.max_page_pixels = max_page_pixels;
+        self
+    }
+
+    /// Sets [`max_total_pixels`](Self::max_total_pixels).
+    #[must_use]
+    pub fn with_max_total_pixels(mut self, max_total_pixels: Option<u64>) -> Self {
+        self.max_total_pixels = max_total_pixels;
+        self
+    }
+
+    /// Sets [`max_decoded_bytes`](Self::max_decoded_bytes).
+    #[must_use]
+    pub fn with_max_decoded_bytes(mut self, max_decoded_bytes: Option<u64>) -> Self {
+        self.max_decoded_bytes = max_decoded_bytes;
+        self
+    }
+
+    /// Sets [`max_render_pixels`](Self::max_render_pixels).
+    #[must_use]
+    pub fn with_max_render_pixels(mut self, max_render_pixels: Option<u64>) -> Self {
+        self.max_render_pixels = max_render_pixels;
+        self
+    }
 }
 
 impl ResourceLimits {
@@ -142,9 +196,19 @@ impl ResourceLimits {
 
 /// Options controlling document parse behaviour and resource limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParseOptions {
     /// Configurable resource limits checked before the document is fully parsed.
     pub limits: Option<ResourceLimits>,
+}
+
+impl ParseOptions {
+    /// Sets [`limits`](Self::limits).
+    #[must_use]
+    pub fn with_limits(mut self, limits: Option<ResourceLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
 }
 
 #[cfg(test)]

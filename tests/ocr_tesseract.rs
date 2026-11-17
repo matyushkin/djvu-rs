@@ -34,11 +34,7 @@ mod tesseract_tests {
         let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu must exist");
         let doc = DjVuDocument::parse(&data).expect("parse must succeed");
         let page = doc.page(0).expect("page 0 must exist");
-        let opts = RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..RenderOptions::default()
-        };
+        let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
         let pixmap = render_pixmap(page, &opts).expect("render must succeed");
 
         let backend = TesseractBackend::new();
@@ -56,11 +52,7 @@ mod tesseract_tests {
         let data = std::fs::read(assets_path().join("boy.djvu")).expect("boy.djvu must exist");
         let doc = DjVuDocument::parse(&data).expect("parse must succeed");
         let page = doc.page(0).expect("page 0 must exist");
-        let opts = RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..RenderOptions::default()
-        };
+        let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
         let pixmap = render_pixmap(page, &opts).expect("render must succeed");
 
         let backend = TesseractBackend::new();

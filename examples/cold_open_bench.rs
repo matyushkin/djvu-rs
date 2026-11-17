@@ -186,11 +186,7 @@ fn report(label: &str, mut samples_ms: Vec<f64>) -> f64 {
 // ---- shared render helper ----------------------------------------------------
 
 fn native_opts(page: &DjVuPage) -> RenderOptions {
-    RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    }
+    RenderOptions::new(page.width() as u32, page.height() as u32)
 }
 
 fn render_native(page: &DjVuPage) -> Result<(), Box<dyn std::error::Error>> {

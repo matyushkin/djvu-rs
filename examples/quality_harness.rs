@@ -29,16 +29,13 @@ use djvu_rs::quality;
 use std::process::Command;
 
 fn opts(w: u32, h: u32, resampling: Resampling) -> RenderOptions {
-    RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: false,
-        resampling,
-        mask_aa: false,
-    }
+    RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(resampling)
+        .with_mask_aa(false)
 }
 
 fn render(path: &str, page_idx: usize, w: u32, h: u32, r: Resampling) -> Option<Pixmap> {

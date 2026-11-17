@@ -636,16 +636,12 @@ mod measure {
                 let reference = reference(&dir, page).unwrap();
                 let djvu_page = doc.page(page.page - 1).unwrap();
                 // Same render as `djvu ocr`: the page's native resolution.
-                let render = RenderOptions {
-                    width: djvu_page.width() as u32,
-                    height: djvu_page.height() as u32,
-                    ..Default::default()
-                };
+                let render =
+                    RenderOptions::new(djvu_page.width() as u32, djvu_page.height() as u32);
                 let pixmap = render_pixmap(djvu_page, &render).unwrap();
-                let options = OcrOptions {
-                    languages: scan.tesseract_lang.clone(),
-                    dpi: djvu_page.dpi() as u32,
-                };
+                let options = OcrOptions::default()
+                    .with_languages(scan.tesseract_lang.clone())
+                    .with_dpi(djvu_page.dpi() as u32);
                 let stem = page.pinned.file.trim_end_matches(".wiki");
                 if let Some(dump) = &dump {
                     std::fs::write(dump.join(format!("{stem}.reference.txt")), &reference).unwrap();

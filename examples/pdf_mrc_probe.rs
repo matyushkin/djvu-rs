@@ -93,14 +93,7 @@ fn rasterize_and_compare(doc: &DjVuDocument, pdf: &[u8], tag: &str, tmp: &std::p
             continue;
         };
         let Ok(page) = doc.page(i) else { continue };
-        let Ok(ours) = render_pixmap(
-            page,
-            &RenderOptions {
-                width: theirs.width,
-                height: theirs.height,
-                ..RenderOptions::default()
-            },
-        ) else {
+        let Ok(ours) = render_pixmap(page, &RenderOptions::new(theirs.width, theirs.height)) else {
             continue;
         };
         let r = compare_color(&ours, &theirs);
@@ -137,14 +130,8 @@ fn main() {
         println!("== {f} ==");
         let default_pdf = djvu_to_pdf_with_options(&doc, &PdfOptions::default()).unwrap();
         rasterize_and_compare(&doc, &default_pdf, "default", &tmp);
-        let mrc_pdf = djvu_to_pdf_with_options(
-            &doc,
-            &PdfOptions {
-                mrc: true,
-                ..PdfOptions::default()
-            },
-        )
-        .unwrap();
+        let mrc_pdf =
+            djvu_to_pdf_with_options(&doc, &PdfOptions::default().with_mrc(true)).unwrap();
         rasterize_and_compare(&doc, &mrc_pdf, "mrc", &tmp);
         let delta =
             100.0 * (mrc_pdf.len() as f64 - default_pdf.len() as f64) / default_pdf.len() as f64;

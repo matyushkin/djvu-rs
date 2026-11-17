@@ -136,12 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height = ((page.height() as u32 * dpi) / page.dpi() as u32).max(1);
     let pixmap = djvu_render::render_pixmap(
         &page,
-        &RenderOptions {
-            width,
-            height,
-            permissive: true,
-            ..RenderOptions::default()
-        },
+        &RenderOptions::new(width, height).with_permissive(true),
     )?;
     let first_pixel = start.elapsed();
 

@@ -7,6 +7,7 @@ use super::*;
 /// Default values reproduce the lossless behavior of [`encode_jb2_dict`]
 /// and [`encode_jb2_dict_with_shared`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Jb2EncodeOptions {
     /// Hamming-distance threshold (as fraction of pixel count) for **lossy
     /// rec-7 substitution** (#224 Phase 4). When `> 0`, CCs that are not
@@ -93,6 +94,35 @@ pub struct Jb2EncodeOptions {
     pub aligned_refine: Option<AlignedRefine>,
 }
 
+impl Jb2EncodeOptions {
+    /// Sets [`cross_size_rec6_probe`](Self::cross_size_rec6_probe).
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn with_cross_size_rec6_probe(
+        mut self,
+        cross_size_rec6_probe: Option<CrossSizeRec6Probe>,
+    ) -> Self {
+        self.cross_size_rec6_probe = cross_size_rec6_probe;
+        self
+    }
+
+    /// Sets [`same_size_rec6`](Self::same_size_rec6).
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn with_same_size_rec6(mut self, same_size_rec6: Option<f32>) -> Self {
+        self.same_size_rec6 = same_size_rec6;
+        self
+    }
+
+    /// Sets [`aligned_refine`](Self::aligned_refine).
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn with_aligned_refine(mut self, aligned_refine: Option<AlignedRefine>) -> Self {
+        self.aligned_refine = aligned_refine;
+        self
+    }
+}
+
 impl Default for Jb2EncodeOptions {
     fn default() -> Self {
         Self {
@@ -123,28 +153,24 @@ impl Jb2EncodeOptions {
     /// saves little — see [`lossy_scan`](Self::lossy_scan), whose calibrated
     /// threshold is looser.
     pub fn lossy_text() -> Self {
-        Self::with_lossy_threshold(0.02)
+        Self::default().with_lossy_threshold(0.02)
     }
 
-    /// Set the [`lossy_threshold`](Self::lossy_threshold) (builder style),
-    /// leaving every other knob at its default. `0.0` keeps lossless behavior.
-    #[allow(clippy::needless_update)] // spread sets the experimental fields when compiled in
-    pub fn with_lossy_threshold(threshold: f32) -> Self {
-        Self {
-            lossy_threshold: threshold,
-            ..Self::default()
-        }
+    /// Sets [`lossy_threshold`](Self::lossy_threshold). `0.0` keeps lossless
+    /// behavior.
+    #[must_use]
+    pub fn with_lossy_threshold(mut self, lossy_threshold: f32) -> Self {
+        self.lossy_threshold = lossy_threshold;
+        self
     }
 
-    /// Set [`despeckle`](Self::despeckle) (builder style), leaving every
-    /// other knob at its default. `max_px` is the largest foreground-pixel
-    /// count a component may have and still be dropped as a speck.
-    #[allow(clippy::needless_update)]
-    pub fn with_despeckle(max_px: u32) -> Self {
-        Self {
-            despeckle: Some(max_px),
-            ..Self::default()
-        }
+    /// Sets [`despeckle`](Self::despeckle): the largest foreground-pixel
+    /// count a component may have and still be dropped as a speck, or `None`
+    /// to keep every component.
+    #[must_use]
+    pub fn with_despeckle(mut self, despeckle: Option<u32>) -> Self {
+        self.despeckle = despeckle;
+        self
     }
 
     /// Recommended **lossy** preset for noisy high-dpi scans (JB2_DESPECKLE):

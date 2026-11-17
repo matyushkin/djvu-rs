@@ -122,6 +122,7 @@ pub enum UserRotation {
 ///
 /// Applied after full-resolution decode and compositing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Resampling {
     /// Bilinear interpolation (default — fast, acceptable quality).
     #[default]
@@ -143,14 +144,10 @@ pub enum Resampling {
 /// use djvu_rs::djvu_render::RenderOptions;
 ///
 /// // Set the output size; the pipeline derives the decode scale from `width`.
-/// let opts = RenderOptions {
-///     width: 800,
-///     height: 600,
-///     aa: true,
-///     ..Default::default()
-/// };
+/// let opts = RenderOptions::new(800, 600).with_aa(true);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RenderOptions {
     /// Compositor width in pixels, in the page's native (pre-rotation)
     /// orientation. The returned pixmap is this size after the page's INFO
@@ -201,6 +198,75 @@ pub struct RenderOptions {
     /// a faithfulness fix. Leaving it `false` keeps `render_pixmap` and
     /// friends byte-identical to prior releases.
     pub mask_aa: bool,
+}
+
+impl RenderOptions {
+    /// Options for an output of `width` × `height` pixels, with every other
+    /// field at its default.
+    #[must_use]
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            ..Self::default()
+        }
+    }
+
+    /// Sets [`width`](Self::width).
+    #[must_use]
+    pub fn with_width(mut self, width: u32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Sets [`height`](Self::height).
+    #[must_use]
+    pub fn with_height(mut self, height: u32) -> Self {
+        self.height = height;
+        self
+    }
+
+    /// Sets [`bold`](Self::bold).
+    #[must_use]
+    pub fn with_bold(mut self, bold: u8) -> Self {
+        self.bold = bold;
+        self
+    }
+
+    /// Sets [`aa`](Self::aa).
+    #[must_use]
+    pub fn with_aa(mut self, aa: bool) -> Self {
+        self.aa = aa;
+        self
+    }
+
+    /// Sets [`rotation`](Self::rotation).
+    #[must_use]
+    pub fn with_rotation(mut self, rotation: UserRotation) -> Self {
+        self.rotation = rotation;
+        self
+    }
+
+    /// Sets [`permissive`](Self::permissive).
+    #[must_use]
+    pub fn with_permissive(mut self, permissive: bool) -> Self {
+        self.permissive = permissive;
+        self
+    }
+
+    /// Sets [`resampling`](Self::resampling).
+    #[must_use]
+    pub fn with_resampling(mut self, resampling: Resampling) -> Self {
+        self.resampling = resampling;
+        self
+    }
+
+    /// Sets [`mask_aa`](Self::mask_aa).
+    #[must_use]
+    pub fn with_mask_aa(mut self, mask_aa: bool) -> Self {
+        self.mask_aa = mask_aa;
+        self
+    }
 }
 
 impl Default for RenderOptions {
@@ -260,6 +326,7 @@ pub(super) fn check_output_pixels(
 
 /// A document layer a permissive render skipped or fell back on (#696).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RecoveredLayer {
     /// The IW44 background (`BG44`), possibly truncated at a corrupt chunk.
     Background,
@@ -273,6 +340,7 @@ pub enum RecoveredLayer {
 
 /// One recovery action a permissive render took to keep going (#696).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RenderRecovery {
     /// Which layer was affected.
     pub layer: RecoveredLayer,
@@ -285,6 +353,7 @@ pub struct RenderRecovery {
 /// Returned alongside the pixmap by [`RenderRequest::pixmap_with_report`]. An empty
 /// report (`is_clean`) means the page decoded fully with no fallbacks.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RenderReport {
     /// Recovery actions in the order the renderer took them.
     pub recoveries: Vec<RenderRecovery>,

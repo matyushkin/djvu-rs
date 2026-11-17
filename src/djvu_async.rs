@@ -18,7 +18,7 @@
 //! let data = std::fs::read("file.djvu")?;
 //! let doc = DjVuDocument::parse(&data)?;
 //! let page = doc.page(0)?.clone();
-//! let opts = RenderOptions { width: 800, height: 600, ..Default::default() };
+//! let opts = RenderOptions::new(800, 600);
 //!
 //! let pixmap = tokio::task::spawn_blocking(move || {
 //!     djvu_render::render_pixmap(&page, &opts)
@@ -695,7 +695,7 @@ where
 /// let data = std::fs::read("file.djvu").unwrap();
 /// let doc = DjVuDocument::parse(&data).unwrap();
 /// let page = doc.page(0).unwrap();
-/// let opts = RenderOptions { width: 800, height: 600, ..Default::default() };
+/// let opts = RenderOptions::new(800, 600);
 ///
 /// let stream = render_progressive_stream(page, opts);
 /// futures::pin_mut!(stream);

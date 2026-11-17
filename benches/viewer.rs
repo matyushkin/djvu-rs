@@ -60,16 +60,13 @@ fn corpus_path() -> PathBuf {
 }
 
 fn render_opts(width: u32, height: u32) -> RenderOptions {
-    RenderOptions {
-        width,
-        height,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: false,
-        resampling: Resampling::Bilinear,
-        mask_aa: false,
-    }
+    RenderOptions::new(width, height)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(Resampling::Bilinear)
+        .with_mask_aa(false)
 }
 
 /// Number of steps in a simulated pan gesture.

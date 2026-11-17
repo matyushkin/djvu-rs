@@ -61,10 +61,7 @@ mod epub_tests {
     #[test]
     fn epub_vec_and_writer_exports_are_byte_identical() {
         let doc = load_doc("boy.djvu");
-        let opts = EpubOptions {
-            modified: Some("2026-07-19T00:00:00Z".to_owned()),
-            ..EpubOptions::default()
-        };
+        let opts = EpubOptions::default().with_modified(Some("2026-07-19T00:00:00Z".to_owned()));
         let expected = djvu_to_epub(&doc, &opts).unwrap();
 
         let mut cursor = std::io::Cursor::new(Vec::new());

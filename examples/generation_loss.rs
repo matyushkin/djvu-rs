@@ -21,11 +21,7 @@ fn render_native(doc: &DjVuDocument) -> Pixmap {
     let page = doc.page(0).unwrap();
     render_pixmap(
         page,
-        &RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..Default::default()
-        },
+        &RenderOptions::new(page.width() as u32, page.height() as u32),
     )
     .unwrap()
 }

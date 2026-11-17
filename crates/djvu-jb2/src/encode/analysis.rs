@@ -422,6 +422,7 @@ pub fn probe_same_size_rec6_density(
 /// from a tighter refinement threshold" or "how large is the rec-7 win
 /// from the shared dict on this corpus" without round-tripping bytes.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct CcStats {
     pub total_ccs: usize,
     /// rec-7: byte-exact match found in the running dict.

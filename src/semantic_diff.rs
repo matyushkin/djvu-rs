@@ -22,6 +22,7 @@ pub enum PlaneStatus {
 
 /// One compared plane and its outcome.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PlaneDiff {
     /// Stable plane name: `pages`, `text`, `annotations`, `metadata`,
     /// `bookmarks`, or `component_graph`.
@@ -34,6 +35,7 @@ pub struct PlaneDiff {
 
 /// The result of a semantic comparison.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SemanticDiff {
     /// One entry per evaluated plane, in canonical plane order.
     pub planes: Vec<PlaneDiff>,

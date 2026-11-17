@@ -101,11 +101,7 @@ fn render_first_page(path: &Path) -> djvu_rs::Pixmap {
     let bytes = std::fs::read(path).unwrap();
     let doc = djvu_rs::Document::from_bytes(bytes).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width(),
-        height: page.height(),
-        ..Default::default()
-    };
+    let opts = RenderOptions::new(page.width(), page.height());
     page.render_with(&opts).unwrap()
 }
 
@@ -1263,10 +1259,11 @@ mod alpha_compositing {
     use std::path::Path;
 
     fn on_background(red: u8, green: u8, blue: u8) -> IngestPolicy {
-        IngestPolicy {
-            alpha: AlphaCompositing::CompositeOnBackground { red, green, blue },
-            ..Default::default()
-        }
+        IngestPolicy::default().with_alpha(AlphaCompositing::CompositeOnBackground {
+            red,
+            green,
+            blue,
+        })
     }
 
     /// 2×1 RGBA PNG: one half-transparent pixel, one fully transparent.
@@ -1654,10 +1651,7 @@ mod icc_policy {
     const PROFILE: &[u8] = b"not a real ICC profile, presence is what counts";
 
     fn reject() -> IngestPolicy {
-        IngestPolicy {
-            icc: IccHandling::Reject,
-            ..Default::default()
-        }
+        IngestPolicy::default().with_icc(IccHandling::Reject)
     }
 
     /// 1×1 gray PNG with an iCCP chunk.

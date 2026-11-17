@@ -28,28 +28,26 @@ pub(super) fn cmd_text(
         TextFormat::Hocr => {
             let data = std::fs::read(path)?;
             let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-            let opts = djvu_rs::text_serialize::HocrOptions {
-                page_index: if all {
+            let opts = djvu_rs::text_serialize::HocrOptions::default()
+                .with_page_index(if all {
                     None
                 } else {
                     Some(page_idx(page, doc.page_count())?)
-                },
-                dpi: None,
-            };
+                })
+                .with_dpi(None);
             let hocr = djvu_rs::text_serialize::to_hocr(&doc, &opts)?;
             write_or_print(output, &hocr)?;
         }
         TextFormat::Alto => {
             let data = std::fs::read(path)?;
             let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-            let opts = djvu_rs::text_serialize::AltoOptions {
-                page_index: if all {
+            let opts = djvu_rs::text_serialize::AltoOptions::default()
+                .with_page_index(if all {
                     None
                 } else {
                     Some(page_idx(page, doc.page_count())?)
-                },
-                dpi: None,
-            };
+                })
+                .with_dpi(None);
             let alto = djvu_rs::text_serialize::to_alto(&doc, &opts)?;
             write_or_print(output, &alto)?;
         }

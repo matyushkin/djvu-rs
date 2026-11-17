@@ -25,6 +25,7 @@ const MAX_GRAPH_VISITS: usize = 1_000_000;
 
 /// Classification of a document component node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ComponentNodeKind {
     /// A renderable `FORM:DJVU` page.
     Page,
@@ -40,6 +41,7 @@ pub enum ComponentNodeKind {
 
 /// One node in the component graph.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ComponentNode {
     /// Identity from the corresponding DIRM entry.
     pub id: String,

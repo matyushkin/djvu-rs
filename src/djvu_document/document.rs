@@ -10,6 +10,7 @@ use super::*;
 /// [`DjVuDocument::enforce_cache_budget`]'s all-or-nothing eviction.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CacheBudgetOptions {
     /// C5_COMPRESS's cheaper middle tier: when true, a least-recently-used
     /// page over budget is first [`DjVuPage::downgrade_render_cache`]d —
@@ -22,6 +23,16 @@ pub struct CacheBudgetOptions {
     /// ceiling is honoured identically either way; only the *shape* of what
     /// stays cached changes.
     pub downgrade_before_drop: bool,
+}
+
+#[cfg(feature = "std")]
+impl CacheBudgetOptions {
+    /// Sets [`downgrade_before_drop`](Self::downgrade_before_drop).
+    #[must_use]
+    pub fn with_downgrade_before_drop(mut self, downgrade_before_drop: bool) -> Self {
+        self.downgrade_before_drop = downgrade_before_drop;
+        self
+    }
 }
 
 /// An opened DjVu document.

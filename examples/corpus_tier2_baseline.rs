@@ -71,16 +71,13 @@ const TIER2: &[Entry] = &[
 ];
 
 fn opts(w: u32, h: u32) -> RenderOptions {
-    RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: false,
-        resampling: Resampling::Bilinear,
-        mask_aa: false,
-    }
+    RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(Resampling::Bilinear)
+        .with_mask_aa(false)
 }
 
 fn ppm_to_pixmap(data: &[u8]) -> Option<Pixmap> {

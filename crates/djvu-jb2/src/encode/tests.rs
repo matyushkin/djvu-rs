@@ -865,7 +865,9 @@ fn lossy_text_preset_is_lossy_and_smaller() {
     // near-twins as rec-7 copies).
     assert_eq!(Jb2EncodeOptions::lossy_text().lossy_threshold, 0.02);
     assert_eq!(
-        Jb2EncodeOptions::with_lossy_threshold(0.07).lossy_threshold,
+        Jb2EncodeOptions::default()
+            .with_lossy_threshold(0.07)
+            .lossy_threshold,
         0.07
     );
 
@@ -946,7 +948,11 @@ fn despeckle_removes_isolated_1px_specks_and_shrinks_output() {
     }
 
     let lossless = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::default());
-    let despeckled = encode_jb2_dict_with_options(&src, &[], &Jb2EncodeOptions::with_despeckle(2));
+    let despeckled = encode_jb2_dict_with_options(
+        &src,
+        &[],
+        &Jb2EncodeOptions::default().with_despeckle(Some(2)),
+    );
     assert!(
         despeckled.len() < lossless.len(),
         "despeckling 1px dust should shrink the stream: despeckled={} lossless={}",
@@ -1008,7 +1014,7 @@ fn despeckle_preserves_punctuation_and_diacritic_dots() {
     src.set(speck.0, speck.1, true);
 
     for max_px in [2u32, 4, 8] {
-        let opts = Jb2EncodeOptions::with_despeckle(max_px);
+        let opts = Jb2EncodeOptions::default().with_despeckle(Some(max_px));
         let enc = encode_jb2_dict_with_options(&src, &[], &opts);
         let decoded = jb2::decode(&enc, None)
             .unwrap_or_else(|e| panic!("despeckle={max_px} decode failed: {e:?}"));

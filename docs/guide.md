@@ -87,11 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page = doc.page(0)?.clone();
 
     let target_dpi = 150u32;
-    let opts = RenderOptions {
-        width: ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
-        height: ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
-        ..Default::default()
-    };
+    let opts = RenderOptions::new(
+        ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
+        ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    );
     let pixmap = tokio::task::spawn_blocking(move || {
         djvu_render::render_pixmap(&page, &opts)
     })
@@ -268,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let doc = DjVuDocument::parse(&data)?;
     let page = doc.page(0)?;
 
-    let opts = RenderOptions { width: 2400, height: 3200, ..Default::default() };
+    let opts = RenderOptions::new(2400, 3200);
     let layout = TileLayout::new(page, &opts, 256)?;
 
     for row in 0..layout.rows() {

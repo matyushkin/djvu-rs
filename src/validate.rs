@@ -31,6 +31,7 @@ const DECODED_BYTES_PER_PIXEL: u64 = 4;
 
 /// The outcome category of a validation finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// A definite validity failure.
     Error,
@@ -56,6 +57,7 @@ impl Severity {
 
 /// The validator layer which produced a finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Layer {
     /// IFF framing, FORM layout, and directory shape.
     Structural,
@@ -84,6 +86,7 @@ impl Layer {
 
 /// One stable, machine-readable validation observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Finding {
     /// Finding category.
     pub severity: Severity,
@@ -103,6 +106,7 @@ pub struct Finding {
 
 /// Counts grouped by [`Severity`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationSummary {
     /// Number of error findings.
     pub errors: usize,
@@ -125,6 +129,7 @@ pub use crate::resource_limits::{
 /// chunk headers — no page is decoded or rendered — so the estimate is always
 /// available, even for documents whose pages cannot be decoded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceEstimate {
     /// Total input size in bytes.
     pub file_bytes: u64,
@@ -143,6 +148,7 @@ pub struct ResourceEstimate {
 
 /// Complete result of one [`validate`] call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationReport {
     /// Findings in deterministic structural/dependency/codec/resource order.
     pub findings: Vec<Finding>,
@@ -179,6 +185,7 @@ impl ValidationReport {
 
 /// Controls the cost of [`validate`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidateOptions {
     /// Retained for callers and consumed by the CLI exit policy.
     ///
@@ -196,6 +203,29 @@ pub struct ValidateOptions {
     /// decode-cost limit violation also suppresses the [`Self::decode_pages`]
     /// work so the validator never performs the decode a limit forbids.
     pub limits: Option<ResourceLimits>,
+}
+
+impl ValidateOptions {
+    /// Sets [`strict`](Self::strict).
+    #[must_use]
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Sets [`decode_pages`](Self::decode_pages).
+    #[must_use]
+    pub fn with_decode_pages(mut self, decode_pages: bool) -> Self {
+        self.decode_pages = decode_pages;
+        self
+    }
+
+    /// Sets [`limits`](Self::limits).
+    #[must_use]
+    pub fn with_limits(mut self, limits: Option<ResourceLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
 }
 
 /// Validate a writer's planned output before it is committed (#696).

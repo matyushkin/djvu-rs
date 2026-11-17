@@ -531,11 +531,7 @@ proptest! {
         threshold in any::<u8>(),
         sub in 1u32..=16,
     ) {
-        let opts = SegmentOptions {
-            threshold,
-            bg_subsample: sub,
-            ..SegmentOptions::default()
-        };
+        let opts = SegmentOptions::default().with_threshold(threshold).with_bg_subsample(sub);
         let seg = segment_page(&pm, &opts);
         prop_assert_eq!(seg.mask.width, pm.width);
         prop_assert_eq!(seg.mask.height, pm.height);
@@ -565,11 +561,7 @@ proptest! {
         pm in arb_pixmap(32, 32),
         sub in 0u32..=16,
     ) {
-        let opts = SegmentOptions {
-            threshold: 128,
-            bg_subsample: sub,
-            ..SegmentOptions::default()
-        };
+        let opts = SegmentOptions::default().with_threshold(128).with_bg_subsample(sub);
         let seg = segment_page(&pm, &opts);
         let effective = sub.max(1);
         prop_assert_eq!(seg.bg.width, pm.width.div_ceil(effective));
@@ -583,11 +575,7 @@ proptest! {
         threshold in any::<u8>(),
         sub in 1u32..=16,
     ) {
-        let opts = SegmentOptions {
-            threshold,
-            bg_subsample: sub,
-            ..SegmentOptions::default()
-        };
+        let opts = SegmentOptions::default().with_threshold(threshold).with_bg_subsample(sub);
         let a = segment_page(&pm, &opts);
         let b = segment_page(&pm, &opts);
         prop_assert_eq!(a.mask.data, b.mask.data);
@@ -597,11 +585,7 @@ proptest! {
     /// Threshold = 0 produces an empty mask (no pixel has lum < 0).
     #[test]
     fn segment_threshold_zero_yields_empty_mask(pm in arb_pixmap(32, 32)) {
-        let opts = SegmentOptions {
-            threshold: 0,
-            bg_subsample: 4,
-            ..SegmentOptions::default()
-        };
+        let opts = SegmentOptions::default().with_threshold(0).with_bg_subsample(4);
         let seg = segment_page(&pm, &opts);
         for y in 0..pm.height {
             for x in 0..pm.width {

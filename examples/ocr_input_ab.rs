@@ -109,19 +109,12 @@ fn main() {
             continue;
         }
         let dpi = page.dpi();
-        let opts = OcrOptions {
-            dpi: dpi as u32,
-            ..Default::default()
-        };
+        let opts = OcrOptions::default().with_dpi(dpi as u32);
 
         // (A) raw composite render at native resolution.
         let raw = render_pixmap(
             page,
-            &RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                ..Default::default()
-            },
+            &RenderOptions::new(page.width() as u32, page.height() as u32),
         )
         .unwrap();
         // (B) Sauvola segmentation mask of the render.

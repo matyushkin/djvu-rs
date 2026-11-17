@@ -32,16 +32,8 @@ fn integrated(path: &str) {
         let doc = DjVuDocument::parse(&data).unwrap();
         let page = doc.page(0).unwrap();
         let (w, h) = (page.width() as u32, page.height() as u32);
-        let s4 = djvu_rs::djvu_render::RenderOptions {
-            width: w / 4,
-            height: h / 4,
-            ..Default::default()
-        };
-        let s1 = djvu_rs::djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
-        };
+        let s4 = djvu_rs::djvu_render::RenderOptions::new(w / 4, h / 4);
+        let s1 = djvu_rs::djvu_render::RenderOptions::new(w, h);
         let _ = djvu_rs::djvu_render::render_pixmap(page, &s4).unwrap();
         let t0 = Instant::now();
         let _ = djvu_rs::djvu_render::render_pixmap(page, &s1).unwrap();

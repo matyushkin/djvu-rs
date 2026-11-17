@@ -93,11 +93,7 @@ mod image_tests {
         let page2 = doc2.page(0).expect("page 0");
 
         // Render via render_into
-        let opts = RenderOptions {
-            width: page1.width() as u32,
-            height: page1.height() as u32,
-            ..RenderOptions::default()
-        };
+        let opts = RenderOptions::new(page1.width() as u32, page1.height() as u32);
         let expected_bytes = (opts.width * opts.height * 4) as usize;
         let mut direct_buf = vec![0u8; expected_bytes];
         page1

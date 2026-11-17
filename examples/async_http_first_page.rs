@@ -252,15 +252,7 @@ async fn main() {
     let scale = dpi / page.dpi().max(1) as f32;
     let w = ((page.width() as f32 * scale).round() as u32).max(1);
     let h = ((page.height() as f32 * scale).round() as u32).max(1);
-    let full_px = djvu_render::render_pixmap(
-        page,
-        &RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let full_px = djvu_render::render_pixmap(page, &RenderOptions::new(w, h)).unwrap();
     let full_ttfp = t0.elapsed().as_secs_f64();
 
     // B: lazy over HTTP Range.
@@ -283,15 +275,7 @@ async fn main() {
     let scale = dpi / p0.dpi().max(1) as f32;
     let w = ((p0.width() as f32 * scale).round() as u32).max(1);
     let h = ((p0.height() as f32 * scale).round() as u32).max(1);
-    let lazy_px = djvu_render::render_pixmap(
-        &p0,
-        &RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let lazy_px = djvu_render::render_pixmap(&p0, &RenderOptions::new(w, h)).unwrap();
     let lazy_ttfp = t1.elapsed().as_secs_f64();
     assert_eq!(
         full_px.data, lazy_px.data,

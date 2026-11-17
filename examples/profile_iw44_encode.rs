@@ -19,11 +19,7 @@ fn main() {
     let doc = djvu_rs::DjVuDocument::parse(&data).expect("parse failed");
     let page = doc.page(0).expect("page 0 not found");
 
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..Default::default()
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = djvu_rs::djvu_render::render_pixmap(page, &opts).expect("render failed");
 
     eprintln!("Encoding {}×{} pixmap", pixmap.width, pixmap.height);

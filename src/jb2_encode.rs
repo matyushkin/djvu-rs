@@ -528,10 +528,7 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     fn probe_opts() -> Jb2EncodeOptions {
-        Jb2EncodeOptions {
-            cross_size_rec6_probe: Some(REC6_PROBE),
-            ..Jb2EncodeOptions::default()
-        }
+        Jb2EncodeOptions::default().with_cross_size_rec6_probe(Some(REC6_PROBE))
     }
 
     /// Aggregated cross-size rec-6 probe measurement over a set of page masks.

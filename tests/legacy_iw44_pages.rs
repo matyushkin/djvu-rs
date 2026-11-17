@@ -59,11 +59,7 @@ fn merge_keeps_legacy_pages_and_the_reader_decodes_them() {
     let doc = DjVuDocument::parse(&bundle).unwrap();
     for index in 1..3 {
         let page = doc.page(index).unwrap();
-        let opts = RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..RenderOptions::default()
-        };
+        let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
         render_pixmap(page, &opts).unwrap_or_else(|e| panic!("render legacy page {index}: {e}"));
     }
 }

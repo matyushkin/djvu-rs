@@ -71,6 +71,7 @@ pub enum OcrError {
 /// model-neutral recast is deferred until a second CLI-live backend needs to be
 /// configured through the trait — see `docs/ocr-backend-seam.md`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OcrOptions {
     /// Languages to recognize (e.g. "eng", "rus+eng"). Advisory; ignored by
     /// backends whose model is not language-parameterized.
@@ -78,6 +79,22 @@ pub struct OcrOptions {
     /// Page DPI (helps OCR engines scale internally). Advisory; ignored by
     /// backends with a fixed input resolution.
     pub dpi: u32,
+}
+
+impl OcrOptions {
+    /// Sets [`languages`](Self::languages).
+    #[must_use]
+    pub fn with_languages(mut self, languages: String) -> Self {
+        self.languages = languages;
+        self
+    }
+
+    /// Sets [`dpi`](Self::dpi).
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: u32) -> Self {
+        self.dpi = dpi;
+        self
+    }
 }
 
 impl Default for OcrOptions {

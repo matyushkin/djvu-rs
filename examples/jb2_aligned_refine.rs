@@ -52,14 +52,12 @@ fn main() {
         for add_to_dict in [true, false] {
             for max_dim_delta in [1u32, 2, 3] {
                 for frac in [0.10f32, 0.20, 0.30] {
-                    let opts = Jb2EncodeOptions {
-                        aligned_refine: Some(AlignedRefine {
+                    let opts =
+                        Jb2EncodeOptions::default().with_aligned_refine(Some(AlignedRefine {
                             max_dim_delta,
                             max_hamming_fraction: frac,
                             add_to_dict,
-                        }),
-                        ..Jb2EncodeOptions::default()
-                    };
+                        }));
                     let t = std::time::Instant::now();
                     let (b, fail) = total(&ms, &opts);
                     println!(

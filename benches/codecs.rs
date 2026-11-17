@@ -556,11 +556,7 @@ fn bench_iw44_encode_color(c: &mut Criterion) {
         Ok(p) => p,
         Err(_) => return,
     };
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..Default::default()
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = match djvu_rs::djvu_render::render_pixmap(page, &opts) {
         Ok(p) => p,
         Err(_) => return,
@@ -728,13 +724,12 @@ fn bench_segment_page_color(c: &mut Criterion) {
         });
     });
 
-    let sauvola = djvu_rs::segment::SegmentOptions {
-        binarization: djvu_rs::segment::Binarization::Sauvola {
+    let sauvola = djvu_rs::segment::SegmentOptions::default().with_binarization(
+        djvu_rs::segment::Binarization::Sauvola {
             window: 31,
             k: 0.34,
         },
-        ..djvu_rs::segment::SegmentOptions::default()
-    };
+    );
     c.bench_function("segment_page_color_sauvola", |b| {
         b.iter(|| {
             let _ = black_box(djvu_rs::segment::segment_page(

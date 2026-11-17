@@ -60,11 +60,7 @@ fn probe_page(name: &str, path: &str) {
     let page = doc.page(0).expect("page 0");
     let w = page.width() as u32;
     let h = page.height() as u32;
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: w,
-        height: h,
-        ..Default::default()
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(w, h);
     let pixmap = djvu_rs::djvu_render::render_pixmap(page, &opts).expect("render");
     let rgb = rgba_to_rgb(&pixmap.data);
 

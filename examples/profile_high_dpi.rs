@@ -34,16 +34,13 @@ fn main() {
             let scale = 600.0f32 / native_dpi;
             let w = ((native_w as f32 * scale).round() as u32).max(1);
             let h = ((native_h as f32 * scale).round() as u32).max(1);
-            let opts = djvu_rs::djvu_render::RenderOptions {
-                width: w,
-                height: h,
-                bold: 0,
-                aa: false,
-                rotation: djvu_rs::djvu_render::UserRotation::None,
-                permissive: false,
-                resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-                mask_aa: false,
-            };
+            let opts = djvu_rs::djvu_render::RenderOptions::new(w, h)
+                .with_bold(0)
+                .with_aa(false)
+                .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                .with_permissive(false)
+                .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+                .with_mask_aa(false);
             eprintln!("boy.djvu @ 600dpi -> {w}x{h}, {iters} iters");
             for _ in 0..iters {
                 let _ = std::hint::black_box(djvu_rs::djvu_render::render_pixmap(page, &opts));
@@ -54,16 +51,14 @@ fn main() {
             let data = std::fs::read(&path).expect("watchmaker.djvu");
             let doc = djvu_rs::DjVuDocument::parse(&data).expect("parse");
             let page = doc.page(0).expect("page 0");
-            let opts = djvu_rs::djvu_render::RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                bold: 0,
-                aa: false,
-                rotation: djvu_rs::djvu_render::UserRotation::None,
-                permissive: false,
-                resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-                mask_aa: false,
-            };
+            let opts =
+                djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+                    .with_bold(0)
+                    .with_aa(false)
+                    .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                    .with_permissive(false)
+                    .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+                    .with_mask_aa(false);
             eprintln!(
                 "watchmaker.djvu native {}x{}, {iters} iters",
                 page.width(),
@@ -78,16 +73,14 @@ fn main() {
             let data = std::fs::read(&path).expect("cable_1973_100133.djvu");
             let doc = djvu_rs::DjVuDocument::parse(&data).expect("parse");
             let page = doc.page(0).expect("page 0");
-            let opts = djvu_rs::djvu_render::RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                bold: 0,
-                aa: false,
-                rotation: djvu_rs::djvu_render::UserRotation::None,
-                permissive: false,
-                resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-                mask_aa: false,
-            };
+            let opts =
+                djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+                    .with_bold(0)
+                    .with_aa(false)
+                    .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                    .with_permissive(false)
+                    .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+                    .with_mask_aa(false);
             eprintln!(
                 "cable_1973_100133.djvu native {}x{}, {iters} iters",
                 page.width(),

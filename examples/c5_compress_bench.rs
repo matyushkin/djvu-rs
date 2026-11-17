@@ -32,9 +32,8 @@ fn evict(doc: &mut djvu_rs::DjVuDocument, mode: &str, budget: usize, protect: &[
             doc.enforce_cache_budget(budget, protect);
         }
         "downgrade" => {
-            let cbo = djvu_rs::djvu_document::CacheBudgetOptions {
-                downgrade_before_drop: true,
-            };
+            let cbo = djvu_rs::djvu_document::CacheBudgetOptions::default()
+                .with_downgrade_before_drop(true);
             doc.enforce_cache_budget_with(budget, protect, cbo);
         }
         _ => {}
@@ -67,16 +66,8 @@ fn main() {
             let p = doc.page(i).unwrap();
             (p.width() as u32, p.height() as u32)
         };
-        let opts_full = djvu_rs::djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            ..Default::default()
-        };
-        let opts_thumb = djvu_rs::djvu_render::RenderOptions {
-            width: w / 2,
-            height: h / 2,
-            ..Default::default()
-        };
+        let opts_full = djvu_rs::djvu_render::RenderOptions::new(w, h);
+        let opts_thumb = djvu_rs::djvu_render::RenderOptions::new(w / 2, h / 2);
         let _ = djvu_rs::djvu_render::render_pixmap(doc.page(i).unwrap(), &opts_thumb).unwrap();
         let _ = djvu_rs::djvu_render::render_pixmap(doc.page(i).unwrap(), &opts_full).unwrap();
         evict(&mut doc, &mode, budget, &[i]);
@@ -109,23 +100,11 @@ fn main() {
         let p = doc.page(0).unwrap();
         (p.width() as u32, p.height() as u32)
     };
-    let opts_s1 = djvu_rs::djvu_render::RenderOptions {
-        width: w0,
-        height: h0,
-        ..Default::default()
-    };
-    let opts_s2 = djvu_rs::djvu_render::RenderOptions {
-        width: w0 / 2,
-        height: h0 / 2,
-        ..Default::default()
-    };
+    let opts_s1 = djvu_rs::djvu_render::RenderOptions::new(w0, h0);
+    let opts_s2 = djvu_rs::djvu_render::RenderOptions::new(w0 / 2, h0 / 2);
     // sub=4: the #607 tier — thumbnail-rail / zoomed-out renders that consume
     // the retained 1/4-res mask instead of re-running the JB2 decode.
-    let opts_s4 = djvu_rs::djvu_render::RenderOptions {
-        width: w0 / 4,
-        height: h0 / 4,
-        ..Default::default()
-    };
+    let opts_s4 = djvu_rs::djvu_render::RenderOptions::new(w0 / 4, h0 / 4);
 
     // Direct full-evict/downgrade convenience calls (not budget-mediated):
     // `downgrade_render_caches` deliberately preserves any already-cached

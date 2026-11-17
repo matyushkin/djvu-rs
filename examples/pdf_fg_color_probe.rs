@@ -67,11 +67,10 @@ fn probe(path: &str, tmp_dir: &std::path::Path) {
     let data = std::fs::read(path).unwrap_or_else(|_| panic!("read {path}"));
     let doc = DjVuDocument::parse(&data).expect("parse");
 
-    let opts = PdfOptions {
-        jpeg_quality: None, // lossless background: stencil is the only variable
-        output_dpi: DPI,
-        ..PdfOptions::default()
-    };
+    // Lossless background: the stencil is the only variable.
+    let opts = PdfOptions::default()
+        .with_jpeg_quality(None)
+        .with_output_dpi(DPI);
     let pdf = djvu_to_pdf_with_options(&doc, &opts).expect("pdf export");
     let stem = std::path::Path::new(path)
         .file_stem()
@@ -132,14 +131,7 @@ fn probe(path: &str, tmp_dir: &std::path::Path) {
                 continue;
             }
         };
-        let ours = match render_pixmap(
-            page,
-            &RenderOptions {
-                width: theirs.width,
-                height: theirs.height,
-                ..RenderOptions::default()
-            },
-        ) {
+        let ours = match render_pixmap(page, &RenderOptions::new(theirs.width, theirs.height)) {
             Ok(p) => p,
             Err(e) => {
                 println!("  page {i}: render failed ({e:?})");

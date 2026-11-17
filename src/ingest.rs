@@ -7,6 +7,7 @@
 /// How semi-transparent pixels are handled when an ingest path must produce
 /// opaque RGBA (CLI: `djvu encode --background <COLOR>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum AlphaCompositing {
     /// Keep the alpha channel unchanged. Downstream segmentation/encoding sees
     /// partial transparency as-is; no background colour is applied silently.
@@ -50,6 +51,7 @@ impl AlphaCompositing {
 /// an error naming the profile. A future `Transform` mode would need a
 /// colour-management engine and is out of scope (#694).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IccHandling {
     /// Decode without colour management; the embedded profile is dropped.
     #[default]
@@ -60,6 +62,7 @@ pub enum IccHandling {
 
 /// Deterministic reduction of >8-bit samples to 8-bit channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DepthDownconversion {
     /// Keep the high 8 bits of each big-endian 16-bit sample (`sample >> 8`).
     /// No dithering; repeatable across platforms.
@@ -69,10 +72,34 @@ pub enum DepthDownconversion {
 
 /// Policy knobs applied while decoding raster inputs into [`Pixmap`](crate::Pixmap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct IngestPolicy {
     pub alpha: AlphaCompositing,
     pub depth_downconversion: DepthDownconversion,
     pub icc: IccHandling,
+}
+
+impl IngestPolicy {
+    /// Sets [`alpha`](Self::alpha).
+    #[must_use]
+    pub fn with_alpha(mut self, alpha: AlphaCompositing) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    /// Sets [`depth_downconversion`](Self::depth_downconversion).
+    #[must_use]
+    pub fn with_depth_downconversion(mut self, depth_downconversion: DepthDownconversion) -> Self {
+        self.depth_downconversion = depth_downconversion;
+        self
+    }
+
+    /// Sets [`icc`](Self::icc).
+    #[must_use]
+    pub fn with_icc(mut self, icc: IccHandling) -> Self {
+        self.icc = icc;
+        self
+    }
 }
 
 impl IngestPolicy {

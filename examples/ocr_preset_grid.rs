@@ -104,11 +104,9 @@ fn main() {
 
         for &despeckle in &despeckles {
             for &t in &thresholds {
-                let opts = Jb2EncodeOptions {
-                    lossy_threshold: t,
-                    despeckle,
-                    ..Jb2EncodeOptions::default()
-                };
+                let opts = Jb2EncodeOptions::default()
+                    .with_lossy_threshold(t)
+                    .with_despeckle(despeckle);
                 let mut total = 0usize;
                 let mut min_agree = 1.0f64;
                 for (m, base_text) in masks.iter().zip(&base_texts) {

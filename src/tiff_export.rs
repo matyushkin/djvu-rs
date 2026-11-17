@@ -76,6 +76,7 @@ impl From<tiff::TiffError> for TiffError {
 
 /// Rendering mode for TIFF export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum TiffMode {
     /// Render each page as a full-color RGB image (24-bit per pixel).
     #[default]
@@ -90,6 +91,7 @@ pub enum TiffMode {
 
 /// Compression choice for [`TiffMode::Bilevel`] pages (#579).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum TiffBilevelCompression {
     /// 8-bit grayscale strips with Deflate — the historical default.
     #[default]
@@ -103,6 +105,7 @@ pub enum TiffBilevelCompression {
 
 /// Options for DjVu → TIFF conversion.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TiffOptions {
     /// Rendering mode.
     pub mode: TiffMode,
@@ -110,6 +113,29 @@ pub struct TiffOptions {
     pub scale: f32,
     /// Compression for bilevel pages (default: the historical Deflate).
     pub bilevel_compression: TiffBilevelCompression,
+}
+
+impl TiffOptions {
+    /// Sets [`mode`](Self::mode).
+    #[must_use]
+    pub fn with_mode(mut self, mode: TiffMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets [`scale`](Self::scale).
+    #[must_use]
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Sets [`bilevel_compression`](Self::bilevel_compression).
+    #[must_use]
+    pub fn with_bilevel_compression(mut self, bilevel_compression: TiffBilevelCompression) -> Self {
+        self.bilevel_compression = bilevel_compression;
+        self
+    }
 }
 
 impl Default for TiffOptions {
