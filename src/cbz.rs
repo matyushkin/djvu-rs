@@ -45,6 +45,7 @@ pub enum CbzError {
 
 /// Options for CBZ conversion.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CbzOptions {
     /// Output resolution in DPI (pages are scaled from their native DPI).
     pub dpi: u32,
@@ -52,6 +53,29 @@ pub struct CbzOptions {
     pub rotation: UserRotation,
     /// 0-based page indices to export; `None` = all pages in order.
     pub pages: Option<Vec<usize>>,
+}
+
+impl CbzOptions {
+    /// Sets [`dpi`](Self::dpi).
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: u32) -> Self {
+        self.dpi = dpi;
+        self
+    }
+
+    /// Sets [`rotation`](Self::rotation).
+    #[must_use]
+    pub fn with_rotation(mut self, rotation: UserRotation) -> Self {
+        self.rotation = rotation;
+        self
+    }
+
+    /// Sets [`pages`](Self::pages).
+    #[must_use]
+    pub fn with_pages(mut self, pages: Option<Vec<usize>>) -> Self {
+        self.pages = pages;
+        self
+    }
 }
 
 impl Default for CbzOptions {

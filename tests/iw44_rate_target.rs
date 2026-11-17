@@ -63,10 +63,7 @@ fn first_bg_pixmap(path: &str) -> Pixmap {
 #[test]
 fn bpp_target_is_deterministic() {
     let pm = first_bg_pixmap("tests/corpus/watchmaker.djvu");
-    let opts = Iw44EncodeOptions {
-        target: Iw44Target::Bpp(0.15),
-        ..Default::default()
-    };
+    let opts = Iw44EncodeOptions::default().with_target(Iw44Target::Bpp(0.15));
     let a = encode_iw44_color(&pm, &opts);
     let b = encode_iw44_color(&pm, &opts);
     assert_eq!(
@@ -89,21 +86,17 @@ fn bpp_target_respects_budget_within_one_slice() {
     // slice-granularity with no budget and take the largest single-slice
     // chunk size actually observed. That is a real, measured upper bound on
     // by how much a single extra slice can overshoot a budget.
-    let calib_opts = Iw44EncodeOptions {
-        slices_per_chunk: 1,
-        total_slices: 40,
-        target: Iw44Target::Slices,
-        ..Default::default()
-    };
+    let calib_opts = Iw44EncodeOptions::default()
+        .with_slices_per_chunk(1)
+        .with_total_slices(40)
+        .with_target(Iw44Target::Slices);
     let calib_chunks = encode_iw44_color(&pm, &calib_opts);
     let max_slice_bytes = calib_chunks.iter().map(Vec::len).max().unwrap_or(0);
 
     for bpp in [0.02f32, 0.05, 0.1, 0.2] {
-        let opts = Iw44EncodeOptions {
-            slices_per_chunk: 1,
-            target: Iw44Target::Bpp(bpp),
-            ..Default::default()
-        };
+        let opts = Iw44EncodeOptions::default()
+            .with_slices_per_chunk(1)
+            .with_target(Iw44Target::Bpp(bpp));
         let chunks = encode_iw44_color(&pm, &opts);
         let total: usize = chunks.iter().map(Vec::len).sum();
         let budget = ((bpp as f64) * (pm.width as f64) * (pm.height as f64) / 8.0).ceil() as usize;
@@ -145,10 +138,7 @@ fn bpp_target_sweep_is_monotone_and_default_unchanged() {
             .sum();
         let explicit_slices_bytes: usize = encode_iw44_color(
             &pm,
-            &Iw44EncodeOptions {
-                target: Iw44Target::Slices,
-                ..Default::default()
-            },
+            &Iw44EncodeOptions::default().with_target(Iw44Target::Slices),
         )
         .iter()
         .map(Vec::len)
@@ -166,10 +156,7 @@ fn bpp_target_sweep_is_monotone_and_default_unchanged() {
             "bpp", "bytes", "psnr_db", "ssim"
         );
         for bpp in budgets {
-            let opts = Iw44EncodeOptions {
-                target: Iw44Target::Bpp(bpp),
-                ..Default::default()
-            };
+            let opts = Iw44EncodeOptions::default().with_target(Iw44Target::Bpp(bpp));
             let chunks = encode_iw44_color(&pm, &opts);
             let bytes: usize = chunks.iter().map(Vec::len).sum();
             let decoded = decode_bg44_owned(&chunks)
@@ -221,10 +208,7 @@ fn bpp_truncated_stream_round_trips_at_every_prefix() {
     // textured content saturating far later than smooth content), so this
     // budget reliably truncates the 10-chunk default schedule.
     let pm = first_bg_pixmap("tests/fixtures/colorbook.djvu");
-    let opts = Iw44EncodeOptions {
-        target: Iw44Target::Bpp(0.03),
-        ..Default::default()
-    };
+    let opts = Iw44EncodeOptions::default().with_target(Iw44Target::Bpp(0.03));
     let chunks = encode_iw44_color(&pm, &opts);
     assert!(
         chunks.len() >= 2,

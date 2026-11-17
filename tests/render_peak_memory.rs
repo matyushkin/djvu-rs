@@ -101,11 +101,7 @@ fn measure(data: &[u8]) -> (usize, usize, u64) {
     let doc = DjVuDocument::parse(data).expect("fixture must parse");
     let page = doc.page(0).expect("fixture must have a page");
     let page_bytes = page.width() as usize * page.height() as usize * 2;
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..Default::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = render_pixmap(page, &opts).expect("page must render");
     let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
     let sum = pixmap.data.iter().map(|&b| b as u64).sum();

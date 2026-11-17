@@ -78,6 +78,7 @@ pub enum PdfError {
 /// - 1-bit FlateDecode for bilevel masks
 /// - Bilevel-only pages skip RGB render entirely (direct 1-bit embed)
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PdfOptions {
     /// JPEG quality for background image encoding (1–100).
     ///
@@ -142,6 +143,43 @@ pub struct PdfOptions {
     /// Pages where the stencil is skipped (multi-colour FG44), photo-only
     /// pages, and bilevel pages fall back to the default path unchanged.
     pub mrc: bool,
+}
+
+impl PdfOptions {
+    /// Sets [`jpeg_quality`](Self::jpeg_quality).
+    #[must_use]
+    pub fn with_jpeg_quality(mut self, jpeg_quality: Option<u8>) -> Self {
+        self.jpeg_quality = jpeg_quality;
+        self
+    }
+
+    /// Sets [`output_dpi`](Self::output_dpi).
+    #[must_use]
+    pub fn with_output_dpi(mut self, output_dpi: u32) -> Self {
+        self.output_dpi = output_dpi;
+        self
+    }
+
+    /// Sets [`adaptive_raster`](Self::adaptive_raster).
+    #[must_use]
+    pub fn with_adaptive_raster(mut self, adaptive_raster: bool) -> Self {
+        self.adaptive_raster = adaptive_raster;
+        self
+    }
+
+    /// Sets [`ccitt_g4`](Self::ccitt_g4).
+    #[must_use]
+    pub fn with_ccitt_g4(mut self, ccitt_g4: bool) -> Self {
+        self.ccitt_g4 = ccitt_g4;
+        self
+    }
+
+    /// Sets [`mrc`](Self::mrc).
+    #[must_use]
+    pub fn with_mrc(mut self, mrc: bool) -> Self {
+        self.mrc = mrc;
+        self
+    }
 }
 
 impl Default for PdfOptions {

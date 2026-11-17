@@ -121,11 +121,7 @@ fn render_pixmap_default_options_boy() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = render_pixmap(page, &opts).expect("render_pixmap must succeed");
     assert!(pixmap.width > 0 && pixmap.height > 0);
     assert_eq!(
@@ -141,11 +137,7 @@ fn render_pixmap_bilevel_page() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = render_pixmap(page, &opts).expect("bilevel render must succeed");
     assert!(pixmap.width > 0 && pixmap.height > 0);
 }
@@ -159,11 +151,7 @@ fn coarse_render_color_page() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let pix = RenderRequest::new(opts)
         .quality(Quality::Coarse)
         .pixmap(page)
@@ -179,11 +167,7 @@ fn coarse_render_bilevel_page_has_no_background() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let result = RenderRequest::new(opts)
         .quality(Quality::Coarse)
         .pixmap(page);
@@ -205,11 +189,7 @@ fn progressive_render_each_chunk() {
     let n = page.bg44_chunks().len();
     assert!(n > 0, "boy.djvu must have BG44 chunks");
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     for i in 0..n {
         let pix = RenderRequest::new(opts.clone())
             .quality(Quality::Step(i))
@@ -364,11 +344,7 @@ fn render_gray8_bilevel_only_black_and_white() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let gray = render_gray8(page, &opts).expect("render_gray8 must succeed");
 
     assert_eq!(
@@ -400,11 +376,7 @@ fn render_gray8_color_page_correct_size() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
 
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let gray = render_gray8(page, &opts).expect("render_gray8 must succeed for colour page");
 
     assert_eq!(
@@ -474,12 +446,7 @@ fn permissive_strict_fails_on_truncated_bg44() {
     let corrupted = make_truncated_bg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: false,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(false);
     let result = render_pixmap(page, &opts);
     assert!(
         result.is_err(),
@@ -493,12 +460,7 @@ fn permissive_render_returns_ok_on_truncated_bg44() {
     let corrupted = make_truncated_bg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: true,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(true);
     let pm =
         render_pixmap(page, &opts).expect("permissive mode must return Ok even for corrupted BG44");
     assert!(!pm.data.is_empty(), "pixmap must not be empty");
@@ -523,12 +485,8 @@ fn strict_tiled_render_fails_after_permissive_one_on_truncated_bg44() {
         width: 64,
         height: 64,
     };
-    let permissive = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: true,
-        ..RenderOptions::default()
-    };
+    let permissive =
+        RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(true);
     let tiled = RenderRequest::new(permissive.clone())
         .region(region)
         .cached(true)
@@ -539,10 +497,7 @@ fn strict_tiled_render_fails_after_permissive_one_on_truncated_bg44() {
         .pixmap(page)
         .unwrap();
     assert_eq!(tiled.data, uncached.data);
-    let strict = RenderOptions {
-        permissive: false,
-        ..permissive
-    };
+    let strict = permissive.with_permissive(false);
     assert!(
         RenderRequest::new(strict)
             .region(region)
@@ -561,12 +516,7 @@ fn permissive_report_records_truncated_bg44_recovery() {
     let corrupted = make_truncated_bg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: true,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(true);
     let (pm, report) = RenderRequest::new(opts)
         .pixmap_with_report(page)
         .expect("permissive render returns Ok");
@@ -595,12 +545,8 @@ fn permissive_report_is_clean_for_intact_page() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
     for permissive in [false, true] {
-        let opts = RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            permissive,
-            ..RenderOptions::default()
-        };
+        let opts = RenderOptions::new(page.width() as u32, page.height() as u32)
+            .with_permissive(permissive);
         let (_pm, report) = RenderRequest::new(opts)
             .pixmap_with_report(page)
             .expect("intact page renders");
@@ -615,12 +561,7 @@ fn permissive_report_is_clean_for_intact_page() {
 fn assert_strict_native_render_rejects(data: &[u8], page_idx: usize) {
     let doc = DjVuDocument::parse(data).expect("mutant should remain structurally parseable");
     let page = doc.page(page_idx).expect("mutant target page should exist");
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: false,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(false);
     assert!(
         render_pixmap(page, &opts).is_err(),
         "strict native render must reject corrupted background data"
@@ -773,12 +714,7 @@ fn strict_fails_on_truncated_fg44() {
     let corrupted = make_truncated_fg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).expect("mutant must remain structurally parseable");
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: false,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(false);
     assert!(
         render_pixmap(page, &opts).is_err(),
         "strict mode must return Err on corrupted FG44"
@@ -792,12 +728,7 @@ fn permissive_render_returns_ok_on_truncated_fg44() {
     let corrupted = make_truncated_fg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).expect("mutant must remain structurally parseable");
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: true,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(true);
     let pm =
         render_pixmap(page, &opts).expect("permissive mode must return Ok even for corrupted FG44");
     assert!(!pm.data.is_empty(), "pixmap must not be empty");
@@ -844,12 +775,7 @@ fn dimension_cross_check_rejects_info_bg44_size_mismatch() {
     // where expected before asserting on render behaviour.
     assert_eq!(page.width(), 192);
     assert_eq!(page.height(), 384);
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: false,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(false);
     let result = render_pixmap(page, &opts);
     assert!(
         result.is_err(),
@@ -865,12 +791,7 @@ fn dimension_cross_check_allows_unmodified_boy_djvu() {
     let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        permissive: false,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32).with_permissive(false);
     let pm = render_pixmap(page, &opts).expect("unmodified boy.djvu must still render");
     assert!(!pm.data.is_empty());
 }
@@ -895,11 +816,7 @@ fn legacy_bm44_renders_full_resolution() {
     let data = std::fs::read("tests/fixtures/legacy_bm44.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).expect("BM44 parse");
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let pixmap = render_pixmap(page, &opts).expect("BM44 render");
     assert_eq!(pixmap.width, 32);
     assert_eq!(pixmap.height, 32);
@@ -911,11 +828,7 @@ fn legacy_pm44_renders_and_progressive() {
     let data = std::fs::read("tests/fixtures/legacy_pm44.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).expect("PM44 parse");
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let full = render_pixmap(page, &opts).expect("PM44 full render");
     assert_eq!(full.width, 181);
     assert_eq!(full.height, 240);
@@ -948,11 +861,7 @@ fn legacy_bm44_matches_ddjvu_within_tolerance() {
     let data = std::fs::read(path).unwrap();
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
-    let opts = RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
     let ours = render_pixmap(page, &opts).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("djvu-rs-bm44-{}.ppm", std::process::id()));
@@ -1014,11 +923,7 @@ fn native_reduced_bg_fg_matches_ddjvu_digest() {
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(9).unwrap();
     assert_eq!((page.width(), page.height()), (2208, 3646));
-    let opts = RenderOptions {
-        width: 2208,
-        height: 3646,
-        ..RenderOptions::default()
-    };
+    let opts = RenderOptions::new(2208, 3646);
     let cases = [
         ((0, 0, 256, 64), 0x7a7a_160f_3395_c602u64),
         ((896, 576, 256, 128), 0x2b29_c1af_3115_087d),

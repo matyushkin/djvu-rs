@@ -43,6 +43,7 @@ impl EditRequest {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "op", rename_all = "snake_case"))]
+#[non_exhaustive]
 pub enum EditOperation {
     /// Replace a page's text layer.
     SetText { page: usize, layer: TextLayer },
@@ -107,6 +108,7 @@ impl EditOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
 pub enum EditOperationKind {
     SetText,
     RemoveText,
@@ -124,6 +126,7 @@ pub enum EditOperationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
 pub enum EditTarget {
     /// A page in document page order.
     Page { page: usize },
@@ -134,6 +137,7 @@ pub enum EditTarget {
 /// One operation in a dry-run semantic plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct PlannedEdit {
     /// Zero-based index in the request's operation list.
     pub operation: usize,
@@ -146,6 +150,7 @@ pub struct PlannedEdit {
 /// Validated semantic change plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct EditPlan {
     /// Request schema version.
     pub schema_version: u16,

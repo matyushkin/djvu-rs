@@ -24,27 +24,13 @@ fn main() {
 
     let variants: &[(&str, PdfOptions)] = &[
         ("default", PdfOptions::default()),
-        (
-            "g4",
-            PdfOptions {
-                ccitt_g4: true,
-                ..PdfOptions::default()
-            },
-        ),
-        (
-            "adaptive",
-            PdfOptions {
-                adaptive_raster: true,
-                ..PdfOptions::default()
-            },
-        ),
+        ("g4", PdfOptions::default().with_ccitt_g4(true)),
+        ("adaptive", PdfOptions::default().with_adaptive_raster(true)),
         (
             "both",
-            PdfOptions {
-                adaptive_raster: true,
-                ccitt_g4: true,
-                ..PdfOptions::default()
-            },
+            PdfOptions::default()
+                .with_adaptive_raster(true)
+                .with_ccitt_g4(true),
         ),
     ];
 

@@ -52,10 +52,7 @@ fn run(path: &str, thresholds: &[f32]) {
         // `..default()` is a no-op under default features (only `lossy_threshold`
         // exists) but sets the experimental fields when they're compiled in.
         #[allow(clippy::needless_update)]
-        let opts = Jb2EncodeOptions {
-            lossy_threshold: t,
-            ..Jb2EncodeOptions::default()
-        };
+        let opts = Jb2EncodeOptions::default().with_lossy_threshold(t);
         let mut total = 0usize;
         let (mut ssim_sum, mut psnr_sum, mut n) = (0.0f64, 0.0f64, 0usize);
         let (mut flipped, mut tot_px) = (0u64, 0u64);

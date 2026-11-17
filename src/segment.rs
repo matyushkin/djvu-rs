@@ -13,6 +13,7 @@ use crate::pixmap::Pixmap;
 
 /// Binarisation method used by [`segment_page`].
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Binarization {
     /// Fixed BT.601 luminance threshold from [`SegmentOptions::threshold`].
     #[default]
@@ -26,6 +27,7 @@ pub enum Binarization {
 
 /// Knobs for [`segment_page`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SegmentOptions {
     /// Luminance cut-off for fixed-threshold masks: pixels with `Y < threshold`
     /// become foreground (black, `1`). BT.601 weights.
@@ -80,6 +82,64 @@ pub struct SegmentOptions {
     pub block_classify: bool,
 }
 
+impl SegmentOptions {
+    /// Sets [`threshold`](Self::threshold).
+    #[must_use]
+    pub fn with_threshold(mut self, threshold: u8) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Sets [`bg_subsample`](Self::bg_subsample).
+    #[must_use]
+    pub fn with_bg_subsample(mut self, bg_subsample: u32) -> Self {
+        self.bg_subsample = bg_subsample;
+        self
+    }
+
+    /// Sets [`adaptive_bg_subsample`](Self::adaptive_bg_subsample).
+    #[must_use]
+    pub fn with_adaptive_bg_subsample(mut self, adaptive_bg_subsample: bool) -> Self {
+        self.adaptive_bg_subsample = adaptive_bg_subsample;
+        self
+    }
+
+    /// Sets [`binarization`](Self::binarization).
+    #[must_use]
+    pub fn with_binarization(mut self, binarization: Binarization) -> Self {
+        self.binarization = binarization;
+        self
+    }
+
+    /// Sets [`bg_inpaint`](Self::bg_inpaint).
+    #[must_use]
+    pub fn with_bg_inpaint(mut self, bg_inpaint: bool) -> Self {
+        self.bg_inpaint = bg_inpaint;
+        self
+    }
+
+    /// Sets [`bg_diffuse`](Self::bg_diffuse).
+    #[must_use]
+    pub fn with_bg_diffuse(mut self, bg_diffuse: bool) -> Self {
+        self.bg_diffuse = bg_diffuse;
+        self
+    }
+
+    /// Sets [`deskew`](Self::deskew).
+    #[must_use]
+    pub fn with_deskew(mut self, deskew: bool) -> Self {
+        self.deskew = deskew;
+        self
+    }
+
+    /// Sets [`block_classify`](Self::block_classify).
+    #[must_use]
+    pub fn with_block_classify(mut self, block_classify: bool) -> Self {
+        self.block_classify = block_classify;
+        self
+    }
+}
+
 impl Default for SegmentOptions {
     fn default() -> Self {
         Self {
@@ -112,6 +172,7 @@ impl SegmentOptions {
 }
 
 /// Result of [`segment_page`].
+#[non_exhaustive]
 pub struct SegmentedPage {
     /// Full-resolution bilevel mask. `true` = foreground/ink.
     pub mask: Bitmap,

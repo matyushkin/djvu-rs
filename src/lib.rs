@@ -122,11 +122,6 @@ pub(crate) use djvu_zp as zp_impl;
 #[allow(dead_code)]
 pub mod bzz;
 
-/// Compatibility alias for the former `bzz_new` module name. The `_new` suffix
-/// fossilised the codec-extraction migration (there was a pre-extraction
-/// `bzz.rs`); the module is now simply [`bzz`]. Prefer `bzz` in new code.
-pub use bzz as bzz_new;
-
 /// BZZ compressor — encoding counterpart to `bzz`.
 #[cfg(feature = "std")]
 pub mod bzz_encode;
@@ -153,11 +148,6 @@ pub mod jb2;
 /// Uses planar YCbCr storage and a ZP arithmetic coder.
 /// RGB conversion happens only in `iw44::Iw44Image::to_rgb`.
 pub mod iw44;
-
-/// Compatibility alias for the former `iw44_new` module name. The `_new` suffix
-/// fossilised the codec-extraction migration; the module is now simply
-/// [`iw44`]. Prefer `iw44` in new code.
-pub use iw44 as iw44_new;
 
 /// IW44 wavelet encoder — produces BG44/FG44/TH44 chunk payloads.
 ///
@@ -752,6 +742,7 @@ impl Document {
 /// Policy for [`Document::thumbnails_with_strategy`]: how to source each
 /// page's thumbnail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ThumbnailStrategy {
     /// Use the page's embedded `TH44` preview when present; otherwise fall
     /// back to a downscaled real render. Fastest and the default — see the

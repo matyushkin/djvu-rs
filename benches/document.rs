@@ -529,16 +529,13 @@ fn bench_tier2_corpus_render(c: &mut Criterion) {
         } else {
             (w, h)
         };
-        let opts = djvu_rs::djvu_render::RenderOptions {
-            width: rw,
-            height: rh,
-            bold: 0,
-            aa: false,
-            rotation: djvu_rs::djvu_render::UserRotation::None,
-            permissive: false,
-            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-            mask_aa: false,
-        };
+        let opts = djvu_rs::djvu_render::RenderOptions::new(rw, rh)
+            .with_bold(0)
+            .with_aa(false)
+            .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+            .with_permissive(false)
+            .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+            .with_mask_aa(false);
         group.bench_function(name, |b| {
             b.iter(|| {
                 let pm = page.render_with(&opts).expect("tier2 render");

@@ -6,14 +6,18 @@
 //! round-trip bit-exactly; IW44 (lossy) must at least produce a stream that
 //! decodes back to the same dimensions.
 
-use djvu_rs::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
 use djvu_rs::iw44::Iw44Image;
+use djvu_rs::iw44_encode::{encode_iw44_color, Iw44EncodeOptions};
 use djvu_rs::smmr::{decode_smmr, encode_smmr};
-use djvu_rs::{Bitmap, Pixmap, jb2, jb2_encode};
+use djvu_rs::{jb2, jb2_encode, Bitmap, Pixmap};
 use libfuzzer_sys::fuzz_target;
 
 fn assert_bitmap_eq(a: &Bitmap, b: &Bitmap) {
-    assert_eq!((a.width, a.height), (b.width, b.height), "dimension mismatch");
+    assert_eq!(
+        (a.width, a.height),
+        (b.width, b.height),
+        "dimension mismatch"
+    );
     for y in 0..a.height {
         for x in 0..a.width {
             assert_eq!(a.get(x, y), b.get(x, y), "pixel mismatch at ({x},{y})");
@@ -62,11 +66,9 @@ fuzz_target!(|data: &[u8]| {
     // output must still be a subset of the input ink (it only drops CCs).
     let despeckle = u32::from(body[0] % 16);
     let lossy_threshold = f32::from(body[body.len() / 2] % 16) / 100.0;
-    let opts = jb2_encode::Jb2EncodeOptions {
-        despeckle: (despeckle > 0).then_some(despeckle),
-        lossy_threshold,
-        ..jb2_encode::Jb2EncodeOptions::default()
-    };
+    let opts = jb2_encode::Jb2EncodeOptions::default()
+        .with_despeckle((despeckle > 0).then_some(despeckle))
+        .with_lossy_threshold(lossy_threshold);
     let enc = jb2_encode::encode_jb2_dict_with_options(&bm, &[], &opts);
     let dec = jb2::decode(&enc, None).expect("jb2 lossy: undecodable encoder output");
     assert_eq!(
@@ -97,7 +99,8 @@ fuzz_target!(|data: &[u8]| {
     let chunks = encode_iw44_color(&pm, &Iw44EncodeOptions::default());
     let mut img = Iw44Image::new();
     for c in &chunks {
-        img.decode_chunk(c).expect("iw44: undecodable encoder chunk");
+        img.decode_chunk(c)
+            .expect("iw44: undecodable encoder chunk");
     }
     let out = img.to_rgb().expect("iw44: to_rgb failed");
     assert_eq!((out.width, out.height), (w, h), "iw44 dimension mismatch");

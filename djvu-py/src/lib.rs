@@ -161,13 +161,12 @@ fn pdf_options(
     ccitt_g4: bool,
     mrc: bool,
 ) -> PdfOptions {
-    PdfOptions {
-        jpeg_quality,
-        output_dpi: dpi,
-        adaptive_raster: adaptive,
-        ccitt_g4,
-        mrc,
-    }
+    PdfOptions::default()
+        .with_jpeg_quality(jpeg_quality)
+        .with_output_dpi(dpi)
+        .with_adaptive_raster(adaptive)
+        .with_ccitt_g4(ccitt_g4)
+        .with_mrc(mrc)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -181,16 +180,15 @@ fn epub_options(
     jpeg_quality: Option<u8>,
     adaptive: bool,
 ) -> EpubOptions {
-    EpubOptions {
-        title: title.to_owned(),
-        author: author.to_owned(),
-        dpi,
-        language: language.to_owned(),
-        modified,
-        reflowable_text,
-        jpeg_quality,
-        adaptive,
-    }
+    EpubOptions::default()
+        .with_title(title.to_owned())
+        .with_author(author.to_owned())
+        .with_dpi(dpi)
+        .with_language(language.to_owned())
+        .with_modified(modified)
+        .with_reflowable_text(reflowable_text)
+        .with_jpeg_quality(jpeg_quality)
+        .with_adaptive(adaptive)
 }
 
 /// Map a rotation in degrees onto the render enum. Only quarter turns exist.
@@ -225,11 +223,10 @@ fn tiff_options(mode: &str, scale: f32, bilevel_compression: &str) -> PyResult<T
             )));
         }
     };
-    Ok(TiffOptions {
-        mode,
-        scale,
-        bilevel_compression,
-    })
+    Ok(TiffOptions::default()
+        .with_mode(mode)
+        .with_scale(scale)
+        .with_bilevel_compression(bilevel_compression))
 }
 
 /// A DjVu document.
@@ -466,11 +463,10 @@ impl Document {
         rotation: i32,
         pages: Option<Vec<usize>>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let opts = CbzOptions {
-            dpi,
-            rotation: user_rotation(rotation)?,
-            pages,
-        };
+        let opts = CbzOptions::default()
+            .with_dpi(dpi)
+            .with_rotation(user_rotation(rotation)?)
+            .with_pages(pages);
         let buf = py.detach(|| {
             djvu_rs::cbz::djvu_to_cbz(self.inner.inner(), &opts)
                 .map_err(|e| ExportError::new_err(format!("CBZ export failed: {e}")))
@@ -490,11 +486,10 @@ impl Document {
         rotation: i32,
         pages: Option<Vec<usize>>,
     ) -> PyResult<()> {
-        let opts = CbzOptions {
-            dpi,
-            rotation: user_rotation(rotation)?,
-            pages,
-        };
+        let opts = CbzOptions::default()
+            .with_dpi(dpi)
+            .with_rotation(user_rotation(rotation)?)
+            .with_pages(pages);
         let sink = create(path)?;
         py.detach(|| {
             let mut sink = sink;

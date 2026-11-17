@@ -208,16 +208,13 @@ fn main() {
         let page = doc.page(page_idx).expect("page");
         let pm = djvu_rs::djvu_render::render_pixmap(
             page,
-            &djvu_rs::djvu_render::RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                bold: 0,
-                aa: false,
-                rotation: djvu_rs::djvu_render::UserRotation::None,
-                permissive: false,
-                resampling: djvu_rs::djvu_render::Resampling::default(),
-                mask_aa: false,
-            },
+            &djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+                .with_bold(0)
+                .with_aa(false)
+                .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                .with_permissive(false)
+                .with_resampling(djvu_rs::djvu_render::Resampling::default())
+                .with_mask_aa(false),
         )
         .expect("render source");
         (pm, page.dpi(), None)
@@ -248,16 +245,13 @@ fn main() {
 
         let rendered = djvu_rs::djvu_render::render_pixmap(
             cand_page,
-            &djvu_rs::djvu_render::RenderOptions {
-                width: source_pm.width,
-                height: source_pm.height,
-                bold: 0,
-                aa: false,
-                rotation: djvu_rs::djvu_render::UserRotation::None,
-                permissive: false,
-                resampling: djvu_rs::djvu_render::Resampling::default(),
-                mask_aa: false,
-            },
+            &djvu_rs::djvu_render::RenderOptions::new(source_pm.width, source_pm.height)
+                .with_bold(0)
+                .with_aa(false)
+                .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                .with_permissive(false)
+                .with_resampling(djvu_rs::djvu_render::Resampling::default())
+                .with_mask_aa(false),
         )
         .expect("render candidate");
 

@@ -20,16 +20,13 @@ fn corpus() -> PathBuf {
 }
 
 fn opts(w: u32, h: u32, resampling: Resampling) -> RenderOptions {
-    RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: false,
-        resampling,
-        mask_aa: false,
-    }
+    RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(resampling)
+        .with_mask_aa(false)
 }
 
 /// Render one document at several scales (fresh parse each time so the cold

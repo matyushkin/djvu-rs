@@ -149,6 +149,7 @@ pub type ChunkId = [u8; 4];
 /// path, so the root path is empty and the third child of the root has path
 /// `[2]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChunkRecord {
     /// The four-byte IFF chunk identifier.
     pub id: ChunkId,

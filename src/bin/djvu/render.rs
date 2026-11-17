@@ -263,11 +263,10 @@ pub(super) fn render_cbz(
 
     let data = std::fs::read(path)?;
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&data)?;
-    let opts = djvu_rs::cbz::CbzOptions {
-        dpi,
-        rotation: rotate,
-        pages,
-    };
+    let opts = djvu_rs::cbz::CbzOptions::default()
+        .with_dpi(dpi)
+        .with_rotation(rotate)
+        .with_pages(pages);
 
     write_atomic_with(output, |file| {
         let mut zip = zip::ZipWriter::new(file);

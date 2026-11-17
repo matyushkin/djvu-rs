@@ -72,11 +72,10 @@ const RENDER_DPI: f32 = 150.0;
 
 fn opts_for(page: &DjVuPage) -> RenderOptions {
     let scale = RENDER_DPI / page.dpi().max(1) as f32;
-    RenderOptions {
-        width: ((page.width() as f32 * scale).round() as u32).max(1),
-        height: ((page.height() as f32 * scale).round() as u32).max(1),
-        ..Default::default()
-    }
+    RenderOptions::new(
+        ((page.width() as f32 * scale).round() as u32).max(1),
+        ((page.height() as f32 * scale).round() as u32).max(1),
+    )
 }
 
 /// Render the first `pages` pages and return `(bytes really retained, bytes

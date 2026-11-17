@@ -11,11 +11,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = cheap.is_valid();
     let deep = djvu_rs::validate::validate(
         data,
-        &djvu_rs::validate::ValidateOptions {
-            strict: true,
-            decode_pages: true,
-            limits: None,
-        },
+        &djvu_rs::validate::ValidateOptions::default()
+            .with_strict(true)
+            .with_decode_pages(true)
+            .with_limits(None),
     );
     let _ = deep.summary();
     let _ = deep.resources;
@@ -25,19 +24,19 @@ fuzz_target!(|data: &[u8]| {
     // exceeded), which must stay panic-free and estimate without overflow.
     let limited = djvu_rs::validate::validate(
         data,
-        &djvu_rs::validate::ValidateOptions {
-            strict: true,
-            decode_pages: true,
-            limits: Some(djvu_rs::validate::ResourceLimits {
-                max_file_bytes: Some(0),
-                max_pages: Some(0),
-                max_components: Some(0),
-                max_page_pixels: Some(0),
-                max_total_pixels: Some(0),
-                max_decoded_bytes: Some(0),
-                max_render_pixels: Some(0),
-            }),
-        },
+        &djvu_rs::validate::ValidateOptions::default()
+            .with_strict(true)
+            .with_decode_pages(true)
+            .with_limits(Some(
+                djvu_rs::validate::ResourceLimits::default()
+                    .with_max_file_bytes(Some(0))
+                    .with_max_pages(Some(0))
+                    .with_max_components(Some(0))
+                    .with_max_page_pixels(Some(0))
+                    .with_max_total_pixels(Some(0))
+                    .with_max_decoded_bytes(Some(0))
+                    .with_max_render_pixels(Some(0)),
+            )),
     );
     let _ = limited.summary();
 

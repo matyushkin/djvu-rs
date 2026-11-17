@@ -296,6 +296,7 @@ pub type TileCancelToken = crate::djvu_render::CancelToken;
 /// The default value reproduces [`render_tile`] exactly: full quality, no
 /// cancellation, no composited-tile cache.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TileRenderControls {
     /// Progressive quality step, `0..progressive_steps(page)` (see
     /// [`progressive_steps`](crate::djvu_render::progressive_steps)).
@@ -318,6 +319,30 @@ pub struct TileRenderControls {
     /// are never cached).
     #[cfg(feature = "std")]
     pub use_cache: bool,
+}
+
+impl TileRenderControls {
+    /// Sets [`quality_step`](Self::quality_step).
+    #[must_use]
+    pub fn with_quality_step(mut self, quality_step: Option<usize>) -> Self {
+        self.quality_step = quality_step;
+        self
+    }
+
+    /// Sets [`cancel`](Self::cancel).
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Option<TileCancelToken>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// Sets [`use_cache`](Self::use_cache).
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_use_cache(mut self, use_cache: bool) -> Self {
+        self.use_cache = use_cache;
+        self
+    }
 }
 
 /// Render one tile under explicit [`TileRenderControls`] (#691 slice 3).
@@ -382,6 +407,7 @@ pub fn render_tile_with(
 /// counts internal tiles, not caller tiles.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TileCacheUsage {
     /// Bytes currently held by cached composited tiles.
     pub bytes: usize,

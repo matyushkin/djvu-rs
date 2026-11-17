@@ -188,6 +188,7 @@ fn delta_e76(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
 /// difference. See the module docs for interpretation guidance.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ColorQualityReport {
     /// Luma-channel SSIM — identical value/definition to [`ssim`].
     pub ssim_y: f64,
@@ -209,6 +210,7 @@ pub struct ColorQualityReport {
 
 /// A one-shot quality comparison of two same-size images.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct QualityReport {
     /// Mean squared error over the luma channel (0.0 = identical).
     pub mse: f64,

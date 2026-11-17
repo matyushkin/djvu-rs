@@ -27,7 +27,7 @@ fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
 | [0.38.0](#0380) | renders pages that carry a rotation, uses `render_into` or `render_region`, writes metadata, exports PDF, or matches on `DjvmError` |
 | [0.45.0](#0450) | builds with Rust older than 1.89 |
 | [0.46.0](#0460) | enables the feature `ocr-neural` or `ocr-neural-candle`, or runs `djvu ocr --backend candle` |
-| [1.0.0](#100) | calls an item with a deprecation note: a `render_*` function other than `render_pixmap`, `RenderOptions::scale`, `Pixmap::new` or `OcrExportError`; in the Python and npm packages, a render method other than `render` and `render_request` |
+| [1.0.0](#100) | calls an item with a deprecation note: a `render_*` function other than `render_pixmap`, `RenderOptions::scale`, `Pixmap::new` or `OcrExportError`; in the Python and npm packages, a render method other than `render` and `render_request`; builds an options struct such as `RenderOptions` with a struct literal; matches on an options enum without a `_` arm; uses the module name `bzz_new` or `iw44_new` |
 
 The calls below did not change between 0.30 and 0.45. Code that uses nothing
 else compiles after the version bump alone:
@@ -453,12 +453,21 @@ only printed an error. Use `--backend tesseract` or `--backend onnx`.
 
 ## 1.0.0
 
-This release removes every item that carried a deprecation note. Each Rust
-replacement shipped in 0.39.0 or earlier, and each replacement in the Python
-and npm packages in 0.42.0 or earlier, so you can make the change before
-the upgrade. Build your crate against 0.46 first: each deprecation warning
-names the call that replaces the old one. A crate that builds against 0.46
-without a deprecation warning needs no change for this section.
+This release makes two kinds of change.
+
+**Removals.** It removes every item that carried a deprecation note. Each
+Rust replacement shipped in 0.39.0 or earlier, and each replacement in the
+Python and npm packages in 0.42.0 or earlier, so you can make the change
+before the upgrade. Build your crate against 0.46 first: each deprecation
+warning names the call that replaces the old one.
+
+**Types that can grow.** It marks the options structs, the report structs
+and the options enums `#[non_exhaustive]`, so that a later 1.x release can
+add a field or a variant without a break. No warning in 0.46 announces this
+change. The sections
+[Options structs are built with `with_*` methods](#options-structs-are-built-with-with_-methods)
+and [A `match` on an options enum needs a `_` arm](#a-match-on-an-options-enum-needs-a-_-arm)
+give a form that compiles on both 0.46 and 1.0.
 
 ### The `render_*` variants are removed
 
@@ -562,22 +571,17 @@ fn viewport(page: &DjVuPage, options: &RenderOptions, part: RenderRect) -> Resul
 ### `RenderOptions::scale` is removed
 
 The renderer ignored this field since 0.20.1: it takes the scale from
-`width` and the width of the page. Remove the field from every
-`RenderOptions` literal. Code that ends a literal with
-`..Default::default()` and does not name `scale` needs no change, and
-neither does code that uses `RenderOptions::fit_to_width`, `fit_to_height`
-or `fit_to_box`.
+`width` and the width of the page. Do not set it. Code that uses
+`RenderOptions::fit_to_width`, `fit_to_height` or `fit_to_box` needs no
+change. A `RenderOptions` literal changes in any case: see
+[Options structs are built with `with_*` methods](#options-structs-are-built-with-with_-methods).
 
 ```rust
 use djvu_rs::djvu_render::RenderOptions;
 
 fn options() -> RenderOptions {
-    RenderOptions {
-        width: 800,
-        height: 1000,
-        // Before 1.0.0 a literal could also carry `scale: 1.0`.
-        ..Default::default()
-    }
+    // Before 1.0.0 a literal could also carry `scale: 1.0`.
+    RenderOptions::new(800, 1000)
 }
 ```
 
@@ -655,6 +659,184 @@ and `pm.view()` gives a view without a copy. `render_coarse` returned
 `undefined` for a page without a background. `render_request` throws for
 such a page; read `page.bg44_chunk_count()` first. `page.render(dpi)` and the
 tile methods did not change.
+
+### Options structs are built with `with_*` methods
+
+These structs are `#[non_exhaustive]`. Rust refuses a struct literal of such
+a type outside the crate that defines it, and it also refuses
+`..Default::default()`:
+
+| Crate | Structs |
+|-------|---------|
+| `djvu-rs` | `RenderOptions`, `PdfOptions`, `EpubOptions`, `CbzOptions`, `TiffOptions`, `SegmentOptions`, `ResourceLimits`, `ParseOptions`, `ValidateOptions`, `IngestPolicy`, `TileRenderControls`, `HocrOptions`, `AltoOptions`, `OcrOptions`, `CacheBudgetOptions` |
+| `djvu-jb2` | `Jb2EncodeOptions` |
+| `djvu-iw44` | `Iw44EncodeOptions` |
+
+Each of them has a `Default` value and one `with_<field>` method per field.
+The method takes the value of the field and returns the struct, so the calls
+chain. `RenderOptions::new(width, height)` sets the two fields that every
+render needs. Reading a field did not change, and neither did assigning to
+one (`options.aa = true`).
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::djvu_render::{RenderOptions, Resampling};
+
+fn options() -> RenderOptions {
+    RenderOptions {
+        width: 800,
+        height: 1000,
+        aa: true,
+        resampling: Resampling::Lanczos3,
+        ..Default::default()
+    }
+}
+```
+
+After:
+
+```rust
+use djvu_rs::djvu_render::{RenderOptions, Resampling};
+use djvu_rs::pdf::PdfOptions;
+
+fn options() -> RenderOptions {
+    RenderOptions::new(800, 1000)
+        .with_aa(true)
+        .with_resampling(Resampling::Lanczos3)
+}
+
+fn pdf_options() -> PdfOptions {
+    PdfOptions::default().with_output_dpi(150)
+}
+```
+
+This form compiles on 0.46 and on 1.0, if you want one source for both:
+
+```rust
+use djvu_rs::djvu_render::RenderOptions;
+
+fn options() -> RenderOptions {
+    let mut options = RenderOptions::default();
+    options.width = 800;
+    options.height = 1000;
+    options.aa = true;
+    options
+}
+```
+
+Two methods of `Jb2EncodeOptions` had these names already, as constructors.
+They are now methods on a value, like the others, and `with_despeckle` takes
+the `Option` that the field holds:
+
+| Before | After |
+|--------|-------|
+| `Jb2EncodeOptions::with_lossy_threshold(0.04)` | `Jb2EncodeOptions::default().with_lossy_threshold(0.04)` |
+| `Jb2EncodeOptions::with_despeckle(2)` | `Jb2EncodeOptions::default().with_despeckle(Some(2))` |
+
+```rust
+use djvu_rs::jb2_encode::Jb2EncodeOptions;
+
+fn options() -> Jb2EncodeOptions {
+    Jb2EncodeOptions::default()
+        .with_lossy_threshold(0.04)
+        .with_despeckle(Some(2))
+}
+```
+
+### Report structs cannot be built outside the crate
+
+These structs are results that djvu-rs returns. They are `#[non_exhaustive]`
+too, so your code can read their fields but cannot build one with a struct
+literal, and a pattern that names their fields needs `..`:
+
+| Crate | Structs |
+|-------|---------|
+| `djvu-rs` | `RenderReport`, `RenderRecovery`, `ValidationReport`, `ValidationSummary`, `Finding`, `ResourceEstimate`, `QualityReport`, `ColorQualityReport`, `ResourceLimitExceeded`, `SavePatchStats`, `RewriteItem`, `TileCacheUsage`, `OptimizationResult`, `PlaneDiff`, `SemanticDiff`, `EditPlan`, `PlannedEdit`, `ComponentNode`, `ComponentDedup`, `PageRemoval`, `IndirectDocument`, `SegmentedPage` |
+| `djvu-jb2` | `CcStats`, `EncodedBlit`, `SymbolBox` |
+| `djvu-iff` | `ChunkRecord` |
+
+If a test of yours builds one of them by hand, get the value from the
+function that returns it.
+
+The data structs stay as they were, and a struct literal still builds them:
+`Rect`, `Color`, `RenderRect`, `TileRect`, `Pixmap`, `GrayPixmap`, `Bitmap`,
+`FgbzColor`, `PageInfo`, `TextLayer`, `TextZone`, `Paragraph`,
+`DjVuBookmark`, `DjVuMetadata`, `Highlight`, `Border`, `EditRequest`,
+`ComponentId`, `ComponentDirectoryEntry`, `EncodedChunk`, `InfoChunk` and
+`DjvuFile`. (`MapArea` and `Annotation` have constructors since
+[0.36.0](#0360).)
+
+### A `match` on an options enum needs a `_` arm
+
+These enums are `#[non_exhaustive]`. A `match` on one of them outside its
+crate needs a `_` arm. Naming a variant to build a value did not change.
+
+| Module | Enums |
+|--------|-------|
+| `djvu_render` | `Resampling`, `RecoveredLayer` |
+| `djvu_encode` | `EncodeQuality`, `BilevelCodec`, `FgbzPaletteOptions` |
+| `iw44_encode` (crate `djvu-iw44`) | `Iw44Target` |
+| `segment` | `Binarization` |
+| `ingest` | `AlphaCompositing`, `IccHandling`, `DepthDownconversion` |
+| `tiff_export` | `TiffMode`, `TiffBilevelCompression` |
+| `validate` | `Severity`, `Layer` |
+| `resource_limits` | `ResourceLimitAxis` |
+| `optimizer` | `OptimizationPreset` |
+| `editor` | `EditOperation`, `EditOperationKind`, `EditTarget` |
+| `djvm` | `UnreachablePolicy`, `DjvmSpool` |
+| crate root | `ComponentNodeKind`, `ThumbnailStrategy` |
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::validate::Severity;
+
+fn label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Tolerated => "tolerated",
+        Severity::Recovery => "recovery",
+    }
+}
+```
+
+After (this form also compiles on 0.46, with a warning about an arm that
+cannot be reached):
+
+```rust
+use djvu_rs::validate::Severity;
+
+fn label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Tolerated => "tolerated",
+        Severity::Recovery => "recovery",
+        _ => "other",
+    }
+}
+```
+
+These enums stay exhaustive, because the DjVu format or plain geometry
+closes them: `TextZoneKind`, `Rotation`, `UserRotation`,
+`annotation::Shape`, `ComponentKind`, `PlaneStatus` and `iff::Chunk`.
+
+### The module names `bzz_new` and `iw44_new` are removed
+
+`djvu_rs::bzz_new` and `djvu_rs::iw44_new` were second names of the modules
+`djvu_rs::bzz` and `djvu_rs::iw44` since 0.23.0. Use the short name; the
+items in the module did not change.
+
+```rust
+// Before: `use djvu_rs::iw44_new::Iw44Image;`
+use djvu_rs::iw44::Iw44Image;
+
+fn empty() -> Iw44Image {
+    Iw44Image::new()
+}
+```
 
 ## Fixes that change results
 

@@ -18,16 +18,13 @@ fn corpus_path() -> PathBuf {
 }
 
 fn render_opts(width: u32, height: u32) -> djvu_rs::djvu_render::RenderOptions {
-    djvu_rs::djvu_render::RenderOptions {
-        width,
-        height,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    }
+    djvu_rs::djvu_render::RenderOptions::new(width, height)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false)
 }
 
 /// Load a DjVuDocument from a test file, returning None if not found.
@@ -65,16 +62,13 @@ fn bench_render_at_dpi(c: &mut Criterion) {
         let w = ((native_w as f32 * scale).round() as u32).max(1);
         let h = ((native_h as f32 * scale).round() as u32).max(1);
 
-        let opts = djvu_rs::djvu_render::RenderOptions {
-            width: w,
-            height: h,
-            bold: 0,
-            aa: false,
-            rotation: djvu_rs::djvu_render::UserRotation::None,
-            permissive: false,
-            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-            mask_aa: false,
-        };
+        let opts = djvu_rs::djvu_render::RenderOptions::new(w, h)
+            .with_bold(0)
+            .with_aa(false)
+            .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+            .with_permissive(false)
+            .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+            .with_mask_aa(false);
 
         group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {
             b.iter(|| {
@@ -103,16 +97,13 @@ fn bench_render_coarse(c: &mut Criterion) {
         }
     };
 
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
 
     let request = djvu_rs::djvu_render::RenderRequest::new(opts)
         .quality(djvu_rs::djvu_render::Quality::Coarse);
@@ -149,16 +140,13 @@ fn bench_render_corpus_color(c: &mut Criterion) {
             return;
         }
     };
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
     c.bench_function("render_corpus_color", |b| {
         b.iter(|| {
             let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
@@ -194,16 +182,13 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
             return;
         }
     };
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: page.width() as u32,
-        height: page.height() as u32,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
     c.bench_function("render_corpus_bilevel", |b| {
         b.iter(|| {
             let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
@@ -254,16 +239,14 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let opts = djvu_rs::djvu_render::RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            bold: 0,
-            aa: false,
-            rotation: djvu_rs::djvu_render::UserRotation::None,
-            permissive: false,
-            resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-            mask_aa: false,
-        };
+        let opts =
+            djvu_rs::djvu_render::RenderOptions::new(page.width() as u32, page.height() as u32)
+                .with_bold(0)
+                .with_aa(false)
+                .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+                .with_permissive(false)
+                .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+                .with_mask_aa(false);
         let buf_len = opts.width as usize * opts.height as usize * 4;
 
         // Warm page-level decode caches so the render stages focus on hot render
@@ -541,32 +524,26 @@ fn bench_render_scaled(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("render_scaled_0.5x");
 
-    let opts_bilinear = djvu_rs::djvu_render::RenderOptions {
-        width: half_w,
-        height: half_h,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts_bilinear = djvu_rs::djvu_render::RenderOptions::new(half_w, half_h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
     group.bench_function("bilinear", |b| {
         b.iter(|| {
             let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts_bilinear));
         });
     });
 
-    let opts_lanczos = djvu_rs::djvu_render::RenderOptions {
-        width: half_w,
-        height: half_h,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Lanczos3,
-        mask_aa: false,
-    };
+    let opts_lanczos = djvu_rs::djvu_render::RenderOptions::new(half_w, half_h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Lanczos3)
+        .with_mask_aa(false);
     group.bench_function("lanczos3", |b| {
         b.iter(|| {
             let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts_lanczos));
@@ -649,16 +626,13 @@ fn bench_render_colorbook(c: &mut Criterion) {
     let w = ((page.width() as f32 * scale).round() as u32).max(1);
     let h = ((page.height() as f32 * scale).round() as u32).max(1);
 
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
 
     c.bench_function("render_colorbook", |b| {
         b.iter(|| {
@@ -692,16 +666,13 @@ fn bench_render_colorbook_stages(c: &mut Criterion) {
     let scale = target_dpi / native_dpi;
     let w = ((page.width() as f32 * scale).round() as u32).max(1);
     let h = ((page.height() as f32 * scale).round() as u32).max(1);
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
 
     // Warm the bg cache (decoded_bg44_partial) — we want to measure each stage in isolation.
     let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts));
@@ -766,16 +737,13 @@ fn bench_render_colorbook_cold(c: &mut Criterion) {
     let w = ((page0.width() as f32 * scale).round() as u32).max(1);
     let h = ((page0.height() as f32 * scale).round() as u32).max(1);
 
-    let opts = djvu_rs::djvu_render::RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: djvu_rs::djvu_render::UserRotation::None,
-        permissive: false,
-        resampling: djvu_rs::djvu_render::Resampling::Bilinear,
-        mask_aa: false,
-    };
+    let opts = djvu_rs::djvu_render::RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(djvu_rs::djvu_render::UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(djvu_rs::djvu_render::Resampling::Bilinear)
+        .with_mask_aa(false);
 
     c.bench_function("render_colorbook_cold", |b| {
         b.iter(|| {
@@ -941,13 +909,12 @@ fn bench_pdf_export_flatdecode(c: &mut Criterion) {
             Ok(d) => d,
             Err(_) => return,
         };
-        let opts = djvu_rs::pdf::PdfOptions {
-            mrc: false,
-            jpeg_quality: None,
-            output_dpi: 150,
-            adaptive_raster: false,
-            ccitt_g4: false,
-        };
+        let opts = djvu_rs::pdf::PdfOptions::default()
+            .with_mrc(false)
+            .with_jpeg_quality(None)
+            .with_output_dpi(150)
+            .with_adaptive_raster(false)
+            .with_ccitt_g4(false);
         let mut group = c.benchmark_group("export");
         group.sample_size(10);
         group.bench_function("pdf_flatdecode", |b| {

@@ -239,6 +239,7 @@ pub enum MutError {
 /// Result of an incremental [`DjVuDocumentMut::save_patched`] write.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SavePatchStats {
     /// Final length of the target file.
     pub file_len: u64,
@@ -1513,6 +1514,7 @@ impl PageMut<'_> {
 /// will touch on commit.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RewriteItem {
     /// The file name (relative to the destination directory). For the root
     /// index this is the name passed to [`IndirectRewritePlan::commit_to_dir`].

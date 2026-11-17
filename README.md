@@ -52,11 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Render to RGBA at 150 dpi.
     let target_dpi = 150u32;
-    let opts = RenderOptions {
-        width: ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
-        height: ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
-        ..Default::default()
-    };
+    let opts = RenderOptions::new(
+        ((page.width() as u32 * target_dpi) / page.dpi() as u32).max(1),
+        ((page.height() as u32 * target_dpi) / page.dpi() as u32).max(1),
+    );
     let pixmap = render_pixmap(page, &opts)?;
     // pixmap.data — RGBA bytes (width × height × 4), row-major
     let _ = pixmap;

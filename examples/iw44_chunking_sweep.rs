@@ -88,10 +88,7 @@ fn main() {
             let mut baseline_rgba: Option<Vec<u8>> = None;
             let mut row = format!("{name:>16} p{page_idx:<4}");
             for (i, &n) in CANDIDATES.iter().enumerate() {
-                let opts = Iw44EncodeOptions {
-                    slices_per_chunk: n,
-                    ..Default::default()
-                };
+                let opts = Iw44EncodeOptions::default().with_slices_per_chunk(n);
                 let chunks = encode_iw44_color(&orig_pixmap, &opts);
                 let bytes: u64 = chunks.iter().map(|c| c.len() as u64).sum();
                 totals[i] += bytes;

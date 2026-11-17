@@ -3,6 +3,7 @@
 use super::*;
 
 /// An indirect `FORM:DJVM` index and the external component files it resolves.
+#[non_exhaustive]
 pub struct IndirectDocument {
     /// The indirect `FORM:DJVM` index file bytes (`DIRM` has no bundled bit or
     /// offset table; document-level chunks such as `NAVM` are retained).

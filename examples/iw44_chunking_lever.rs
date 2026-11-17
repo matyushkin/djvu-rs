@@ -148,10 +148,7 @@ fn process_file(path: &Path, tmp: &Path) {
     let mut baseline_pixels: Option<(usize, usize, Vec<u8>)> = None;
 
     for &n in &CANDIDATES {
-        let opts = Iw44EncodeOptions {
-            slices_per_chunk: n,
-            ..Default::default()
-        };
+        let opts = Iw44EncodeOptions::default().with_slices_per_chunk(n);
         let encoded = match PageEncoder::from_pixmap(&src)
             .with_quality(EncodeQuality::Quality)
             .with_iw44_options(opts)

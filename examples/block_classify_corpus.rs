@@ -15,7 +15,7 @@ use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder};
 use djvu_rs::djvu_render::{RenderOptions, render_pixmap};
 use djvu_rs::jb2_encode::{Jb2EncodeOptions, encode_jb2_dict_with_options};
 use djvu_rs::quality::compare_color;
-use djvu_rs::segment::{SegmentOptions, segment_page};
+use djvu_rs::segment::segment_page;
 
 fn render_page(path: &str, page_no: usize) -> Pixmap {
     let data = std::fs::read(path).unwrap();
@@ -23,11 +23,7 @@ fn render_page(path: &str, page_no: usize) -> Pixmap {
     let page = doc.page(page_no).unwrap();
     render_pixmap(
         page,
-        &RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..Default::default()
-        },
+        &RenderOptions::new(page.width() as u32, page.height() as u32),
     )
     .unwrap()
 }
@@ -63,17 +59,11 @@ fn main() {
     ];
 
     let base = EncodeQuality::Quality.default_segment_options();
-    let cls = SegmentOptions {
-        block_classify: true,
-        ..base
-    };
+    let cls = base.with_block_classify(true);
     // The round-97 follow-up: with photo blocks cleared from the mask their
     // pixels count as background detail, so the #569 adaptive subsample can
     // densify the BG grid exactly where the classifier routed a photo.
-    let cls_adaptive = SegmentOptions {
-        adaptive_bg_subsample: true,
-        ..cls
-    };
+    let cls_adaptive = cls.with_adaptive_bg_subsample(true);
 
     for &(path, page_no, label) in pages {
         let pm = render_page(path, page_no);
@@ -98,11 +88,7 @@ fn main() {
             let doc = DjVuDocument::parse(&enc).unwrap();
             let dec = render_pixmap(
                 doc.page(0).unwrap(),
-                &RenderOptions {
-                    width: pm.width,
-                    height: pm.height,
-                    ..Default::default()
-                },
+                &RenderOptions::new(pm.width, pm.height),
             )
             .unwrap();
             let q = compare_color(&pm, &dec);

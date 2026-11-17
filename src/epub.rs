@@ -58,6 +58,7 @@ pub enum EpubError {
 
 /// Options for EPUB conversion.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EpubOptions {
     /// Title embedded in the OPF metadata. Defaults to `"DjVu Document"`.
     pub title: String,
@@ -88,6 +89,64 @@ pub struct EpubOptions {
     /// keep the smaller (the PDF_ADAPTIVE_RASTER pattern; only one page's
     /// pair is ever live at once). Without it, `Some(q)` means JPEG always.
     pub adaptive: bool,
+}
+
+impl EpubOptions {
+    /// Sets [`title`](Self::title).
+    #[must_use]
+    pub fn with_title(mut self, title: String) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// Sets [`author`](Self::author).
+    #[must_use]
+    pub fn with_author(mut self, author: String) -> Self {
+        self.author = author;
+        self
+    }
+
+    /// Sets [`dpi`](Self::dpi).
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: u32) -> Self {
+        self.dpi = dpi;
+        self
+    }
+
+    /// Sets [`language`](Self::language).
+    #[must_use]
+    pub fn with_language(mut self, language: String) -> Self {
+        self.language = language;
+        self
+    }
+
+    /// Sets [`modified`](Self::modified).
+    #[must_use]
+    pub fn with_modified(mut self, modified: Option<String>) -> Self {
+        self.modified = modified;
+        self
+    }
+
+    /// Sets [`reflowable_text`](Self::reflowable_text).
+    #[must_use]
+    pub fn with_reflowable_text(mut self, reflowable_text: bool) -> Self {
+        self.reflowable_text = reflowable_text;
+        self
+    }
+
+    /// Sets [`jpeg_quality`](Self::jpeg_quality).
+    #[must_use]
+    pub fn with_jpeg_quality(mut self, jpeg_quality: Option<u8>) -> Self {
+        self.jpeg_quality = jpeg_quality;
+        self
+    }
+
+    /// Sets [`adaptive`](Self::adaptive).
+    #[must_use]
+    pub fn with_adaptive(mut self, adaptive: bool) -> Self {
+        self.adaptive = adaptive;
+        self
+    }
 }
 
 impl Default for EpubOptions {

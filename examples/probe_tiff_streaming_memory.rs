@@ -53,14 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let file = File::create(&output)?;
-    djvu_to_tiff_writer(
-        &doc,
-        &TiffOptions {
-            scale,
-            ..TiffOptions::default()
-        },
-        file,
-    )?;
+    djvu_to_tiff_writer(&doc, &TiffOptions::default().with_scale(scale), file)?;
 
     let out_bytes = std::fs::metadata(&output)?.len();
     println!("pages: {}", doc.page_count());

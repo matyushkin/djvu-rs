@@ -313,15 +313,15 @@ fn main() {
         },
         Point {
             label: "lossy 5%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.05),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.05),
         },
         Point {
             label: "lossy 8%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.08),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.08),
         },
         Point {
             label: "lossy 10%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.10),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.10),
         },
     ];
 
@@ -333,10 +333,7 @@ fn main() {
         },
         Point {
             label: "despeckle 8",
-            opts: Jb2EncodeOptions {
-                despeckle: Some(8),
-                ..Jb2EncodeOptions::default()
-            },
+            opts: Jb2EncodeOptions::default().with_despeckle(Some(8)),
         },
         Point {
             label: "lossy_text 2%",
@@ -344,15 +341,15 @@ fn main() {
         },
         Point {
             label: "lossy 5%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.05),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.05),
         },
         Point {
             label: "lossy 8%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.08),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.08),
         },
         Point {
             label: "lossy 10%",
-            opts: Jb2EncodeOptions::with_lossy_threshold(0.10),
+            opts: Jb2EncodeOptions::default().with_lossy_threshold(0.10),
         },
     ];
 

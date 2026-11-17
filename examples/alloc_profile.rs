@@ -27,11 +27,10 @@ use djvu_rs::djvu_render::{RenderOptions, render_pixmap};
 
 fn opts_for(page: &djvu_rs::djvu_document::DjVuPage, dpi: f32) -> RenderOptions {
     let scale = dpi / page.dpi().max(1) as f32;
-    RenderOptions {
-        width: ((page.width() as f32 * scale).round() as u32).max(1),
-        height: ((page.height() as f32 * scale).round() as u32).max(1),
-        ..Default::default()
-    }
+    RenderOptions::new(
+        ((page.width() as f32 * scale).round() as u32).max(1),
+        ((page.height() as f32 * scale).round() as u32).max(1),
+    )
 }
 
 fn main() {
@@ -58,11 +57,7 @@ fn main() {
         "cold-open-full" => {
             let doc = DjVuDocument::parse(&data).unwrap();
             let page = doc.page(0).unwrap();
-            let opts = RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                ..Default::default()
-            };
+            let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
             let _ = render_pixmap(page, &opts).unwrap();
         }
         // One cold render, then 10 warm re-renders (cache-hit path).
@@ -87,11 +82,7 @@ fn main() {
             let mut pixmaps = Vec::with_capacity(n);
             for i in 0..n {
                 let page = doc.page(i).unwrap();
-                let opts = RenderOptions {
-                    width: page.width() as u32,
-                    height: page.height() as u32,
-                    ..Default::default()
-                };
+                let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
                 pixmaps.push(render_pixmap(page, &opts).unwrap());
             }
             let _ = djvu_rs::djvu_encode::encode_djvm_layered_shared(
@@ -116,11 +107,7 @@ fn main() {
                 n,
                 |i| -> Result<_, djvu_rs::djvu_render::RenderError> {
                     let page = doc.page(i).unwrap();
-                    let opts = RenderOptions {
-                        width: page.width() as u32,
-                        height: page.height() as u32,
-                        ..Default::default()
-                    };
+                    let opts = RenderOptions::new(page.width() as u32, page.height() as u32);
                     render_pixmap(page, &opts)
                 },
                 djvu_rs::djvu_encode::EncodeQuality::Quality,

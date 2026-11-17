@@ -18,11 +18,10 @@ pub(super) fn cmd_validate(
         Some(limits_path) => Some(load_limits(limits_path)?),
         None => None,
     };
-    let options = ValidateOptions {
-        strict,
-        decode_pages,
-        limits,
-    };
+    let options = ValidateOptions::default()
+        .with_strict(strict)
+        .with_decode_pages(decode_pages)
+        .with_limits(limits);
     let report = djvu_rs::validate::validate(&data, &options);
     let summary = report.summary();
 
@@ -88,15 +87,14 @@ pub(super) fn load_limits(path: &Path) -> Result<ResourceLimits, Box<dyn std::er
         }
     };
 
-    Ok(ResourceLimits {
-        max_file_bytes: read("max_file_bytes")?,
-        max_pages: read("max_pages")?,
-        max_components: read("max_components")?,
-        max_page_pixels: read("max_page_pixels")?,
-        max_total_pixels: read("max_total_pixels")?,
-        max_decoded_bytes: read("max_decoded_bytes")?,
-        max_render_pixels: read("max_render_pixels")?,
-    })
+    Ok(ResourceLimits::default()
+        .with_max_file_bytes(read("max_file_bytes")?)
+        .with_max_pages(read("max_pages")?)
+        .with_max_components(read("max_components")?)
+        .with_max_page_pixels(read("max_page_pixels")?)
+        .with_max_total_pixels(read("max_total_pixels")?)
+        .with_max_decoded_bytes(read("max_decoded_bytes")?)
+        .with_max_render_pixels(read("max_render_pixels")?))
 }
 
 pub(super) fn cmd_diff(

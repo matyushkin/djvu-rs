@@ -49,7 +49,11 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!((dec.width, dec.height), (w, h), "g4 dimension mismatch");
     for y in 0..h {
         for x in 0..w {
-            assert_eq!(bm.get(x, y), dec.get(x, y), "g4 pixel mismatch at ({x},{y})");
+            assert_eq!(
+                bm.get(x, y),
+                dec.get(x, y),
+                "g4 pixel mismatch at ({x},{y})"
+            );
         }
     }
 });

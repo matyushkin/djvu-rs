@@ -37,6 +37,7 @@ use crate::{Bitmap, GrayPixmap, Pixmap};
 
 /// A high-level optimization policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OptimizationPreset {
     /// Remove semantically inert IFF padding while preserving decoded pixels.
     LosslessCleanup,
@@ -219,6 +220,7 @@ pub struct OptimizationPlan {
 
 /// Result of applying an optimization plan in memory.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct OptimizationResult {
     /// Optimized bytes. The input is never modified in place.
     pub bytes: Vec<u8>,
@@ -1229,10 +1231,7 @@ fn decode_reference(chunks: &[&[u8]]) -> Result<Reference, Iw44Error> {
 }
 
 fn encode_background(reference: &Reference, slices: u8) -> Vec<Vec<u8>> {
-    let options = Iw44EncodeOptions {
-        total_slices: slices,
-        ..Iw44EncodeOptions::default()
-    };
+    let options = Iw44EncodeOptions::default().with_total_slices(slices);
     match reference {
         Reference::Color(pixmap) => encode_iw44_color(pixmap, &options),
         Reference::Gray(gray) => encode_iw44_gray(gray, &options),

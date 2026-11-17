@@ -12,6 +12,7 @@
 ///
 /// `Default` is `Slices`, preserving byte-identical output to previous versions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub enum Iw44Target {
     /// Encode exactly `total_slices` slices (default, legacy behaviour).
     #[default]
@@ -23,6 +24,7 @@ pub enum Iw44Target {
 #[cfg(feature = "std")]
 /// Options for IW44 encoding.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Iw44EncodeOptions {
     /// Number of slices per BG44 chunk (1..=99, default 10).
     pub slices_per_chunk: u8,
@@ -39,6 +41,37 @@ pub struct Iw44EncodeOptions {
     /// Encode-stopping criterion. Default: [`Iw44Target::Slices`] (encode all
     /// `total_slices`, byte-identical to pre-target versions).
     pub target: Iw44Target,
+}
+
+#[cfg(feature = "std")]
+impl Iw44EncodeOptions {
+    /// Sets [`slices_per_chunk`](Self::slices_per_chunk).
+    #[must_use]
+    pub fn with_slices_per_chunk(mut self, slices_per_chunk: u8) -> Self {
+        self.slices_per_chunk = slices_per_chunk;
+        self
+    }
+
+    /// Sets [`total_slices`](Self::total_slices).
+    #[must_use]
+    pub fn with_total_slices(mut self, total_slices: u8) -> Self {
+        self.total_slices = total_slices;
+        self
+    }
+
+    /// Sets [`chroma_delay`](Self::chroma_delay).
+    #[must_use]
+    pub fn with_chroma_delay(mut self, chroma_delay: u8) -> Self {
+        self.chroma_delay = chroma_delay;
+        self
+    }
+
+    /// Sets [`target`](Self::target).
+    #[must_use]
+    pub fn with_target(mut self, target: Iw44Target) -> Self {
+        self.target = target;
+        self
+    }
 }
 
 #[cfg(feature = "std")]

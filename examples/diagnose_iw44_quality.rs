@@ -195,27 +195,20 @@ fn encode_variant(reference: &Pixmap, variant: Variant) -> Option<VariantResult>
         Variant::ModelCurrent | Variant::ModelInverse => unreachable!(),
         Variant::Default => encode_iw44_color(reference, &Iw44EncodeOptions::default()),
         Variant::FullChroma => {
-            let opts = Iw44EncodeOptions {
-                chroma_half: false,
-                ..Iw44EncodeOptions::default()
-            };
+            let opts = Iw44EncodeOptions::default();
             encode_iw44_color(reference, &opts)
         }
         Variant::MoreSlices => {
-            let opts = Iw44EncodeOptions {
-                total_slices: 200,
-                slices_per_chunk: 20,
-                ..Iw44EncodeOptions::default()
-            };
+            let opts = Iw44EncodeOptions::default()
+                .with_total_slices(200)
+                .with_slices_per_chunk(20);
             encode_iw44_color(reference, &opts)
         }
         Variant::GrayLumaOnly => {
             let gray = reference.to_gray8();
-            let opts = Iw44EncodeOptions {
-                total_slices: 200,
-                slices_per_chunk: 20,
-                ..Iw44EncodeOptions::default()
-            };
+            let opts = Iw44EncodeOptions::default()
+                .with_total_slices(200)
+                .with_slices_per_chunk(20);
             encode_iw44_gray(&gray, &opts)
         }
     };

@@ -581,11 +581,10 @@ fn encode_quality_directory_produces_layered_multipage_bundle() {
         assert!(page.raw_chunk(b"Sjbz").is_some(), "page {idx} Sjbz");
         assert!(!page.all_chunks(b"BG44").is_empty(), "page {idx} BG44");
         assert!(page.raw_chunk(b"FGbz").is_some(), "page {idx} FGbz");
-        let opts = djvu_rs::djvu_render::RenderOptions {
-            width: u32::from(page.width()),
-            height: u32::from(page.height()),
-            ..Default::default()
-        };
+        let opts = djvu_rs::djvu_render::RenderOptions::new(
+            u32::from(page.width()),
+            u32::from(page.height()),
+        );
         let rendered = djvu_rs::djvu_render::render_pixmap(page, &opts).unwrap();
         assert_eq!((rendered.width, rendered.height), (32, 32));
     }

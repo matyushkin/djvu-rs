@@ -3,6 +3,7 @@
 use super::*;
 
 /// The result of [`dedup_shared_components`].
+#[non_exhaustive]
 pub struct ComponentDedup {
     /// The deduplicated bundled document.
     pub document: Vec<u8>,
@@ -12,6 +13,7 @@ pub struct ComponentDedup {
 
 /// Policy for shared components that become unreachable after page removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnreachablePolicy {
     /// Keep unreachable shared components in the output.
     Preserve,
@@ -20,6 +22,7 @@ pub enum UnreachablePolicy {
 }
 
 /// Result of removing pages from a bundled document.
+#[non_exhaustive]
 pub struct PageRemoval {
     /// The rebuilt bundled document.
     pub document: Vec<u8>,

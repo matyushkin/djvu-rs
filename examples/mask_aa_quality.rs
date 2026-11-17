@@ -29,16 +29,13 @@ use djvu_rs::djvu_render::{self, RenderOptions, Resampling, UserRotation};
 use djvu_rs::quality;
 
 fn opts(w: u32, h: u32, mask_aa: bool) -> RenderOptions {
-    RenderOptions {
-        width: w,
-        height: h,
-        bold: 0,
-        aa: false,
-        rotation: UserRotation::None,
-        permissive: false,
-        resampling: Resampling::Bilinear,
-        mask_aa,
-    }
+    RenderOptions::new(w, h)
+        .with_bold(0)
+        .with_aa(false)
+        .with_rotation(UserRotation::None)
+        .with_permissive(false)
+        .with_resampling(Resampling::Bilinear)
+        .with_mask_aa(mask_aa)
 }
 
 /// Threshold an RGBA pixmap's luminance to a bilevel `Bitmap` (dark = foreground).

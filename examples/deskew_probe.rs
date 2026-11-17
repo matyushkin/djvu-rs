@@ -62,10 +62,7 @@ mod ocr {
 
     pub fn text(pm: &Pixmap, dpi: u32) -> Option<String> {
         let backend = TesseractBackend::new();
-        let opts = OcrOptions {
-            dpi,
-            ..Default::default()
-        };
+        let opts = OcrOptions::default().with_dpi(dpi);
         backend
             .recognize(pm, &opts)
             .ok()
@@ -116,11 +113,7 @@ fn main() {
         let dpi = page.dpi() as u32;
         let src = render_pixmap(
             page,
-            &RenderOptions {
-                width: page.width() as u32,
-                height: page.height() as u32,
-                ..Default::default()
-            },
+            &RenderOptions::new(page.width() as u32, page.height() as u32),
         )
         .unwrap();
 
@@ -164,13 +157,8 @@ fn main() {
             // estimate + counter-rotate before binarization.
             let deskew_col = if deg > 0.0 {
                 let est = djvu_rs::segment::estimate_skew(&rotated);
-                let seg_fixed = segment_page(
-                    &rotated,
-                    &SegmentOptions {
-                        deskew: true,
-                        ..SegmentOptions::default()
-                    },
-                );
+                let seg_fixed =
+                    segment_page(&rotated, &SegmentOptions::default().with_deskew(true));
                 let fixed = encode_jb2_dict_with_options(
                     &seg_fixed.mask,
                     &[],

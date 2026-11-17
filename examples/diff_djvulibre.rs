@@ -204,11 +204,7 @@ fn process_file(path: &Path, target_w: u32, tolerance: u8, max_pages: usize) -> 
         let render_w = target_w.min(pw);
         let render_h = ((ph as u64 * render_w as u64) / pw as u64).max(1) as u32;
 
-        let opts = RenderOptions {
-            width: render_w,
-            height: render_h,
-            ..Default::default()
-        };
+        let opts = RenderOptions::new(render_w, render_h);
         let rs_pix = match render_pixmap(page, &opts) {
             Ok(p) => p,
             Err(e) => {

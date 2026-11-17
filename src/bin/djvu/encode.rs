@@ -78,19 +78,17 @@ pub(super) fn cmd_encode(
     // #694: --background composites transparent PNG/TIFF pixels onto a solid
     // colour at decode time (the default preserves the alpha channel);
     // --icc reject refuses ICC-profiled input instead of dropping the profile.
-    let policy = djvu_rs::ingest::IngestPolicy {
-        alpha: match background {
+    let policy = djvu_rs::ingest::IngestPolicy::default()
+        .with_alpha(match background {
             Some((red, green, blue)) => {
                 djvu_rs::ingest::AlphaCompositing::CompositeOnBackground { red, green, blue }
             }
             None => djvu_rs::ingest::AlphaCompositing::Preserve,
-        },
-        icc: match icc {
+        })
+        .with_icc(match icc {
             IccArg::Ignore => djvu_rs::ingest::IccHandling::Ignore,
             IccArg::Reject => djvu_rs::ingest::IccHandling::Reject,
-        },
-        ..Default::default()
-    };
+        });
     let EncodeBundleArgs {
         shared_dict_pages,
         thumbnails,
@@ -335,7 +333,9 @@ pub(super) fn cmd_encode(
                 .with_bilevel_codec(codec)
                 .encode()
         }
-        EncodeQuality::Quality | EncodeQuality::Archival | EncodeQuality::Photo => {
+        // Every other profile (`Quality`, `Archival`, `Photo`, and any profile
+        // a later release adds) is a layered colour encode.
+        _ => {
             let mut encoder = PageEncoder::from_pixmap(&pixmap)
                 .with_dpi(dpi)
                 .with_quality(q);
@@ -343,10 +343,7 @@ pub(super) fn cmd_encode(
                 encoder = encoder.with_segment_options(opts);
             }
             if let Some(bpp) = bg_bpp {
-                let iw44_opts = Iw44EncodeOptions {
-                    target: Iw44Target::Bpp(bpp),
-                    ..Iw44EncodeOptions::default()
-                };
+                let iw44_opts = Iw44EncodeOptions::default().with_target(Iw44Target::Bpp(bpp));
                 encoder = encoder.with_iw44_options(iw44_opts);
             }
             encoder.encode()

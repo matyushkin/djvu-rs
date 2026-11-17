@@ -45,14 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (render_ms, rgba_bytes, rgb_ms, rgb_bytes, jpeg_ms, jpeg_len) = {
         let render_start = Instant::now();
-        let pixmap = render_pixmap(
-            page,
-            &RenderOptions {
-                width: rw,
-                height: rh,
-                ..RenderOptions::default()
-            },
-        )?;
+        let pixmap = render_pixmap(page, &RenderOptions::new(rw, rh))?;
         let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
         let rgba_bytes = pixmap.data.len();
 

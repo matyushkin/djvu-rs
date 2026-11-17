@@ -34,10 +34,7 @@ fn run(path: &str, thresholds: &[f32]) {
         base_total
     );
     for &frac in thresholds {
-        let opts = Jb2EncodeOptions {
-            same_size_rec6: Some(frac),
-            ..Jb2EncodeOptions::default()
-        };
+        let opts = Jb2EncodeOptions::default().with_same_size_rec6(Some(frac));
         let mut total = 0usize;
         let (mut rt_ok, mut rt_fail) = (0usize, 0usize);
         for m in &masks {

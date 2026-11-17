@@ -21,11 +21,7 @@ fn render_page(path: &str, page_no: usize) -> Pixmap {
     let page = doc.page(page_no).unwrap();
     render_pixmap(
         page,
-        &RenderOptions {
-            width: page.width() as u32,
-            height: page.height() as u32,
-            ..Default::default()
-        },
+        &RenderOptions::new(page.width() as u32, page.height() as u32),
     )
     .unwrap()
 }
@@ -57,11 +53,7 @@ fn main() {
         let page = doc.page(0).unwrap();
         render_pixmap(
             page,
-            &RenderOptions {
-                width: page.width() as u32 * 3,
-                height: page.height() as u32 * 3,
-                ..Default::default()
-            },
+            &RenderOptions::new(page.width() as u32 * 3, page.height() as u32 * 3),
         )
         .unwrap()
     };
@@ -110,32 +102,21 @@ fn main() {
     paste(&mut mixed_ht, &halftone, px, 128);
 
     let fixed = SegmentOptions::default();
-    let fixed_cls = SegmentOptions {
-        block_classify: true,
-        ..fixed
-    };
-    let sauvola = SegmentOptions {
-        binarization: Binarization::Sauvola {
-            window: 25,
-            k: 0.34,
-        },
-        ..SegmentOptions::default()
-    };
-    let classified = SegmentOptions {
-        block_classify: true,
-        ..sauvola
-    };
+    let fixed_cls = fixed.with_block_classify(true);
+    let sauvola = SegmentOptions::default().with_binarization(Binarization::Sauvola {
+        window: 25,
+        k: 0.34,
+    });
+    let classified = sauvola.with_block_classify(true);
 
     for (page_label, mixed) in [("continuous-tone", &mixed), ("halftone", &mixed_ht)] {
         println!(
             "== synthetic mixed page, {page_label} ({}x{}) ==",
             mixed.width, mixed.height
         );
-        let classified_adaptive = SegmentOptions {
-            block_classify: true,
-            adaptive_bg_subsample: true,
-            ..sauvola
-        };
+        let classified_adaptive = sauvola
+            .with_block_classify(true)
+            .with_adaptive_bg_subsample(true);
         for (label, opts) in [
             ("fixed", &fixed),
             ("fixed+classify", &fixed_cls),
@@ -157,11 +138,7 @@ fn main() {
             let doc = DjVuDocument::parse(&enc).unwrap();
             let dec = render_pixmap(
                 doc.page(0).unwrap(),
-                &RenderOptions {
-                    width: mixed.width,
-                    height: mixed.height,
-                    ..Default::default()
-                },
+                &RenderOptions::new(mixed.width, mixed.height),
             )
             .unwrap();
             let q = compare_color(mixed, &dec);

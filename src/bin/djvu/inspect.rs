@@ -197,5 +197,7 @@ pub(super) fn component_kind_text(kind: ComponentNodeKind) -> &'static str {
         ComponentNodeKind::Annotation => "annotation",
         ComponentNodeKind::SharedOther => "shared_other",
         ComponentNodeKind::Thumbnail => "thumbnail",
+        // `ComponentNodeKind` can gain variants in a minor release.
+        _ => "unknown",
     }
 }

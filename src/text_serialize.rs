@@ -52,6 +52,7 @@ pub enum TextSerializeError {
 
 /// Options for hOCR output.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct HocrOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
@@ -63,8 +64,25 @@ pub struct HocrOptions {
     pub dpi: Option<u32>,
 }
 
+impl HocrOptions {
+    /// Sets [`page_index`](Self::page_index).
+    #[must_use]
+    pub fn with_page_index(mut self, page_index: Option<usize>) -> Self {
+        self.page_index = page_index;
+        self
+    }
+
+    /// Sets [`dpi`](Self::dpi).
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: Option<u32>) -> Self {
+        self.dpi = dpi;
+        self
+    }
+}
+
 /// Options for ALTO XML output.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AltoOptions {
     /// If `Some(n)`, only include page `n` (0-based). Default: all pages.
     pub page_index: Option<usize>,
@@ -74,6 +92,22 @@ pub struct AltoOptions {
     /// with a rendered image at a specific DPI. When `None`, coordinates are
     /// emitted in native page pixels.
     pub dpi: Option<u32>,
+}
+
+impl AltoOptions {
+    /// Sets [`page_index`](Self::page_index).
+    #[must_use]
+    pub fn with_page_index(mut self, page_index: Option<usize>) -> Self {
+        self.page_index = page_index;
+        self
+    }
+
+    /// Sets [`dpi`](Self::dpi).
+    #[must_use]
+    pub fn with_dpi(mut self, dpi: Option<u32>) -> Self {
+        self.dpi = dpi;
+        self
+    }
 }
 
 // ---- Public API -------------------------------------------------------------
