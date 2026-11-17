@@ -164,7 +164,7 @@ impl ScratchPool {
 /// Append the RGB bytes of one RGBA scanline to `dst`, dropping the alpha.
 ///
 /// The per-row strip both the PDF and TIFF streaming encoders build from their
-/// [`render_streaming`](crate::djvu_render::render_streaming) callback.
+/// [`RenderRequest::rows`](crate::djvu_render::RenderRequest::rows) callback.
 ///
 /// `#[allow(dead_code)]`: only the `pdf`/`tiff`/`cbz`-gated exporters call it.
 #[allow(dead_code)]

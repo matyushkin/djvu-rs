@@ -16,7 +16,6 @@
 //!   cargo run --release --example interop_pixdiff -- --corpus   # sweep a set
 //!
 //! Requires `ddjvu` on PATH (DjVuLibre).
-#![allow(deprecated)]
 
 #[path = "support/mod.rs"]
 mod support;

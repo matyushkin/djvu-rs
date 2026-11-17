@@ -2,62 +2,6 @@
 
 use super::*;
 
-/// Coarse render: decode only the first BG44 chunk for a fast blurry preview.
-///
-/// The background alone is composited, then finished like [`render_pixmap`]:
-/// anti-aliasing, Lanczos-3 at a scaled size, and rotation all apply.
-///
-/// Returns `Ok(None)` when the page has no BG44 chunks.
-#[deprecated(
-    note = "use `RenderRequest::new(opts).quality(Quality::Coarse).pixmap(page)`; a page without a background gives `RenderError::NoBackground`"
-)]
-pub fn render_coarse(page: &DjVuPage, opts: &RenderOptions) -> Result<Option<Pixmap>, RenderError> {
-    match RenderRequest::new(opts.clone())
-        .quality(Quality::Coarse)
-        .operation("render_coarse")
-        .pixmap(page)
-    {
-        Err(RenderError::NoBackground) => Ok(None),
-        result => result.map(Some),
-    }
-}
-
-/// Progressive render: decode BG44 chunks 1..=chunk_n and all other layers.
-///
-/// `chunk_n = 0` decodes the first chunk only, like [`render_coarse`], but with
-/// the foreground. Each additional chunk adds detail. The result after all
-/// chunks equals [`render_pixmap`], with one exception: at scales of about a quarter of the native size and below (IW44 subsample 4
-/// or more), [`render_pixmap`] decodes only the first background chunk and
-/// reads a quarter-resolution mask, so the two differ slightly there.
-///
-/// The whole-pixmap steps — anti-aliasing, Lanczos-3 at a scaled size, and
-/// rotation — apply to every frame as they do in [`render_pixmap`].
-///
-/// # Errors
-///
-/// Returns [`RenderError::ChunkOutOfRange`] if `chunk_n` exceeds the number
-/// of available BG44 chunks.
-#[deprecated(note = "use `RenderRequest::new(opts).quality(Quality::Step(n)).pixmap(page)`")]
-pub fn render_progressive(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    chunk_n: usize,
-) -> Result<Pixmap, RenderError> {
-    check_output_pixels("render_progressive", page, None, opts.width, opts.height)?;
-
-    let n_bg44 = page.bg44_chunks().len();
-    let max_chunk = n_bg44.saturating_sub(1);
-
-    if n_bg44 > 0 && chunk_n > max_chunk {
-        return Err(RenderError::ChunkOutOfRange {
-            chunk_n,
-            max: max_chunk,
-        });
-    }
-
-    Composite::decode(page, opts, Detail::Chunks(chunk_n + 1))?.page_pixmap(None)
-}
-
 /// Number of progressive refinement frames a page yields: one per BG44 chunk,
 /// or a single frame for bilevel/JB2-only pages with no BG44 data.
 ///
@@ -86,26 +30,10 @@ pub(super) fn progressive_frame(
         .pixmap(page)
 }
 
-/// Render progressive frame `step` (`0..`[`progressive_steps`]).
-///
-/// Encapsulates the "no BG44 chunks ⇒ a single full [`render_pixmap`], otherwise
-/// [`render_progressive`]`(step)`" decision that every progressive caller (the
-/// `Page::render_scaled_progressive` collector and the async
-/// `render_progressive_stream`) previously open-coded. `step` is interpreted as
-/// the BG44 chunk index on multi-chunk pages.
-#[deprecated(note = "use `RenderRequest::new(opts).quality(Quality::Step(step)).pixmap(page)`")]
-pub fn render_progressive_step(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    step: usize,
-) -> Result<Pixmap, RenderError> {
-    progressive_frame(page, opts, step)
-}
-
 /// Stateful **streaming** progressive decoder (B5).
 ///
 /// Where [`render_progressive_all`] needs every BG44 chunk up front and
-/// [`render_progressive`] re-decodes chunks `1..=k` from scratch for frame `k`
+/// a [`Quality::Step`] render re-decodes chunks `1..=k` from scratch for frame `k`
 /// (O(N²) over all frames), this holds the decode state across calls: the
 /// foreground (mask / FG44 / palette) is decoded **once** and the background
 /// accumulates in a single [`Iw44Image`]. Feed one BG44 refinement chunk at a
@@ -211,13 +139,13 @@ impl<'a> ProgressiveDecoder<'a> {
 
 /// Eagerly render every progressive frame into a `Vec`, coarsest first.
 ///
-/// The convenience form of [`render_progressive_step`] over the full
+/// The convenience form of a [`Quality::Step`] render over the full
 /// [`progressive_steps`] range. The last frame equals [`render_pixmap`], except
 /// at scales of about a quarter of the native size and below (IW44 subsample 4
 /// or more), [`render_pixmap`] decodes only the first background chunk and
 /// reads a quarter-resolution mask, so the two differ slightly there.
 /// Streaming consumers that want one frame at a time should drive a
-/// [`ProgressiveDecoder`] (strict Bilinear) or [`render_progressive_step`].
+/// [`ProgressiveDecoder`] (strict Bilinear) or render each [`Quality::Step`].
 pub fn render_progressive_all(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -225,7 +153,7 @@ pub fn render_progressive_all(
     let steps = progressive_steps(page);
     let bg44_chunks = page.bg44_chunks();
 
-    // Incremental fast path (B5): the per-frame `render_progressive_step` decodes
+    // Incremental fast path (B5): a per-frame `Quality::Step` render decodes
     // BG44 chunks 1..=k from scratch for every frame k — O(N²) over all frames.
     // The foreground (mask/FG44/palette) is identical across frames and already
     // memoised; only the background refines. So decode the foreground once, feed

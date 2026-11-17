@@ -425,7 +425,7 @@ fn render_options_construction() {
 }
 
 /// The incremental `render_progressive_all` fast path (B5) must be
-/// byte-identical to the per-frame `render_progressive_step` loop it
+/// byte-identical to the per-frame `Quality::Step` loop it
 /// replaces, on a real multi-BG44-chunk page.
 #[test]
 fn render_progressive_all_matches_per_frame() {
@@ -449,7 +449,7 @@ fn render_progressive_all_matches_per_frame() {
     let steps = progressive_steps(page);
     assert_eq!(all.len(), steps);
     for (step, frame) in all.iter().enumerate() {
-        let per_frame = render_progressive_step(page, &opts, step).expect("progressive_step");
+        let per_frame = progressive_frame(page, &opts, step).expect("progressive_step");
         assert_eq!(
             (frame.width, frame.height),
             (per_frame.width, per_frame.height),
@@ -498,7 +498,7 @@ fn progressive_decoder_streams_frames_matching_batch() {
 }
 
 /// The streaming `ProgressiveDecoder`, fed one BG44 chunk at a time, must
-/// reproduce `render_progressive_step`'s frames byte-for-byte — the
+/// reproduce the `Quality::Step` frames byte-for-byte — the
 /// byte-identical requirement checked directly against the per-frame API
 /// (not only via the `render_progressive_all` batch path already covered
 /// above), on both the small 3-chunk `chicken.djvu` and the larger
@@ -523,7 +523,7 @@ pub(super) fn assert_progressive_decoder_matches_step(filename: &str) {
     let steps = progressive_steps(page);
     for (i, chunk) in chunks.iter().take(steps).enumerate() {
         let streamed = dec.push_bg44_chunk(chunk).expect("push");
-        let stepped = render_progressive_step(page, &opts, i).expect("progressive_step");
+        let stepped = progressive_frame(page, &opts, i).expect("progressive_step");
         assert_eq!(
             (streamed.width, streamed.height),
             (stepped.width, stepped.height),
@@ -531,7 +531,7 @@ pub(super) fn assert_progressive_decoder_matches_step(filename: &str) {
         );
         assert!(
             streamed.data == stepped.data,
-            "{filename}: streamed frame {i} pixels differ from render_progressive_step"
+            "{filename}: streamed frame {i} pixels differ from the Quality::Step frame"
         );
     }
 }
@@ -548,7 +548,7 @@ fn progressive_decoder_matches_render_progressive_step_colorbook() {
 
 /// Structural proof of the B5 claim (primary evidence per the design doc,
 /// since wall-clock is noisy on a shared machine): a naive session that
-/// calls `render_progressive_step(0..N)` re-decodes BG44 chunks
+/// calls `progressive_frame(0..N)` re-decodes BG44 chunks
 /// `1+2+...+N` times — O(N²) — while a `ProgressiveDecoder` session over
 /// the same N frames decodes each chunk exactly once — O(N). Counted via
 /// the `#[cfg(test)]`-only `BG44_CHUNK_DECODES` counter at the two real
@@ -590,11 +590,11 @@ fn progressive_decoder_chunk_decodes_are_on_not_on_squared() {
                 ..Default::default()
             };
 
-            // Naive per-frame session: render_progressive_step(0..N), each call
+            // Naive per-frame session: progressive_frame(0..N), each call
             // re-decoding the chunk prefix from scratch (the pre-B5 behaviour).
             BG44_CHUNK_DECODES.with(|c| c.set(0));
             for step in 0..n {
-                render_progressive_step(page, &opts, step).expect("progressive_step");
+                progressive_frame(page, &opts, step).expect("progressive_step");
             }
             let naive = BG44_CHUNK_DECODES.with(|c| c.get());
             let expected_naive: usize = (1..=n).sum(); // 1+2+...+N
@@ -683,7 +683,7 @@ fn render_progressive_all_matches_per_frame_bold() {
     let steps = progressive_steps(page);
     assert_eq!(all.len(), steps);
     for (step, frame) in all.iter().enumerate() {
-        let per_frame = render_progressive_step(page, &opts, step).expect("progressive_step");
+        let per_frame = progressive_frame(page, &opts, step).expect("progressive_step");
         assert_eq!(
             (frame.width, frame.height),
             (per_frame.width, per_frame.height),
@@ -1199,7 +1199,7 @@ fn fit_to_width_preserves_aspect() {
     let expected_h = ((ph as f64 * 800.0) / pw as f64).round() as u32;
     assert_eq!(opts.height, expected_h);
     // The pipeline's decode scale is derived from width; it matches the
-    // width/page-width ratio the deprecated `scale` field used to carry.
+    // width/page-width ratio.
     assert!((opts.decode_scale(page) - 800.0 / pw as f32).abs() < 0.01);
 }
 
@@ -1455,7 +1455,7 @@ fn render_progressive_each_chunk() {
 /// `watchmaker.djvu` page 0, BG44 chunk 2 of 4 is a legitimate two-byte
 /// `[serial, slices]` header with a **zero-length** ZP payload (the encoder
 /// had nothing left to encode for that refinement round). The strict
-/// progressive path (`render_progressive_step` / `ProgressiveDecoder`)
+/// progressive path (`Quality::Step` / `ProgressiveDecoder`)
 /// used to hard-fail on it with `Iw44(ZpTooShort)`, while the permissive
 /// full-page cache (`PageLayers::bg44`) silently swallowed the error and
 /// dropped that chunk *and every chunk after it* — so the full render
@@ -1492,7 +1492,7 @@ fn render_progressive_step_handles_zero_length_bg44_chunk() {
     };
 
     for step in 0..progressive_steps(page) {
-        render_progressive_step(page, &opts, step)
+        progressive_frame(page, &opts, step)
             .unwrap_or_else(|e| panic!("step {step} should succeed, got {e}"));
     }
     render_progressive_all(page, &opts).expect("progressive_all should succeed");
@@ -1530,8 +1530,8 @@ fn render_progressive_all_seals_chunk_loop() {
         full.data,
         "final progressive frame must equal the full render"
     );
-    // `render_progressive_step(0)` is also a valid (coarse) frame.
-    let first = render_progressive_step(page, &opts, 0).expect("step 0 must succeed");
+    // `progressive_frame(0)` is also a valid (coarse) frame.
+    let first = progressive_frame(page, &opts, 0).expect("step 0 must succeed");
     assert_eq!(first.data, frames[0].data);
 }
 
@@ -1554,7 +1554,7 @@ fn render_progressive_ignores_mask_sub4_warmth() {
     let cold = {
         let doc = load_doc("colorbook.djvu");
         let page = doc.page(0).unwrap();
-        render_progressive_step(page, &opts, 1).unwrap()
+        progressive_frame(page, &opts, 1).unwrap()
     };
     let doc = load_doc("colorbook.djvu");
     let page = doc.page(0).unwrap();
@@ -1565,7 +1565,7 @@ fn render_progressive_ignores_mask_sub4_warmth() {
         page.render_layers().mask_sub4_cached().is_some(),
         "precondition: the full render must have retained the sub4 mask"
     );
-    let warm = render_progressive_step(page, &opts, 1).unwrap();
+    let warm = progressive_frame(page, &opts, 1).unwrap();
     assert_eq!(
         cold.data, warm.data,
         "progressive frame changed with cache warmth"

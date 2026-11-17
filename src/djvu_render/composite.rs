@@ -4,7 +4,7 @@ use super::*;
 
 /// A sub-rectangle within the full rendered output.
 ///
-/// Used by [`render_region`] to select which portion of the page to render.
+/// Used by [`RenderRequest::region`] to select which portion of the page to render.
 /// `x` and `y` are pixel offsets within the output at `opts.width × opts.height`
 /// resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub struct RenderRect {
 /// All decoded layers and options passed to the compositor.
 ///
 /// `Clone`/`Copy`: every field is a reference or a `Copy` primitive, so
-/// [`render_region_tiled`] can stamp out one context per tile (only
+/// [`render_region_tiled_cancellable`] can stamp out one context per tile (only
 /// `offset_x`/`offset_y`/`out_w`/`out_h` differ) without rebuilding the q24 /
 /// gamma-LUT plumbing each time.
 #[derive(Clone, Copy)]
@@ -650,7 +650,7 @@ pub(super) fn composite_into(
 /// `ctx.out_w`.  A single scratch row is allocated up-front (not per-row), so
 /// peak additional heap use is `out_w * 4` bytes regardless of page height.
 ///
-/// This is the streaming primitive behind [`render_streaming`]; callers
+/// This is the streaming primitive behind [`RenderRequest::rows`]; callers
 /// that already hold a flat output buffer should prefer [`composite_into`],
 /// which writes directly without an intermediate copy.
 pub(super) fn composite_rows<F>(ctx: &CompositeContext<'_>, mut sink: F) -> Result<(), RenderError>
@@ -781,7 +781,7 @@ pub(super) fn composite_rows_bilevel_one(
         // stores, replacing 8×16 scalar instructions. Works whenever offset_x is
         // byte-aligned (offset_x % 8 == 0) so output byte `i` maps to source mask byte
         // `offset_x/8 + i` with no per-pixel bit shuffle — covers full-page renders
-        // (offset_x==0) and byte-aligned `render_region` viewports. Guard
+        // (offset_x==0) and byte-aligned region viewports. Guard
         // `offset_x + out_w <= mask.width` keeps the source index in bounds and makes
         // the `.min(page_w-1)` clamp a no-op (mask.width == page_w for the 1:1 mask).
         let out_w = row_buf.len() / 4;

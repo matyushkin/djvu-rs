@@ -21,7 +21,6 @@
 //! ## Usage
 //!   cargo run --release --example quality_harness -- <file.djvu> [page] [--half|--third|--quarter]
 //!   cargo run --release --example quality_harness -- --pair <a.djvu> <b.djvu> [page]
-#![allow(deprecated)]
 
 use djvu_rs::Pixmap;
 use djvu_rs::djvu_document::DjVuDocument;
@@ -33,7 +32,6 @@ fn opts(w: u32, h: u32, resampling: Resampling) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

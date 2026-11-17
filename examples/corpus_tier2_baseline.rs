@@ -8,7 +8,6 @@
 //! `tests/corpus/` are skipped. Renders at native page size (same contract as
 //! `interop_pixdiff`); the photo page is timed at 1/4 linear for wall-clock
 //! only, with a separate native interop row.
-#![allow(deprecated)]
 
 use djvu_rs::Pixmap;
 use djvu_rs::djvu_document::DjVuDocument;
@@ -75,7 +74,6 @@ fn opts(w: u32, h: u32) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

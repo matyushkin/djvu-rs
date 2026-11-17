@@ -66,7 +66,7 @@ before rotation (`unrotated_size`):
 
 - `aa: true` halves the page, so the grid covers `opts.width / 2 ×
   opts.height / 2` (min 1). A tile is averaged from the doubled window of
-  the canvas, exactly as `render_region` does.
+  the canvas, exactly as a region render does.
 - `Resampling::Lanczos3` at a scaled size keeps the requested size and
   ignores `aa`. A tile is cut from the rescaled page. The first cache miss
   rescales the whole page and, when the page fits the tile-cache budget,
@@ -148,15 +148,15 @@ reproduces `render_tile_cached`.
 - `quality_step: Some(k)` composites the tile from BG44 background chunks
   `0..=k` only (full foreground and mask), for
   `k < progressive_steps(page)`. The tile is **byte-identical** to the
-  matching crop of the full-page progressive frame
-  `render_progressive_step(page, opts, k)`, under every rotation.
+  matching crop of the full-page progressive frame `Quality::Step(k)`,
+  under every rotation.
 - **Never-regress by construction.** Each BG44 chunk is a wavelet
   refinement over the same base image: step `k+1` adds detail to step `k`,
   never replaces or coarsens it. Walking `0..progressive_steps` is the same
   monotonic ladder full-page progressive rendering rides; the tile API adds
   no resampling or re-quantization that could break it.
 - On pages without BG44 data the ladder has exactly one step: `Some(0)` is
-  the full render (mirroring `render_progressive_step`), larger steps error
+  the full render (as for `Quality::Step` on the whole page), larger steps error
   with `ChunkOutOfRange`.
 - Partial-quality pixels are decoded per call and **never** enter the
   composited-tile cache, so no later full-quality render can observe them.

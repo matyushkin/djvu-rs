@@ -3,10 +3,6 @@
 //! Uses the public domain corpus file `pathogenic_bacteria_1896.djvu` (520 pages, 25 MB)
 //! to measure real-world performance on a large mixed-content document.
 
-// Tier-2 render benches build `RenderOptions` literals that still name the
-// deprecated `scale` field (ignored by the pipeline; see #377).
-#![allow(deprecated)]
-
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -536,7 +532,6 @@ fn bench_tier2_corpus_render(c: &mut Criterion) {
         let opts = djvu_rs::djvu_render::RenderOptions {
             width: rw,
             height: rh,
-            scale: 1.0,
             bold: 0,
             aa: false,
             rotation: djvu_rs::djvu_render::UserRotation::None,

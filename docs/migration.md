@@ -27,6 +27,7 @@ fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
 | [0.38.0](#0380) | renders pages that carry a rotation, uses `render_into` or `render_region`, writes metadata, exports PDF, or matches on `DjvmError` |
 | [0.45.0](#0450) | builds with Rust older than 1.89 |
 | [0.46.0](#0460) | enables the feature `ocr-neural` or `ocr-neural-candle`, or runs `djvu ocr --backend candle` |
+| [1.0.0](#100) | calls an item with a deprecation note: a `render_*` function other than `render_pixmap`, `RenderOptions::scale`, `Pixmap::new` or `OcrExportError` |
 
 The calls below did not change between 0.30 and 0.45. Code that uses nothing
 else compiles after the version bump alone:
@@ -302,14 +303,17 @@ The same release changed these sizes for the same pages:
 size, and for a rotation. Before, they ignored these options and wrote a
 buffer without them. `RenderOptions::can_stream` tells in advance.
 
+The example uses `RenderRequest::write_rgba`, which follows the same rule.
+It replaces the two free functions, which [1.0.0](#100) removes.
+
 ```rust
 use djvu_rs::DjVuPage;
-use djvu_rs::djvu_render::{RenderError, RenderOptions, render_into, render_pixmap};
+use djvu_rs::djvu_render::{RenderError, RenderOptions, RenderRequest, render_pixmap};
 
 fn rgba(page: &DjVuPage, options: &RenderOptions) -> Result<Vec<u8>, RenderError> {
     if options.can_stream(page) {
         let mut buffer = vec![0; options.width as usize * options.height as usize * 4];
-        render_into(page, options, &mut buffer)?;
+        RenderRequest::new(options.clone()).write_rgba(page, &mut buffer)?;
         Ok(buffer)
     } else {
         // The pixmap can have another size than `options` asks for:
@@ -345,7 +349,8 @@ fn top_left_tile(page: &DjVuPage, options: RenderOptions) -> Result<Pixmap, Rend
 ```
 
 Anti-aliasing also halves progressive frames, `ProgressiveDecoder` frames
-and the output of `render_coarse`. `render_coarse` applies Lanczos-3.
+and the coarse render (`render_coarse`). The coarse render applies
+Lanczos-3.
 
 ### Metadata setters return a `Result`
 
@@ -445,6 +450,158 @@ installation. `ocr-onnx` is the experimental neural backend; it needs Rust
 
 The `djvu ocr` command no longer accepts `--backend candle`. That value
 only printed an error. Use `--backend tesseract` or `--backend onnx`.
+
+## 1.0.0
+
+This release removes every item that carried a deprecation note. Each
+replacement shipped in 0.39.0 or earlier, so you can make the change before
+the upgrade. Build your crate against 0.46 first: each deprecation warning
+names the call that replaces the old one. A crate that builds against 0.46
+without a deprecation warning needs no change for this section.
+
+### The `render_*` variants are removed
+
+`djvu_render::RenderRequest` replaces ten functions of `djvu_render`. A
+request holds the options, an optional region, the quality, the resource
+limits and a cancel token. One of its methods then picks the output.
+`render_pixmap`, `render_gray8`, `render_progressive_all` and the method
+`DjVuPage::render_into` stay.
+
+| Removed | Replacement |
+|---------|-------------|
+| `render_into(page, &opts, buf)` | `RenderRequest::new(opts).write_rgba(page, buf)` |
+| `render_into_with_limits(page, &opts, limits, buf)` | `RenderRequest::new(opts).limits(limits).write_rgba(page, buf)` |
+| `render_pixmap_with_limits(page, &opts, limits)` | `RenderRequest::new(opts).limits(limits).pixmap(page)` |
+| `render_pixmap_with_report(page, &opts)` | `RenderRequest::new(opts).pixmap_with_report(page)` |
+| `render_streaming(page, &opts, sink)` | `RenderRequest::new(opts).rows(page, sink)` |
+| `render_region(page, region, &opts)` | `RenderRequest::new(opts).region(region).pixmap(page)` |
+| `render_region_tiled(page, region, &opts)` | `RenderRequest::new(opts).region(region).cached(true).pixmap(page)` |
+| `render_coarse(page, &opts)` | `RenderRequest::new(opts).quality(Quality::Coarse).pixmap(page)` |
+| `render_progressive(page, &opts, n)` | `RenderRequest::new(opts).quality(Quality::Step(n)).pixmap(page)` |
+| `render_progressive_step(page, &opts, n)` | `RenderRequest::new(opts).quality(Quality::Step(n)).pixmap(page)` |
+
+`RenderRequest::new` takes the options by value: clone them if you need
+them again. The request methods take `&self`, so one request can render
+many pages.
+
+The pixels are the same. Four details differ:
+
+- **A region on a rotated page.** The removed `render_region` and
+  `render_region_tiled` took a rectangle on the page before its rotation.
+  `RenderRequest::region` takes a rectangle on the page as `render_pixmap`
+  returns it, after the rotation. On a page without a rotation the two are
+  equal. Otherwise convert the rectangle with the table below.
+- **A coarse render of a page without a background.** `render_coarse`
+  returned `Ok(None)`. The request returns `Err(RenderError::NoBackground)`.
+- **A progressive step on a page without background chunks.**
+  `render_progressive` and `render_progressive_step` returned the full
+  render for every step. `Quality::Step` accepts step 0 only there, and
+  returns `RenderError::ChunkOutOfRange` for a larger step. Take the number
+  of steps from `progressive_steps(page)`.
+- **The operation name in a resource-limit error.** The field
+  `ResourceLimitExceeded::operation` holds `"render"` for every request.
+  Before, it held the name of the function, for example `"render_into"`.
+
+The rotation in this table is the rotation of the output: the rotation of
+the `INFO` chunk plus `RenderOptions::rotation`. `W` and `H` are the width
+and height of the page before the rotation. The old rectangle is
+`(x, y, w, h)`.
+
+| Rotation of the output | Rectangle for `RenderRequest::region` |
+|------------------------|----------------------------------------|
+| none | `(x, y, w, h)` |
+| 90° clockwise | `(H − y − h, x, h, w)` |
+| 180° | `(W − x − w, H − y − h, w, h)` |
+| 90° counter-clockwise | `(y, W − x − w, h, w)` |
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::djvu_render::{render_coarse, render_progressive, render_region};
+```
+
+After:
+
+```rust
+use djvu_rs::{DjVuPage, Pixmap};
+use djvu_rs::djvu_render::{
+    Quality, RenderError, RenderOptions, RenderRect, RenderRequest, progressive_steps,
+};
+
+/// A fast blurry preview; `None` for a page without a background.
+fn preview(page: &DjVuPage, options: &RenderOptions) -> Result<Option<Pixmap>, RenderError> {
+    let request = RenderRequest::new(options.clone()).quality(Quality::Coarse);
+    match request.pixmap(page) {
+        Ok(pixmap) => Ok(Some(pixmap)),
+        Err(RenderError::NoBackground) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Every progressive frame, the least detailed first.
+fn frames(page: &DjVuPage, options: &RenderOptions) -> Result<Vec<Pixmap>, RenderError> {
+    (0..progressive_steps(page))
+        .map(|step| {
+            RenderRequest::new(options.clone())
+                .quality(Quality::Step(step))
+                .pixmap(page)
+        })
+        .collect()
+}
+
+/// A part of the page, as a viewer shows it while the reader pans.
+fn viewport(page: &DjVuPage, options: &RenderOptions, part: RenderRect) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(options.clone())
+        .region(part)
+        .cached(true)
+        .pixmap(page)
+}
+```
+
+### `RenderOptions::scale` is removed
+
+The renderer ignored this field since 0.20.1: it takes the scale from
+`width` and the width of the page. Remove the field from every
+`RenderOptions` literal. Code that ends a literal with
+`..Default::default()` and does not name `scale` needs no change, and
+neither does code that uses `RenderOptions::fit_to_width`, `fit_to_height`
+or `fit_to_box`.
+
+```rust
+use djvu_rs::djvu_render::RenderOptions;
+
+fn options() -> RenderOptions {
+    RenderOptions {
+        width: 800,
+        height: 1000,
+        // Before 1.0.0 a literal could also carry `scale: 1.0`.
+        ..Default::default()
+    }
+}
+```
+
+### `Pixmap::new` is removed
+
+`Pixmap::new` returned an empty pixmap of 0 × 0 when the requested size was
+too large. `Pixmap::try_new` (since 0.34.0) takes the same arguments and
+reports that case as a `PixmapError`. `Pixmap::white` stays.
+
+```rust
+use djvu_rs::{Pixmap, PixmapError};
+
+fn red_canvas(width: u32, height: u32) -> Result<Pixmap, PixmapError> {
+    // Before: `Pixmap::new(width, height, 255, 0, 0, 255)`.
+    Pixmap::try_new(width, height, 255, 0, 0, 255)
+}
+```
+
+The same holds for the crate `djvu-pixmap`, which defines the type.
+
+### `OcrExportError` is removed
+
+`text_serialize::OcrExportError` was an alias of
+`text_serialize::TextSerializeError` since 0.21.0. Use the name
+`TextSerializeError`.
 
 ## Fixes that change results
 

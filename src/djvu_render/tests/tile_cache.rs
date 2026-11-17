@@ -368,42 +368,25 @@ fn best_iw44_subsample_values() {
     );
 }
 
-/// The IW44 decode subsample is derived from the output `width`, not from
-/// the deprecated `scale` field — the regression guard for the PDF
-/// over-decode (#377).
+/// The IW44 decode subsample is derived from the output `width` — the
+/// regression guard for the PDF over-decode (#377).
 #[test]
-#[allow(deprecated)] // deliberately writes the legacy `scale` field to prove it is ignored
-fn decode_subsample_derives_from_width_not_scale_field() {
+fn decode_subsample_derives_from_width() {
     let doc = load_doc("chicken.djvu");
     let page = doc.page(0).unwrap();
     let (dw, _) = display_dimensions(page);
 
     // Quarter-width output. The PDF exporter built exactly this — a small
-    // `width` with `scale` left at the 1.0 default — and the old pipeline
-    // read `scale` and decoded at full wavelet resolution (subsample 1).
-    // The decode scale is now derived from `width`, so it is 0.25 →
-    // subsample 4, and the over-decode is gone.
+    // `width` with the former `scale` field left at its 1.0 default — and
+    // the old pipeline read `scale` and decoded at full wavelet resolution
+    // (subsample 1). The decode scale is derived from `width`, so it is
+    // 0.25 → subsample 4.
     let opts = RenderOptions {
         width: dw / 4,
         ..Default::default()
     };
     assert!((opts.decode_scale(page) - 0.25).abs() < 0.01);
     assert_eq!(best_iw44_subsample(opts.decode_scale(page)), 4);
-
-    // Writing the legacy `scale` field by hand — to any value — must not
-    // change the width-derived subsample.
-    for misleading in [1.0_f32, 0.0, 0.5, 4.0] {
-        let mut o = RenderOptions {
-            width: dw / 4,
-            ..Default::default()
-        };
-        o.scale = misleading;
-        assert_eq!(
-            best_iw44_subsample(o.decode_scale(page)),
-            4,
-            "scale={misleading} must not change the width-derived subsample",
-        );
-    }
 }
 
 /// INFO-rotated page: the decode scale follows the *native* page width, not

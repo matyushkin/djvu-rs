@@ -21,7 +21,6 @@
 //! Usage:
 //!   cargo run --release --example mask_aa_quality -- <file.djvu> [page] [divisors...]
 //!   (divisors default to 2 4 — i.e. 2× and 4× zoom reconstruction)
-#![allow(deprecated)]
 
 use djvu_rs::Bitmap;
 use djvu_rs::djvu_document::DjVuDocument;
@@ -33,7 +32,6 @@ fn opts(w: u32, h: u32, mask_aa: bool) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

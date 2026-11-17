@@ -675,7 +675,7 @@ where
 /// final frame equals [`render_pixmap`][djvu_render::render_pixmap], except at
 /// scales of about a quarter of the native size and below, where
 /// `render_pixmap` stops at the first background chunk (see
-/// [`render_progressive`][djvu_render::render_progressive]).
+/// [`render_progressive_all`][djvu_render::render_progressive_all]).
 ///
 /// If the page has no BG44 chunks (bilevel JB2-only pages), exactly one frame
 /// is yielded via [`render_pixmap`][djvu_render::render_pixmap].
@@ -768,8 +768,8 @@ pub async fn render_tile_async(
 ///
 /// The tile-granular counterpart of [`render_progressive_stream`]: yields one
 /// frame per quality step `0..progressive_steps(page)`, coarsest first. Each
-/// frame is byte-identical to the matching crop of the full-page frame from
-/// [`render_progressive_step`](djvu_render::render_progressive_step) — so
+/// frame is byte-identical to the matching crop of the full-page
+/// [`Quality::Step`](djvu_render::Quality::Step) frame — so
 /// per-tile refinement and full-page refinement can be mixed freely in one
 /// viewer. Bilevel pages (no BG44 data) yield exactly one full-quality frame.
 ///

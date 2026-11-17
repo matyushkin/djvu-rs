@@ -142,7 +142,7 @@ pub fn djvu_to_tiff(doc: &DjVuDocument, opts: &TiffOptions) -> Result<Vec<u8>, T
 /// Write a DjVu document as a multi-page TIFF to `writer`.
 ///
 /// This is the lowest-memory TIFF export entry point: when color rendering is
-/// streamable, rows are passed directly from [`djvu_render::render_streaming`]
+/// streamable, rows are passed directly from [`djvu_render::RenderRequest::rows`]
 /// into TIFF strips without constructing a full output [`crate::Pixmap`] or an
 /// intermediate full RGB image. Bilevel G4 export first makes a sizing pass
 /// that renders and encodes each page only to retain its dimensions, DPI, and

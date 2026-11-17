@@ -5,7 +5,9 @@
 //!
 //! ## Key public types
 //!
-//! - `RenderOptions` — render parameters (size, scale, bold, AA)
+//! - `RenderRequest` — one builder for every render: whole page or region,
+//!   full, progressive or coarse quality, to a pixmap, a buffer, or rows
+//! - `RenderOptions` — render parameters (size, bold, AA, rotation)
 //! - `RenderError` — typed errors from the render pipeline
 //!
 //! ## Compositing model
@@ -31,9 +33,9 @@
 //!
 //! ## Progressive rendering
 //!
-//! `render_coarse()` decodes only the first BG44 chunk; subsequent calls to
-//! `render_progressive(chunk_n)` decode one additional chunk, yielding
-//! progressively higher-quality images.
+//! `Quality::Coarse` decodes only the first BG44 chunk, for a fast preview.
+//! `Quality::Step(n)` decodes chunks `0..=n` and the foreground, so each
+//! step yields a higher-quality image.
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
@@ -50,7 +52,7 @@ use crate::render_size::RenderSize;
 // loop and `ProgressiveDecoder::push_bg44_chunk`).
 //
 // Exists to back the B5 structural claim — O(N²) chunk decodes for a
-// per-frame `render_progressive_step` session vs O(N) for the stateful
+// per-frame `Quality::Step` session vs O(N) for the stateful
 // decoder — with an exact call count instead of noisy wall-clock timing.
 // `#[cfg(test)]`-gated so it costs nothing (not even the branch) outside
 // test builds. Thread-local (not a shared global) so parallel test runners
@@ -119,6 +121,4 @@ use sampling::*;
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-// The deprecated entry points keep their tests until they are removed.
-#[allow(deprecated)]
 mod tests;

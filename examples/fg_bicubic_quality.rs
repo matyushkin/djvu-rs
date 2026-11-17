@@ -38,7 +38,6 @@
 //!
 //! ## Usage
 //!   cargo run --release --example fg_bicubic_quality -- <file.djvu> [page] [zoom]
-#![allow(deprecated)]
 
 use djvu_rs::Pixmap;
 use djvu_rs::djvu_document::DjVuDocument;

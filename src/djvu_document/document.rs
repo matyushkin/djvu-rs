@@ -104,7 +104,7 @@ impl DjVuDocument {
     /// When [`ParseOptions::limits`](crate::resource_limits::ParseOptions::limits) is set, header-only estimates are checked
     /// before the document is fully parsed. The same limits are stored on the
     /// returned document and inherited by subsequent render calls unless
-    /// overridden via [`render_pixmap_with_limits`](crate::djvu_render::render_pixmap_with_limits).
+    /// overridden via [`RenderRequest::limits`](crate::djvu_render::RenderRequest::limits).
     #[cfg(feature = "std")]
     pub fn parse_with_options(
         data: &[u8],

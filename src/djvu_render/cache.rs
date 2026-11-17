@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Tile edge length (pixels) used by [`render_region_tiled`]'s composited-
+/// Tile edge length (pixels) used by [`render_region_tiled_cancellable`]'s composited-
 /// output cache. 256 keeps a full RGBA tile at 256 KiB — small enough that a
 /// pan/zoom viewer's working set (a screenful of tiles) stays a few MB, large
 /// enough that the per-tile `HashMap`/`Mutex` overhead is negligible next to
@@ -399,7 +399,7 @@ pub(crate) struct PageLayers {
     /// (without touching) by `DjVuDocument::enforce_cache_budget` to evict the
     /// least-recently-used pages first. Not part of the decoded data.
     pub(super) access: std::sync::atomic::AtomicU64,
-    /// C4_TILE_CACHE: composited-output tiles for [`render_region_tiled`],
+    /// C4_TILE_CACHE: composited-output tiles for [`render_region_tiled_cancellable`],
     /// keyed by `(full_w, full_h, tile_x, tile_y, bold, mask_aa)`. Unlike the
     /// layers above (which cache *decoded* data), these cache the *compositor's
     /// output* — the per-pixel work `composite_into` repeats on every call is

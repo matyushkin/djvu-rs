@@ -40,10 +40,10 @@ bump). This includes:
 - The error hierarchy (`DjVuError`, `IffError`, `Jb2Error`, `Iw44Error`,
   `BzzError`, `DocError`, `RenderError`) — see the error-stability rule below.
 - The rendering entry points in [`djvu_render`] (`RenderOptions`,
-  `RenderRequest`, `render_pixmap`, …). The older `render_*` variants
-  (`render_into`, `render_streaming`, `render_region`, `render_coarse`,
-  `render_progressive`, …) are deprecated in favour of `RenderRequest`; they
-  keep working until a future breaking release removes them.
+  `RenderRequest`, `render_pixmap`, …). `RenderRequest` is the one way to
+  ask for a region, a progressive step, a coarse preview, a row stream or a
+  render into a caller's buffer; the older `render_*` variants were removed
+  in 1.0.0 (see [`docs/migration.md`](migration.md#100)).
 - The codec entry points of the workspace crates that the README advertises as
   `no_std`-callable: `iff::parse_form`, `bzz::bzz_decode`, `jb2::decode_dict`,
   `iw44::Iw44Image::decode_chunk`.
@@ -100,7 +100,6 @@ Current deprecated surfaces:
 |------|------|-------------|
 | `bzz_new` module | re-export alias | `bzz` |
 | `iw44_new` module | re-export alias | `iw44` |
-| `Pixmap::new` (since 0.34.0) | constructor that returns an empty pixmap on an oversized request | `Pixmap::try_new` (reports `PixmapError`) |
 
 These aliases are kept intentionally cheap (a `pub use`) so they can outlive
 the minimum window without cost.

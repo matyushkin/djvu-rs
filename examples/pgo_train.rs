@@ -8,10 +8,6 @@
 //! accumulate representative profile counters. Run under `-Cprofile-generate`;
 //! see the `pgo` target in the `Makefile`.
 
-// The RenderOptions literals still name the deprecated `scale` field (ignored by
-// the pipeline; kept until the field is removed), same as the bench harnesses.
-#![allow(deprecated)]
-
 use djvu_rs::djvu_document::DjVuDocument;
 use djvu_rs::djvu_render::{self, RenderOptions, Resampling, UserRotation};
 use std::path::PathBuf;
@@ -27,7 +23,6 @@ fn opts(w: u32, h: u32, resampling: Resampling) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,
