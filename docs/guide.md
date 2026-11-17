@@ -244,12 +244,12 @@ names the `RenderRequest` call that replaces each of them. Note that a
 `RenderRequest` region is in display (rotated) coordinates.
 
 The bindings follow the same shape. In Python, `Page.render(dpi, size=...,
-region=(x, y, w, h), quality="coarse" | n)` replaces `render_region`,
-`render_coarse` and `render_progressive`, which now raise a
-`DeprecationWarning`. In the browser, a `WasmRenderRequest` (a DPI, plus
-`set_region`, `set_step`, `set_coarse`) goes to `WasmPage.render_request`,
-which replaces `render_coarse`, `render_progressive`,
-`render_into_pixmap` and `render_progressive_into_pixmap`. The high-level
+region=(x, y, w, h), quality="coarse" | n)` is the one render call. In the
+browser, a `WasmRenderRequest` (a DPI, plus `set_region`, `set_step`,
+`set_coarse`) goes to `WasmPage.render_request`. The older methods of both
+packages (`render_region`, `render_coarse`, `render_progressive`,
+`render_into_pixmap`, `render_progressive_into_pixmap`) were removed in
+1.0.0; the same migration guide lists their replacements. The high-level
 `Page` runs any `RenderRequest` with `Page::render_request`.
 
 ### Tile rendering

@@ -28,8 +28,10 @@ background, and a chunk index must be below `page.bg44_chunk_count`. The
 result is a `Pixmap`: `.to_pil()`, `.to_numpy()` (shape `(height, width, 4)`,
 `uint8`), their `_zerocopy` variants backed by the same buffer, `.data()` for
 raw RGBA bytes, and the buffer protocol (`memoryview`).
-The old `render_region`, `render_coarse` and `render_progressive` still work
-but emit a `DeprecationWarning`.
+The old `render_region`, `render_coarse` and `render_progressive` were removed
+in 1.0.0; the
+[migration guide](https://github.com/matyushkin/djvu-rs/blob/main/docs/migration.md#100)
+lists the `render` call that replaces each.
 
 ## Export
 

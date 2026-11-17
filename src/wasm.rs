@@ -49,39 +49,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     djvu_document::DjVuDocument,
-    djvu_render::{Quality, RenderError, RenderOptions, RenderRect, RenderRequest},
+    djvu_render::{Quality, RenderError, RenderRect, RenderRequest},
     djvu_tile,
-    pixmap::Pixmap,
     render_size::RenderSize,
 };
-
-/// The coarse preview, or `None` when the page has no background.
-fn render_coarse(
-    page: &crate::djvu_document::DjVuPage,
-    opts: &RenderOptions,
-) -> Result<Option<Pixmap>, RenderError> {
-    match RenderRequest::new(opts.clone())
-        .quality(Quality::Coarse)
-        .operation("render_coarse")
-        .pixmap(page)
-    {
-        Err(RenderError::NoBackground) => Ok(None),
-        result => result.map(Some),
-    }
-}
-
-/// Progressive frame `chunk_n`: background chunks `0..=chunk_n` and every
-/// other layer.
-fn render_progressive(
-    page: &crate::djvu_document::DjVuPage,
-    opts: &RenderOptions,
-    chunk_n: usize,
-) -> Result<Pixmap, RenderError> {
-    RenderRequest::new(opts.clone())
-        .quality(Quality::Step(chunk_n))
-        .operation("render_progressive")
-        .pixmap(page)
-}
 
 // ── WasmPixmap — Rust-owned pixel buffer (#611) ──────────────────────────────
 
@@ -101,8 +72,8 @@ fn render_progressive(
 ///   — the Rust-side allocation is reused across frames (a progressive
 ///   session allocates once instead of once per refinement pass).
 ///
-/// The existing copying `render*` methods are unchanged for callers that need
-/// independently owned JS bytes.
+/// [`WasmPage::render`] and [`to_bytes`](WasmPixmap::to_bytes) stay for
+/// callers that need independently owned JS bytes.
 #[wasm_bindgen]
 pub struct WasmPixmap {
     data: Vec<u8>,
@@ -468,70 +439,13 @@ impl WasmPage {
 
     /// Number of BG44 background chunks on this page.
     ///
-    /// Determines how many refinement steps are available via
-    /// [`render_progressive`](Self::render_progressive). Returns `0` for bilevel-only pages.
+    /// Determines how many refinement steps a [`WasmRenderRequest`] can ask
+    /// for with `set_step`. Returns `0` for bilevel-only pages.
     pub fn bg44_chunk_count(&self) -> u32 {
         self.doc
             .page(self.index)
             .map(|p| p.bg44_chunks().len() as u32)
             .unwrap_or(0)
-    }
-
-    /// Fast coarse render — decodes only the first BG44 chunk (~5 ms for a
-    /// typical color page).
-    ///
-    /// @deprecated Use `render_request` with `set_coarse()`.
-    ///
-    /// Returns `undefined` for bilevel-only pages (no BG44 data); use
-    /// [`render`](Self::render) for those.  For color pages the result is a blurry but
-    /// instantly visible preview; call [`render_progressive`](Self::render_progressive) or [`render`](Self::render)
-    /// on a Web Worker to produce the final image.
-    ///
-    /// Throws on decode error.
-    pub fn render_coarse(
-        &self,
-        target_dpi: u32,
-    ) -> Result<Option<js_sys::Uint8ClampedArray>, JsError> {
-        let page = crate::foreign::page(&self.doc, self.index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-
-        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-        let pm = render_coarse(page, &opts).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(pm.map(|p| {
-            let arr = js_sys::Uint8ClampedArray::new_with_length(p.data.len() as u32);
-            arr.copy_from(&p.data);
-            arr
-        }))
-    }
-
-    /// Progressive render — decodes BG44 chunks 0..=`chunk_n` plus all
-    /// foreground layers (JB2 mask, text).
-    ///
-    /// @deprecated Use `render_request` with `set_step(chunk_n)`.
-    ///
-    /// `chunk_n = 0` is equivalent to [`render_coarse`](Self::render_coarse) but also composites
-    /// the mask. Each subsequent call with `chunk_n += 1` adds one more
-    /// wavelet refinement pass. After the last chunk the result is identical
-    /// to [`render`](Self::render).
-    ///
-    /// Use [`bg44_chunk_count`](Self::bg44_chunk_count) to find the maximum valid `chunk_n`
-    /// (`bg44_chunk_count() - 1`).
-    ///
-    /// Throws on decode error or if `chunk_n` is out of range.
-    pub fn render_progressive(
-        &self,
-        target_dpi: u32,
-        chunk_n: u32,
-    ) -> Result<js_sys::Uint8ClampedArray, JsError> {
-        let page = crate::foreign::page(&self.doc, self.index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-
-        let opts = crate::foreign::render_opts_for_dpi(page, target_dpi as f32);
-        let pm = render_progressive(page, &opts, chunk_n as usize)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        let arr = js_sys::Uint8ClampedArray::new_with_length(pm.data.len() as u32);
-        arr.copy_from(&pm.data);
-        Ok(arr)
     }
 
     /// Render the page at `target_dpi` and return raw RGBA pixels
@@ -567,29 +481,6 @@ impl WasmPage {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
         render_request_into(page, request, out).map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    /// Render into a caller-owned [`WasmPixmap`], reusing its Rust-side
-    /// allocation (#611).
-    ///
-    /// @deprecated Use `render_request(new WasmRenderRequest(target_dpi), out)`.
-    pub fn render_into_pixmap(&self, target_dpi: u32, out: &mut WasmPixmap) -> Result<(), JsError> {
-        self.render_request(&WasmRenderRequest::new(target_dpi), out)
-    }
-
-    /// Progressive render into a caller-owned [`WasmPixmap`] (#611): the same
-    /// refinement semantics as [`render_progressive`](Self::render_progressive).
-    ///
-    /// @deprecated Use `render_request` with `set_step(chunk_n)`.
-    pub fn render_progressive_into_pixmap(
-        &self,
-        target_dpi: u32,
-        chunk_n: u32,
-        out: &mut WasmPixmap,
-    ) -> Result<(), JsError> {
-        let mut request = WasmRenderRequest::new(target_dpi);
-        request.set_step(chunk_n);
-        self.render_request(&request, out)
     }
 
     // ── Tile-first rendering (#691, contract in docs/tile-rendering.md) ──────
@@ -638,9 +529,9 @@ impl WasmPage {
     }
 
     /// Render one tile at progressive quality step `chunk_n` (BG44 chunks
-    /// `0..=chunk_n` only), byte-identical to the tile's rectangle of
-    /// [`render_progressive`](Self::render_progressive) with the same
-    /// `chunk_n`. Partial-quality tiles are never cached.
+    /// `0..=chunk_n` only), byte-identical to the tile's rectangle of a
+    /// [`render_request`](Self::render_request) with `set_step(chunk_n)`.
+    /// Partial-quality tiles are never cached.
     ///
     /// On bilevel pages (no BG44 data) `chunk_n = 0` is the full render.
     /// Throws on decode error, a grid violation, or `chunk_n` out of range.
@@ -994,7 +885,10 @@ mod lazy {
         let pm = if chunk_n == u32::MAX {
             crate::djvu_render::render_pixmap(page, &opts)
         } else {
-            crate::wasm::render_progressive(page, &opts, chunk_n as usize)
+            crate::djvu_render::RenderRequest::new(opts.clone())
+                .quality(crate::djvu_render::Quality::Step(chunk_n as usize))
+                .operation("render_progressive")
+                .pixmap(page)
         }
         .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(WasmPixmap {
@@ -1163,6 +1057,33 @@ pub use lazy::{WasmLazyDocument, WasmLazyIndirectDocument};
 mod native_tests {
     use super::*;
     use crate::djvu_render::{RenderOptions, render_pixmap};
+    use crate::pixmap::Pixmap;
+
+    /// The coarse preview, or `None` when the page has no background.
+    fn render_coarse(
+        page: &crate::djvu_document::DjVuPage,
+        opts: &RenderOptions,
+    ) -> Result<Option<Pixmap>, RenderError> {
+        match RenderRequest::new(opts.clone())
+            .quality(Quality::Coarse)
+            .pixmap(page)
+        {
+            Err(RenderError::NoBackground) => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
+    /// Progressive frame `chunk_n`: background chunks `0..=chunk_n` and every
+    /// other layer.
+    fn render_progressive(
+        page: &crate::djvu_document::DjVuPage,
+        opts: &RenderOptions,
+        chunk_n: usize,
+    ) -> Result<Pixmap, RenderError> {
+        RenderRequest::new(opts.clone())
+            .quality(Quality::Step(chunk_n))
+            .pixmap(page)
+    }
 
     fn boy_bytes() -> Vec<u8> {
         // boy.djvu: 192×256 px, 300 dpi, color IW44.

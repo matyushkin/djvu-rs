@@ -209,7 +209,7 @@ Tests: `tile_async_matches_sync_tile`,
 starts at canvas pixel `(col·tile_size, row·tile_size)`),
 `render_tile` (full quality, composited-tile cache, returns a `WasmPixmap`
 carrying the clipped tile dimensions), `render_tile_progressive`
-(quality step `chunk_n`, matching `render_progressive`'s numbering, never
+(quality step `chunk_n`, numbered as in `WasmRenderRequest.set_step`, never
 cached), and `render_tile_into_pixmap` (buffer-reuse variant, #611
 pattern). Cancellation tokens are not exposed: wasm renders are
 synchronous calls that JS cannot interrupt mid-call. Parity is enforced by

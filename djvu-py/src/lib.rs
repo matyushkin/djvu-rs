@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyDeprecationWarning, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pythonize::{depythonize, pythonize};
@@ -591,20 +591,14 @@ fn parse_quality(quality: Option<&Bound<'_, PyAny>>) -> PyResult<Quality> {
     })
 }
 
-/// Emit a `DeprecationWarning` pointing at the caller's line.
-fn deprecated(py: Python<'_>, message: &std::ffi::CStr) -> PyResult<()> {
-    PyErr::warn(py, &py.get_type::<PyDeprecationWarning>(), message, 1)
-}
-
 impl Page {
-    /// The one render path behind ``render`` and its deprecated variants.
+    /// The render path behind ``render``.
     ///
     /// `size` sides left `None` default to the render size at `dpi` (native
     /// DPI when `None`).
     fn render_request(
         &self,
         py: Python<'_>,
-        operation: &str,
         size: Option<(Option<u32>, Option<u32>)>,
         dpi: Option<f32>,
         region: Option<(u32, u32, u32, u32)>,
@@ -632,7 +626,7 @@ impl Page {
                     .cached(true);
             }
             page.render_request(&request)
-                .map_err(|e| DecodeError::new_err(format!("{operation} failed: {e}")))
+                .map_err(|e| DecodeError::new_err(format!("render failed: {e}")))
         })?;
         Ok(Pixmap {
             width: pixmap.width,
@@ -702,83 +696,7 @@ impl Page {
         }
         let quality = parse_quality(quality)?;
         let size = size.map(|(w, h)| (Some(w), Some(h)));
-        self.render_request(py, "render", size, dpi, region, quality)
-    }
-
-    /// Deprecated: use ``render(size=(full_width, full_height), region=(x, y, w, h))``.
-    ///
-    /// Renders the rectangle ``(x, y, w, h)`` cut from a full render of
-    /// ``full_width x full_height`` (the page size by default).
-    #[pyo3(signature = (x, y, w, h, full_width=None, full_height=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn render_region(
-        &self,
-        py: Python<'_>,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        full_width: Option<u32>,
-        full_height: Option<u32>,
-    ) -> PyResult<Pixmap> {
-        deprecated(
-            py,
-            c"Page.render_region is deprecated; use Page.render(size=..., region=(x, y, w, h))",
-        )?;
-        let size = match (full_width, full_height) {
-            (None, None) => None,
-            (fw, fh) => Some((fw, fh)),
-        };
-        self.render_request(
-            py,
-            "render_region",
-            size,
-            None,
-            Some((x, y, w, h)),
-            Quality::Full,
-        )
-    }
-
-    /// Deprecated: use ``render(dpi, quality="coarse")``.
-    ///
-    /// A fast, blurry preview; None for bilevel-only pages.
-    #[pyo3(signature = (dpi=None))]
-    fn render_coarse(&self, py: Python<'_>, dpi: Option<f32>) -> PyResult<Option<Pixmap>> {
-        deprecated(
-            py,
-            c"Page.render_coarse is deprecated; use Page.render(dpi, quality=\"coarse\")",
-        )?;
-        let has_background = self.bg44_chunk_count()? > 0;
-        if !has_background {
-            return Ok(None);
-        }
-        self.render_request(py, "render_coarse", None, dpi, None, Quality::Coarse)
-            .map(Some)
-    }
-
-    /// Deprecated: use ``render(dpi, quality=chunk_n)``.
-    ///
-    /// Progressive render: BG44 chunks ``0..=chunk_n`` plus all foreground
-    /// layers.
-    #[pyo3(signature = (chunk_n, dpi=None))]
-    fn render_progressive(
-        &self,
-        py: Python<'_>,
-        chunk_n: usize,
-        dpi: Option<f32>,
-    ) -> PyResult<Pixmap> {
-        deprecated(
-            py,
-            c"Page.render_progressive is deprecated; use Page.render(dpi, quality=chunk_n)",
-        )?;
-        self.render_request(
-            py,
-            "render_progressive",
-            None,
-            dpi,
-            None,
-            Quality::Step(chunk_n),
-        )
+        self.render_request(py, size, dpi, region, quality)
     }
 
     /// Number of BG44 refinement chunks (0 for bilevel pages).
