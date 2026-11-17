@@ -75,8 +75,10 @@ the version bump when it prepares the release PR:
 | `feat:` | minor | `feat: async render API` |
 | `feat!:` or `BREAKING CHANGE:` in footer | major | `feat!: remove deprecated render_to_size` |
 
-**While version is `0.x`:** `feat!` bumps minor (not major) — configured via
-`bump-minor-pre-major: true` in `release-please-config.json`.
+A major release also needs the deprecation window of
+[`docs/api-compatibility.md`](docs/api-compatibility.md) §1 to have passed for
+every item it removes. Do not merge the release PR of a major release before
+that date.
 
 Full spec: [conventionalcommits.org](https://www.conventionalcommits.org/en/v1.0.0/)
 
@@ -90,13 +92,14 @@ Follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 | New public API, backward-compatible | MINOR (`feat`) |
 | Bug fix, performance, docs, internal | PATCH (`fix`, `perf`, `docs`, `refactor`) |
 
-While version is `0.x`, minor bumps may include breaking changes per SemVer §4.
+A new field or variant on a type marked `#[non_exhaustive]` and an MSRV raise
+are MINOR ([`docs/api-compatibility.md`](docs/api-compatibility.md) §2 and §3).
 
 ## Tokens
 
 | Secret | Used by | Notes |
 |--------|---------|-------|
-| `CARGO_REGISTRY_TOKEN` | `release-please.yml` and `publish.yml` (`cargo publish`) | **Required** — crates.io cannot publish without it. Issue it with **no expiry** at <https://crates.io/settings/tokens> so it never becomes a release blocker. |
+| `CARGO_REGISTRY_TOKEN` | `release-please.yml` and `publish.yml` (`cargo publish`) | **Required** — crates.io cannot publish without it. Both jobs run in the `crates-io` environment, so the value they read is the **environment** secret (Settings → Environments → `crates-io`); it overrides a repository secret of the same name. The token is made at <https://crates.io/settings/tokens> with the scopes `publish-new` and `publish-update` for the crates `djvu*`. When it expires or is revoked, `cargo publish` fails with `403 Forbidden: authentication failed`, as in the 0.46.0 release: replace the environment secret and re-run the failed job. |
 | `GITHUB_TOKEN` | `release-please.yml` | Built in, nothing to rotate. It opens the release PR, tags, releases, publishes to crates.io, and dispatches the other two workflows. A `RELEASE_PLEASE_TOKEN` PAT was used once, expired, and silently broke the 0.25.0 release with `Bad credentials`; it is no longer used. |
 
 ## Python wheels and npm packages

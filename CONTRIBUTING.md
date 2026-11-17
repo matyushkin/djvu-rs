@@ -98,7 +98,7 @@ Common types and their effect on versioning:
 | `docs` | — (no entry) | patch |
 | `refactor` | — (no entry) | patch |
 | `chore` | — (no entry) | none |
-| `feat!` or `BREAKING CHANGE:` footer | — | major (minor while `0.x`) |
+| `feat!` or `BREAKING CHANGE:` footer | — | major |
 
 A breaking change also needs a section in
 [`docs/migration.md`](docs/migration.md) in the same PR; see the last

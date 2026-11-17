@@ -4,9 +4,11 @@ This guide is for a crate that depends on djvu-rs 0.30 or later and moves to
 a newer release. It lists the breaking changes of each release, with the code
 before and after.
 
-djvu-rs is at `0.x`. Cargo treats each `0.x` minor as its own compatibility
-line: a requirement of `djvu-rs = "0.33"` never selects 0.34. Fixes, security
-fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
+Cargo treats each `0.x` minor as its own compatibility line: a requirement
+of `djvu-rs = "0.33"` never selects 0.34, and no `0.x` requirement selects
+1.0. Fixes, security fixes included, go into the latest `1.x` release only
+([`SECURITY.md`](../SECURITY.md)). From 1.0.0 only a major release breaks the
+API, so a requirement of `djvu-rs = "1"` selects every later `1.x` release.
 
 ## How to read it
 
@@ -854,7 +856,7 @@ images, hashes and expected texts after the upgrade.
 ## Keeping this guide current
 
 A change that breaks the API adds a section here in the same pull request,
-under the release it will ship in: the next minor while the crate is `0.x`.
+under the release it will ship in: the next major release.
 The test `tests/migration_sync.rs` fails when `CHANGELOG.md` lists breaking
 changes for a release that has no section here, so a release cannot ship
 without one. Every `rust` code block in this file is compiled as a doctest:

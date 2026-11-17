@@ -6,9 +6,9 @@
 //! and the release waits for the guide.
 //!
 //! To avoid that stop, add the section in the PR that makes the breaking
-//! change, under the version release-please will cut next (the next minor
-//! while the crate is `0.x`). A section for a version that is not released
-//! yet is allowed for this reason.
+//! change, under the version release-please will cut next (the next major
+//! release). A section for a version that is not released yet is allowed for
+//! this reason.
 //!
 //! Rationale: three crates on crates.io sat on 0.30, 0.33 and 0.41 while the
 //! current release was 0.45, and the only upgrade path was to read twelve
