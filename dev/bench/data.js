@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794951918445,
+  "lastUpdate": 1794958587916,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26668,6 +26668,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 40826000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "263189f2f3dea4e31ae0d3229195899cbdf4a9f0",
+          "message": "feat(render)!: remove the deprecated render functions, RenderOptions::scale, Pixmap::new and OcrExportError (#1002)\n\nPart of #993 (Release 1.0): the deprecated Rust surface.\n\nRemoved:\n\n- djvu_render: render_into, render_into_with_limits,\n  render_pixmap_with_report, render_pixmap_with_limits, render_streaming,\n  render_region, render_region_tiled, render_coarse, render_progressive and\n  render_progressive_step. RenderRequest (since 0.39.0) replaces all ten.\n- RenderOptions::scale. The renderer has ignored it since 0.20.1.\n- Pixmap::new in djvu-pixmap. Pixmap::try_new (since 0.34.0) replaces it.\n- text_serialize::OcrExportError, an alias of TextSerializeError since\n  0.21.0.\n\nNo #[deprecated] item and no #[allow(deprecated)] is left in the Rust code.\nThe Python and WebAssembly bindings keep their deprecated method names for\nnow; a separate change removes them.\n\nrender_pixmap, render_gray8, render_progressive_all, ProgressiveDecoder and\nthe method DjVuPage::render_into stay.\n\nThe in-crate render tests keep their bodies. They call shorthands in\nsrc/djvu_render/tests/mod.rs that build a RenderRequest, or reach the\ninternal region renderer where a test needs a rectangle before rotation.\nA new test checks the rectangle conversion table of docs/migration.md.\n\nBREAKING CHANGE: the ten deprecated render_* functions of djvu_render, RenderOptions::scale, Pixmap::new and text_serialize::OcrExportError are removed. Use RenderRequest, Pixmap::try_new and TextSerializeError. A RenderRequest region addresses the page after its rotation; a coarse render of a page without a background returns RenderError::NoBackground; Quality::Step accepts only step 0 on a page without background chunks. See the 1.0.0 section of docs/migration.md.",
+          "timestamp": "2026-11-18T01:14:04+02:00",
+          "tree_id": "9e1e67fcfdad1b352d72a6ba3c12a83cfcf87c80",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/263189f2f3dea4e31ae0d3229195899cbdf4a9f0"
+        },
+        "date": 1794958586131,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 110000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6133000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 40477000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 38957000,
             "range": "± 0",
             "unit": "ns/iter"
           }
