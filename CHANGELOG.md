@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.0](https://github.com/matyushkin/djvu-rs/compare/v0.45.0...v0.46.0) (2026-11-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ocr:** the features `ocr-neural` and `ocr-neural-candle`, the module `ocr_neural` with `CandleBackend`, and the CLI value `--backend candle` are removed. Use `ocr-tesseract`, or `ocr-onnx` for the experimental neural backend.
+
+### Features
+
+* **ocr:** remove the ocr-neural placeholder and its alias ([#999](https://github.com/matyushkin/djvu-rs/issues/999)) ([c1b47c1](https://github.com/matyushkin/djvu-rs/commit/c1b47c198422605fab13f1c8cb9162115abffb7f))
+
 ## [0.45.0](https://github.com/matyushkin/djvu-rs/compare/v0.44.1...v0.45.0) (2026-11-12)
 
 
