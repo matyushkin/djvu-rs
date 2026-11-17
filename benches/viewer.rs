@@ -30,8 +30,6 @@
 //! tile cache could capture, using the real compositor — not a per-pixel cost
 //! model.
 
-#![allow(deprecated)]
-
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,7 +63,6 @@ fn render_opts(width: u32, height: u32) -> RenderOptions {
     RenderOptions {
         width,
         height,
-        scale: 0.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

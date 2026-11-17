@@ -571,7 +571,7 @@ pub(super) fn decode_layers(
     // Restricted to full-background decodes (`bg_chunk_limit == usize::MAX`):
     // the progressive path composites with the mask returned *here* (it never
     // consults `sub4_mask`), so handing it a maskless layer set made
-    // `render_progressive` frames silently drop the text layer whenever this
+    // progressive frames silently drop the text layer whenever this
     // cache happened to be warm — output depended on cache warmth (#691
     // slice 3 regression test `render_progressive_ignores_mask_sub4_warmth`).
     #[cfg(feature = "std")]
@@ -675,7 +675,7 @@ pub(super) struct ForegroundLayers {
 }
 
 /// Strict-mode decode of a page's foreground layers, shared by the full
-/// [`decode_layers`] path and [`render_progressive`] (which decodes a partial
+/// [`decode_layers`] path and the progressive path (which decodes a partial
 /// background but the same foreground).
 ///
 /// Owns the "indexed mask when an FGbz palette is present, plain mask

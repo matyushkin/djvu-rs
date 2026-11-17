@@ -350,10 +350,54 @@ fn pixmap_into_matches_the_pixmap_and_reuses_the_buffer() {
     ));
 }
 
-/// A cancelled token stops every output with `Cancelled`; quality errors
-/// name the problem.
+/// `docs/migration.md` (1.0.0) gives a table that turns a rectangle of the
+/// removed `render_region` — on the page before its rotation — into the
+/// rectangle `RenderRequest::region` takes. The table gives the same pixels.
 #[test]
-fn deprecated_progressive_step_matches_render_request() {
+fn migration_guide_rectangle_table_matches_the_native_region() {
+    let doc = load_doc("chicken.djvu");
+    let page = doc.page(0).unwrap();
+    let (w, h) = (90u32, 120u32);
+    let (x, y, rw, rh) = (10u32, 25u32, 40u32, 30u32);
+    let native = RenderRect {
+        x,
+        y,
+        width: rw,
+        height: rh,
+    };
+    let table = [
+        (UserRotation::None, (x, y, rw, rh)),
+        (UserRotation::Cw90, (h - y - rh, x, rh, rw)),
+        (UserRotation::Rot180, (w - x - rw, h - y - rh, rw, rh)),
+        (UserRotation::Ccw90, (y, w - x - rw, rh, rw)),
+    ];
+    for (rotation, (dx, dy, dw, dh)) in table {
+        let opts = RenderOptions {
+            width: w,
+            height: h,
+            rotation,
+            ..Default::default()
+        };
+        let display = RenderRect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
+        };
+        let old = render_region(page, native, &opts).unwrap();
+        let new = RenderRequest::new(opts)
+            .region(display)
+            .pixmap(page)
+            .unwrap();
+        assert_eq!((new.width, new.height), (dw, dh), "{rotation:?}");
+        assert_eq!(old.data, new.data, "{rotation:?}");
+    }
+}
+
+/// The internal frame renderer that the tile, async and collector paths share
+/// returns the frames of a `Quality::Step` request.
+#[test]
+fn progressive_frame_matches_render_request() {
     let opts = RenderOptions {
         width: 60,
         height: 80,
@@ -364,18 +408,18 @@ fn deprecated_progressive_step_matches_render_request() {
     for step in 0..progressive_steps(page) {
         let request = RenderRequest::new(opts.clone()).quality(Quality::Step(step));
         assert_eq!(
-            render_progressive_step(page, &opts, step).unwrap().data,
+            progressive_frame(page, &opts, step).unwrap().data,
             request.pixmap(page).unwrap().data,
             "step {step}"
         );
     }
     // A page without background chunks has one full frame, whatever step
-    // the old entry point is asked for.
+    // the frame renderer is asked for.
     let doc = load_doc("boy_jb2.djvu");
     let bilevel = doc.page(0).unwrap();
     let full = render_pixmap(bilevel, &opts).unwrap();
     assert_eq!(
-        render_progressive_step(bilevel, &opts, 3).unwrap().data,
+        progressive_frame(bilevel, &opts, 3).unwrap().data,
         full.data
     );
     assert_eq!(
@@ -384,6 +428,8 @@ fn deprecated_progressive_step_matches_render_request() {
     );
 }
 
+/// A cancelled token stops every output with `Cancelled`; quality errors
+/// name the problem.
 #[test]
 fn render_request_cancel_and_quality_errors() {
     let doc = load_doc("chicken.djvu");

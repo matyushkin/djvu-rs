@@ -16,7 +16,7 @@ pub enum RenderError {
     #[error("JB2 decode error: {0}")]
     Jb2(#[from] crate::error::Jb2Error),
 
-    /// The output buffer provided to `render_into` is too small.
+    /// The output buffer provided to [`RenderRequest::write_rgba`] is too small.
     #[error("buffer too small: need {need} bytes, got {got}")]
     BufTooSmall { need: usize, got: usize },
 
@@ -47,7 +47,8 @@ pub enum RenderError {
 
     /// A render option is incompatible with the chosen entry point.
     ///
-    /// Returned by [`render_streaming`] when an option requires post-processing
+    /// Returned by [`RenderRequest::rows`] and [`RenderRequest::write_rgba`]
+    /// when an option requires post-processing
     /// of a fully-allocated pixmap (anti-aliasing, Lanczos resampling at a
     /// scaled output, or rotation).
     #[error("unsupported render option: {0}")]
@@ -134,7 +135,7 @@ pub enum Resampling {
     Lanczos3,
 }
 
-/// Rendering parameters passed to `render_into` and related functions.
+/// Rendering parameters passed to [`RenderRequest::new`] and [`render_pixmap`].
 ///
 /// # Example
 ///
@@ -159,22 +160,6 @@ pub struct RenderOptions {
     /// Compositor height in pixels, in the page's native orientation (see
     /// [`width`](Self::width)).
     pub height: u32,
-    /// Deprecated and **ignored by the render pipeline**.
-    ///
-    /// Rendering now derives its decode scale from `width` and the page's
-    /// native width (see the internal `decode_scale`), so this field no longer
-    /// controls anything. It is retained for backward compatibility — the
-    /// `fit_to_*` constructors still populate it — but setting it by hand has no
-    /// effect. Build options via
-    /// [`RenderOptions::fit_to_width`] / [`fit_to_box`](RenderOptions::fit_to_box)
-    /// instead of assembling the `(width, height, scale)` triple yourself.
-    #[deprecated(
-        since = "0.20.1",
-        note = "scale is derived from `width` by the render pipeline and is no longer read; \
-                build options via `RenderOptions::fit_to_width`/`fit_to_box`. \
-                This field is ignored and will be removed in a future release."
-    )]
-    pub scale: f32,
     /// Bold level: number of dilation passes on the JB2 mask (0 = no dilation).
     pub bold: u8,
     /// Whether to apply anti-aliasing downscale pass: the page is composited
@@ -219,12 +204,10 @@ pub struct RenderOptions {
 }
 
 impl Default for RenderOptions {
-    #[allow(deprecated)] // still sets the retained-for-compat `scale` field
     fn default() -> Self {
         RenderOptions {
             width: 0,
             height: 0,
-            scale: 1.0,
             bold: 0,
             aa: false,
             rotation: UserRotation::None,
@@ -299,7 +282,7 @@ pub struct RenderRecovery {
 
 /// Structured record of what a permissive render skipped or recovered (#696).
 ///
-/// Returned alongside the pixmap by [`render_pixmap_with_report`]. An empty
+/// Returned alongside the pixmap by [`RenderRequest::pixmap_with_report`]. An empty
 /// report (`is_clean`) means the page decoded fully with no fallbacks.
 #[derive(Debug, Clone, Default)]
 pub struct RenderReport {
@@ -316,7 +299,7 @@ impl RenderReport {
 
 #[cfg(feature = "std")]
 thread_local! {
-    /// Active recovery sink. `Some` only while [`render_pixmap_with_report`] is
+    /// Active recovery sink. `Some` only while [`RenderRequest::pixmap_with_report`] is
     /// on the stack; otherwise `record_recovery` is a no-op, so the ordinary
     /// [`render_pixmap`] hot path is untouched.
     pub(super) static RECOVERY_SINK: core::cell::RefCell<Option<Vec<RenderRecovery>>> =
@@ -364,30 +347,19 @@ pub(super) fn permissive_layer<T>(
     }
 }
 
-#[allow(deprecated)] // the `fit_to_*` constructors still populate `scale` for back-compat
 impl RenderOptions {
     /// Create render options that scale the page to fit the given width,
     /// preserving aspect ratio. Respects page rotation from the INFO chunk:
     /// `width` is the width of the rendered (rotated) pixmap.
     pub fn fit_to_width(page: &crate::djvu_document::DjVuPage, width: u32) -> Self {
-        let size = RenderSize::fit_width(page, width);
-        let scale = size.display.0 as f32 / display_dimensions(page).0.max(1) as f32;
-        RenderOptions {
-            scale,
-            ..size.options()
-        }
+        RenderSize::fit_width(page, width).options()
     }
 
     /// Create render options that scale the page to fit the given height,
     /// preserving aspect ratio. Respects page rotation from the INFO chunk:
     /// `height` is the height of the rendered (rotated) pixmap.
     pub fn fit_to_height(page: &crate::djvu_document::DjVuPage, height: u32) -> Self {
-        let size = RenderSize::fit_height(page, height);
-        let scale = size.display.1 as f32 / display_dimensions(page).1.max(1) as f32;
-        RenderOptions {
-            scale,
-            ..size.options()
-        }
+        RenderSize::fit_height(page, height).options()
     }
 
     /// Create render options that scale the page to fit within a bounding box,
@@ -398,20 +370,10 @@ impl RenderOptions {
         max_width: u32,
         max_height: u32,
     ) -> Self {
-        let size = RenderSize::fit_box(page, max_width, max_height);
-        let (dw, dh) = display_dimensions(page);
-        let scale = if dw == 0 || dh == 0 {
-            1.0
-        } else {
-            (max_width as f64 / dw as f64).min(max_height as f64 / dh as f64) as f32
-        };
-        RenderOptions {
-            scale,
-            ..size.options()
-        }
+        RenderSize::fit_box(page, max_width, max_height).options()
     }
 
-    /// Whether `page` can be rendered with [`render_streaming`] under these
+    /// Whether `page` can be rendered with [`RenderRequest::rows`] under these
     /// options, producing pixels identical to [`render_pixmap`].
     ///
     /// The streaming path emits the page row-by-row without buffering a full
@@ -425,7 +387,7 @@ impl RenderOptions {
     /// cancels the page's INFO rotation streams too.
     ///
     /// This is the single source of truth for streaming eligibility; export
-    /// paths call it instead of re-deriving the rule, and [`render_streaming`]
+    /// paths call it instead of re-deriving the rule, and [`RenderRequest::rows`]
     /// refuses exactly the options it rejects.
     pub fn can_stream(&self, page: &crate::djvu_document::DjVuPage) -> bool {
         self.whole_pixmap_reason(page).is_none()
@@ -436,7 +398,7 @@ impl RenderOptions {
     ///
     /// The three whole-image post-passes are the anti-aliasing halving,
     /// Lanczos-3 rescaling, and the combined rotation. The reason doubles as
-    /// the [`render_streaming`] error message.
+    /// the streaming error message.
     pub(crate) fn whole_pixmap_reason(
         &self,
         page: &crate::djvu_document::DjVuPage,
@@ -476,9 +438,8 @@ impl RenderOptions {
     /// This is the single home of the `scale ≈ width / page-width` invariant that
     /// every caller used to maintain by hand — and that the PDF exporter got
     /// wrong, leaving `scale = 1.0` and silently over-decoding at every DPI.
-    /// Rendering reads *this*, never the deprecated public [`scale`](Self::scale)
-    /// field, so a caller can no longer cause a silent over- or under-decode by
-    /// building the size triple inconsistently.
+    /// Rendering reads *this*. Until 1.0 the options also had a public `scale`
+    /// field that a caller could set inconsistently with the size.
     pub(crate) fn decode_scale(&self, page: &crate::djvu_document::DjVuPage) -> f32 {
         self.width as f32 / (page.width() as u32).max(1) as f32
     }

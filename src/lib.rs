@@ -272,12 +272,10 @@ pub mod semantic_diff;
 /// render: whole page or region, full / progressive / coarse quality,
 /// resource limits, cancellation (`djvu_render::CancelToken`), and the
 /// composited-tile cache, written to a pixmap, a buffer, or a row sink.
-/// The `render_*` functions below are shorthands for common requests.
 ///
 /// Also provides `djvu_render::RenderOptions`, `djvu_render::RenderRect`,
-/// `djvu_render::render_into`, `djvu_render::render_pixmap`,
-/// `djvu_render::render_region`, `djvu_render::render_coarse`, and
-/// `djvu_render::render_progressive`.
+/// and `djvu_render::render_pixmap`, the shorthand for a whole page at full
+/// quality.
 pub mod djvu_render;
 
 /// Page render size in native and display orientation — the one translation

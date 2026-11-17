@@ -26,10 +26,6 @@
 //!    differential fuzzing (Option C: pre-rendered reference corpus + libfuzzer
 //!    target) is a separate piece of work tracked on the issue.
 
-// Names the deprecated, now-ignored `RenderOptions::scale` field (#377); allowed
-// so this harness keeps building while the back-compat field exists.
-#![allow(deprecated)]
-
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -211,7 +207,6 @@ fn process_file(path: &Path, target_w: u32, tolerance: u8, max_pages: usize) -> 
         let opts = RenderOptions {
             width: render_w,
             height: render_h,
-            scale: render_w as f32 / pw as f32,
             ..Default::default()
         };
         let rs_pix = match render_pixmap(page, &opts) {

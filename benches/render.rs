@@ -3,12 +3,6 @@
 //! Uses real DjVu test files from the references/ and tests/corpus/ directories.
 //! Benchmarks are skipped gracefully if the test files are not found.
 
-// These harnesses build `RenderOptions` literals that still name the deprecated
-// `scale` field (now ignored — the pipeline derives the decode scale from
-// `width`; see #377). Allowed here so the perf harness keeps building while the
-// back-compat field exists.
-#![allow(deprecated)]
-
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -23,11 +17,10 @@ fn corpus_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
 }
 
-fn render_opts(width: u32, height: u32, scale: f32) -> djvu_rs::djvu_render::RenderOptions {
+fn render_opts(width: u32, height: u32) -> djvu_rs::djvu_render::RenderOptions {
     djvu_rs::djvu_render::RenderOptions {
         width,
         height,
-        scale,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -75,7 +68,6 @@ fn bench_render_at_dpi(c: &mut Criterion) {
         let opts = djvu_rs::djvu_render::RenderOptions {
             width: w,
             height: h,
-            scale,
             bold: 0,
             aa: false,
             rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -114,7 +106,6 @@ fn bench_render_coarse(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: page.width() as u32,
         height: page.height() as u32,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -161,7 +152,6 @@ fn bench_render_corpus_color(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: page.width() as u32,
         height: page.height() as u32,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -207,7 +197,6 @@ fn bench_render_corpus_bilevel(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: page.width() as u32,
         height: page.height() as u32,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -268,7 +257,6 @@ fn bench_render_native_stage_breakdown(c: &mut Criterion) {
         let opts = djvu_rs::djvu_render::RenderOptions {
             width: page.width() as u32,
             height: page.height() as u32,
-            scale: 1.0,
             bold: 0,
             aa: false,
             rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -410,7 +398,7 @@ fn bench_render_compositor_only(c: &mut Criterion) {
 
         let width = ((page.width() as f32 * scale).round() as u32).max(1);
         let height = ((page.height() as f32 * scale).round() as u32).max(1);
-        let opts = render_opts(width, height, scale);
+        let opts = render_opts(width, height);
         let mut buf = vec![0u8; width as usize * height as usize * 4];
 
         djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(&opts))
@@ -494,7 +482,7 @@ fn bench_render_row_scratch_ab(c: &mut Criterion) {
 
         let width = ((page.width() as f32 * scale).round() as u32).max(1);
         let height = ((page.height() as f32 * scale).round() as u32).max(1);
-        let opts = render_opts(width, height, scale);
+        let opts = render_opts(width, height);
         let mut direct_buf = vec![0u8; width as usize * height as usize * 4];
         let mut scratch_buf = vec![0u8; direct_buf.len()];
 
@@ -556,7 +544,6 @@ fn bench_render_scaled(c: &mut Criterion) {
     let opts_bilinear = djvu_rs::djvu_render::RenderOptions {
         width: half_w,
         height: half_h,
-        scale: 0.5,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -573,7 +560,6 @@ fn bench_render_scaled(c: &mut Criterion) {
     let opts_lanczos = djvu_rs::djvu_render::RenderOptions {
         width: half_w,
         height: half_h,
-        scale: 0.5,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -615,13 +601,13 @@ fn bench_render_scaled_large(c: &mut Criterion) {
     let (hw, hh) = ((nw / 2).max(1), (nh / 2).max(1));
 
     // Warm decode caches so we measure the resampling passes, not cold decode.
-    let _ = djvu_rs::djvu_render::render_pixmap(page, &render_opts(hw, hh, 0.5));
+    let _ = djvu_rs::djvu_render::render_pixmap(page, &render_opts(hw, hh));
 
     let mut group = c.benchmark_group("render_scaled_large_colorbook");
     group.sample_size(20);
-    let mut o_bilin = render_opts(hw, hh, 0.5);
+    let mut o_bilin = render_opts(hw, hh);
     o_bilin.resampling = djvu_rs::djvu_render::Resampling::Bilinear;
-    let mut o_lancz = render_opts(hw, hh, 0.5);
+    let mut o_lancz = render_opts(hw, hh);
     o_lancz.resampling = djvu_rs::djvu_render::Resampling::Lanczos3;
     group.bench_function("bilinear", |b| {
         b.iter(|| {
@@ -666,7 +652,6 @@ fn bench_render_colorbook(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: w,
         height: h,
-        scale,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -710,7 +695,6 @@ fn bench_render_colorbook_stages(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: w,
         height: h,
-        scale,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -785,7 +769,6 @@ fn bench_render_colorbook_cold(c: &mut Criterion) {
     let opts = djvu_rs::djvu_render::RenderOptions {
         width: w,
         height: h,
-        scale,
         bold: 0,
         aa: false,
         rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -887,7 +870,7 @@ fn bench_render_corpus_bilevel_dpi(c: &mut Criterion) {
         let scale = dpi as f32 / native_dpi;
         let w = ((native_w as f32 * scale).round() as u32).max(1);
         let h = ((native_h as f32 * scale).round() as u32).max(1);
-        let opts = render_opts(w, h, scale);
+        let opts = render_opts(w, h);
         group.bench_with_input(BenchmarkId::new("dpi", dpi), &opts, |b, opts| {
             b.iter(|| {
                 let _ = djvu_rs::djvu_render::render_pixmap(black_box(page), black_box(opts));
@@ -919,7 +902,7 @@ fn bench_render_region_bilevel(c: &mut Criterion) {
     };
     let full_w = page.width() as u32;
     let full_h = page.height() as u32;
-    let opts = render_opts(full_w, full_h, 1.0);
+    let opts = render_opts(full_w, full_h);
     // Warm decode caches.
     let _ = djvu_rs::djvu_render::render_pixmap(page, &opts);
     // A tall byte-aligned viewport down the middle of the page.

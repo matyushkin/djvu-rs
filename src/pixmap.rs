@@ -231,7 +231,7 @@ pub(crate) fn scale_lanczos3_window(
             mid_row[ob] = (acc[0] * col.norm).round().clamp(0.0, 255.0) as u8;
             mid_row[ob + 1] = (acc[1] * col.norm).round().clamp(0.0, 255.0) as u8;
             mid_row[ob + 2] = (acc[2] * col.norm).round().clamp(0.0, 255.0) as u8;
-            // mid_row[ob + 3] stays 255 (from Pixmap::new alpha init).
+            // mid_row[ob + 3] stays 255 (from the pixmap alpha init).
         }
     };
     #[cfg(feature = "parallel")]
@@ -292,7 +292,7 @@ pub(crate) fn scale_lanczos3_window(
             out_row[ob] = (acc[ob] * norm).round().clamp(0.0, 255.0) as u8;
             out_row[ob + 1] = (acc[ob + 1] * norm).round().clamp(0.0, 255.0) as u8;
             out_row[ob + 2] = (acc[ob + 2] * norm).round().clamp(0.0, 255.0) as u8;
-            // out_row[ob + 3] stays 255 (from Pixmap::new alpha init).
+            // out_row[ob + 3] stays 255 (from the pixmap alpha init).
         }
     };
 

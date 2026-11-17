@@ -50,6 +50,85 @@ pub(super) fn load_doc(filename: &str) -> DjVuDocument {
     DjVuDocument::parse(&data).unwrap_or_else(|e| panic!("parse failed: {e}"))
 }
 
+// ── Shorthands ───────────────────────────────────────────────────────────────
+//
+// The tests below predate `RenderRequest` and were written against free
+// functions that 1.0 removed. These shorthands keep them readable. The first
+// group is the public request API; the second reaches the internal region
+// renderers, which take a rectangle in native (pre-rotation) coordinates.
+
+pub(super) fn render_into(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    buf: &mut [u8],
+) -> Result<(), RenderError> {
+    RenderRequest::new(opts.clone()).write_rgba(page, buf)
+}
+
+pub(super) fn render_pixmap_with_limits(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    limits: Option<crate::resource_limits::ResourceLimits>,
+) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(opts.clone()).limits(limits).pixmap(page)
+}
+
+pub(super) fn render_streaming<F>(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    sink: F,
+) -> Result<(), RenderError>
+where
+    F: FnMut(usize, &[u8]),
+{
+    RenderRequest::new(opts.clone()).rows(page, sink)
+}
+
+/// A coarse render; `None` for a page without a background.
+pub(super) fn render_coarse(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+) -> Result<Option<Pixmap>, RenderError> {
+    match RenderRequest::new(opts.clone())
+        .quality(Quality::Coarse)
+        .pixmap(page)
+    {
+        Err(RenderError::NoBackground) => Ok(None),
+        result => result.map(Some),
+    }
+}
+
+pub(super) fn render_progressive(
+    page: &DjVuPage,
+    opts: &RenderOptions,
+    step: usize,
+) -> Result<Pixmap, RenderError> {
+    RenderRequest::new(opts.clone())
+        .quality(Quality::Step(step))
+        .pixmap(page)
+}
+
+/// The uncached region renderer on a native (pre-rotation) rectangle.
+pub(super) fn render_region(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    check_output_pixels("render_region", page, None, region.width, region.height)?;
+    let pm = Composite::decode(page, opts, Detail::Full)?.region(region)?;
+    Ok(rotate_pixmap(pm, opts.output_rotation(page)))
+}
+
+/// The tile-cached region renderer on a native (pre-rotation) rectangle.
+pub(super) fn render_region_tiled(
+    page: &DjVuPage,
+    region: RenderRect,
+    opts: &RenderOptions,
+) -> Result<Pixmap, RenderError> {
+    let pm = render_region_tiled_cancellable(page, region, opts, None)?;
+    Ok(pm.expect("uncancellable render completed"))
+}
+
 mod aa_zoom;
 mod banded;
 mod compositor;

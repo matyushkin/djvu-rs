@@ -10,7 +10,6 @@
 //! example pulls this file in via `#[path = "support/mod.rs"] mod support;`,
 //! so it is compiled once per binary and unused items would otherwise warn.
 #![allow(dead_code)]
-#![allow(deprecated)] // `RenderOptions::scale` — retained-for-compat, see the field's own doc comment
 
 use djvu_rs::djvu_render::{RenderOptions, Resampling, UserRotation};
 
@@ -21,7 +20,6 @@ pub fn native_opts(w: u32, h: u32) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

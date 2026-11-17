@@ -33,8 +33,7 @@
 //!
 //! - **Quality steps.** `quality_step = Some(k)` renders the tile from BG44
 //!   background chunks `0..=k` only — byte-identical to the matching crop of
-//!   [`render_progressive_step`](crate::djvu_render::render_progressive_step)
-//!   frame `k`. Each later step only *adds* wavelet refinement over the same
+//!   the [`Quality::Step`](crate::djvu_render::Quality::Step)`(k)` frame. Each later step only *adds* wavelet refinement over the same
 //!   base image, so walking steps `0..progressive_steps` never regresses
 //!   detail — the same monotonic ladder full-page progressive rendering
 //!   already rides.
@@ -302,9 +301,9 @@ pub struct TileRenderControls {
     /// [`progressive_steps`](crate::djvu_render::progressive_steps)).
     ///
     /// `Some(k)` composites the tile from BG44 background chunks `0..=k`
-    /// only — byte-identical to the matching crop of
-    /// [`render_progressive_step`](crate::djvu_render::render_progressive_step)
-    /// frame `k`. `None` (default) renders full quality, byte-identical to
+    /// only — byte-identical to the matching crop of the
+    /// [`Quality::Step`](crate::djvu_render::Quality::Step)`(k)` frame.
+    /// `None` (default) renders full quality, byte-identical to
     /// [`render_tile`]. Partial-quality pixels are decoded per call and are
     /// never stored in the composited-tile cache, so a later full-quality
     /// render can never be polluted by a lower step.
@@ -329,10 +328,10 @@ pub struct TileRenderControls {
 /// - default controls ⇒ identical to [`render_tile`];
 /// - `use_cache` ⇒ identical to [`render_tile_cached`] (which is itself
 ///   byte-identical to [`render_tile`]);
-/// - `quality_step: Some(k)` ⇒ identical to the tile's crop of
-///   [`render_progressive_step`](crate::djvu_render::render_progressive_step)
-///   frame `k`; on pages without BG44 background data the single step `0`
-///   is the full render (mirroring `render_progressive_step`'s fallback).
+/// - `quality_step: Some(k)` ⇒ identical to the tile's crop of the
+///   [`Quality::Step`](crate::djvu_render::Quality::Step)`(k)` frame; on
+///   pages without BG44 background data the single step `0` is the full
+///   render, as it is for a whole-page request.
 ///
 /// # Errors
 ///
@@ -378,7 +377,7 @@ pub fn render_tile_with(
 /// Snapshot of one page's composited-tile cache (#691 slice 2).
 ///
 /// The cache stores *internal* 256-pixel composited tiles (the granularity of
-/// [`render_region_tiled`](crate::djvu_render::render_region_tiled)), which
+/// [`RenderRequest::cached`](crate::djvu_render::RenderRequest::cached)), which
 /// back any caller-chosen [`render_tile_cached`] grid. `tiles` therefore
 /// counts internal tiles, not caller tiles.
 #[cfg(feature = "std")]
@@ -602,14 +601,11 @@ fn prefetch_tiles_inner(
 }
 
 #[cfg(all(test, feature = "std"))]
-// The deprecated entry points keep their tests until they are removed.
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::djvu_document::DjVuDocument;
     use crate::djvu_render::{
-        RenderRequest, Resampling, UserRotation, progressive_steps, render_pixmap,
-        render_progressive_step,
+        Quality, RenderRequest, Resampling, UserRotation, progressive_steps, render_pixmap,
     };
 
     fn assets_path() -> std::path::PathBuf {
@@ -1183,7 +1179,7 @@ mod tests {
     }
 
     /// At every progressive quality step, assembled tiles are byte-identical
-    /// to the full `render_progressive_step` frame; steps actually refine.
+    /// to the full `Quality::Step` frame; steps actually refine.
     #[test]
     fn progressive_tiles_match_progressive_frames() {
         let doc = load_doc("chicken.djvu");
@@ -1198,7 +1194,10 @@ mod tests {
         let layout = TileLayout::new(page, &opts, 32).unwrap();
         let mut frames = Vec::new();
         for step in 0..steps {
-            let full = render_progressive_step(page, &opts, step).unwrap();
+            let full = RenderRequest::new(opts.clone())
+                .quality(Quality::Step(step))
+                .pixmap(page)
+                .unwrap();
             let controls = TileRenderControls {
                 quality_step: Some(step),
                 ..Default::default()
@@ -1231,7 +1230,10 @@ mod tests {
             rotation: UserRotation::Cw90,
             ..Default::default()
         };
-        let full = render_progressive_step(page, &opts, 0).unwrap();
+        let full = RenderRequest::new(opts.clone())
+            .quality(Quality::Step(0))
+            .pixmap(page)
+            .unwrap();
         let layout = TileLayout::new(page, &opts, 32).unwrap();
         let controls = TileRenderControls {
             quality_step: Some(0),

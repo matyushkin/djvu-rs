@@ -30,7 +30,6 @@
 //!   cargo run --release --features cli --example interop_encode -- --corpus
 //!
 //! Requires `ddjvu` on PATH (DjVuLibre: `brew install djvulibre`).
-#![allow(deprecated)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};

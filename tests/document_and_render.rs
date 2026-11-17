@@ -2,14 +2,10 @@
 //!
 //! Uses both the low-level `DjVuDocument` and the high-level `Document` wrapper.
 
-// This file also tests the deprecated render entry points.
-#![allow(deprecated)]
-
 use djvu_rs::IffError;
 use djvu_rs::djvu_document::{DjVuDocument, DocError};
 use djvu_rs::djvu_render::{
-    RenderOptions, RenderRect, render_coarse, render_gray8, render_pixmap, render_progressive,
-    render_region, render_region_tiled,
+    Quality, RenderError, RenderOptions, RenderRect, RenderRequest, render_gray8, render_pixmap,
 };
 use djvu_rs::iff::parse_form;
 
@@ -154,11 +150,11 @@ fn render_pixmap_bilevel_page() {
     assert!(pixmap.width > 0 && pixmap.height > 0);
 }
 
-// ── djvu_render — render_coarse ───────────────────────────────────────────────
+// ── djvu_render — coarse quality ──────────────────────────────────────────────
 
-/// render_coarse must produce a pixmap for a color page (at least one BG44 chunk).
+/// A coarse render must produce a pixmap for a color page (at least one BG44 chunk).
 #[test]
-fn render_coarse_color_page() {
+fn coarse_render_color_page() {
     let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
@@ -168,15 +164,17 @@ fn render_coarse_color_page() {
         height: page.height() as u32,
         ..RenderOptions::default()
     };
-    let result = render_coarse(page, &opts).expect("render_coarse must not error");
-    assert!(result.is_some(), "color page must produce coarse pixmap");
-    let pix = result.unwrap();
+    let pix = RenderRequest::new(opts)
+        .quality(Quality::Coarse)
+        .pixmap(page)
+        .expect("color page must produce coarse pixmap");
     assert!(pix.width > 0 && pix.height > 0);
 }
 
-/// render_coarse on a bilevel-only page (no BG44) must not error.
+/// A coarse render of a bilevel-only page (no BG44) reports that the page has
+/// no background.
 #[test]
-fn render_coarse_bilevel_page_no_error() {
+fn coarse_render_bilevel_page_has_no_background() {
     let data = std::fs::read("tests/fixtures/boy_jb2.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
@@ -186,15 +184,20 @@ fn render_coarse_bilevel_page_no_error() {
         height: page.height() as u32,
         ..RenderOptions::default()
     };
-    // A JB2-only page has no BG44 — coarse render returns None, not an error
-    let _ = render_coarse(page, &opts).expect("render_coarse must not error on bilevel");
+    let result = RenderRequest::new(opts)
+        .quality(Quality::Coarse)
+        .pixmap(page);
+    assert!(
+        matches!(result, Err(RenderError::NoBackground)),
+        "a JB2-only page has no coarse render: {result:?}"
+    );
 }
 
-// ── djvu_render — render_progressive ─────────────────────────────────────────
+// ── djvu_render — progressive quality ────────────────────────────────────────
 
-/// render_progressive returns a valid pixmap for each BG44 chunk index.
+/// A progressive render returns a valid pixmap for each BG44 chunk index.
 #[test]
-fn render_progressive_each_chunk() {
+fn progressive_render_each_chunk() {
     let data = std::fs::read("tests/fixtures/boy.djvu").unwrap();
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
@@ -208,8 +211,10 @@ fn render_progressive_each_chunk() {
         ..RenderOptions::default()
     };
     for i in 0..n {
-        let pix = render_progressive(page, &opts, i)
-            .unwrap_or_else(|e| panic!("render_progressive chunk {i} failed: {e}"));
+        let pix = RenderRequest::new(opts.clone())
+            .quality(Quality::Step(i))
+            .pixmap(page)
+            .unwrap_or_else(|e| panic!("progressive step {i} failed: {e}"));
         assert!(pix.width > 0 && pix.height > 0);
         assert_eq!(pix.data.len(), (pix.width * pix.height * 4) as usize);
     }
@@ -524,18 +529,26 @@ fn strict_tiled_render_fails_after_permissive_one_on_truncated_bg44() {
         permissive: true,
         ..RenderOptions::default()
     };
-    let tiled = render_region_tiled(page, region, &permissive)
+    let tiled = RenderRequest::new(permissive.clone())
+        .region(region)
+        .cached(true)
+        .pixmap(page)
         .expect("permissive tiled render must recover");
-    assert_eq!(
-        tiled.data,
-        render_region(page, region, &permissive).unwrap().data
-    );
+    let uncached = RenderRequest::new(permissive.clone())
+        .region(region)
+        .pixmap(page)
+        .unwrap();
+    assert_eq!(tiled.data, uncached.data);
     let strict = RenderOptions {
         permissive: false,
         ..permissive
     };
     assert!(
-        render_region_tiled(page, region, &strict).is_err(),
+        RenderRequest::new(strict)
+            .region(region)
+            .cached(true)
+            .pixmap(page)
+            .is_err(),
         "a strict request must not read tiles a permissive one cached"
     );
 }
@@ -543,7 +556,7 @@ fn strict_tiled_render_fails_after_permissive_one_on_truncated_bg44() {
 /// #696: the permissive render report must name the recovered layer.
 #[test]
 fn permissive_report_records_truncated_bg44_recovery() {
-    use djvu_rs::djvu_render::{RecoveredLayer, render_pixmap_with_report};
+    use djvu_rs::djvu_render::RecoveredLayer;
 
     let corrupted = make_truncated_bg44_djvu();
     let doc = DjVuDocument::parse(&corrupted).unwrap();
@@ -554,8 +567,9 @@ fn permissive_report_records_truncated_bg44_recovery() {
         permissive: true,
         ..RenderOptions::default()
     };
-    let (pm, report) =
-        render_pixmap_with_report(page, &opts).expect("permissive render returns Ok");
+    let (pm, report) = RenderRequest::new(opts)
+        .pixmap_with_report(page)
+        .expect("permissive render returns Ok");
     assert!(!pm.data.is_empty());
     assert!(
         report
@@ -577,8 +591,6 @@ fn permissive_report_records_truncated_bg44_recovery() {
 /// A clean page reports no recoveries in either mode.
 #[test]
 fn permissive_report_is_clean_for_intact_page() {
-    use djvu_rs::djvu_render::render_pixmap_with_report;
-
     let data = std::fs::read("tests/fixtures/boy.djvu").expect("fixture");
     let doc = DjVuDocument::parse(&data).unwrap();
     let page = doc.page(0).unwrap();
@@ -589,7 +601,9 @@ fn permissive_report_is_clean_for_intact_page() {
             permissive,
             ..RenderOptions::default()
         };
-        let (_pm, report) = render_pixmap_with_report(page, &opts).expect("intact page renders");
+        let (_pm, report) = RenderRequest::new(opts)
+            .pixmap_with_report(page)
+            .expect("intact page renders");
         assert!(
             report.is_clean(),
             "intact page must need no recovery (permissive={permissive}): {:?}",
@@ -906,12 +920,16 @@ fn legacy_pm44_renders_and_progressive() {
     assert_eq!(full.width, 181);
     assert_eq!(full.height, 240);
 
-    let coarse = render_coarse(page, &opts)
-        .expect("PM44 coarse")
+    let coarse = RenderRequest::new(opts.clone())
+        .quality(Quality::Coarse)
+        .pixmap(page)
         .expect("PM44 has IW44 chunks");
     assert!(coarse.width > 0 && coarse.height > 0);
 
-    let progressive = render_progressive(page, &opts, 0).expect("PM44 progressive");
+    let progressive = RenderRequest::new(opts)
+        .quality(Quality::Step(0))
+        .pixmap(page)
+        .expect("PM44 progressive");
     assert_eq!(progressive.width, 181);
     assert_eq!(progressive.height, 240);
 }
@@ -1014,13 +1032,20 @@ fn native_reduced_bg_fg_matches_ddjvu_digest() {
             width,
             height,
         };
-        let pm = render_region(page, rect, &opts).unwrap();
+        let pm = RenderRequest::new(opts.clone())
+            .region(rect)
+            .pixmap(page)
+            .unwrap();
         assert_eq!(
             fnv1a_rgb(&pm),
             want,
             "region ({x},{y},{width}x{height}) differs from ddjvu"
         );
-        let tiled = render_region_tiled(page, rect, &opts).unwrap();
+        let tiled = RenderRequest::new(opts.clone())
+            .region(rect)
+            .cached(true)
+            .pixmap(page)
+            .unwrap();
         assert_eq!(
             fnv1a_rgb(&tiled),
             want,

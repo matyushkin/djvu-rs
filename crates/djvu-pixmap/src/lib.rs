@@ -128,20 +128,6 @@ impl Pixmap {
         })
     }
 
-    /// Create a new pixmap filled with the given RGBA color.
-    ///
-    /// Returns an empty 0×0 pixmap if `width * height` would exceed
-    /// [`Pixmap::MAX_PIXELS`] or overflow `usize`. That silent fallback is
-    /// why this constructor is deprecated: use [`Pixmap::try_new`] and
-    /// handle the [`PixmapError`] instead.
-    #[deprecated(
-        since = "0.34.0",
-        note = "use `Pixmap::try_new`, which reports an oversized request instead of returning an empty pixmap"
-    )]
-    pub fn new(width: u32, height: u32, r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self::try_new(width, height, r, g, b, a).unwrap_or_default()
-    }
-
     /// Create a white opaque pixmap.
     ///
     /// # Errors
@@ -469,11 +455,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn new_returns_empty_on_refusal() {
-        let pm = Pixmap::new(u32::MAX, u32::MAX, 0, 0, 0, 0);
+    fn white_returns_empty_on_refusal() {
+        let pm = Pixmap::white(u32::MAX, u32::MAX);
         assert_eq!((pm.width, pm.height, pm.data.len()), (0, 0, 0));
-        let pm = Pixmap::new(10000, 10000, 255, 0, 0, 255);
+        let pm = Pixmap::white(10000, 10000);
         assert_eq!((pm.width, pm.height, pm.data.len()), (0, 0, 0));
     }
 

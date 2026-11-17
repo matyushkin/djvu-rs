@@ -69,7 +69,7 @@ fn configurable_render_limit_overrides_inherited_ceiling() {
     };
     assert!(matches!(
         render_pixmap_with_limits(page, &opts, Some(limits)),
-        Err(RenderError::ResourceLimit(exceeded)) if exceeded.operation == "render_pixmap"
+        Err(RenderError::ResourceLimit(exceeded)) if exceeded.operation == "render"
             && exceeded.axis == crate::resource_limits::ResourceLimitAxis::RenderOutputPixels
     ));
 }

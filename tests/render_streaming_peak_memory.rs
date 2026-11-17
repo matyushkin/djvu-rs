@@ -1,7 +1,7 @@
 //! Guard: streaming one very large page at full resolution must not build the
 //! output pixmap or the whole background pixmap (#811).
 //!
-//! [`render_streaming`] hands the caller one row at a time, so the output
+//! [`RenderRequest::rows`] hands the caller one row at a time, so the output
 //! never needs to exist whole. Before #811 the background did: the renderer
 //! converted the whole IW44 image to one RGBA pixmap (248 MB for the
 //! 6780x9148 scan below) before it composited a single row. Now a page this
@@ -17,9 +17,6 @@
 //! The whole measurement is one `#[test]` on purpose: the allocator counters
 //! are process-global and a second test in this file would count the first
 //! one's allocations. Do not add one.
-
-// This file also tests the deprecated render entry points.
-#![allow(deprecated)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,7 +70,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOC: Counting = Counting;
 
 use djvu_rs::djvu_document::DjVuDocument;
-use djvu_rs::djvu_render::{RenderOptions, render_streaming};
+use djvu_rs::djvu_render::{RenderOptions, RenderRequest};
 
 /// One very large colour scan with a full-resolution BG44 background.
 const SUBJECT: &str = "tests/fixtures/big-scanned-page.djvu";
@@ -97,11 +94,12 @@ fn measure(data: &[u8]) -> (usize, usize, u64) {
     };
     let mut sum = 0u64;
     let mut rows = 0usize;
-    render_streaming(page, &opts, |_, row| {
-        sum += row.iter().map(|&b| b as u64).sum::<u64>();
-        rows += 1;
-    })
-    .expect("page must stream");
+    RenderRequest::new(opts)
+        .rows(page, |_, row| {
+            sum += row.iter().map(|&b| b as u64).sum::<u64>();
+            rows += 1;
+        })
+        .expect("page must stream");
     assert_eq!(
         rows,
         page.height() as usize,

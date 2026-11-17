@@ -236,12 +236,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `render_pixmap` stays as the shorthand for the plain whole-page render. The
-other `render_*` functions (`render_into`, `render_streaming`,
-`render_coarse`, `render_progressive`, `render_region`, …) are deprecated:
-each deprecation note names the `RenderRequest` call that replaces it. They
-still work and will be removed only in a future breaking release. Note that a
-`RenderRequest` region is in display (rotated) coordinates, while the old
-`render_region` took the rectangle before rotation.
+other `render_*` functions of earlier releases (`render_into`,
+`render_streaming`, `render_coarse`, `render_progressive`, `render_region`,
+…) were removed in 1.0.0. The
+[migration guide](https://github.com/matyushkin/djvu-rs/blob/main/docs/migration.md#100)
+names the `RenderRequest` call that replaces each of them. Note that a
+`RenderRequest` region is in display (rotated) coordinates.
 
 The bindings follow the same shape. In Python, `Page.render(dpi, size=...,
 region=(x, y, w, h), quality="coarse" | n)` replaces `render_region`,

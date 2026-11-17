@@ -28,7 +28,6 @@
 //! Usage:
 //!   cargo run --release --features cli --example iw44_chunking_lever -- \
 //!       tests/fixtures/colorbook.djvu tests/corpus/watchmaker.djvu
-#![allow(deprecated)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

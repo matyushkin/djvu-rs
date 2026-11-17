@@ -16,8 +16,6 @@
 //! With `--crop`, also writes before/after PNG crops of the highest-chroma
 //! region (the "coloured text") to `_pr_assets/`.
 
-#![allow(deprecated)]
-
 use djvu_rs::Pixmap;
 use djvu_rs::djvu_document::DjVuDocument;
 use djvu_rs::djvu_encode::{EncodeQuality, FgbzPaletteOptions, PageEncoder};
@@ -213,7 +211,6 @@ fn main() {
             &djvu_rs::djvu_render::RenderOptions {
                 width: page.width() as u32,
                 height: page.height() as u32,
-                scale: 1.0,
                 bold: 0,
                 aa: false,
                 rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -254,7 +251,6 @@ fn main() {
             &djvu_rs::djvu_render::RenderOptions {
                 width: source_pm.width,
                 height: source_pm.height,
-                scale: 1.0,
                 bold: 0,
                 aa: false,
                 rotation: djvu_rs::djvu_render::UserRotation::None,

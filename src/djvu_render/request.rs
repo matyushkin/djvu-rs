@@ -54,13 +54,12 @@ pub enum Quality {
     #[default]
     Full,
     /// Progressive frame `k`, `0..`[`progressive_steps`]`(page)`: the
-    /// background from BG44 chunks `0..=k` and every foreground layer, as
-    /// [`render_progressive`] renders it. On a page without BG44 chunks the
-    /// single frame `0` is the full render.
+    /// background from BG44 chunks `0..=k` and every foreground layer. On a
+    /// page without BG44 chunks the single frame `0` is the full render.
     Step(usize),
     /// The background from its first BG44 chunk only, with no foreground: a
-    /// fast blurry preview, as [`render_coarse`] renders it. A page without
-    /// a background has no coarse render: [`RenderError::NoBackground`].
+    /// fast blurry preview. A page without a background has no coarse
+    /// render: [`RenderError::NoBackground`].
     Coarse,
 }
 
@@ -161,8 +160,8 @@ impl RenderRequest {
     }
 
     /// Let a full-quality region render assemble its pixels from the page's
-    /// composited-tile cache, and add the tiles it composites to it (see
-    /// [`render_region_tiled`]). Repeated and overlapping regions — a
+    /// composited-tile cache, and add the tiles it composites to it.
+    /// Repeated and overlapping regions — a
     /// viewer's pans — then cost only their new tiles. The bytes are the
     /// same either way. Ignored without a region, and for progressive or
     /// coarse quality, whose pixels are never cached. Needs the `std`
@@ -431,7 +430,7 @@ impl RenderRequest {
 /// returns it turned by the output rotation, or `None` when cancelled.
 ///
 /// Only the part of `region` inside the display page reaches `render_native`;
-/// the rest is white, as in [`render_region`].
+/// the rest is white.
 pub(super) fn display_region(
     page: &DjVuPage,
     opts: &RenderOptions,
@@ -463,49 +462,6 @@ pub(super) fn display_region(
         return Ok(Some(pm));
     }
     Ok(Some(white_crop(&pm, (region.x, region.y), region)))
-}
-
-/// Render a `DjVuPage` into a pre-allocated RGBA buffer.
-///
-/// This is the zero-allocation render path when `buf` is reused across calls
-/// with the same dimensions. The buffer must be at least `width * height * 4`
-/// bytes.
-///
-/// The buffer holds the composited page as it leaves the compositor, so the
-/// whole-pixmap steps of [`render_pixmap`] — anti-aliasing, Lanczos-3 at a
-/// scaled size, and rotation — are refused rather than skipped, exactly as in
-/// [`render_streaming`]. [`RenderOptions::can_stream`] answers the question
-/// without rendering.
-///
-/// # Errors
-///
-/// - [`RenderError::BufTooSmall`] if `buf.len() < width * height * 4`
-/// - [`RenderError::InvalidDimensions`] if `width == 0 || height == 0`
-/// - [`RenderError::UnsupportedOption`] if a whole-pixmap option is set
-/// - Propagates IW44 / JB2 decode errors.
-#[deprecated(note = "use `RenderRequest::new(opts).write_rgba(page, buf)`")]
-pub fn render_into(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    buf: &mut [u8],
-) -> Result<(), RenderError> {
-    RenderRequest::new(opts.clone())
-        .operation("render_into")
-        .write_rgba(page, buf)
-}
-
-/// Like [`render_into`], with an optional caller-supplied resource limit override.
-#[deprecated(note = "use `RenderRequest::new(opts).limits(limits).write_rgba(page, buf)`")]
-pub fn render_into_with_limits(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    limits: Option<crate::resource_limits::ResourceLimits>,
-    buf: &mut [u8],
-) -> Result<(), RenderError> {
-    RenderRequest::new(opts.clone())
-        .limits(limits)
-        .operation("render_into")
-        .write_rgba(page, buf)
 }
 
 /// Output rows `oy0..oy0 + rows` of an RGBA buffer `w` pixels wide.
@@ -578,24 +534,6 @@ pub(crate) fn unrotated_size(page: &DjVuPage, opts: &RenderOptions) -> (u32, u32
     }
 }
 
-/// Render a page and return the pixmap together with a [`RenderReport`] of any
-/// layers a permissive render skipped or recovered (#696).
-///
-/// The pixmap is byte-identical to [`render_pixmap`]. In strict mode the report
-/// is always clean (decode errors propagate instead of being recovered); in
-/// permissive mode it lists each background truncation, dropped mask, or
-/// skipped foreground/palette in the order the renderer took them.
-#[cfg(feature = "std")]
-#[deprecated(note = "use `RenderRequest::new(opts).pixmap_with_report(page)`")]
-pub fn render_pixmap_with_report(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-) -> Result<(Pixmap, RenderReport), RenderError> {
-    RenderRequest::new(opts.clone())
-        .operation("render_pixmap")
-        .pixmap_with_report(page)
-}
-
 /// Render a `DjVuPage` to a new [`Pixmap`] using the given options: the
 /// whole page at full quality, the same as
 /// [`RenderRequest::new`]`(opts).`[`pixmap`](RenderRequest::pixmap)`(page)`.
@@ -612,126 +550,6 @@ pub fn render_pixmap(page: &DjVuPage, opts: &RenderOptions) -> Result<Pixmap, Re
         .pixmap(page)
 }
 
-/// Render a page to an owned RGBA pixmap with an optional resource limit override.
-///
-/// When `limits` is `None`, limits inherited from the parent document at parse
-/// time apply (see [`ParseOptions::limits`](crate::resource_limits::ParseOptions::limits)).
-/// Per-render overrides use [`render_pixmap_with_limits`] /
-/// [`render_into_with_limits`].
-#[deprecated(note = "use `RenderRequest::new(opts).limits(limits).pixmap(page)`")]
-pub fn render_pixmap_with_limits(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    limits: Option<crate::resource_limits::ResourceLimits>,
-) -> Result<Pixmap, RenderError> {
-    RenderRequest::new(opts.clone())
-        .limits(limits)
-        .operation("render_pixmap")
-        .pixmap(page)
-}
-
-/// Render a `DjVuPage` row by row, calling `sink(row_index, &rgba_row)` for
-/// each output row in top-to-bottom order. Each `rgba_row` slice has length
-/// `opts.width * 4` bytes (RGBA, alpha = 255).
-///
-/// This is the constant-memory render path for low-memory targets (mobile,
-/// WASM, embedded) and for streaming consumers (TIFF/PDF row-encoders, the
-/// browser `OffscreenCanvas` row blit). Internally it allocates a single
-/// `opts.width * 4` byte scratch row and reuses it across all rows; peak heap
-/// usage during compositing is bounded by that scratch plus the decoded
-/// background (BG44) and mask (JB2) buffers. For a page whose full-resolution
-/// background would not fit the `djvu-iw44` band budget (128 MiB) the
-/// background is never built whole: the rows are composited from bands of the
-/// wavelet image, one band in memory at a time (#811), so the peak stays near
-/// one band regardless of the page size.
-///
-/// Output is byte-identical to [`render_pixmap`] when both produce a result.
-///
-/// # Constraints
-///
-/// [`render_pixmap`] applies anti-aliasing, Lanczos-3 resampling, and rotation
-/// as **post-processing on the full pixmap**. The streaming path cannot
-/// support those modes without buffering the entire output, defeating its
-/// purpose. The following must hold or [`RenderError::UnsupportedOption`] is
-/// returned:
-///
-/// - `opts.aa == false`
-/// - `opts.resampling == Resampling::Bilinear`, *or* the output dimensions
-///   match the page's native dimensions (in which case Lanczos becomes a
-///   no-op and `Bilinear` produces the same bytes anyway)
-/// - the page's INFO rotation combined with `opts.rotation` is the identity
-///   (an upright page with no user rotation, or a user rotation that cancels
-///   the INFO rotation)
-///
-/// [`RenderOptions::can_stream`] answers the same question without rendering.
-/// For any of those modes, use [`render_pixmap`] instead.
-///
-/// # Errors
-///
-/// - [`RenderError::InvalidDimensions`] if `opts.width == 0 || opts.height == 0`
-/// - [`RenderError::UnsupportedOption`] if a post-processing option is set
-/// - Propagates IW44 / JB2 decode errors.
-///
-/// # Example
-///
-/// ```no_run
-/// use djvu_rs::djvu_render::{render_streaming, RenderOptions};
-/// # let doc = djvu_rs::djvu_document::DjVuDocument::parse(&[]).unwrap();
-/// # let page = doc.page(0).unwrap();
-/// let opts = RenderOptions::fit_to_width(page, 1024);
-/// render_streaming(page, &opts, |y, rgba_row| {
-///     // hand the row off to an encoder, GPU upload, network write, etc
-///     # let _ = (y, rgba_row);
-/// }).unwrap();
-/// ```
-#[deprecated(note = "use `RenderRequest::new(opts).rows(page, sink)`")]
-pub fn render_streaming<F>(
-    page: &DjVuPage,
-    opts: &RenderOptions,
-    sink: F,
-) -> Result<(), RenderError>
-where
-    F: FnMut(usize, &[u8]),
-{
-    RenderRequest::new(opts.clone())
-        .operation("render_streaming")
-        .rows(page, sink)
-}
-
-/// Render a sub-rectangle of a page into a new [`Pixmap`].
-///
-/// Unlike [`render_pixmap`], which always allocates `opts.width × opts.height`
-/// pixels, `render_region` only allocates `region.width × region.height` pixels.
-/// This makes it efficient for thumbnails, viewport clips, and tile rendering.
-///
-/// `opts.width` and `opts.height` still define the **full-page** render dimensions
-/// used for scale calculation. `region` selects which sub-rectangle of that
-/// full render to output. The returned `Pixmap` has dimensions
-/// `region.width × region.height`.
-///
-/// The region is the exact crop of [`render_pixmap`] before its rotation,
-/// then turned by the same rotation; pixels outside the page are white.
-/// Every option applies: with `opts.aa` the region addresses the halved page
-/// (`opts.width / 2 × opts.height / 2`), and Lanczos-3 at a scaled size
-/// crops the rescaled page.
-///
-/// # Errors
-///
-/// - [`RenderError::InvalidDimensions`] if `region.width == 0 || region.height == 0`
-/// - Propagates IW44 / JB2 decode errors.
-#[deprecated(
-    note = "use `RenderRequest::new(opts).region(r).pixmap(page)`; its region is in display (rotated) coordinates"
-)]
-pub fn render_region(
-    page: &DjVuPage,
-    region: RenderRect,
-    opts: &RenderOptions,
-) -> Result<Pixmap, RenderError> {
-    check_output_pixels("render_region", page, None, region.width, region.height)?;
-    let pm = Composite::decode(page, opts, Detail::Full)?.region(region)?;
-    Ok(rotate_pixmap(pm, opts.output_rotation(page)))
-}
-
 /// `true` when a cooperative cancel flag is present and set.
 ///
 /// `Relaxed` is enough: the flag carries no data, it only asks in-flight work
@@ -740,76 +558,6 @@ pub fn render_region(
 #[inline]
 pub(crate) fn is_cancelled(cancel: Option<&core::sync::atomic::AtomicBool>) -> bool {
     cancel.is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Relaxed))
-}
-
-/// Render a sub-rectangle of a page, assembling the output from a per-page
-/// cache of composited `TILE_SIZE`×`TILE_SIZE` output tiles.
-///
-/// # Why this exists (C4_TILE_CACHE)
-///
-/// [`render_region`] recomposites its entire requested rectangle from scratch
-/// on every call — the per-pixel work in `composite_into` is not memoized
-/// anywhere. VIEWER_BENCH (`benches/viewer.rs`) scripted an interactive
-/// pan/zoom session (open → full render → zoom → 12-step overlapping pan →
-/// zoom → pan) and measured that a `full_recomposite` pan step costs
-/// proportionally to its *entire* viewport every time, while an
-/// `incremental_strip` step (composite only the newly-exposed edge) costs
-/// proportionally to just that edge — see `PERF_EXPERIMENTS.md` round 36 for
-/// the numbers. A tile cache captures that gap for real: it composites each
-/// `TILE_SIZE`-aligned tile once and reuses it for every subsequent request
-/// that touches it, regardless of how the requested rectangle is framed.
-///
-/// # Correctness
-///
-/// **Byte-identical** to [`render_region`] for every input — this is a cache
-/// in front of the same compositor, not a different one. `composite_into`
-/// computes each output pixel from its *absolute* position
-/// (`offset_x + ox`, `offset_y + oy`); tile boundaries are aligned to that
-/// same absolute grid, so assembling a request from whole or partial tiles
-/// reproduces exactly the bytes a direct `render_region` call would have
-/// produced (see `render_region_tiled_matches_render_region` and
-/// `render_region_tiled_overlapping_regions_share_cache` in the test module).
-///
-/// # Eligibility
-///
-/// Every request uses the cache. Tiles hold the unrotated output page, the
-/// one [`render_region`] crops, so the options that derive it from a canvas
-/// of another size are cached too:
-///
-/// - Anti-aliasing: a missing tile is averaged from the doubled window of
-///   the canvas, exactly as [`render_region`] does.
-/// - Lanczos-3 at a scaled size: the first miss rescales the whole page and,
-///   when the page fits the tile-cache budget, caches all of its tiles, so
-///   the rest of a grid hits instead of rescaling the page again.
-///
-/// - Rotation: tiles are cached in native orientation and the assembled
-///   region is rotated once, exactly as [`render_region`] does.
-/// - `opts.permissive`: strict and permissive requests share tiles. Layers
-///   decode before any tile lookup, so a strict request on a damaged page
-///   still fails there. On an intact page both modes decode identical
-///   layers (the same background chunks too, see `full_detail_chunks`),
-///   hence identical tiles, whichever mode fills the cache first.
-///
-/// This is an **opt-in** entry point: call it where you want tile caching
-/// (e.g. a pan/zoom viewer). [`render_region`] itself is untouched and pays no
-/// overhead for callers (thumbnails, export, one-shot renders) that don't
-/// want a per-page tile cache.
-///
-/// # Errors
-///
-/// Same as [`render_region`].
-#[cfg(feature = "std")]
-#[deprecated(
-    note = "use `RenderRequest::new(opts).region(r).cached(true).pixmap(page)`; its region is in display (rotated) coordinates"
-)]
-pub fn render_region_tiled(
-    page: &DjVuPage,
-    region: RenderRect,
-    opts: &RenderOptions,
-) -> Result<Pixmap, RenderError> {
-    let pm = render_region_tiled_cancellable(page, region, opts, None)?;
-    // Without a cancel flag the render can never be abandoned.
-    Ok(pm.expect("uncancellable render completed"))
 }
 
 /// Map a display-space rectangle back to the native rectangle whose rotated
@@ -856,7 +604,57 @@ pub(crate) fn native_rect(
     }
 }
 
-/// [`render_region_tiled`] with a cooperative cancel flag (#691 slice 3).
+/// Render the native (pre-rotation) rectangle `region` of the unrotated
+/// output page, turned by the output rotation, assembling it from a per-page
+/// cache of composited `TILE_SIZE`×`TILE_SIZE` tiles. This is the renderer
+/// behind [`RenderRequest::cached`].
+///
+/// # Why this exists (C4_TILE_CACHE)
+///
+/// An uncached region render ([`Composite::region`]) recomposites its entire
+/// rectangle from scratch on every call — the per-pixel work in
+/// `composite_into` is not memoized anywhere. VIEWER_BENCH
+/// (`benches/viewer.rs`) scripted an interactive pan/zoom session (open →
+/// full render → zoom → 12-step overlapping pan → zoom → pan) and measured
+/// that a `full_recomposite` pan step costs proportionally to its *entire*
+/// viewport every time, while an `incremental_strip` step (composite only
+/// the newly-exposed edge) costs proportionally to just that edge — see
+/// `PERF_EXPERIMENTS.md` round 36 for the numbers. A tile cache captures
+/// that gap for real: it composites each `TILE_SIZE`-aligned tile once and
+/// reuses it for every subsequent request that touches it, regardless of how
+/// the requested rectangle is framed.
+///
+/// # Correctness
+///
+/// **Byte-identical** to the uncached region render for every input — this
+/// is a cache in front of the same compositor, not a different one.
+/// `composite_into` computes each output pixel from its *absolute* position
+/// (`offset_x + ox`, `offset_y + oy`); tile boundaries are aligned to that
+/// same absolute grid, so assembling a request from whole or partial tiles
+/// reproduces exactly the bytes of the uncached render (see
+/// `render_region_tiled_matches_render_region` and
+/// `render_region_tiled_overlapping_regions_share_cache` in the test module).
+///
+/// # Eligibility
+///
+/// Every request uses the cache. Tiles hold the unrotated output page, the
+/// one the uncached render crops, so the options that derive it from a
+/// canvas of another size are cached too:
+///
+/// - Anti-aliasing: a missing tile is averaged from the doubled window of
+///   the canvas, exactly as the uncached render does.
+/// - Lanczos-3 at a scaled size: the first miss rescales the whole page and,
+///   when the page fits the tile-cache budget, caches all of its tiles, so
+///   the rest of a grid hits instead of rescaling the page again.
+/// - Rotation: tiles are cached in native orientation and the assembled
+///   region is rotated once, exactly as the uncached render does.
+/// - `opts.permissive`: strict and permissive requests share tiles. Layers
+///   decode before any tile lookup, so a strict request on a damaged page
+///   still fails there. On an intact page both modes decode identical
+///   layers (the same background chunks too, see `full_detail_chunks`),
+///   hence identical tiles, whichever mode fills the cache first.
+///
+/// # Cancellation (#691 slice 3)
 ///
 /// The flag is checked on entry and again before each internal
 /// [`TILE_SIZE`]-tile is fetched or composited; `Ok(None)` means the render
@@ -878,7 +676,7 @@ pub(crate) fn render_region_tiled_cancellable(
         region.height,
     )?;
 
-    // Tiles cover the unrotated output page, the one `render_region` crops.
+    // Tiles cover the unrotated output page, the one `Composite::region` crops.
     let canvas = (opts.width.max(1), opts.height.max(1));
     let (full_w, full_h) = unrotated_size(page, opts);
     let aa = aa_halves(page, opts);
@@ -888,7 +686,7 @@ pub(crate) fn render_region_tiled_cancellable(
         return Ok(None);
     }
     // Tiles are cached in native orientation; the assembled region turns
-    // once at the end, as in `render_region`.
+    // once at the end, as in an uncached region render.
     let rotation = opts.output_rotation(page);
 
     let composite = Composite::decode(page, opts, Detail::Full)?;
@@ -913,7 +711,7 @@ pub(crate) fn render_region_tiled_cancellable(
     let region_y1 = region.y.saturating_add(region.height).min(full_h);
     if region_x1 <= region.x || region_y1 <= region.y {
         // Region lies entirely outside the full render — nothing to copy;
-        // return the white-filled pixmap (matches render_region's behaviour,
+        // return the white-filled pixmap (matches `Composite::region`,
         // whose compositor loop would likewise touch no valid pixels).
         return Ok(Some(rotate_pixmap(pm, rotation)));
     }

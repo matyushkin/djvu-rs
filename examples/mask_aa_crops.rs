@@ -10,7 +10,6 @@
 //!
 //! Usage:
 //!   cargo run --release --example mask_aa_crops -- <file.djvu> [page] [out_dir]
-#![allow(deprecated)]
 
 use djvu_rs::djvu_document::DjVuDocument;
 use djvu_rs::djvu_render::{RenderOptions, RenderRect, RenderRequest, Resampling, UserRotation};
@@ -20,7 +19,6 @@ fn opts(w: u32, h: u32, mask_aa: bool) -> RenderOptions {
     RenderOptions {
         width: w,
         height: h,
-        scale: 1.0,
         bold: 0,
         aa: false,
         rotation: UserRotation::None,

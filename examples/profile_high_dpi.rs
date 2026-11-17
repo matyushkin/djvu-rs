@@ -2,7 +2,6 @@
 //! with samply. Not part of any CI gate.
 //!
 //! Usage: `profile_high_dpi <boy600|color|bilevel> [iterations]`
-#![allow(deprecated)]
 
 use std::path::PathBuf;
 
@@ -38,7 +37,6 @@ fn main() {
             let opts = djvu_rs::djvu_render::RenderOptions {
                 width: w,
                 height: h,
-                scale,
                 bold: 0,
                 aa: false,
                 rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -59,7 +57,6 @@ fn main() {
             let opts = djvu_rs::djvu_render::RenderOptions {
                 width: page.width() as u32,
                 height: page.height() as u32,
-                scale: 1.0,
                 bold: 0,
                 aa: false,
                 rotation: djvu_rs::djvu_render::UserRotation::None,
@@ -84,7 +81,6 @@ fn main() {
             let opts = djvu_rs::djvu_render::RenderOptions {
                 width: page.width() as u32,
                 height: page.height() as u32,
-                scale: 1.0,
                 bold: 0,
                 aa: false,
                 rotation: djvu_rs::djvu_render::UserRotation::None,

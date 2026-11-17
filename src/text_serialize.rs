@@ -48,11 +48,6 @@ pub enum TextSerializeError {
     Fmt(#[from] std::fmt::Error),
 }
 
-/// Deprecated alias for [`TextSerializeError`], kept so code written against the
-/// former `ocr_export` module name still compiles.
-#[deprecated(since = "0.21.0", note = "renamed to `TextSerializeError`")]
-pub type OcrExportError = TextSerializeError;
-
 // ---- Options ----------------------------------------------------------------
 
 /// Options for hOCR output.
