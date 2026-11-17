@@ -27,7 +27,7 @@ fixes included, go into the latest minor only ([`SECURITY.md`](../SECURITY.md)).
 | [0.38.0](#0380) | renders pages that carry a rotation, uses `render_into` or `render_region`, writes metadata, exports PDF, or matches on `DjvmError` |
 | [0.45.0](#0450) | builds with Rust older than 1.89 |
 | [0.46.0](#0460) | enables the feature `ocr-neural` or `ocr-neural-candle`, or runs `djvu ocr --backend candle` |
-| [1.0.0](#100) | calls an item with a deprecation note: a `render_*` function other than `render_pixmap`, `RenderOptions::scale`, `Pixmap::new` or `OcrExportError` |
+| [1.0.0](#100) | calls an item with a deprecation note: a `render_*` function other than `render_pixmap`, `RenderOptions::scale`, `Pixmap::new` or `OcrExportError`; in the Python and npm packages, a render method other than `render` and `render_request` |
 
 The calls below did not change between 0.30 and 0.45. Code that uses nothing
 else compiles after the version bump alone:
@@ -453,8 +453,9 @@ only printed an error. Use `--backend tesseract` or `--backend onnx`.
 
 ## 1.0.0
 
-This release removes every item that carried a deprecation note. Each
-replacement shipped in 0.39.0 or earlier, so you can make the change before
+This release removes every item that carried a deprecation note. Each Rust
+replacement shipped in 0.39.0 or earlier, and each replacement in the Python
+and npm packages in 0.42.0 or earlier, so you can make the change before
 the upgrade. Build your crate against 0.46 first: each deprecation warning
 names the call that replaces the old one. A crate that builds against 0.46
 without a deprecation warning needs no change for this section.
@@ -602,6 +603,58 @@ The same holds for the crate `djvu-pixmap`, which defines the type.
 `text_serialize::OcrExportError` was an alias of
 `text_serialize::TextSerializeError` since 0.21.0. Use the name
 `TextSerializeError`.
+
+### The old render methods of the Python and npm packages are removed
+
+The Python package and the npm (WebAssembly) package each keep one render
+call that takes a region and a quality. The older methods are removed. In
+0.46 the Python methods emit a `DeprecationWarning`, and the JavaScript
+methods carry a `@deprecated` note.
+
+Python, where `page` is a `djvu_rs.Page`. The replacement shipped in 0.40.0.
+
+| Removed | Replacement |
+|---------|-------------|
+| `page.render_region(x, y, w, h)` | `page.render(region=(x, y, w, h))` |
+| `page.render_region(x, y, w, h, full_width=fw, full_height=fh)` | `page.render(size=(fw, fh), region=(x, y, w, h))` |
+| `page.render_coarse(dpi)` | `page.render(dpi, quality="coarse")` |
+| `page.render_progressive(n, dpi)` | `page.render(dpi, quality=n)` |
+
+`render_coarse` returned `None` for a page without a background.
+`render(quality="coarse")` raises `DecodeError` for such a page. Read
+`page.bg44_chunk_count` first when your code handles bilevel pages:
+
+```python
+if page.bg44_chunk_count > 0:
+    preview = page.render(dpi=72, quality="coarse")
+else:
+    preview = page.render(dpi=72)
+```
+
+JavaScript, where `page` is a `WasmPage`. `WasmRenderRequest` is in the npm
+package since 0.42.0.
+
+| Removed | Replacement |
+|---------|-------------|
+| `page.render_coarse(dpi)` | `req.set_coarse(); page.render_request(req, pm)` |
+| `page.render_progressive(dpi, n)` | `req.set_step(n); page.render_request(req, pm)` |
+| `page.render_into_pixmap(dpi, pm)` | `page.render_request(new WasmRenderRequest(dpi), pm)` |
+| `page.render_progressive_into_pixmap(dpi, n, pm)` | `req.set_step(n); page.render_request(req, pm)` |
+
+```js
+const req = new WasmRenderRequest(150);
+const pm = new WasmPixmap();
+req.set_coarse();
+page.render_request(req, pm);
+const pixels = pm.to_bytes(); // Uint8ClampedArray, as render_coarse returned
+```
+
+`render_coarse` and `render_progressive` returned a `Uint8ClampedArray`.
+`render_request` fills a `WasmPixmap`: `pm.to_bytes()` gives an owned copy,
+and `pm.view()` gives a view without a copy. `render_coarse` returned
+`undefined` for a page without a background. `render_request` throws for
+such a page; read `page.bg44_chunk_count()` first. `page.render(dpi)` and the
+tile methods did not change.
 
 ## Fixes that change results
 

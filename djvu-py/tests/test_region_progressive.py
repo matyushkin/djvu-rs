@@ -1,8 +1,8 @@
 """#583: region render == crop of full render; coarse/progressive semantics.
 
 All through the one `Page.render(dpi, size=, region=, quality=)` call; the
-deprecated `render_region` / `render_coarse` / `render_progressive` still work
-and warn.
+older `render_region` / `render_coarse` / `render_progressive` were removed in
+1.0.0.
 """
 import djvu_rs
 import pytest
@@ -74,24 +74,7 @@ def test_coarse_render_of_bilevel_page_raises():
         doc.page(0).render(quality="coarse")
 
 
-def test_deprecated_variants_warn_and_match(color_doc):
+def test_removed_variants_are_gone(color_doc):
     page = color_doc.page(0)
-    n = page.bg44_chunk_count
-    with pytest.deprecated_call():
-        region = page.render_region(40, 60, 128, 96)
-    assert region.data() == page.render(region=(40, 60, 128, 96)).data()
-    with pytest.deprecated_call():
-        region = page.render_region(10, 20, 64, 48, full_width=300, full_height=400)
-    assert region.data() == page.render(size=(300, 400), region=(10, 20, 64, 48)).data()
-    with pytest.deprecated_call():
-        coarse = page.render_coarse(dpi=100)
-    assert coarse.data() == page.render(dpi=100, quality="coarse").data()
-    with pytest.deprecated_call():
-        step = page.render_progressive(n - 1, dpi=100)
-    assert step.data() == page.render(dpi=100, quality=n - 1).data()
-
-
-def test_deprecated_render_coarse_none_for_bilevel():
-    doc = djvu_rs.Document.open(str(FIXTURES / "boy_jb2.djvu"))
-    with pytest.deprecated_call():
-        assert doc.page(0).render_coarse() is None
+    for name in ("render_region", "render_coarse", "render_progressive"):
+        assert not hasattr(page, name), name

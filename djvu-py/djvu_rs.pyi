@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union, final
 
-from typing_extensions import deprecated
-
 __all__ = [
     "__version__",
     "Error",
@@ -280,23 +278,6 @@ class Page:
         default), "coarse" (a fast preview; DecodeError on a page without a
         background), or a chunk index n (background chunks 0..=n).
         """
-    @deprecated("use Page.render(size=..., region=(x, y, w, h))")
-    def render_region(
-        self,
-        x: int,
-        y: int,
-        w: int,
-        h: int,
-        full_width: Optional[int] = None,
-        full_height: Optional[int] = None,
-    ) -> Pixmap:
-        """Deprecated: use `render(size=(full_width, full_height), region=(x, y, w, h))`."""
-    @deprecated('use Page.render(dpi, quality="coarse")')
-    def render_coarse(self, dpi: Optional[float] = None) -> Optional[Pixmap]:
-        """Deprecated: use `render(dpi, quality="coarse")`. None for bilevel-only pages."""
-    @deprecated("use Page.render(dpi, quality=chunk_n)")
-    def render_progressive(self, chunk_n: int, dpi: Optional[float] = None) -> Pixmap:
-        """Deprecated: use `render(dpi, quality=chunk_n)`."""
     def text(self) -> Optional[str]:
         """The page text, or None when there is no text layer."""
     def annotations(self) -> Optional[Tuple[Annotation, List[MapArea]]]:
