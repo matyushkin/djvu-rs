@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794960194295,
+  "lastUpdate": 1794961573253,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26764,6 +26764,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 41355000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1bfefb387c42ea8552df206f994c2c7c88763fb2",
+          "message": "feat(api)!: mark the options structs, report structs and options enums non_exhaustive (#1006)\n\nA struct with all-public fields cannot gain a field without a break, and an\nexhaustive enum cannot gain a variant. 0.34.0 solved this for the optimizer\ntypes. This change does the same once for the rest of the stable surface,\nso that 1.x releases can add options and report fields without a major\nrelease (#993).\n\n- Options structs: RenderOptions, PdfOptions, EpubOptions, CbzOptions,\n  TiffOptions, SegmentOptions, ResourceLimits, ParseOptions,\n  ValidateOptions, IngestPolicy, TileRenderControls, HocrOptions,\n  AltoOptions, OcrOptions, CacheBudgetOptions, Jb2EncodeOptions and\n  Iw44EncodeOptions are #[non_exhaustive]. Each has one with_<field>\n  method per public field; RenderOptions::new(width, height) sets the two\n  fields every render needs. Reading and assigning a field did not change.\n- Report structs, which the crate only returns, are #[non_exhaustive]:\n  RenderReport, RenderRecovery, ValidationReport, ValidationSummary,\n  Finding, ResourceEstimate, QualityReport, ColorQualityReport,\n  ResourceLimitExceeded, SavePatchStats, RewriteItem, TileCacheUsage,\n  OptimizationResult, PlaneDiff, SemanticDiff, EditPlan, PlannedEdit,\n  ComponentNode, ComponentDedup, PageRemoval, IndirectDocument,\n  SegmentedPage, CcStats, EncodedBlit, SymbolBox and ChunkRecord.\n- Options and classification enums are #[non_exhaustive]: Resampling,\n  RecoveredLayer, EncodeQuality, BilevelCodec, FgbzPaletteOptions,\n  Iw44Target, Binarization, AlphaCompositing, IccHandling,\n  DepthDownconversion, TiffMode, TiffBilevelCompression, Severity, Layer,\n  ResourceLimitAxis, OptimizationPreset, EditOperation, EditOperationKind,\n  EditTarget, UnreachablePolicy, DjvmSpool, ComponentNodeKind and\n  ThumbnailStrategy.\n- Jb2EncodeOptions::with_lossy_threshold and with_despeckle were\n  constructors. They are now methods on a value like the other with_*\n  methods, and with_despeckle takes the Option<u32> of its field.\n- The module aliases djvu_rs::bzz_new and djvu_rs::iw44_new are removed.\n  docs/api-compatibility.md listed them as deprecated since 0.28.0.\n\nPlain data stays constructible by literal: Rect, Color, RenderRect,\nTileRect, Pixmap, GrayPixmap, Bitmap, FgbzColor, PageInfo, TextLayer,\nTextZone, Paragraph, DjVuBookmark, DjVuMetadata, EditRequest and the\ncomponent identity types. The enums that the format or geometry closes stay\nexhaustive: TextZoneKind, Rotation, UserRotation, annotation::Shape,\nComponentKind, PlaneStatus and iff::Chunk.\n\nThe tests, examples, benches, fuzz targets, the CLI and the Python binding\nbuild their options with the new methods. docs/api-compatibility.md gains\nthe extensible-type rule; docs/migration.md gains four subsections in its\n1.0.0 section, with a form that compiles on both 0.46 and 1.0.\n\nBREAKING CHANGE: the options structs (RenderOptions, PdfOptions, EpubOptions, CbzOptions, TiffOptions, SegmentOptions, ResourceLimits, ParseOptions, ValidateOptions, IngestPolicy, TileRenderControls, HocrOptions, AltoOptions, OcrOptions, CacheBudgetOptions, Jb2EncodeOptions, Iw44EncodeOptions) are #[non_exhaustive]: build them with Default and the with_<field> methods, or RenderOptions::new(width, height), not with a struct literal. The report structs are #[non_exhaustive] and cannot be built outside the crate. A match on an options enum (Resampling, EncodeQuality, Iw44Target, Severity, EditOperation and the others listed in docs/migration.md) needs a `_` arm. Jb2EncodeOptions::with_lossy_threshold and with_despeckle are methods on a value: write Jb2EncodeOptions::default().with_lossy_threshold(x) and .with_despeckle(Some(n)). The module aliases bzz_new and iw44_new are removed: use bzz and iw44. See the 1.0.0 section of docs/migration.md.",
+          "timestamp": "2026-11-18T01:58:32+02:00",
+          "tree_id": "3940b10b3abaa5ea2dfcbaaf88fde6b22f3133fc",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/1bfefb387c42ea8552df206f994c2c7c88763fb2"
+        },
+        "date": 1794961571621,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 126000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7073000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45581000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43676000,
             "range": "± 0",
             "unit": "ns/iter"
           }
