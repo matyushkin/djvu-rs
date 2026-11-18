@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794958587916,
+  "lastUpdate": 1794960194295,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -26716,6 +26716,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 38957000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "30a90cac9f38bdd4893102b61eca9b960215edca",
+          "message": "feat(bindings)!: remove the deprecated render methods from the Python and WebAssembly packages (#1003)\n\nThe Python package and the npm package each keep one render call that takes\na region and a quality: Page.render in Python, WasmPage.render_request in\nJavaScript. This change removes the older methods, which carried a\ndeprecation note since 0.40.0:\n\n- Python: Page.render_region, Page.render_coarse, Page.render_progressive.\n  They emitted a DeprecationWarning.\n- WebAssembly: WasmPage.render_coarse, render_progressive,\n  render_into_pixmap, render_progressive_into_pixmap. They carried a\n  @deprecated note.\n\nWasmPage.render, the tile methods and the lazy loaders stay. The type stub\ndjvu_rs.pyi, the Python guide, docs/guide.md and docs/tile-rendering.md\nfollow. docs/migration.md gains a subsection in its 1.0.0 section with the\nreplacement for each removed method.\n\nBREAKING CHANGE: the Python methods Page.render_region, Page.render_coarse and Page.render_progressive, and the WebAssembly methods WasmPage.render_coarse, render_progressive, render_into_pixmap and render_progressive_into_pixmap are removed. Use Page.render(dpi, size=, region=, quality=) in Python and WasmPage.render_request with a WasmRenderRequest in JavaScript. A coarse render of a page without a background raises DecodeError in Python and throws in JavaScript; the removed methods returned None and undefined. See the 1.0.0 section of docs/migration.md.",
+          "timestamp": "2026-11-18T01:33:54+02:00",
+          "tree_id": "1eca329a8cf8dd2ff1e59933ba4ae20431367cc8",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/30a90cac9f38bdd4893102b61eca9b960215edca"
+        },
+        "date": 1794960192318,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 123000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6542000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 43103000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41355000,
             "range": "± 0",
             "unit": "ns/iter"
           }
