@@ -2,13 +2,24 @@
 
 ## Supported versions
 
-Only the latest release (the newest `1.x` on crates.io, PyPI and npm) gets
-security fixes. Fixes are not backported to an older minor release or to the
-`0.x` releases: upgrade to the latest release to pick them up. A `1.x` release
-does not break the stable API
+| Version | Gets fixes | Until |
+|---------|------------|-------|
+| newest `1.x` | security and other bugs | — |
+| `1.0.0-rc.N` | none: upgrade to the next candidate or to `1.0.0` | — |
+| `0.46.x` | security and critical bugs (a panic, wrong output or lost data on some input) | the `1.0.0` release |
+| `0.46.x` | security only | 2027-03-31 |
+| older `0.x` | none: upgrade to `0.46.x` | — |
+
+Fixes are not backported to an older `1.x` minor release: upgrade to the
+newest `1.x`. A `1.x` release does not break the stable API
 ([`docs/api-compatibility.md`](docs/api-compatibility.md)), so a Cargo
-requirement of `djvu-rs = "1"` selects each fix on `cargo update`. To move
-from `0.x`, see [`docs/migration.md`](docs/migration.md).
+requirement of `djvu-rs = "1"` selects each fix on `cargo update`.
+
+Moving from `0.46` to `1.0` needs code changes, described in
+[`docs/migration.md`](docs/migration.md). The `0.46.x` line gets fixes for a
+while so that this move can wait for a planned moment: `djvu-rs = "0.46"`
+selects each `0.46.x` fix on `cargo update`. After 2027-03-31 the `0.x` line
+gets no more releases.
 
 ## Scope
 

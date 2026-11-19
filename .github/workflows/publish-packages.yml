@@ -603,6 +603,36 @@ jobs:
           name: npm-package
           path: .
 
+      # `npm install djvu-rs` takes the `latest` tag, so only a newest stable
+      # release may move it. A prerelease (1.0.0-rc.1) goes to `next`. A fix
+      # for an older line (0.46.1 after 1.0.0) goes to `legacy`.
+      - name: Choose the npm tag
+        id: dist-tag
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          if [[ "$VERSION" == *-* ]]; then
+            tag=next
+          else
+            current="$(npm view djvu-rs dist-tags.latest 2>/dev/null || true)"
+            if [[ -n "$current" ]] && node -e '
+              const p = (v) => v.split("-")[0].split(".").map(Number);
+              const [a, b] = [p(process.argv[1]), p(process.argv[2])];
+              for (let i = 0; i < 3; i++) {
+                if (a[i] !== b[i]) process.exit(a[i] < b[i] ? 0 : 1);
+              }
+              process.exit(1);
+            ' "$VERSION" "$current"; then
+              tag=legacy
+            fi
+          fi
+          echo "npm tag for $VERSION: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Publish
         working-directory: npm-pkg
-        run: npm publish --access public
+        env:
+          DIST_TAG: ${{ steps.dist-tag.outputs.tag }}
+        run: npm publish --access public --tag "$DIST_TAG"

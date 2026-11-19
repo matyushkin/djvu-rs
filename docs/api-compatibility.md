@@ -20,6 +20,8 @@ It is enforced in CI. See [Enforcement](#enforcement) for the exact gates.
 > only a major release breaks the stable surface. The `0.x` releases used
 > Cargo's rule for `0.MINOR.PATCH`, where the minor number was the breaking
 > axis; [`docs/migration.md`](migration.md) lists what each of them broke.
+> The Python and npm packages carry the crate's version and follow the same
+> rule for their own API, deprecation window included.
 
 ## 1. Surface tiers
 

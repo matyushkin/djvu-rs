@@ -42,6 +42,15 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # A version with a prerelease part (v1.0.0-rc.1) is a test release:
+      # mark it as such, so the newest stable release stays "Latest".
+      - name: Mark a prerelease on GitHub
+        if: ${{ steps.release.outputs.release_created && contains(steps.release.outputs.tag_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --latest=false
+
       # Pass 2 (GitHub App token) opens and updates the release PR. A PR pushed by
       # GITHUB_TOKEN gets its `pull_request` runs held for manual approval, so the
       # required checks never start without a click. A PR pushed by an App starts
