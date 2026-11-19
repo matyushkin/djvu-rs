@@ -17,17 +17,20 @@ updates:
       cargo:
         patterns: ["*"]
     ignore:
-      # pythonize 0.29 requires pyo3 0.29, and Cargo links one pyo3 per build.
-      # A pyo3 0.30 requirement makes the whole workspace unresolvable, so the
-      # grouped PR fails every check and the Dependabot run itself fails (#974).
-      # Remove this rule when pythonize supports the next pyo3 line.
+      # pythonize follows pyo3 one minor line at a time (pythonize 0.30
+      # requires pyo3 0.30), and Cargo links one pyo3 per build. A pyo3 line
+      # that pythonize does not support yet makes the whole workspace
+      # unresolvable, so the grouped PR fails every check and the Dependabot
+      # run itself fails (#974). When pythonize releases the next line, raise
+      # both requirements in djvu-py/Cargo.toml together and move this bound
+      # one line up (#996 is the PR that bumped pythonize alone and failed).
       #
       # The rule names a version range, not `update-types`. Cargo.lock is not
       # tracked, so Dependabot knows no current pyo3 version, and it applies
       # `update-types` only relative to a current version: that form was
       # accepted and then ignored (#977, #980).
       - dependency-name: "pyo3*"
-        versions: [">= 0.30.0"]
+        versions: [">= 0.31.0"]
     commit-message:
       prefix: "chore(deps)"
 
