@@ -16,11 +16,10 @@ This document is the checked-in, enforceable contract for consumers of the
 
 It is enforced in CI. See [Enforcement](#enforcement) for the exact gates.
 
-> **Pre-1.0 note.** The crate is currently `0.x`. Under Cargo's SemVer rules a
-> `0.MINOR.PATCH` release treats **MINOR** as the breaking-change axis and
-> **PATCH** as the compatible axis. Everything below is written so it reads the
-> same way once the crate reaches `1.0`; until then, substitute "minor bump"
-> for "major bump" wherever a breaking change is described.
+> **Versions.** From 1.0.0 the crate follows Semantic Versioning as written:
+> only a major release breaks the stable surface. The `0.x` releases used
+> Cargo's rule for `0.MINOR.PATCH`, where the minor number was the breaking
+> axis; [`docs/migration.md`](migration.md) lists what each of them broke.
 
 ## 1. Surface tiers
 
@@ -31,8 +30,8 @@ feature whose name signals the tier.
 ### Stable
 
 The default surface. Stable items follow SemVer: a breaking change to their
-signature, behavior, or error contract requires a major bump (pre-1.0: a minor
-bump). This includes:
+signature, behavior, or error contract requires a major release. This
+includes:
 
 - `Document`, `Page`, and the crate-root re-exports of the document model
   (`DjVuDocument`, `DjVuPage`, `DjVuBookmark`, `PageInfo`, `Rotation`,
@@ -111,7 +110,8 @@ two ways, both of which must be present:
 
 Current experimental features: `experimental`, `iw44-probe`, `alloc-profile`,
 `ocr-onnx`, `wasm-threads`. These are **out of scope** for API freezing per
-issue #695 and remain free to change.
+issue #695 and remain free to change. The 1.0.0 release confirmed this set
+(#993): the 1.0 stability promise does not cover them.
 
 ### Deprecated
 
@@ -126,7 +126,7 @@ Still stable and still shipped, but scheduled for removal. A deprecated item:
 **Deprecation window.** A deprecated item remains available for at least **two
 minor releases** after the release that introduced the deprecation, and never
 less than **90 days**, whichever is longer. Removal happens only in a
-breaking (major; pre-1.0 minor) release.
+major release.
 
 Current deprecated surfaces: none. 1.0.0 removed every deprecated item,
 including the module aliases `bzz_new` and `iw44_new` (listed here since
@@ -134,20 +134,22 @@ including the module aliases `bzz_new` and `iw44_new` (listed here since
 
 ## 2. Semantic versioning
 
-- **Patch** (`0.y.Z`): bug fixes, performance work, new **stable** APIs that are
-  purely additive, new error variants, new features that default to off.
-- **Minor** (`0.Y.z`, pre-1.0 = breaking): removals of deprecated items after
-  their window, signature/behavior changes to stable items, MSRV raises.
+- **Patch** (`x.y.Z`): bug fixes, performance work, documentation.
+- **Minor** (`x.Y.z`): new **stable** APIs that are purely additive, new
+  error variants, new fields and variants on the extensible types of §1, new
+  features that default to off, new deprecation notes, MSRV raises (§3).
+- **Major** (`X.y.z`): removals of deprecated items after their window,
+  signature/behavior changes to stable items.
 - Experimental surfaces are exempt: they may break in any release.
 
 Unintended breakage of the **stable** surface is caught by
 [`cargo-semver-checks`](#enforcement) in CI, which compares each change against
 its parent (a PR against its base commit, a push to `main` against the previous
-tip) and understands the `0.x` breaking axis. A break declared by an earlier
+tip). A break declared by an earlier
 PR is therefore not reported again before the next release. An
 intended break is declared with a `!` in the PR title (`feat(scope)!: …`) or
 a `BREAKING CHANGE:` footer, the same marker release-please reads; the gate
-then checks the PR as the breaking bump it will produce (`0.Y` on 0.x) and
+then checks the PR as the major release it will produce and
 still fails on any break the PR does not declare. The version itself is never
 bumped by hand.
 
@@ -238,8 +240,8 @@ Behaviour also changed: the render caches are now bounded by default. See §7.
 
 - MSRV is **Rust 1.89** (edition 2024; the `wide` 1.x SIMD dependency needs
   1.89). It is declared in `rust-version` in every workspace `Cargo.toml`.
-- Raising the MSRV is a **minor** (pre-1.0 breaking) change and is called out in
-  the changelog.
+- Raising the MSRV is a **minor** release, never a patch release, and is
+  called out in the changelog.
 - MSRV is a **required** CI gate (the `MSRV` job builds the crate on the
   pinned toolchain). A PR that uses a newer-than-MSRV language or std feature
   fails that gate.

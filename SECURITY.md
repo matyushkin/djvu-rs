@@ -2,10 +2,13 @@
 
 ## Supported versions
 
-Only the latest minor release (the newest `0.x` on crates.io, PyPI and npm)
-gets security fixes. Fixes are not backported to older minor releases: upgrade
-to the latest release to pick them up. While the crate is pre-1.0, a minor
-release can change the API; [`CHANGELOG.md`](CHANGELOG.md) lists every change.
+Only the latest release (the newest `1.x` on crates.io, PyPI and npm) gets
+security fixes. Fixes are not backported to an older minor release or to the
+`0.x` releases: upgrade to the latest release to pick them up. A `1.x` release
+does not break the stable API
+([`docs/api-compatibility.md`](docs/api-compatibility.md)), so a Cargo
+requirement of `djvu-rs = "1"` selects each fix on `cargo update`. To move
+from `0.x`, see [`docs/migration.md`](docs/migration.md).
 
 ## Scope
 
