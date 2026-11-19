@@ -48,6 +48,8 @@ access token is on the release path.
 
 ## Emergency release without release-please
 
+This is also the path for a fix release of an older line (see below).
+
 `publish.yml` still listens for `push: tags: ['v*']` and for a manual
 `workflow_dispatch` with a `tag` input. Write the version-bump commit by hand, merge it,
 then:
@@ -60,6 +62,57 @@ git push --no-verify origin vX.Y.Z
 `--no-verify` skips the pre-push hook (a full `make check`); the commit is already on
 `main` and green, so re-running it on a tag push is wasted minutes. A tag pushed by a
 person — not by `GITHUB_TOKEN` — does start both publish workflows.
+
+## Release candidates (`X.Y.Z-rc.N`)
+
+A release candidate is a test release of a major version, for users who opt
+in. Neither Cargo (`djvu-rs = "1"`), pip nor `npm install djvu-rs` selects it
+unless asked by name: `djvu-rs = "=1.0.0-rc.1"`, `pip install --pre djvu-rs`,
+`npm install djvu-rs@next`.
+
+1. **Set the version.** In `release-please-config.json`, set
+   `"release-as": "1.0.0-rc.1"` on the `.` package. release-please then
+   titles the release PR `chore(main): release 1.0.0-rc.1`.
+2. **Merge the release PR** as in the standard procedure. The publish steps
+   handle the prerelease part of the version:
+   - `release-please.yml` marks the GitHub Release as a pre-release, so the
+     newest stable release stays "Latest";
+   - `publish-packages.yml` publishes the npm package under the `next` tag,
+     so `latest` does not move. PyPI and crates.io need no flag: they
+     recognize the prerelease part themselves (PyPI shows `1.0.0rc1`).
+3. **Set the next version at once.** `release-as` stays in force until it is
+   changed, so the next release PR would offer the same version again. In
+   the first PR after the release, set it to `1.0.0-rc.2` (a fix is needed)
+   or `1.0.0` (the candidate is good).
+4. **After the final release**, remove `release-as`. From then on,
+   Conventional Commits pick the version again.
+
+A candidate may come out before the deprecation window ends, because nobody
+gets it without asking for it by name. The final release keeps to the date:
+for 1.0.0, no earlier than 2026-12-30.
+
+## Fix releases of an older line (`0.46.x`)
+
+[`SECURITY.md`](SECURITY.md) lists which older lines get fixes. release-please
+works only on `main`, so a fix release of an older line follows the
+emergency procedure above, from its own branch:
+
+1. Create the branch from the last tag of the line, once, when the first fix
+   is needed: `git switch -c release/0.46 v0.46.0`.
+2. As the first commit on the branch, copy the "Choose the npm tag" step
+   and the `--tag "$DIST_TAG"` flag of the "Publish" step from `main`'s
+   `.github/workflows/publish-packages.yml`. The tag push runs the workflow
+   file of the tagged commit. Without that step, npm would move `latest` to
+   the older line; with it, an older line goes under the `legacy` tag.
+3. Cherry-pick the fix from `main` (`git cherry-pick -x <sha>`), or write it
+   on the branch when `main` no longer has the code. Add no features.
+4. Raise the patch version in the root `Cargo.toml`, in the workspace crates
+   it lists, in `djvu-py/Cargo.toml` and in `.release-please-manifest.json`,
+   and add a `CHANGELOG.md` section. Run `make check`.
+5. Push the branch, then tag the commit and push the tag as in the emergency
+   procedure. Create the GitHub Release with `gh release create v0.46.1`.
+   Once 1.0.0 is out, add `--latest=false`, so the `1.x` release stays
+   "Latest".
 
 ## Conventional Commits
 
