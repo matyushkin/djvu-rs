@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.1](https://github.com/matyushkin/djvu-rs/compare/v0.46.0...v1.0.0-rc.1) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** the options structs (RenderOptions, PdfOptions, EpubOptions, CbzOptions, TiffOptions, SegmentOptions, ResourceLimits, ParseOptions, ValidateOptions, IngestPolicy, TileRenderControls, HocrOptions, AltoOptions, OcrOptions, CacheBudgetOptions, Jb2EncodeOptions, Iw44EncodeOptions) are #[non_exhaustive]: build them with Default and the with_<field> methods, or RenderOptions::new(width, height), not with a struct literal. The report structs are #[non_exhaustive] and cannot be built outside the crate. A match on an options enum (Resampling, EncodeQuality, Iw44Target, Severity, EditOperation and the others listed in docs/migration.md) needs a `_` arm. Jb2EncodeOptions::with_lossy_threshold and with_despeckle are methods on a value: write Jb2EncodeOptions::default().with_lossy_threshold(x) and .with_despeckle(Some(n)). The module aliases bzz_new and iw44_new are removed: use bzz and iw44. See the 1.0.0 section of docs/migration.md.
+* **bindings:** the Python methods Page.render_region, Page.render_coarse and Page.render_progressive, and the WebAssembly methods WasmPage.render_coarse, render_progressive, render_into_pixmap and render_progressive_into_pixmap are removed. Use Page.render(dpi, size=, region=, quality=) in Python and WasmPage.render_request with a WasmRenderRequest in JavaScript. A coarse render of a page without a background raises DecodeError in Python and throws in JavaScript; the removed methods returned None and undefined. See the 1.0.0 section of docs/migration.md.
+* **render:** the ten deprecated render_* functions of djvu_render, RenderOptions::scale, Pixmap::new and text_serialize::OcrExportError are removed. Use RenderRequest, Pixmap::try_new and TextSerializeError. A RenderRequest region addresses the page after its rotation; a coarse render of a page without a background returns RenderError::NoBackground; Quality::Step accepts only step 0 on a page without background chunks. See the 1.0.0 section of docs/migration.md.
+
+### Features
+
+* **api:** mark the options structs, report structs and options enums non_exhaustive ([#1006](https://github.com/matyushkin/djvu-rs/issues/1006)) ([1bfefb3](https://github.com/matyushkin/djvu-rs/commit/1bfefb387c42ea8552df206f994c2c7c88763fb2))
+* **bindings:** remove the deprecated render methods from the Python and WebAssembly packages ([#1003](https://github.com/matyushkin/djvu-rs/issues/1003)) ([30a90ca](https://github.com/matyushkin/djvu-rs/commit/30a90cac9f38bdd4893102b61eca9b960215edca))
+* **render:** remove the deprecated render functions, RenderOptions::scale, Pixmap::new and OcrExportError ([#1002](https://github.com/matyushkin/djvu-rs/issues/1002)) ([263189f](https://github.com/matyushkin/djvu-rs/commit/263189f2f3dea4e31ae0d3229195899cbdf4a9f0))
+
 ## [0.46.0](https://github.com/matyushkin/djvu-rs/compare/v0.45.0...v0.46.0) (2026-11-17)
 
 
