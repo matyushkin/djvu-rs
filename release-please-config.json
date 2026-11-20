@@ -4,7 +4,7 @@
       "release-type": "rust",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
-      "release-as": "1.0.0-rc.1"
+      "release-as": "1.0.0"
     }
   }
 }
