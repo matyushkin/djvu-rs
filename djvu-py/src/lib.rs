@@ -7,12 +7,14 @@ use std::sync::Arc;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBufferError, PyIndexError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyType};
 use pythonize::{depythonize, pythonize};
 
 use djvu_rs::annotation::{Annotation, MapArea};
 use djvu_rs::cbz::CbzOptions;
+use djvu_rs::djvm::{self, DjvmError, UnreachablePolicy};
 use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
 use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
 use djvu_rs::djvu_render::{Quality, RenderRect, RenderRequest, UserRotation};
@@ -157,6 +159,65 @@ fn edit_error(e: MutError) -> PyErr {
         MutError::PageOutOfRange { .. } => PageIndexError::new_err(format!("{e}")),
         other => EditError::new_err(format!("{other}")),
     }
+}
+
+// ---- Structural edits --------------------------------------------------------
+//
+// Module-level functions over `djvu_rs::djvm`. Each takes whole documents as
+// bytes and returns a new document as bytes; none of them decodes a page. All
+// release the GIL: the work is copying, and a book can be hundreds of megabytes.
+
+fn djvm_error(e: DjvmError) -> PyErr {
+    match e {
+        DjvmError::PageRangeOutOfBounds { .. } | DjvmError::PageIndexOutOfBounds { .. } => {
+            PageIndexError::new_err(format!("{e}"))
+        }
+        DjvmError::Iff(_) | DjvmError::Doc(_) => DecodeError::new_err(format!("{e}")),
+        // The crate words this one for `to_indirect`; say what applies here.
+        DjvmError::NotBundledDjvm => {
+            EditError::new_err("the document is not a bundled multi-page (FORM:DJVM) file")
+        }
+        other => EditError::new_err(format!("{other}")),
+    }
+}
+
+/// Join documents into one bundled multi-page document, in the given order.
+#[pyfunction]
+fn merge<'py>(py: Python<'py>, documents: Vec<PyBackedBytes>) -> PyResult<Bound<'py, PyBytes>> {
+    let merged = py.detach(|| {
+        let parts: Vec<&[u8]> = documents.iter().map(|d| &**d).collect();
+        djvm::merge(&parts).map_err(djvm_error)
+    })?;
+    Ok(PyBytes::new(py, &merged))
+}
+
+/// Copy pages `start..end` (0-based, `end` excluded) into a new document.
+#[pyfunction]
+fn split<'py>(
+    py: Python<'py>,
+    document: PyBackedBytes,
+    start: usize,
+    end: usize,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let part = py.detach(|| djvm::split(&document, start, end).map_err(djvm_error))?;
+    Ok(PyBytes::new(py, &part))
+}
+
+/// Remove the pages at the given 0-based indices from a bundled document.
+///
+/// Shared data that only the removed pages used is dropped as well.
+#[pyfunction]
+fn remove_pages<'py>(
+    py: Python<'py>,
+    document: PyBackedBytes,
+    indices: Vec<usize>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let rebuilt = py.detach(|| {
+        djvm::remove_pages(&document, &indices, UnreachablePolicy::GarbageCollect)
+            .map(|removal| removal.document)
+            .map_err(djvm_error)
+    })?;
+    Ok(PyBytes::new(py, &rebuilt))
 }
 
 // ---- Export ------------------------------------------------------------------
@@ -1180,5 +1241,8 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Page>()?;
     m.add_class::<Editor>()?;
     m.add_class::<Pixmap>()?;
+    m.add_function(wrap_pyfunction!(merge, m)?)?;
+    m.add_function(wrap_pyfunction!(split, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_pages, m)?)?;
     Ok(())
 }

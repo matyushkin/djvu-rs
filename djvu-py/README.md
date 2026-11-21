@@ -53,8 +53,9 @@ package ships a type stub and `TypedDict` shapes for every edit value.
 
 ## Status & limitations
 
-- **No encoding.** Creating DjVu from images, merge, split, and page
-  insertion stay on the Rust crate / `djvu` CLI.
+- **No encoding yet.** Creating DjVu from images stays on the Rust crate /
+  `djvu` CLI. Merge, split and page removal are available: see the
+  [guide](GUIDE.md#merge-split-and-remove-pages).
 - **Bookmarks need a bundled multi-page file;** on a single-page file
   `set_bookmarks` raises `EditError`.
 - **Legacy `BM44` / `PM44` pages are read-only:** they render, but editing
