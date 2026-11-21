@@ -81,7 +81,7 @@ atomically.
 | `djvu_rs.IoError` | Filesystem failures from `Document.open` and the `write_*` exporters |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failures |
 | `djvu_rs.EditError` | An `Editor` change or save the file cannot take |
-| `djvu_rs.PageIndexError` | Out-of-range `Document.page` (also an `IndexError`) |
+| `djvu_rs.PageIndexError` | Out-of-range page index (a `djvu_rs.Error` and an `IndexError`) |
 
 ### Smoke tests
 

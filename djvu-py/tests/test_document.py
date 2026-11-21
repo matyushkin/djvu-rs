@@ -95,6 +95,7 @@ def test_typed_exception_hierarchy():
     assert issubclass(djvu.DecodeError, djvu.Error)
     assert issubclass(djvu.IoError, djvu.Error)
     assert issubclass(djvu.PageIndexError, IndexError)
+    assert issubclass(djvu.PageIndexError, djvu.Error)
 
 
 def test_module_version_matches_package():

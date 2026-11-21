@@ -63,7 +63,7 @@ class IoError(Error):
 class ExportError(Error):
     """Conversion to PDF, EPUB, CBZ or TIFF failed."""
 
-class PageIndexError(IndexError):
+class PageIndexError(Error, IndexError):
     """Page index is out of range for this document."""
 
 class EditError(Error):
