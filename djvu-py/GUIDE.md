@@ -120,6 +120,44 @@ A dict of the wrong shape raises `ValueError` and leaves the document
 unchanged. An out-of-range page raises `PageIndexError`. Legacy `BM44` /
 `PM44` pages and bookmarks on a single-page file raise `EditError`.
 
+## Merge, split and remove pages
+
+Three module functions change which pages a file has. Each takes whole
+documents as `bytes` and returns the new document as `bytes`. No page is
+decoded or re-encoded, so the pages keep their exact content.
+
+```python
+from pathlib import Path
+
+book = Path('book.djvu').read_bytes()
+
+first_two = djvu.split(book, 0, 2)            # pages 0 and 1; `end` is excluded
+rest = djvu.split(book, 2, djvu.Document.from_bytes(book).page_count())
+without_cover = djvu.remove_pages(book, [0])
+
+# Insert a page: split around the position and merge the parts back.
+scan = Path('scan.djvu').read_bytes()
+page = djvu.split(scan, 0, 1)
+combined = djvu.merge([first_two, page, rest])
+
+Path('combined.djvu').write_bytes(combined)
+```
+
+| Function | Effect |
+|---|---|
+| `merge(documents)` | One bundled document with every page of every input, in order |
+| `split(document, start, end)` | A new document with pages `start..end` (`end` excluded) |
+| `remove_pages(document, indices)` | The document without the listed pages |
+
+- `merge` and `split` do not carry bookmarks or thumbnails over, because
+  both point at page positions that change. Read the bookmarks first and set
+  them again with `Editor.set_bookmarks`. `remove_pages` keeps the bookmarks
+  as they are.
+- `remove_pages` needs a bundled multi-page file and never removes every
+  page; both cases raise `EditError`.
+- An out-of-range page raises `PageIndexError`. An input that is not DjVu
+  raises `DecodeError`.
+
 ## Type hints
 
 The package ships a type stub (`djvu_rs.pyi`) and a `py.typed` marker, so
@@ -155,7 +193,7 @@ A shape is a dict with one key; `if "Rect" in shape:` narrows it to
 | `djvu_rs.DecodeError` | Parse / decode / render failure |
 | `djvu_rs.IoError` | Filesystem failure from `Document.open` |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failure |
-| `djvu_rs.EditError` | An edit or `Editor.save` the file cannot take |
+| `djvu_rs.EditError` | An edit, `Editor.save`, `merge` or `remove_pages` the file cannot take |
 | `djvu_rs.PageIndexError` | Out-of-range page index (a `djvu_rs.Error` and an `IndexError`) |
 
 ## Build from source

@@ -22,6 +22,9 @@ __all__ = [
     "Page",
     "Editor",
     "Pixmap",
+    "merge",
+    "split",
+    "remove_pages",
     "Annotation",
     "AnnotationInput",
     "Bookmark",
@@ -395,3 +398,21 @@ class Editor:
     def remove_page_text_layer(self, index: int) -> None: ...
     def to_bytes(self) -> bytes: ...
     def save(self, path: str) -> None: ...
+
+# ---- Structural edits ---------------------------------------------------------------
+
+def merge(documents: Sequence[Union[bytes, bytearray]]) -> bytes:
+    """Join documents into one bundled multi-page document, in the given
+    order. Bookmarks and thumbnails are not carried over. Raises `EditError`
+    for an empty list and `DecodeError` for an input that is not DjVu."""
+
+def split(document: Union[bytes, bytearray], start: int, end: int) -> bytes:
+    """Copy pages `start..end` (0-based, `end` excluded) into a new document.
+    Raises `PageIndexError` when the range is empty or out of range."""
+
+def remove_pages(document: Union[bytes, bytearray], indices: Sequence[int]) -> bytes:
+    """Remove the pages at the given 0-based indices from a bundled
+    multi-page document. Shared data that only the removed pages used is
+    dropped too. Raises `PageIndexError` for an out-of-range index and
+    `EditError` for a repeated index, for removing every page, or for a
+    single-page file."""

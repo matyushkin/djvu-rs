@@ -59,6 +59,20 @@ def test_stub_methods_match_the_classes():
         assert stub[name] == expected, (name, stub[name] ^ expected)
 
 
+def test_stub_functions_match():
+    stub = {
+        fn.name: [a.arg for a in fn.args.args]
+        for fn in stub_tree().body
+        if isinstance(fn, ast.FunctionDef)
+    }
+    runtime = {
+        name: list(inspect.signature(getattr(djvu, name)).parameters)
+        for name in dir(djvu)
+        if not name.startswith("_") and inspect.isbuiltin(getattr(djvu, name))
+    }
+    assert stub == runtime
+
+
 def test_stub_parameters_match():
     stub = {
         (cls.name, fn.name): [
