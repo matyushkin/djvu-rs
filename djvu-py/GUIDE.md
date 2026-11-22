@@ -156,7 +156,7 @@ A shape is a dict with one key; `if "Rect" in shape:` narrows it to
 | `djvu_rs.IoError` | Filesystem failure from `Document.open` |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failure |
 | `djvu_rs.EditError` | An edit or `Editor.save` the file cannot take |
-| `djvu_rs.PageIndexError` | Out-of-range page index (also an `IndexError`) |
+| `djvu_rs.PageIndexError` | Out-of-range page index (a `djvu_rs.Error` and an `IndexError`) |
 
 ## Build from source
 

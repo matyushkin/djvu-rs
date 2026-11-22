@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyIndexError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyBytes, PyDict, PyType};
 use pythonize::{depythonize, pythonize};
 
 use djvu_rs::annotation::{Annotation, MapArea};
@@ -46,12 +47,39 @@ create_exception!(
     Error,
     "Conversion to PDF, EPUB, CBZ or TIFF failed."
 );
-create_exception!(
-    djvu_rs,
-    PageIndexError,
-    pyo3::exceptions::PyIndexError,
-    "Page index is out of range for this document."
-);
+/// `djvu_rs.PageIndexError`: page index out of range.
+///
+/// It inherits both `djvu_rs.Error` and the built-in `IndexError`, so
+/// `except djvu_rs.Error` and `except IndexError` both catch it.
+/// `create_exception!` takes one base only, so the module initialiser builds
+/// the class with `type(name, bases, namespace)` and stores it here.
+struct PageIndexError;
+
+static PAGE_INDEX_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+impl PageIndexError {
+    fn type_object(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+        PAGE_INDEX_ERROR
+            .get_or_try_init(py, || {
+                let namespace = PyDict::new(py);
+                namespace.set_item("__doc__", "Page index is out of range for this document.")?;
+                namespace.set_item("__module__", "djvu_rs")?;
+                let bases = (py.get_type::<Error>(), py.get_type::<PyIndexError>());
+                let class = py
+                    .get_type::<PyType>()
+                    .call1(("PageIndexError", bases, namespace))?;
+                Ok(class.cast_into::<PyType>()?.unbind())
+            })
+            .map(|class| class.bind(py))
+    }
+
+    fn new_err(message: String) -> PyErr {
+        Python::attach(|py| match Self::type_object(py) {
+            Ok(class) => PyErr::from_type(class.clone(), message),
+            Err(error) => error,
+        })
+    }
+}
 create_exception!(
     djvu_rs,
     EditError,
@@ -1146,7 +1174,7 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DecodeError", m.py().get_type::<DecodeError>())?;
     m.add("IoError", m.py().get_type::<IoError>())?;
     m.add("ExportError", m.py().get_type::<ExportError>())?;
-    m.add("PageIndexError", m.py().get_type::<PageIndexError>())?;
+    m.add("PageIndexError", PageIndexError::type_object(m.py())?)?;
     m.add("EditError", m.py().get_type::<EditError>())?;
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;
