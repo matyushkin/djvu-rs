@@ -72,3 +72,4 @@ examples/wasm/pkg/
 # corpus in the actions cache (fuzz.yml). Add new seeds with `git add -f`.
 /fuzz/corpus/
 /fuzz/artifacts/
+/viewer_site/

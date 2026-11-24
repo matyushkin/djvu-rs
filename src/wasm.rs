@@ -418,23 +418,7 @@ impl WasmPage {
     pub fn text_zones_json(&self, target_dpi: u32) -> Result<Option<String>, JsError> {
         let page = crate::foreign::page(&self.doc, self.index)
             .map_err(|e| JsError::new(&e.to_string()))?;
-
-        let (render_w, render_h) = RenderSize::at_dpi(page, target_dpi as f32).display;
-
-        let Some(layer) = page
-            .text_layer_at_size(render_w, render_h)
-            .map_err(|e| JsError::new(&e.to_string()))?
-        else {
-            return Ok(None);
-        };
-
-        let mut buf = String::from("[");
-        let mut first = true;
-        for zone in &layer.zones {
-            collect_leaf_zones(zone, &mut buf, &mut first);
-        }
-        buf.push(']');
-        Ok(Some(buf))
+        page_text_zones_json(page, target_dpi)
     }
 
     /// Number of BG44 background chunks on this page.
@@ -598,6 +582,30 @@ impl WasmPage {
 
 // ── Text zone helpers ─────────────────────────────────────────────────────────
 
+/// Leaf text zones of `page` as a JSON array, scaled to a render at
+/// `target_dpi`. `None` when the page has no text layer.
+fn page_text_zones_json(
+    page: &crate::djvu_document::DjVuPage,
+    target_dpi: u32,
+) -> Result<Option<String>, JsError> {
+    let (render_w, render_h) = RenderSize::at_dpi(page, target_dpi as f32).display;
+
+    let Some(layer) = page
+        .text_layer_at_size(render_w, render_h)
+        .map_err(|e| JsError::new(&e.to_string()))?
+    else {
+        return Ok(None);
+    };
+
+    let mut buf = String::from("[");
+    let mut first = true;
+    for zone in &layer.zones {
+        collect_leaf_zones(zone, &mut buf, &mut first);
+    }
+    buf.push(']');
+    Ok(Some(buf))
+}
+
 /// Recursively collect leaf zones (zones without children) into a JSON array.
 fn collect_leaf_zones(zone: &crate::text::TextZone, buf: &mut String, first: &mut bool) {
     if zone.children.is_empty() {
@@ -666,6 +674,7 @@ mod lazy {
         AsyncComponentResolver, LazyDocument, LazyIndirectDocument, from_async_reader_lazy_local,
     };
     use crate::djvu_document::{ComponentId, ComponentKind, ComponentResolveError, DjVuPage};
+    use crate::{djvu_tile, render_size::RenderSize};
 
     /// Fetch granularity. 64 KiB matches the native HTTP-Range probe (#584):
     /// the whole head + DIRM index of a 500-component book fits in one block,
@@ -832,6 +841,17 @@ mod lazy {
             self.inner.page_count() as u32
         }
 
+        /// Fetch (or reuse) page `index` and return a handle with the tile
+        /// and text methods.
+        pub async fn page(&self, index: u32) -> Result<WasmLazyPage, JsError> {
+            let page = self
+                .inner
+                .page_async(index as usize)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmLazyPage { page })
+        }
+
         /// Fetch (or reuse) page `index` and return `[width_px, height_px, dpi]`
         /// at the page's native resolution.
         pub async fn page_info(&self, index: u32) -> Result<js_sys::Uint32Array, JsError> {
@@ -875,6 +895,114 @@ mod lazy {
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
             render(&page, target_dpi, chunk_n)
+        }
+    }
+
+    /// One page of a [`WasmLazyDocument`], already fetched and parsed.
+    ///
+    /// It has the tile and text methods of [`WasmPage`](super::WasmPage), so a
+    /// viewer draws a lazily opened document the same way as one opened from
+    /// bytes. Call `free()` to release the handle.
+    #[wasm_bindgen]
+    pub struct WasmLazyPage {
+        page: Arc<DjVuPage>,
+    }
+
+    #[wasm_bindgen]
+    impl WasmLazyPage {
+        /// Native DPI stored in the INFO chunk.
+        pub fn dpi(&self) -> u32 {
+            self.page.dpi() as u32
+        }
+
+        /// Output width in pixels when rendered at `target_dpi` (after the
+        /// page's INFO rotation).
+        pub fn width_at(&self, target_dpi: u32) -> u32 {
+            RenderSize::at_dpi(&self.page, target_dpi as f32).display.0
+        }
+
+        /// Output height in pixels when rendered at `target_dpi` (after the
+        /// page's INFO rotation).
+        pub fn height_at(&self, target_dpi: u32) -> u32 {
+            RenderSize::at_dpi(&self.page, target_dpi as f32).display.1
+        }
+
+        /// Number of BG44 background chunks on this page; `0` for a
+        /// bilevel-only page.
+        pub fn bg44_chunk_count(&self) -> u32 {
+            self.page.bg44_chunks().len() as u32
+        }
+
+        /// Text zones scaled to a render at `target_dpi`, in the JSON shape of
+        /// [`WasmPage::text_zones_json`](super::WasmPage::text_zones_json).
+        /// Returns `undefined` if the page has no text layer.
+        pub fn text_zones_json(&self, target_dpi: u32) -> Result<Option<String>, JsError> {
+            super::page_text_zones_json(&self.page, target_dpi)
+        }
+
+        /// Number of tile columns at `target_dpi` for `tile_size`-pixel tiles.
+        pub fn tile_cols(&self, target_dpi: u32, tile_size: u32) -> Result<u32, JsError> {
+            self.tile_layout(target_dpi, tile_size).map(|l| l.cols())
+        }
+
+        /// Number of tile rows at `target_dpi` for `tile_size`-pixel tiles.
+        pub fn tile_rows(&self, target_dpi: u32, tile_size: u32) -> Result<u32, JsError> {
+            self.tile_layout(target_dpi, tile_size).map(|l| l.rows())
+        }
+
+        /// Render one full-quality tile; see
+        /// [`WasmPage::render_tile`](super::WasmPage::render_tile).
+        pub fn render_tile(
+            &self,
+            target_dpi: u32,
+            tile_size: u32,
+            col: u32,
+            row: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let opts = crate::foreign::render_opts_for_dpi(&self.page, target_dpi as f32);
+            let pm = djvu_tile::render_tile_cached(&self.page, &opts, tile_size, col, row)
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmPixmap {
+                data: pm.data,
+                width: pm.width,
+                height: pm.height,
+            })
+        }
+
+        /// Render one tile at progressive quality step `chunk_n`; see
+        /// [`WasmPage::render_tile_progressive`](super::WasmPage::render_tile_progressive).
+        pub fn render_tile_progressive(
+            &self,
+            target_dpi: u32,
+            tile_size: u32,
+            col: u32,
+            row: u32,
+            chunk_n: u32,
+        ) -> Result<WasmPixmap, JsError> {
+            let opts = crate::foreign::render_opts_for_dpi(&self.page, target_dpi as f32);
+            let controls = djvu_tile::TileRenderControls {
+                quality_step: Some(chunk_n as usize),
+                ..Default::default()
+            };
+            let pm = djvu_tile::render_tile_with(&self.page, &opts, tile_size, col, row, &controls)
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(WasmPixmap {
+                data: pm.data,
+                width: pm.width,
+                height: pm.height,
+            })
+        }
+    }
+
+    impl WasmLazyPage {
+        fn tile_layout(
+            &self,
+            target_dpi: u32,
+            tile_size: u32,
+        ) -> Result<djvu_tile::TileLayout, JsError> {
+            let opts = crate::foreign::render_opts_for_dpi(&self.page, target_dpi as f32);
+            djvu_tile::TileLayout::new(&self.page, &opts, tile_size)
+                .map_err(|e| JsError::new(&e.to_string()))
         }
     }
 

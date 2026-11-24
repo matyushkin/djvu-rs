@@ -11,6 +11,7 @@ when the engine supports it.
 
 | Your task | How |
 |-----------|-----|
+| Show a whole book on a web page | `<djvu-viewer src="book.djvu">` — [ready-made viewer element](#ready-made-viewer-element) |
 | Draw a page on a `<canvas>` | `page.render(dpi)` → `ImageData` |
 | Open a large book from a URL, fetching only the pages shown | `WasmLazyDocument.open(size, fetchRange)` — [lazy loading](#lazy-loading-over-http) |
 | Fast preview, then sharpen | `WasmRenderRequest` with `set_coarse()` / `set_step(n)` |
@@ -24,6 +25,79 @@ when the engine supports it.
 ```sh
 npm install djvu-rs
 ```
+
+## Ready-made viewer element
+
+`djvu-rs/viewer` registers a `<djvu-viewer>` custom element. It needs no
+framework. ([Live demo](https://matyushkin.github.io/djvu-rs/dev/viewer/).)
+
+```html
+<script type="module">
+  import 'djvu-rs/viewer';
+</script>
+
+<djvu-viewer src="book.djvu" controls style="height: 80vh"></djvu-viewer>
+```
+
+Without a bundler, load the module from a CDN or from your own copy of the
+package:
+
+```html
+<script type="module" src="https://cdn.jsdelivr.net/npm/djvu-rs/viewer/djvu-viewer.js"></script>
+```
+
+What it does:
+
+- Pages scroll in one vertical column. Only the pages near the viewport stay
+  decoded.
+- Decoding runs in a Web Worker, so scrolling stays smooth.
+- The file opens through HTTP `Range` requests when the server supports them:
+  the viewer fetches only the pages on screen. Otherwise it downloads the
+  whole file.
+- Pages are drawn as tiles at the current zoom: a coarse picture first, then
+  the sharp one.
+- The text layer is selectable, so copy works.
+
+| Attribute | Meaning |
+|-----------|---------|
+| `src` | URL of the `.djvu` file |
+| `page` | Page to open, counted from 1 |
+| `zoom` | `fit-width` (default), `fit-page`, or a percent such as `150` |
+| `controls` | Show the toolbar: page number, previous/next, zoom |
+
+Properties: `src`, `page`, `zoom`, read-only `pageCount` and `scale`; methods
+`zoomIn()` and `zoomOut()`. Events: `documentload` (`{pageCount}`),
+`pagechange` (`{page, pageCount}`), `zoomchange` (`{zoom, scale}`),
+`documenterror` (`{message}`).
+
+```js
+const viewer = document.querySelector('djvu-viewer');
+viewer.addEventListener('pagechange', (e) => console.log(e.detail.page));
+viewer.page = 12;
+viewer.zoom = 'fit-page';
+```
+
+Keys, when the viewer has focus: `←` / `→` previous / next page, `Home` /
+`End` first / last page, `+` / `-` zoom, `Ctrl`+`0` fit width; `Ctrl` + wheel
+and a trackpad pinch zoom. Arrows up/down, `PageUp` / `PageDown` and `Space` scroll.
+
+Style it with CSS: the element is a block, 600px tall by default. Custom
+properties `--djvu-background`, `--djvu-page-background`,
+`--djvu-toolbar-background`, `--djvu-toolbar-color`, `--djvu-selection`; parts
+`toolbar`, `viewport`, `page`, `text-layer`, `message`.
+
+The viewer starts its worker from `viewer/djvu-viewer-worker.js` next to the
+module (`new URL(..., import.meta.url)`; Vite and webpack 5 handle this). If
+your setup serves the worker or the `.wasm` file from another place, set
+`DjVuViewer.workerUrl` / `DjVuViewer.wasmUrl` before the first element opens a
+file. The document URL must be same-origin or allow CORS.
+
+Size (version 1.0.0-rc.1): the viewer is 25 KB of JavaScript (8 KB gzip) plus
+a 5 KB worker (2 KB gzip). The worker loads one WebAssembly build, about
+575 KB (225 KB gzip).
+
+Not in this version: search, thumbnails, an outline panel, links and
+annotations, printing.
 
 ## Quick start
 

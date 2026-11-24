@@ -127,13 +127,17 @@ ctx.putImageData(new ImageData(pixels, page.width_at(150), page.height_at(150)),
 ```
 
 The npm package ships TypeScript declarations and scalar + `simd128` builds
-(picked at runtime). See [`examples/wasm/`](examples/wasm/) for a drag-and-drop
+(picked at runtime), and a ready-made `<djvu-viewer>` web component
+([live demo](https://matyushkin.github.io/djvu-rs/dev/viewer/)). See [`examples/wasm/`](examples/wasm/) for a drag-and-drop
 demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
 (`wasm-lazy` feature); packaging details in [`docs/packaging.md`](docs/packaging.md).
 
 ## Status & limitations
 
-- **Library + CLI, not a viewer.** No GUI; the WASM demo is the closest thing.
+- **No desktop viewer.** The library and CLI have no GUI. For the web, the npm
+  package ships a ready-made [`<djvu-viewer>` element](examples/wasm/README.npm.md#ready-made-viewer-element)
+  ([live demo](https://matyushkin.github.io/djvu-rs/dev/viewer/)); it has no
+  search, thumbnails, outline panel or printing yet.
 - **Indirect DJVM mutation goes through two paths:** `from_indirect_resolved`
   (rebundles) or `IndirectRewritePlan` (rewrites component files; per-file
   atomic, not transactional). `DjVuDocumentMut::from_bytes` + `page_mut` on an
