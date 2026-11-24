@@ -203,8 +203,54 @@ Path('longer.djvu').write_bytes(djvu.merge([book, page]))
 - A page side is at most 65 535 pixels; a larger image raises `EncodeError`.
   An image object of another kind raises `TypeError`. A wrong size, shape,
   `quality` or dict raises `ValueError`.
-- Building a multi-page book in one call is not in Python yet. Encode the
-  pages one by one and join them with `merge`.
+
+## Create a book from images
+
+`encode_document` turns a sequence of images into one multi-page DjVu file.
+A letter shape that repeats across pages is stored once for the whole file,
+so a scanned book comes out smaller than the same pages joined with `merge`.
+
+```python
+from pathlib import Path
+from PIL import Image, ImageDraw
+
+def scan(number):
+    image = Image.new('RGB', (600, 400), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((50, 50, 550, 90), fill='black')
+    draw.text((60, 150), f'Page {number}', fill='black')
+    return image
+
+book = djvu.encode_document([scan(1), scan(2), scan(3)], dpi=300)
+Path('scans.djvu').write_bytes(book)
+
+# For a long book, load each image only when the encoder asks for it.
+class Scans:
+    def __len__(self):
+        return 3
+    def __getitem__(self, index):
+        return scan(index + 1)
+
+book = djvu.encode_document(Scans(), quality='lossless', thumbnails=True)
+```
+
+- Each page is a PIL image, a numpy `uint8` array or a `Pixmap`. Pages may
+  differ in size.
+- The encoder reads a sequence one page at a time by index. A generator has
+  no index, so it is read into a list first; all its images then stay in
+  memory.
+- The whole file has one profile: `'lossless'`, `'quality'` or `'archival'`
+  from the table above. `'auto'` (default) picks `'lossless'` when every page
+  is black and white and `'quality'` otherwise. For that it reads every page
+  twice; name a profile to read each page once.
+- `'photo'` is not available here. Encode photographs with `encode_page` and
+  join them with `merge`.
+- `shared_dict_pages` (default 2) is the number of pages a letter shape must
+  repeat on before the file stores it once.
+- `thumbnails=True` adds a small preview image to each page.
+- An exception raised while a page loads passes through unchanged. No pages,
+  or a wrong `quality`, `dpi` or `shared_dict_pages`, raises `ValueError`.
+- Add a text layer, bookmarks or metadata to the finished book with `Editor`.
 
 ## Type hints
 

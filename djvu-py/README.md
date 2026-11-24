@@ -16,6 +16,7 @@ the GIL.
 | Build a viewer (previews, viewport crops) | `page.render(quality='coarse')`, `page.render(region=(x, y, w, h))` |
 | Edit metadata, bookmarks, links, text layer | `djvu.Editor` — [editing](https://github.com/matyushkin/djvu-rs/blob/main/djvu-py/GUIDE.md#editing) |
 | Create a DjVu page from an image | `djvu.encode_page(image)` — [encoding](https://github.com/matyushkin/djvu-rs/blob/main/djvu-py/GUIDE.md#create-a-page-from-an-image) |
+| Create a multi-page DjVu book from images | `djvu.encode_document(images)` — [encoding a book](https://github.com/matyushkin/djvu-rs/blob/main/djvu-py/GUIDE.md#create-a-book-from-images) |
 
 ## Install
 
@@ -53,10 +54,6 @@ package ships a type stub and `TypedDict` shapes for every edit value.
 
 ## Status & limitations
 
-- **Encoding works one page at a time.** `encode_page` makes a single-page
-  file; join pages with `merge`. A multi-page encode with a shared shape
-  dictionary stays on the Rust crate / `djvu` CLI. See the
-  [guide](GUIDE.md#create-a-page-from-an-image).
 - **Bookmarks need a bundled multi-page file;** on a single-page file
   `set_bookmarks` raises `EditError`.
 - **Legacy `BM44` / `PM44` pages are read-only:** they render, but editing
