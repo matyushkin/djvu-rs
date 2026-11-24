@@ -13,7 +13,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push replaces the run of a pull request. Runs on `main` all
+  # finish: a cancelled run there turns the README badge to "failing".
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
