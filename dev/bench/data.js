@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795520019190,
+  "lastUpdate": 1795535264610,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -27514,6 +27514,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 41909000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4c9c70a555d2560fc26ae8d55e6eebadecfdccd9",
+          "message": "feat(wasm): ship a ready-made <djvu-viewer> web component (#1021)\n\n* feat(wasm): ship a ready-made <djvu-viewer> web component (#991)\n\nThe npm package gets a 'djvu-rs/viewer' entry: a custom element without a\nframework, with TypeScript declarations. A Web Worker decodes. The element\nscrolls pages in one column, keeps only the pages near the viewport decoded,\ndraws tiles at the current zoom (coarse first, then sharp), opens the file\nthrough HTTP Range requests with a fallback to a full download, and has a\nselectable text layer.\n\nWasmLazyDocument.page(index) returns a WasmLazyPage with tiles and text\nzones, so a lazily opened document can feed a tiled viewer.\n\nA new workflow runs a headless-browser smoke test and publishes the demo\nto gh-pages under dev/viewer/.\n\n* ci(viewer): install cargo-about for the package build",
+          "timestamp": "2026-11-24T17:23:40+02:00",
+          "tree_id": "22fbedf897b45ae1100722fc711fb4250ebc51c5",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/4c9c70a555d2560fc26ae8d55e6eebadecfdccd9"
+        },
+        "date": 1795535263002,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7415000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47122000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45133000,
             "range": "± 0",
             "unit": "ns/iter"
           }
