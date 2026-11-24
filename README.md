@@ -134,8 +134,9 @@ demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
 ## Status & limitations
 
 - **Library + CLI, not a viewer.** No GUI; the WASM demo is the closest thing.
-- **Python covers reading, export, metadata-level editing, and merge / split /
-  page removal.** Encoding stays on the Rust crate / CLI.
+- **Python covers reading, export, metadata-level editing, merge / split /
+  page removal, and single-page encoding.** Multi-page encoding with a shared
+  shape dictionary stays on the Rust crate / CLI.
 - **Indirect DJVM mutation goes through two paths:** `from_indirect_resolved`
   (rebundles) or `IndirectRewritePlan` (rewrites component files; per-file
   atomic, not transactional). `DjVuDocumentMut::from_bytes` + `page_mut` on an

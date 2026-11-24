@@ -158,6 +158,54 @@ Path('combined.djvu').write_bytes(combined)
 - An out-of-range page raises `PageIndexError`. An input that is not DjVu
   raises `DecodeError`.
 
+## Create a page from an image
+
+`encode_page` turns one image into a single-page DjVu file and returns it as
+`bytes`. The image is a PIL image, a numpy `uint8` array, a `Pixmap`, or raw
+RGBA bytes with `size=(width, height)`.
+
+```python
+from pathlib import Path
+from PIL import Image, ImageDraw
+
+image = Image.new('RGB', (600, 400), 'white')
+ImageDraw.Draw(image).rectangle((50, 50, 550, 90), fill='black')
+
+page = djvu.encode_page(image, dpi=300)
+Path('page.djvu').write_bytes(page)
+
+# A numpy array works the same way; `quality` picks the profile.
+import numpy as np
+photo = np.zeros((400, 600, 3), dtype=np.uint8)
+photo[..., 0] = np.linspace(0, 255, 600, dtype=np.uint8)
+Path('photo.djvu').write_bytes(djvu.encode_page(photo, quality='photo'))
+
+# Add the new page to a book.
+book = Path('book.djvu').read_bytes()
+Path('longer.djvu').write_bytes(djvu.merge([book, page]))
+```
+
+| `quality` | Use it for | What is written |
+|---|---|---|
+| `'auto'` (default) | Any image | One of the profiles below, picked from the image content |
+| `'lossless'` | Black-and-white scans | A black-and-white page; pixel-exact for a pure black-and-white image |
+| `'quality'` | Text over paper, in colour | A text mask, the ink colours and a background image |
+| `'archival'` | The same, with a denser background | The same layers as `'quality'` |
+| `'photo'` | Photographs and grayscale scans | One image, no text mask |
+
+- `'lossless'` on an image that has grays or colours first turns each pixel
+  black or white.
+- `'quality'` and `'archival'` treat dark areas as ink. Use `'photo'` for a
+  photograph.
+- `text_layer` and `metadata` take the dicts that `Editor.set_page_text_layer`
+  and `Editor.set_metadata` take. Zone rectangles are in pixels from the top
+  left corner of the image.
+- A page side is at most 65 535 pixels; a larger image raises `EncodeError`.
+  An image object of another kind raises `TypeError`. A wrong size, shape,
+  `quality` or dict raises `ValueError`.
+- Building a multi-page book in one call is not in Python yet. Encode the
+  pages one by one and join them with `merge`.
+
 ## Type hints
 
 The package ships a type stub (`djvu_rs.pyi`) and a `py.typed` marker, so
@@ -194,6 +242,7 @@ A shape is a dict with one key; `if "Rect" in shape:` narrows it to
 | `djvu_rs.IoError` | Filesystem failure from `Document.open` |
 | `djvu_rs.ExportError` | PDF / EPUB / CBZ / TIFF conversion failure |
 | `djvu_rs.EditError` | An edit, `Editor.save`, `merge` or `remove_pages` the file cannot take |
+| `djvu_rs.EncodeError` | An image `encode_page` cannot encode |
 | `djvu_rs.PageIndexError` | Out-of-range page index (a `djvu_rs.Error` and an `IndexError`) |
 
 ## Build from source
