@@ -16,11 +16,15 @@ use djvu_rs::annotation::{Annotation, MapArea};
 use djvu_rs::cbz::CbzOptions;
 use djvu_rs::djvm::{self, DjvmError, UnreachablePolicy};
 use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
-use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder, classify_content};
+use djvu_rs::djvu_encode::{
+    EncodeError as RustEncodeError, EncodeQuality, PageEncoder, classify_content,
+    encode_djvm_layered_shared_streaming,
+};
 use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
 use djvu_rs::djvu_render::{Quality, RenderRect, RenderRequest, UserRotation};
 use djvu_rs::editor::DocumentEditor;
 use djvu_rs::epub::EpubOptions;
+use djvu_rs::jb2_encode::encode_djvm_bundle_jb2_with_thumbnails;
 use djvu_rs::metadata::DjVuMetadata;
 use djvu_rs::pdf::PdfOptions;
 use djvu_rs::segment::{SegmentOptions, segment_page};
@@ -396,6 +400,115 @@ fn encode_page<'py>(
             profile => finish(PageEncoder::from_pixmap(&pixmap).with_quality(profile)),
         }
         .map_err(|e| EncodeError::new_err(format!("{e}")))
+    })?;
+    Ok(PyBytes::new(py, &encoded))
+}
+
+/// Encode a sequence of images as one multi-page DjVu file.
+///
+/// The pages are read one at a time by index, so a sequence that loads each
+/// image on access keeps the memory use low. Letter shapes that repeat on
+/// `shared_dict_pages` or more pages are stored once for the whole file.
+#[pyfunction]
+#[pyo3(signature = (pages, *, dpi=300, quality="auto", shared_dict_pages=2, thumbnails=false))]
+fn encode_document<'py>(
+    py: Python<'py>,
+    pages: &Bound<'py, PyAny>,
+    dpi: u16,
+    quality: &str,
+    shared_dict_pages: usize,
+    thumbnails: bool,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let requested = match quality {
+        "auto" => None,
+        "lossless" => Some(EncodeQuality::Lossless),
+        "quality" => Some(EncodeQuality::Quality),
+        "archival" => Some(EncodeQuality::Archival),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "quality must be 'auto', 'lossless', 'quality' or 'archival', not {other:?}"
+            )));
+        }
+    };
+    if dpi == 0 {
+        return Err(PyValueError::new_err("dpi must be at least 1"));
+    }
+    if shared_dict_pages == 0 {
+        return Err(PyValueError::new_err(
+            "shared_dict_pages must be at least 1",
+        ));
+    }
+    // A generator has no length and no index: read it into a list first.
+    let pages = if pages.hasattr("__len__")? && pages.hasattr("__getitem__")? {
+        pages.clone()
+    } else {
+        pages
+            .try_iter()
+            .map_err(|_| PyTypeError::new_err("pages must be a sequence or an iterable of images"))?
+            .collect::<PyResult<Vec<_>>>()?
+            .into_pyobject(py)?
+            .into_any()
+    };
+    let count = pages.len()?;
+    if count == 0 {
+        return Err(PyValueError::new_err("pages is empty"));
+    }
+    let pages = pages.unbind();
+
+    let encoded = py.detach(|| -> PyResult<Vec<u8>> {
+        let load = |index: usize| -> PyResult<djvu_rs::Pixmap> {
+            Python::attach(|py| image_to_rgba(&pages.bind(py).get_item(index)?, None))
+        };
+        // The file has one profile. `auto` looks at every page first: all
+        // black and white gives `lossless`, anything else gives `quality`.
+        let profile = match requested {
+            Some(profile) => profile,
+            None => {
+                let mut profile = EncodeQuality::Lossless;
+                for index in 0..count {
+                    if classify_content(&load(index)?) != EncodeQuality::Lossless {
+                        profile = EncodeQuality::Quality;
+                        break;
+                    }
+                }
+                profile
+            }
+        };
+        if profile == EncodeQuality::Lossless {
+            let masks = (0..count)
+                .map(|index| load(index).map(|pixmap| bilevel_mask(&pixmap)))
+                .collect::<PyResult<Vec<_>>>()?;
+            if masks.iter().any(|m| m.width > 0xFFFF || m.height > 0xFFFF) {
+                return Err(EncodeError::new_err(
+                    "a page side is larger than 65535 pixels",
+                ));
+            }
+            return Ok(encode_djvm_bundle_jb2_with_thumbnails(
+                &masks,
+                shared_dict_pages,
+                dpi,
+                thumbnails,
+            ));
+        }
+        encode_djvm_layered_shared_streaming(
+            count,
+            load,
+            profile,
+            dpi,
+            None,
+            shared_dict_pages,
+            thumbnails,
+            None,
+            None,
+        )
+        .map_err(|e| match e {
+            // A page that failed to load keeps its own Python exception.
+            RustEncodeError::PageSource(source) => match source.downcast::<PyErr>() {
+                Ok(err) => *err,
+                Err(other) => EncodeError::new_err(format!("{other}")),
+            },
+            other => EncodeError::new_err(format!("{other}")),
+        })
     })?;
     Ok(PyBytes::new(py, &encoded))
 }
@@ -1426,5 +1539,6 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(remove_pages, m)?)?;
     m.add_function(wrap_pyfunction!(encode_page, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_document, m)?)?;
     Ok(())
 }

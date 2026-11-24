@@ -8,7 +8,7 @@ left out take their defaults.
 
 from __future__ import annotations
 
-from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union, final
+from typing import Any, Iterable, List, Literal, Optional, Sequence, Tuple, TypedDict, Union, final
 
 __all__ = [
     "__version__",
@@ -26,6 +26,7 @@ __all__ = [
     "merge",
     "split",
     "remove_pages",
+    "encode_document",
     "encode_page",
     "Annotation",
     "AnnotationInput",
@@ -442,3 +443,26 @@ def encode_page(
     for a pure black-and-white image. Raises `EncodeError` when the image
     cannot be encoded, `TypeError` for an unsupported image object and
     `ValueError` for a wrong size, shape, `quality` or dict."""
+
+def encode_document(
+    pages: Iterable[Any],
+    *,
+    dpi: int = 300,
+    quality: Literal["auto", "lossless", "quality", "archival"] = "auto",
+    shared_dict_pages: int = 2,
+    thumbnails: bool = False,
+) -> bytes:
+    """Encode a sequence of images as one multi-page DjVu file.
+
+    Each page is a `Pixmap`, a PIL image or a numpy `uint8` array, as in
+    `encode_page`. A sequence is read one page at a time by index, so a
+    sequence that loads each image on access keeps the memory use low. A
+    generator is read into a list first. The whole file has one profile:
+    `quality='auto'` picks `'lossless'` when every page is black and white
+    and `'quality'` otherwise, and reads every page twice. A letter shape
+    that repeats on `shared_dict_pages` or more pages is stored once for the
+    file. `thumbnails=True` adds a small preview to each page. Raises
+    `EncodeError` when a page cannot be encoded, `TypeError` for an
+    unsupported image object and `ValueError` for no pages or a wrong
+    `quality`, `dpi` or `shared_dict_pages`. An exception raised while a
+    page loads passes through unchanged."""
