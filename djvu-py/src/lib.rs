@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyIndexError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::sync::PyOnceLock;
@@ -16,12 +16,14 @@ use djvu_rs::annotation::{Annotation, MapArea};
 use djvu_rs::cbz::CbzOptions;
 use djvu_rs::djvm::{self, DjvmError, UnreachablePolicy};
 use djvu_rs::djvu_document::{DjVuBookmark, DjVuDocument};
+use djvu_rs::djvu_encode::{EncodeQuality, PageEncoder, classify_content};
 use djvu_rs::djvu_mut::{DjVuDocumentMut, MutError};
 use djvu_rs::djvu_render::{Quality, RenderRect, RenderRequest, UserRotation};
 use djvu_rs::editor::DocumentEditor;
 use djvu_rs::epub::EpubOptions;
 use djvu_rs::metadata::DjVuMetadata;
 use djvu_rs::pdf::PdfOptions;
+use djvu_rs::segment::{SegmentOptions, segment_page};
 use djvu_rs::text::TextLayer;
 use djvu_rs::tiff_export::{TiffBilevelCompression, TiffMode, TiffOptions};
 
@@ -87,6 +89,12 @@ create_exception!(
     EditError,
     Error,
     "An edit was rejected, or the edited document could not be saved."
+);
+create_exception!(
+    djvu_rs,
+    EncodeError,
+    Error,
+    "An image could not be encoded to DjVu."
 );
 
 // ---- Document model as Python data ----------------------------------------
@@ -218,6 +226,178 @@ fn remove_pages<'py>(
             .map_err(djvm_error)
     })?;
     Ok(PyBytes::new(py, &rebuilt))
+}
+
+// ---- Encoding ----------------------------------------------------------------
+//
+// `encode_page` turns one image into a single-page DjVu file. The pixels are
+// copied out of the Python object first, so the codec work runs without the GIL.
+
+/// Copy `image` into an RGBA pixmap.
+///
+/// Accepts a `Pixmap`, a PIL image, a numpy array of `uint8` (H x W, H x W x 3
+/// or H x W x 4), or raw RGBA `bytes` together with `size`.
+fn image_to_rgba(image: &Bound<'_, PyAny>, size: Option<(u32, u32)>) -> PyResult<djvu_rs::Pixmap> {
+    let (width, height, channels, data): (u32, u32, usize, Vec<u8>) = if let Some((w, h)) = size {
+        let bytes: PyBackedBytes = image.extract().map_err(|_| {
+            PyTypeError::new_err("with `size`, the image must be RGBA bytes or a bytearray")
+        })?;
+        (w, h, 4, bytes.to_vec())
+    } else if let Ok(pixmap) = image.cast::<Pixmap>() {
+        let pixmap = pixmap.borrow();
+        (pixmap.width, pixmap.height, 4, pixmap.data.clone())
+    } else if image.hasattr("convert")? && image.hasattr("size")? {
+        // A PIL image, in any mode.
+        let rgba = image.call_method1("convert", ("RGBA",))?;
+        let (w, h): (u32, u32) = rgba.getattr("size")?.extract()?;
+        let bytes: PyBackedBytes = rgba.call_method0("tobytes")?.extract()?;
+        (w, h, 4, bytes.to_vec())
+    } else if image.hasattr("shape")? && image.hasattr("tobytes")? {
+        // A numpy array.
+        if image.getattr("dtype")?.str()?.to_string_lossy() != "uint8" {
+            return Err(PyTypeError::new_err("the array must have dtype uint8"));
+        }
+        let shape: Vec<usize> = image.getattr("shape")?.extract()?;
+        let (h, w, channels) = match shape[..] {
+            [h, w] => (h, w, 1),
+            [h, w, c @ (1 | 3 | 4)] => (h, w, c),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "the array must have the shape (H, W), (H, W, 3) or (H, W, 4), not {shape:?}"
+                )));
+            }
+        };
+        let too_large = || PyValueError::new_err("the array is too large");
+        let w = u32::try_from(w).map_err(|_| too_large())?;
+        let h = u32::try_from(h).map_err(|_| too_large())?;
+        let bytes: PyBackedBytes = image.call_method0("tobytes")?.extract()?;
+        (w, h, channels, bytes.to_vec())
+    } else if image.extract::<PyBackedBytes>().is_ok() {
+        return Err(PyTypeError::new_err(
+            "raw RGBA bytes need `size=(width, height)`",
+        ));
+    } else {
+        return Err(PyTypeError::new_err(
+            "the image must be a Pixmap, a PIL image, a numpy array, or RGBA bytes with `size`",
+        ));
+    };
+
+    if width == 0 || height == 0 {
+        return Err(PyValueError::new_err("the image is empty"));
+    }
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .filter(|n| n.checked_mul(channels) == Some(data.len()))
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "{} bytes do not match a {width} x {height} image with {channels} bytes per pixel",
+                data.len()
+            ))
+        })?;
+    let data = match channels {
+        4 => data,
+        3 => {
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for px in data.as_chunks::<3>().0 {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+            rgba
+        }
+        _ => {
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for &v in &data {
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+            rgba
+        }
+    };
+    Ok(djvu_rs::Pixmap {
+        width,
+        height,
+        data,
+    })
+}
+
+/// The black-and-white version of `pixmap` for the `lossless` profile.
+///
+/// An image that is already pure black and white maps pixel for pixel. Any
+/// other image goes through the page segmenter, as in the `djvu encode` CLI.
+fn bilevel_mask(pixmap: &djvu_rs::Pixmap) -> djvu_rs::Bitmap {
+    let is_black = |px: &[u8]| px[0] == 0 && px[1] == 0 && px[2] == 0;
+    let is_white = |px: &[u8]| px[0] == 255 && px[1] == 255 && px[2] == 255;
+    let pixels = pixmap.data.as_chunks::<4>().0;
+    if !pixels.iter().all(|px| is_black(px) || is_white(px)) {
+        return segment_page(pixmap, &SegmentOptions::default()).mask;
+    }
+    let mut mask = djvu_rs::Bitmap::new(pixmap.width, pixmap.height);
+    let width = pixmap.width as usize;
+    for (i, px) in pixels.iter().enumerate() {
+        if is_black(px) {
+            mask.set((i % width) as u32, (i / width) as u32, true);
+        }
+    }
+    mask
+}
+
+/// Encode one image as a single-page DjVu file.
+///
+/// `quality` is `'auto'` (pick a profile from the image content),
+/// `'lossless'` (black and white), `'quality'`, `'archival'` or `'photo'`.
+#[pyfunction]
+#[pyo3(signature = (image, *, size=None, dpi=300, quality="auto", text_layer=None, metadata=None))]
+fn encode_page<'py>(
+    py: Python<'py>,
+    image: &Bound<'py, PyAny>,
+    size: Option<(u32, u32)>,
+    dpi: u16,
+    quality: &str,
+    text_layer: Option<&Bound<'py, PyAny>>,
+    metadata: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let requested = match quality {
+        "auto" => None,
+        "lossless" => Some(EncodeQuality::Lossless),
+        "quality" => Some(EncodeQuality::Quality),
+        "archival" => Some(EncodeQuality::Archival),
+        "photo" => Some(EncodeQuality::Photo),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "quality must be 'auto', 'lossless', 'quality', 'archival' or 'photo', not {other:?}"
+            )));
+        }
+    };
+    if dpi == 0 {
+        return Err(PyValueError::new_err("dpi must be at least 1"));
+    }
+    let text_layer: Option<TextLayer> = text_layer
+        .map(|layer| from_python(layer, "text layer"))
+        .transpose()?;
+    let metadata: Option<DjVuMetadata> = metadata
+        .map(|metadata| from_python(metadata, "metadata"))
+        .transpose()?;
+    let pixmap = image_to_rgba(image, size)?;
+
+    let encoded = py.detach(|| {
+        let finish = |mut encoder: PageEncoder<'_>| {
+            encoder = encoder.with_dpi(dpi);
+            if let Some(layer) = text_layer.clone() {
+                encoder = encoder.with_text_layer(layer);
+            }
+            if let Some(metadata) = metadata.clone() {
+                encoder = encoder.with_metadata(metadata);
+            }
+            encoder.encode()
+        };
+        match requested.unwrap_or_else(|| classify_content(&pixmap)) {
+            EncodeQuality::Lossless => {
+                let mask = bilevel_mask(&pixmap);
+                finish(PageEncoder::from_bitmap(&mask))
+            }
+            profile => finish(PageEncoder::from_pixmap(&pixmap).with_quality(profile)),
+        }
+        .map_err(|e| EncodeError::new_err(format!("{e}")))
+    })?;
+    Ok(PyBytes::new(py, &encoded))
 }
 
 // ---- Export ------------------------------------------------------------------
@@ -1237,6 +1417,7 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ExportError", m.py().get_type::<ExportError>())?;
     m.add("PageIndexError", PageIndexError::type_object(m.py())?)?;
     m.add("EditError", m.py().get_type::<EditError>())?;
+    m.add("EncodeError", m.py().get_type::<EncodeError>())?;
     m.add_class::<Document>()?;
     m.add_class::<Page>()?;
     m.add_class::<Editor>()?;
@@ -1244,5 +1425,6 @@ fn djvu_rs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(merge, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(remove_pages, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_page, m)?)?;
     Ok(())
 }

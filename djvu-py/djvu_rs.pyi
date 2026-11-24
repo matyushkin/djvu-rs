@@ -18,6 +18,7 @@ __all__ = [
     "ExportError",
     "PageIndexError",
     "EditError",
+    "EncodeError",
     "Document",
     "Page",
     "Editor",
@@ -25,6 +26,7 @@ __all__ = [
     "merge",
     "split",
     "remove_pages",
+    "encode_page",
     "Annotation",
     "AnnotationInput",
     "Bookmark",
@@ -71,6 +73,9 @@ class PageIndexError(Error, IndexError):
 
 class EditError(Error):
     """An edit was rejected, or the edited document could not be saved."""
+
+class EncodeError(Error):
+    """An image could not be encoded to DjVu."""
 
 # ---- Document model as dicts ----------------------------------------------------
 
@@ -416,3 +421,24 @@ def remove_pages(document: Union[bytes, bytearray], indices: Sequence[int]) -> b
     dropped too. Raises `PageIndexError` for an out-of-range index and
     `EditError` for a repeated index, for removing every page, or for a
     single-page file."""
+
+# ---- Encoding -----------------------------------------------------------------------
+
+def encode_page(
+    image: Any,
+    *,
+    size: Optional[Tuple[int, int]] = None,
+    dpi: int = 300,
+    quality: Literal["auto", "lossless", "quality", "archival", "photo"] = "auto",
+    text_layer: Optional[TextLayerInput] = None,
+    metadata: Optional[MetadataInput] = None,
+) -> bytes:
+    """Encode one image as a single-page DjVu file.
+
+    `image` is a `Pixmap`, a PIL image, a numpy `uint8` array of the shape
+    (H, W), (H, W, 3) or (H, W, 4), or raw RGBA bytes together with
+    `size=(width, height)`. `quality='auto'` picks a profile from the image
+    content. `'lossless'` writes a black-and-white page and is pixel-exact
+    for a pure black-and-white image. Raises `EncodeError` when the image
+    cannot be encoded, `TypeError` for an unsupported image object and
+    `ValueError` for a wrong size, shape, `quality` or dict."""

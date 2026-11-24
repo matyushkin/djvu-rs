@@ -61,7 +61,7 @@ def test_stub_methods_match_the_classes():
 
 def test_stub_functions_match():
     stub = {
-        fn.name: [a.arg for a in fn.args.args]
+        fn.name: [a.arg for a in fn.args.args + fn.args.kwonlyargs]
         for fn in stub_tree().body
         if isinstance(fn, ast.FunctionDef)
     }
