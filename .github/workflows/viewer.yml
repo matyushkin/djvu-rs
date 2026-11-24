@@ -61,6 +61,12 @@ jobs:
         with:
           tool: wasm-pack@0.13.1
 
+      # The package build needs it for THIRD_PARTY_NOTICES when CI is set.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-about
+
       - name: Build dual wasm package
         run: OUT="$PWD/npm-pkg" make wasm
 
