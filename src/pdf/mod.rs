@@ -291,7 +291,7 @@ fn djvu_to_pdf_impl<W: std::io::Write>(
 
     // Reserve a font object ID
     let font_id = w.alloc_id(); // 3
-    w.add_obj(font_id, font_dict())?;
+    add_text_font(&mut w, font_id)?;
 
     let page_count = doc.page_count();
 
