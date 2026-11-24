@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795113272214,
+  "lastUpdate": 1795520019190,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -27466,6 +27466,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45610000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ea978d9eb1ac74ca0e0591f56285d2b79d0678a3",
+          "message": "fix(pdf): keep non-ASCII text in the text layer, outline titles and link URIs (#1017)\n\nThe invisible text layer used Helvetica with WinAnsiEncoding and replaced\nevery non-ASCII character with '?', so search and copy did not work for\nCyrillic, Greek or accented Latin books.\n\n- Text layer: a Type0 font with Identity-H, 2-byte codes and a ToUnicode\n  map. The embedded font program is a generated TrueType file with one\n  empty glyph. The /W array comes from the advance table that sizes the\n  text runs.\n- Outline titles: UTF-16BE hex strings with a byte-order mark.\n- Link and bookmark URIs: non-ASCII characters are percent-encoded.\n\nA character outside the Basic Multilingual Plane is written as U+FFFD.\n\nFixes #1012",
+          "timestamp": "2026-11-24T13:09:28+02:00",
+          "tree_id": "7451936d11b882395aa402298413792d96d7e17f",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/ea978d9eb1ac74ca0e0591f56285d2b79d0678a3"
+        },
+        "date": 1795520017405,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 127000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 6617000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 44777000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 41909000,
             "range": "± 0",
             "unit": "ns/iter"
           }
