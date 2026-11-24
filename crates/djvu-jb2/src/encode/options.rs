@@ -74,13 +74,13 @@ pub struct Jb2EncodeOptions {
     /// `None` (default) = lossless: no component is ever dropped,
     /// byte-identical to the shipped encoder.
     pub despeckle: Option<u32>,
-    /// Experiment-only cross-size record-6 refinement (#322). `None` (default)
+    /// **Experimental:** cross-size record-6 refinement (#322). `None` (default)
     /// keeps the shipped behavior — only record-1 (new) and record-7 (copy)
     /// are emitted. `Some(_)` enables the lossless cross-size refinement path
     /// described on [`CrossSizeRec6Probe`].
     #[cfg(feature = "experimental")]
     pub cross_size_rec6_probe: Option<CrossSizeRec6Probe>,
-    /// Experiment-only **same-size** record-6 refinement (Phase A1 of
+    /// **Experimental:** **same-size** record-6 refinement (Phase A1 of
     /// `docs/jb2-size-gap-plan.md`). `None` (default) keeps the shipped
     /// behavior. `Some(frac)` diverts a fresh CC that has a **same-bounding-box**
     /// dictionary twin within `pixel_count × frac` flipped pixels to a lossless
@@ -89,13 +89,13 @@ pub struct Jb2EncodeOptions {
     /// the refinement context stays pixel-aligned. Lossless (round-trip exact).
     #[cfg(feature = "experimental")]
     pub same_size_rec6: Option<f32>,
-    /// Experiment-only center-aligned refinement; see [`AlignedRefine`].
+    /// **Experimental:** center-aligned refinement; see [`AlignedRefine`].
     #[cfg(feature = "experimental")]
     pub aligned_refine: Option<AlignedRefine>,
 }
 
 impl Jb2EncodeOptions {
-    /// Sets [`cross_size_rec6_probe`](Self::cross_size_rec6_probe).
+    /// **Experimental:** Sets [`cross_size_rec6_probe`](Self::cross_size_rec6_probe).
     #[cfg(feature = "experimental")]
     #[must_use]
     pub fn with_cross_size_rec6_probe(
@@ -106,7 +106,7 @@ impl Jb2EncodeOptions {
         self
     }
 
-    /// Sets [`same_size_rec6`](Self::same_size_rec6).
+    /// **Experimental:** Sets [`same_size_rec6`](Self::same_size_rec6).
     #[cfg(feature = "experimental")]
     #[must_use]
     pub fn with_same_size_rec6(mut self, same_size_rec6: Option<f32>) -> Self {
@@ -114,7 +114,7 @@ impl Jb2EncodeOptions {
         self
     }
 
-    /// Sets [`aligned_refine`](Self::aligned_refine).
+    /// **Experimental:** Sets [`aligned_refine`](Self::aligned_refine).
     #[cfg(feature = "experimental")]
     #[must_use]
     pub fn with_aligned_refine(mut self, aligned_refine: Option<AlignedRefine>) -> Self {
@@ -208,7 +208,7 @@ impl Jb2EncodeOptions {
         }
     }
 
-    /// Auto-policy preset for [`same_size_rec6`](Self::same_size_rec6)
+    /// **Experimental:** Auto-policy preset for [`same_size_rec6`](Self::same_size_rec6)
     /// (JB2_AUTO_REC6, the Phase A3 follow-up of
     /// `docs/jb2-size-gap-plan.md`): runs the cheap, bounded
     /// [`probe_same_size_rec6_density`] against `bitmap` and enables

@@ -1,6 +1,6 @@
-//! C FFI bindings for djvu-rs.
+//! **Experimental:** C FFI bindings for djvu-rs, behind the `ffi` feature.
 //!
-//! Exposes a stable C API for opening DjVu documents, querying metadata,
+//! Exposes a C API for opening DjVu documents, querying metadata,
 //! rendering pages, and extracting text. All functions are `extern "C"`
 //! with no-panic guarantees via `catch_unwind`.
 //!

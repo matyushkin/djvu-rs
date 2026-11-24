@@ -1,5 +1,11 @@
 //! WebAssembly bindings for djvu-rs.
 //!
+//! **Not part of the Rust API.** These items exist to be compiled by
+//! `wasm-bindgen` into the npm package. Their contract is the npm package's
+//! TypeScript declarations, versioned with the npm package
+//! (`docs/api-compatibility.md` §1, "Binding tier"), so the module is
+//! `#[doc(hidden)]`.
+//!
 //! Exposes a minimal browser-friendly API via `wasm-bindgen`:
 //!
 //! - [`WasmDocument`] — parsed DjVu document, created from raw bytes.

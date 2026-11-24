@@ -5,6 +5,8 @@
 //! lifecycle (open → metadata → render → text → free) and the error / null
 //! paths directly through the C entry points.
 
+#![cfg(feature = "ffi")]
+
 use std::os::raw::c_char;
 
 use djvu_rs::ffi::{

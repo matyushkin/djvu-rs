@@ -26,6 +26,7 @@ use crate::djvu_document::{DjVuDocument, DjVuPage, DocError};
 use crate::djvu_render::{self, RenderError, RenderOptions};
 use crate::pixmap::Pixmap;
 
+#[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used only by the C ABI
 /// Error taxonomy shared by every foreign binding.
 ///
 /// The variant determines the stable integer [`code`](ForeignError::code) the
@@ -45,6 +46,7 @@ pub(crate) enum ForeignError {
 }
 
 impl ForeignError {
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used only by the C ABI
     /// The stable C ABI error code: `1` parse, `2` decode/render, `3` range.
     pub(crate) fn code(&self) -> i32 {
         match self {
@@ -75,6 +77,7 @@ impl core::fmt::Display for ForeignError {
     }
 }
 
+#[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used only by the C ABI
 /// Parse a DjVu document from bytes — the single entry point both bindings
 /// share.
 pub(crate) fn open(data: &[u8]) -> Result<DjVuDocument, ForeignError> {
@@ -86,11 +89,13 @@ pub(crate) fn page(doc: &DjVuDocument, index: usize) -> Result<&DjVuPage, Foreig
     doc.page(index).map_err(ForeignError::from_page_lookup)
 }
 
+#[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used only by the C ABI
 /// Width in pixels of page `index`.
 pub(crate) fn page_width(doc: &DjVuDocument, index: usize) -> Result<u32, ForeignError> {
     Ok(page(doc, index)?.width() as u32)
 }
 
+#[cfg_attr(not(feature = "ffi"), allow(dead_code))] // used only by the C ABI
 /// Height in pixels of page `index`.
 pub(crate) fn page_height(doc: &DjVuDocument, index: usize) -> Result<u32, ForeignError> {
     Ok(page(doc, index)?.height() as u32)

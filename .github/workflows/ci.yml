@@ -54,7 +54,7 @@ jobs:
       # default-features pass above no longer sees src/pdf.rs / src/epub.rs.
       # Lint them explicitly (cli implies pdf; epub added on top).
       - name: Clippy (all targets, cli+epub features)
-        run: cargo clippy --all-targets --features cli,epub -- -D warnings
+        run: cargo clippy --all-targets --features cli,epub,ffi -- -D warnings
 
       # #509 regression guard: writer/feature-owned crates (zip, zopfli,
       # jpeg-encoder, clap, …) must not leak into the default (decode-only)
@@ -70,7 +70,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: >-
           cargo doc --workspace --exclude djvu-py --no-deps
-          --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,experimental,iw44-probe
+          --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,experimental,iw44-probe,ffi
 
   # ── Tests ────────────────────────────────────────────────────────────────────
   # stable: every push + PRs, full suite on main
@@ -96,13 +96,13 @@ jobs:
       # main: every test in one pass — slow PDF/IW44 run in parallel with fast ones
       - name: Test (all)
         if: github.ref == 'refs/heads/main'
-        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async
+        run: cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async,ffi
 
       # PR / other branch: fast tests only (~440 tests, skip 200s PDF + large IW44)
       - name: Test (fast — skip slow PDF + IW44)
         if: github.ref != 'refs/heads/main'
         run: >
-          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async
+          cargo nextest run --profile ci --workspace --exclude djvu-py --features cli,tiff,async,ffi
           --filter-expr 'not (binary(pdf_conversion) or test(iw44_new_decode_big))'
 
       # nextest does not run doctests; this compiles every ```rust block in

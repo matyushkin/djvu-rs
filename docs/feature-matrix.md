@@ -27,7 +27,7 @@ full power-set explosion (which is intractable for ~20 features).
 | `--no-default-features` | `no_std` + `alloc` codec-only (host) | `Test (stable)` → *Build (no_std check)* |
 | `--no-default-features` (wasm32) | strict `no_std` link test | `wasm32 build check` |
 | *(default)* `std` | decode-only surface, no writer deps | `Lint`, `Test (stable)`, feature-hygiene |
-| `std,jpeg` | standalone JPEG decode | feature-matrix job |
+| `ffi` | experimental C ABI | feature-matrix job, `Lint (cli+epub+ffi)`, tests |
 | `pdf` | PDF writer (+ owns miniz_oxide/jpeg-encoder) | `Lint (cli+epub)`, feature-matrix job |
 | `epub` | EPUB writer (+ owns zip/flate2) | `Lint (cli+epub)`, feature-matrix job |
 | `cbz` | CBZ writer | feature-matrix job |
@@ -85,7 +85,7 @@ cargo check --features image
 cargo check --features tiff
 cargo check --features mmap
 cargo check --features parallel
-cargo check --features std,jpeg
+cargo check --features ffi
 
 # wasm targets
 cargo check --target wasm32-unknown-unknown --features wasm

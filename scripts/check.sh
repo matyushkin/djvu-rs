@@ -10,7 +10,7 @@ run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --check
 run cargo clippy --all-targets -- -D warnings
-run cargo clippy --all-targets --features cli,epub -- -D warnings  # pdf/epub writers (#509)
+run cargo clippy --all-targets --features cli,epub,ffi -- -D warnings  # pdf/epub writers (#509)
 run cargo clippy --all-targets --features tiff -- -D warnings      # tiff ingest/export tree, which djvu-py now compiles
 run cargo check --all-targets --features ocr-onnx           # ocr_onnx test tree; its CI job runs only on main push, so PRs never gate it
 run scripts/check_feature_hygiene.sh                        # decode-only default tree (#509)
@@ -18,7 +18,7 @@ run scripts/check_package_versions.sh                       # py/npm versions tr
 run cargo build --no-default-features                       # no_std (host)
 # Broken or private intra-doc links (mirrors the "Rustdoc" Lint step).
 run env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude djvu-py --no-deps \
-  --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,experimental,iw44-probe
+  --features cli,epub,tiff,async,parallel,mmap,serde,image,wasm-lazy,ocr-onnx,experimental,iw44-probe,ffi
 
 # wasm32 — the gate that catches no_std `vec!` / leaked `std::*` (#448 class).
 if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown'; then
@@ -38,9 +38,9 @@ fi
 
 # tests (nextest if present, else cargo test) — same scope as CI
 if command -v cargo-nextest >/dev/null 2>&1; then
-  run cargo nextest run --workspace --exclude djvu-py --features cli,tiff,async
+  run cargo nextest run --workspace --exclude djvu-py --features cli,tiff,async,ffi
 else
-  run cargo test --workspace --exclude djvu-py --features cli,tiff,async
+  run cargo test --workspace --exclude djvu-py --features cli,tiff,async,ffi
 fi
 
 # README doctests — nextest skips doctests; this compiles every rust block in

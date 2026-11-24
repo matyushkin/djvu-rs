@@ -445,7 +445,7 @@ pub mod ocr;
 #[cfg(feature = "ocr-tesseract")]
 pub mod ocr_tesseract;
 
-/// Experimental ONNX OCR helper via tract (requires `ocr-onnx` feature).
+/// **Experimental:** ONNX OCR helper via tract (requires the `ocr-onnx` feature).
 #[cfg(feature = "ocr-onnx")]
 pub mod ocr_onnx;
 
@@ -470,22 +470,26 @@ pub mod smmr;
 #[cfg(feature = "std")]
 pub mod chunk_encode;
 
+// Binding tier, not part of the Rust API: see the module docs.
 #[cfg(feature = "wasm")]
+#[doc(hidden)]
 pub mod wasm;
 
 /// Shared core for the foreign-language bindings (`ffi` and `wasm`).
 ///
 /// Owns the open→size→render→text flow and the `DjVuError`→`(code, message)`
 /// taxonomy; `ffi` and `wasm` are thin target-specific caps over it.
-#[cfg(feature = "std")]
+#[cfg(any(feature = "ffi", feature = "wasm"))]
 mod foreign;
 
-/// C FFI bindings for foreign language integration.
+/// **Experimental:** C FFI bindings, behind the `ffi` feature.
 ///
 /// Provides `extern "C"` functions with no-panic guarantees.
 /// Key functions: `djvu_doc_open`, `djvu_doc_free`, `djvu_page_render`,
-/// `djvu_pixmap_free`, `djvu_page_text`.
-#[cfg(feature = "std")]
+/// `djvu_pixmap_free`, `djvu_page_text`. No C header is shipped yet; the
+/// functions, their error codes and `DjvuError`'s layout may change in any
+/// release until the C API is declared stable.
+#[cfg(feature = "ffi")]
 #[allow(unsafe_code)]
 pub mod ffi;
 

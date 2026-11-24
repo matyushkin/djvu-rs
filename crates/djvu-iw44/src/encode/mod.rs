@@ -23,6 +23,7 @@ use crate::{
     prelim_flags_bucket,
 };
 
+/// **Experimental:** behind the `iw44-probe` feature; may change in any release.
 #[cfg(feature = "iw44-probe")]
 pub mod probe;
 
