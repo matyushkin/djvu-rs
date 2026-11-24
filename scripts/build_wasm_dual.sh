@@ -54,6 +54,7 @@ export let WasmPixmap;
 export let WasmRenderRequest;
 export let WasmLazyDocument;
 export let WasmLazyIndirectDocument;
+export let WasmLazyPage;
 export let initThreadPool;
 
 export function wasmSimd128Supported() {
@@ -82,6 +83,7 @@ export default async function init(input) {
   WasmRenderRequest = selectedModule.WasmRenderRequest;
   WasmLazyDocument = selectedModule.WasmLazyDocument;
   WasmLazyIndirectDocument = selectedModule.WasmLazyIndirectDocument;
+  WasmLazyPage = selectedModule.WasmLazyPage;
   initThreadPool = selectedModule.initThreadPool;
 
   return selectedModule;
@@ -107,6 +109,10 @@ elif [[ -n "${CI:-}" ]]; then
 else
   echo "warning: cargo-about not found; skipping THIRD_PARTY_NOTICES (cargo install cargo-about --locked --features cli)" >&2
 fi
+# The <djvu-viewer> web component: plain ES modules, no build step.
+mkdir -p "$OUT/viewer"
+cp "$ROOT/viewer/djvu-viewer.js" "$ROOT/viewer/djvu-viewer-worker.js" \
+  "$ROOT/viewer/djvu-viewer.d.ts" "$OUT/viewer/"
 cat >> "$OUT/djvu_rs.d.ts" <<'EOF_DTS'
 
 export function wasmSimd128Supported(): boolean;
@@ -130,6 +136,9 @@ pkg.files = [
   "simd128/djvu_rs.d.ts",
   "simd128/djvu_rs_bg.wasm",
   "simd128/djvu_rs_bg.wasm.d.ts",
+  "viewer/djvu-viewer.js",
+  "viewer/djvu-viewer-worker.js",
+  "viewer/djvu-viewer.d.ts",
 ];
 pkg.type = "module";
 // The crate's description and keywords cover the CLI/Python encoders and
@@ -146,8 +155,15 @@ pkg.exports = {
     import: "./djvu_rs.js",
     default: "./djvu_rs.js",
   },
+  "./viewer": {
+    types: "./viewer/djvu-viewer.d.ts",
+    import: "./viewer/djvu-viewer.js",
+    default: "./viewer/djvu-viewer.js",
+  },
+  "./viewer/worker": "./viewer/djvu-viewer-worker.js",
 };
-pkg.sideEffects = false;
+// Importing the viewer registers the <djvu-viewer> element.
+pkg.sideEffects = ["./viewer/djvu-viewer.js", "./viewer/djvu-viewer-worker.js"];
 console.log(`${JSON.stringify(pkg, null, 2)}\n`);
 EOF_NODE
 

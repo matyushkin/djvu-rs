@@ -479,6 +479,12 @@ jobs:
             --package npm-pkg \
             --fixture tests/fixtures/boy.djvu
 
+      - name: Viewer component smoke
+        run: |
+          node scripts/smoke_viewer_browser.mjs \
+            --package npm-pkg \
+            --fixture tests/fixtures/DjVu3Spec_bundled.djvu
+
   checksums-and-attest:
     name: Checksums + attestations
     needs: [resolve, python-sdist, python-wheels, python-smoke, npm-package, npm-smoke]

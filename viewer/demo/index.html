@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>djvu-viewer demo — djvu-rs</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif; color-scheme: light dark; }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 12px; }
+    header h1 { font-size: 16px; margin: 0; }
+    header code { font-size: 13px; }
+    #status { margin-left: auto; opacity: 0.75; }
+    djvu-viewer { flex: 1; height: auto; min-height: 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><a href="https://github.com/matyushkin/djvu-rs">djvu-rs</a>: <code>&lt;djvu-viewer&gt;</code></h1>
+    <label>Open a file: <input id="file" type="file" accept=".djvu,.djv"></label>
+    <span>or add <code>?src=URL</code> to the address</span>
+    <span id="status"></span>
+  </header>
+  <djvu-viewer id="viewer" controls></djvu-viewer>
+
+  <script type="module">
+    import "./pkg/viewer/djvu-viewer.js";
+
+    const viewer = document.getElementById("viewer");
+    const status = document.getElementById("status");
+    viewer.addEventListener("pagechange", (event) => {
+      status.textContent = `page ${event.detail.page} of ${event.detail.pageCount}`;
+    });
+    viewer.addEventListener("documenterror", (event) => {
+      status.textContent = event.detail.message;
+    });
+
+    // The sample is the DjVu 3 specification, 71 pages. The viewer fetches
+    // only the pages on screen when the server answers HTTP Range requests.
+    viewer.src = new URLSearchParams(location.search).get("src") ?? "sample.djvu";
+
+    let objectUrl;
+    document.getElementById("file").addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = URL.createObjectURL(file);
+      viewer.src = objectUrl;
+    });
+  </script>
+</body>
+</html>
