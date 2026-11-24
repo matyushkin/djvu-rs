@@ -154,10 +154,175 @@ pub(super) fn make_ccitt_stream(
     make_stream(&extra, bitstream)
 }
 
-/// Build a Type1 font dictionary for Helvetica (standard 14 font, no embedding needed).
-/// Returns object body bytes.
-pub(super) fn font_dict() -> Vec<u8> {
-    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec()
+/// Default glyph advance of the text-layer font, in 1/1000 em.
+const TEXT_FONT_DEFAULT_WIDTH: u32 = 556;
+
+/// Write the font used by the invisible text layer under object `font_id`.
+///
+/// The font is a composite (Type0) font with the `Identity-H` encoding: every
+/// code in a content stream is the 2-byte Unicode value of one character. A `/ToUnicode`
+/// map sends each code back to the same Unicode value, so search and copy work
+/// for any script (#1012). The text is never painted, so the embedded font
+/// program is a tiny TrueType file with a single empty glyph.
+pub(super) fn add_text_font<W: std::io::Write>(
+    w: &mut PdfWriter<W>,
+    font_id: usize,
+) -> Result<(), PdfError> {
+    let font_file = glyphless_ttf();
+    let file_id = w.add(make_deflate_stream(
+        &format!(" /Length1 {}", font_file.len()),
+        &font_file,
+    ))?;
+    let descriptor_id = w.add(
+        format!(
+            "<< /Type /FontDescriptor /FontName /GlyphLessFont /Flags 4              /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0              /CapHeight 1000 /StemV 80 /FontFile2 {file_id} 0 R >>"
+        )
+        .into_bytes(),
+    )?;
+    // Every code maps to glyph 0, the only glyph of the font.
+    let cid_to_gid_id = w.add(make_deflate_stream("", &vec![0u8; 0x2_0000]))?;
+    let cid_font_id = w.add(
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GlyphLessFont              /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>              /FontDescriptor {descriptor_id} 0 R /CIDToGIDMap {cid_to_gid_id} 0 R              /DW {TEXT_FONT_DEFAULT_WIDTH} /W [{}] >>",
+            text_font_widths()
+        )
+        .into_bytes(),
+    )?;
+    let to_unicode_id = w.add(make_deflate_stream("", to_unicode_cmap().as_bytes()))?;
+    w.add_obj(
+        font_id,
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /GlyphLessFont /Encoding /Identity-H              /DescendantFonts [{cid_font_id} 0 R] /ToUnicode {to_unicode_id} 0 R >>"
+        )
+        .into_bytes(),
+    )
+}
+
+/// Advance of one UTF-16 code unit in the text-layer font, in 1/1000 em.
+fn code_unit_width(unit: u32) -> u32 {
+    match char::from_u32(unit) {
+        Some(c) => (super::text::helvetica_advance(c) * 1000.0).round() as u32,
+        // A surrogate value: never written to a content stream.
+        None => TEXT_FONT_DEFAULT_WIDTH,
+    }
+}
+
+/// Body of the `/W` array: `first last width` for each run of code units whose
+/// width differs from the default. Built from the same table that sizes the
+/// text runs, so the viewer and the `Tz` scaling agree.
+pub(super) fn text_font_widths() -> String {
+    let mut out = String::new();
+    let mut unit = 0u32;
+    while unit <= 0xFFFF {
+        let width = code_unit_width(unit);
+        let mut last = unit;
+        while last < 0xFFFF && code_unit_width(last + 1) == width {
+            last += 1;
+        }
+        if width != TEXT_FONT_DEFAULT_WIDTH {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{unit} {last} {width}"));
+        }
+        unit = last + 1;
+    }
+    out
+}
+
+/// `/ToUnicode` map: every 2-byte code is its own UTF-16 code unit.
+///
+/// A range may not cross a change of the high byte, hence 256 ranges, and a
+/// block holds at most 100 ranges.
+pub(super) fn to_unicode_cmap() -> String {
+    let mut out = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    let mut high = 0u32;
+    while high < 256 {
+        let count = (256 - high).min(100);
+        out.push_str(&format!("{count} beginbfrange\n"));
+        for h in high..high + count {
+            out.push_str(&format!("<{h:02X}00> <{h:02X}FF> <{h:02X}00>\n"));
+        }
+        out.push_str("endbfrange\n");
+        high += count;
+    }
+    out.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    out
+}
+
+/// A minimal TrueType font: one empty glyph and the six tables PDF requires.
+pub(super) fn glyphless_ttf() -> Vec<u8> {
+    fn be16(values: &[u16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+    fn checksum(data: &[u8]) -> u32 {
+        data.chunks(4).fold(0u32, |sum, chunk| {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            sum.wrapping_add(u32::from_be_bytes(word))
+        })
+    }
+
+    let width = TEXT_FONT_DEFAULT_WIDTH as u16;
+    let mut head = Vec::new();
+    head.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // version
+    head.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // fontRevision
+    head.extend_from_slice(&0u32.to_be_bytes()); // checkSumAdjustment, patched below
+    head.extend_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magicNumber
+    head.extend_from_slice(&be16(&[0, 1000])); // flags, unitsPerEm
+    head.extend_from_slice(&[0u8; 16]); // created, modified
+    head.extend_from_slice(&be16(&[0, 0, 0, 0])); // bounding box
+    head.extend_from_slice(&be16(&[0, 8, 2, 0, 0])); // macStyle, lowestRecPPEM, direction, loca format, glyph format
+
+    // version, ascender, descender, lineGap, advanceWidthMax, three extents,
+    // caret rise/run/offset, four reserved, metricDataFormat, numberOfHMetrics
+    let mut hhea = 0x0001_0000u32.to_be_bytes().to_vec();
+    hhea.extend_from_slice(&be16(&[
+        1000, 0, 0, width, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+    ]));
+
+    // version, numGlyphs, then the limits; maxZones is 2 as the format asks.
+    let mut maxp = 0x0001_0000u32.to_be_bytes().to_vec();
+    maxp.extend_from_slice(&be16(&[1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]));
+
+    let tables: [(&[u8; 4], Vec<u8>); 6] = [
+        // One glyph: no contours, empty bounding box, no instructions.
+        (b"glyf", vec![0u8; 12]),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", be16(&[width, 0])),
+        // Short offsets, stored halved: the glyph spans bytes 0..12.
+        (b"loca", be16(&[0, 6])),
+        (b"maxp", maxp),
+    ];
+
+    let mut font = 0x0001_0000u32.to_be_bytes().to_vec();
+    // numTables, searchRange, entrySelector, rangeShift
+    font.extend_from_slice(&be16(&[6, 64, 2, 32]));
+    let mut offset = 12 + 16 * tables.len();
+    let mut head_offset = 0;
+    for (tag, data) in &tables {
+        if *tag == b"head" {
+            head_offset = offset;
+        }
+        font.extend_from_slice(*tag);
+        font.extend_from_slice(&checksum(data).to_be_bytes());
+        font.extend_from_slice(&(offset as u32).to_be_bytes());
+        font.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len().next_multiple_of(4);
+    }
+    for (_, data) in &tables {
+        font.extend_from_slice(data);
+        font.resize(font.len().next_multiple_of(4), 0);
+    }
+    let adjustment = 0xB1B0_AFBAu32.wrapping_sub(checksum(&font));
+    font[head_offset + 8..head_offset + 12].copy_from_slice(&adjustment.to_be_bytes());
+    font
 }
 
 /// Format one colour component for a PDF `rg` operator (0..255 → 0..1).
@@ -182,7 +347,10 @@ pub(super) fn fmt_pt(v: f32) -> String {
     }
 }
 
-/// Escape a string for PDF literal string syntax.
+/// Escape an ASCII string for PDF literal string syntax.
+///
+/// Callers go through [`pdf_text_string`], [`pdf_uri_string`] or
+/// [`pdf_cid_string`], which never pass a non-ASCII character here.
 pub(super) fn pdf_escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -191,13 +359,60 @@ pub(super) fn pdf_escape_string(s: &str) -> String {
             ')' => out.push_str("\\)"),
             '\\' => out.push_str("\\\\"),
             c if c.is_ascii() => out.push(c),
-            // Non-ASCII: encode as UTF-16BE with BOM for PDF
-            _ => {
-                // For simplicity, skip non-ASCII chars in text positioning
-                // (they'll still be in the document via the image)
-                out.push('?');
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
+/// Hex digits of `s` as big-endian UTF-16 code units.
+fn utf16be_hex(s: &str) -> String {
+    s.encode_utf16().map(|unit| format!("{unit:04X}")).collect()
+}
+
+/// A complete PDF text string object (outline titles and the like).
+///
+/// ASCII stays a literal string. Anything else becomes a UTF-16BE hex string
+/// with a byte-order mark, which keeps every Unicode character.
+pub(super) fn pdf_text_string(s: &str) -> String {
+    if s.is_ascii() {
+        format!("({})", pdf_escape_string(s))
+    } else {
+        format!("<FEFF{}>", utf16be_hex(s))
+    }
+}
+
+/// A complete PDF string object holding a URI.
+///
+/// A URI is 7-bit ASCII, so each non-ASCII character is percent-encoded as
+/// its UTF-8 bytes.
+pub(super) fn pdf_uri_string(s: &str) -> String {
+    let mut ascii = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            ascii.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for byte in c.encode_utf8(&mut buf).bytes() {
+                ascii.push_str(&format!("%{byte:02X}"));
             }
         }
     }
+    format!("({})", pdf_escape_string(&ascii))
+}
+
+/// A complete string operand for `Tj` in the text-layer font: one 2-byte code
+/// per character.
+///
+/// A character outside the Basic Multilingual Plane has no single 2-byte code,
+/// so it is written as U+FFFD (the replacement character).
+pub(super) fn pdf_cid_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 4 + 2);
+    out.push('<');
+    for c in s.chars() {
+        let code = if c.len_utf16() == 1 { c as u32 } else { 0xFFFD };
+        out.push_str(&format!("{code:04X}"));
+    }
+    out.push('>');
     out
 }

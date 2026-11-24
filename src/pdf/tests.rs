@@ -63,11 +63,45 @@ fn test_make_deflate_stream() {
 }
 
 #[test]
-fn test_font_dict() {
-    let d = font_dict();
-    let s = String::from_utf8_lossy(&d);
-    assert!(s.contains("/Type /Font"));
-    assert!(s.contains("/BaseFont /Helvetica"));
+fn text_font_is_a_composite_font_with_to_unicode() {
+    let mut buf = Vec::new();
+    let mut w = PdfWriter::new(&mut buf).unwrap();
+    let font_id = w.alloc_id();
+    add_text_font(&mut w, font_id).unwrap();
+    w.finish().unwrap();
+    let s = String::from_utf8_lossy(&buf);
+    assert!(s.contains("/Subtype /Type0"));
+    assert!(s.contains("/Encoding /Identity-H"));
+    assert!(s.contains("/ToUnicode"));
+    assert!(s.contains("/FontFile2"));
+}
+
+#[test]
+fn to_unicode_cmap_covers_every_high_byte() {
+    let cmap = to_unicode_cmap();
+    assert_eq!(cmap.matches("beginbfrange").count(), 3);
+    assert!(cmap.contains("<0400> <04FF> <0400>"));
+    assert!(cmap.contains("<FF00> <FFFF> <FF00>"));
+}
+
+#[test]
+fn text_font_widths_follow_the_advance_table() {
+    let widths = text_font_widths();
+    // Space, uppercase ASCII and CJK differ from the default; Cyrillic does not.
+    assert!(widths.contains("32 33 278"), "{widths}");
+    assert!(widths.contains("65 90 667"), "{widths}");
+    assert!(widths.contains("19968 42191 1000"), "{widths}");
+    assert!(!widths.contains("1040 "), "{widths}");
+}
+
+#[test]
+fn glyphless_ttf_has_a_valid_checksum() {
+    let font = glyphless_ttf();
+    assert_eq!(font.len() % 4, 0);
+    let sum = font.chunks(4).fold(0u32, |sum, c| {
+        sum.wrapping_add(u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+    });
+    assert_eq!(sum, 0xB1B0_AFBA);
 }
 
 #[test]
@@ -139,10 +173,10 @@ fn test_pdf_escape_special_chars() {
 }
 
 #[test]
-fn test_pdf_escape_non_ascii() {
-    // Non-ASCII chars should be replaced with ?
-    let result = pdf_escape_string("caf\u{00e9}");
-    assert_eq!(result, "caf?");
+fn test_pdf_text_string_non_ascii() {
+    // Non-ASCII text becomes UTF-16BE with a byte-order mark (#1012).
+    assert_eq!(pdf_text_string("caf\u{00e9}"), "<FEFF00630061006600E9>");
+    assert_eq!(pdf_text_string("a(b)"), "(a\\(b\\))");
 }
 
 #[test]
@@ -967,9 +1001,28 @@ fn pdf_escape_ascii_passthrough() {
 }
 
 #[test]
-fn pdf_escape_non_ascii_replaced_with_question_mark() {
-    let s = pdf_escape_string("über");
-    assert!(s.contains('?'), "non-ASCII must be replaced with ?: {s}");
+fn pdf_cid_string_keeps_non_ascii() {
+    assert_eq!(pdf_cid_string("Привіт"), "<041F04400438043204560442>");
+    // Outside the Basic Multilingual Plane: the replacement character.
+    assert_eq!(pdf_cid_string("a\u{1F600}"), "<0061FFFD>");
+}
+
+#[test]
+fn pdf_uri_string_percent_encodes_non_ascii() {
+    assert_eq!(pdf_uri_string("http://x/ї(1)"), "(http://x/%D1%97\\(1\\))");
+}
+
+#[test]
+fn emit_word_span_writes_cyrillic_as_codes() {
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 20,
+    };
+    let mut ops = String::new();
+    emit_word_span(&mut ops, &rect, "Привіт", 72.0, 720.0);
+    assert!(ops.contains("<041F04400438043204560442> Tj"), "{ops}");
 }
 
 // ── helvetica_advance ─────────────────────────────────────────────────────

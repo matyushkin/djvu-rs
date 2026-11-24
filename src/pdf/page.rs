@@ -192,13 +192,13 @@ pub(super) fn collect_link_annot_bodies(page: &DjVuPage, dpi: f32, pt_h: f32) ->
         .iter()
         .filter_map(|link| {
             let rect = shape_to_pdf_rect(&link.shape, dpi, pt_h)?;
-            let url_escaped = pdf_escape_string(&link.url);
+            let uri = pdf_uri_string(&link.url);
             Some(
                 format!(
                     "<< /Type /Annot /Subtype /Link\n\
                        /Rect [{:.4} {:.4} {:.4} {:.4}]\n\
                        /Border [0 0 0]\n\
-                       /A << /S /URI /URI ({url_escaped}) >> >>",
+                       /A << /S /URI /URI {uri} >> >>",
                     rect.0, rect.1, rect.2, rect.3
                 )
                 .into_bytes(),

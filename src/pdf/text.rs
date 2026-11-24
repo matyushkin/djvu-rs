@@ -55,11 +55,12 @@ pub(super) fn emit_word_span(ops: &mut String, rect: &Rect, text: &str, dpi: f32
     }
 
     // Horizontal scale to fit text width
-    let text_escaped = pdf_escape_string(text);
-    // Sum per-character advance widths using Helvetica metrics.
+    let text_operand = pdf_cid_string(text);
+    // Sum per-character advance widths; the font's `/W` array is built from
+    // the same table.
     let natural_width: f32 = text
         .chars()
-        .map(|c| helvetica_advance(c) * font_size)
+        .map(|c| text_advance(c) * font_size)
         .sum::<f32>()
         .max(0.01);
     let h_scale = if natural_width > 0.01 {
@@ -74,7 +75,19 @@ pub(super) fn emit_word_span(ops: &mut String, rect: &Rect, text: &str, dpi: f32
     if (h_scale - 100.0).abs() > 1.0 {
         ops.push_str(&format!("{h_scale:.2} Tz\n"));
     }
-    ops.push_str(&format!("({text_escaped}) Tj\n"));
+    ops.push_str(&format!("{text_operand} Tj\n"));
+}
+
+/// Advance of `c` in the text-layer font, as a fraction of em.
+///
+/// A character outside the Basic Multilingual Plane is written as U+FFFD,
+/// which has the font's default width.
+pub(super) fn text_advance(c: char) -> f32 {
+    if c.len_utf16() == 2 {
+        0.556
+    } else {
+        helvetica_advance(c)
+    }
 }
 
 /// Return the normalized advance width (fraction of em) for `c` in Helvetica.

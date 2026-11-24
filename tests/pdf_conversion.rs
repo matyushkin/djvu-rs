@@ -103,10 +103,10 @@ fn test_text_layer_invisible() {
         pdf_contains(&pdf, b"/Font <<"),
         "should have font resources for text"
     );
-    // 2. Helvetica font definition (separate object, not compressed)
+    // 2. Text-layer font definition (separate object, not compressed)
     assert!(
-        pdf_contains(&pdf, b"/BaseFont /Helvetica"),
-        "should use Helvetica font"
+        pdf_contains(&pdf, b"/Encoding /Identity-H"),
+        "should use the Identity-H text-layer font"
     );
 }
 

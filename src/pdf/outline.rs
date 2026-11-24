@@ -76,13 +76,11 @@ pub(super) fn build_outline_items<W: std::io::Write>(
             String::new()
         };
 
-        let title = pdf_escape_string(&bm.title);
+        let title = pdf_text_string(&bm.title);
         w.add_obj(
             item_id,
-            format!(
-                "<< /Title ({title}) /Parent {parent_id} 0 R{prev}{next}{dest}{children_str} >>"
-            )
-            .into_bytes(),
+            format!("<< /Title {title} /Parent {parent_id} 0 R{prev}{next}{dest}{children_str} >>")
+                .into_bytes(),
         )?;
     }
 
@@ -109,8 +107,8 @@ pub(super) fn resolve_bookmark_dest(url: &str, page_ids: &[usize]) -> String {
 
     // External URL or unparseable — use URI action
     if !url.is_empty() {
-        let escaped = pdf_escape_string(url);
-        return format!(" /A << /S /URI /URI ({escaped}) >>");
+        let uri = pdf_uri_string(url);
+        return format!(" /A << /S /URI /URI {uri} >>");
     }
 
     String::new()
