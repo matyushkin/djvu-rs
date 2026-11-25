@@ -112,7 +112,7 @@ impl ModelManifest {
     ///
     /// # Errors
     ///
-    /// [`OcrError::ManifestInvalid`] — never expected for the built-in
+    /// [`OcrError::InitFailed`] — never expected for the built-in
     /// manifest (its parse is locked by unit tests), but surfaced as a typed
     /// error rather than a panic.
     pub fn builtin() -> Result<Self, OcrError> {
@@ -128,7 +128,7 @@ impl ModelManifest {
     ///
     /// # Errors
     ///
-    /// [`OcrError::ManifestInvalid`] describing the offending line or the
+    /// [`OcrError::InitFailed`] describing the offending line or the
     /// incomplete entry.
     pub fn parse(text: &str) -> Result<Self, OcrError> {
         let mut entries = Vec::new();
@@ -147,13 +147,13 @@ impl ModelManifest {
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
-                return Err(OcrError::ManifestInvalid(format!(
+                return Err(manifest_invalid(format!(
                     "line {}: expected `key = value`, got: {line}",
                     idx + 1
                 )));
             };
             let Some(partial) = current.as_mut() else {
-                return Err(OcrError::ManifestInvalid(format!(
+                return Err(manifest_invalid(format!(
                     "line {}: key outside of a [[model]] table",
                     idx + 1
                 )));
@@ -164,7 +164,7 @@ impl ModelManifest {
             entries.push(partial.finish()?);
         }
         if entries.is_empty() {
-            return Err(OcrError::ManifestInvalid("no [[model]] entries".into()));
+            return Err(manifest_invalid("no [[model]] entries".into()));
         }
         Ok(Self { entries })
     }
@@ -219,6 +219,12 @@ struct PartialEntry {
     license: Option<String>,
 }
 
+/// A malformed manifest is a backend initialisation failure: the backend
+/// cannot know which model bytes to trust.
+fn manifest_invalid(detail: String) -> OcrError {
+    OcrError::InitFailed(format!("model manifest invalid: {detail}"))
+}
+
 impl PartialEntry {
     fn set(&mut self, key: &str, value: &str, line_no: usize) -> Result<(), OcrError> {
         let string = |v: &str| -> Result<String, OcrError> {
@@ -226,7 +232,7 @@ impl PartialEntry {
                 .and_then(|s| s.strip_suffix('"'))
                 .map(str::to_owned)
                 .ok_or_else(|| {
-                    OcrError::ManifestInvalid(format!(
+                    manifest_invalid(format!(
                         "line {line_no}: expected a double-quoted string for `{key}`"
                     ))
                 })
@@ -240,12 +246,12 @@ impl PartialEntry {
             "license" => self.license = Some(string(value)?),
             "size" => {
                 self.size = Some(value.parse().map_err(|_| {
-                    OcrError::ManifestInvalid(format!("line {line_no}: invalid integer `size`"))
+                    manifest_invalid(format!("line {line_no}: invalid integer `size`"))
                 })?)
             }
             "opset" => {
                 self.opset = Some(value.parse().map_err(|_| {
-                    OcrError::ManifestInvalid(format!("line {line_no}: invalid integer `opset`"))
+                    manifest_invalid(format!("line {line_no}: invalid integer `opset`"))
                 })?)
             }
             _ => {} // unknown keys: forward compatibility
@@ -255,33 +261,29 @@ impl PartialEntry {
 
     fn finish(self) -> Result<ModelEntry, OcrError> {
         let require = |field: &str, v: Option<String>| {
-            v.ok_or_else(|| {
-                OcrError::ManifestInvalid(format!("[[model]] entry is missing `{field}`"))
-            })
+            v.ok_or_else(|| manifest_invalid(format!("[[model]] entry is missing `{field}`")))
         };
         let sha256 = require("sha256", self.sha256)?;
         if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(OcrError::ManifestInvalid(format!(
+            return Err(manifest_invalid(format!(
                 "`sha256` must be 64 hex characters, got: {sha256}"
             )));
         }
         if sha256.bytes().any(|b| b.is_ascii_uppercase()) {
-            return Err(OcrError::ManifestInvalid(
-                "`sha256` must be lowercase hex".into(),
-            ));
+            return Err(manifest_invalid("`sha256` must be lowercase hex".into()));
         }
         Ok(ModelEntry {
             name: require("name", self.name)?,
             file: require("file", self.file)?,
             url: require("url", self.url)?,
             commit: require("commit", self.commit)?,
-            size: self.size.ok_or_else(|| {
-                OcrError::ManifestInvalid("[[model]] entry is missing `size`".into())
-            })?,
+            size: self
+                .size
+                .ok_or_else(|| manifest_invalid("[[model]] entry is missing `size`".into()))?,
             sha256,
-            opset: self.opset.ok_or_else(|| {
-                OcrError::ManifestInvalid("[[model]] entry is missing `opset`".into())
-            })?,
+            opset: self
+                .opset
+                .ok_or_else(|| manifest_invalid("[[model]] entry is missing `opset`".into()))?,
             license: require("license", self.license)?,
         })
     }
@@ -379,7 +381,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_malformed_manifests() {
-        assert!(ModelManifest::parse("").is_err());
+        assert!(matches!(
+            ModelManifest::parse(""),
+            Err(OcrError::InitFailed(m)) if m.contains("model manifest invalid")
+        ));
         assert!(ModelManifest::parse("name = \"orphan\"").is_err());
         assert!(ModelManifest::parse("[[model]]\nname = \"x\"").is_err());
         let bad_sha = r#"

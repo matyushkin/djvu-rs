@@ -35,7 +35,7 @@ pub enum RenderError {
     /// JPEG decode error (for BGjp/FGjp chunks).
     #[cfg(feature = "std")]
     #[error("JPEG decode error: {0}")]
-    Jpeg(String),
+    Jpeg(#[source] JpegError),
 
     /// Document-level error (e.g. page index out of range).
     #[error("document error: {0}")]
@@ -62,6 +62,58 @@ pub enum RenderError {
     /// layer.
     #[error("page has no background layer for a coarse render")]
     NoBackground,
+}
+
+/// A BGjp/FGjp chunk could not be decoded as JPEG.
+///
+/// Carried by [`RenderError::Jpeg`]. The type is opaque so that the JPEG
+/// decoder the crate uses stays out of the public API: its
+/// [`Display`](core::fmt::Display) gives the decoder's message, and
+/// [`source`](std::error::Error::source) returns the decoder's own error when
+/// there is one.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct JpegError {
+    message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+#[cfg(feature = "std")]
+impl JpegError {
+    /// A failure reported by the JPEG decoder.
+    pub(crate) fn decoder<E>(error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            message: error.to_string(),
+            source: Some(Box::new(error)),
+        }
+    }
+
+    /// A failure detected by this crate, with no underlying error.
+    pub(crate) fn msg(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for JpegError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for JpegError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
 }
 
 /// A refused output pixmap is a render-output limit.

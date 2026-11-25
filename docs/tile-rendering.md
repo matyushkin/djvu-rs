@@ -192,7 +192,7 @@ over unchanged; neither surface adds rendering logic of its own.
   sync entry point inside `tokio::task::spawn_blocking`. Cancel from any
   task via a clone of the token in `controls.cancel`; the render stops at
   its next checkpoint with `TileError::Cancelled` (wrapped in
-  `AsyncTileError::Tile`).
+  `AsyncRenderError::Tile`).
 - `render_tile_progressive_stream(page, opts, tile_size, col, row, cancel)`
   is the tile-granular counterpart of `render_progressive_stream`: one
   frame per quality step, coarsest first, each byte-identical to the

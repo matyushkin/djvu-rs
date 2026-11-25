@@ -35,12 +35,42 @@ pub enum CbzError {
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// PNG encoding error.
-    #[error("png encode error: {0}")]
-    Png(String),
+    /// The PNG encoder failed on a page image.
+    #[error("PNG encoding error: {0}")]
+    Encode(#[source] PngEncodeError),
     /// Export was cancelled by its observer.
     #[error("export cancelled")]
     Cancelled,
+}
+
+/// The PNG encoder failed on a page image.
+///
+/// Carried by [`CbzError::Encode`]. The type is opaque so that the PNG
+/// encoder the crate uses stays out of the public API: its
+/// [`Display`](std::fmt::Display) gives the encoder's message, and
+/// [`source`](std::error::Error::source) returns the encoder's own error.
+#[derive(Debug)]
+pub struct PngEncodeError(Box<dyn std::error::Error + Send + Sync + 'static>);
+
+impl PngEncodeError {
+    fn encoder<E>(error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self(Box::new(error))
+    }
+}
+
+impl std::fmt::Display for PngEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PngEncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
 }
 
 /// Options for CBZ conversion.
@@ -226,10 +256,10 @@ fn build_page_png(
         enc.set_depth(png::BitDepth::Eight);
         let mut writer = enc
             .write_header()
-            .map_err(|e| CbzError::Png(e.to_string()))?;
+            .map_err(|e| CbzError::Encode(PngEncodeError::encoder(e)))?;
         writer
             .write_image_data(rgb)
-            .map_err(|e| CbzError::Png(e.to_string()))?;
+            .map_err(|e| CbzError::Encode(PngEncodeError::encoder(e)))?;
     }
     Ok(buf)
 }
