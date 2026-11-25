@@ -474,7 +474,10 @@ give a form that compiles on both 0.46 and 1.0.
 **Surface outside the stable API.** The review of the public surface
 before the freeze ([`api-review-1.0.md`](api-review-1.0.md)) moves the C
 API behind an `ffi` feature, hides the `wasm` module and removes the empty
-`jpeg` feature. The sections at the end of this release say what to change.
+`jpeg` feature. It also gives every error that held a formatted message a
+typed source, replaces `djvu_rs::Error` with a djvu-rs-owned enum, and
+removes error variants that nothing returned. The sections at the end of
+this release say what to change.
 
 ### The `render_*` variants are removed
 
@@ -872,6 +875,397 @@ package. It is now `#[doc(hidden)]`, and its contract is the npm package's
 TypeScript declarations, not the Rust items. The JavaScript API does not
 change. Rust code that used `WasmDocument` and the other `Wasm*` types
 directly uses `DjVuDocument` and `RenderRequest` instead.
+
+### `djvu_rs::Error` is a typed enum owned by djvu-rs
+
+`djvu_rs::Error` (the error of `Document` and `Page`) was an alias of
+`djvu_iff::LegacyError`, and every failure arrived as
+`FormatError(String)`. It is now a `#[non_exhaustive]` enum defined in
+djvu-rs that carries the typed error of the layer that failed:
+
+| Variant | When |
+|---------|------|
+| `Io(std::io::Error)` | reading the file or reader failed |
+| `Doc(DocError)` | parsing the document or decoding a page component failed |
+| `Render(RenderError)` | rendering failed |
+| `NoThumbnail { page }` | `ThumbnailStrategy::Th44Only` on a page without `TH44` |
+
+`Doc` and `Render` are transparent: `Display` and `source()` are those of
+the wrapped error, so messages lose the old `format error: ` prefix. The
+type is no longer `Clone`/`PartialEq`/`Eq`. A configured resource limit is
+reachable as a value instead of a string, through `Error::resource_limit()`.
+Code that only uses the type, `?` or `Display` keeps compiling.
+
+Before:
+
+```rust,ignore
+match doc.page(0) {
+    Err(djvu_rs::Error::FormatError(msg)) => eprintln!("{msg}"),
+    _ => {}
+}
+```
+
+After:
+
+```rust
+use djvu_rs::{DocError, Document, Error};
+
+fn pages(path: &str) -> Result<usize, Error> {
+    Ok(Document::open(path)?.page_count())
+}
+
+match pages("no-such-file.djvu") {
+    Ok(n) => println!("{n} pages"),
+    Err(Error::Io(e)) => eprintln!("cannot read: {e}"),
+    Err(Error::Doc(DocError::PageOutOfRange { index, count })) => {
+        eprintln!("page {index} of {count}")
+    }
+    Err(e) if e.resource_limit().is_some() => eprintln!("over budget: {e}"),
+    Err(e) => eprintln!("{e}"),
+}
+```
+
+`djvu_rs::error::Error` and `djvu_rs::error::LegacyError` are removed.
+
+### `djvu_iff::LegacyError` is removed; `iff::parse` returns `IffError`
+
+The owned chunk-tree parser `djvu_iff::parse` (also `djvu_rs::iff::parse`)
+now reports `IffError`, the same error as `parse_form`. `LegacyError`, its
+alias `djvu_iff::Error`, and its never-constructed `InvalidMagic` variant
+are gone.
+
+| Was (`LegacyError`) | Is (`IffError`) |
+|---------------------|-----------------|
+| `UnexpectedEof` (input shorter than 4 bytes) | `TooShort` |
+| `UnexpectedEof` (chunk header cut off) | `Truncated` |
+| `UnexpectedEof` (payload past the end of the input) | `ChunkTooLong { id, claimed, available }` |
+| `InvalidLength` (`FORM` shorter than its type) | `Truncated` |
+| `InvalidLength` (nesting deeper than 64) | `DepthLimitExceeded { max: 64 }` |
+
+```rust
+use djvu_rs::iff::{self, IffError};
+
+assert!(matches!(iff::parse(b"AT"), Err(IffError::TooShort)));
+```
+
+### `IffError::UnknownFormType` is removed
+
+No parser ever returned it. A `match` on `IffError` drops the arm.
+
+### `DjVuError` and `fgbz_encode::decode_fgbz` are removed
+
+`DjVuError` was returned only by `fgbz_encode::decode_fgbz`, a decoder in
+an encoder module. The function is now test-only inside the crate and
+`DjVuError` is gone; the typed errors of the document model are
+`DocError` and `RenderError`. To read the palette size of an FGbz chunk,
+read its header (byte 0: version, bit 7 = an index table follows; bytes
+1–2: big-endian palette size):
+
+```rust
+fn fgbz_palette_len(fgbz: &[u8]) -> Option<usize> {
+    let n = fgbz.get(1..3)?;
+    Some(u16::from_be_bytes([n[0], n[1]]) as usize)
+}
+assert_eq!(fgbz_palette_len(&[0x00, 0x00, 0x02]), Some(2));
+```
+
+### `DocError` keeps the sources it used to stringify
+
+- `DocError::Smmr(String)` is `DocError::Smmr(SmmrError)`; `SmmrError`
+  now implements `std::error::Error`.
+- `DocError::IndirectResolve(String)` is
+  `DocError::IndirectResolve { name, source: Box<DocError> }`: the
+  component name plus the error the resolver returned (a `DocError::Io`
+  from `parse_from_dir`).
+- `DocError::InvalidUtf8` is removed; nothing produced it since #524.
+
+A `parse_with_resolver` callback that returned
+`DocError::IndirectResolve(name)` for a missing component returns any other
+`DocError`; the parser wraps it with the name:
+
+```rust
+use djvu_rs::DocError;
+
+let resolver = |name: &str| -> Result<Vec<u8>, DocError> {
+    std::fs::read(name).map_err(DocError::Io)
+};
+# let _ = resolver;
+```
+
+### `ComponentResolveError::Failed` carries a typed source and is not `Clone`
+
+`Failed { component, reason: String }` is
+`Failed { component, source: Box<dyn Error + Send + Sync> }`. Any error
+converts with `.into()`, and so does a message:
+
+```rust
+use djvu_rs::{ComponentId, ComponentResolveError};
+
+fn fetch(component: &ComponentId) -> Result<Vec<u8>, ComponentResolveError> {
+    std::fs::read(&component.name).map_err(|e| ComponentResolveError::Failed {
+        component: component.clone(),
+        source: e.into(), // was: reason: e.to_string()
+    })
+}
+# let _ = fetch;
+```
+
+`ComponentResolveError` no longer derives `Clone`.
+
+### `MutError` variants are named after what they hold
+
+| Was | Is |
+|-----|----|
+| `MutError::Parse(LegacyError)` | `MutError::Iff(IffError)` |
+| `MutError::InfoParse(IffError)` | `MutError::Iff(IffError)` |
+| `MutError::SaveIo(io::Error)` | `MutError::Io(io::Error)` |
+| `MutError::RewriteIo { name, message: String }` | `MutError::RewriteIo { name, source: io::Error }` |
+
+`From<IffError>` and `From<io::Error>` stay; they now land in variants
+whose names say what they carry.
+
+### `chunk_encode::EncodeError` is now `ChunkEncodeError`
+
+It shared a name with `djvu_encode::EncodeError`. The variants and
+messages are unchanged.
+
+```rust
+use djvu_rs::chunk_encode::ChunkEncodeError;
+
+fn describe(e: &ChunkEncodeError) -> String {
+    match e {
+        ChunkEncodeError::PaletteOverflow { found } => format!("{found} colours"),
+        other => other.to_string(),
+    }
+}
+```
+
+### `djvu_encode::EncodeError` has typed variants
+
+`Unsupported` used to carry every failure. It now means only a missing
+encoder capability: a nonzero JB2 `lossy_threshold` on the streaming
+bundle path. The other failures have their own variants:
+
+- `InvalidProfile { quality, .. }`: the input kind does not fit the
+  profile or option.
+- `DimensionsTooLarge { width, height }`: a page side is over 65 535 px.
+- `MaskSizeMismatch { page, .. }` and `MaskCountMismatch { masks, pages }`.
+- `Djvm(DjvmError)`: the bundle is over the DIRM or 4 GiB limit, with the
+  original error as its source.
+
+```rust
+use djvu_rs::Pixmap;
+use djvu_rs::djvu_encode::{EncodeError, EncodeQuality, PageEncoder};
+
+let pixmap = Pixmap::white(70_000, 1);
+match PageEncoder::from_pixmap(&pixmap)
+    .with_quality(EncodeQuality::Quality)
+    .encode()
+{
+    Err(EncodeError::DimensionsTooLarge { width, height }) => {
+        assert_eq!((width, height), (70_000, 1))
+    }
+    other => panic!("unexpected: {other:?}"),
+}
+```
+
+### Component graph: `GraphError` for parse failures, `GraphIssue` for findings
+
+`ComponentGraph::validate` returns `Vec<GraphIssue>`. `GraphIssue` keeps
+`MissingTarget`, `DuplicateIdentity`, `InvalidComponentType` and `Cycle`,
+and adds `LimitExceeded`. `GraphError` is only what
+`ComponentGraph::parse` returns: `Iff(IffError)`, `NotBundled`,
+`Malformed { reason, .. }` or `LimitExceeded`. It implements
+`std::error::Error` and is no longer `Clone`, `PartialEq` or `Eq`.
+
+```rust
+use djvu_rs::{ComponentGraph, GraphError, GraphIssue};
+
+fn report(bytes: &[u8]) {
+    match ComponentGraph::parse(bytes) {
+        Ok(graph) => {
+            for issue in graph.validate() {
+                if let GraphIssue::MissingTarget { source, target } = &issue {
+                    eprintln!("{source} includes missing {target}");
+                }
+            }
+        }
+        Err(GraphError::NotBundled) => eprintln!("not a bundled document"),
+        Err(error) => eprintln!("{error}"),
+    }
+}
+```
+
+### `DjvmError::ComponentGraph` carries the `GraphError`
+
+It used to hold a `{:?}` string. It now holds the `GraphError`, which is
+also its `source()`.
+
+```rust
+fn graph_failure(e: &djvu_rs::djvm::DjvmError) -> Option<&djvu_rs::GraphError> {
+    match e {
+        djvu_rs::djvm::DjvmError::ComponentGraph(inner) => Some(inner),
+        _ => None,
+    }
+}
+```
+
+### `OptimizeError`: `Parse` and `Rewrite`, a typed `Verification`
+
+- `From<MutError> for OptimizeError` is removed.
+- `Parse` now means that the input did not parse.
+- A failure to apply or serialise a rewrite is the new `Rewrite`.
+- `Verification(String)` is now `Verification { reason: VerificationFailure, .. }`.
+  When the output does not parse again, the `MutError` is the `source()`.
+  The Display text is unchanged.
+
+```rust
+use djvu_rs::optimizer::{OptimizeError, VerificationFailure};
+
+fn stage(e: &OptimizeError) -> &'static str {
+    match e {
+        OptimizeError::Parse(_) => "input does not parse",
+        OptimizeError::Rewrite(_) => "rewrite failed",
+        OptimizeError::Verification {
+            reason: VerificationFailure::PageCountChanged { .. },
+            ..
+        } => "page count changed",
+        OptimizeError::Verification { .. } => "output does not verify",
+        _ => "other",
+    }
+}
+
+fn open(bytes: &[u8]) -> Result<djvu_rs::djvu_mut::DjVuDocumentMut, OptimizeError> {
+    djvu_rs::djvu_mut::DjVuDocumentMut::from_bytes(bytes).map_err(OptimizeError::Parse)
+}
+```
+
+### Errors that carried a `String` now carry a typed error
+
+Five error variants held a formatted message and dropped the error behind
+it. They now hold a djvu-rs type whose `Display` gives the message and
+whose `std::error::Error::source` returns the underlying error. The JPEG
+decoder and the TIFF and PNG encoders stay out of the public API.
+
+| Before | After |
+|--------|-------|
+| `djvu_render::RenderError::Jpeg(String)` | `RenderError::Jpeg(djvu_render::JpegError)` |
+| `tiff_export::TiffError::Encode(String)` | `TiffError::Encode(tiff_export::TiffEncodeError)`, and `TiffError::Io(std::io::Error)` for a failed write to the output |
+| `cbz::CbzError::Png(String)` | `CbzError::Encode(cbz::PngEncodeError)` |
+| `export_async::AsyncPdfError::Join(String)`, `AsyncDjvmError::Join(String)` | `Join(djvu_async::JoinFailure)` |
+| `djvu_async::AsyncRenderError::Join(String)`, `AsyncTileError::Join(String)` | `AsyncRenderError::Join(djvu_async::JoinFailure)` |
+
+A write to the TIFF output that failed was `TiffError::Encode`, with the
+I/O message in the string. It is now `TiffError::Io`, which keeps the
+`std::io::Error` and its `kind()`.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::tiff_export::TiffError;
+
+fn describe(error: &TiffError) -> String {
+    match error {
+        TiffError::Encode(message) => message.clone(),
+        _ => error.to_string(),
+    }
+}
+```
+
+After:
+
+```rust
+# #[cfg(feature = "tiff")]
+# mod after {
+use djvu_rs::tiff_export::TiffError;
+
+pub fn describe(error: &TiffError) -> String {
+    match error {
+        TiffError::Io(io) => format!("could not write the TIFF: {io}"),
+        TiffError::Encode(encode) => encode.to_string(),
+        _ => error.to_string(),
+    }
+}
+# }
+```
+
+For the other variants, call `to_string()` on the new payload where the
+code read the `String`.
+
+`JoinFailure` replaces the message of a blocking task that panicked or was
+cancelled. Ask it which with `is_panic()` and `is_cancelled()`:
+
+```rust
+# #[cfg(feature = "async")]
+# mod after {
+use djvu_rs::djvu_async::AsyncRenderError;
+
+pub fn task_panicked(error: &AsyncRenderError) -> bool {
+    matches!(error, AsyncRenderError::Join(failure) if failure.is_panic())
+}
+# }
+```
+
+### `AsyncTileError` is merged into `AsyncRenderError`
+
+`djvu_async::AsyncTileError` and `AsyncRenderError` differed in one
+variant. `render_tile_async` and `render_tile_progressive_stream` now return
+`AsyncRenderError`, which gained the variant `Tile(TileError)`. Replace the
+type name; the variant name `Tile` stays.
+
+Before:
+
+```rust,compile_fail
+use djvu_rs::djvu_async::AsyncTileError;
+use djvu_rs::djvu_tile::TileError;
+
+fn was_cancelled(error: &AsyncTileError) -> bool {
+    matches!(error, AsyncTileError::Tile(TileError::Cancelled))
+}
+```
+
+After:
+
+```rust
+# #[cfg(feature = "async")]
+# mod after {
+use djvu_rs::djvu_async::AsyncRenderError;
+use djvu_rs::djvu_tile::TileError;
+
+pub fn was_cancelled(error: &AsyncRenderError) -> bool {
+    matches!(error, AsyncRenderError::Tile(TileError::Cancelled))
+}
+# }
+```
+
+### Error variants that nothing returned are removed
+
+No code path built these variants, so a `match` arm on them never ran.
+Delete the arm.
+
+- `djvu_bzz::BzzError::ZpError` and `BzzError::InvalidBwtIndex`. A ZP
+  coder that cannot start is reported as `BzzError::TooShort`, as before.
+- `text_serialize::TextSerializeError::Text`. A text layer that does not
+  decode arrives as `TextSerializeError::Doc(DocError::Text(_))`, as
+  before.
+- `text_serialize::TextSerializeError::Fmt`. `to_hocr` and `to_alto`
+  format into a `String`, which cannot fail. `TextSerializeError` now has
+  one variant, `Doc`.
+
+### `OcrError::ManifestInvalid` is removed
+
+The `ocr-onnx` model manifest is built into the crate, and tests cover its
+parse. A malformed manifest now returns `OcrError::InitFailed`, with a
+message that starts with `model manifest invalid:`.
+`OcrError::ModelVerificationFailed { name, detail }` stays: any backend
+that checks its model files returns it.
+
+### `PixmapError` is no longer `Copy` or `Hash`
+
+`djvu_rs::PixmapError` (from `djvu-pixmap`) keeps `Clone`, `PartialEq` and
+`Eq`. Where the code copied the error out of a reference, call `.clone()`.
+A later 1.x release can then add a variant that holds data which is not
+`Copy`.
 
 ## Fixes that change results
 

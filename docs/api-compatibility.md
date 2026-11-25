@@ -205,7 +205,7 @@ there, so the release PR stays red until the section exists.
 
 #### 1.0.0 — the deprecated surface is removed and the growing types are marked
 
-Three changes, all described in
+Four changes, all described in
 [`docs/migration.md`](migration.md#100):
 
 - Every item with a deprecation note is removed: the `render_*` variants
@@ -222,6 +222,11 @@ Three changes, all described in
   ([`api-review-1.0.md`](api-review-1.0.md)) moves the C API behind the new
   experimental `ffi` feature, hides the `wasm` module (binding tier) and
   removes the `jpeg` feature, which enabled nothing.
+- Errors (review group B): `djvu_rs::Error` becomes a djvu-rs-owned enum
+  in place of `djvu_iff::LegacyError`, which is removed with `DjVuError`;
+  every error that held a formatted message holds a typed source; variants
+  that nothing returned are removed; `chunk_encode::EncodeError` is renamed
+  `ChunkEncodeError`, and component-graph findings move to `GraphIssue`.
 
 #### 0.34.0 — the optimizer's request and report types became extensible
 
