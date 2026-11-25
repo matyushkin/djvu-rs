@@ -27,11 +27,7 @@
 //! the caller explicitly calls `thumbnail()` (which invokes the IW44 decoder).
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use crate::{
     annotation::{Annotation, AnnotationError, MapArea},

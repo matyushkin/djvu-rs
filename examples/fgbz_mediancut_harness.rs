@@ -240,8 +240,9 @@ fn main() {
         let fgbz_len = cand_page.raw_chunk(b"FGbz").map_or(0, |d| d.len());
         let palette_len = cand_page
             .raw_chunk(b"FGbz")
-            .and_then(|d| djvu_rs::fgbz_encode::decode_fgbz(d).ok())
-            .map_or(0, |(p, _)| p.len());
+            // FGbz bytes 1..3: big-endian u16 palette size.
+            .and_then(|d| d.get(1..3))
+            .map_or(0, |n| u16::from_be_bytes([n[0], n[1]]) as usize);
 
         let rendered = djvu_rs::djvu_render::render_pixmap(
             cand_page,

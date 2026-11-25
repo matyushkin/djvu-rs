@@ -242,9 +242,14 @@ fn encode_quality_profile_emits_fgbz_for_colored_ink() {
     let doc = djvu_rs::djvu_document::DjVuDocument::parse(&bytes).unwrap();
     let page = doc.page(0).unwrap();
     let fgbz = page.raw_chunk(b"FGbz").expect("FGbz");
-    let (palette, indices) = djvu_rs::fgbz_encode::decode_fgbz(fgbz).unwrap();
-    assert!(palette.len() >= 2);
-    assert!(indices.len() >= 2);
+    // FGbz header: version (bit 7 = index table follows), u16 BE palette
+    // size, the BGR triples, then a u24 BE index count.
+    let palette_len = u16::from_be_bytes([fgbz[1], fgbz[2]]) as usize;
+    assert!(palette_len >= 2);
+    assert_eq!(fgbz[0] & 0x80, 0x80, "FGbz must carry an index table");
+    let idx = 3 + palette_len * 3;
+    let index_count = u32::from_be_bytes([0, fgbz[idx], fgbz[idx + 1], fgbz[idx + 2]]);
+    assert!(index_count >= 2);
 }
 
 #[test]

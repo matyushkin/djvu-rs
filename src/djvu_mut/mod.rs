@@ -58,7 +58,7 @@ use crate::chunk_encode::{ChunkEncoder, NavmChunk};
 use crate::dirm::is_page_form;
 use crate::dirm::{BUNDLED_FLAG, DirmComponent, DirmComponentKind, DirmPayload};
 use crate::djvu_document::DjVuBookmark;
-use crate::error::{IffError, LegacyError};
+use crate::error::IffError;
 use crate::iff::{self, Chunk, DjvuFile, parse_form_body};
 use crate::info::PageInfo;
 use crate::metadata::{DjVuMetadata, encode_metadata};
@@ -69,9 +69,11 @@ use crate::text_encode::encode_text_layer;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MutError {
-    /// IFF parse error during [`DjVuDocumentMut::from_bytes`].
-    #[error("IFF parse error: {0}")]
-    Parse(#[from] LegacyError),
+    /// The IFF container did not parse: the input of
+    /// [`DjVuDocumentMut::from_bytes`], an index file, or a page's `INFO`
+    /// chunk.
+    #[error("IFF error: {0}")]
+    Iff(#[from] IffError),
 
     /// The path indexed past the end of a FORM's children.
     #[error("chunk path out of range: index {index} at depth {depth} (form has {len} children)")]
@@ -111,10 +113,6 @@ pub enum MutError {
     /// payload depends on page height (currently `set_text_layer`).
     #[error("page has no INFO chunk; cannot encode height-dependent chunk")]
     MissingPageInfo,
-
-    /// The page's INFO chunk failed to parse.
-    #[error("INFO chunk parse error: {0}")]
-    InfoParse(#[from] IffError),
 
     /// The operation requires DIRM offset recomputation, which is not
     /// implemented for indirect (non-bundled) `FORM:DJVM` documents — those
@@ -214,19 +212,19 @@ pub enum MutError {
     },
 
     /// A filesystem error occurred while committing an external-file rewrite.
-    #[error("rewrite I/O error for {name:?}: {message}")]
+    #[error("rewrite I/O error for {name:?}: {source}")]
     RewriteIo {
         /// The file the error is associated with.
         name: String,
-        /// The underlying error message.
-        message: String,
+        /// The underlying I/O error.
+        source: std::io::Error,
     },
 
     /// I/O failure while writing an incremental save
     /// ([`DjVuDocumentMut::save_patched`]) to the target file.
     #[cfg(feature = "std")]
-    #[error("save I/O error: {0}")]
-    SaveIo(#[from] std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 
     /// [`DjVuDocumentMut::save_patched`] found that the target file does not
     /// hold this document's original bytes (length or boundary spot-check
@@ -311,7 +309,7 @@ impl DjVuDocumentMut {
     /// - [`MutError::ComponentMalformed`] if a resolved component does not parse
     ///   as a `FORM:DJVU`/`DJVI`/`THUM`.
     /// - [`MutError::DirmMalformed`] if the `DIRM` chunk cannot be read.
-    /// - [`MutError::InfoParse`] if `root_bytes` is not a parseable IFF FORM.
+    /// - [`MutError::Iff`] if `root_bytes` is not a parseable IFF FORM.
     pub fn from_indirect_resolved<R, E>(root_bytes: &[u8], resolver: R) -> Result<Self, MutError>
     where
         R: Fn(&str) -> Result<Vec<u8>, E>,
@@ -622,7 +620,7 @@ impl DjVuDocumentMut {
     ///
     /// - [`MutError::PatchTargetMismatch`] — `file` does not hold the original
     ///   bytes (nothing has been written when this is returned)
-    /// - [`MutError::SaveIo`] — an underlying read/write/truncate failed
+    /// - [`MutError::Io`] — an underlying read/write/truncate failed
     /// - any error [`Self::try_into_bytes`] can return
     #[cfg(feature = "std")]
     pub fn save_patched(mut self, file: &mut std::fs::File) -> Result<SavePatchStats, MutError> {
@@ -1623,7 +1621,7 @@ impl IndirectRewritePlan {
     /// - [`MutError::ComponentResolve`] if the resolver fails for a component.
     /// - [`MutError::ComponentMalformed`] if a resolved component does not parse
     ///   as a `FORM:DJVU`/`DJVI`/`THUM`.
-    /// - [`MutError::DirmMalformed`] / [`MutError::InfoParse`] if the index or its
+    /// - [`MutError::DirmMalformed`] / [`MutError::Iff`] if the index or its
     ///   `DIRM` chunk cannot be read.
     pub fn from_indirect_resolved<R, E>(root_bytes: &[u8], resolver: R) -> Result<Self, MutError>
     where
@@ -1791,7 +1789,7 @@ impl IndirectRewritePlan {
 
         std::fs::create_dir_all(dir).map_err(|e| MutError::RewriteIo {
             name: dir.display().to_string(),
-            message: e.to_string(),
+            source: e,
         })?;
 
         // ---- Write component files, then the root index ---------------------
@@ -1853,7 +1851,7 @@ fn stage_and_rename(
 
     let io_err = |path: &std::path::Path, e: std::io::Error| MutError::RewriteIo {
         name: path.display().to_string(),
-        message: e.to_string(),
+        source: e,
     };
 
     {

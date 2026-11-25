@@ -88,7 +88,10 @@ where
     ) -> Result<Option<assembly::ComponentBytes<'static>>, DocError> {
         Ok(match entry.kind {
             DirmComponentKind::Page => {
-                Some((self.0)(&entry.id).map_err(|_| DocError::IndirectResolve(entry.id.clone()))?)
+                Some((self.0)(&entry.id).map_err(|e| DocError::IndirectResolve {
+                    name: entry.id.clone(),
+                    source: Box::new(e),
+                })?)
             }
             DirmComponentKind::Shared | DirmComponentKind::SharedAnno => (self.0)(&entry.id).ok(),
             DirmComponentKind::Thumbnail => None,

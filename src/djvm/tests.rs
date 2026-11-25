@@ -1157,8 +1157,8 @@ fn create_indirect_parses_with_resolver() {
                 if name == "chicken.djvu" {
                     Ok(chicken_data.clone())
                 } else {
-                    Err(crate::djvu_document::DocError::IndirectResolve(
-                        name.to_string(),
+                    Err(crate::djvu_document::DocError::Io(
+                        std::io::ErrorKind::NotFound.into(),
                     ))
                 }
             },

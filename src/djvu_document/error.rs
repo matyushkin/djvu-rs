@@ -36,9 +36,17 @@ pub enum DocError {
     #[error("malformed DjVu document: {0}")]
     Malformed(&'static str),
 
-    /// An indirect page reference could not be resolved.
-    #[error("failed to resolve indirect page '{0}'")]
-    IndirectResolve(String),
+    /// An indirect page reference could not be resolved: the resolver
+    /// callback of [`DjVuDocument::parse_with_resolver`] (or the file read of
+    /// [`DjVuDocument::parse_from_dir`]) failed for this component.
+    #[error("failed to resolve indirect page '{name}': {source}")]
+    IndirectResolve {
+        /// The DIRM component name passed to the resolver.
+        name: String,
+        /// The error the resolver returned (a [`DocError::Io`] for
+        /// `parse_from_dir`).
+        source: Box<DocError>,
+    },
 
     /// A typed resolver could not provide one indirect component.
     #[error("component resolution failed: {0}")]
@@ -59,13 +67,6 @@ pub enum DocError {
     #[error("page index {index} is out of range (document has {count} pages)")]
     PageOutOfRange { index: usize, count: usize },
 
-    /// Invalid UTF-8 in a string field.
-    ///
-    /// No longer produced since #524: NAVM bookmark strings are decoded
-    /// leniently (CP1252 fallback). Kept so matching code keeps compiling.
-    #[error("invalid UTF-8 in DjVu metadata")]
-    InvalidUtf8,
-
     /// The resolver callback is required for indirect documents but was not provided.
     #[error("indirect DjVu document requires a resolver callback")]
     NoResolver,
@@ -77,7 +78,7 @@ pub enum DocError {
 
     /// G4/MMR mask decoding error.
     #[error("Smmr decode error: {0}")]
-    Smmr(String),
+    Smmr(#[from] crate::smmr::SmmrError),
 
     /// Text layer parse error.
     #[error("text layer error: {0}")]

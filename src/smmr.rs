@@ -50,6 +50,8 @@ impl core::fmt::Display for SmmrError {
     }
 }
 
+impl core::error::Error for SmmrError {}
+
 /// Maximum Smmr (G4) bitmap area. An 8-byte header can declare up to
 /// 65535×65535 (~4.3 G pixels ≈ 537 MB packed) — far beyond any real DjVu page
 /// mask. Bound it so a tiny crafted chunk can't trigger a huge allocation.

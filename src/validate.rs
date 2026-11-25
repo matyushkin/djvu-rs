@@ -1298,7 +1298,6 @@ fn iff_error_code(error: &iff::IffError) -> &'static str {
         iff::IffError::ChunkTooLong { .. } => "iff.truncated-chunk",
         iff::IffError::Truncated | iff::IffError::TooShort => "iff.truncated",
         iff::IffError::BadMagic { .. } => "iff.bad-magic",
-        iff::IffError::UnknownFormType { .. } => "iff.unknown-form",
         iff::IffError::DepthLimitExceeded { .. } => "iff.depth-limit",
         iff::IffError::UnsupportedVersion { .. } => "iff.unsupported-version",
         // `IffError` is `#[non_exhaustive]` (see `docs/api-compatibility.md`

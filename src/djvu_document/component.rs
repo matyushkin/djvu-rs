@@ -1,7 +1,7 @@
 //! Indirect-document components: kinds, ids and the typed resolver.
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 /// The kind of an external component listed by an indirect `FORM:DJVM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,7 @@ impl ComponentId {
 }
 
 /// Typed failures returned by a [`ComponentResolver`].
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ComponentResolveError {
     /// The requested component is not available to the resolver.
@@ -47,12 +47,16 @@ pub enum ComponentResolveError {
     },
 
     /// The resolver could not read or construct the requested component.
-    #[error("failed to resolve indirect component {component:?}: {reason}")]
+    ///
+    /// `source` is the resolver's own error. Any error type converts into it
+    /// with `.into()` (or `Box::new`); so does a message (`String` or
+    /// `&str`).
+    #[error("failed to resolve indirect component {component:?}: {source}")]
     Failed {
         /// Identity of the component that could not be resolved.
         component: ComponentId,
-        /// Human-readable resolver detail.
-        reason: String,
+        /// The underlying resolver error.
+        source: Box<dyn core::error::Error + Send + Sync>,
     },
 }
 
