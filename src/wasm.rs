@@ -1061,13 +1061,14 @@ mod lazy {
             async move {
                 let failed = |e: JsValue| ComponentResolveError::Failed {
                     component: component.clone(),
-                    reason: e
+                    source: e
                         .as_string()
                         .or_else(|| {
                             e.dyn_ref::<js_sys::Error>()
                                 .map(|err| String::from(err.message()))
                         })
-                        .unwrap_or_else(|| "JS component resolver failed".to_string()),
+                        .unwrap_or_else(|| "JS component resolver failed".to_string())
+                        .into(),
                 };
                 let value = call.map_err(failed)?;
                 // `Promise.resolve` also accepts a plain (non-promise) value.

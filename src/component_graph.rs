@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, btree_map::Entry};
 
 use crate::{
     dirm::{DirmComponentKind, DirmPayload},
-    iff::{parse_form, parse_form_body},
+    iff::{IffError, parse_form, parse_form_body},
 };
 
 /// Maximum graph depth retained by the iterative traversals.
@@ -55,10 +55,38 @@ pub struct ComponentNode {
     pub included_by: Vec<usize>,
 }
 
-/// Structural problems found while building or validating a component graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why [`ComponentGraph::parse`] could not build a graph.
+///
+/// These are hard failures: no graph exists. Problems in a graph that does
+/// parse (a missing INCL target, a cycle, …) are [`GraphIssue`]s, reported
+/// by [`ComponentGraph::validate`].
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum GraphError {
+    /// The IFF container or an embedded component body did not parse.
+    #[error("IFF parse error: {0}")]
+    Iff(#[source] IffError),
+    /// The input is not a bundled `FORM:DJVM` document: a single-page
+    /// `FORM:DJVU`, an indirect `DJVM` index, or another FORM type.
+    #[error("not a bundled FORM:DJVM document")]
+    NotBundled,
+    /// The `DIRM` chunk or a component `FORM` is missing or malformed.
+    #[error("malformed DIRM or component FORM: {reason}")]
+    #[non_exhaustive]
+    Malformed {
+        /// What is wrong, for humans; the text is not part of the API.
+        reason: &'static str,
+    },
+    /// The document has more INCL edges than the graph walks are bounded to.
+    #[error("INCL edge limit exceeded")]
+    LimitExceeded,
+}
+
+/// A problem in a component graph that did parse, reported by
+/// [`ComponentGraph::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GraphIssue {
     /// An INCL payload names no DIRM component.
     MissingTarget {
         /// Component that carried the INCL chunk.
@@ -83,44 +111,64 @@ pub enum GraphError {
         /// Component identities forming the directed cycle.
         path: Vec<String>,
     },
-    /// The DJVM container or its DIRM/component bodies could not be parsed.
-    Malformed(String),
+    /// The cycle check stopped at its visit or depth bound, so cycles beyond
+    /// that point were not looked for.
+    LimitExceeded,
+}
+
+impl core::fmt::Display for GraphIssue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            GraphIssue::MissingTarget { source, target } => {
+                write!(f, "component '{source}' includes missing target '{target}'")
+            }
+            GraphIssue::DuplicateIdentity { id } => {
+                write!(f, "DIRM declares component identity '{id}' more than once")
+            }
+            GraphIssue::InvalidComponentType { id, form } => write!(
+                f,
+                "component '{id}' has FORM:{} incompatible with its DIRM type",
+                String::from_utf8_lossy(form)
+            ),
+            GraphIssue::Cycle { path } => {
+                write!(f, "component include cycle: {}", path.join(" -> "))
+            }
+            GraphIssue::LimitExceeded => f.write_str("component graph validation limit exceeded"),
+        }
+    }
 }
 
 /// A read-only component dependency graph for a bundled DjVu document.
 pub struct ComponentGraph {
     nodes: Vec<ComponentNode>,
     id_to_index: BTreeMap<String, usize>,
-    validation_errors: Vec<GraphError>,
+    validation_errors: Vec<GraphIssue>,
 }
 
 impl ComponentGraph {
     /// Parse a bundled `FORM:DJVM` document and build its component graph.
     ///
     /// A malformed IFF container, DIRM payload, or embedded component body
-    /// returns [`GraphError::Malformed`]. Missing INCL targets, duplicate DIRM
-    /// identities, and component-type disagreements are retained for
-    /// [`Self::validate`] instead.
+    /// returns a [`GraphError`]. Missing INCL targets, duplicate DIRM
+    /// identities, and component-type disagreements are retained as
+    /// [`GraphIssue`]s for [`Self::validate`] instead.
     pub fn parse(bytes: &[u8]) -> Result<ComponentGraph, GraphError> {
-        let document =
-            parse_form(bytes).map_err(|error| GraphError::Malformed(error.to_string()))?;
+        let document = parse_form(bytes).map_err(GraphError::Iff)?;
         if document.form_type != *b"DJVM" {
-            return Err(GraphError::Malformed(
-                "component graphs require a FORM:DJVM document".to_string(),
-            ));
+            return Err(GraphError::NotBundled);
         }
 
         let dirm_chunk = document
             .chunks
             .iter()
             .find(|chunk| chunk.id == *b"DIRM")
-            .ok_or_else(|| GraphError::Malformed("missing DIRM chunk".to_string()))?;
+            .ok_or(GraphError::Malformed {
+                reason: "missing DIRM chunk",
+            })?;
         let dirm = DirmPayload::decode(dirm_chunk.data)
-            .map_err(|error| GraphError::Malformed(error.to_string()))?;
+            .map_err(|reason| GraphError::Malformed { reason })?;
         if !dirm.is_bundled() {
-            return Err(GraphError::Malformed(
-                "component graphs support bundled FORM:DJVM documents only".to_string(),
-            ));
+            return Err(GraphError::NotBundled);
         }
 
         let directory = dirm.components();
@@ -130,9 +178,9 @@ impl ComponentGraph {
             .filter(|chunk| chunk.id == *b"FORM")
             .collect();
         if component_forms.len() < directory.len() {
-            return Err(GraphError::Malformed(
-                "DIRM entry count exceeds embedded FORM components".to_string(),
-            ));
+            return Err(GraphError::Malformed {
+                reason: "DIRM entry count exceeds embedded FORM components",
+            });
         }
 
         let mut nodes = Vec::with_capacity(directory.len());
@@ -146,18 +194,16 @@ impl ComponentGraph {
                 .data
                 .get(..4)
                 .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| {
-                    GraphError::Malformed("component FORM body too short".to_string())
+                .ok_or(GraphError::Malformed {
+                    reason: "component FORM body too short",
                 })?;
-            let body = component
-                .data
-                .get(4..)
-                .ok_or_else(|| GraphError::Malformed("component FORM body missing".to_string()))?;
-            let chunks =
-                parse_form_body(body).map_err(|error| GraphError::Malformed(error.to_string()))?;
+            let body = component.data.get(4..).ok_or(GraphError::Malformed {
+                reason: "component FORM body missing",
+            })?;
+            let chunks = parse_form_body(body).map_err(GraphError::Iff)?;
 
             if !form_matches_kind(form, entry.kind) {
-                validation_errors.push(GraphError::InvalidComponentType {
+                validation_errors.push(GraphIssue::InvalidComponentType {
                     id: entry.id.clone(),
                     form,
                 });
@@ -165,7 +211,7 @@ impl ComponentGraph {
 
             let node_index = nodes.len();
             match id_to_index.entry(entry.id.clone()) {
-                Entry::Occupied(_) => validation_errors.push(GraphError::DuplicateIdentity {
+                Entry::Occupied(_) => validation_errors.push(GraphIssue::DuplicateIdentity {
                     id: entry.id.clone(),
                 }),
                 Entry::Vacant(slot) => {
@@ -175,9 +221,7 @@ impl ComponentGraph {
 
             for chunk in chunks.iter().filter(|chunk| chunk.id == *b"INCL") {
                 if unresolved_edges.len() == MAX_GRAPH_VISITS {
-                    return Err(GraphError::Malformed(
-                        "component graph INCL edge limit exceeded".to_string(),
-                    ));
+                    return Err(GraphError::LimitExceeded);
                 }
                 let target = component_id_from_incl(chunk.data)?;
                 unresolved_edges.push((node_index, target));
@@ -196,7 +240,7 @@ impl ComponentGraph {
             if let Some(&target_index) = id_to_index.get(&target) {
                 nodes[source].includes.push(target_index);
             } else {
-                validation_errors.push(GraphError::MissingTarget {
+                validation_errors.push(GraphIssue::MissingTarget {
                     source: nodes[source].id.clone(),
                     target,
                 });
@@ -294,9 +338,9 @@ impl ComponentGraph {
 
     /// All graph-shaped validation problems.
     ///
-    /// This includes errors retained by [`Self::parse`] and every cycle found
+    /// This includes issues retained by [`Self::parse`] and every cycle found
     /// by a bounded, iterative depth-first walk of the INCL graph.
-    pub fn validate(&self) -> Vec<GraphError> {
+    pub fn validate(&self) -> Vec<GraphIssue> {
         let mut errors = self.validation_errors.clone();
         for error in self.cycles() {
             push_unique(&mut errors, error);
@@ -338,7 +382,7 @@ impl ComponentGraph {
         closure
     }
 
-    fn cycles(&self) -> Vec<GraphError> {
+    fn cycles(&self) -> Vec<GraphIssue> {
         const UNSEEN: u8 = 0;
         const ACTIVE: u8 = 1;
         const COMPLETE: u8 = 2;
@@ -352,9 +396,7 @@ impl ComponentGraph {
                 continue;
             }
             if !consume_visit(&mut visits) {
-                errors.push(GraphError::Malformed(
-                    "component graph validation visit limit exceeded".to_string(),
-                ));
+                errors.push(GraphIssue::LimitExceeded);
                 break;
             }
 
@@ -370,18 +412,14 @@ impl ComponentGraph {
                 let target = self.nodes[*index].includes[*edge_index];
                 *edge_index += 1;
                 if !consume_visit(&mut visits) {
-                    errors.push(GraphError::Malformed(
-                        "component graph validation visit limit exceeded".to_string(),
-                    ));
+                    errors.push(GraphIssue::LimitExceeded);
                     return errors;
                 }
 
                 match colors[target] {
                     UNSEEN => {
                         if stack.len() == MAX_GRAPH_DEPTH {
-                            errors.push(GraphError::Malformed(
-                                "component graph validation depth limit exceeded".to_string(),
-                            ));
+                            errors.push(GraphIssue::LimitExceeded);
                             return errors;
                         }
                         colors[target] = ACTIVE;
@@ -397,7 +435,7 @@ impl ComponentGraph {
                             .map(|(node, _)| self.nodes[*node].id.clone())
                             .collect::<Vec<_>>();
                         path.push(self.nodes[target].id.clone());
-                        push_unique(&mut errors, GraphError::Cycle { path });
+                        push_unique(&mut errors, GraphIssue::Cycle { path });
                     }
                     COMPLETE => {}
                     _ => unreachable!("color state is one of the three constants"),
@@ -454,7 +492,9 @@ fn classify_component(
 fn component_id_from_incl(data: &[u8]) -> Result<String, GraphError> {
     crate::dirm::incl_target(data)
         .map(str::to_owned)
-        .ok_or_else(|| GraphError::Malformed("INCL component id is not valid UTF-8".to_string()))
+        .ok_or(GraphError::Malformed {
+            reason: "INCL component id is not valid UTF-8",
+        })
 }
 
 fn consume_visit(visits: &mut usize) -> bool {
@@ -466,7 +506,7 @@ fn consume_visit(visits: &mut usize) -> bool {
     }
 }
 
-fn push_unique(errors: &mut Vec<GraphError>, error: GraphError) {
+fn push_unique(errors: &mut Vec<GraphIssue>, error: GraphIssue) {
     if !errors.contains(&error) {
         errors.push(error);
     }
@@ -619,7 +659,7 @@ mod tests {
         )]))
         .expect("container remains parseable");
 
-        assert!(graph.validate().contains(&GraphError::MissingTarget {
+        assert!(graph.validate().contains(&GraphIssue::MissingTarget {
             source: "page.djvu".to_string(),
             target: "missing.djvi".to_string(),
         }));
@@ -636,7 +676,7 @@ mod tests {
         assert!(graph.validate().iter().any(|error| {
             matches!(
                 error,
-                GraphError::Cycle { path }
+                GraphIssue::Cycle { path }
                     if path == &vec!["one.djvi".to_string(), "two.djvi".to_string(), "one.djvi".to_string()]
             )
         }));
@@ -650,7 +690,7 @@ mod tests {
         ]))
         .expect("container remains parseable");
 
-        assert!(graph.validate().contains(&GraphError::DuplicateIdentity {
+        assert!(graph.validate().contains(&GraphIssue::DuplicateIdentity {
             id: "same.djvu".to_string(),
         }));
         assert_eq!(graph.node("same.djvu").unwrap().dirm_index, 0);
@@ -689,10 +729,25 @@ mod tests {
         assert!(
             graph
                 .validate()
-                .contains(&GraphError::InvalidComponentType {
+                .contains(&GraphIssue::InvalidComponentType {
                     id: "page.djvu".to_string(),
                     form: *b"DJVI",
                 })
         );
+    }
+
+    #[test]
+    fn parse_failures_are_typed_and_keep_their_source() {
+        let error = ComponentGraph::parse(b"not an IFF file")
+            .err()
+            .expect("rejected");
+        assert!(matches!(error, GraphError::Iff(_)));
+        assert!(std::error::Error::source(&error).is_some());
+
+        let page = iff::partial_emit(*b"DJVU", &[]).expect("empty page FORM");
+        assert!(matches!(
+            ComponentGraph::parse(&page),
+            Err(GraphError::NotBundled)
+        ));
     }
 }

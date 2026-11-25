@@ -29,23 +29,41 @@ use std::fmt::Write as FmtWrite;
 use crate::djvu_document::DjVuDocument;
 use crate::text::{TextLayer, TextZone, TextZoneKind};
 
+/// `write!` into a `String`, dropping the `fmt::Result`.
+///
+/// Writing to a `String` cannot fail; only a `Display` impl that returns an
+/// error could, which std's own `ToString` treats as a bug. The serializers
+/// format only strings and integers, so the result carries no information.
+macro_rules! w {
+    ($out:expr, $($arg:tt)*) => {{
+        let _ = $out.write_fmt(format_args!($($arg)*));
+    }};
+}
+
+/// `writeln!` into a `String`; see [`w!`].
+macro_rules! wln {
+    ($out:expr) => {
+        w!($out, "\n")
+    };
+    ($out:expr, $($arg:tt)*) => {{
+        w!($out, $($arg)*);
+        w!($out, "\n");
+    }};
+}
+
 // ---- Error ------------------------------------------------------------------
 
 /// Errors from text-layer serialization.
+///
+/// A text layer that fails to decode is reported by the page accessor, so it
+/// arrives as [`Doc`](Self::Doc) wrapping
+/// [`DocError::Text`](crate::djvu_document::DocError::Text).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TextSerializeError {
-    /// Accessing a page failed.
+    /// Accessing a page or decoding its text layer failed.
     #[error("document error: {0}")]
     Doc(#[from] crate::djvu_document::DocError),
-
-    /// Text layer extraction failed.
-    #[error("text layer error: {0}")]
-    Text(#[from] crate::text::TextError),
-
-    /// String formatting error (infallible in practice).
-    #[error("format error: {0}")]
-    Fmt(#[from] std::fmt::Error),
 }
 
 // ---- Options ----------------------------------------------------------------
@@ -125,17 +143,17 @@ impl AltoOptions {
 pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSerializeError> {
     let mut out = String::with_capacity(4096);
 
-    writeln!(out, "<!DOCTYPE html>")?;
-    writeln!(out, r#"<html xmlns="http://www.w3.org/1999/xhtml">"#)?;
-    writeln!(out, "<head>")?;
-    writeln!(out, r#"  <meta charset="utf-8"/>"#)?;
-    writeln!(out, r#"  <meta name="ocr-system" content="djvu-rs"/>"#)?;
-    writeln!(
+    wln!(out, "<!DOCTYPE html>");
+    wln!(out, r#"<html xmlns="http://www.w3.org/1999/xhtml">"#);
+    wln!(out, "<head>");
+    wln!(out, r#"  <meta charset="utf-8"/>"#);
+    wln!(out, r#"  <meta name="ocr-system" content="djvu-rs"/>"#);
+    wln!(
         out,
         r#"  <meta name="ocr-capabilities" content="ocr_page ocr_block ocr_par ocr_line ocrx_word"/>"#
-    )?;
-    writeln!(out, "</head>")?;
-    writeln!(out, "<body>")?;
+    );
+    wln!(out, "</head>");
+    wln!(out, "<body>");
 
     for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
@@ -149,14 +167,14 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSer
         };
 
         // bbox for the full page
-        write!(
+        w!(
             out,
             r#"  <div class="ocr_page" id="page_{idx}" title="image page_{idx}.djvu; bbox 0 0 {w} {h}; ppageno {idx}">"#,
             idx = page_idx,
             w = out_w,
             h = out_h,
-        )?;
-        writeln!(out)?;
+        );
+        wln!(out);
 
         let layer_opt = if opts.dpi.is_some() {
             page.text_layer_at_size(out_w, out_h)?
@@ -164,14 +182,14 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSer
             page.text_layer()?
         };
         if let Some(layer) = layer_opt {
-            write_hocr_zones(&mut out, &layer, page_idx)?;
+            write_hocr_zones(&mut out, &layer, page_idx);
         }
 
-        writeln!(out, "  </div>")?;
+        wln!(out, "  </div>");
     }
 
-    writeln!(out, "</body>")?;
-    writeln!(out, "</html>")?;
+    wln!(out, "</body>");
+    wln!(out, "</html>");
 
     Ok(out)
 }
@@ -187,26 +205,26 @@ pub fn to_hocr(doc: &DjVuDocument, opts: &HocrOptions) -> Result<String, TextSer
 pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, TextSerializeError> {
     let mut out = String::with_capacity(4096);
 
-    writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
-    writeln!(
+    wln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    wln!(
         out,
         r#"<alto xmlns="http://www.loc.gov/standards/alto/ns-v4#""#
-    )?;
-    writeln!(
+    );
+    wln!(
         out,
         r#"      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#
-    )?;
-    writeln!(
+    );
+    wln!(
         out,
         r#"      xsi:schemaLocation="http://www.loc.gov/standards/alto/ns-v4# https://www.loc.gov/standards/alto/v4/alto.xsd">"#
-    )?;
-    writeln!(out, "  <Description>")?;
-    writeln!(out, "    <MeasurementUnit>pixel</MeasurementUnit>")?;
-    writeln!(out, "    <sourceImageInformation>")?;
-    writeln!(out, "      <fileName>document.djvu</fileName>")?;
-    writeln!(out, "    </sourceImageInformation>")?;
-    writeln!(out, "  </Description>")?;
-    writeln!(out, "  <Layout>")?;
+    );
+    wln!(out, "  <Description>");
+    wln!(out, "    <MeasurementUnit>pixel</MeasurementUnit>");
+    wln!(out, "    <sourceImageInformation>");
+    wln!(out, "      <fileName>document.djvu</fileName>");
+    wln!(out, "    </sourceImageInformation>");
+    wln!(out, "  </Description>");
+    wln!(out, "  <Layout>");
 
     for page_idx in crate::export_common::page_indices(doc, opts.page_index) {
         let page = doc.page(page_idx)?;
@@ -219,19 +237,19 @@ pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, TextSer
             None => (page.width() as u32, page.height() as u32),
         };
 
-        writeln!(
+        wln!(
             out,
             r#"    <Page ID="page_{idx}" WIDTH="{w}" HEIGHT="{h}" PHYSICAL_IMG_NR="{idx}">"#,
             idx = page_idx,
             w = out_w,
             h = out_h,
-        )?;
-        writeln!(
+        );
+        wln!(
             out,
             "      <PrintSpace WIDTH=\"{w}\" HEIGHT=\"{h}\" HPOS=\"0\" VPOS=\"0\">",
             w = out_w,
             h = out_h
-        )?;
+        );
 
         let layer_opt = if opts.dpi.is_some() {
             page.text_layer_at_size(out_w, out_h)?
@@ -239,26 +257,22 @@ pub fn to_alto(doc: &DjVuDocument, opts: &AltoOptions) -> Result<String, TextSer
             page.text_layer()?
         };
         if let Some(layer) = layer_opt {
-            write_alto_zones(&mut out, &layer, page_idx)?;
+            write_alto_zones(&mut out, &layer, page_idx);
         }
 
-        writeln!(out, "      </PrintSpace>")?;
-        writeln!(out, "    </Page>")?;
+        wln!(out, "      </PrintSpace>");
+        wln!(out, "    </Page>");
     }
 
-    writeln!(out, "  </Layout>")?;
-    writeln!(out, "</alto>")?;
+    wln!(out, "  </Layout>");
+    wln!(out, "</alto>");
 
     Ok(out)
 }
 
 // ---- hOCR helpers -----------------------------------------------------------
 
-fn write_hocr_zones(
-    out: &mut String,
-    layer: &TextLayer,
-    page_idx: usize,
-) -> Result<(), TextSerializeError> {
+fn write_hocr_zones(out: &mut String, layer: &TextLayer, page_idx: usize) {
     let mut block_id = 0usize;
     let mut line_id = 0usize;
     let mut word_id = 0usize;
@@ -272,9 +286,8 @@ fn write_hocr_zones(
             &mut line_id,
             &mut word_id,
             3,
-        )?;
+        );
     }
-    Ok(())
 }
 
 fn write_hocr_zone(
@@ -285,7 +298,7 @@ fn write_hocr_zone(
     line_id: &mut usize,
     word_id: &mut usize,
     indent: usize,
-) -> Result<(), TextSerializeError> {
+) {
     let pad = " ".repeat(indent);
     let r = &zone.rect;
     let bbox = format!("bbox {} {} {} {}", r.x, r.y, r.x + r.width, r.y + r.height);
@@ -294,64 +307,63 @@ fn write_hocr_zone(
         TextZoneKind::Page => {
             // Page zone is handled by the caller
             for child in &zone.children {
-                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent)?;
+                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent);
             }
         }
         TextZoneKind::Column | TextZoneKind::Region => {
             let id = *block_id;
             *block_id += 1;
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<div class="ocr_block" id="block_{page}_{id}" title="{bbox}">"#,
                 page = page_idx
-            )?;
+            );
             for child in &zone.children {
-                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2)?;
+                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2);
             }
-            writeln!(out, "{pad}</div>")?;
+            wln!(out, "{pad}</div>");
         }
         TextZoneKind::Para => {
             let id = *block_id;
             *block_id += 1;
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<p class="ocr_par" id="par_{page}_{id}" title="{bbox}">"#,
                 page = page_idx
-            )?;
+            );
             for child in &zone.children {
-                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2)?;
+                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2);
             }
-            writeln!(out, "{pad}</p>")?;
+            wln!(out, "{pad}</p>");
         }
         TextZoneKind::Line => {
             let id = *line_id;
             *line_id += 1;
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<span class="ocr_line" id="line_{page}_{id}" title="{bbox}">"#,
                 page = page_idx
-            )?;
+            );
             for child in &zone.children {
-                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2)?;
+                write_hocr_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2);
             }
-            writeln!(out, "{pad}</span>")?;
+            wln!(out, "{pad}</span>");
         }
         TextZoneKind::Word => {
             let id = *word_id;
             *word_id += 1;
             let text = escape_markup(&zone.text);
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<span class="ocrx_word" id="word_{page}_{id}" title="{bbox}">{text}</span>"#,
                 page = page_idx
-            )?;
+            );
             // Words may have character children — skip sub-word nesting in hOCR
         }
         TextZoneKind::Character => {
             // Characters are not a standard hOCR class; skip.
         }
     }
-    Ok(())
 }
 
 /// Escape text for embedding in hOCR (XHTML) or ALTO (XML) markup.
@@ -374,11 +386,7 @@ fn escape_markup(s: &str) -> String {
 
 // ---- ALTO helpers -----------------------------------------------------------
 
-fn write_alto_zones(
-    out: &mut String,
-    layer: &TextLayer,
-    page_idx: usize,
-) -> Result<(), TextSerializeError> {
+fn write_alto_zones(out: &mut String, layer: &TextLayer, page_idx: usize) {
     let mut block_id = 0usize;
     let mut line_id = 0usize;
     let mut word_id = 0usize;
@@ -392,9 +400,8 @@ fn write_alto_zones(
             &mut line_id,
             &mut word_id,
             4,
-        )?;
+        );
     }
-    Ok(())
 }
 
 fn write_alto_zone(
@@ -405,20 +412,20 @@ fn write_alto_zone(
     line_id: &mut usize,
     word_id: &mut usize,
     indent: usize,
-) -> Result<(), TextSerializeError> {
+) {
     let pad = " ".repeat(indent);
     let r = &zone.rect;
 
     match zone.kind {
         TextZoneKind::Page => {
             for child in &zone.children {
-                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent)?;
+                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent);
             }
         }
         TextZoneKind::Column | TextZoneKind::Region | TextZoneKind::Para => {
             let id = *block_id;
             *block_id += 1;
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<TextBlock ID="block_{page}_{id}" HPOS="{hpos}" VPOS="{vpos}" WIDTH="{w}" HEIGHT="{h}">"#,
                 page = page_idx,
@@ -426,16 +433,16 @@ fn write_alto_zone(
                 vpos = r.y,
                 w = r.width,
                 h = r.height,
-            )?;
+            );
             for child in &zone.children {
-                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2)?;
+                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2);
             }
-            writeln!(out, "{pad}</TextBlock>")?;
+            wln!(out, "{pad}</TextBlock>");
         }
         TextZoneKind::Line => {
             let id = *line_id;
             *line_id += 1;
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<TextLine ID="line_{page}_{id}" HPOS="{hpos}" VPOS="{vpos}" WIDTH="{w}" HEIGHT="{h}">"#,
                 page = page_idx,
@@ -443,17 +450,17 @@ fn write_alto_zone(
                 vpos = r.y,
                 w = r.width,
                 h = r.height,
-            )?;
+            );
             for child in &zone.children {
-                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2)?;
+                write_alto_zone(out, child, page_idx, block_id, line_id, word_id, indent + 2);
             }
-            writeln!(out, "{pad}</TextLine>")?;
+            wln!(out, "{pad}</TextLine>");
         }
         TextZoneKind::Word => {
             let id = *word_id;
             *word_id += 1;
             let text = escape_markup(&zone.text);
-            writeln!(
+            wln!(
                 out,
                 r#"{pad}<String ID="word_{page}_{id}" HPOS="{hpos}" VPOS="{vpos}" WIDTH="{w}" HEIGHT="{h}" CONTENT="{text}"/>"#,
                 page = page_idx,
@@ -461,13 +468,12 @@ fn write_alto_zone(
                 vpos = r.y,
                 w = r.width,
                 h = r.height,
-            )?;
+            );
         }
         TextZoneKind::Character => {
             // Glyph-level elements not included in the basic ALTO export.
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -571,7 +577,7 @@ mod tests {
     fn hocr_word_contains_class_and_text() {
         let layer = simple_layer(&[("hello", 10, 20, 50, 15)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("ocrx_word"), "expected ocrx_word class");
         assert!(out.contains("hello"), "expected word text");
     }
@@ -581,7 +587,7 @@ mod tests {
         // bbox in hOCR is "x1 y1 x2 y2"
         let layer = simple_layer(&[("foo", 10, 20, 30, 10)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         // x2 = x + width = 10 + 30 = 40, y2 = 20 + 10 = 30
         assert!(
             out.contains("bbox 10 20 40 30"),
@@ -593,7 +599,7 @@ mod tests {
     fn hocr_word_ids_increment() {
         let layer = simple_layer(&[("a", 0, 0, 10, 10), ("b", 20, 0, 10, 10)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("word_0_0"));
         assert!(out.contains("word_0_1"));
     }
@@ -602,7 +608,7 @@ mod tests {
     fn hocr_page_index_in_ids() {
         let layer = simple_layer(&[("x", 0, 0, 10, 10)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 3).unwrap();
+        write_hocr_zones(&mut out, &layer, 3);
         assert!(
             out.contains("word_3_0"),
             "page index should appear in id: {out}"
@@ -613,7 +619,7 @@ mod tests {
     fn hocr_escapes_special_chars_in_text() {
         let layer = simple_layer(&[("a&b", 0, 0, 10, 10)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("a&amp;b"), "expected escaped ampersand: {out}");
         assert!(!out.contains(" a&b "), "unescaped text must not appear");
     }
@@ -622,7 +628,7 @@ mod tests {
     fn hocr_line_zone_has_ocr_line_class() {
         let layer = simple_layer(&[("w", 0, 0, 50, 20)]);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("ocr_line"), "expected ocr_line class: {out}");
     }
 
@@ -632,7 +638,7 @@ mod tests {
     fn alto_word_has_string_element() {
         let layer = simple_layer(&[("hello", 5, 10, 40, 12)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(out.contains("<String"), "expected String element: {out}");
         assert!(
             out.contains(r#"CONTENT="hello""#),
@@ -644,7 +650,7 @@ mod tests {
     fn alto_word_hpos_vpos_width_height() {
         let layer = simple_layer(&[("w", 5, 10, 40, 12)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(out.contains(r#"HPOS="5""#));
         assert!(out.contains(r#"VPOS="10""#));
         assert!(out.contains(r#"WIDTH="40""#));
@@ -655,7 +661,7 @@ mod tests {
     fn alto_word_ids_increment() {
         let layer = simple_layer(&[("a", 0, 0, 10, 10), ("b", 20, 0, 10, 10)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(out.contains(r#"ID="word_0_0""#));
         assert!(out.contains(r#"ID="word_0_1""#));
     }
@@ -664,7 +670,7 @@ mod tests {
     fn alto_line_has_textline_element() {
         let layer = simple_layer(&[("w", 0, 0, 50, 20)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(
             out.contains("<TextLine"),
             "expected TextLine element: {out}"
@@ -679,7 +685,7 @@ mod tests {
     fn alto_escapes_special_chars_in_content() {
         let layer = simple_layer(&[("it's", 0, 0, 30, 10)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(out.contains("&#39;"), "expected escaped apostrophe: {out}");
     }
 
@@ -687,7 +693,7 @@ mod tests {
     fn alto_page_index_in_word_id() {
         let layer = simple_layer(&[("x", 0, 0, 10, 10)]);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 5).unwrap();
+        write_alto_zones(&mut out, &layer, 5);
         assert!(
             out.contains(r#"ID="word_5_0""#),
             "page index in word id: {out}"
@@ -723,7 +729,7 @@ mod tests {
         let col = zone(TextZoneKind::Column, vec![inner]);
         let layer = layer_with_zone(col);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(
             out.contains("ocr_block"),
             "Column must produce ocr_block: {out}"
@@ -737,7 +743,7 @@ mod tests {
         let reg = zone(TextZoneKind::Region, vec![inner]);
         let layer = layer_with_zone(reg);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(
             out.contains("ocr_block"),
             "Region must produce ocr_block: {out}"
@@ -750,7 +756,7 @@ mod tests {
         let para = zone(TextZoneKind::Para, vec![inner]);
         let layer = layer_with_zone(para);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("ocr_par"), "Para must produce ocr_par: {out}");
         assert!(out.contains("</p>"), "must close p: {out}");
     }
@@ -760,7 +766,7 @@ mod tests {
         let ch = zone(TextZoneKind::Character, vec![]);
         let layer = layer_with_zone(ch);
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         // Character zones produce no output at all
         assert!(!out.contains("span"), "Character must not emit span: {out}");
         assert!(!out.contains("div"), "Character must not emit div: {out}");
@@ -777,7 +783,7 @@ mod tests {
             zones: vec![zone(TextZoneKind::Page, vec![col, para])],
         };
         let mut out = String::new();
-        write_hocr_zones(&mut out, &layer, 0).unwrap();
+        write_hocr_zones(&mut out, &layer, 0);
         assert!(out.contains("block_0_0"), "first block id: {out}");
         assert!(out.contains("par_0_1"), "second block id (par): {out}");
     }
@@ -790,7 +796,7 @@ mod tests {
         let col = zone(TextZoneKind::Column, vec![inner]);
         let layer = layer_with_zone(col);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(
             out.contains("<TextBlock"),
             "Column must produce TextBlock: {out}"
@@ -804,7 +810,7 @@ mod tests {
         let para = zone(TextZoneKind::Para, vec![inner]);
         let layer = layer_with_zone(para);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(
             out.contains("<TextBlock"),
             "Para must produce TextBlock: {out}"
@@ -817,7 +823,7 @@ mod tests {
         let reg = zone(TextZoneKind::Region, vec![inner]);
         let layer = layer_with_zone(reg);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(
             out.contains("<TextBlock"),
             "Region must produce TextBlock: {out}"
@@ -829,7 +835,7 @@ mod tests {
         let ch = zone(TextZoneKind::Character, vec![]);
         let layer = layer_with_zone(ch);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(
             !out.contains("String"),
             "Character must not emit String: {out}"
@@ -868,7 +874,7 @@ mod tests {
         };
         let layer = layer_with_zone(col);
         let mut out = String::new();
-        write_alto_zones(&mut out, &layer, 0).unwrap();
+        write_alto_zones(&mut out, &layer, 0);
         assert!(out.contains("<TextBlock"), "must have TextBlock for column");
         assert!(out.contains("<TextBlock"), "must have TextBlock for para");
         assert!(out.contains("<TextLine"), "must have TextLine");

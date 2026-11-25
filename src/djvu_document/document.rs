@@ -292,6 +292,13 @@ impl DjVuDocument {
     ///
     /// The resolver receives the `name` field from each INCL chunk and must
     /// return the raw bytes of that external component file.
+    ///
+    /// # Errors
+    ///
+    /// When the resolver fails for a page component, the open fails with
+    /// [`DocError::IndirectResolve`], which names the component and carries
+    /// the resolver's error as its `source`. A failed shared component is
+    /// skipped.
     pub fn parse_with_resolver<R>(data: &[u8], resolver: Option<R>) -> Result<Self, DocError>
     where
         R: Fn(&str) -> Result<Vec<u8>, DocError>,
@@ -769,8 +776,9 @@ impl DjVuDocument {
     ///
     /// # Errors
     ///
-    /// Returns `DocError::Io` if a component file cannot be read, or any parse
-    /// error from the component data.
+    /// Returns [`DocError::IndirectResolve`] with a [`DocError::Io`] source if
+    /// a page component file cannot be read, or any parse error from the
+    /// component data.
     #[cfg(feature = "std")]
     pub fn parse_from_dir(
         data: &[u8],
@@ -799,7 +807,10 @@ impl DjVuDocument {
             } else {
                 base.join(name)
             };
-            std::fs::read(&path).map_err(|_| DocError::IndirectResolve(name.to_string()))
+            std::fs::read(&path).map_err(|e| DocError::IndirectResolve {
+                name: name.to_string(),
+                source: Box::new(DocError::Io(e)),
+            })
         };
         Self::parse_with_resolver_and_options(data, Some(resolver), opts)
     }

@@ -7,7 +7,7 @@
 //!
 //! # Key public types
 //!
-//! - [`DjVuError`] — top-level error enum (wraps [`IffError`], etc.)
+//! - [`Error`] — error type of the [`Document`]/[`Page`] facade (wraps [`DocError`] and [`djvu_render::RenderError`])
 //! - [`IffError`] — errors from the IFF container parser
 //! - [`PageInfo`] — page metadata parsed from the INFO chunk
 //! - [`Rotation`] — page rotation enum (None, Ccw90, Rot180, Cw90)
@@ -98,10 +98,8 @@ pub struct MigrationDoctests;
 /// IFF container parser (phase 1, written from spec).
 pub mod iff;
 
-/// Typed error hierarchy for the new implementation (phase 1).
-///
-/// Key types: `DjVuError`, `IffError`, `BzzError`, `Jb2Error`, `Iw44Error`,
-/// `LegacyError`. See also `text::TextError` and `annotation::AnnotationError`.
+/// Error types of the codec layers: `IffError`, `BzzError`, `Jb2Error`,
+/// `Iw44Error`. See also `text::TextError` and `annotation::AnnotationError`.
 pub mod error;
 
 /// INFO chunk parser (phase 1).
@@ -168,8 +166,7 @@ pub mod jb2_encode;
 /// FGbz foreground-palette encoder — produces FGbz chunk payloads.
 ///
 /// Provides [`fgbz_encode::encode_fgbz`] (palette + optional per-blit
-/// index table) and [`fgbz_encode::decode_fgbz`] (inverse), plus the
-/// [`fgbz_encode::FgbzColor`] palette-entry type.
+/// index table) and the [`fgbz_encode::FgbzColor`] palette-entry type.
 #[cfg(feature = "std")]
 pub mod fgbz_encode;
 
@@ -465,7 +462,7 @@ pub mod navm_encode;
 pub mod smmr;
 
 /// Chunk-encoder seam — one `(id, payload)` interface ([`chunk_encode::ChunkEncoder`])
-/// over the per-chunk encoders, with a single [`chunk_encode::EncodeError`]
+/// over the per-chunk encoders, with a single [`chunk_encode::ChunkEncodeError`]
 /// discipline (no panic, no silent truncation).
 #[cfg(feature = "std")]
 pub mod chunk_encode;
@@ -477,7 +474,7 @@ pub mod wasm;
 
 /// Shared core for the foreign-language bindings (`ffi` and `wasm`).
 ///
-/// Owns the open→size→render→text flow and the `DjVuError`→`(code, message)`
+/// Owns the open→size→render→text flow and the error→`(code, message)`
 /// taxonomy; `ffi` and `wasm` are thin target-specific caps over it.
 #[cfg(any(feature = "ffi", feature = "wasm"))]
 mod foreign;
@@ -493,8 +490,8 @@ mod foreign;
 #[allow(unsafe_code)]
 pub mod ffi;
 
-// Re-export new phase-1 error types
-pub use error::{BzzError, DjVuError, IffError, Iw44Error, Jb2Error};
+// Re-export the codec error types
+pub use error::{BzzError, IffError, Iw44Error, Jb2Error};
 
 // Re-export new phase-3 document model
 pub use djvu_document::{
@@ -513,7 +510,9 @@ pub use editor::{
 // Re-export the bundled component-graph API for callers that do not need to
 // distinguish the module from the rest of the high-level document API.
 #[cfg(feature = "std")]
-pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
+pub use component_graph::{
+    ComponentGraph, ComponentNode, ComponentNodeKind, GraphError, GraphIssue,
+};
 
 /// Re-export the semantic diff API for callers that prefer the crate root.
 #[cfg(feature = "std")]
@@ -560,9 +559,59 @@ pub use text::{TextLayer, TextZone, TextZoneKind};
 #[cfg(feature = "std")]
 pub type Bookmark = DjVuBookmark;
 
-// Legacy error type (re-exported from legacy_error module included via error.rs)
+/// Error type of the [`Document`] / [`Page`] facade.
+///
+/// Each variant carries the typed error of the layer that failed, so nothing
+/// is flattened into a string: match on [`Error::Doc`] / [`Error::Render`] to
+/// reach a [`DocError`] or a [`RenderError`](djvu_render::RenderError), or
+/// walk [`source()`](std::error::Error::source). A configured resource limit
+/// that was hit is also available directly through
+/// [`Error::resource_limit`].
+///
+/// `Doc` and `Render` are transparent: their `Display` and `source()` are
+/// those of the wrapped error.
 #[cfg(feature = "std")]
-pub use error::LegacyError as Error;
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Reading the document bytes failed ([`Document::open`],
+    /// [`Document::from_reader`], …).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Parsing the document or decoding a page component failed.
+    #[error(transparent)]
+    Doc(#[from] DocError),
+
+    /// Rendering a page failed.
+    #[error(transparent)]
+    Render(#[from] djvu_render::RenderError),
+
+    /// [`ThumbnailStrategy::Th44Only`] was asked for a page without an
+    /// embedded `TH44` thumbnail.
+    #[error("page {page} has no embedded TH44 thumbnail (Th44Only strategy)")]
+    NoThumbnail {
+        /// Zero-based index of the page.
+        page: usize,
+    },
+}
+
+#[cfg(feature = "std")]
+impl Error {
+    /// The configured resource limit this error reports, if it is one.
+    ///
+    /// Looks through [`DocError::ResourceLimit`],
+    /// [`RenderError::ResourceLimit`](djvu_render::RenderError::ResourceLimit)
+    /// and a document error inside a render error.
+    pub fn resource_limit(&self) -> Option<&ResourceLimitExceeded> {
+        match self {
+            Error::Doc(DocError::ResourceLimit(e))
+            | Error::Render(djvu_render::RenderError::ResourceLimit(e))
+            | Error::Render(djvu_render::RenderError::Doc(DocError::ResourceLimit(e))) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 /// A parsed DjVu document. Owns the parsed structure.
 ///
@@ -590,8 +639,7 @@ impl Document {
         path: impl AsRef<std::path::Path>,
         opts: &crate::resource_limits::ParseOptions,
     ) -> Result<Self, Error> {
-        let data = std::fs::read(path.as_ref())
-            .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
+        let data = std::fs::read(path.as_ref())?;
         Self::from_bytes_with_options(data, opts)
     }
 
@@ -611,11 +659,9 @@ impl Document {
         opts: &crate::resource_limits::ParseOptions,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
-        let data = std::fs::read(path)
-            .map_err(|e| Error::FormatError(format!("failed to read file: {}", e)))?;
+        let data = std::fs::read(path)?;
         let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
-        let doc = DjVuDocument::parse_from_dir_with_options(&data, base_dir, opts)
-            .map_err(|e| Error::FormatError(e.to_string()))?;
+        let doc = DjVuDocument::parse_from_dir_with_options(&data, base_dir, opts)?;
         Ok(Document { doc })
     }
 
@@ -623,9 +669,7 @@ impl Document {
     pub fn from_reader(reader: impl std::io::Read) -> Result<Self, Error> {
         let mut reader = reader;
         let mut data = Vec::new();
-        reader
-            .read_to_end(&mut data)
-            .map_err(|e| Error::FormatError(format!("failed to read: {}", e)))?;
+        reader.read_to_end(&mut data)?;
         Self::from_bytes(data)
     }
 
@@ -644,8 +688,7 @@ impl Document {
         opts: &crate::resource_limits::ParseOptions,
     ) -> Result<Self, Error> {
         let backing: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = std::sync::Arc::new(data);
-        let doc = DjVuDocument::parse_backed_with_options(backing, opts)
-            .map_err(|e| Error::FormatError(e.to_string()))?;
+        let doc = DjVuDocument::parse_backed_with_options(backing, opts)?;
         Ok(Document { doc })
     }
 
@@ -677,10 +720,7 @@ impl Document {
 
     /// Access a page by 0-based index.
     pub fn page(&self, index: usize) -> Result<Page<'_>, Error> {
-        let page = self
-            .doc
-            .page(index)
-            .map_err(|e| Error::FormatError(e.to_string()))?;
+        let page = self.doc.page(index)?;
         Ok(Page { page, index })
     }
 
@@ -827,7 +867,7 @@ impl<'a> Page<'a> {
     /// # let _ = part;
     /// ```
     pub fn render_request(&self, request: &djvu_render::RenderRequest) -> Result<Pixmap, Error> {
-        request.pixmap(self.page).map_err(Self::render_err)
+        Ok(request.pixmap(self.page)?)
     }
 
     /// Render with caller-supplied [`RenderOptions`](djvu_render::RenderOptions) — the single entry point
@@ -852,7 +892,7 @@ impl<'a> Page<'a> {
             .limits(limits)
             .operation("render_pixmap")
             .pixmap(self.page)
-            .map_err(Self::render_err)
+            .map_err(Error::Render)
     }
 
     /// Page resolution in dots per inch.
@@ -880,17 +920,11 @@ impl<'a> Page<'a> {
         self.page.rotation()
     }
 
-    fn render_err(e: djvu_render::RenderError) -> Error {
-        Error::FormatError(e.to_string())
-    }
-
     /// Decode the JB2/G4 mask layer only (no compositing).
     ///
     /// Returns `None` when the page has no mask chunk (pure IW44 background page).
     pub fn decode_mask(&self) -> Result<Option<Bitmap>, Error> {
-        self.page
-            .extract_mask()
-            .map_err(|e| Error::FormatError(e.to_string()))
+        Ok(self.page.extract_mask()?)
     }
 
     /// Render the page to an RGBA pixmap at native resolution.
@@ -935,7 +969,7 @@ impl<'a> Page<'a> {
             .cached(true)
             .operation("render_region_tiled")
             .pixmap(self.page)
-            .map_err(Self::render_err)
+            .map_err(Error::Render)
     }
 
     /// Fast coarse render — decodes only the first BG44 chunk (a blurry but
@@ -948,7 +982,7 @@ impl<'a> Page<'a> {
             .pixmap(self.page)
         {
             Err(djvu_render::RenderError::NoBackground) => Ok(None),
-            result => result.map(Some).map_err(Self::render_err),
+            result => result.map(Some).map_err(Error::Render),
         }
     }
 
@@ -968,7 +1002,7 @@ impl<'a> Page<'a> {
             .quality(djvu_render::Quality::Step(chunk_n))
             .operation("render_progressive")
             .pixmap(self.page)
-            .map_err(Self::render_err)
+            .map_err(Error::Render)
     }
 
     /// Number of BG44 refinement chunks on this page (0 for bilevel pages).
@@ -978,9 +1012,7 @@ impl<'a> Page<'a> {
 
     /// Decode the page thumbnail, if available.
     pub fn thumbnail(&self) -> Result<Option<Pixmap>, Error> {
-        self.page
-            .thumbnail()
-            .map_err(|e| Error::FormatError(e.to_string()))
+        Ok(self.page.thumbnail()?)
     }
 
     /// Build this page's thumbnail scaled to fit within `max_w × max_h`
@@ -996,12 +1028,9 @@ impl<'a> Page<'a> {
         match strategy {
             ThumbnailStrategy::RenderOnly => self.render_fit_to_box(max_w, max_h),
             ThumbnailStrategy::Th44Only => {
-                let pm = self.thumbnail()?.ok_or_else(|| {
-                    Error::FormatError(format!(
-                        "page {} has no embedded TH44 thumbnail (Th44Only strategy)",
-                        self.index
-                    ))
-                })?;
+                let pm = self
+                    .thumbnail()?
+                    .ok_or(Error::NoThumbnail { page: self.index })?;
                 Self::fit_within(pm, max_w, max_h)
             }
             ThumbnailStrategy::Auto => match self.thumbnail()? {
@@ -1036,14 +1065,12 @@ impl<'a> Page<'a> {
         let tw = ((pm.width as f64 * scale).round() as u32).max(1);
         let th = ((pm.height as f64 * scale).round() as u32).max(1);
         crate::pixmap::scale_lanczos3(&pm, tw, th)
-            .map_err(|e| Self::render_err(djvu_render::RenderError::from(e)))
+            .map_err(|e| Error::Render(djvu_render::RenderError::from(e)))
     }
 
     /// Extract the text layer (TXTz/TXTa) with zone hierarchy.
     pub fn text_layer(&self) -> Result<Option<TextLayer>, Error> {
-        self.page
-            .text_layer()
-            .map_err(|e| Error::FormatError(e.to_string()))
+        Ok(self.page.text_layer()?)
     }
 
     /// Extract the plain text content of the page.
@@ -1255,8 +1282,47 @@ mod tests {
         };
         let err = page.render_with(&opts).unwrap_err();
         assert!(
-            matches!(err, Error::FormatError(_)),
-            "invalid dims must return FormatError, got {err:?}"
+            matches!(
+                err,
+                Error::Render(crate::djvu_render::RenderError::InvalidDimensions { .. })
+            ),
+            "invalid dims must return Render(InvalidDimensions), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_file_is_io_error() {
+        let err = Document::open("/nonexistent/djvu-rs/missing.djvu")
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_failure_is_typed_doc_error() {
+        let err = Document::from_bytes(b"not a djvu".to_vec()).err().unwrap();
+        assert!(matches!(err, Error::Doc(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn render_limit_is_reachable_through_resource_limit() {
+        let doc = Document::open(chicken()).unwrap();
+        let page = doc.page(0).unwrap();
+        let limits =
+            crate::resource_limits::ResourceLimits::default().with_max_render_pixels(Some(1));
+        let err = page
+            .render_with_limits(&page.options_for_size(64, 64), Some(limits))
+            .unwrap_err();
+        let limit = err.resource_limit().expect("typed limit");
+        assert_eq!(
+            limit.axis,
+            crate::resource_limits::ResourceLimitAxis::RenderOutputPixels
+        );
+        let source = std::error::Error::source(&err).expect("source");
+        assert!(
+            source
+                .downcast_ref::<crate::resource_limits::ResourceLimitExceeded>()
+                .is_some()
         );
     }
 
@@ -1386,8 +1452,11 @@ mod tests {
         let doc = Document::open(chicken()).unwrap();
         let results = doc.thumbnails_with_strategy(128, 128, ThumbnailStrategy::Th44Only);
         assert_eq!(results.len(), doc.page_count());
-        for r in &results {
-            assert!(r.is_err(), "Th44Only must error when no TH44 chunk exists");
+        for (i, r) in results.iter().enumerate() {
+            assert!(
+                matches!(r, Err(Error::NoThumbnail { page }) if *page == i),
+                "Th44Only must error when no TH44 chunk exists, got {r:?}"
+            );
         }
     }
 

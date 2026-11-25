@@ -33,6 +33,7 @@ use tokio::{
 };
 
 use crate::djvm::{DjvmError, DjvmSpool, DjvmStreamWriter};
+use crate::djvu_async::JoinFailure;
 
 #[cfg(feature = "pdf")]
 use crate::djvu_document::DjVuDocument;
@@ -83,7 +84,7 @@ impl io::Write for ChannelWriter {
 enum DrainError<E> {
     Writer(E),
     Sink(io::Error),
-    Join(String),
+    Join(JoinFailure),
 }
 
 /// Drain output sent from a blocking exporter into `sink` and wait for the
@@ -110,7 +111,7 @@ where
     match task.await {
         Ok(Ok(())) => sink.flush().await.map_err(DrainError::Sink),
         Ok(Err(error)) => Err(DrainError::Writer(error)),
-        Err(error) => Err(DrainError::Join(error.to_string())),
+        Err(error) => Err(DrainError::Join(JoinFailure::new(error))),
     }
 }
 
@@ -128,9 +129,9 @@ pub enum AsyncPdfError {
     #[error("async sink I/O error: {0}")]
     Sink(#[source] io::Error),
 
-    /// The blocking task was cancelled or panicked.
-    #[error("spawn_blocking join error: {0}")]
-    Join(String),
+    /// The blocking task that ran the exporter panicked or was cancelled.
+    #[error(transparent)]
+    Join(JoinFailure),
 }
 
 /// Stream a PDF export to an async sink.
@@ -181,9 +182,9 @@ pub enum AsyncDjvmError {
     #[error("async sink I/O error: {0}")]
     Sink(#[source] io::Error),
 
-    /// The blocking task was cancelled or panicked.
-    #[error("spawn_blocking join error: {0}")]
-    Join(String),
+    /// The blocking task that ran the exporter panicked or was cancelled.
+    #[error(transparent)]
+    Join(JoinFailure),
 }
 
 /// Build a bundled DJVM document and stream it to an async sink.

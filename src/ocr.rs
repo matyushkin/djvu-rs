@@ -38,25 +38,19 @@ pub enum OcrError {
     #[error("OCR model/language not found: {0}")]
     ModelNotFound(String),
 
-    /// Model bytes do not match their pinned manifest entry (#693).
+    /// A model file was found but failed the backend's integrity check, so it
+    /// was not loaded.
     ///
-    /// Raised by the `ocr-onnx` manifest loader when a model file's byte size
-    /// or SHA-256 differs from `docs/ocr-model-manifest.toml`. Unverified
-    /// weights are never loaded — this is a hard error, not a warning.
+    /// A backend that pins its model files (by size, checksum or signature)
+    /// returns this instead of running unverified weights. It is a hard error,
+    /// not a warning: fetch the model again rather than retrying.
     #[error("model verification failed for '{name}': {detail}")]
     ModelVerificationFailed {
-        /// Manifest entry name (e.g. "ppocr-v4-mobile-det").
+        /// Name of the model the backend tried to load.
         name: String,
-        /// What differed: size or SHA-256, with expected/actual values.
+        /// What did not match, with the expected and actual values.
         detail: String,
     },
-
-    /// The embedded model manifest is malformed (#693).
-    ///
-    /// Indicates a bug in `docs/ocr-model-manifest.toml` itself; guarded by
-    /// unit tests, so callers should never see this for the built-in manifest.
-    #[error("model manifest invalid: {0}")]
-    ManifestInvalid(String),
 
     /// I/O error (e.g. loading model file).
     #[error("I/O error: {0}")]

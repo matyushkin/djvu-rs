@@ -12,7 +12,7 @@
 //!   while the rest were infallible.
 //!
 //! This module is the one place that pairs each encoder with its id and routes
-//! every fallible case through a single [`EncodeError`](crate::chunk_encode::EncodeError). A wrapper implements
+//! every fallible case through a single [`ChunkEncodeError`](crate::chunk_encode::ChunkEncodeError). A wrapper implements
 //! [`ChunkEncoder`](crate::chunk_encode::ChunkEncoder) and yields an [`EncodedChunk`](crate::chunk_encode::EncodedChunk); [`EncodedChunk::into_leaf`](crate::chunk_encode::EncodedChunk::into_leaf)
 //! bridges to the `iff` emission seam ([`Chunk::Leaf`](crate::iff::Chunk::Leaf)) so framing and
 //! word-alignment padding stay centralised there (see issue #367).
@@ -35,7 +35,7 @@ use crate::text_encode::encode_text_layer;
 /// count is surfaced to the caller instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum EncodeError {
+pub enum ChunkEncodeError {
     /// A `NAVM` bookmark node has more children than the `u8` child-count
     /// field can express (limit 255).
     BookmarkChildrenOverflow {
@@ -62,22 +62,22 @@ pub enum EncodeError {
     },
 }
 
-impl core::fmt::Display for EncodeError {
+impl core::fmt::Display for ChunkEncodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            EncodeError::BookmarkChildrenOverflow { found } => write!(
+            ChunkEncodeError::BookmarkChildrenOverflow { found } => write!(
                 f,
                 "NAVM bookmark node has {found} children, exceeds wire-format limit 255"
             ),
-            EncodeError::BookmarkCountOverflow { found } => write!(
+            ChunkEncodeError::BookmarkCountOverflow { found } => write!(
                 f,
                 "NAVM bookmark tree has {found} nodes, exceeds wire-format limit 65535"
             ),
-            EncodeError::PaletteOverflow { found } => write!(
+            ChunkEncodeError::PaletteOverflow { found } => write!(
                 f,
                 "FGbz palette size {found} exceeds wire-format limit 65535"
             ),
-            EncodeError::IndexCountOverflow { found } => write!(
+            ChunkEncodeError::IndexCountOverflow { found } => write!(
                 f,
                 "FGbz index count {found} exceeds wire-format limit 2^24 - 1"
             ),
@@ -85,7 +85,7 @@ impl core::fmt::Display for EncodeError {
     }
 }
 
-impl std::error::Error for EncodeError {}
+impl std::error::Error for ChunkEncodeError {}
 
 /// An encoded chunk: its 4-byte id paired with the wire payload.
 ///
@@ -115,10 +115,10 @@ impl EncodedChunk {
 /// A value that can be serialized into a single DjVu chunk.
 ///
 /// Implementors pair a chunk id with a payload encoder and route every
-/// fallible case through [`EncodeError`].
+/// fallible case through [`ChunkEncodeError`].
 pub trait ChunkEncoder {
     /// Encode `self` into its `(id, payload)` chunk.
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError>;
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError>;
 }
 
 /// Build the 10-byte `INFO` chunk body — the **canonical** serializer.
@@ -154,7 +154,7 @@ pub struct InfoChunk {
 }
 
 impl ChunkEncoder for InfoChunk {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"INFO",
             payload: encode_info(self.width, self.height, self.dpi),
@@ -166,7 +166,7 @@ impl ChunkEncoder for InfoChunk {
 pub struct NavmChunk<'a>(pub &'a [DjVuBookmark]);
 
 impl ChunkEncoder for NavmChunk<'_> {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"NAVM",
             payload: encode_navm(self.0)?,
@@ -183,7 +183,7 @@ pub struct FgbzChunk<'a> {
 }
 
 impl ChunkEncoder for FgbzChunk<'_> {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"FGbz",
             payload: encode_fgbz(self.palette, self.indices)?,
@@ -204,7 +204,7 @@ pub struct TextChunk<'a> {
 }
 
 impl ChunkEncoder for TextChunk<'_> {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"TXTa",
             payload: encode_text_layer(self.layer, self.page_height),
@@ -216,7 +216,7 @@ impl ChunkEncoder for TextChunk<'_> {
 pub struct SmmrChunk<'a>(pub &'a Bitmap);
 
 impl ChunkEncoder for SmmrChunk<'_> {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"Smmr",
             payload: encode_smmr(self.0),
@@ -229,7 +229,7 @@ impl ChunkEncoder for SmmrChunk<'_> {
 pub struct Jb2Chunk<'a>(pub &'a Bitmap);
 
 impl ChunkEncoder for Jb2Chunk<'_> {
-    fn encode_chunk(&self) -> Result<EncodedChunk, EncodeError> {
+    fn encode_chunk(&self) -> Result<EncodedChunk, ChunkEncodeError> {
         Ok(EncodedChunk {
             id: *b"Sjbz",
             payload: encode_jb2_lossless(self.0),
@@ -252,22 +252,22 @@ mod tests {
     #[test]
     fn encode_error_display_messages() {
         assert!(
-            EncodeError::BookmarkChildrenOverflow { found: 256 }
+            ChunkEncodeError::BookmarkChildrenOverflow { found: 256 }
                 .to_string()
                 .contains("256")
         );
         assert!(
-            EncodeError::BookmarkCountOverflow { found: 65536 }
+            ChunkEncodeError::BookmarkCountOverflow { found: 65536 }
                 .to_string()
                 .contains("65536")
         );
         assert!(
-            EncodeError::PaletteOverflow { found: 70000 }
+            ChunkEncodeError::PaletteOverflow { found: 70000 }
                 .to_string()
                 .contains("70000")
         );
         assert!(
-            EncodeError::IndexCountOverflow { found: 1 << 24 }
+            ChunkEncodeError::IndexCountOverflow { found: 1 << 24 }
                 .to_string()
                 .contains("16777216")
         );
@@ -321,7 +321,10 @@ mod tests {
         let children: Vec<DjVuBookmark> = (0..256).map(|_| bm("child", vec![])).collect();
         let root = vec![bm("root", children)];
         let err = NavmChunk(&root).encode_chunk().unwrap_err();
-        assert_eq!(err, EncodeError::BookmarkChildrenOverflow { found: 256 });
+        assert_eq!(
+            err,
+            ChunkEncodeError::BookmarkChildrenOverflow { found: 256 }
+        );
     }
 
     #[test]
@@ -333,7 +336,10 @@ mod tests {
             .map(|_| bm("x", vec![]))
             .collect();
         let err = NavmChunk(&bookmarks).encode_chunk().unwrap_err();
-        assert_eq!(err, EncodeError::BookmarkCountOverflow { found: 65536 });
+        assert_eq!(
+            err,
+            ChunkEncodeError::BookmarkCountOverflow { found: 65536 }
+        );
     }
 
     #[test]
@@ -358,7 +364,7 @@ mod tests {
         }
         .encode_chunk()
         .unwrap_err();
-        assert_eq!(err, EncodeError::PaletteOverflow { found: 65536 });
+        assert_eq!(err, ChunkEncodeError::PaletteOverflow { found: 65536 });
     }
 
     #[test]

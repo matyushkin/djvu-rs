@@ -50,7 +50,9 @@ fn content_models_are_send_sync() {
 /// `spawn_blocking`/rayon closures).
 #[test]
 fn error_types_are_send_sync() {
-    assert_send_sync::<djvu_rs::DjVuError>();
+    assert_send_sync::<djvu_rs::Error>();
+    assert_send_sync::<djvu_rs::ComponentResolveError>();
+    assert_send_sync::<djvu_rs::djvu_mut::MutError>();
     assert_send_sync::<djvu_rs::IffError>();
     assert_send_sync::<djvu_rs::Jb2Error>();
     assert_send_sync::<djvu_rs::Iw44Error>();

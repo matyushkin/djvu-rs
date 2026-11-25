@@ -164,18 +164,21 @@ fn with_mask_rejects_invalid_combinations() {
         PageEncoder::from_pixmap(&pm)
             .with_mask(&wrong_size)
             .encode(),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::MaskSizeMismatch { page: 0, .. })
     ));
     assert!(matches!(
         PageEncoder::from_pixmap(&pm)
             .with_quality(EncodeQuality::Photo)
             .with_mask(&mask)
             .encode(),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::InvalidProfile {
+            quality: EncodeQuality::Photo,
+            ..
+        })
     ));
     assert!(matches!(
         PageEncoder::from_bitmap(&mask).with_mask(&mask).encode(),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::InvalidProfile { .. })
     ));
 }
 
@@ -380,7 +383,7 @@ fn empty_bitmap_round_trips() {
 
 #[test]
 fn encode_rejects_pixmap_width_exceeding_u16() {
-    // width = 70000 > 65535: try_from fails → EncodeError::Unsupported
+    // width = 70000 > 65535: try_from fails → EncodeError::DimensionsTooLarge
     let pm = Pixmap {
         width: 70_000,
         height: 1,
@@ -390,6 +393,13 @@ fn encode_rejects_pixmap_width_exceeding_u16() {
         .with_quality(EncodeQuality::Quality)
         .encode()
         .unwrap_err();
+    assert!(matches!(
+        err,
+        EncodeError::DimensionsTooLarge {
+            width: 70_000,
+            height: 1
+        }
+    ));
     let msg = format!("{err}");
     assert!(
         msg.contains("width") || msg.contains("65"),
@@ -399,7 +409,7 @@ fn encode_rejects_pixmap_width_exceeding_u16() {
 
 #[test]
 fn encode_rejects_bitmap_height_exceeding_u16() {
-    // height = 70000 > 65535: try_from fails → EncodeError::Unsupported
+    // height = 70000 > 65535: try_from fails → EncodeError::DimensionsTooLarge
     let bm = Bitmap {
         width: 1,
         height: 70_000,
@@ -1423,7 +1433,7 @@ fn layered_shared_with_masks_rejects_invalid_combinations() {
             2,
             &[Some(&mask0)],
         ),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::MaskCountMismatch { masks: 1, pages: 2 })
     ));
 
     // Mismatched mask dimensions for page 1.
@@ -1436,7 +1446,7 @@ fn layered_shared_with_masks_rejects_invalid_combinations() {
             2,
             &[Some(&mask0), Some(&wrong_size)],
         ),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::MaskSizeMismatch { page: 1, .. })
     ));
 
     // `encode_djvm_layered_shared` only supports the layered colour
@@ -1450,7 +1460,10 @@ fn layered_shared_with_masks_rejects_invalid_combinations() {
             2,
             &[Some(&mask0), Some(&mask1)],
         ),
-        Err(EncodeError::Unsupported(_))
+        Err(EncodeError::InvalidProfile {
+            quality: EncodeQuality::Lossless,
+            ..
+        })
     ));
 
     // Valid combination still succeeds (sanity check the rejects above

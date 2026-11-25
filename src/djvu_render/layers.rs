@@ -740,15 +740,15 @@ pub(super) fn decode_jpeg_to_pixmap(data: &[u8]) -> Result<Pixmap, RenderError> 
     let mut decoder = JpegDecoder::new(cursor);
     decoder
         .decode_headers()
-        .map_err(|e| RenderError::Jpeg(format!("{e:?}")))?;
-    let info = decoder
-        .info()
-        .ok_or_else(|| RenderError::Jpeg("missing image info after decode_headers".to_owned()))?;
+        .map_err(|e| RenderError::Jpeg(JpegError::decoder(e)))?;
+    let info = decoder.info().ok_or_else(|| {
+        RenderError::Jpeg(JpegError::msg("missing image info after decode_headers"))
+    })?;
     let w = info.width as usize;
     let h = info.height as usize;
     let rgb = decoder
         .decode()
-        .map_err(|e| RenderError::Jpeg(format!("{e:?}")))?;
+        .map_err(|e| RenderError::Jpeg(JpegError::decoder(e)))?;
 
     // zune-jpeg returns packed RGB; convert to RGBA with alpha = 255.
     let pixel_count = w * h;

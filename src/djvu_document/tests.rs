@@ -74,7 +74,7 @@ fn indirect_named_resolver_attaches_shared_dict() {
             files
                 .get(name)
                 .cloned()
-                .ok_or_else(|| DocError::IndirectResolve(name.to_string()))
+                .ok_or_else(|| DocError::Io(std::io::ErrorKind::NotFound.into()))
         }),
     )
     .unwrap();
@@ -131,7 +131,7 @@ fn page_before_its_shared_dict_in_dirm_gets_it() {
             files
                 .get(name)
                 .cloned()
-                .ok_or_else(|| DocError::IndirectResolve(name.to_string()))
+                .ok_or_else(|| DocError::Io(std::io::ErrorKind::NotFound.into()))
         }),
     )
     .unwrap();
@@ -216,7 +216,7 @@ fn shared_annotation_is_listed_and_supplies_metadata() {
                 .iter()
                 .find(|(id, _)| id == name)
                 .map(|(_, bytes)| bytes.clone())
-                .ok_or(DocError::IndirectResolve(name.to_string()))
+                .ok_or(DocError::Io(std::io::ErrorKind::NotFound.into()))
         }),
     )
     .unwrap();
@@ -585,7 +585,7 @@ fn indirect_document_with_resolver() {
         if name == "chicken.djvu" {
             Ok(chicken_data.clone())
         } else {
-            Err(DocError::IndirectResolve(name.to_string()))
+            Err(DocError::Io(std::io::ErrorKind::NotFound.into()))
         }
     };
 
@@ -596,6 +596,45 @@ fn indirect_document_with_resolver() {
     let page = doc.page(0).unwrap();
     assert_eq!(page.width(), 181);
     assert_eq!(page.height(), 240);
+}
+
+/// A failed page resolver keeps the component name and the resolver's own
+/// error as the `source` of `IndirectResolve`.
+#[test]
+fn indirect_resolve_failure_keeps_name_and_source() {
+    use std::error::Error as _;
+
+    let djvm_data = build_indirect_djvm_bytes("chicken.djvu");
+    let resolver = |_name: &str| -> Result<Vec<u8>, DocError> {
+        Err(DocError::Io(std::io::ErrorKind::NotFound.into()))
+    };
+    let err = DjVuDocument::parse_with_resolver(&djvm_data, Some(resolver)).unwrap_err();
+    match &err {
+        DocError::IndirectResolve { name, source } => {
+            assert_eq!(name, "chicken.djvu");
+            assert!(matches!(**source, DocError::Io(_)), "got {source:?}");
+        }
+        other => panic!("expected IndirectResolve, got {other:?}"),
+    }
+    assert!(err.source().is_some());
+}
+
+/// `ComponentResolveError::Failed` carries the resolver's error as `source`.
+#[test]
+fn component_resolve_failed_carries_source() {
+    use std::error::Error as _;
+
+    let err = ComponentResolveError::Failed {
+        component: ComponentId::new("p.djvu", ComponentKind::Page),
+        source: Box::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+    };
+    let source = err.source().expect("source");
+    assert!(source.downcast_ref::<std::io::Error>().is_some());
+    let from_message = ComponentResolveError::Failed {
+        component: ComponentId::new("p.djvu", ComponentKind::Page),
+        source: "network down".into(),
+    };
+    assert!(from_message.to_string().contains("network down"));
 }
 
 /// Indirect document without resolver must return NoResolver error.
@@ -1468,7 +1507,7 @@ fn indirect_djvm_with_shared_djvi_entry_skips_to_page() {
         if name == "page.djvu" {
             Ok(chicken_data.clone())
         } else {
-            Err(DocError::IndirectResolve(name.to_string()))
+            Err(DocError::Io(std::io::ErrorKind::NotFound.into()))
         }
     };
 

@@ -5,8 +5,11 @@
 //! 1. **New spec-based parser** (`parse_form`) — zero-copy, borrowing slices from
 //!    the input byte buffer. Written from the sndjvu.org specification.
 //!
-//! 2. **Legacy API** (`parse`, `Chunk`, `DjvuFile`) — the original tree-based parser
-//!    kept for internal backward compatibility while the rewrite is in progress.
+//! 2. **Owned chunk tree** (`parse`, `Chunk`, `DjvuFile`, `emit`) — copies every
+//!    chunk into an owned tree that can be edited and written back with
+//!    [`emit`]. The mutation and optimizer layers of `djvu-rs` build on it.
+//!
+//! Both parsers report failures as [`IffError`].
 //!
 //! ## DjVu IFF layout
 //!
@@ -51,13 +54,6 @@ pub enum IffError {
     #[error("bad magic bytes: expected AT&T, got {got:?}")]
     BadMagic { got: [u8; 4] },
 
-    /// The FORM type identifier is not a recognised DjVu type.
-    ///
-    /// Note: this is *not* an error — callers may encounter unknown form types
-    /// in bundled documents and should handle them gracefully.
-    #[error("unknown FORM type: {id:?}")]
-    UnknownFormType { id: [u8; 4] },
-
     /// A chunk header claims more bytes than are available in the buffer.
     #[error(
         "chunk {:?} claims {} bytes but only {} are available",
@@ -90,43 +86,6 @@ pub enum IffError {
     #[error("unsupported DjVu format version {version} (DjVuLibre rejects version >= 50)")]
     UnsupportedVersion { version: u16 },
 }
-
-/// Original error type used by the legacy implementation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum LegacyError {
-    /// Input data is shorter than expected.
-    UnexpectedEof,
-    /// A required magic number or tag was not found.
-    InvalidMagic,
-    /// A chunk or field has an invalid length.
-    InvalidLength,
-    /// A required chunk is missing.
-    MissingChunk(&'static str),
-    /// An unsupported feature or version was encountered.
-    Unsupported(&'static str),
-    /// Generic format violation.
-    FormatError(String),
-}
-
-impl core::fmt::Display for LegacyError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            LegacyError::UnexpectedEof => write!(f, "unexpected end of input"),
-            LegacyError::InvalidMagic => write!(f, "invalid magic number"),
-            LegacyError::InvalidLength => write!(f, "invalid length"),
-            LegacyError::MissingChunk(id) => write!(f, "missing required chunk: {}", id),
-            LegacyError::Unsupported(msg) => write!(f, "unsupported: {}", msg),
-            LegacyError::FormatError(msg) => write!(f, "format error: {}", msg),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for LegacyError {}
-
-/// Alias for [`LegacyError`].
-pub use LegacyError as Error;
 
 // ---- IFF chunk types --------------------------------------------------------
 
@@ -242,12 +201,22 @@ pub struct DjvuFile {
     pub root: Chunk,
 }
 
-/// Parse a DjVu file from raw bytes (legacy tree-based parser).
+/// Parse a DjVu file from raw bytes into an owned chunk tree.
 ///
-/// Expects the file to begin with "AT&T" magic followed by a root FORM chunk.
-pub fn parse(data: &[u8]) -> Result<DjvuFile, Error> {
+/// Expects the file to begin with "AT&T" magic followed by a root FORM chunk;
+/// a bare FORM without the magic is accepted too.
+///
+/// # Errors
+///
+/// - [`IffError::TooShort`] if `data` is shorter than four bytes.
+/// - [`IffError::Truncated`] if a chunk header is cut off, or a `FORM` is too
+///   short to hold its secondary type.
+/// - [`IffError::ChunkTooLong`] if a chunk claims more bytes than the input
+///   holds.
+/// - [`IffError::DepthLimitExceeded`] if `FORM`s nest deeper than 64 levels.
+pub fn parse(data: &[u8]) -> Result<DjvuFile, IffError> {
     if data.len() < 4 {
-        return Err(Error::UnexpectedEof);
+        return Err(IffError::TooShort);
     }
     // Check for "AT&T" magic
     let (magic, rest) = if &data[..4] == b"AT&T" {
@@ -274,7 +243,7 @@ const MAX_IFF_DEPTH: u32 = 64;
 /// records. Offsets are absolute file-byte offsets pointing at each chunk's
 /// four-byte identifier, including the root `FORM` at offset four. The walker
 /// accepts harmless trailing bytes after the root FORM and trailing fragments
-/// shorter than a chunk header inside a FORM, matching the legacy parser's
+/// shorter than a chunk header inside a FORM, matching the tree parser's
 /// diagnostic tolerance. It rejects a truncated header or a chunk payload that
 /// exceeds its enclosing FORM.
 ///
@@ -388,12 +357,14 @@ fn walk_chunk(
 
 /// Parse a single chunk starting at `offset` within `data`.
 /// Returns the parsed chunk and the number of bytes consumed (including padding).
-fn parse_chunk(data: &[u8], offset: usize, depth: u32) -> Result<(Chunk, usize), Error> {
+fn parse_chunk(data: &[u8], offset: usize, depth: u32) -> Result<(Chunk, usize), IffError> {
     if depth > MAX_IFF_DEPTH {
-        return Err(Error::InvalidLength);
+        return Err(IffError::DepthLimitExceeded {
+            max: MAX_IFF_DEPTH as usize,
+        });
     }
     if offset.checked_add(8).is_none_or(|end| end > data.len()) {
-        return Err(Error::UnexpectedEof);
+        return Err(IffError::Truncated);
     }
 
     let id: ChunkId = [
@@ -413,23 +384,26 @@ fn parse_chunk(data: &[u8], offset: usize, depth: u32) -> Result<(Chunk, usize),
     // `length` is attacker-controlled (u32, up to 4 GiB). On 32-bit targets
     // (wasm32) `payload_start + length` can wrap, defeating the bounds check
     // below and causing a slice panic or a runaway loop. Use checked math.
+    let too_long = || IffError::ChunkTooLong {
+        id,
+        claimed: length,
+        available: data.len().saturating_sub(payload_start),
+    };
     let payload_end = payload_start
         .checked_add(length as usize)
-        .ok_or(Error::InvalidLength)?;
+        .ok_or_else(too_long)?;
 
     if payload_end > data.len() {
-        return Err(Error::UnexpectedEof);
+        return Err(too_long());
     }
 
     // Word-align: next chunk starts at even offset
-    let total = 8usize
-        .checked_add(length as usize)
-        .ok_or(Error::InvalidLength)?;
-    let padded_total = total.checked_add(total % 2).ok_or(Error::InvalidLength)?;
+    let total = 8usize.checked_add(length as usize).ok_or_else(too_long)?;
+    let padded_total = total.checked_add(total % 2).ok_or_else(too_long)?;
 
     if &id == b"FORM" {
         if length < 4 {
-            return Err(Error::InvalidLength);
+            return Err(IffError::Truncated);
         }
         let secondary_id: ChunkId = [
             data[payload_start],
@@ -462,7 +436,12 @@ fn parse_chunk(data: &[u8], offset: usize, depth: u32) -> Result<(Chunk, usize),
 }
 
 /// Parse sequential chunks within a range of bytes.
-fn parse_children(data: &[u8], start: usize, end: usize, depth: u32) -> Result<Vec<Chunk>, Error> {
+fn parse_children(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    depth: u32,
+) -> Result<Vec<Chunk>, IffError> {
     let mut chunks = Vec::new();
     let mut pos = start;
 
@@ -475,15 +454,15 @@ fn parse_children(data: &[u8], start: usize, end: usize, depth: u32) -> Result<V
         chunks.push(chunk);
         // `consumed` is padded_total ≥ 8, so this always advances; checked to
         // stay sound under any future change and on 32-bit targets.
-        pos = pos.checked_add(consumed).ok_or(Error::InvalidLength)?;
+        pos = pos.checked_add(consumed).ok_or(IffError::Truncated)?;
     }
 
     Ok(chunks)
 }
 
-// ---- Legacy emitter (round-trip support, #195) ------------------------------
+// ---- Tree emitter (round-trip support, #195) --------------------------------
 
-/// Serialise a `DjvuFile` (legacy parser) back into the on-disk IFF byte
+/// Serialise a `DjvuFile` (from [`parse`]) back into the on-disk IFF byte
 /// stream, including the leading "AT&T" magic.
 ///
 /// Parser/emitter contract: `parse(emit(file)) == file` for any tree
@@ -694,7 +673,7 @@ pub fn partial_emit_with_offsets(
 // ---- New spec-based IFF parser (phase 1) ------------------------------------
 //
 // `parse_form` is a new zero-copy parser written from the sndjvu.org spec.
-// It returns `Form` and `IffChunk` types (distinct from the legacy `Chunk`).
+// It returns `Form` and `IffChunk` types (distinct from the owned tree's `Chunk`).
 
 /// A parsed IFF chunk from the new spec-based parser: a 4-byte identifier
 /// plus a zero-copy slice into the original byte buffer.
@@ -834,7 +813,7 @@ fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, IffError> {
     Ok(u32::from_be_bytes(b))
 }
 
-// ---- Legacy dump helper -----------------------------------------------------
+// ---- Tree dump helper -------------------------------------------------------
 
 /// Produce a structural dump of the chunk tree.
 ///
@@ -1046,7 +1025,7 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/iff")
     }
 
-    // ---- Legacy parser tests ------------------------------------------------
+    // ---- Tree parser tests --------------------------------------------------
 
     /// Parse our structural dump and djvudump output to comparable lines.
     fn normalize_dump(input: &str) -> Vec<String> {
@@ -1480,29 +1459,6 @@ mod tests {
         assert!(!form.chunks.is_empty());
     }
 
-    // Lines 95-102: LegacyError Display variants
-    #[test]
-    fn legacy_error_display_variants() {
-        assert_eq!(
-            LegacyError::UnexpectedEof.to_string(),
-            "unexpected end of input"
-        );
-        assert_eq!(
-            LegacyError::InvalidMagic.to_string(),
-            "invalid magic number"
-        );
-        assert_eq!(LegacyError::InvalidLength.to_string(), "invalid length");
-        assert_eq!(
-            LegacyError::MissingChunk("INFO").to_string(),
-            "missing required chunk: INFO"
-        );
-        assert_eq!(LegacyError::Unsupported("x").to_string(), "unsupported: x");
-        assert_eq!(
-            LegacyError::FormatError("y".to_string()).to_string(),
-            "format error: y"
-        );
-    }
-
     // Lines 151, 169-172, 180, 185-190: Chunk accessor methods on Form/Leaf
     #[test]
     fn chunk_accessors_form_and_leaf() {
@@ -1596,14 +1552,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_input_returns_unexpected_eof() {
-        // Line 207: data.len() < 4
-        assert!(matches!(parse(b""), Err(Error::UnexpectedEof)));
-        assert!(matches!(parse(b"AT"), Err(Error::UnexpectedEof)));
+    fn parse_empty_input_returns_too_short() {
+        // data.len() < 4
+        assert!(matches!(parse(b""), Err(IffError::TooShort)));
+        assert!(matches!(parse(b"AT"), Err(IffError::TooShort)));
     }
 
     #[test]
-    fn parse_form_length_too_small_returns_invalid_length() {
+    fn parse_form_length_too_small_returns_truncated() {
         // Line 255: FORM chunk with length field < 4
         // AT&T + FORM + length(3) + 3 bytes payload = 15 bytes total
         let mut data = vec![];
@@ -1611,7 +1567,7 @@ mod tests {
         data.extend_from_slice(b"FORM");
         data.extend_from_slice(&3u32.to_be_bytes()); // length < 4
         data.extend_from_slice(b"XYZ");
-        assert!(matches!(parse(&data), Err(Error::InvalidLength)));
+        assert!(matches!(parse(&data), Err(IffError::Truncated)));
     }
 
     #[test]

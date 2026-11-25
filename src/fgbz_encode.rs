@@ -22,10 +22,8 @@
 //! may differ byte-for-byte vs. another implementation, since BZZ is
 //! not canonical, but `decode(encode(idx)) == idx`).
 
-use crate::bzz::bzz_decode;
 use crate::bzz_encode::bzz_encode;
-use crate::chunk_encode::EncodeError;
-use crate::error::DjVuError;
+use crate::chunk_encode::ChunkEncodeError;
 
 /// One palette entry (24-bit RGB).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,20 +38,23 @@ pub struct FgbzColor {
 ///
 /// # Errors
 ///
-/// - [`EncodeError::PaletteOverflow`] if `palette.len() > 65 535`.
-/// - [`EncodeError::IndexCountOverflow`] if `indices.map(len) ≥ 2²⁴`.
+/// - [`ChunkEncodeError::PaletteOverflow`] if `palette.len() > 65 535`.
+/// - [`ChunkEncodeError::IndexCountOverflow`] if `indices.map(len) ≥ 2²⁴`.
 ///
 /// Both are wire-format limits; this replaces the previous `assert!` panic.
-pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_fgbz(
+    palette: &[FgbzColor],
+    indices: Option<&[i16]>,
+) -> Result<Vec<u8>, ChunkEncodeError> {
     if palette.len() > u16::MAX as usize {
-        return Err(EncodeError::PaletteOverflow {
+        return Err(ChunkEncodeError::PaletteOverflow {
             found: palette.len(),
         });
     }
     if let Some(idx) = indices
         && idx.len() >= (1usize << 24)
     {
-        return Err(EncodeError::IndexCountOverflow { found: idx.len() });
+        return Err(ChunkEncodeError::IndexCountOverflow { found: idx.len() });
     }
 
     let cap = 3 + palette.len() * 3 + indices.map_or(0, |i| 3 + i.len() * 2);
@@ -84,12 +85,15 @@ pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Result<Vec
     Ok(out)
 }
 
-/// Decode an FGbz chunk payload.
+/// Decode an FGbz chunk payload: the test oracle for [`encode_fgbz`].
 ///
-/// Inverse of [`encode_fgbz`] — returns the palette and (when present)
-/// the per-blit index table. Independent of the renderer's internal
-/// `parse_fgbz`; both share the same wire spec.
-pub fn decode_fgbz(data: &[u8]) -> Result<(Vec<FgbzColor>, Vec<i16>), DjVuError> {
+/// Test-only: the renderer decodes FGbz with its own `parse_fgbz`.
+///
+/// Returns the palette and (when present) the per-blit index table.
+/// Independent of the renderer's internal `parse_fgbz`; both share the
+/// same wire spec.
+#[cfg(test)]
+pub(crate) fn decode_fgbz(data: &[u8]) -> Result<(Vec<FgbzColor>, Vec<i16>), &'static str> {
     if data.len() < 3 {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -97,15 +101,13 @@ pub fn decode_fgbz(data: &[u8]) -> Result<(Vec<FgbzColor>, Vec<i16>), DjVuError>
     let version = data[0];
     let has_indices = (version & 0x80) != 0;
     if version & 0x7f != 0 {
-        return Err(DjVuError::InvalidStructure(
-            "FGbz: reserved version bits set",
-        ));
+        return Err("FGbz: reserved version bits set");
     }
 
     let n_colors = u16::from_be_bytes([data[1], data[2]]) as usize;
     let color_bytes = n_colors * 3;
     if data.len() < 3 + color_bytes {
-        return Err(DjVuError::InvalidStructure("FGbz: palette truncated"));
+        return Err("FGbz: palette truncated");
     }
 
     let mut colors = Vec::with_capacity(n_colors);
@@ -122,17 +124,16 @@ pub fn decode_fgbz(data: &[u8]) -> Result<(Vec<FgbzColor>, Vec<i16>), DjVuError>
     if has_indices {
         let idx_start = 3 + color_bytes;
         if idx_start + 3 > data.len() {
-            return Err(DjVuError::InvalidStructure("FGbz: index header truncated"));
+            return Err("FGbz: index header truncated");
         }
         let m = ((data[idx_start] as u32) << 16)
             | ((data[idx_start + 1] as u32) << 8)
             | (data[idx_start + 2] as u32);
         let bzz = &data[idx_start + 3..];
-        let raw = bzz_decode(bzz)?;
+        let raw =
+            crate::bzz::bzz_decode(bzz).map_err(|_| "FGbz: index payload is not valid BZZ")?;
         if raw.len() < (m as usize) * 2 {
-            return Err(DjVuError::InvalidStructure(
-                "FGbz: index payload shorter than declared count",
-            ));
+            return Err("FGbz: index payload shorter than declared count");
         }
         indices.reserve(m as usize);
         for i in 0..(m as usize) {
@@ -146,6 +147,7 @@ pub fn decode_fgbz(data: &[u8]) -> Result<(Vec<FgbzColor>, Vec<i16>), DjVuError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn empty_palette_no_indices() {
@@ -302,5 +304,26 @@ mod tests {
         // version=0x80 (has indices), 1 colour, then nothing.
         let bytes = [0x80, 0x00, 0x01, 0x01, 0x02, 0x03];
         assert!(decode_fgbz(&bytes).is_err());
+    }
+
+    proptest! {
+        /// FGbz: bit-exact round-trip for palette + index table (#217).
+        /// Index strategy includes negative i16 values (-1 is sometimes used
+        /// as a "no-color" sentinel) and bursts of repeats (BZZ-friendly).
+        #[test]
+        fn fgbz_roundtrip(
+            palette in prop::collection::vec(
+                (any::<u8>(), any::<u8>(), any::<u8>())
+                    .prop_map(|(r, g, b)| FgbzColor { r, g, b }),
+                0..256usize,
+            ),
+            indices in prop::option::of(prop::collection::vec(any::<i16>(), 0..1024usize)),
+        ) {
+            let bytes = encode_fgbz(&palette, indices.as_deref()).expect("FGbz encode failed");
+            let (decoded_palette, decoded_indices) =
+                decode_fgbz(&bytes).expect("FGbz decode failed");
+            prop_assert_eq!(decoded_palette, palette);
+            prop_assert_eq!(decoded_indices, indices.unwrap_or_default());
+        }
     }
 }

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ComponentGraph, ComponentNodeKind, DjVuDocument, GraphError,
+    ComponentGraph, ComponentNodeKind, DjVuDocument, GraphError, GraphIssue,
     dirm::DirmPayload,
     iff::{self, ChunkRecord},
     info::PageInfo,
@@ -569,8 +569,8 @@ fn validate_dependencies(
                     component_offsets.insert(record.offset, node.id.clone());
                 }
             }
-            for error in graph.validate() {
-                findings.push(graph_error_finding(error));
+            for issue in graph.validate() {
+                findings.push(graph_issue_finding(issue));
             }
             for index in graph.unreachable_components() {
                 let Some(node) = graph.nodes().get(index) else {
@@ -603,9 +603,9 @@ fn validate_dependencies(
     component_offsets
 }
 
-fn graph_error_finding(error: GraphError) -> Finding {
-    match error {
-        GraphError::MissingTarget { source, target } => finding(
+fn graph_issue_finding(issue: GraphIssue) -> Finding {
+    match issue {
+        GraphIssue::MissingTarget { source, target } => finding(
             Severity::Error,
             Layer::Dependency,
             "dep.missing-target",
@@ -614,7 +614,7 @@ fn graph_error_finding(error: GraphError) -> Finding {
             None,
             format!("component '{source}' includes missing target '{target}'"),
         ),
-        GraphError::DuplicateIdentity { id } => finding(
+        GraphIssue::DuplicateIdentity { id } => finding(
             Severity::Error,
             Layer::Dependency,
             "dep.duplicate-identity",
@@ -623,7 +623,7 @@ fn graph_error_finding(error: GraphError) -> Finding {
             None,
             format!("DIRM declares component identity '{id}' more than once"),
         ),
-        GraphError::InvalidComponentType { id, form } => finding(
+        GraphIssue::InvalidComponentType { id, form } => finding(
             Severity::Error,
             Layer::Dependency,
             "dep.invalid-component-type",
@@ -635,7 +635,7 @@ fn graph_error_finding(error: GraphError) -> Finding {
                 chunk_id_text(form)
             ),
         ),
-        GraphError::Cycle { path } => finding(
+        GraphIssue::Cycle { path } => finding(
             Severity::Error,
             Layer::Dependency,
             "dep.cycle",
@@ -644,16 +644,28 @@ fn graph_error_finding(error: GraphError) -> Finding {
             None,
             format!("component include cycle: {}", path.join(" -> ")),
         ),
-        GraphError::Malformed(message) => finding(
+        GraphIssue::LimitExceeded => finding(
             Severity::Error,
             Layer::Dependency,
             "dep.malformed-graph",
             None,
             None,
             None,
-            format!("component graph parse failed: {message}"),
+            "component graph validation limit exceeded".to_string(),
         ),
     }
+}
+
+fn graph_error_finding(error: GraphError) -> Finding {
+    finding(
+        Severity::Error,
+        Layer::Dependency,
+        "dep.malformed-graph",
+        None,
+        None,
+        None,
+        format!("component graph parse failed: {error}"),
+    )
 }
 
 /// Derive cheap, header-only resource estimates by walking the chunk tree and
@@ -1298,7 +1310,6 @@ fn iff_error_code(error: &iff::IffError) -> &'static str {
         iff::IffError::ChunkTooLong { .. } => "iff.truncated-chunk",
         iff::IffError::Truncated | iff::IffError::TooShort => "iff.truncated",
         iff::IffError::BadMagic { .. } => "iff.bad-magic",
-        iff::IffError::UnknownFormType { .. } => "iff.unknown-form",
         iff::IffError::DepthLimitExceeded { .. } => "iff.depth-limit",
         iff::IffError::UnsupportedVersion { .. } => "iff.unsupported-version",
         // `IffError` is `#[non_exhaustive]` (see `docs/api-compatibility.md`
@@ -1454,21 +1465,21 @@ mod tests {
     #[test]
     fn every_component_graph_error_kind_has_a_stable_dependency_code() {
         let codes = [
-            graph_error_finding(GraphError::MissingTarget {
+            graph_issue_finding(GraphIssue::MissingTarget {
                 source: "page.djvu".to_string(),
                 target: "missing.djvi".to_string(),
             })
             .code,
-            graph_error_finding(GraphError::DuplicateIdentity {
+            graph_issue_finding(GraphIssue::DuplicateIdentity {
                 id: "dup.djvi".to_string(),
             })
             .code,
-            graph_error_finding(GraphError::InvalidComponentType {
+            graph_issue_finding(GraphIssue::InvalidComponentType {
                 id: "page.djvu".to_string(),
                 form: *b"DJVI",
             })
             .code,
-            graph_error_finding(GraphError::Cycle {
+            graph_issue_finding(GraphIssue::Cycle {
                 path: vec!["a.djvi".to_string(), "a.djvi".to_string()],
             })
             .code,

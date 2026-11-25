@@ -28,8 +28,15 @@
 //! # Ok(()) }
 //! ```
 //!
-//! The render error type stays the typed [`djvu_render::RenderError`] — there
-//! is no wrapper enum to unwrap.
+//! Called this way, the render error stays the typed
+//! [`djvu_render::RenderError`]. The async entry points of this module
+//! ([`render_progressive_stream`](crate::djvu_async::render_progressive_stream),
+//! [`render_tile_async`](crate::djvu_async::render_tile_async),
+//! [`render_tile_progressive_stream`](crate::djvu_async::render_tile_progressive_stream))
+//! spawn the blocking task themselves and return one enum,
+//! [`AsyncRenderError`](crate::djvu_async::AsyncRenderError): `Render` or
+//! `Tile` wraps the sync error, and `Join` reports a task that panicked or was
+//! cancelled ([`JoinFailure`](crate::djvu_async::JoinFailure)).
 //!
 //! ## Key public abstractions
 //!
@@ -64,31 +71,66 @@ use crate::{
 
 // ── Error types ───────────────────────────────────────────────────────────────
 
-/// Errors from async rendering.
+/// Errors from the async render entry points: [`render_progressive_stream`],
+/// [`render_tile_async`] and [`render_tile_progressive_stream`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AsyncRenderError {
-    /// The underlying render failed.
+    /// The underlying page render failed ([`render_progressive_stream`]).
     #[error("render error: {0}")]
     Render(#[from] RenderError),
 
-    /// The blocking task was cancelled or panicked.
-    #[error("spawn_blocking join error: {0}")]
-    Join(String),
-}
-
-/// Errors from async tile rendering (#691).
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum AsyncTileError {
-    /// The underlying tile render failed — including
+    /// The underlying tile render failed ([`render_tile_async`],
+    /// [`render_tile_progressive_stream`]) — including
     /// [`TileError::Cancelled`] when the token fired.
     #[error("tile error: {0}")]
     Tile(#[from] TileError),
 
-    /// The blocking task was cancelled or panicked.
-    #[error("spawn_blocking join error: {0}")]
-    Join(String),
+    /// The blocking task that ran the render panicked or was cancelled.
+    #[error(transparent)]
+    Join(JoinFailure),
+}
+
+/// A blocking task spawned by an async adapter did not finish: it panicked,
+/// or the runtime cancelled it (for example while shutting down).
+///
+/// Returned by [`AsyncRenderError::Join`] and by the `Join` variants of the
+/// [`export_async`](crate::export_async) errors. Its message includes the
+/// panic payload when that is a string; [`source`] returns the runtime's own
+/// join error.
+///
+/// [`source`]: std::error::Error::source
+#[derive(Debug)]
+pub struct JoinFailure(tokio::task::JoinError);
+
+impl JoinFailure {
+    /// Whether the task panicked.
+    pub fn is_panic(&self) -> bool {
+        self.0.is_panic()
+    }
+
+    /// Whether the task was cancelled before it completed.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    pub(crate) fn new(error: tokio::task::JoinError) -> Self {
+        Self(error)
+    }
+}
+
+impl core::fmt::Display for JoinFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The runtime's message says "panicked" or "cancelled" and carries a
+        // string panic payload.
+        write!(f, "blocking task failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for JoinFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 /// Errors from async document loading (both the streaming loader and the true
@@ -728,7 +770,7 @@ pub fn render_progressive_stream(
                     .map_err(AsyncRenderError::Render)
             })
             .await
-            .map_err(|e| AsyncRenderError::Join(e.to_string()));
+            .map_err(|e| AsyncRenderError::Join(JoinFailure::new(e)));
             yield result.and_then(|r| r);
         }
     }
@@ -746,7 +788,7 @@ pub fn render_progressive_stream(
 ///
 /// Cancel from any thread or task by cancelling a clone of the token in
 /// `controls.cancel`; the render stops at its next checkpoint with
-/// [`TileError::Cancelled`] (wrapped in [`AsyncTileError::Tile`]).
+/// [`TileError::Cancelled`] (wrapped in [`AsyncRenderError::Tile`]).
 pub async fn render_tile_async(
     page: &DjVuPage,
     opts: RenderOptions,
@@ -754,14 +796,14 @@ pub async fn render_tile_async(
     col: u32,
     row: u32,
     controls: TileRenderControls,
-) -> Result<Pixmap, AsyncTileError> {
+) -> Result<Pixmap, AsyncRenderError> {
     let page = page.clone();
     tokio::task::spawn_blocking(move || {
         crate::djvu_tile::render_tile_with(&page, &opts, tile_size, col, row, &controls)
-            .map_err(AsyncTileError::Tile)
+            .map_err(AsyncRenderError::Tile)
     })
     .await
-    .map_err(|e| AsyncTileError::Join(e.to_string()))?
+    .map_err(|e| AsyncRenderError::Join(JoinFailure::new(e)))?
 }
 
 /// Progressive quality ladder for one tile, as a lazy stream (#691).
@@ -775,7 +817,7 @@ pub async fn render_tile_async(
 ///
 /// Each frame is produced via [`tokio::task::spawn_blocking`] just before it
 /// is yielded. If `cancel` fires, the stream yields one
-/// `Err(AsyncTileError::Tile(TileError::Cancelled))` and ends — the token is
+/// `Err(AsyncRenderError::Tile(TileError::Cancelled))` and ends — the token is
 /// sticky, so no later step could succeed.
 pub fn render_tile_progressive_stream(
     page: &DjVuPage,
@@ -784,7 +826,7 @@ pub fn render_tile_progressive_stream(
     col: u32,
     row: u32,
     cancel: Option<TileCancelToken>,
-) -> impl futures_core::Stream<Item = Result<Pixmap, AsyncTileError>> {
+) -> impl futures_core::Stream<Item = Result<Pixmap, AsyncRenderError>> {
     // Single clone wrapped in Arc — all spawn_blocking closures share
     // this one allocation instead of cloning the full page each time.
     let page = Arc::new(page.clone());
@@ -801,12 +843,12 @@ pub fn render_tile_progressive_stream(
             };
             let result = tokio::task::spawn_blocking(move || {
                 crate::djvu_tile::render_tile_with(&page, &opts, tile_size, col, row, &controls)
-                    .map_err(AsyncTileError::Tile)
+                    .map_err(AsyncRenderError::Tile)
             })
             .await
-            .map_err(|e| AsyncTileError::Join(e.to_string()))
+            .map_err(|e| AsyncRenderError::Join(JoinFailure::new(e)))
             .and_then(|r| r);
-            let cancelled = matches!(result, Err(AsyncTileError::Tile(TileError::Cancelled)));
+            let cancelled = matches!(result, Err(AsyncRenderError::Tile(TileError::Cancelled)));
             yield result;
             if cancelled {
                 return;
@@ -878,6 +920,25 @@ mod tests {
             s.contains("render error"),
             "error must mention 'render error'"
         );
+    }
+
+    /// A panicking blocking task surfaces as `AsyncRenderError::Join` with a
+    /// `JoinFailure` that reports the panic and keeps its message and source.
+    #[tokio::test]
+    async fn join_failure_reports_panic() {
+        use std::error::Error as _;
+        let join_error = tokio::task::spawn_blocking(|| -> () { panic!("boom") })
+            .await
+            .expect_err("task panicked");
+        let err = AsyncRenderError::Join(JoinFailure::new(join_error));
+        let AsyncRenderError::Join(failure) = &err else {
+            unreachable!()
+        };
+        assert!(failure.is_panic());
+        assert!(!failure.is_cancelled());
+        assert!(failure.source().is_some());
+        let s = err.to_string();
+        assert!(s.contains("panicked") && s.contains("boom"), "{s}");
     }
 
     // ── render_progressive_stream tests ──────────────────────────────────────
@@ -1036,7 +1097,7 @@ mod tests {
             .await
             .expect_err("pre-cancelled render must fail");
         assert!(
-            matches!(err, AsyncTileError::Tile(TileError::Cancelled)),
+            matches!(err, AsyncRenderError::Tile(TileError::Cancelled)),
             "expected Cancelled, got: {err}"
         );
 
@@ -1046,7 +1107,7 @@ mod tests {
         while let Some(result) = stream.next().await {
             items += 1;
             assert!(
-                matches!(result, Err(AsyncTileError::Tile(TileError::Cancelled))),
+                matches!(result, Err(AsyncRenderError::Tile(TileError::Cancelled))),
                 "cancelled stream must only yield Cancelled"
             );
         }

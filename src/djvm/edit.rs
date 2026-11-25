@@ -41,8 +41,7 @@ pub fn remove_pages(
     policy: UnreachablePolicy,
 ) -> Result<PageRemoval, DjvmError> {
     let bundle = Bundle::parse(bundled)?;
-    let graph = ComponentGraph::parse(bundled)
-        .map_err(|error| DjvmError::ComponentGraph(format!("{error:?}")))?;
+    let graph = ComponentGraph::parse(bundled).map_err(DjvmError::ComponentGraph)?;
 
     let pages = graph
         .nodes()

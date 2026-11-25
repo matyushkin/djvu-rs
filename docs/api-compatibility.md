@@ -38,7 +38,7 @@ includes:
 - `Document`, `Page`, and the crate-root re-exports of the document model
   (`DjVuDocument`, `DjVuPage`, `DjVuBookmark`, `PageInfo`, `Rotation`,
   `ComponentId`, `ComponentKind`, …).
-- The error hierarchy (`DjVuError`, `IffError`, `Jb2Error`, `Iw44Error`,
+- The error hierarchy (`Error`, `IffError`, `Jb2Error`, `Iw44Error`,
   `BzzError`, `DocError`, `RenderError`) — see the error-stability rule below.
 - The rendering entry points in [`djvu_render`] (`RenderOptions`,
   `RenderRequest`, `render_pixmap`, …). `RenderRequest` is the one way to
@@ -205,7 +205,7 @@ there, so the release PR stays red until the section exists.
 
 #### 1.0.0 — the deprecated surface is removed and the growing types are marked
 
-Three changes, all described in
+Four changes, all described in
 [`docs/migration.md`](migration.md#100):
 
 - Every item with a deprecation note is removed: the `render_*` variants
@@ -222,6 +222,11 @@ Three changes, all described in
   ([`api-review-1.0.md`](api-review-1.0.md)) moves the C API behind the new
   experimental `ffi` feature, hides the `wasm` module (binding tier) and
   removes the `jpeg` feature, which enabled nothing.
+- Errors (review group B): `djvu_rs::Error` becomes a djvu-rs-owned enum
+  in place of `djvu_iff::LegacyError`, which is removed with `DjVuError`;
+  every error that held a formatted message holds a typed source; variants
+  that nothing returned are removed; `chunk_encode::EncodeError` is renamed
+  `ChunkEncodeError`, and component-graph findings move to `GraphIssue`.
 
 #### 0.34.0 — the optimizer's request and report types became extensible
 
@@ -425,16 +430,20 @@ the failing entry point returns a typed error naming the axis and operation:
 
 | Limit | Typed error | Wrapped as |
 |-------|-------------|------------|
-| IFF nesting too deep | `IffError::DepthLimitExceeded { max }` | `DjVuError::Iff` |
-| IFF chunk longer than its container | `IffError::ChunkTooLong { id, claimed, available }` | `DjVuError::Iff` |
-| JB2 image / symbol / dict too large | `Jb2Error::ImageTooLarge` / `InheritedDictTooLarge` | `DjVuError::Jb2` |
-| JB2 too many records | `Jb2Error::TooManyRecords` | `DjVuError::Jb2` |
-| IW44 image too large | `Iw44Error::ImageTooLarge` | `DjVuError::Iw44` |
-| BZZ block / output too large | `BzzError::BlockSizeTooLarge(_)` / `OutputTooLarge` | `DjVuError::Bzz` |
+| IFF nesting too deep | `IffError::DepthLimitExceeded { max }` | `DocError::Iff` |
+| IFF chunk longer than its container | `IffError::ChunkTooLong { id, claimed, available }` | `DocError::Iff` |
+| JB2 image / symbol / dict too large | `Jb2Error::ImageTooLarge` / `InheritedDictTooLarge` | `DocError::Jb2` / `RenderError::Jb2` |
+| JB2 too many records | `Jb2Error::TooManyRecords` | `DocError::Jb2` / `RenderError::Jb2` |
+| IW44 image too large | `Iw44Error::ImageTooLarge` | `DocError::Iw44` / `RenderError::Iw44` |
+| BZZ block / output too large | `BzzError::BlockSizeTooLarge(_)` / `OutputTooLarge` | `DocError::Bzz` / `RenderError::Bzz` |
 | Configured document/render budget exceeded | [`ResourceLimitExceeded`](../../src/validate.rs) | [`DocError::ResourceLimit`](../../src/djvu_document/error.rs) / [`RenderError::ResourceLimit`](../../src/djvu_render/options.rs) |
 
-The `DjVuError` variant (`Iff` / `Jb2` / `Iw44` / `Bzz`) identifies which
+The wrapping variant (`Iff` / `Jb2` / `Iw44` / `Bzz`) identifies which
 decode stage rejected the input; the inner variant identifies the axis.
+The [`Document`](../src/lib.rs) / `Page` facade returns `djvu_rs::Error`,
+which carries the `DocError` or `RenderError` unchanged in its `Doc` /
+`Render` variant; `Error::resource_limit()` returns the
+`ResourceLimitExceeded` of a configured budget directly.
 [`ResourceLimitExceeded::operation`] names the public entry point (for example
 `document.parse` or `render_pixmap`). `IffError::ChunkTooLong` additionally
 reports the offending chunk `id`.

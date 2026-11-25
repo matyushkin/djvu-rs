@@ -30,7 +30,7 @@ impl AsRef<[u8]> for Pixmap {
 ///
 /// Both variants describe the requested size, so a caller can report it or
 /// map it into its own limit error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PixmapError {
     /// `width * height` does not fit in `usize` on this target.

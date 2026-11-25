@@ -57,18 +57,74 @@ pub enum TiffError {
     #[error("render error: {0}")]
     Render(#[from] RenderError),
 
-    /// TIFF encoding error.
+    /// The TIFF encoder failed.
     #[error("TIFF encoding error: {0}")]
-    Encode(String),
+    Encode(#[source] TiffEncodeError),
+
+    /// Writing to the output sink failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 
     /// Export was cancelled by its observer.
     #[error("export cancelled")]
     Cancelled,
 }
 
+/// The TIFF encoder failed.
+///
+/// Carried by [`TiffError::Encode`]. The type is opaque so that the TIFF
+/// encoder the crate uses stays out of the public API: its
+/// [`Display`](std::fmt::Display) gives the encoder's message, and
+/// [`source`](std::error::Error::source) returns the encoder's own error when
+/// there is one. Failures to write to the output sink are reported as
+/// [`TiffError::Io`], not as this type.
+#[derive(Debug)]
+pub struct TiffEncodeError {
+    message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl TiffEncodeError {
+    fn encoder<E>(error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            message: error.to_string(),
+            source: Some(Box::new(error)),
+        }
+    }
+
+    fn msg(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+}
+
+impl std::fmt::Display for TiffEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TiffEncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// An I/O failure inside the encoder is a sink write error
+/// ([`TiffError::Io`]); any other failure is [`TiffError::Encode`].
 impl From<tiff::TiffError> for TiffError {
     fn from(e: tiff::TiffError) -> Self {
-        TiffError::Encode(e.to_string())
+        match e {
+            tiff::TiffError::IoError(io) => TiffError::Io(io),
+            other => TiffError::Encode(TiffEncodeError::encoder(other)),
+        }
     }
 }
 
@@ -411,9 +467,9 @@ fn write_color_page_streaming<W: Write + Seek>(
         return Err(e.into());
     }
     if !strip.is_empty() || img.next_strip_sample_count() != 0 {
-        return Err(TiffError::Encode(
-            "streamed render ended before all TIFF strips were written".to_string(),
-        ));
+        return Err(TiffError::Encode(TiffEncodeError::msg(
+            "streamed render ended before all TIFF strips were written",
+        )));
     }
 
     img.finish()?;
@@ -540,7 +596,7 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(
         return Err(TiffError::Cancelled);
     }
 
-    let io = |e: std::io::Error| TiffError::Encode(e.to_string());
+    let io = TiffError::Io;
 
     // Layout: header (8) → per page [strip data, then 8-byte-aligned IFD].
     const NTAGS: u16 = 11;
@@ -585,10 +641,10 @@ fn write_bilevel_g4_tiff<W: Write + Seek>(
             let (plan, page_layout) = (&plans[idx], &layout[idx]);
             debug_assert_eq!(plan.encoded_len, emitted_plan.encoded_len);
             if plan.encoded_len != emitted_plan.encoded_len {
-                return Err(TiffError::Encode(format!(
+                return Err(TiffError::Encode(TiffEncodeError::msg(format!(
                     "G4 encoded length diverged between sizing and emission passes for page {}",
                     idx + 1
-                )));
+                ))));
             }
 
             debug_assert_eq!(pos, page_layout.strip_offset);
@@ -818,7 +874,7 @@ mod tests {
             pages.push(encode_bilevel_g4_page(doc, page_index)?);
         }
 
-        let io = |e: std::io::Error| TiffError::Encode(e.to_string());
+        let io = TiffError::Io;
         const NTAGS: u16 = 11;
         let ifd_size = 2 + NTAGS as u32 * 12 + 4;
         let mut offset: u32 = 8;
@@ -959,7 +1015,8 @@ mod tests {
         .expect_err("injected sink failure must be returned");
 
         assert!(
-            matches!(error, TiffError::Encode(message) if message.contains("injected sink failure"))
+            matches!(&error, TiffError::Io(io) if io.to_string().contains("injected sink failure")),
+            "sink failure must be TiffError::Io: {error:?}"
         );
     }
 
@@ -1290,23 +1347,42 @@ mod tests {
         assert!((opts.scale - 1.0).abs() < 1e-6);
     }
 
-    /// `From<tiff::TiffError> for TiffError` wraps the error message.
+    /// `From<tiff::TiffError> for TiffError`: an encoder I/O failure is a sink
+    /// error and keeps the original `io::Error`.
     #[test]
-    fn from_tiff_error_wraps_message() {
+    fn from_tiff_io_error_is_io() {
         let io_err = std::io::Error::other("test tiff failure");
         let tiff_err: tiff::TiffError = io_err.into();
         let djvu_tiff_err: TiffError = tiff_err.into();
+        assert!(
+            matches!(&djvu_tiff_err, TiffError::Io(e) if e.to_string() == "test tiff failure"),
+            "{djvu_tiff_err:?}"
+        );
+    }
+
+    /// `From<tiff::TiffError> for TiffError`: any other encoder failure is
+    /// `Encode`, with the encoder's error as its source.
+    #[test]
+    fn from_tiff_encoder_error_is_encode_with_source() {
+        use std::error::Error as _;
+        let tiff_err = tiff::TiffError::LimitsExceeded;
+        let expected = tiff_err.to_string();
+        let djvu_tiff_err: TiffError = tiff_err.into();
         let s = djvu_tiff_err.to_string();
         assert!(
-            s.contains("TIFF encoding error"),
-            "must mention TIFF encoding error: {s}"
+            s.contains("TIFF encoding error") && s.contains(&expected),
+            "{s}"
         );
+        let TiffError::Encode(inner) = &djvu_tiff_err else {
+            panic!("expected Encode: {djvu_tiff_err:?}");
+        };
+        assert!(inner.source().is_some());
     }
 
     /// `TiffError::Encode` display includes the inner message.
     #[test]
     fn tiff_error_display() {
-        let e = TiffError::Encode("something went wrong".to_string());
+        let e = TiffError::Encode(TiffEncodeError::msg("something went wrong"));
         assert!(e.to_string().contains("something went wrong"));
     }
 

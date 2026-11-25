@@ -32,14 +32,6 @@ pub enum BzzError {
     #[error("BZZ stream contains an invalid block size")]
     InvalidBlockSize,
 
-    /// The BWT sort index embedded in the stream is out of range.
-    #[error("BZZ stream contains an invalid BWT index")]
-    InvalidBwtIndex,
-
-    /// The ZP arithmetic coder encountered an error.
-    #[error("ZP coder error in BZZ stream")]
-    ZpError,
-
     /// The BWT block did not contain an end-of-block marker.
     #[error("BZZ block is missing the end-of-block marker")]
     MissingMarker,

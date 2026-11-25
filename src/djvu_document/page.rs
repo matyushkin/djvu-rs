@@ -711,7 +711,7 @@ impl DjVuPage {
             return Ok(Some(bm));
         }
         if let Some(smmr) = self.find_chunk(b"Smmr") {
-            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            let bm = crate::smmr::decode_smmr(smmr)?;
             return Ok(Some(bm));
         }
         Ok(None)
@@ -737,7 +737,7 @@ impl DjVuPage {
             return Ok(Some((bm, blit_map)));
         }
         if let Some(smmr) = self.find_chunk(b"Smmr") {
-            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            let bm = crate::smmr::decode_smmr(smmr)?;
             let len = (bm.width * bm.height) as usize;
             return Ok(Some((bm, vec![0i32; len])));
         }
@@ -778,7 +778,7 @@ impl DjVuPage {
             // No reduced-scale G4/MMR decoder exists; fall back to a full
             // decode + the same max-pool reduction `mask_sub4` would apply.
             // Smmr masks are rare in practice (Sjbz is the common case).
-            let bm = crate::smmr::decode_smmr(smmr).map_err(|e| DocError::Smmr(e.to_string()))?;
+            let bm = crate::smmr::decode_smmr(smmr)?;
             return Ok(Some(crate::djvu_render::downsample_mask_4x(&bm)));
         }
         Ok(None)
