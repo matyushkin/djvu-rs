@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0](https://github.com/matyushkin/djvu-rs/compare/v1.0.0-rc.1...v1.0.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **errors:** `djvu_rs::Error` is a new enum (variants `Io`, `Doc`, `Render`, `NoThumbnail`; no `Clone`/`PartialEq`); `djvu_rs::error::Error`, `djvu_rs::error::LegacyError`, `djvu_iff::LegacyError`, `djvu_iff::Error`, `DjVuError` and `fgbz_encode::decode_fgbz` are removed; `iff::parse` returns `IffError`; `IffError::UnknownFormType` and `DocError::InvalidUtf8` are removed; `DocError::Smmr`, `DocError::IndirectResolve`, `ComponentResolveError::Failed` and `MutError::RewriteIo` change payloads; `ComponentResolveError` is not `Clone`; `MutError::{Parse, InfoParse}` are merged into `MutError::Iff` and `MutError::SaveIo` is renamed `MutError::Io`.
+* **api:** `djvu_rs::ffi` needs the `ffi` feature; the `jpeg` feature is removed; `djvu_rs::wasm` is no longer part of the Rust API. See docs/migration.md, 1.0.0.
+
+### Features
+
+* **api:** record the 1.0 surface review; gate the C API, hide wasm, widen the semver gate ([#1022](https://github.com/matyushkin/djvu-rs/issues/1022)) ([81a4f6b](https://github.com/matyushkin/djvu-rs/commit/81a4f6b3a481fe55da23d231fa74beb4e9ef63b8)), closes [#993](https://github.com/matyushkin/djvu-rs/issues/993)
+* **errors:** own djvu_rs::Error and give every error a typed source ([#1023](https://github.com/matyushkin/djvu-rs/issues/1023)) ([4985820](https://github.com/matyushkin/djvu-rs/commit/4985820be4267e2cba07278180fb0046cf5b5b01)), closes [#993](https://github.com/matyushkin/djvu-rs/issues/993)
+* **py:** encode a multi-page book from images ([#1020](https://github.com/matyushkin/djvu-rs/issues/1020)) ([0faa1ab](https://github.com/matyushkin/djvu-rs/commit/0faa1ab661a1e5315973e03c5047f798ce0e2b61)), closes [#990](https://github.com/matyushkin/djvu-rs/issues/990)
+* **py:** encode one page from an image ([#1018](https://github.com/matyushkin/djvu-rs/issues/1018)) ([6b9208d](https://github.com/matyushkin/djvu-rs/commit/6b9208d8e4fa0d51717afe706ff23211c9368a6c))
+* **py:** merge, split and remove pages from Python ([#1014](https://github.com/matyushkin/djvu-rs/issues/1014)) ([2bdd163](https://github.com/matyushkin/djvu-rs/commit/2bdd163d41cfff14c91a04e46861b6758e90d8a4))
+* **wasm:** ship a ready-made &lt;djvu-viewer&gt; web component ([#1021](https://github.com/matyushkin/djvu-rs/issues/1021)) ([4c9c70a](https://github.com/matyushkin/djvu-rs/commit/4c9c70a555d2560fc26ae8d55e6eebadecfdccd9))
+
+
+### Bug Fixes
+
+* **pdf:** keep non-ASCII text in the text layer, outline titles and link URIs ([#1017](https://github.com/matyushkin/djvu-rs/issues/1017)) ([ea978d9](https://github.com/matyushkin/djvu-rs/commit/ea978d9eb1ac74ca0e0591f56285d2b79d0678a3)), closes [#1012](https://github.com/matyushkin/djvu-rs/issues/1012)
+* **py:** make PageIndexError a djvu_rs.Error as well as an IndexError ([#1013](https://github.com/matyushkin/djvu-rs/issues/1013)) ([883231d](https://github.com/matyushkin/djvu-rs/commit/883231d88e4cfdc22f559185ca09222f68bae0c7))
+
 ## [1.0.0-rc.1](https://github.com/matyushkin/djvu-rs/compare/v0.46.0...v1.0.0-rc.1) (2026-11-19)
 
 
