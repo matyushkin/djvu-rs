@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795535264610,
+  "lastUpdate": 1795572295021,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -27562,6 +27562,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45133000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "81a4f6b3a481fe55da23d231fa74beb4e9ef63b8",
+          "message": "feat(api)!: record the 1.0 surface review; gate the C API, hide wasm, widen the semver gate (#1022)\n\n* feat(api)!: record the 1.0 surface review; gate the C API, hide wasm, widen the semver gate\n\nItem 4 of #993: the public surface of the root crate and the seven codec\ncrates, reviewed item by item. docs/api-review-1.0.md records about 70\nfindings in six groups, the maintainer's decisions, and what is accepted\nas it is. This change lands group A, the gate and the tiers, which the\nother groups rely on.\n\n- cargo-semver-checks now also checks djvu-rs with the stable writer and\n  async features, and the seven codec crates. Before, only djvu-rs with\n  default features was gated.\n- The C ABI (`djvu_rs::ffi`) moves behind a new experimental `ffi`\n  feature. It was compiled into every `std` build with no shipped header.\n- `djvu_rs::wasm` is `#[doc(hidden)]`: its contract is the npm package\n  (new \"Binding tier\" in docs/api-compatibility.md §1).\n- The `jpeg` feature is removed: it enabled nothing that `std` does not.\n- §1 states the rules for third-party types, `#[doc(hidden)]` items,\n  encoder output and serialized forms (JSON is versioned by\n  EDIT_SCHEMA_VERSION, not by the crate version).\n- Experimental items open their rustdoc with `**Experimental:**`.\n\nBREAKING CHANGE: `djvu_rs::ffi` needs the `ffi` feature; the `jpeg`\nfeature is removed; `djvu_rs::wasm` is no longer part of the Rust API.\nSee docs/migration.md, 1.0.0.\n\nRefs #993\n\n* ci(api): run each semver-checks configuration as its own matrix job\n\nA second run of cargo-semver-checks-action in one job finds the first\nrun's baseline checkout under the workspace and fails on two djvu-rs\nmanifests (\"package `djvu-rs` is ambiguous\").\n\nRefs #993",
+          "timestamp": "2026-11-25T03:41:05+02:00",
+          "tree_id": "6f07306d2b81a035870fa80c45120d54c844d1e1",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/81a4f6b3a481fe55da23d231fa74beb4e9ef63b8"
+        },
+        "date": 1795572293574,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7456000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 46923000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45164000,
             "range": "± 0",
             "unit": "ns/iter"
           }
