@@ -64,7 +64,7 @@ use crate::bitmap::Bitmap;
 use crate::bzz_encode::bzz_encode;
 use crate::chunk_encode::{ChunkEncoder, EncodedChunk, FgbzChunk, encode_info};
 use crate::dirm::DirmComponentKind;
-use crate::djvm::BundlePart;
+use crate::djvm::{BundlePart, DjvmError};
 use crate::fgbz_encode::FgbzColor;
 use crate::iff::{Chunk, DjvuFile, emit};
 use crate::iw44_encode::{Iw44EncodeOptions, encode_iw44_color};
@@ -91,11 +91,52 @@ use crate::text_encode::encode_text_layer;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EncodeError {
-    /// The requested combination of input + quality profile is not
-    /// implemented yet. The message names the missing dependency
-    /// (typically a sibling issue tracking the codec layer).
+    /// The request needs an encoder capability that is not implemented:
+    /// today only a nonzero JB2 `lossy_threshold` on the streaming bundle
+    /// path. The message names what is missing.
     #[error("page encoder: {0}")]
     Unsupported(&'static str),
+    /// The input kind does not fit the quality profile or another option:
+    /// a bitmap with a colour profile, a pixmap with `Lossless` or the
+    /// `Smmr` bilevel codec, a mask with a bitmap or the `Photo` profile,
+    /// or a bundle profile other than `Quality` / `Archival`.
+    #[error("page encoder: {reason}")]
+    #[non_exhaustive]
+    InvalidProfile {
+        /// The quality profile that was requested.
+        quality: EncodeQuality,
+        /// What does not fit, for humans; the text is not part of the API.
+        reason: &'static str,
+    },
+    /// A page side exceeds the 65 535-pixel limit of the `INFO` chunk.
+    #[error(
+        "page encoder: page is {width}x{height} px, the INFO chunk limit is 65 535 px per side"
+    )]
+    DimensionsTooLarge {
+        /// Page width in pixels.
+        width: u32,
+        /// Page height in pixels.
+        height: u32,
+    },
+    /// A reused mask's dimensions differ from its page's pixmap.
+    #[error("page encoder: reused mask dimensions must match the pixmap of page {page}")]
+    #[non_exhaustive]
+    MaskSizeMismatch {
+        /// Zero-based page index (`0` for [`PageEncoder`]).
+        page: usize,
+    },
+    /// The number of masks differs from the number of pages.
+    #[error("page encoder: {masks} masks given for {pages} pages")]
+    MaskCountMismatch {
+        /// Length of the `masks` slice.
+        masks: usize,
+        /// Number of pages.
+        pages: usize,
+    },
+    /// Assembling the bundled `FORM:DJVM` failed, for example because it
+    /// would exceed the `DIRM` component count or the 4 GiB IFF limit.
+    #[error("page encoder: bundle assembly failed: {0}")]
+    Djvm(#[source] DjvmError),
     /// A caller-supplied page source (see
     /// [`encode_djvm_layered_shared_streaming`]) failed to produce a page.
     ///
@@ -566,7 +607,8 @@ impl<'a> PageEncoder<'a> {
     ///
     /// Only `Quality` / `Archival` pixmap encodes accept a mask, and its
     /// dimensions must equal the pixmap's — other combinations make
-    /// [`encode`](Self::encode) return [`EncodeError::Unsupported`]. The
+    /// [`encode`](Self::encode) return [`EncodeError::InvalidProfile`] or
+    /// [`EncodeError::MaskSizeMismatch`]. The
     /// mask-producing segmentation knobs (`binarization`, `threshold`,
     /// `block_classify`, `deskew`) are ignored; the background-derivation
     /// knobs still apply. With the default lossless JB2 options the emitted
@@ -669,34 +711,25 @@ impl<'a> PageEncoder<'a> {
     /// wrapped in the `AT&T` IFF container).
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let (w, h) = self.source.dimensions();
-        let w = u16::try_from(w).map_err(|_| {
-            EncodeError::Unsupported("page width exceeds INFO chunk limit (65 535 px)")
-        })?;
-        let h = u16::try_from(h).map_err(|_| {
-            EncodeError::Unsupported("page height exceeds INFO chunk limit (65 535 px)")
-        })?;
+        let (w, h) = info_dimensions(w, h)?;
+        let invalid = |reason| EncodeError::InvalidProfile {
+            quality: self.quality,
+            reason,
+        };
         if matches!(&self.source, Source::Pixmap(_)) && self.bilevel_codec != BilevelCodec::Jb2 {
-            return Err(EncodeError::Unsupported(
-                "Smmr bilevel codec requires Bitmap input",
-            ));
+            return Err(invalid("Smmr bilevel codec requires Bitmap input"));
         }
         if let Some(mask) = self.mask {
             match &self.source {
                 Source::Bitmap(_) => {
-                    return Err(EncodeError::Unsupported(
-                        "mask reuse requires colour input (from_pixmap)",
-                    ));
+                    return Err(invalid("mask reuse requires colour input (from_pixmap)"));
                 }
                 Source::Pixmap(pm) => {
                     if matches!(self.quality, EncodeQuality::Photo) {
-                        return Err(EncodeError::Unsupported(
-                            "Photo profile has no mask layer to reuse",
-                        ));
+                        return Err(invalid("Photo profile has no mask layer to reuse"));
                     }
                     if mask.width != pm.width || mask.height != pm.height {
-                        return Err(EncodeError::Unsupported(
-                            "reused mask dimensions must match the page pixmap",
-                        ));
+                        return Err(EncodeError::MaskSizeMismatch { page: 0 });
                     }
                 }
             }
@@ -827,16 +860,16 @@ impl<'a> PageEncoder<'a> {
                 self.push_metadata_chunk(&mut chunks);
                 Ok(encode_form_djvu(chunks))
             }
-            (Source::Bitmap(_), EncodeQuality::Photo) => Err(EncodeError::Unsupported(
-                "Photo profile requires color input (from_pixmap)",
-            )),
-            (Source::Pixmap(_), EncodeQuality::Lossless) => Err(EncodeError::Unsupported(
+            (Source::Bitmap(_), EncodeQuality::Photo) => {
+                Err(invalid("Photo profile requires color input (from_pixmap)"))
+            }
+            (Source::Pixmap(_), EncodeQuality::Lossless) => Err(invalid(
                 "Lossless requires bilevel input — use from_bitmap or switch to Quality",
             )),
-            (Source::Bitmap(_), EncodeQuality::Quality) => Err(EncodeError::Unsupported(
+            (Source::Bitmap(_), EncodeQuality::Quality) => Err(invalid(
                 "Quality requires colour input — use from_pixmap or switch to Lossless",
             )),
-            (Source::Bitmap(_), EncodeQuality::Archival) => Err(EncodeError::Unsupported(
+            (Source::Bitmap(_), EncodeQuality::Archival) => Err(invalid(
                 "Archival requires colour input — use from_pixmap or switch to Lossless",
             )),
         }
@@ -968,8 +1001,8 @@ pub fn encode_djvm_layered_shared_with_thumbnails(
 ///
 /// `masks` must have the same length as `pixmaps`, and a `Some` entry's
 /// bitmap must match its page's pixmap dimensions — otherwise this returns
-/// [`EncodeError::Unsupported`], matching `PageEncoder::with_mask`'s
-/// validation. The intended source of each mask is the corresponding page of
+/// [`EncodeError::MaskCountMismatch`] or [`EncodeError::MaskSizeMismatch`],
+/// matching `PageEncoder::with_mask`'s validation. The intended source of each mask is the corresponding page of
 /// the document being re-encoded, decoded via
 /// [`extract_mask`](crate::djvu_document::DjVuPage::extract_mask).
 pub fn encode_djvm_layered_shared_with_masks(
@@ -1088,17 +1121,14 @@ where
     F: FnMut(usize) -> Result<Pixmap, E>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    if !matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
-        return Err(EncodeError::Unsupported(
-            "encode_djvm_layered_shared requires the Quality or Archival profile",
-        ));
-    }
+    check_layered_profile(quality)?;
     if let Some(masks) = masks
         && masks.len() != page_count
     {
-        return Err(EncodeError::Unsupported(
-            "masks length must equal page_count",
-        ));
+        return Err(EncodeError::MaskCountMismatch {
+            masks: masks.len(),
+            pages: page_count,
+        });
     }
     let opts = segment_options.unwrap_or_else(|| quality.default_segment_options());
     let mask_at = |idx: usize| -> Option<&Bitmap> { masks.and_then(|m| m[idx]) };
@@ -1136,9 +1166,7 @@ where
             if let Some(mask) = mask_at(idx)
                 && (mask.width != pm.width || mask.height != pm.height)
             {
-                return Err(EncodeError::Unsupported(
-                    "reused mask dimensions must match its page pixmap",
-                ));
+                return Err(EncodeError::MaskSizeMismatch { page: idx });
             }
             chunk_pixmaps.push(pm);
         }
@@ -1266,24 +1294,19 @@ fn encode_djvm_layered_shared_impl(
     with_thumbnails: bool,
     masks: Option<&[Option<&Bitmap>]>,
 ) -> Result<Vec<u8>, EncodeError> {
-    if !matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
-        return Err(EncodeError::Unsupported(
-            "encode_djvm_layered_shared requires the Quality or Archival profile",
-        ));
-    }
+    check_layered_profile(quality)?;
     if let Some(masks) = masks {
         if masks.len() != pixmaps.len() {
-            return Err(EncodeError::Unsupported(
-                "masks length must equal pixmaps length",
-            ));
+            return Err(EncodeError::MaskCountMismatch {
+                masks: masks.len(),
+                pages: pixmaps.len(),
+            });
         }
-        for (pm, mask) in pixmaps.iter().zip(masks.iter()) {
+        for (page, (pm, mask)) in pixmaps.iter().zip(masks.iter()).enumerate() {
             if let Some(mask) = mask
                 && (mask.width != pm.width || mask.height != pm.height)
             {
-                return Err(EncodeError::Unsupported(
-                    "reused mask dimensions must match its page pixmap",
-                ));
+                return Err(EncodeError::MaskSizeMismatch { page });
             }
         }
     }
@@ -1615,10 +1638,7 @@ fn build_page(
     dpi: u16,
     jb2_options: &Jb2EncodeOptions,
 ) -> Result<BundlePart, EncodeError> {
-    let w = u16::try_from(prep.width)
-        .map_err(|_| EncodeError::Unsupported("page width exceeds INFO chunk limit"))?;
-    let h = u16::try_from(prep.height)
-        .map_err(|_| EncodeError::Unsupported("page height exceeds INFO chunk limit"))?;
+    let (w, h) = info_dimensions(prep.width, prep.height)?;
 
     // Sjbz + FGbz: prefer phase 1's precomputed geometric decomposition and
     // colour table (step 3) — both were built from `pm`/`prep.mask` while
@@ -1714,8 +1734,27 @@ fn build_page(
 
 /// Assemble the bundled DJVM from its shared dictionary and page parts.
 fn bundle(parts: Vec<BundlePart>) -> Result<Vec<u8>, EncodeError> {
-    crate::djvm::build_djvm(parts)
-        .map_err(|_| EncodeError::Unsupported("bundle exceeds the DIRM or 4 GiB IFF limit"))
+    crate::djvm::build_djvm(parts).map_err(EncodeError::Djvm)
+}
+
+/// The page size as the `INFO` chunk's `u16` fields.
+fn info_dimensions(width: u32, height: u32) -> Result<(u16, u16), EncodeError> {
+    match (u16::try_from(width), u16::try_from(height)) {
+        (Ok(w), Ok(h)) => Ok((w, h)),
+        _ => Err(EncodeError::DimensionsTooLarge { width, height }),
+    }
+}
+
+/// The layered bundle encoders take the `Quality` and `Archival` profiles only.
+fn check_layered_profile(quality: EncodeQuality) -> Result<(), EncodeError> {
+    if matches!(quality, EncodeQuality::Quality | EncodeQuality::Archival) {
+        Ok(())
+    } else {
+        Err(EncodeError::InvalidProfile {
+            quality,
+            reason: "encode_djvm_layered_shared requires the Quality or Archival profile",
+        })
+    }
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────

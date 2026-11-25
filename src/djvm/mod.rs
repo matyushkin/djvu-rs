@@ -87,7 +87,7 @@ pub enum DjvmError {
 
     /// The bundled component graph could not be built.
     #[error("component graph error: {0}")]
-    ComponentGraph(String),
+    ComponentGraph(#[source] crate::component_graph::GraphError),
 
     /// The assembled document's FORM payload would exceed `u32::MAX` (4 GiB).
     #[error("merged document exceeds the 4 GiB IFF FORM limit")]

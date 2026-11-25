@@ -163,7 +163,7 @@ pub enum MutError {
     /// A chunk encoder rejected its input because a count exceeds the wire
     /// format's fixed-width field (e.g. a bookmark node with > 255 children).
     #[error("chunk encode error: {0}")]
-    Encode(#[from] crate::chunk_encode::EncodeError),
+    Encode(#[from] crate::chunk_encode::ChunkEncodeError),
 
     /// [`DjVuDocumentMut::from_indirect_resolved`] was called on a document
     /// that is not an indirect `FORM:DJVM` (it is single-page `FORM:DJVU` or an

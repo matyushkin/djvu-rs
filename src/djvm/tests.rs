@@ -391,7 +391,7 @@ fn remove_pages_garbage_collects_newly_and_already_unreachable_shared_components
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "the result has no dangling INCL targets"
     );
 
@@ -431,7 +431,7 @@ fn remove_pages_preserves_unreachable_shared_components_when_requested() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "preserving unreachable components keeps all INCL targets valid"
     );
 }
@@ -574,7 +574,7 @@ fn dedup_shared_components_merges_identical_dicts_and_redirects_incls() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "redirected INCL edges have no missing targets"
     );
     assert_eq!(
@@ -652,7 +652,7 @@ fn dedup_shared_components_is_a_byte_preserving_no_op_without_duplicates() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. }))
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. }))
     );
 }
 
@@ -681,7 +681,7 @@ fn dedup_shared_components_round_trips_bundled_fixture() {
         rewritten
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "deduplicated fixture has no dangling INCL edges"
     );
 }
@@ -721,7 +721,7 @@ fn to_indirect_round_trips_graph_dirm_metadata_and_shared_dictionaries() {
         original_graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "the source bundle has no dangling INCL edges"
     );
 
@@ -1333,7 +1333,7 @@ fn split_bundled_djvm_keeps_transitive_dependencies_and_dirm_ids() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "the retained page INCLs resolve within the extracted bundle"
     );
 }
@@ -1357,7 +1357,7 @@ fn split_single_page_with_dependencies_bundles_its_closure() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "the retained page INCL resolves within the extracted bundle"
     );
 }
@@ -1429,7 +1429,7 @@ fn split_second_page_from_djvm_skips_first() {
         graph
             .validate()
             .iter()
-            .all(|error| !matches!(error, crate::GraphError::MissingTarget { .. })),
+            .all(|error| !matches!(error, crate::GraphIssue::MissingTarget { .. })),
         "the extracted page's INCL resolves within its bundle"
     );
 }

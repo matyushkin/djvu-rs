@@ -263,7 +263,11 @@ pub struct OptimizationReport {
 pub enum OptimizeError {
     /// The input did not parse as an IFF document.
     #[error("optimizer input parse failed: {0}")]
-    Parse(#[from] MutError),
+    Parse(#[source] MutError),
+    /// Applying a selected rewrite to the document tree, or serialising the
+    /// rewritten tree, failed.
+    #[error("optimizer rewrite failed: {0}")]
+    Rewrite(#[source] MutError),
     /// A request constraint is invalid.
     #[error("invalid optimization request: {0}")]
     InvalidRequest(&'static str),
@@ -272,12 +276,48 @@ pub enum OptimizeError {
     /// The optimizer re-parses what it produced and compares the page count
     /// with the input's. A mismatch means the rewrite is wrong, so the bytes
     /// are withheld rather than returned.
-    #[error("optimized output failed verification: {0}")]
-    Verification(String),
+    #[error(
+        "optimized output failed verification: {reason}{}",
+        .source.as_ref().map(|error| format!(": {error}")).unwrap_or_default()
+    )]
+    #[non_exhaustive]
+    Verification {
+        /// Which check failed.
+        reason: VerificationFailure,
+        /// The parse error, when the output did not re-parse.
+        #[source]
+        source: Option<MutError>,
+    },
     /// The run was stopped by the hook installed with
     /// [`Optimizer::with_cancel`]. No output was produced.
     #[error("optimization cancelled")]
     Cancelled,
+}
+
+/// Which post-rewrite check an [`OptimizeError::Verification`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerificationFailure {
+    /// The output did not re-parse; the error's `source` holds why.
+    OutputDoesNotParse,
+    /// The output has a different page count from the input.
+    PageCountChanged {
+        /// Pages in the input.
+        input: usize,
+        /// Pages in the output.
+        output: usize,
+    },
+}
+
+impl core::fmt::Display for VerificationFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OutputDoesNotParse => f.write_str("output does not parse"),
+            Self::PageCountChanged { input, output } => {
+                write!(f, "input has {input} pages, output has {output}")
+            }
+        }
+    }
 }
 
 /// The stage of an optimization run a [`ProgressEvent`] belongs to.
@@ -529,7 +569,7 @@ impl Optimizer {
     fn analyse(&self, input: &[u8]) -> Result<Analysis, OptimizeError> {
         self.validate_request()?;
         self.check_cancelled()?;
-        let document = DjVuDocumentMut::from_bytes(input)?;
+        let document = DjVuDocumentMut::from_bytes(input).map_err(OptimizeError::Parse)?;
         let mut warnings = Vec::new();
         let policy = self.archival_policy(&mut warnings);
 
@@ -570,7 +610,7 @@ impl Optimizer {
         let mut bytes_so_far = 0usize;
         for (index, form_path) in paths.iter().enumerate() {
             self.check_cancelled()?;
-            let chunk = component_at(&document, form_path)?;
+            let chunk = component_at(&document, form_path).map_err(OptimizeError::Parse)?;
             if let Some(policy) = &policy {
                 for mut layer in Layer::collect(form_path, chunk, policy, &mut untouched) {
                     let choice = layer.choose(policy.floor, &mut warnings);
@@ -760,7 +800,7 @@ impl Optimizer {
     /// Apply the selected plan in memory and return bytes plus an audit report.
     pub fn optimize(&self, input: &[u8]) -> Result<OptimizationResult, OptimizeError> {
         let Analysis { plan, payloads } = self.analyse(input)?;
-        let document = DjVuDocumentMut::from_bytes(input)?;
+        let document = DjVuDocumentMut::from_bytes(input).map_err(OptimizeError::Parse)?;
         let mut bytes_so_far = 0usize;
         let bytes = apply_rewrites(
             &document,
@@ -779,15 +819,21 @@ impl Optimizer {
             },
         )?;
         self.check_cancelled()?;
-        let output = DjVuDocumentMut::from_bytes(&bytes)
-            .map_err(|e| OptimizeError::Verification(format!("output does not parse: {e}")))?;
+        let output =
+            DjVuDocumentMut::from_bytes(&bytes).map_err(|error| OptimizeError::Verification {
+                reason: VerificationFailure::OutputDoesNotParse,
+                source: Some(error),
+            })?;
         self.walk_components(OptimizationPhase::Verify, &output)?;
         let output_pages = page_count(&output);
         if output_pages != plan.page_count {
-            return Err(OptimizeError::Verification(format!(
-                "input has {} pages, output has {output_pages}",
-                plan.page_count
-            )));
+            return Err(OptimizeError::Verification {
+                reason: VerificationFailure::PageCountChanged {
+                    input: plan.page_count,
+                    output: output_pages,
+                },
+                source: None,
+            });
         }
         let report = OptimizationReport {
             preset: plan.preset,
@@ -1302,7 +1348,7 @@ fn apply_rewrites(
                 if path.is_empty() {
                     return Err(OptimizeError::InvalidRequest("a removal path is empty"));
                 }
-                edited.remove_leaf(&path)?;
+                edited.remove_leaf(&path).map_err(OptimizeError::Rewrite)?;
                 removed.push(&component.path);
             }
             RewriteAction::ReencodeBackground | RewriteAction::ReencodeMask => {
@@ -1311,12 +1357,14 @@ fn apply_rewrites(
                         "a re-encode rewrite carries no payload",
                     ));
                 };
-                edited.replace_leaves_by_id(&path, &component.chunk_id, chunks.clone())?;
+                edited
+                    .replace_leaves_by_id(&path, &component.chunk_id, chunks.clone())
+                    .map_err(OptimizeError::Rewrite)?;
             }
         }
         after(index, component);
     }
-    Ok(edited.try_into_bytes()?)
+    edited.try_into_bytes().map_err(OptimizeError::Rewrite)
 }
 
 /// `path` in the tree after `removed` leaves are gone: at each depth, the

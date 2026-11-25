@@ -23,7 +23,7 @@
 //! not canonical, but `decode(encode(idx)) == idx`).
 
 use crate::bzz_encode::bzz_encode;
-use crate::chunk_encode::EncodeError;
+use crate::chunk_encode::ChunkEncodeError;
 
 /// One palette entry (24-bit RGB).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -38,20 +38,23 @@ pub struct FgbzColor {
 ///
 /// # Errors
 ///
-/// - [`EncodeError::PaletteOverflow`] if `palette.len() > 65 535`.
-/// - [`EncodeError::IndexCountOverflow`] if `indices.map(len) ≥ 2²⁴`.
+/// - [`ChunkEncodeError::PaletteOverflow`] if `palette.len() > 65 535`.
+/// - [`ChunkEncodeError::IndexCountOverflow`] if `indices.map(len) ≥ 2²⁴`.
 ///
 /// Both are wire-format limits; this replaces the previous `assert!` panic.
-pub fn encode_fgbz(palette: &[FgbzColor], indices: Option<&[i16]>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_fgbz(
+    palette: &[FgbzColor],
+    indices: Option<&[i16]>,
+) -> Result<Vec<u8>, ChunkEncodeError> {
     if palette.len() > u16::MAX as usize {
-        return Err(EncodeError::PaletteOverflow {
+        return Err(ChunkEncodeError::PaletteOverflow {
             found: palette.len(),
         });
     }
     if let Some(idx) = indices
         && idx.len() >= (1usize << 24)
     {
-        return Err(EncodeError::IndexCountOverflow { found: idx.len() });
+        return Err(ChunkEncodeError::IndexCountOverflow { found: idx.len() });
     }
 
     let cap = 3 + palette.len() * 3 + indices.map_or(0, |i| 3 + i.len() * 2);

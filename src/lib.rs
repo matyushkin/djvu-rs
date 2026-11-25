@@ -462,7 +462,7 @@ pub mod navm_encode;
 pub mod smmr;
 
 /// Chunk-encoder seam — one `(id, payload)` interface ([`chunk_encode::ChunkEncoder`])
-/// over the per-chunk encoders, with a single [`chunk_encode::EncodeError`]
+/// over the per-chunk encoders, with a single [`chunk_encode::ChunkEncodeError`]
 /// discipline (no panic, no silent truncation).
 #[cfg(feature = "std")]
 pub mod chunk_encode;
@@ -510,7 +510,9 @@ pub use editor::{
 // Re-export the bundled component-graph API for callers that do not need to
 // distinguish the module from the rest of the high-level document API.
 #[cfg(feature = "std")]
-pub use component_graph::{ComponentGraph, ComponentNode, ComponentNodeKind, GraphError};
+pub use component_graph::{
+    ComponentGraph, ComponentNode, ComponentNodeKind, GraphError, GraphIssue,
+};
 
 /// Re-export the semantic diff API for callers that prefer the crate root.
 #[cfg(feature = "std")]

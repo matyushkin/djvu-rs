@@ -21,7 +21,7 @@
 //! ```
 
 use crate::bzz_encode::bzz_encode;
-use crate::chunk_encode::EncodeError;
+use crate::chunk_encode::ChunkEncodeError;
 use crate::djvu_document::DjVuBookmark;
 
 /// Encode a list of bookmarks into a NAVM chunk payload (BZZ-compressed).
@@ -31,20 +31,20 @@ use crate::djvu_document::DjVuBookmark;
 ///
 /// # Errors
 ///
-/// - [`EncodeError::BookmarkChildrenOverflow`] if any node has more than 255
+/// - [`ChunkEncodeError::BookmarkChildrenOverflow`] if any node has more than 255
 ///   children (the `u8` child-count field cannot express more).
-/// - [`EncodeError::BookmarkCountOverflow`] if the tree has more than 65 535
+/// - [`ChunkEncodeError::BookmarkCountOverflow`] if the tree has more than 65 535
 ///   nodes in total (the `u16` count field cannot express more).
 ///
 /// Both were previously silent truncations of the wire fields.
-pub fn encode_navm(bookmarks: &[DjVuBookmark]) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_navm(bookmarks: &[DjVuBookmark]) -> Result<Vec<u8>, ChunkEncodeError> {
     if bookmarks.is_empty() {
         return Ok(Vec::new());
     }
 
     let total = count_bookmarks(bookmarks);
     if total > u16::MAX as usize {
-        return Err(EncodeError::BookmarkCountOverflow { found: total });
+        return Err(ChunkEncodeError::BookmarkCountOverflow { found: total });
     }
     let mut raw = Vec::new();
 
@@ -68,10 +68,10 @@ fn count_bookmarks(bookmarks: &[DjVuBookmark]) -> usize {
 }
 
 /// Serialize one bookmark node (and its children) into `buf`.
-fn write_bookmark(buf: &mut Vec<u8>, bm: &DjVuBookmark) -> Result<(), EncodeError> {
+fn write_bookmark(buf: &mut Vec<u8>, bm: &DjVuBookmark) -> Result<(), ChunkEncodeError> {
     let n_children = bm.children.len();
     if n_children > u8::MAX as usize {
-        return Err(EncodeError::BookmarkChildrenOverflow { found: n_children });
+        return Err(ChunkEncodeError::BookmarkChildrenOverflow { found: n_children });
     }
     buf.push(n_children as u8);
     write_navm_str(buf, &bm.title);
