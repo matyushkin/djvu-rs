@@ -37,9 +37,31 @@ jobs:
   # This fails only on an *unintended* break of the stable surface: one that
   # the change does not declare as a major release.
   semver:
-    name: Public API breakage (cargo-semver-checks)
+    name: Public API breakage (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Three runs cover the stable surface (docs/api-review-1.0.md, row A1).
+    # Until 1.0 only the first existed, so the writers, `async` and the seven
+    # codec crates had no gate. Experimental features (`experimental`,
+    # `iw44-probe`, `ocr-onnx`, `ffi`, `wasm-threads`, `alloc-profile`) and the
+    # binding tier (`wasm`, `wasm-lazy`) stay out of every run. Each run is its
+    # own job: a second run of the action in one job finds the first run's
+    # baseline checkout under the workspace and fails on two `djvu-rs`
+    # manifests. `ocr-tesseract` needs a system leptonica (see the OCR job in
+    # ci.yml); its items are reviewed by hand (docs/api-review-1.0.md).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "djvu-rs, default features"
+            package: djvu-rs
+            features: ""
+          - name: "djvu-rs, writer and async features"
+            package: djvu-rs
+            features: "pdf,epub,cbz,tiff,async,parallel,mmap,serde,image"
+          - name: "codec crates"
+            package: "djvu-zp,djvu-bzz,djvu-iff,djvu-bitmap,djvu-pixmap,djvu-jb2,djvu-iw44"
+            features: ""
     # Blocking since v0.32.0 (#695). It ran with continue-on-error from #695
     # until then, for one reason: the error enums were exhaustive, so every
     # intended new variant reported as breakage and the gate could not tell that
@@ -71,7 +93,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: semver-checks
+          key: semver-checks-${{ strategy.job-index }}
 
       - name: Read the release type the change declares
         id: declared
@@ -89,39 +111,14 @@ jobs:
           echo "release-type=$release_type" >> "$GITHUB_OUTPUT"
           echo "declared release type: ${release_type:-none (derived from Cargo.toml)}"
 
-      # Three runs cover the stable surface (docs/api-review-1.0.md, row A1).
-      # Until 1.0 only the first existed, so the writers, `async` and the
-      # seven codec crates had no gate. Experimental features (`experimental`,
-      # `iw44-probe`, `ocr-onnx`, `ffi`, `wasm-threads`, `alloc-profile`) and
-      # the binding tier (`wasm`, `wasm-lazy`) stay out of every run.
-      - name: cargo-semver-checks (djvu-rs, default features)
+      - name: cargo-semver-checks (${{ matrix.name }})
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          # Default features = the decode-only `std` stable surface.
+          # Default features = the decode-only `std` stable surface; the
+          # matrix adds the stable writer features on top for one run.
           feature-group: default-features
-          package: djvu-rs
-          # Empty = derive from the version number (the action skips the flag).
-          release-type: ${{ steps.declared.outputs.release-type }}
-          # The change's parent; empty (workflow_dispatch) = latest crates.io
-          # release, since the action skips an empty flag.
-          baseline-rev: ${{ github.event.pull_request.base.sha || github.event.before }}
-
-      - name: cargo-semver-checks (djvu-rs, stable writer and async features)
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          feature-group: default-features
-          # ocr-tesseract needs a system leptonica (see the OCR job in ci.yml);
-          # its two items are reviewed by hand (docs/api-review-1.0.md).
-          features: pdf,epub,cbz,tiff,async,parallel,mmap,serde,image
-          package: djvu-rs
-          release-type: ${{ steps.declared.outputs.release-type }}
-          baseline-rev: ${{ github.event.pull_request.base.sha || github.event.before }}
-
-      - name: cargo-semver-checks (codec crates)
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          feature-group: default-features
-          package: djvu-zp,djvu-bzz,djvu-iff,djvu-bitmap,djvu-pixmap,djvu-jb2,djvu-iw44
+          features: ${{ matrix.features }}
+          package: ${{ matrix.package }}
           # Empty = derive from the version number (the action skips the flag).
           release-type: ${{ steps.declared.outputs.release-type }}
           # The change's parent; empty (workflow_dispatch) = latest crates.io
