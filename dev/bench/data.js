@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795572295021,
+  "lastUpdate": 1795574880830,
   "repoUrl": "https://github.com/matyushkin/djvu-rs",
   "entries": {
     "djvu-rs benchmarks": [
@@ -27610,6 +27610,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "djvulibre_render_dpi_300",
             "value": 45164000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "leva.matyushkin@gmail.com",
+            "name": "Leo Matyushkin",
+            "username": "matyushkin"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4985820be4267e2cba07278180fb0046cf5b5b01",
+          "message": "feat(errors)!: own djvu_rs::Error and give every error a typed source (#1023)\n\n* feat(error)!: own djvu_rs::Error and keep typed error sources\n\nGroup B (errors) of the pre-1.0 API review (#993, item 4), rows B1, B2,\nB3/B5/B7 (document, resolver and mutation parts) and B6.\n\n- B1: `djvu_rs::Error` is a new `#[non_exhaustive]` enum defined in the\n  root crate: `Io(io::Error)`, `Doc(DocError)`, `Render(RenderError)` and\n  `NoThumbnail { page }`. `Document`/`Page` no longer flatten failures into\n  `FormatError(String)`; `Error::resource_limit()` returns a configured\n  limit as a `ResourceLimitExceeded`, and `source()` reaches it too.\n  `djvu_rs::error::{Error, LegacyError}` are removed.\n- djvu-iff: `LegacyError`, its alias `djvu_iff::Error` and the dead\n  `InvalidMagic` variant are removed. The owned tree parser `parse` now\n  returns `IffError` (TooShort / Truncated / ChunkTooLong /\n  DepthLimitExceeded). Crate docs no longer call it a legacy API.\n- B7: `IffError::UnknownFormType` (never constructed) and\n  `DocError::InvalidUtf8` (not produced since #524) are removed.\n- B2: `DjVuError` is removed; its only user, `fgbz_encode::decode_fgbz`,\n  is now a test-only `pub(crate)` oracle. Its proptest moves into the\n  module.\n- B3: `DocError::Smmr` carries `SmmrError` (which now implements\n  `Error`); `DocError::IndirectResolve` is `{ name, source: Box<DocError> }`\n  instead of dropping the resolver error; `ComponentResolveError::Failed`\n  carries `source: Box<dyn Error + Send + Sync>` instead of `reason:\n  String`; `MutError::RewriteIo` carries `source: io::Error`.\n- B5: `ComponentResolveError` no longer derives `Clone`.\n- B6: `MutError::Parse` and `MutError::InfoParse` become `MutError::Iff`,\n  `MutError::SaveIo` becomes `MutError::Io`.\n- docs/api-compatibility.md §1/§7 name `Error` and the real wrapping\n  variants instead of `DjVuError`.\n\nBREAKING CHANGE: `djvu_rs::Error` is a new enum (variants `Io`, `Doc`,\n`Render`, `NoThumbnail`; no `Clone`/`PartialEq`); `djvu_rs::error::Error`,\n`djvu_rs::error::LegacyError`, `djvu_iff::LegacyError`, `djvu_iff::Error`,\n`DjVuError` and `fgbz_encode::decode_fgbz` are removed; `iff::parse`\nreturns `IffError`; `IffError::UnknownFormType` and `DocError::InvalidUtf8`\nare removed; `DocError::Smmr`, `DocError::IndirectResolve`,\n`ComponentResolveError::Failed` and `MutError::RewriteIo` change payloads;\n`ComponentResolveError` is not `Clone`; `MutError::{Parse, InfoParse}` are\nmerged into `MutError::Iff` and `MutError::SaveIo` is renamed `MutError::Io`.\n\n* feat(errors)!: type the encoder, optimizer, DJVM and component-graph errors\n\nGroup B (errors) of the 1.0 API review, rows B3/B4/B5/B6/B10 for the\nencoder, optimizer, DJVM and component-graph modules (#993, item 4).\n\n- B10: rename chunk_encode::EncodeError to ChunkEncodeError (Display\n  unchanged), so it no longer shares a name with djvu_encode::EncodeError.\n- B4: djvu_encode::EncodeError gains InvalidProfile { quality, reason },\n  DimensionsTooLarge { width, height }, MaskSizeMismatch { page },\n  MaskCountMismatch { masks, pages } and Djvm(DjvmError) with a source.\n  Unsupported is kept only for the streaming lossy refusal and its\n  internal fallback.\n- B3/B5: GraphError is now the hard-failure type of ComponentGraph::parse\n  (Iff(IffError) with a source, NotBundled, Malformed { reason },\n  LimitExceeded), implements std::error::Error, and drops\n  Clone/PartialEq/Eq. The findings returned by ComponentGraph::validate\n  move to a new GraphIssue enum (Clone + PartialEq + Eq, Display), with\n  LimitExceeded replacing the validation-limit Malformed strings.\n- B3: DjvmError::ComponentGraph carries the GraphError as its source\n  instead of a Debug string.\n- B3/B6: OptimizeError loses its blanket From<MutError>. Parse is the\n  input parse only; a new Rewrite(MutError) covers applying rewrites and\n  serialising. Verification(String) becomes Verification { reason:\n  VerificationFailure, source: Option<MutError> } with a new\n  VerificationFailure enum; Display text is unchanged.\n\nCall sites updated in validate.rs, fgbz_encode.rs, navm_encode.rs,\ndjvu_mut (MutError::Encode type name), lib.rs (doc link, GraphIssue\nre-export) and the djvm/djvu_encode/component_graph tests.\n\nBREAKING CHANGE: chunk_encode::EncodeError is renamed ChunkEncodeError.\ndjvu_encode::EncodeError::Unsupported no longer carries profile, size,\nmask or bundle failures; match the new variants. ComponentGraph::validate\nreturns Vec<GraphIssue>; GraphError lost its finding variants, Malformed\n(String) and Clone/PartialEq/Eq. DjvmError::ComponentGraph holds a\nGraphError. OptimizeError has no From<MutError>, gains Rewrite, and\nVerification is a struct variant.\n\n* feat(errors)!: typed error payloads, merged async render error, dead variants removed\n\nGroup B (errors) of the 1.0 API review (#993), rows B3, B5, B7, B8, B9\nfor the render, export, async, OCR, text-serialize, BZZ and pixmap\nerror types.\n\n- B3: RenderError::Jpeg carries the opaque djvu_render::JpegError\n  (Display + source) instead of a String; zune-jpeg stays private.\n- B3: TiffError::Encode carries the opaque tiff_export::TiffEncodeError;\n  new TiffError::Io(std::io::Error) receives sink write failures, both\n  from the G4 writer and from the tiff encoder's IoError.\n- B3: CbzError::Png(String) becomes CbzError::Encode(cbz::PngEncodeError).\n- B3: the Join(String) variants of AsyncPdfError, AsyncDjvmError and\n  AsyncRenderError carry djvu_async::JoinFailure (is_panic,\n  is_cancelled, Display, source = tokio JoinError).\n- B9: AsyncTileError is merged into AsyncRenderError, which gains\n  Tile(TileError); the djvu_async module doc no longer claims there is\n  no wrapper enum.\n- B8: OcrError::ManifestInvalid is removed; a malformed ocr-onnx\n  manifest returns InitFailed. ModelVerificationFailed stays, documented\n  as backend-neutral.\n- B7: BzzError::{ZpError, InvalidBwtIndex} and\n  TextSerializeError::{Text, Fmt} are removed (never constructed /\n  infallible String formatting).\n- B5: PixmapError no longer derives Copy or Hash.\n\nBREAKING CHANGE: RenderError::Jpeg, TiffError::Encode, the Join variants\nof AsyncPdfError/AsyncDjvmError/AsyncRenderError change payload;\nCbzError::Png is renamed to CbzError::Encode with a new payload; sink\nwrite failures of the TIFF writer are now TiffError::Io; AsyncTileError\nis removed (use AsyncRenderError); OcrError::ManifestInvalid,\nBzzError::ZpError, BzzError::InvalidBwtIndex, TextSerializeError::Text\nand TextSerializeError::Fmt are removed; PixmapError is no longer Copy\nor Hash.\n\n* docs(migration): describe the group B error changes for 1.0.0\n\nCollects the migration sections of the three group B commits into the\n1.0.0 section of docs/migration.md, marks rows B1-B10 done in\ndocs/api-review-1.0.md (and group A as merged in #1022), adds row B11\nfor two MutError variants that still drop their source, and lists the\nchange under the 1.0.0 intentional breaks in docs/api-compatibility.md.\n\nRefs #993",
+          "timestamp": "2026-11-25T04:24:10+02:00",
+          "tree_id": "ab17b0d365e729adaa36d99d5c71cec4ac35ce83",
+          "url": "https://github.com/matyushkin/djvu-rs/commit/4985820be4267e2cba07278180fb0046cf5b5b01"
+        },
+        "date": 1795574878552,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "djvulibre_render_dpi_72",
+            "value": 142000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_150",
+            "value": 7443000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 47043000,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "djvulibre_render_dpi_300",
+            "value": 45145000,
             "range": "± 0",
             "unit": "ns/iter"
           }
