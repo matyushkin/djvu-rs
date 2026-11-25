@@ -452,7 +452,7 @@ pub(super) fn find_same_size_refine_ref(
     best.map(|(i, _)| i)
 }
 
-/// Experiment-only knobs for the cross-size record-6 refinement emitter (#322).
+/// **Experimental:** knobs for the cross-size record-6 refinement emitter (#322).
 ///
 /// When present in [`Jb2EncodeOptions::cross_size_rec6_probe`], fresh
 /// connected components that have no exact dictionary hit are matched against

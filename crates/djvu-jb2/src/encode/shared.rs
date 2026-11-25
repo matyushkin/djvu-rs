@@ -253,7 +253,7 @@ pub(super) fn cluster_impl(pages: &[&Bitmap], page_threshold: usize) -> Vec<Bitm
     promoted.into_iter().map(|c| c.rep).collect()
 }
 
-/// JB2_DICT_ORDER probe (diagnostic-only): three orderings of the same
+/// **Experimental:** JB2_DICT_ORDER probe (diagnostic-only): three orderings of the same
 /// byte-exact shared-symbol set [`cluster_shared_symbols`] produces, for
 /// measuring whether dictionary index assignment affects `Sjbz`/`Djbz` size.
 ///
@@ -281,7 +281,7 @@ pub struct DictOrderVariants {
     pub by_bucket: Vec<Bitmap>,
 }
 
-/// Build the three [`DictOrderVariants`] orderings from the same byte-exact
+/// **Experimental:** Build the three [`DictOrderVariants`] orderings from the same byte-exact
 /// clustering pass [`cluster_shared_symbols`] runs. Mirrors that function's
 /// dedup + pixel-budget trim exactly (so the *set* of promoted symbols is
 /// identical to what the shipped encoder would use) and only changes what

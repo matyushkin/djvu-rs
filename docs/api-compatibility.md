@@ -96,6 +96,36 @@ adding a variant to an enum that the format or geometry closes
 (`TextZoneKind`, `Rotation`, `UserRotation`, `annotation::Shape`,
 `ComponentKind`, `PlaneStatus`, `iff::Chunk`).
 
+**Third-party types.** A type from another crate in a stable signature ties
+djvu-rs to that crate's major version: its next breaking release becomes a
+breaking release of djvu-rs. Stable signatures use only `core`/`alloc`/`std`
+types, types of the workspace crates, and `tokio` 1.x / `futures-core` 0.3
+in the `async` surface. Any other crate's types sit behind an experimental
+or a version-named feature (`image` 0.25 behind `image`, see the
+[1.0 review](api-review-1.0.md), row C3).
+
+**Hidden items.** A `#[doc(hidden)] pub` item is internal to the workspace and
+is not covered: the codec crates use it for the parts the root crate needs
+that `pub(crate)` cannot reach (ZP coder state, IFF emit helpers, JB2
+encoder plumbing). It may change or go away in any release.
+`cargo-semver-checks` skips these items as well.
+
+**Encoder output.** For the encoders (`djvu_encode`, `djvm`, `segment`,
+`ingest`, `chunk_encode`, `smmr`, `thumbnail` and the codec crates' `encode`
+modules) the stable contract is the signatures and that the output is a
+valid DjVu file that DjVuLibre decodes. The exact bytes, the
+classification and segmentation results, and the default values of tuning
+options may change in a minor release, as an encoder improves. A change
+that makes output larger or worse for the same options is a regression,
+not a break.
+
+**Serialized forms.** The `serde` form of the public types and the JSON of
+`OptimizationPlan::to_json` / `OptimizationReport::to_json` are not covered
+by the Rust version. An edit request carries its own schema version,
+`EDIT_SCHEMA_VERSION`: a field added to a serialized type within one schema
+version has `#[serde(default)]`, and the editor keeps accepting requests
+written for an older schema version.
+
 [`docs/migration.md`](migration.md#100) lists every type in each group as
 of 1.0.0. A new public options struct, report struct or options enum must be
 marked the same way.
@@ -111,9 +141,19 @@ two ways, both of which must be present:
 - the surface is reachable only behind an experimental feature flag.
 
 Current experimental features: `experimental`, `iw44-probe`, `alloc-profile`,
-`ocr-onnx`, `wasm-threads`. These are **out of scope** for API freezing per
+`ocr-onnx`, `wasm-threads`, `ffi`. These are **out of scope** for API freezing per
 issue #695 and remain free to change. The 1.0.0 release confirmed this set
-(#993): the 1.0 stability promise does not cover them.
+(#993): the 1.0 stability promise does not cover them. `ffi` (the C ABI)
+joined it in 1.0.0: until then it was compiled into every `std` build,
+although no C header was shipped.
+
+### Binding tier
+
+The `wasm` module (features `wasm`, `wasm-lazy`) is `#[doc(hidden)]` and is
+not part of the Rust API. Its items exist to be compiled by `wasm-bindgen`;
+their contract is the TypeScript declarations of the npm package, which
+carries the crate's version and follows the rules of this document for its
+own API. The Python package (`djvu-py`) is the same tier.
 
 ### Deprecated
 
@@ -165,7 +205,7 @@ there, so the release PR stays red until the section exists.
 
 #### 1.0.0 — the deprecated surface is removed and the growing types are marked
 
-Two changes, both described with code in
+Three changes, all described in
 [`docs/migration.md`](migration.md#100):
 
 - Every item with a deprecation note is removed: the `render_*` variants
@@ -178,6 +218,10 @@ Two changes, both described with code in
   surface, so that 1.x releases can add options and report fields without a
   major release. `Jb2EncodeOptions::with_lossy_threshold` and
   `with_despeckle` change from constructors to methods on a value.
+- The surface review before the freeze
+  ([`api-review-1.0.md`](api-review-1.0.md)) moves the C API behind the new
+  experimental `ffi` feature, hides the `wasm` module (binding tier) and
+  removes the `jpeg` feature, which enabled nothing.
 
 #### 0.34.0 — the optimizer's request and report types became extensible
 

@@ -169,16 +169,16 @@ demo and [lazy HTTP `Range` loading](examples/wasm/range_lazy.md)
 | `tiff` | disabled | TIFF export (`djvu_to_tiff`) **and** TIFF encode input for `djvu encode` / `decode_image_to_pixmap` |
 | `async` | disabled | Async render API and lazy `AsyncRead + AsyncSeek` document loading |
 | `parallel` | disabled | Parallel multi-page render via `rayon` (`render_pages_parallel`) |
-| `jpeg` | disabled | Standalone JPEG decode without full `std` (JPEG is included in `std` by default) |
 | `mmap` | disabled | Memory-mapped file I/O via `memmap2` (`MmapDocument::open`) |
 | `serde` | disabled | `Serialize` + `Deserialize` for all public data types |
 | `image` | disabled | `image::ImageDecoder` impl via `DjVuDecoder` — integrates with the `image` crate |
 | `epub` | disabled | EPUB 3 export via `djvu_to_epub` — page images, text overlay, bookmarks as nav (owns `zip`) |
-| `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`) |
+| `wasm` | disabled | WebAssembly bindings via `wasm-bindgen` (`WasmDocument`, `WasmPage`); their contract is the npm package, not the Rust API |
 | `wasm-lazy` | disabled | Lazy Range-based document loading in the browser: a JS `(offset, len)` reader fetches only the pages you open |
 | `wasm-threads` | disabled | wasm32 thread pool (rayon via Web Workers); requires a nightly toolchain, not part of the stable CI gate |
 | `ocr-tesseract` | disabled | OCR recognition via a system Tesseract installation (the supported OCR backend) |
 | `ocr-onnx` | disabled | Experimental neural OCR via `tract-onnx` (#693; needs Rust 1.91): pinned manifest + SHA-256-verified weights, DBNet detection, Cyrillic CTC recognition, CLI `--backend onnx` |
+| `ffi` | disabled | Experimental C ABI (`djvu_rs::ffi`, `extern "C"` functions); no header is shipped yet |
 | `experimental` | disabled | Experimental JB2 encoder paths used by internal example binaries |
 | `iw44-probe` | disabled | IW44 encoder diagnostics probe (dev-only) |
 | `alloc-profile` | disabled | dhat allocation-profiling harness for `examples/alloc_profile.rs` (dev-only) |

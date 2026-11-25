@@ -99,7 +99,6 @@ pdf = ["std", "dep:miniz_oxide", "dep:jpeg-encoder"]
 # The CLI also writes CBZ archives, so it owns zip (+ flate2, see the `zip`
 # dependency comment) alongside the PDF writer it exposes.
 cli = ["pdf", "cbz", "dep:clap", "dep:zip", "dep:flate2", "dep:serde_json"]
-jpeg = ["dep:zune-jpeg"]
 tiff = ["dep:tiff", "std"]
 async = ["dep:tokio", "dep:async-stream", "dep:futures-core", "std"]
 parallel = ["dep:rayon", "std", "djvu-bzz/parallel", "djvu-iw44/parallel", "djvu-jb2/parallel"]
@@ -130,6 +129,10 @@ epub = ["std", "dep:zip", "dep:flate2", "dep:jpeg-encoder"]
 cbz = ["std", "dep:zip", "dep:flate2"]
 ocr-tesseract = ["dep:tesseract", "std"]
 ocr-onnx = ["dep:tract-onnx", "dep:sha2", "std"]
+# Experimental C ABI (`djvu_rs::ffi`, `extern "C"` functions). Off by default:
+# without it the default build carries no `#[no_mangle]` symbols, and two
+# djvu-rs versions in one dependency graph cannot collide at link time.
+ffi = ["std"]
 # Experiment-only encoder surface in the codec crates (e.g. the #322 cross-size
 # rec-6 refinement probe and its analysis helpers). Off by default; not part of
 # the published API. Implies `std` since the encoders are std-only.

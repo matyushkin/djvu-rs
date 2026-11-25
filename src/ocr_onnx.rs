@@ -1,4 +1,4 @@
-//! Experimental ONNX OCR via tract (requires `ocr-onnx` feature).
+//! **Experimental:** ONNX OCR via tract (requires the `ocr-onnx` feature).
 //!
 //! Two layers live here:
 //!

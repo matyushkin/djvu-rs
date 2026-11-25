@@ -455,7 +455,7 @@ only printed an error. Use `--backend tesseract` or `--backend onnx`.
 
 ## 1.0.0
 
-This release makes two kinds of change.
+This release makes three kinds of change.
 
 **Removals.** It removes every item that carried a deprecation note. Each
 Rust replacement shipped in 0.39.0 or earlier, and each replacement in the
@@ -470,6 +470,11 @@ change. The sections
 [Options structs are built with `with_*` methods](#options-structs-are-built-with-with_-methods)
 and [A `match` on an options enum needs a `_` arm](#a-match-on-an-options-enum-needs-a-_-arm)
 give a form that compiles on both 0.46 and 1.0.
+
+**Surface outside the stable API.** The review of the public surface
+before the freeze ([`api-review-1.0.md`](api-review-1.0.md)) moves the C
+API behind an `ffi` feature, hides the `wasm` module and removes the empty
+`jpeg` feature. The sections at the end of this release say what to change.
 
 ### The `render_*` variants are removed
 
@@ -839,6 +844,34 @@ fn empty() -> Iw44Image {
     Iw44Image::new()
 }
 ```
+
+### The C API moves behind the `ffi` feature
+
+`djvu_rs::ffi` and its `extern "C"` functions (`djvu_doc_open`,
+`djvu_page_render`, …) were compiled into every build with the `std`
+feature. They are now behind the `ffi` feature, which is off by default and
+experimental: no C header ships yet, so the functions and the `DjvuError`
+layout can still change. A crate that calls them, or builds a `cdylib` for
+C callers, turns the feature on:
+
+```toml
+[dependencies]
+djvu-rs = { version = "1", features = ["ffi"] }
+```
+
+### The `jpeg` feature is removed
+
+The feature enabled nothing that `std` does not already enable: JPEG
+backgrounds are decoded with the default features, as before. Remove
+`"jpeg"` from the feature list.
+
+### The `wasm` module is hidden from the Rust API
+
+`djvu_rs::wasm` exists to be compiled by `wasm-bindgen` into the npm
+package. It is now `#[doc(hidden)]`, and its contract is the npm package's
+TypeScript declarations, not the Rust items. The JavaScript API does not
+change. Rust code that used `WasmDocument` and the other `Wasm*` types
+directly uses `DjVuDocument` and `RenderRequest` instead.
 
 ## Fixes that change results
 

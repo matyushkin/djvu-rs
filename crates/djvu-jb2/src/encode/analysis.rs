@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Summary of an experiment-only cross-size refinement search.
+/// **Experimental:** Summary of an experiment-only cross-size refinement search.
 ///
 /// This does not affect encoding. It estimates how many components currently
 /// emitted as fresh record-1 symbols have a nearly matching dictionary symbol
@@ -68,7 +68,7 @@ pub(super) fn estimate_cross_size_rec6_symbol_bytes(hamming: u32, dict_len: usiz
         + packed_bytes_for_pixels(u64::from(hamming))
 }
 
-/// Estimate cross-size refinement headroom without changing encoder output.
+/// **Experimental:** Estimate cross-size refinement headroom without changing encoder output.
 ///
 /// The JB2 format can encode record-6 refinements where the reference symbol
 /// has a different `(w, h)`, but the shipped encoder intentionally only uses
@@ -176,7 +176,7 @@ pub fn analyze_jb2_cross_size_refinement(
     stats
 }
 
-/// Summary of an experiment-only **same-size** refinement search (Phase A0 of
+/// **Experimental:** Summary of an experiment-only **same-size** refinement search (Phase A0 of
 /// `docs/jb2-size-gap-plan.md`).
 ///
 /// Measurement only — does not change encoding. It counts, for the components
@@ -217,7 +217,7 @@ pub struct SameSizeRefinementStats {
     pub best_hamming_permille: Vec<u32>,
 }
 
-/// Measure the same-size refinement candidate population without changing output
+/// **Experimental:** Measure the same-size refinement candidate population without changing output
 /// (Phase A0). Mirrors the default encoder's exact-dedup dictionary growth
 /// (`encode_jb2_dict_with_shared`: exact record-7 copy or fresh record-1, no
 /// refinement), then for every fresh, eligible component scores its minimum
@@ -343,7 +343,7 @@ pub(super) fn same_size_refinement_scan(
     stats
 }
 
-/// Default bounded sample size for [`probe_same_size_rec6_density`] and
+/// **Experimental:** Default bounded sample size for [`probe_same_size_rec6_density`] and
 /// [`Jb2EncodeOptions::same_size_rec6_auto`]: the probe stops scanning once
 /// this many *fresh* CCs have been examined. Large enough to be a stable
 /// estimate — watchmaker's whole-page fresh population is 3 475 components,
@@ -354,7 +354,7 @@ pub(super) fn same_size_refinement_scan(
 #[cfg(feature = "experimental")]
 pub const SAME_SIZE_REC6_AUTO_SAMPLE_CCS: usize = 1000;
 
-/// Density threshold (fraction of sampled fresh CCs with a same-size ≤5 %
+/// **Experimental:** Density threshold (fraction of sampled fresh CCs with a same-size ≤5 %
 /// Hamming twin) at/above which [`Jb2EncodeOptions::same_size_rec6_auto`]
 /// enables same-size rec-6.
 ///
@@ -377,14 +377,14 @@ pub const SAME_SIZE_REC6_AUTO_SAMPLE_CCS: usize = 1000;
 #[cfg(feature = "experimental")]
 pub const SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD: f32 = 0.05;
 
-/// Refinement fraction [`Jb2EncodeOptions::same_size_rec6_auto`] applies once
+/// **Experimental:** Refinement fraction [`Jb2EncodeOptions::same_size_rec6_auto`] applies once
 /// density clears [`SAME_SIZE_REC6_AUTO_DENSITY_THRESHOLD`] — the validated
 /// sweet spot from round 18 (a tighter threshold wins more: 2 % > 5 % > 8 %
 /// on watchmaker).
 #[cfg(feature = "experimental")]
 pub const SAME_SIZE_REC6_AUTO_FRAC: f32 = 0.02;
 
-/// Cheap, bounded density probe backing [`Jb2EncodeOptions::same_size_rec6_auto`]
+/// **Experimental:** Cheap, bounded density probe backing [`Jb2EncodeOptions::same_size_rec6_auto`]
 /// (Phase A3 follow-up of `docs/jb2-size-gap-plan.md`, JB2_AUTO_REC6).
 ///
 /// Scans at most `max_ccs` *fresh* connected components (same reading order
