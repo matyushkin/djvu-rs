@@ -91,4 +91,8 @@ pub struct ComponentDirectoryEntry {
     pub kind: char,
     /// Resolver / directory id string.
     pub id: String,
+    /// Title: the page name a viewer shows, often the printed page number
+    /// (`xv`, `1`); `#<title>` links refer to the page by it. The id when the
+    /// directory gives no title.
+    pub title: String,
 }

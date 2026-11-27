@@ -569,6 +569,7 @@ mod tests {
                 kind: DirmComponentKind::from_flag(component.dirm_flag),
                 id: component.id.to_string(),
                 size: u32::try_from(8 + body.len()).unwrap(),
+                title: None,
             })
             .collect::<Vec<_>>();
         let mut dirm = DirmPayload::build_bundled(&entries);

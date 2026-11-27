@@ -65,6 +65,7 @@ fn split_bundled_fixture_with_document_chunks(
             kind: DirmComponentKind::from_flag(component.dirm_flag),
             id: component.id.to_string(),
             size: u32::try_from(8 + body.len()).unwrap(),
+            title: None,
         })
         .collect::<Vec<_>>();
     let mut dirm = DirmPayload::build_bundled(&entries);
@@ -150,6 +151,7 @@ fn two_pass_djvm_reference(
             kind: DirmComponentKind::from_flag(flag),
             id: id.clone(),
             size: u32::try_from(component.len()).expect("small fixture component"),
+            title: None,
         })
         .collect::<Vec<_>>();
     let mut dirm = DirmPayload::build_bundled(&entries);

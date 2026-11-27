@@ -115,6 +115,10 @@ pub(crate) struct DirmComponent {
     /// and written by the directory builders.
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     pub size: u32,
+    /// Title string (flag 0x40), or `None` when the entry has none. Read
+    /// only: the directory builders clear the title bit (see
+    /// [`DirmComponentKind::flag`]) and do not write it.
+    pub title: Option<String>,
 }
 
 #[cfg(test)]
@@ -125,6 +129,7 @@ impl DirmComponent {
             kind,
             id: id.to_string(),
             size: 0,
+            title: None,
         }
     }
 }
@@ -229,7 +234,7 @@ impl DirmPayload {
         out
     }
 
-    /// Decode the per-component kind + id list from the BZZ metadata.
+    /// Decode the per-component kind, id and title list from the BZZ metadata.
     ///
     /// Lenient by design, matching the historical readers: a BZZ-decode failure
     /// or short/truncated metadata yields `nfiles` synthetic `Page` entries
@@ -248,6 +253,7 @@ impl DirmPayload {
                     kind: DirmComponentKind::Page,
                     id: format!("p{i:04}"),
                     size: 0,
+                    title: None,
                 })
                 .collect();
         }
@@ -260,11 +266,18 @@ impl DirmPayload {
             if flag & 0x80 != 0 {
                 let _ = read_nt_string(&meta, &mut pos);
             }
-            if flag & 0x40 != 0 {
-                let _ = read_nt_string(&meta, &mut pos);
-            }
+            let title = if flag & 0x40 != 0 {
+                read_nt_string(&meta, &mut pos)
+            } else {
+                None
+            };
             let size = u32::from_be_bytes([0, meta[i * 3], meta[i * 3 + 1], meta[i * 3 + 2]]);
-            out.push(DirmComponent { kind, id, size });
+            out.push(DirmComponent {
+                kind,
+                id,
+                size,
+                title,
+            });
         }
         out
     }
@@ -557,6 +570,7 @@ mod tests {
             kind,
             id: id.to_string(),
             size,
+            title: None,
         }
     }
 
@@ -680,12 +694,15 @@ mod tests {
             metadata: crate::bzz_encode::bzz_encode(&meta),
         };
         let comps = p.components();
-        let parts: Vec<_> = comps.iter().map(|c| (c.kind, c.id.as_str())).collect();
+        let parts: Vec<_> = comps
+            .iter()
+            .map(|c| (c.kind, c.id.as_str(), c.title.as_deref()))
+            .collect();
         assert_eq!(
             parts,
             [
-                (DirmComponentKind::Page, "pg1"),
-                (DirmComponentKind::Page, "pg2")
+                (DirmComponentKind::Page, "pg1", None),
+                (DirmComponentKind::Page, "pg2", Some("title2"))
             ]
         );
     }

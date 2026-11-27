@@ -710,6 +710,7 @@ impl DjVuDocument {
                     DirmComponentKind::Shared => 'I',
                     DirmComponentKind::SharedAnno => 'A',
                 },
+                title: component.title.unwrap_or_else(|| component.id.clone()),
                 id: component.id,
             })
             .collect())

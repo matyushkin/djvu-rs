@@ -190,6 +190,7 @@ impl<W: Write> DjvmStreamWriter<W> {
             kind,
             id: id.to_string(),
             size,
+            title: None,
         });
         Ok(())
     }
