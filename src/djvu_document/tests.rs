@@ -1762,3 +1762,30 @@ fn legacy_bm44_rejects_color_bitstream() {
     let err = DjVuDocument::parse(&data).expect_err("color BM44 must fail");
     assert!(matches!(err, DocError::Malformed(_)), "got {err:?}");
 }
+
+/// `component_directory` gives an entry its DIRM title (flag 0x40), and the
+/// id when the entry has none.
+#[test]
+fn component_directory_title_defaults_to_id() {
+    use crate::dirm::DirmPayload;
+    let chicken = std::fs::read(assets_path().join("chicken.djvu")).unwrap();
+    let mut meta = vec![0u8; 6];
+    meta.extend_from_slice(&[0x41, 0x01]);
+    meta.extend_from_slice(b"p1.djvu\0xv\0p2.djvu\0");
+    let dirm = DirmPayload {
+        flags: 0x01,
+        nfiles: 2,
+        offsets: Vec::new(),
+        metadata: crate::bzz_encode::bzz_encode(&meta),
+    };
+    let djvm = build_djvm_with_dirm(&dirm.encode());
+    let doc = DjVuDocument::parse_with_resolver(
+        &djvm,
+        Some(|_: &str| Ok::<_, DocError>(chicken.clone())),
+    )
+    .unwrap();
+    let titles: Vec<_> = (doc.component_directory().unwrap().into_iter())
+        .map(|entry| entry.title)
+        .collect();
+    assert_eq!(titles, ["xv", "p2.djvu"]);
+}

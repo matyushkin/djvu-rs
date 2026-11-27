@@ -1267,6 +1267,13 @@ that checks its model files returns it.
 A later 1.x release can then add a variant that holds data which is not
 `Copy`.
 
+### `ComponentDirectoryEntry` has a `title` field
+
+`DjVuDocument::component_directory` gives each entry its DIRM title: the
+page name a viewer shows, which `#<title>` links refer to, or the id when the
+directory gives none. A struct literal of `ComponentDirectoryEntry` needs the
+new field, for example `title: id.clone()`.
+
 ## Fixes that change results
 
 These releases have no breaking change in the API. They fix decoding

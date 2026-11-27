@@ -1395,6 +1395,7 @@ mod tests {
             kind: crate::dirm::DirmComponentKind::Page,
             id: "page.djvu".to_string(),
             size: u32::try_from(8 + page_body.len()).expect("small page"),
+            title: None,
         }]);
         let emit = |dirm: &DirmPayload| {
             let dirm = Chunk::Leaf {

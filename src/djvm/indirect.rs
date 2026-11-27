@@ -104,6 +104,7 @@ pub fn create_indirect(page_names: &[&str]) -> Result<Vec<u8>, DjvmError> {
             kind: DirmComponentKind::Page,
             id: name.to_string(),
             size: 0,
+            title: None,
         })
         .collect::<Vec<_>>();
 
@@ -201,6 +202,7 @@ pub fn create_indirect_with_components(components: &[(&str, &[u8])]) -> Result<V
             kind,
             id: name.to_string(),
             size: declared.saturating_add(8),
+            title: None,
         });
     }
     if page_includes.is_empty() {
